@@ -413,10 +413,13 @@ toCore dataDefs visited = \case
   SemanticTypeTuple elements ->
     SchemaCoreTuple {prefixItems = map (toJsonSchema dataDefs visited) elements}
   SemanticTypeObject fields ->
+    -- Open object: a Katari type names only the minimum required fields, so a
+    -- value of @{x: T}@ may legitimately carry more. @additionalProperties@ is
+    -- always permissive (the schema must not reject those extra properties).
     SchemaCoreObject
       { properties = Map.map (toJsonSchema dataDefs visited) fields,
         required = Map.keysSet fields,
-        additionalProperties = False
+        additionalProperties = True
       }
   SemanticTypeUnion branches ->
     compactUnion (map (toCore dataDefs visited) branches)
@@ -435,10 +438,13 @@ toCore dataDefs visited = \case
                 info.dataFields
             ctorProp = plain SchemaCoreConst {value = toJSON qnameStr}
             properties = Map.insert ctorDiscriminatorKey ctorProp fieldProps
-         in SchemaCoreObject
+         in -- A @data@ value is a tagged object and, like any object in the
+            -- unified lattice, may carry properties beyond its declared fields
+            -- (it is a subtype of its open object view), so leave it open too.
+            SchemaCoreObject
               { properties = properties,
                 required = Set.insert ctorDiscriminatorKey (Map.keysSet info.dataFields),
-                additionalProperties = False
+                additionalProperties = True
               }
     | otherwise -> SchemaCoreUnknown
   -- Concrete function types and the 'function' top type are both
@@ -486,7 +492,7 @@ callableRefCore =
           callableDiscriminatorKey
           (plain SchemaCoreString {schemaEnum = []}),
       required = Set.singleton callableDiscriminatorKey,
-      additionalProperties = False
+      additionalProperties = True
     }
 
 -- | Reserved JSON-Schema property name carrying a value reference (blob
@@ -639,7 +645,7 @@ buildInputObject dataDefs parameters labelsAndAnnotations =
               -- Optional parameters (those with a default) may be omitted by
               -- the caller, so they are excluded from @required@.
               required = Map.keysSet (Map.filter (not . (.optional)) parameters),
-              additionalProperties = False
+              additionalProperties = True
             }
         )
 
@@ -688,7 +694,7 @@ buildRequestRef ctx qualifiedName = do
                 )
                 paramTypes,
             required = Map.keysSet (Map.filter (not . (.optional)) parameters),
-            additionalProperties = False
+            additionalProperties = True
           }
   pure
     RequestSchemaRef

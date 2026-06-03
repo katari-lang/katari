@@ -89,7 +89,9 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keysSet properties `shouldBe` Set.fromList ["age", "name"]
         required `shouldBe` Set.fromList ["age", "name"]
-        additionalProperties `shouldBe` False
+        -- Open: a Katari object names only its minimum required fields, so a
+        -- value may carry more — the schema must permit additional properties.
+        additionalProperties `shouldBe` True
       _ -> expectationFailure "expected SchemaCoreObject"
 
   it "function types emit a callable-reference object with required $agent: string" $ do
@@ -102,7 +104,8 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
       SchemaCoreObject {properties, required, additionalProperties} -> do
         Map.keys properties `shouldBe` ["$agent"]
         required `shouldBe` Set.singleton "$agent"
-        additionalProperties `shouldBe` False
+        -- Schemas are uniformly open (additionalProperties = true).
+        additionalProperties `shouldBe` True
       _ -> expectationFailure "expected SchemaCoreObject (callable reference)"
 
 unionCompactionSpec :: Spec

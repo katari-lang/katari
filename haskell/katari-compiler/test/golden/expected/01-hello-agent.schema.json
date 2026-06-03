@@ -2,7 +2,7 @@
   {
     "description": "Returns the canonical greeting.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {},
       "required": [],
       "type": "object"
@@ -16,7 +16,7 @@
   {
     "description": "Add two numbers.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -40,7 +40,7 @@
   {
     "description": "AI metadata of a callable (name / id / description / I-O schema).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "description": {
           "type": "string"
@@ -69,7 +69,7 @@
     },
     "name": "primitive.agent_metadata",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.agent_metadata"
@@ -105,7 +105,7 @@
   {
     "description": "Logical and.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "boolean"
@@ -129,7 +129,7 @@
   {
     "description": "Dynamically invoke a callable by name. @name@ is the callable handle from @get_metadata@'s @id@: a qualified agent name (@module.agent@) or a closure ref (@closureref:<id>@); @args@ is a record matching the target's parameter list. Raises @call_agent_error@ on unknown names or schema-invalid args.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "args": {
           "additionalProperties": true,
@@ -152,7 +152,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "message": {
               "type": "string"
@@ -173,7 +173,7 @@
   {
     "description": "Raised by @call_agent@ when the name fails to resolve to a known callable, or the supplied args fail the target's input schema. Handle via @request call_agent_error(message) { ... }@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "message": {
           "type": "string"
@@ -191,7 +191,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "message": {
               "type": "string"
@@ -212,7 +212,7 @@
   {
     "description": "Concatenate two strings (taint-aware: if either operand is secret, the result is secret).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "string"
@@ -236,7 +236,7 @@
   {
     "description": "Divide two numbers (always returns number).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -260,7 +260,7 @@
   {
     "description": "Raised when a requested env key is not present in the store. Handle to provide a default; if uncaught the snapshot transitions to the `error` state.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "env_key": {
           "type": "string"
@@ -278,7 +278,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "env_key": {
               "type": "string"
@@ -299,7 +299,7 @@
   {
     "description": "Structural equality.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {},
         "rhs": {}
@@ -319,7 +319,7 @@
   {
     "description": "Read a file's bytes back as a UTF-8 string.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "additionalProperties": true,
@@ -357,7 +357,7 @@
   {
     "description": "Format a value for f-string interpolation. Accepts string or secret only (taint-aware: secret yields secret); other types must be converted via @to_string@ first.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {}
       },
@@ -375,7 +375,7 @@
   {
     "description": "Parse a wire-format string (produced by @to_string@) back into a value. Raises @from_string_error@ on malformed input.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "text": {
           "type": "string"
@@ -391,7 +391,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "message": {
               "type": "string"
@@ -412,7 +412,7 @@
   {
     "description": "Raised by @from_string@ when the input cannot be decoded as a canonical wire-format value (invalid JSON, illegal discriminator combinations, etc.). Handle via @request from_string_error(message) { ... }@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "message": {
           "type": "string"
@@ -430,7 +430,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "message": {
               "type": "string"
@@ -451,7 +451,7 @@
   {
     "description": "Greater or equal.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -474,7 +474,7 @@
   },
   {
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "field": {
           "type": "string"
@@ -494,10 +494,10 @@
   {
     "description": "Return the AI metadata of any callable value.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$agent": {
               "type": "string"
@@ -516,7 +516,7 @@
     },
     "name": "primitive.get_metadata",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.agent_metadata"
@@ -552,7 +552,7 @@
   {
     "description": "Greater than.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -576,13 +576,13 @@
   {
     "description": "JSON array of further `json` values.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "items": {
           "items": {
             "anyOf": [
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_array"
@@ -592,7 +592,7 @@
                       "anyOf": [
                         {},
                         {
-                          "additionalProperties": false,
+                          "additionalProperties": true,
                           "properties": {
                             "$constructor": {
                               "const": "primitive.json_boolean"
@@ -608,7 +608,7 @@
                           "type": "object"
                         },
                         {
-                          "additionalProperties": false,
+                          "additionalProperties": true,
                           "properties": {
                             "$constructor": {
                               "const": "primitive.json_integer"
@@ -624,7 +624,7 @@
                           "type": "object"
                         },
                         {
-                          "additionalProperties": false,
+                          "additionalProperties": true,
                           "properties": {
                             "$constructor": {
                               "const": "primitive.json_null"
@@ -636,7 +636,7 @@
                           "type": "object"
                         },
                         {
-                          "additionalProperties": false,
+                          "additionalProperties": true,
                           "properties": {
                             "$constructor": {
                               "const": "primitive.json_number"
@@ -652,7 +652,7 @@
                           "type": "object"
                         },
                         {
-                          "additionalProperties": false,
+                          "additionalProperties": true,
                           "properties": {
                             "$constructor": {
                               "const": "primitive.json_object"
@@ -671,7 +671,7 @@
                           "type": "object"
                         },
                         {
-                          "additionalProperties": false,
+                          "additionalProperties": true,
                           "properties": {
                             "$constructor": {
                               "const": "primitive.json_string"
@@ -698,7 +698,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_boolean"
@@ -714,7 +714,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_integer"
@@ -730,7 +730,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_null"
@@ -742,7 +742,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_number"
@@ -758,7 +758,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_object"
@@ -777,7 +777,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_string"
@@ -804,7 +804,7 @@
     },
     "name": "primitive.json_array",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_array"
@@ -814,7 +814,7 @@
             "anyOf": [
               {},
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_boolean"
@@ -830,7 +830,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_integer"
@@ -846,7 +846,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_null"
@@ -858,7 +858,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_number"
@@ -874,7 +874,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_object"
@@ -893,7 +893,7 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
+                "additionalProperties": true,
                 "properties": {
                   "$constructor": {
                     "const": "primitive.json_string"
@@ -924,7 +924,7 @@
   {
     "description": "JSON boolean.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "boolean"
@@ -937,7 +937,7 @@
     },
     "name": "primitive.json_boolean",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_boolean"
@@ -957,7 +957,7 @@
   {
     "description": "JSON integral number. Distinct from `json_number` so that round-trips through `parse` -> `stringify` preserve integer-vs-fractional form.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "integer"
@@ -970,7 +970,7 @@
     },
     "name": "primitive.json_integer",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_integer"
@@ -990,14 +990,14 @@
   {
     "description": "JSON null. The unit-shaped variant of the `json` union.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {},
       "required": [],
       "type": "object"
     },
     "name": "primitive.json_null",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_null"
@@ -1013,7 +1013,7 @@
   {
     "description": "JSON non-integral number.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "number"
@@ -1026,7 +1026,7 @@
     },
     "name": "primitive.json_number",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_number"
@@ -1046,7 +1046,7 @@
   {
     "description": "JSON object: a record (homogeneous string-keyed map) of further `json` values.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "entries": {
           "additionalProperties": true,
@@ -1062,7 +1062,7 @@
     },
     "name": "primitive.json_object",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_object"
@@ -1085,7 +1085,7 @@
   {
     "description": "Raised by `json.parse` when the input text is not valid JSON. Handle via `request json_parse_error(message) { ... }`.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "message": {
           "type": "string"
@@ -1103,7 +1103,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "message": {
               "type": "string"
@@ -1124,7 +1124,7 @@
   {
     "description": "JSON string.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "string"
@@ -1137,7 +1137,7 @@
     },
     "name": "primitive.json_string",
     "output": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "$constructor": {
           "const": "primitive.json_string"
@@ -1157,7 +1157,7 @@
   {
     "description": "Less or equal.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -1181,7 +1181,7 @@
   {
     "description": "Less than.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -1205,7 +1205,7 @@
   {
     "description": "Floor-mod two numbers.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -1229,7 +1229,7 @@
   {
     "description": "Multiply two numbers.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -1253,7 +1253,7 @@
   {
     "description": "Structural inequality.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {},
         "rhs": {}
@@ -1273,7 +1273,7 @@
   {
     "description": "Unary negate.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "number"
@@ -1293,7 +1293,7 @@
   {
     "description": "Logical not.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "boolean"
@@ -1313,7 +1313,7 @@
   {
     "description": "Logical or.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "boolean"
@@ -1337,7 +1337,7 @@
   {
     "description": "Write a string's bytes to a new file (a persistent value reference). Rejects @secret@ (a credential must not be laundered into a re-readable file).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "string"
@@ -1375,7 +1375,7 @@
   {
     "description": "Subtract two numbers.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -1399,7 +1399,7 @@
   {
     "description": "Raise a recoverable runtime error. Bubbles through enclosing handle scopes until a `request throw` handler catches it; if nothing catches it the snapshot transitions to the `error` state.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "msg": {
           "type": "string"
@@ -1419,7 +1419,7 @@
   {
     "description": "Serialize any value to its canonical wire-format string (Plan D — strings get quoted, tagged values get their @$constructor@ discriminator). Inverse: @from_string@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {}
       },
@@ -1436,7 +1436,7 @@
   },
   {
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "index": {
           "type": "integer"
@@ -1456,7 +1456,7 @@
   {
     "description": "Return the runtime type-of-value tag as a string.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {}
       },
@@ -1474,7 +1474,7 @@
   {
     "description": "Append @value@ to the end, returning a fresh array (arrays are immutable).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1498,7 +1498,7 @@
   {
     "description": "Concatenate two arrays into a fresh array.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "items": {},
@@ -1525,7 +1525,7 @@
   {
     "description": "True if @value@ is structurally equal to some element.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1548,7 +1548,7 @@
   {
     "description": "The empty array. Its element type is `never` (the empty array has no elements), which is a subtype of every `array[T]`, so it can seed a typed accumulator: `var history = array.empty()` grown with `array.append`.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {},
       "required": [],
       "type": "object"
@@ -1565,7 +1565,7 @@
   {
     "description": "Retrieve the element at @index@ (0-based). Raises out-of-bounds as a `throw`.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1588,7 +1588,7 @@
   {
     "description": "Index of the first element structurally equal to @value@, or -1 if absent.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1611,7 +1611,7 @@
   {
     "description": "Number of elements in the array.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1632,7 +1632,7 @@
   {
     "description": "A single-element array carrying @value@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {}
       },
@@ -1651,7 +1651,7 @@
   {
     "description": "The array reversed.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1673,7 +1673,7 @@
   {
     "description": "The sub-array from @start@ (inclusive) to @end@ (exclusive), 0-based.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "array": {
           "items": {},
@@ -1703,7 +1703,7 @@
   {
     "description": "Look up a non-secret env entry by key. Raises `env_not_found` if the key is missing.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "key": {
           "type": "string"
@@ -1721,7 +1721,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "env_key": {
               "type": "string"
@@ -1742,7 +1742,7 @@
   {
     "description": "Write an env entry. `is_secret = true` stores the value encrypted; reading it back requires `env.get_secret`.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "is_secret": {
           "type": "boolean"
@@ -1770,7 +1770,7 @@
   {
     "description": "Parse a JSON-encoded string into a `json` value. Raises `json_parse_error` on malformed input.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "text": {
           "type": "string"
@@ -1785,7 +1785,7 @@
     "output": {
       "anyOf": [
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_array"
@@ -1795,7 +1795,7 @@
                 "anyOf": [
                   {},
                   {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "$constructor": {
                         "const": "primitive.json_boolean"
@@ -1811,7 +1811,7 @@
                     "type": "object"
                   },
                   {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "$constructor": {
                         "const": "primitive.json_integer"
@@ -1827,7 +1827,7 @@
                     "type": "object"
                   },
                   {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "$constructor": {
                         "const": "primitive.json_null"
@@ -1839,7 +1839,7 @@
                     "type": "object"
                   },
                   {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "$constructor": {
                         "const": "primitive.json_number"
@@ -1855,7 +1855,7 @@
                     "type": "object"
                   },
                   {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "$constructor": {
                         "const": "primitive.json_object"
@@ -1874,7 +1874,7 @@
                     "type": "object"
                   },
                   {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "$constructor": {
                         "const": "primitive.json_string"
@@ -1901,7 +1901,7 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_boolean"
@@ -1917,7 +1917,7 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_integer"
@@ -1933,7 +1933,7 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_null"
@@ -1945,7 +1945,7 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_number"
@@ -1961,7 +1961,7 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_object"
@@ -1980,7 +1980,7 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "$constructor": {
               "const": "primitive.json_string"
@@ -2000,7 +2000,7 @@
     "requests": [
       {
         "input": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "message": {
               "type": "string"
@@ -2021,12 +2021,12 @@
   {
     "description": "Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "anyOf": [
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_array"
@@ -2036,7 +2036,7 @@
                     "anyOf": [
                       {},
                       {
-                        "additionalProperties": false,
+                        "additionalProperties": true,
                         "properties": {
                           "$constructor": {
                             "const": "primitive.json_boolean"
@@ -2052,7 +2052,7 @@
                         "type": "object"
                       },
                       {
-                        "additionalProperties": false,
+                        "additionalProperties": true,
                         "properties": {
                           "$constructor": {
                             "const": "primitive.json_integer"
@@ -2068,7 +2068,7 @@
                         "type": "object"
                       },
                       {
-                        "additionalProperties": false,
+                        "additionalProperties": true,
                         "properties": {
                           "$constructor": {
                             "const": "primitive.json_null"
@@ -2080,7 +2080,7 @@
                         "type": "object"
                       },
                       {
-                        "additionalProperties": false,
+                        "additionalProperties": true,
                         "properties": {
                           "$constructor": {
                             "const": "primitive.json_number"
@@ -2096,7 +2096,7 @@
                         "type": "object"
                       },
                       {
-                        "additionalProperties": false,
+                        "additionalProperties": true,
                         "properties": {
                           "$constructor": {
                             "const": "primitive.json_object"
@@ -2115,7 +2115,7 @@
                         "type": "object"
                       },
                       {
-                        "additionalProperties": false,
+                        "additionalProperties": true,
                         "properties": {
                           "$constructor": {
                             "const": "primitive.json_string"
@@ -2142,7 +2142,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_boolean"
@@ -2158,7 +2158,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_integer"
@@ -2174,7 +2174,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_null"
@@ -2186,7 +2186,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_number"
@@ -2202,7 +2202,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_object"
@@ -2221,7 +2221,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
+              "additionalProperties": true,
               "properties": {
                 "$constructor": {
                   "const": "primitive.json_string"
@@ -2253,7 +2253,7 @@
   {
     "description": "Absolute value (integer when the operand is integer).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "number"
@@ -2273,7 +2273,7 @@
   {
     "description": "Round up to the nearest integer.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "number"
@@ -2293,7 +2293,7 @@
   {
     "description": "Round down to the nearest integer.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "number"
@@ -2313,7 +2313,7 @@
   {
     "description": "The larger of two numbers (integer when both are integers).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -2337,7 +2337,7 @@
   {
     "description": "The smaller of two numbers (integer when both are integers).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "lhs": {
           "type": "number"
@@ -2361,7 +2361,7 @@
   {
     "description": "Round to the nearest integer (ties away from zero).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "number"
@@ -2381,7 +2381,7 @@
   {
     "description": "Construct an empty record.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {},
       "required": [],
       "type": "object"
@@ -2398,7 +2398,7 @@
   {
     "description": "Retrieve a record entry by key. Returns null when the key is absent.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "key": {
           "type": "string"
@@ -2423,7 +2423,7 @@
   {
     "description": "True if the record carries an entry under the given key.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "key": {
           "type": "string"
@@ -2450,7 +2450,7 @@
   {
     "description": "List the keys present in the record (insertion order is not guaranteed).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "record": {
           "additionalProperties": true,
@@ -2476,7 +2476,7 @@
   {
     "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "key": {
           "type": "string"
@@ -2506,7 +2506,7 @@
   {
     "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "key": {
           "type": "string"
@@ -2538,7 +2538,7 @@
   {
     "description": "Number of entries in the record.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "record": {
           "additionalProperties": true,
@@ -2561,7 +2561,7 @@
   {
     "description": "True if @substring@ occurs anywhere in @value@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "substring": {
           "type": "string"
@@ -2585,7 +2585,7 @@
   {
     "description": "True if @value@ ends with @suffix@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "suffix": {
           "type": "string"
@@ -2609,7 +2609,7 @@
   {
     "description": "Code-point index of the first occurrence of @substring@, or -1 if absent.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "substring": {
           "type": "string"
@@ -2633,7 +2633,7 @@
   {
     "description": "Join the parts with @separator@ between them.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "parts": {
           "items": {
@@ -2660,7 +2660,7 @@
   {
     "description": "Number of Unicode code points in the string.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "string"
@@ -2680,7 +2680,7 @@
   {
     "description": "Lower-case the string.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "string"
@@ -2700,7 +2700,7 @@
   {
     "description": "Replace every occurrence of @pattern@ with @replacement@ (literal, not a regex).",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "pattern": {
           "type": "string"
@@ -2728,7 +2728,7 @@
   {
     "description": "The sub-string from @start@ (inclusive) to @end@ (exclusive), counted in code points.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "end": {
           "type": "integer"
@@ -2756,7 +2756,7 @@
   {
     "description": "Split on every occurrence of @separator@. An empty separator splits into code points.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "separator": {
           "type": "string"
@@ -2783,7 +2783,7 @@
   {
     "description": "True if @value@ begins with @prefix@.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "prefix": {
           "type": "string"
@@ -2807,7 +2807,7 @@
   {
     "description": "Strip leading and trailing whitespace.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "string"
@@ -2827,7 +2827,7 @@
   {
     "description": "Upper-case the string.",
     "input": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "value": {
           "type": "string"
