@@ -28,6 +28,8 @@ module Katari.Typechecker.Check
     subtypeAssert,
     synthExpr,
     checkExpr,
+    CheckSubject (..),
+    checkModule,
   )
 where
 
@@ -50,8 +52,10 @@ import Katari.SemanticType
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (TypeData (..))
+import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.NormalizedType
   ( DataFieldEnv,
+    buildDataFieldEnv,
     normaliseSemantic,
     subtypeNormalizedType,
   )
@@ -827,3 +831,154 @@ fieldType sourceSpan subject label = case subject of
   _ -> missing
   where
     missing = emitError (CheckErrorUnsupported sourceSpan ("no field '" <> label <> "' on the accessed value")) >> pure SemanticTypeUnknown
+
+-- ===========================================================================
+-- Module entry point
+-- ===========================================================================
+
+-- | Everything the checker needs for one module. Mirrors the constraint
+-- pipeline's 'TypecheckSubject'.
+data CheckSubject = CheckSubject
+  { csModuleName :: Text,
+    csModuleAST :: Module Identified,
+    csTypeData :: Map QualifiedName TypeData,
+    csKnownRequests :: Set QualifiedName,
+    csPrimRules :: Map QualifiedName PrimRule,
+    csImportedTypes :: Map QualifiedName (SemanticType Resolved)
+  }
+
+-- | Type-check a module bidirectionally, returning every diagnostic. (Module
+-- @Zonked@ assembly + the effect SCC fixpoint land when the checker is wired
+-- into 'Katari.Typechecker'; this entry validates the type-checking core.)
+checkModule :: CheckSubject -> [Diagnostic]
+checkModule subject =
+  let elaborationEnv =
+        CheckEnv
+          { checkTypeData = subject.csTypeData,
+            checkDataFieldEnv = mempty,
+            checkSynonymVisited = Set.empty,
+            checkLocals = Map.empty,
+            checkPrimRules = subject.csPrimRules,
+            checkExpectedReturn = Nothing
+          }
+      (nonAgentSignatures, signatureErrors) =
+        runCheck elaborationEnv (computeNonAgentSignatures subject.csModuleAST.declarations)
+      resolvedCallables = Map.union subject.csImportedTypes nonAgentSignatures
+      fullEnv =
+        elaborationEnv
+          { checkDataFieldEnv = buildDataFieldEnv resolvedCallables,
+            checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables
+          }
+      (_, bodyErrors) = runCheck fullEnv (processAgentSCCs subject)
+   in map toDiagnostic (signatureErrors ++ bodyErrors)
+
+-- | Signatures of the non-agent callables (data ctors, requests, externals,
+-- prims) — all derivable from annotations alone (no body to check).
+computeNonAgentSignatures :: [Declaration Identified] -> Check (Map QualifiedName (SemanticType Resolved))
+computeNonAgentSignatures declarations =
+  Map.fromList . concat <$> mapM one declarations
+  where
+    bind nameRef sig = pure (maybe [] (\qualifiedName -> [(qualifiedName, sig)]) (topLevelQName nameRef))
+    one = \case
+      DeclarationData DataDeclaration {name, typeName, parameters} -> do
+        fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
+        let returnType = maybe SemanticTypeUnknown SemanticTypeData typeName.resolution
+        bind name (SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyRequest)
+      DeclarationRequest RequestDeclaration {name, requestName, parameters, returnType} -> do
+        (_, paramSig, _) <- elaborateParameters parameters
+        ret <- elaborateType returnType
+        let effect = case requestName.resolution of
+              Just qualifiedName | not (isThrow qualifiedName) -> SemanticRequest (Set.singleton (SemanticRequestElementConcrete qualifiedName))
+              _ -> emptyRequest
+        bind name (SemanticTypeFunction paramSig ret effect)
+      DeclarationExternalAgent ExternalAgentDeclaration {name, parameters, returnType, withRequests} -> do
+        (_, paramSig, _) <- elaborateParameters parameters
+        ret <- elaborateType returnType
+        effect <- elaborateRequestList withRequests
+        bind name (SemanticTypeFunction paramSig ret effect)
+      DeclarationPrimAgent PrimAgentDeclaration {name, parameters, returnType, withRequests} -> do
+        (_, paramSig, _) <- elaborateParameters parameters
+        ret <- elaborateType returnType
+        effect <- elaborateRequestList withRequests
+        bind name (SemanticTypeFunction paramSig ret effect)
+      _ -> pure []
+    isThrow qualifiedName = qualifiedName.module_ == "primitive" && qualifiedName.name == "throw"
+
+-- | Process the agent SCCs in topological order, extending the environment
+-- with each SCC's finalised signatures before the next.
+processAgentSCCs :: CheckSubject -> Check ()
+processAgentSCCs subject = go (agentSCCs subject.csModuleName subject.csModuleAST)
+  where
+    declMap = Map.fromList (mapMaybe agentEntry subject.csModuleAST.declarations)
+    agentEntry = \case
+      DeclarationAgent decl -> (\qualifiedName -> (qualifiedName, decl)) <$> topLevelQName decl.name
+      _ -> Nothing
+    go [] = pure ()
+    go (scc : rest) = do
+      bindings <- processAgentSCC declMap scc
+      withLocals bindings (go rest)
+
+-- | Type-check one SCC of mutually-recursive agents. A multi-member (hence
+-- recursive) SCC requires every member to annotate its return type, which
+-- breaks the recursion for checking; a non-recursive singleton infers its
+-- return from the body.
+processAgentSCC ::
+  Map QualifiedName (AgentDeclaration Identified) ->
+  Set QualifiedName ->
+  Check [(VariableResolution, SemanticType Resolved)]
+processAgentSCC declMap scc = do
+  let members = mapMaybe (`Map.lookup` declMap) (Set.toList scc)
+      recursive = Set.size scc > 1
+  if recursive
+    then do
+      seeds <- mapM seedRecursiveSignature members
+      let bindings = [(ResolvedTopLevel qualifiedName, sig) | (qualifiedName, sig) <- concat seeds]
+      withLocals bindings $ mapM_ checkAgentBodyAgainstReturn members
+      pure bindings
+    else case members of
+      [decl] -> do
+        sig <- checkAgentBodyInferring decl
+        pure (maybe [] (\resolution -> [(resolution, sig)]) decl.name.resolution)
+      _ -> pure []
+
+-- | A recursive agent's seeded signature, from its (mandatory) return
+-- annotation. A missing annotation is the recursive-return diagnostic.
+seedRecursiveSignature :: AgentDeclaration Identified -> Check [(QualifiedName, SemanticType Resolved)]
+seedRecursiveSignature AgentDeclaration {name, parameters, returnType, sourceSpan} = do
+  (_, paramSig, _) <- elaborateParameters parameters
+  ret <- case returnType of
+    Just t -> elaborateType t
+    Nothing -> do
+      emitError (CheckErrorUnsupported sourceSpan "a recursive agent needs an explicit return type — it can't be inferred through the recursion")
+      pure SemanticTypeUnknown
+  pure (maybe [] (\qualifiedName -> [(qualifiedName, SemanticTypeFunction paramSig ret emptyRequest)]) (topLevelQName name))
+
+-- | Check a recursive agent's body against its (already-seeded) declared
+-- return type.
+checkAgentBodyAgainstReturn :: AgentDeclaration Identified -> Check ()
+checkAgentBodyAgainstReturn AgentDeclaration {parameters, returnType, body} = do
+  (_, _, paramLocals) <- elaborateParameters parameters
+  ret <- maybe (pure SemanticTypeUnknown) elaborateType returnType
+  withLocals paramLocals . withExpectedReturn ret $ do
+    (_, bodyType) <- walkBlock body
+    subtypeAssert (sourceSpanOf body) bodyType ret
+
+-- | Check a non-recursive agent's body, inferring its return type when no
+-- annotation is present. Returns the finalised signature.
+checkAgentBodyInferring :: AgentDeclaration Identified -> Check (SemanticType Resolved)
+checkAgentBodyInferring AgentDeclaration {parameters, returnType, body} = do
+  (_, paramSig, paramLocals) <- elaborateParameters parameters
+  declaredReturn <- traverse elaborateType returnType
+  bodyType <-
+    withLocals paramLocals $ case declaredReturn of
+      Just ret -> withExpectedReturn ret $ do
+        (_, bodyType) <- walkBlock body
+        subtypeAssert (sourceSpanOf body) bodyType ret
+        pure ret
+      Nothing -> snd <$> walkBlock body
+  pure (SemanticTypeFunction paramSig bodyType emptyRequest)
+
+topLevelQName :: NameRef Identified VariableRef -> Maybe QualifiedName
+topLevelQName nameRef = case nameRef.resolution of
+  Just (ResolvedTopLevel qualifiedName) -> Just qualifiedName
+  _ -> Nothing
