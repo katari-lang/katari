@@ -789,6 +789,11 @@ data SyntacticType (phase :: Phase) where
   -- reserved for tagged-value encoding; record entries should avoid
   -- them to keep the wire round-trip stable.
   TypeRecord :: RecordTypeNode phase -> SyntacticType phase
+  -- | @{label: T, ...}@ — a structural object type naming a fixed set of
+  -- fields. A precise member of the map layer: @data <: object <: record@,
+  -- so an object value may carry fields beyond those named (width
+  -- subtyping), and a value of an object type may actually be a @data@.
+  TypeObject :: ObjectTypeNode phase -> SyntacticType phase
 
 instance HasSourceSpan (SyntacticType phase) where
   sourceSpanOf = \case
@@ -804,6 +809,7 @@ instance HasSourceSpan (SyntacticType phase) where
     TypeUnknown node -> node.sourceSpan
     TypeFunctionAny node -> node.sourceSpan
     TypeRecord node -> node.sourceSpan
+    TypeObject node -> node.sourceSpan
 
 -- | Which primitive type a 'PrimitiveTypeNode' carries. The five surface
 -- primitives that have a dedicated keyword.
@@ -867,6 +873,18 @@ data RecordTypeNode (phase :: Phase) = RecordTypeNode
   }
 
 instance HasSourceSpan (RecordTypeNode p) where
+  sourceSpanOf node = node.sourceSpan
+
+-- | AST node for a structural object type @{label: T, ...}@. Field labels
+-- are bare text in source order; label resolution is type-directed, exactly
+-- like 'FunctionTypeNode' parameters. The set of named fields is the
+-- /minimum/ a value must carry — extra fields are allowed by width subtyping.
+data ObjectTypeNode (phase :: Phase) = ObjectTypeNode
+  { fields :: [(Text, SyntacticType phase)],
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (ObjectTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
 -- | AST node for a bare type name. The 'NameRef' is resolved against the
@@ -1455,6 +1473,12 @@ retagSyntacticType = \case
         { valueType = retagSyntacticType valueType,
           sourceSpan = sourceSpan
         }
+  TypeObject ObjectTypeNode {fields, sourceSpan} ->
+    TypeObject
+      ObjectTypeNode
+        { fields = [(label, retagSyntacticType subType) | (label, subType) <- fields],
+          sourceSpan = sourceSpan
+        }
 
 -- | Change the phase tag of a 'SyntacticRequest'.
 retagSyntacticRequest ::
@@ -1703,6 +1727,10 @@ deriving instance (ShowPhase phase) => Show (ArrayTypeNode phase)
 deriving instance (EqPhase phase) => Eq (RecordTypeNode phase)
 
 deriving instance (ShowPhase phase) => Show (RecordTypeNode phase)
+
+deriving instance (EqPhase phase) => Eq (ObjectTypeNode phase)
+
+deriving instance (ShowPhase phase) => Show (ObjectTypeNode phase)
 
 deriving instance (EqPhase phase) => Eq (TupleTypeNode phase)
 

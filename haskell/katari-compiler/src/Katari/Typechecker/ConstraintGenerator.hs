@@ -431,6 +431,8 @@ elaborateType = \case
   TypeFunctionAny _ -> pure SemanticTypeFunctionAny
   TypeRecord RecordTypeNode {valueType} ->
     SemanticTypeRecord <$> elaborateType valueType
+  TypeObject ObjectTypeNode {fields} ->
+    SemanticTypeObject . Map.fromList <$> mapM (\(label, fieldType) -> (label,) <$> elaborateType fieldType) fields
 
 -- | Map a 'PrimitiveTypeKind' to the matching 'SemanticType' constructor.
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase
@@ -1363,24 +1365,21 @@ walkArrayExpr ArrayExpression {elements, sourceSpan} = do
 -- type becomes @record[tValue]@. Keys are implicitly @string@ (the
 -- wire form is a JSON object) so the labels do not contribute to
 -- type generation here.
+-- | An object literal @{ label = e, ... }@ infers a *precise* object type
+-- @object{label: typeof e, ...}@ — each field keeps its own type rather than
+-- being joined into a single homogeneous @record[V]@. The precise type widens
+-- to @record[V]@ on demand via the @object <: record@ edge, so it is still
+-- usable wherever a record is expected.
 walkRecordExpr :: RecordExpression Identified -> CG (Expression Constrained)
 walkRecordExpr RecordExpression {entries, sourceSpan} = do
   entries' <- mapM (\(lbl, e) -> (lbl,) <$> walkExpression e) entries
-  tValue <- freshTypeVar
-  mapM_
-    ( \(_, e) ->
-        addTypeConstraint
-          (constrainedExpressionType e)
-          tValue
-          (ConstraintReason ReasonKindRecordValue sourceSpan)
-    )
-    entries'
+  let fields = Map.fromList [(lbl, constrainedExpressionType e) | (lbl, e) <- entries']
   pure
     ( ExpressionRecord
         RecordExpression
           { entries = entries',
             sourceSpan = sourceSpan,
-            typeOf = SemanticTypeRecord tValue
+            typeOf = SemanticTypeObject fields
           }
     )
 

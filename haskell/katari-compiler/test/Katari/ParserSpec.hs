@@ -1806,6 +1806,16 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     _ <- shouldSucceed "agent main(p: (integer, string,)) { 1 }"
     pure ()
 
+  it "object type {x: T, y: U} yields TypeObject node" $ do
+    m <- shouldSucceed "agent main(o: {x: integer, y: string}) { 1 }"
+    case head (decls m) of
+      DeclarationAgent a -> case a.parameters of
+        [pr] -> case pr.typeAnnotation of
+          Just (TypeObject n) -> map fst n.fields `shouldBe` ["x", "y"]
+          _ -> expectationFailure "expected TypeObject"
+        _ -> expectationFailure "expected one parameter"
+      _ -> expectationFailure "expected agent"
+
   it "parses grouped type (integer) as integer" $ do
     m <- shouldSucceed "agent main(x: (integer)) { 1 }"
     case head (decls m) of

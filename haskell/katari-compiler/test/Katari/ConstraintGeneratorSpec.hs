@@ -152,6 +152,7 @@ spec = do
   dataNameClash
   implicitReturnReason
   crossShapeEdges
+  objectTypeSyntax
 
 -- ---------------------------------------------------------------------------
 -- Basic agent
@@ -903,4 +904,36 @@ crossShapeEdges = describe "cross-shape subtype edges" $ do
     diags <-
       compileOne
         "agent main(t: array[integer]) -> (integer, integer) { t }"
+    diags `shouldSatisfy` hasErrors
+
+-- ---------------------------------------------------------------------------
+-- Object type syntax {label: T} and object-literal inference. An object
+-- literal infers a precise object type (each field its own type); it is a
+-- subtype of both a matching object type and a record[V] (object <: record).
+-- ---------------------------------------------------------------------------
+
+objectTypeSyntax :: Spec
+objectTypeSyntax = describe "object type syntax" $ do
+  it "field access through an object-typed parameter yields the field type" $ do
+    diags <- compileOne "agent f(o: {x: integer}) -> integer { o.x }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "an object literal satisfies a matching object return type" $ do
+    diags <- compileOne "agent f() -> {x: integer} { {x = 1} }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "extra fields on an object literal are accepted (width)" $ do
+    diags <- compileOne "agent f() -> {x: integer} { {x = 1, y = \"hi\"} }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "an object literal widens to a record via object <: record" $ do
+    diags <- compileOne "agent f() -> record[integer] { {x = 1, y = 2} }"
+    diags `shouldNotSatisfy` hasErrors
+
+  it "an object literal field type must satisfy the object annotation" $ do
+    diags <- compileOne "agent f() -> {x: string} { {x = 1} }"
+    diags `shouldSatisfy` hasErrors
+
+  it "a missing field is rejected against an object type" $ do
+    diags <- compileOne "agent f() -> {x: integer, y: integer} { {x = 1} }"
     diags `shouldSatisfy` hasErrors

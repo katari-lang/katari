@@ -1878,6 +1878,7 @@ parseAtomicType =
       parseLiteralType,
       try parseArrayType,
       try parseRecordType,
+      parseObjectType,
       parseTupleOrGroupedType,
       parseNamedOrQualifiedType
     ]
@@ -2024,6 +2025,29 @@ parseRecordType = parseWithSpan $ do
         { valueType = valueType,
           sourceSpan = sourceSpan
         }
+
+-- | @{label: T, label2: U, ...}@ — a structural object type. @{}@ is the
+-- empty object (any value of the map layer; no required fields). Multi-line
+-- forms need a trailing comma on each field, like every other @{ }@-delimited
+-- list, because the lexer keeps virtual semicolons inside braces.
+parseObjectType :: Parser (SyntacticType Parsed)
+parseObjectType = parseWithSpan $ do
+  parsePunctuation PunctuationLeftBrace
+  objectFields <- parseObjectTypeField `sepEndBy` parseComma
+  parsePunctuation PunctuationRightBrace
+  pure $ \sourceSpan ->
+    TypeObject
+      ObjectTypeNode
+        { fields = objectFields,
+          sourceSpan = sourceSpan
+        }
+
+parseObjectTypeField :: Parser (Text, SyntacticType Parsed)
+parseObjectTypeField = do
+  label <- parseIdentifier
+  parsePunctuation PunctuationColon
+  fieldType <- parseType
+  pure (label, fieldType)
 
 -- | @(T)@ collapses to @T@ (grouped type). @(A, B, ...)@ is a tuple.
 -- @()@ is the empty tuple type. A single-element grouping keeps its inner

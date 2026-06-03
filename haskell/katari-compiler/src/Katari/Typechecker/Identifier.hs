@@ -1287,6 +1287,15 @@ resolveType = \case
               sourceSpan = sourceSpan
             }
       )
+  TypeObject ObjectTypeNode {fields, sourceSpan} -> do
+    fields' <- mapM (\(label, fieldType) -> (label,) <$> resolveType fieldType) fields
+    pure
+      ( TypeObject
+          ObjectTypeNode
+            { fields = fields',
+              sourceSpan = sourceSpan
+            }
+      )
   where
     rebuildPrimitive PrimitiveTypeNode {kind, sourceSpan} =
       PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan}
