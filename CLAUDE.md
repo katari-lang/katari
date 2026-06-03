@@ -59,12 +59,13 @@ diagnostic と IR (JSON 化可能) と Schema を出力する。
   → Katari.Lexer                   Char stream → [WithPos Token], 仮想セミコロン挿入
   → Katari.Parser                  Token stream → Module Parsed (megaparsec カスタムストリーム)
   → Katari.Typechecker.Identifier  名前解決, 5 id 名前空間 (VariableId / TypeId / ModuleId / RequestId / ConstructorId) 発行
-  → Katari.Typechecker.ConstraintGenerator  制約生成
-  → Katari.Typechecker.Solver      制約解決 (subtype, effect)
-  → Katari.Typechecker.Zonker      Resolved 型に確定
+  → Katari.Typechecker.Check        bidirectional 型検査 (synth/check) + effect SCC 固定点 → Module Zonked
+  → Katari.Typechecker.Exhaustive   網羅性 / 到達性検査 (Maranget)
   → Katari.Lowering                AST Zonked → IRModule (JSON 化可能)
-  ┖ Katari.Schema                  ZonkResult → SchemaBundle (AI tool calling 用 JSON Schema)
+  ┖ Katari.Schema                  Zonked module + type env → SchemaBundle (AI tool calling 用 JSON Schema)
 ```
+
+型検査は **bidirectional checker** ([Katari.Typechecker.Check](haskell/katari-compiler/src/Katari/Typechecker/Check.hs)) に一本化されている。型変数・制約・unification・zonking は無い (全 callable の引数型が必須注釈なので、synth/check の単一トップダウン walk で確定する)。subtype は `Katari.Typechecker.NormalizedType` の純関数を直接呼ぶ。`Katari.Typechecker` が SCC ごとに `checkSCC` を回す。
 
 統一エントリは [Katari.Compile](haskell/katari-compiler/src/Katari/Compile.hs):
 
@@ -80,7 +81,7 @@ compile :: CompileInput -> CompileResult
 AST ノードは `(p :: Phase)` でパラメータ化:
 
 ```haskell
-type data Phase = Parsed | Identified | Constrained | Zonked
+type data Phase = Parsed | Identified | Zonked
 ```
 
 - `NameRef p s` の `resolution :: NameRefMeta p s` フィールドに phase 別の名前解決情報。
@@ -92,7 +93,8 @@ type data Phase = Parsed | Identified | Constrained | Zonked
   - `RequestRef` → `Maybe RequestId` (req handler の target、`req foo` 宣言のみ占有)
   - `ConstructorRef` → `Maybe ConstructorId` (match constructor pattern の target、`data Foo` のみ占有)
 - `Expression p` / `Pattern p` の `typeOf :: ExprType p` / `PatType p` に推論型
-  (`Constrained` で `SemanticType Unresolved`、`Zonked` で `SemanticType Resolved`)。
+  (`Zonked` で `SemanticType Resolved`; `Parsed` / `Identified` は `()`)。型変数を持つ
+  中間 phase は無い — checker が `Identified` から直接 `Zonked` (= Resolved 型付き) を作る。
 - phase 推移は payload を素通しする identity 変換になり、`passThroughX` 系の boilerplate は不要。
 
 `RequestRef` / `ConstructorRef` を slot 分離した結果、「handler target が req でない」「match
@@ -274,12 +276,11 @@ runtime が closure 値の lexical scope を構成する。
 
 ```haskell
 data CompileResult = CompileResult
-  { irModule         :: !(Maybe IRModule)         -- Error diagnostic があれば Nothing
-  , schemaBundle     :: !(Maybe SchemaBundle)      -- 同上
-  , diagnostics      :: ![Diagnostic]
-  , identifierResult :: !(Maybe IdentifierResult)  -- LSP / CLI agent listing 用
-  , solverResult     :: !(Maybe SolverResult)
-  , zonkResult       :: !(Maybe ZonkResult)         -- Query layer で使用
+  { irModule      :: !(Maybe IRModule)        -- Error diagnostic があれば Nothing
+  , schemaEntries :: !(Maybe [SchemaEntry])   -- 同上
+  , diagnostics   :: ![Diagnostic]
+  , querySnapshot :: !Query.QuerySnapshot     -- Query layer (hover / completion) 用
+  , updatedCache  :: !(Map ModuleName ModuleCache)  -- incremental back-end cache
   }
 ```
 
@@ -303,15 +304,15 @@ data IRModule = IRModule
 
 ```haskell
 -- Hover 情報: position → 最内ノードの型情報
-lookupAtPosition :: ZonkResult -> FilePath -> Position -> Maybe HoverInfo
+lookupAtPosition :: QuerySnapshot -> FilePath -> Position -> Maybe HoverInfo
 
 -- Occurrence index: 一度 build して繰り返し query
-buildOccurrenceIndex :: ZonkResult -> OccurrenceIndex
+buildOccurrenceIndex :: QuerySnapshot -> OccurrenceIndex
 
 -- find-references / go-to-definition
-identifyAtPosition :: ZonkResult -> FilePath -> Position -> Maybe ResolvedReference
+identifyAtPosition :: QuerySnapshot -> FilePath -> Position -> Maybe ResolvedReference
 findReferences     :: OccurrenceIndex -> ResolvedReference -> [SourceSpan]
-findDefinition     :: ZonkResult -> FilePath -> Position -> Maybe SourceSpan
+findDefinition     :: QuerySnapshot -> FilePath -> Position -> Maybe SourceSpan
 ```
 
 Position は **code-point 単位** (LSP layer が UTF-16 オフセットを変換してから渡す)。

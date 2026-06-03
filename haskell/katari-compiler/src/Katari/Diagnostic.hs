@@ -1,7 +1,7 @@
 -- | Unified diagnostic type for the Katari compiler.
 --
--- Each compiler phase (lexer / parser / identifier / constraint-gen / solver
--- / zonker / lowering) historically produced its own error type. This module
+-- Each compiler phase (lexer / parser / identifier / typechecker / lowering)
+-- produces its own error type. This module
 -- defines a single 'Diagnostic' carrier that downstream consumers (LSP /
 -- katari-project / playground) can render uniformly. Per-phase errors are
 -- still produced internally for debugging, and converted to 'Diagnostic'
@@ -15,9 +15,9 @@
 --
 --   * K0001-K0099 — lexer / parser
 --   * K0100-K0199 — identifier
---   * K0200-K0299 — constraint generator / solver / zonker
+--   * K0200-K0299 — typechecker (bidirectional checker + exhaustiveness)
 --   * K0300-K0399 — lowering
---   * K0400-K0499 — schema / emit
+--   * K0400-K0499 — schema / emit (reserved; unused so far)
 --   * K9999       — internal compiler error (invariant violation;
 --                   produced by 'Katari.Internal' helpers and surfaced
 --                   in the diagnostic stream so long-running embedders

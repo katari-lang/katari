@@ -7,7 +7,7 @@
 --      by name (e.g. 'agent_metadata' returned by @get_metadata@).
 --   2. @primitive@ declarations for every built-in primitive. The
 --      compiler parses these like any other declaration and runs them
---      through the usual Identifier / CG / Zonk / Lowering pipeline. The
+--      through the usual Identifier / typechecker / Lowering pipeline. The
 --      runtime executes a hardcoded implementation keyed on the prim's
 --      bare name (see @katari-runtime/src/engine/prim.ts@).
 --

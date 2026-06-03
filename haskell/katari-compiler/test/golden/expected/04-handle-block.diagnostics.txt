@@ -1,4 +1,4 @@
-error[K0403]: a request handler must exit with 'break' or 'next' — it cannot fall through to a value
+error[K0213]: a request handler must exit with 'break' or 'next' — it cannot fall through to a value
   --> test/golden/cases/04-handle-block.ktr (7:28)
   |
 7 |     request fetch_answer() { 42 }

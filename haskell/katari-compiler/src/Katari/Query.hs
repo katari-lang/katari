@@ -1,7 +1,7 @@
 -- | Position-based query layer for LSP / CLI tooling.
 --
 -- Callers compile a source set via 'Katari.Compile.compile', then use the
--- returned 'ZonkResult' to answer editor queries without re-running the
+-- returned 'QuerySnapshot' to answer editor queries without re-running the
 -- compiler. All positions are code-point based (LSP layer converts UTF-16
 -- offsets before calling here).
 module Katari.Query
@@ -163,8 +163,7 @@ data HoverInfo = HoverInfo
 --
 -- @
 -- let result = compile input
---     info   = lookupAtPosition
---                (identifierResult result) (zonkResult result)
+--     info   = lookupAtPosition result.querySnapshot
 --                "main.ktr" (Position {line = 0, column = 10})
 -- -- info :: Maybe HoverInfo
 -- -- Just (HoverInfo {hoverType = Just ..., hoverNameSpan = ..., ...})

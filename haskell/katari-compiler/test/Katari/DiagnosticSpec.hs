@@ -115,15 +115,21 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
     mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
     mapM_ (\d -> isReservedCode "K0100" "K0199" d.code `shouldBe` True) diags
 
-  it "Check (bidirectional typechecker) codes fall in K0400-K0499" $ do
+  it "Check (bidirectional typechecker) codes fall in K0200-K0299" $ do
     let diags =
           map
             Check.toDiagnostic
             [ Check.CheckErrorTypeMismatch dummySpan SemanticTypeInteger SemanticTypeString,
-              Check.CheckErrorUndeclaredEffect dummySpan [QualifiedName "test" "foo"]
+              Check.CheckErrorTypeSynonymCycle dummySpan "Foo",
+              Check.CheckErrorUnresolvedVariable dummySpan "x",
+              Check.CheckErrorUndeclaredEffect dummySpan [QualifiedName "test" "foo"],
+              Check.CheckErrorHandlerMustExit dummySpan,
+              Check.CheckErrorMissingArgument dummySpan "x",
+              Check.CheckErrorNoSuchField dummySpan "x",
+              Check.CheckErrorRecursiveReturn dummySpan "loop"
             ]
     mapM_ (\d -> d.severity `shouldBe` SeverityError) diags
-    mapM_ (\d -> isReservedCode "K0400" "K0499" d.code `shouldBe` True) diags
+    mapM_ (\d -> isReservedCode "K0200" "K0299" d.code `shouldBe` True) diags
 
   it "Lowering codes fall in K0300-K0399" $ do
     let diags =

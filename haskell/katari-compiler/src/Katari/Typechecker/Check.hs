@@ -15,11 +15,9 @@
 --     then assert @synthesised <: expected@).
 --
 -- 'checkSCC' is the per-SCC entry point that 'Katari.Typechecker' drives in
--- place of the constraint generator + solver + zonker.
---
--- Effect inference (the per-SCC request fixpoint) is not yet implemented here:
--- an agent's effect is its declared @with@ clause, or empty when unannotated.
--- That is the next slice.
+-- place of the constraint generator + solver + zonker. It also runs effect
+-- inference (a per-SCC request fixpoint — 'inferEffects') and checks each
+-- agent's body against its declared @with@ clause.
 module Katari.Typechecker.Check
   ( CheckError (..),
     toDiagnostic,
@@ -79,34 +77,52 @@ data CheckError
   | -- | A request handler body falls through to a value instead of exiting
     -- with @break@ / @next@.
     CheckErrorHandlerMustExit SourceSpan
-  | -- | A form the checker does not yet handle (WIP scaffold only).
-    CheckErrorUnsupported SourceSpan Text
+  | -- | A call omits a required (non-defaulted) argument.
+    CheckErrorMissingArgument SourceSpan Text
+  | -- | Field access on a value whose type lacks the named field.
+    CheckErrorNoSuchField SourceSpan Text
+  | -- | A recursive agent (named here) is missing its mandatory return type.
+    CheckErrorRecursiveReturn SourceSpan Text
+  | -- | A compiler-invariant violation (e.g. a node the Identifier pass should
+    -- have eliminated). Should never fire on a well-formed AST.
+    CheckErrorInternal SourceSpan Text
   deriving (Show)
 
--- | Convert a 'CheckError' to a unified 'Diagnostic'.
+-- | Convert a 'CheckError' to a unified 'Diagnostic'. Type-checker codes live
+-- in the K0200-K0299 range (alongside 'Katari.Typechecker.Exhaustive's
+-- K0290-K0292); internal invariants use K9999.
 toDiagnostic :: CheckError -> Diagnostic
 toDiagnostic = \case
-  CheckErrorTypeMismatch sourceSpan actual expected ->
-    diagnosticError
-      "K0400"
-      ("type mismatch: '" <> renderSemanticType actual <> "' is not a subtype of '" <> renderSemanticType expected <> "'")
-      sourceSpan
   CheckErrorTypeSynonymCycle sourceSpan name ->
     diagnosticError "K0200" ("cyclic type synonym '" <> name <> "'") sourceSpan
+  CheckErrorTypeMismatch sourceSpan actual expected ->
+    diagnosticError
+      "K0210"
+      ("type mismatch: '" <> renderSemanticType actual <> "' is not a subtype of '" <> renderSemanticType expected <> "'")
+      sourceSpan
   CheckErrorUnresolvedVariable sourceSpan name ->
-    diagnosticError "K0401" ("unresolved variable '" <> name <> "'") sourceSpan
+    diagnosticError "K0211" ("unresolved variable '" <> name <> "'") sourceSpan
   CheckErrorUndeclaredEffect sourceSpan requests ->
     diagnosticError
-      "K0402"
+      "K0212"
       ("this agent raises requests outside its 'with' clause: " <> Text.intercalate ", " (map renderQName requests))
       sourceSpan
   CheckErrorHandlerMustExit sourceSpan ->
     diagnosticError
-      "K0403"
+      "K0213"
       "a request handler must exit with 'break' or 'next' — it cannot fall through to a value"
       sourceSpan
-  CheckErrorUnsupported sourceSpan what ->
-    diagnosticError "K0499" ("typechecker (bidirectional, WIP): unsupported form: " <> what) sourceSpan
+  CheckErrorMissingArgument sourceSpan label ->
+    diagnosticError "K0214" ("missing required argument '" <> label <> "'") sourceSpan
+  CheckErrorNoSuchField sourceSpan label ->
+    diagnosticError "K0215" ("no field '" <> label <> "' on this value") sourceSpan
+  CheckErrorRecursiveReturn sourceSpan name ->
+    diagnosticError
+      "K0216"
+      ("recursive agent '" <> name <> "' needs an explicit return type — it can't be inferred through the recursion")
+      sourceSpan
+  CheckErrorInternal sourceSpan what ->
+    diagnosticError "K9999" ("internal typechecker invariant violated: " <> what) sourceSpan
 
 -- ===========================================================================
 -- Environment + monad
@@ -382,7 +398,7 @@ lookupVariableType _ _ = \case
 -- internal-invariant diagnostic and yield a @null@ placeholder.
 internalNull :: SourceSpan -> Text -> Check (Expression Zonked, SemanticType Resolved)
 internalNull sourceSpan reason = do
-  emitError (CheckErrorUnsupported sourceSpan ("internal invariant: " <> reason))
+  emitError (CheckErrorInternal sourceSpan reason)
   pure (ExpressionLiteral LiteralExpression {value = LiteralValueNull, sourceSpan = sourceSpan, typeOf = SemanticTypeNull}, SemanticTypeNull)
 
 walkTemplateElement :: TemplateElement Identified -> Check (TemplateElement Zonked, Maybe (SemanticType Resolved))
@@ -434,7 +450,7 @@ applyNormalCall sourceSpan calleeType argTypes = case calleeType of
         Just argType -> subtypeAssert sourceSpan argType parameter.parameterType
         Nothing
           | parameter.optional -> pure ()
-          | otherwise -> emitError (CheckErrorUnsupported sourceSpan ("missing required argument '" <> label <> "'"))
+          | otherwise -> emitError (CheckErrorMissingArgument sourceSpan label)
     pure returnType
   SemanticTypeFunctionAny -> pure SemanticTypeUnknown
   SemanticTypeUnknown -> pure SemanticTypeUnknown
@@ -870,7 +886,7 @@ fieldType sourceSpan subject label = case subject of
   SemanticTypeUnknown -> pure SemanticTypeUnknown
   _ -> missing
   where
-    missing = emitError (CheckErrorUnsupported sourceSpan ("no field '" <> label <> "' on the accessed value")) >> pure SemanticTypeUnknown
+    missing = emitError (CheckErrorNoSuchField sourceSpan label) >> pure SemanticTypeUnknown
 
 
 -- ===========================================================================
@@ -1082,7 +1098,7 @@ seedAgentSignature AgentDeclaration {name, parameters, returnType, withRequests,
   ret <- case returnType of
     Just t -> elaborateType t
     Nothing -> do
-      emitError (CheckErrorUnsupported sourceSpan "a recursive agent needs an explicit return type — it can't be inferred through the recursion")
+      emitError (CheckErrorRecursiveReturn sourceSpan name.text)
       pure SemanticTypeUnknown
   effect <- maybe (pure emptyRequest) elaborateRequestList withRequests
   pure (maybe [] (\qualifiedName -> [(qualifiedName, SemanticTypeFunction paramSig ret effect)]) (topLevelQName name))

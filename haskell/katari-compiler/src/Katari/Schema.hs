@@ -7,7 +7,7 @@
 -- ('SemanticTypeData') are inlined via 'DataDefs' (no @$defs@ / @$ref@).
 -- Description text is pulled from the AST's @\@\"...\"@ annotations.
 --
--- Input is 'ZonkResult' only ('IRModule' is not required).
+-- Input is the typechecked module + type environment (no 'IRModule' needed).
 module Katari.Schema
   ( -- * Output types
     SchemaEntry (..),

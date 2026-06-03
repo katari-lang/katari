@@ -15,7 +15,7 @@
 --
 -- 'NormalizedType' (see 'Katari.Typechecker.NormalizedType') is yet another
 -- representation that further normalises union / tuple shapes for use by the
--- constraint solver.
+-- bidirectional type checker.
 module Katari.SemanticType where
 
 import Data.Map.Strict (Map)
@@ -97,7 +97,7 @@ data SemanticType phase where
   -- parameter list.
   SemanticTypeData :: QualifiedName -> SemanticType phase
   -- | Structural object type with named fields. Not surfaced in the
-  -- syntactic AST: synthesised by the constraint generator for "has field"
+  -- syntactic AST: produced by the checker for structural "has field"
   -- constraints (e.g. field access on data values is encoded as
   -- @T \<: SemanticTypeObject {label: t_field}@). Convertible to / from
   -- JSON schema style records.
@@ -152,16 +152,9 @@ unionSemantic = \case
 -- Requests
 -- ---------------------------------------------------------------------------
 
--- | An request set is the disjoint sum of "request type variables that have
--- not yet been resolved" and "concrete @req@ VariableIds that have already
--- been pinned down". Subtyping on requests is just set inclusion on both
--- components.
---
--- The @phase@ parameter is phantom: at @Resolved@ phase the
--- 'requestVars' field is required to be empty (the solver enforces this when
--- zonking), but the type system does not enforce it. Keeping the same
--- representation across phases lets the same operations (union, equality)
--- work without case splits.
+-- | A request (effect) set: the concrete @req@ qualified names an expression
+-- can raise. Subtyping on requests is set inclusion. The @phase@ parameter is a
+-- vestigial phantom (only @Resolved@ exists).
 data SemanticRequest phase where
   SemanticRequest :: Set (SemanticRequestElement phase) -> SemanticRequest phase
 
@@ -188,7 +181,7 @@ emptyRequest :: SemanticRequest phase
 emptyRequest = SemanticRequest Set.empty
 
 -- | A request set containing exactly one concrete request. Used when
--- the constraint generator records that a particular call site triggers
+-- the checker records that a particular call site triggers
 -- a specific declared @req@.
 singletonRequest :: QualifiedName -> SemanticRequest phase
 singletonRequest requestId = SemanticRequest (Set.singleton (SemanticRequestElementConcrete requestId))

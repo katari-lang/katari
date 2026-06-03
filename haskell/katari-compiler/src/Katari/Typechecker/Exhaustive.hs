@@ -2,7 +2,7 @@
 -- and irrefutable binding contexts.
 --
 -- Implements Maranget's "Warnings for pattern matching" (JFP 2007) as a
--- post-Zonker pass. The entry point 'checkExhaustive' walks 'ZonkResult'
+-- post-typecheck pass. The entry point walks the typechecked ('Zonked') module
 -- and returns:
 --
 --   * 'ExhaustiveErrorNonExhaustiveMatch'   (K0290) — a @match@ is missing
