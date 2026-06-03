@@ -76,6 +76,9 @@ data CheckError
     CheckErrorUnresolvedVariable SourceSpan Text
   | -- | An agent's body raises requests outside its declared @with@ clause.
     CheckErrorUndeclaredEffect SourceSpan [QualifiedName]
+  | -- | A request handler body falls through to a value instead of exiting
+    -- with @break@ / @next@.
+    CheckErrorHandlerMustExit SourceSpan
   | -- | A form the checker does not yet handle (WIP scaffold only).
     CheckErrorUnsupported SourceSpan Text
   deriving (Show)
@@ -96,6 +99,11 @@ toDiagnostic = \case
     diagnosticError
       "K0402"
       ("this agent raises requests outside its 'with' clause: " <> Text.intercalate ", " (map renderQName requests))
+      sourceSpan
+  CheckErrorHandlerMustExit sourceSpan ->
+    diagnosticError
+      "K0403"
+      "a request handler must exit with 'break' or 'next' — it cannot fall through to a value"
       sourceSpan
   CheckErrorUnsupported sourceSpan what ->
     diagnosticError "K0499" ("typechecker (bidirectional, WIP): unsupported form: " <> what) sourceSpan
@@ -566,8 +574,13 @@ walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType
   (parameters', _, paramLocals) <- elaborateParameters parameters
   (body', bodyType) <- withLocals paramLocals (walkBlock body)
   -- A request handler body must transfer control with @break@ / @next@; falling
-  -- through to a value is an error (its type must be 'never').
-  subtypeAssert (sourceSpanOf body) bodyType SemanticTypeNever
+  -- through to a value (its type is not 'never') is a dedicated error.
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  let isNever = subtypeNormalizedType dataFieldEnv (normaliseSemantic bodyType) (normaliseSemantic SemanticTypeNever)
+  case bodyType of
+    SemanticTypeUnknown -> pure () -- error recovery: a prior diagnostic already fired
+    _ | isNever -> pure ()
+    _ -> emitError (CheckErrorHandlerMustExit (sourceSpanOf body))
   pure
     RequestHandler
       { moduleQualifier = fmap retagNameRef moduleQualifier,
