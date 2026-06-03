@@ -30,6 +30,7 @@ library:
     - Katari.Typechecker.Solver.Request
     - Katari.Typechecker.Solver.Internal
     - Katari.Typechecker.Solver.Substitution
+    - Katari.Typechecker.Check
     - Katari.Typechecker.AgentGraph
     - Katari.Typechecker.ImportGraph
     - Katari.Typechecker.ModuleInterface
