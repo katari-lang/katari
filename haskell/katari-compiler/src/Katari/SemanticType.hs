@@ -1,9 +1,8 @@
 -- | Semantic type representation for the Katari typechecker.
 --
--- 'SemanticType' is parameterised by a phase tag (@Unresolved@ / @Resolved@)
--- so that the @SemanticTypeVariable@ constructor only exists at the
--- @Unresolved@ phase. A @SemanticType Resolved@ value is therefore guaranteed
--- by the type system to be free of unification variables.
+-- 'SemanticType' carries a vestigial @phase@ tag (only @Resolved@ exists now —
+-- the bidirectional checker never introduces unification variables). A value is
+-- therefore always fully resolved.
 --
 -- This is a separate data type from 'Katari.AST.SyntacticType': the AST
 -- captures user-written syntax (e.g. type names, qualified references, type
@@ -19,8 +18,6 @@
 -- constraint solver.
 module Katari.SemanticType where
 
-import Data.Functor.Const (Const (..))
-import Data.Functor.Identity (Identity (..))
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -31,40 +28,18 @@ import Katari.Common (QualifiedName (..))
 -- Phase markers
 -- ---------------------------------------------------------------------------
 
--- | Phase tag for @SemanticType@ values that may still contain unification
--- variables (constraint generation phase).
-type data Unresolved
-
--- | Phase tag for @SemanticType@ values that are guaranteed to contain no
--- unification variables (after the constraint solver has run).
+-- | Phase tag for fully-resolved @SemanticType@ values. The bidirectional
+-- checker produces these directly, so it is the only phase that exists now
+-- (the @phase@ parameter is retained as a vestigial single-inhabitant tag).
 type data Resolved
-
--- ---------------------------------------------------------------------------
--- Type / request variables
--- ---------------------------------------------------------------------------
-
--- | Unification variable id. Allocated by the constraint generator and
--- substituted away by the solver.
-newtype TypeVariableId = TypeVariableId Int
-  deriving (Eq, Ord, Show)
-
--- | Request variable id. Used to bound an request set whose membership is not
--- yet known at constraint generation time.
-newtype RequestVariableId = RequestVariableId Int
-  deriving (Eq, Ord, Show)
 
 -- ---------------------------------------------------------------------------
 -- Semantic types
 -- ---------------------------------------------------------------------------
 
--- | Semantic type. The phase parameter selects whether unification variables
--- may appear: only @SemanticType Unresolved@ admits 'SemanticTypeVariable',
--- because that constructor's GADT signature constrains the phase to
--- @Unresolved@. Pattern-matching on a @SemanticType Resolved@ therefore does
--- not need to (and cannot) handle the variable case.
+-- | Semantic type. Every value is fully resolved (no unification variables —
+-- the checker never introduces any).
 data SemanticType phase where
-  -- | Unification variable. Only constructible at @Unresolved@ phase.
-  SemanticTypeVariable :: TypeVariableId -> SemanticType Unresolved
   -- | Lattice bottom: no values inhabit this type.
   SemanticTypeNever :: SemanticType phase
   -- | Lattice top: any value satisfies this type.
@@ -196,15 +171,9 @@ deriving instance Eq (SemanticRequest phase)
 
 deriving instance Ord (SemanticRequest phase)
 
--- | One member of a 'SemanticRequest' set. A concrete element points at
--- a specific @req@ declaration by 'RequestId' and is valid in any
--- phase. A variable element stands for an unsolved request-row
--- placeholder introduced by the constraint generator and only exists
--- at @Unresolved@ phase; the solver discharges it before zonking, so
--- after zonk a @SemanticRequest Resolved@ contains concrete elements
--- only.
+-- | One member of a 'SemanticRequest' set: a concrete element pointing at a
+-- specific @req@ declaration by its 'QualifiedName'.
 data SemanticRequestElement phase where
-  SemanticRequestElementVariable :: RequestVariableId -> SemanticRequestElement Unresolved
   SemanticRequestElementConcrete :: QualifiedName -> SemanticRequestElement phase
 
 deriving instance Show (SemanticRequestElement phase)
@@ -224,104 +193,8 @@ emptyRequest = SemanticRequest Set.empty
 singletonRequest :: QualifiedName -> SemanticRequest phase
 singletonRequest requestId = SemanticRequest (Set.singleton (SemanticRequestElementConcrete requestId))
 
--- | A request set containing exactly one row-variable placeholder.
--- The constraint generator emits this when it does not yet know which
--- concrete request(s) an expression will perform; the solver later
--- substitutes a concrete 'SemanticRequest' for the variable. Only
--- valid at @Unresolved@ phase.
-singletonRequestVariable :: RequestVariableId -> SemanticRequest Unresolved
-singletonRequestVariable varId = SemanticRequest (Set.singleton (SemanticRequestElementVariable varId))
-
 -- | Set union over request elements. Used to combine the request sets
 -- of subexpressions (@e1 + e2@'s requests = @e1@'s ∪ @e2@'s).
 unionRequests :: SemanticRequest phase -> SemanticRequest phase -> SemanticRequest phase
 unionRequests (SemanticRequest elements1) (SemanticRequest elements2) =
   SemanticRequest (Set.union elements1 elements2)
-
--- | Applicative traversal that rewrites every type variable and every
--- request variable inside a 'SemanticType', threading the user's
--- effects (substitution lookup, error accumulation, ...) through the
--- structure. The two callbacks decide what each leaf becomes, and the
--- traversal handles all the structural cases (function / array / tuple
--- / union / object / ...) uniformly. Building blocks 'foldVariable' is
--- the @Const@-specialised pure-fold variant of this.
-substituteVariable ::
-  (Applicative f) =>
-  (TypeVariableId -> f (SemanticType phase)) ->
-  (RequestVariableId -> f (SemanticRequest phase)) ->
-  SemanticType phase' ->
-  f (SemanticType phase)
-substituteVariable onVariable onRequest = \case
-  SemanticTypeVariable varId -> onVariable varId
-  SemanticTypeFunction parameters returnType requests ->
-    SemanticTypeFunction
-      <$> traverse
-        ( \parameter ->
-            (\substituted -> Parameter {parameterType = substituted, optional = parameter.optional})
-              <$> substituteVariable onVariable onRequest parameter.parameterType
-        )
-        parameters
-      <*> substituteVariable onVariable onRequest returnType
-      <*> substituteRequestVariable requests
-  SemanticTypeArray element -> SemanticTypeArray <$> substituteVariable onVariable onRequest element
-  SemanticTypeTuple elements -> SemanticTypeTuple <$> traverse (substituteVariable onVariable onRequest) elements
-  SemanticTypeUnion branches -> SemanticTypeUnion <$> traverse (substituteVariable onVariable onRequest) branches
-  SemanticTypeObject fields -> SemanticTypeObject <$> traverse (substituteVariable onVariable onRequest) fields
-  SemanticTypeRecord valueType ->
-    SemanticTypeRecord <$> substituteVariable onVariable onRequest valueType
-  SemanticTypeNever -> pure SemanticTypeNever
-  SemanticTypeUnknown -> pure SemanticTypeUnknown
-  SemanticTypeFunctionAny -> pure SemanticTypeFunctionAny
-  SemanticTypeNull -> pure SemanticTypeNull
-  SemanticTypeInteger -> pure SemanticTypeInteger
-  SemanticTypeNumber -> pure SemanticTypeNumber
-  SemanticTypeString -> pure SemanticTypeString
-  SemanticTypeSecret -> pure SemanticTypeSecret
-  SemanticTypeFile -> pure SemanticTypeFile
-  SemanticTypeBoolean -> pure SemanticTypeBoolean
-  SemanticTypeLiteralInteger value -> pure (SemanticTypeLiteralInteger value)
-  SemanticTypeLiteralString value -> pure (SemanticTypeLiteralString value)
-  SemanticTypeLiteralBoolean value -> pure (SemanticTypeLiteralBoolean value)
-  SemanticTypeData typeId -> pure (SemanticTypeData typeId)
-  where
-    substituteRequestVariable (SemanticRequest elements) =
-      foldr unionRequests emptyRequest
-        <$> traverse substituteElement (Set.toList elements)
-      where
-        substituteElement = \case
-          SemanticRequestElementVariable variableId -> onRequest variableId
-          SemanticRequestElementConcrete requestId -> pure (singletonRequest requestId)
-
--- | Read-only traversal: collect a monoidal summary of every type
--- variable and every request variable that occurs anywhere inside a
--- 'SemanticType'. Used for free-variable computation, occurs checks,
--- and pretty printing. The 'Monoid' choice (e.g. @Set TypeVariableId@,
--- @Any@, @Sum Int@) picks the analysis.
-foldVariable ::
-  (Monoid m) =>
-  (TypeVariableId -> m) ->
-  (RequestVariableId -> m) ->
-  SemanticType phase ->
-  m
-foldVariable onVariable onRequest = getConst . substituteVariable (Const . onVariable) (Const . onRequest)
-
--- | Re-tag a 'Resolved' semantic type as 'Unresolved'. Sound because the
--- 'SemanticTypeVariable' constructor only exists at @Unresolved@ phase, so a
--- @SemanticType Resolved@ value structurally cannot contain anything that is
--- not also a valid 'Unresolved' shape. The @onVariable@ closure is statically
--- unreachable; supplying a sentinel so we don't have to call 'error' there.
-liftResolvedToUnresolved :: SemanticType Resolved -> SemanticType Unresolved
-liftResolvedToUnresolved =
-  runIdentity
-    . substituteVariable
-      (\_ -> Identity SemanticTypeNever)
-      (\_ -> Identity emptyRequest)
-
--- | Re-tag a 'Resolved' request set as 'Unresolved'. See
--- 'liftResolvedToUnresolved' for the soundness argument.
-liftRequestResolvedToUnresolved :: SemanticRequest Resolved -> SemanticRequest Unresolved
-liftRequestResolvedToUnresolved (SemanticRequest elements) =
-  SemanticRequest (Set.fromList (map liftElement (Set.toList elements)))
-  where
-    liftElement :: SemanticRequestElement Resolved -> SemanticRequestElement Unresolved
-    liftElement (SemanticRequestElementConcrete reqId) = SemanticRequestElementConcrete reqId

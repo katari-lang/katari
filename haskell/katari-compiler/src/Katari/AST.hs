@@ -10,11 +10,11 @@
 -- Key design points:
 --
 --   * @NameRefResolution@ is a closed type family returning the same shape
---     (@Maybe Identifier@) for the three phases Identified / Constrained /
+--     (@Maybe Identifier@) for the phases Identified /
 --     Zonked. Phase transitions can be passed through via 'retagNameRef' /
 --     'retagSyntacticType' etc.
 --   * @ExpressionType@ / @PatternType@ are also closed type families:
---     @()@ for Parsed / Identified, @SemanticType@ for Constrained / Zonked.
+--     @()@ for Parsed / Identified, @SemanticType@ for Zonked.
 --     'Katari.SemanticType' is a leaf module so no cycles.
 --   * 'Module' / 'Declaration' / 'Statement' families are not expected to
 --     carry type information and therefore do not have a @typeOf@ field
@@ -27,7 +27,7 @@ import Katari.Common (LiteralValue (..), QualifiedName, TypePatternTag (..))
 import Katari.Id
   ( VariableResolution (..),
   )
-import Katari.SemanticType (Resolved, SemanticType, Unresolved)
+import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 
 -- ---------------------------------------------------------------------------
@@ -65,19 +65,15 @@ type data Phase where
   -- | Identifier resolution complete: 'NameRef' nodes carry 'Just' identifiers
   -- for successfully resolved names and 'Nothing' for unresolved names.
   Identified :: Phase
-  -- | Constraint generation complete: 'NameRef' nodes carry the same
-  -- resolution metadata as 'Identified', but expression / pattern nodes
-  -- also carry semantic type information (see 'ExpressionType' / 'PatternType').
-  Constrained :: Phase
-  -- | Zonking complete: same name resolution as 'Constrained' (still
-  -- 'VariableResolution' / 'QualifiedName'), but every expression / pattern's
-  -- @typeOf@ is now a fully-resolved 'SemanticType' with no remaining
-  -- unification variables. IR-level ids are assigned later, by Lowering.
+  -- | Type-checking complete: same name resolution as 'Identified', and every
+  -- expression / pattern's @typeOf@ is now a fully-resolved 'SemanticType' (the
+  -- bidirectional checker computes these directly — see 'ExpressionType' /
+  -- 'PatternType'). IR-level ids are assigned later, by Lowering.
   Zonked :: Phase
 
 -- | NameRef resolution metadata for a given phase + symbol kind. After
 -- Identifier the shape stabilises (@Maybe@ + identifier), and
--- 'Constrained' / 'Zonked' keep the same resolution metadata. The
+-- 'Zonked' keeps the same resolution metadata as 'Identified'. The
 -- 'Parsed' phase carries no resolution information yet.
 type family NameRefResolution (phase :: Phase) (nameRefKind :: NameRefKind) :: Type where
   NameRefResolution Parsed _ = ()
@@ -88,14 +84,12 @@ type family NameRefResolution (phase :: Phase) (nameRefKind :: NameRefKind) :: T
   NameRefResolution _ RequestRef = Maybe QualifiedName
   NameRefResolution _ ConstructorRef = Maybe QualifiedName
 
--- | Expression node type metadata. Closed family: all four phases are
--- enumerated here. 'Parsed' / 'Identified' carry no type information;
--- 'Constrained' / 'Zonked' carry 'SemanticType' at the appropriate
--- resolution phase.
+-- | Expression node type metadata. Closed family: all phases are enumerated
+-- here. 'Parsed' / 'Identified' carry no type information; 'Zonked' carries the
+-- resolved 'SemanticType' the checker computed.
 type family ExpressionType (phase :: Phase) :: Type where
   ExpressionType Parsed = ()
   ExpressionType Identified = ()
-  ExpressionType Constrained = SemanticType Unresolved
   ExpressionType Zonked = SemanticType Resolved
 
 -- | Pattern node type metadata. Same shape as 'ExpressionType'; the two are kept
@@ -104,7 +98,6 @@ type family ExpressionType (phase :: Phase) :: Type where
 type family PatternType (phase :: Phase) :: Type where
   PatternType Parsed = ()
   PatternType Identified = ()
-  PatternType Constrained = SemanticType Unresolved
   PatternType Zonked = SemanticType Resolved
 
 -- ---------------------------------------------------------------------------
@@ -120,7 +113,7 @@ data NameRef (phase :: Phase) (nameRefKind :: NameRefKind) = NameRef
   { text :: Text,
     sourceSpan :: SourceSpan,
     -- | Phase-specific resolution payload. 'Parsed': trivial. 'Identified'
-    -- / 'Constrained' / 'Zonked': @Maybe Identifier@.
+    -- / 'Zonked': @Maybe Identifier@.
     resolution :: NameRefResolution phase nameRefKind
   }
 
@@ -1355,7 +1348,7 @@ instance HasSourceSpan (TemplateExpressionElement p) where
 -- Utility for downstream phases that want to pass through upstream phase
 -- ASTs with only "type-level tag rewriting". Safety is established by
 -- using a @~@ constraint to assert that @NameRefResolution@ agrees between
--- the two phases (the three phases Identified / Constrained / Zonked share
+-- the two phases (the phases Identified / Zonked share
 -- the same shape via a closed type family).
 --
 -- Only @NameRef@ / @SyntacticType@ / @SyntacticRequest@ / each @TypeNode@
