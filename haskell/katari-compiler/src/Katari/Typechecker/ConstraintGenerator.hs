@@ -169,10 +169,6 @@ data ReasonKind where
   ReasonKindIndexAccessArray :: ReasonKind
   ReasonKindIndexAccessIndex :: ReasonKind
   ReasonKindTemplateInterpolation :: ReasonKind
-  -- | Every value in a record literal '{ a = e1, b = e2 }' must
-  -- agree on a single value type. Each entry's expression type is
-  -- subtype-constrained against the literal's fresh value-type var.
-  ReasonKindRecordValue :: ReasonKind
   ReasonKindConstructorPattern :: ReasonKind
   -- | Type-guard pattern (@integer(p)@ etc.) narrows the subject's type
   -- to the named primitive / structural family. Attached to the
