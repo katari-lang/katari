@@ -93,6 +93,37 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       are rare pre-generics (they need a *free* variable at a field access;
       monomorphic code's access subject is always concrete, so `Decompose`
       handles it), so this is deferred behind the generics phase.
+- [ ] **[big · under consideration] Replace the constraint solver with a
+      bidirectional type checker.** Because Katari requires explicit parameter
+      types everywhere, almost nothing actually needs global type-variable
+      inference: parameter types are given → derived expression types →
+      let/pattern-bound variable types → the match subject are all determined by
+      a forward synthesise / check walk. The only cases needing more are (a)
+      generic instantiation — handled by *requiring explicit type arguments* and
+      then variance-aware **bound substitution** (replace a generic by its upper
+      bound in covariant positions, lower bound in contravariant ones) when
+      looking through it for match / exhaustiveness / field access — and (b)
+      recursion: an inferred **return type** would need an annotation on a
+      recursive cycle (the type lattice has infinite ascending chains, so a
+      fixpoint may diverge), whereas **effect** inference can keep using a
+      per-SCC fixpoint (the request-name lattice is finite, so it terminates).
+      This dissolves the Solver / Zonker / all type & request variables /
+      bound-pair / Branch, the aggregate-narrow item above, **and** the
+      match-subject projection-direction problem below — while keeping the
+      `NormalizedType` lattice (subtype / union / intersect), Identifier, and the
+      per-SCC ordering. Substantial rewrite of `ConstraintGenerator`; wants a
+      design doc first.
+- [ ] **[blocked on the above] Match-subject component projection is
+      direction-locked.** A tuple/record pattern's component types are flowed
+      from the subject by a bridging subtype constraint while the subject is
+      still a type variable. `subject <: tuple[fresh]` makes tuple-*prefix*
+      matching work (`(a, b)` over a longer tuple, per minimum-elements) but
+      makes a tuple pattern over an `array` subject a contradiction; the original
+      `tuple[fresh] <: subject` does the reverse. No single direction serves both
+      because the subject's shape isn't known yet — exactly what a bidirectional
+      checker (subject synthesised *before* the arms) removes. Current code keeps
+      the array-friendly direction; tuple-prefix exhaustiveness is therefore not
+      recognised (a wildcard is required).
 
 ## SDK (`@katari-lang/port`)
 
