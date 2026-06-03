@@ -334,10 +334,9 @@ export type CallAgentThread = Common & {
 
 /**
  * Shared shape for threads that fan out into N sibling element computations
- * and collect their results into an ordered sequence (TupleThread / ArrayThread).
- * The runtime helpers in `thread/ops/collecting.ts` operate generically on this
- * base; only the final-value construction step (build a tuple vs an array Value)
- * is variant-specific.
+ * and collect their results into an ordered sequence (TupleThread). The runtime
+ * helpers in `thread/ops/collecting.ts` operate generically on this base; the
+ * final value is always an ordered `array` Value (tuples and arrays share it).
  */
 type CollectingBase = {
   blockId: BlockId;
@@ -346,14 +345,11 @@ type CollectingBase = {
   nextIndex: number;
 };
 
+// The unified seq thread — both `[...]` and `par [...]` fan out here and collect
+// into one ordered `array` Value (tuple / array share the runtime form).
 export type TupleThread = Common &
   CollectingBase & {
     kind: "tuple";
-  };
-
-export type ArrayThread = Common &
-  CollectingBase & {
-    kind: "array";
   };
 
 export type RecordThread = Common &
@@ -362,11 +358,11 @@ export type RecordThread = Common &
   };
 
 /**
- * Union of every variant that goes through the shared collecting ops
- * (`collecting.ts`). RecordThread uses `CollectingBase` for its shape but
- * has its own ops (`record.ts`) — it is intentionally excluded here.
+ * Threads that go through the shared collecting ops (`collecting.ts`).
+ * RecordThread uses `CollectingBase` for its shape but has its own ops
+ * (`record.ts`) — it is intentionally excluded here.
  */
-export type CollectingThread = TupleThread | ArrayThread;
+export type CollectingThread = TupleThread;
 
 export type Thread =
   | AgentThread
@@ -381,7 +377,6 @@ export type Thread =
   | CtorThread
   | MakeClosureThread
   | TupleThread
-  | ArrayThread
   | RecordThread;
 
 export type ThreadKind = Thread["kind"];

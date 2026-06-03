@@ -459,7 +459,6 @@ getExpressionType = \case
   AST.ExpressionLiteral e -> e.typeOf
   AST.ExpressionVariable e -> e.typeOf
   AST.ExpressionTuple e -> e.typeOf
-  AST.ExpressionArray e -> e.typeOf
   AST.ExpressionRecord e -> e.typeOf
   AST.ExpressionCall e -> e.typeOf
   AST.ExpressionBinaryOperator e -> e.typeOf
@@ -473,7 +472,6 @@ getExpressionType = \case
   AST.ExpressionTemplate e -> e.typeOf
   AST.ExpressionHandle e -> e.typeOf
   AST.ExpressionParTuple e -> e.typeOf
-  AST.ExpressionParArray e -> e.typeOf
   AST.ExpressionQualifiedReference e -> e.typeOf
 
 -- ===========================================================================
@@ -643,8 +641,6 @@ walkExpression env = \case
     walkExpression env ue.operand
   AST.ExpressionTuple te ->
     concatMap (walkExpression env) te.elements
-  AST.ExpressionArray ae ->
-    concatMap (walkExpression env) ae.elements
   AST.ExpressionRecord re ->
     concatMap (walkExpression env . snd) re.entries
   AST.ExpressionFieldAccess fa ->
@@ -665,8 +661,6 @@ walkExpression env = \case
       ++ walkBlock env he.body
   AST.ExpressionParTuple pte ->
     concatMap (walkExpression env) pte.elements
-  AST.ExpressionParArray pae ->
-    concatMap (walkExpression env) pae.elements
   AST.ExpressionLiteral _ -> []
   AST.ExpressionVariable _ -> []
   AST.ExpressionQualifiedReference _ -> []

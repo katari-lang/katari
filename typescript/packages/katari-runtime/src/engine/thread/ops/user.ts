@@ -230,7 +230,6 @@ function isStructuralBlock(kind: Block["kind"]): boolean {
     case "blockFor":
     case "blockMatch":
     case "blockTuple":
-    case "blockArray":
       return true;
     case "blockDelegate":
       // BlockDelegate may reference a runtime value at a VarId in the

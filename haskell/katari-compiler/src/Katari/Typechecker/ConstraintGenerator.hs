@@ -169,7 +169,6 @@ data ReasonKind where
   ReasonKindIndexAccessArray :: ReasonKind
   ReasonKindIndexAccessIndex :: ReasonKind
   ReasonKindTemplateInterpolation :: ReasonKind
-  ReasonKindArrayElement :: ReasonKind
   -- | Every value in a record literal '{ a = e1, b = e2 }' must
   -- agree on a single value type. Each entry's expression type is
   -- subtype-constrained against the literal's fresh value-type var.
@@ -1030,7 +1029,6 @@ constrainedExpressionType = \case
   ExpressionLiteral LiteralExpression {typeOf} -> typeOf
   ExpressionVariable VariableExpression {typeOf} -> typeOf
   ExpressionTuple TupleExpression {typeOf} -> typeOf
-  ExpressionArray ArrayExpression {typeOf} -> typeOf
   ExpressionRecord RecordExpression {typeOf} -> typeOf
   ExpressionCall CallExpression {typeOf} -> typeOf
   ExpressionBinaryOperator BinaryOperatorExpression {typeOf} -> typeOf
@@ -1041,7 +1039,6 @@ constrainedExpressionType = \case
   ExpressionBlock BlockExpression {typeOf} -> typeOf
   ExpressionHandle HandleExpression {typeOf} -> typeOf
   ExpressionParTuple ParTupleExpression {typeOf} -> typeOf
-  ExpressionParArray ParArrayExpression {typeOf} -> typeOf
   ExpressionFieldAccess FieldAccessExpression {typeOf} -> typeOf
   ExpressionIndexAccess IndexAccessExpression {typeOf} -> typeOf
   ExpressionTemplate TemplateExpression {typeOf} -> typeOf
@@ -1285,7 +1282,6 @@ walkExpression = \case
   ExpressionLiteral expr -> walkLiteralExpr expr
   ExpressionVariable expr -> walkVariableExpr expr
   ExpressionTuple expr -> walkTupleExpr expr
-  ExpressionArray expr -> walkArrayExpr expr
   ExpressionRecord expr -> walkRecordExpr expr
   ExpressionCall expr -> walkCallExpr expr
   ExpressionBinaryOperator expr -> walkBinaryExpr expr
@@ -1296,7 +1292,6 @@ walkExpression = \case
   ExpressionBlock expr -> walkBlockExpr expr
   ExpressionHandle expr -> walkHandleExpr expr
   ExpressionParTuple expr -> walkParTupleExpr expr
-  ExpressionParArray expr -> walkParArrayExpr expr
   ExpressionFieldAccess expr -> walkFieldAccessExpr expr
   ExpressionIndexAccess expr -> walkIndexAccessExpr expr
   ExpressionTemplate expr -> walkTemplateExpr expr
@@ -1336,27 +1331,6 @@ walkTupleExpr TupleExpression {elements, sourceSpan} = do
           { elements = elements',
             sourceSpan = sourceSpan,
             typeOf = semantic
-          }
-    )
-
-walkArrayExpr :: ArrayExpression Identified -> CG (Expression Constrained)
-walkArrayExpr ArrayExpression {elements, sourceSpan} = do
-  elements' <- mapM walkExpression elements
-  tElem <- freshTypeVar
-  mapM_
-    ( \e ->
-        addTypeConstraint
-          (constrainedExpressionType e)
-          tElem
-          (ConstraintReason ReasonKindArrayElement sourceSpan)
-    )
-    elements'
-  pure
-    ( ExpressionArray
-        ArrayExpression
-          { elements = elements',
-            sourceSpan = sourceSpan,
-            typeOf = SemanticTypeArray tElem
           }
     )
 
@@ -1777,27 +1751,6 @@ walkParTupleExpr ParTupleExpression {elements, sourceSpan} = do
           { elements = elements',
             sourceSpan = sourceSpan,
             typeOf = semantic
-          }
-    )
-
-walkParArrayExpr :: ParArrayExpression Identified -> CG (Expression Constrained)
-walkParArrayExpr ParArrayExpression {elements, sourceSpan} = do
-  elements' <- mapM walkExpression elements
-  tElem <- freshTypeVar
-  mapM_
-    ( \e ->
-        addTypeConstraint
-          (constrainedExpressionType e)
-          tElem
-          (ConstraintReason ReasonKindArrayElement sourceSpan)
-    )
-    elements'
-  pure
-    ( ExpressionParArray
-        ParArrayExpression
-          { elements = elements',
-            sourceSpan = sourceSpan,
-            typeOf = SemanticTypeArray tElem
           }
     )
 

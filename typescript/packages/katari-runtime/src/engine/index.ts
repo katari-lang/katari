@@ -57,7 +57,6 @@ export { deserialize, serialize } from "./snapshot.js";
 export type { State } from "./state.js";
 export type {
   AgentThread,
-  ArrayThread,
   AskIdMap,
   ChildRole,
   CtorThread,

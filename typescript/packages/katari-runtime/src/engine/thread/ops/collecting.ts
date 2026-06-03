@@ -1,20 +1,18 @@
-// Shared logic for TupleThread and ArrayThread.
+// Shared logic for the seq collecting thread (TupleThread).
 //
-// Both spawn N inline children (one per element block) and assemble the
-// returned values into a single tuple/array Value when all children are
-// done. Sequential mode runs them one at a time; parallel fans them all
-// out at once.
-//
-// The variant ops files just specialize this with the right `resultKind`.
+// Spawns N inline children (one per element block) and assembles the returned
+// values into a single ordered `array` Value when all children are done.
+// Sequential mode runs them one at a time; parallel fans them all out at once
+// (driven by the block's `parallel` flag).
 
-import type { ArrayBlock, BlockId, TupleBlock } from "../../../ir/types.js";
+import type { BlockId, TupleBlock } from "../../../ir/types.js";
 import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { CollectingThread } from "../types.js";
 
-type CollectingBlock = TupleBlock | ArrayBlock;
+type CollectingBlock = TupleBlock;
 
 export function collectingCreate(ctx: StepCtx, t: CollectingThread): void {
   const block = getBlock(ctx, t.blockId);
@@ -70,8 +68,8 @@ function getBlock(ctx: StepCtx, blockId: BlockId): CollectingBlock {
   if (b === undefined) {
     throw new Error(`engine.collecting: block ${blockId} not found`);
   }
-  if (b.kind !== "blockTuple" && b.kind !== "blockArray") {
-    throw new Error(`engine.collecting: block ${blockId} is not tuple/array (got ${b.kind})`);
+  if (b.kind !== "blockTuple") {
+    throw new Error(`engine.collecting: block ${blockId} is not a seq block (got ${b.kind})`);
   }
   return b.body;
 }
@@ -100,10 +98,9 @@ function finishCollecting(ctx: StepCtx, t: CollectingThread, totalLen: number): 
 
 function emitDone(ctx: StepCtx, t: CollectingThread, elements: Value[]): void {
   if (t.parent === null || t.parentCallId === null) return;
-  // Tuples and arrays share one runtime Value variant. The TupleThread
-  // vs ArrayThread distinction only affects the IR-level evaluation
-  // strategy (sequential vs parallel element collection); the produced
-  // 'Value' is the same shape either way.
+  // Tuples and arrays share one runtime Value variant — the seq block always
+  // produces an ordered `array` Value; its `parallel` flag only chose
+  // sequential vs concurrent element collection.
   ctx.enqueue({
     kind: "done",
     target: t.parent,

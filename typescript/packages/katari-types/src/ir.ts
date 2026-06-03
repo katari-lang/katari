@@ -165,7 +165,6 @@ export type Block =
   | { kind: "blockFor"; body: ForBlock }
   | { kind: "blockHandle"; body: HandleBlock }
   | { kind: "blockTuple"; body: TupleBlock }
-  | { kind: "blockArray"; body: ArrayBlock }
   | { kind: "blockRecord"; body: RecordBlock }
   | { kind: "blockAgent"; body: AgentBlock }
   | { kind: "blockDelegate"; body: DelegateBlock };
@@ -336,15 +335,8 @@ export type HandleBlock = {
   thenBlock?: BlockId;
 };
 
-/** Payload for blockTuple. */
+/** Payload for blockTuple — the unified seq (tuple / array) block. */
 export type TupleBlock = {
-  parallel: boolean;
-  /** Each element is an inline block computing one value. */
-  elements: BlockId[];
-};
-
-/** Payload for blockArray. */
-export type ArrayBlock = {
   parallel: boolean;
   /** Each element is an inline block computing one value. */
   elements: BlockId[];

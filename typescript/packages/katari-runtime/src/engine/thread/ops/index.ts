@@ -10,7 +10,6 @@ import type { StepCtx } from "../../step-ctx.js";
 import type { Value } from "../../value.js";
 import type { Thread, ThreadKind } from "../types.js";
 import { agentOps } from "./agent.js";
-import { arrayOps } from "./array.js";
 import { callAgentOps } from "./callAgent.js";
 import { ctorOps } from "./ctor.js";
 import { delegateOps } from "./delegate.js";
@@ -32,7 +31,6 @@ const opsTable: Record<ThreadKind, ThreadOps<any>> = {
   prim: primOps,
   ctor: ctorOps,
   tuple: tupleOps,
-  array: arrayOps,
   record: recordOps,
   match: matchOps,
   user: userOps,

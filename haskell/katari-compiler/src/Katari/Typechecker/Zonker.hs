@@ -474,7 +474,6 @@ walkExpression = \case
   ExpressionLiteral expr -> ExpressionLiteral <$> walkLiteralExpr expr
   ExpressionVariable expr -> ExpressionVariable <$> walkVariableExpr expr
   ExpressionTuple expr -> ExpressionTuple <$> walkTupleExpr expr
-  ExpressionArray expr -> ExpressionArray <$> walkArrayExpr expr
   ExpressionRecord expr -> ExpressionRecord <$> walkRecordExpr expr
   ExpressionCall expr -> ExpressionCall <$> walkCallExpr expr
   ExpressionBinaryOperator expr -> ExpressionBinaryOperator <$> walkBinaryExpr expr
@@ -488,7 +487,6 @@ walkExpression = \case
   ExpressionTemplate expr -> ExpressionTemplate <$> walkTemplateExpr expr
   ExpressionHandle expr -> ExpressionHandle <$> walkHandleExpr expr
   ExpressionParTuple expr -> ExpressionParTuple <$> walkParTupleExpr expr
-  ExpressionParArray expr -> ExpressionParArray <$> walkParArrayExpr expr
   ExpressionQualifiedReference expr -> ExpressionQualifiedReference <$> walkQualifiedReferenceExpr expr
 
 walkLiteralExpr :: LiteralExpression Constrained -> Zonk (LiteralExpression Zonked)
@@ -511,12 +509,6 @@ walkTupleExpr TupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
   typeOf' <- zonkType sourceSpan typeOf
   pure TupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
-
-walkArrayExpr :: ArrayExpression Constrained -> Zonk (ArrayExpression Zonked)
-walkArrayExpr ArrayExpression {elements, sourceSpan, typeOf} = do
-  elements' <- mapM walkExpression elements
-  typeOf' <- zonkType sourceSpan typeOf
-  pure ArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 walkRecordExpr :: RecordExpression Constrained -> Zonk (RecordExpression Zonked)
 walkRecordExpr RecordExpression {entries, sourceSpan, typeOf} = do
@@ -733,12 +725,6 @@ walkParTupleExpr ParTupleExpression {elements, sourceSpan, typeOf} = do
   elements' <- mapM walkExpression elements
   typeOf' <- zonkType sourceSpan typeOf
   pure ParTupleExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
-
-walkParArrayExpr :: ParArrayExpression Constrained -> Zonk (ParArrayExpression Zonked)
-walkParArrayExpr ParArrayExpression {elements, sourceSpan, typeOf} = do
-  elements' <- mapM walkExpression elements
-  typeOf' <- zonkType sourceSpan typeOf
-  pure ParArrayExpression {elements = elements', sourceSpan = sourceSpan, typeOf = typeOf'}
 
 -- ===========================================================================
 -- Entry point

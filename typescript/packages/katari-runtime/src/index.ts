@@ -47,7 +47,6 @@ export {
 export type {
   ActiveShard,
   AgentThread,
-  ArrayThread,
   AskId,
   AskIdMap,
   AskKind,

@@ -35,7 +35,6 @@ import Data.Text (Text)
 import Katari.AST
   ( AgentDeclaration (..),
     AgentStatement (..),
-    ArrayExpression (..),
     BinaryOperatorExpression (..),
     Block (..),
     BlockExpression (..),
@@ -65,7 +64,6 @@ import Katari.AST
     NameRef (..),
     NameRefKind (..),
     NextStatement (..),
-    ParArrayExpression (..),
     ParTupleExpression (..),
     ParameterBinding (..),
     Pattern (..),
@@ -460,12 +458,8 @@ hoverFromExpression snap moduleName position expression
         hoverFromBlock snap moduleName position be.block
       ExpressionTuple te ->
         listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) te.elements)
-      ExpressionArray ae ->
-        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) ae.elements)
       ExpressionParTuple pte ->
         listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) pte.elements)
-      ExpressionParArray pae ->
-        listToMaybe (mapMaybe (hoverFromExpression snap moduleName position) pae.elements)
       ExpressionFieldAccess fae ->
         hoverFromExpression snap moduleName position fae.object
       ExpressionIndexAccess iae ->
@@ -504,7 +498,6 @@ zonkedExpressionType = \case
   ExpressionLiteral e -> e.typeOf
   ExpressionVariable e -> e.typeOf
   ExpressionTuple e -> e.typeOf
-  ExpressionArray e -> e.typeOf
   ExpressionRecord e -> e.typeOf
   ExpressionCall e -> e.typeOf
   ExpressionBinaryOperator e -> e.typeOf
@@ -518,7 +511,6 @@ zonkedExpressionType = \case
   ExpressionTemplate e -> e.typeOf
   ExpressionHandle e -> e.typeOf
   ExpressionParTuple e -> e.typeOf
-  ExpressionParArray e -> e.typeOf
   ExpressionQualifiedReference e -> e.typeOf
 
 -- | Walk a match-case arm: try the pattern bindings first (so hover on
@@ -689,12 +681,8 @@ refFromExpression position expression
         refFromBlock position be.block
       ExpressionTuple te ->
         listToMaybe (mapMaybe (refFromExpression position) te.elements)
-      ExpressionArray ae ->
-        listToMaybe (mapMaybe (refFromExpression position) ae.elements)
       ExpressionParTuple pte ->
         listToMaybe (mapMaybe (refFromExpression position) pte.elements)
-      ExpressionParArray pae ->
-        listToMaybe (mapMaybe (refFromExpression position) pae.elements)
       ExpressionFieldAccess fae ->
         refFromExpression position fae.object
       ExpressionIndexAccess iae ->
@@ -820,12 +808,8 @@ collectExpressionOccurrences expression index = case expression of
     collectBlockOccurrences be.block index
   ExpressionTuple te ->
     foldr collectExpressionOccurrences index te.elements
-  ExpressionArray ae ->
-    foldr collectExpressionOccurrences index ae.elements
   ExpressionParTuple pte ->
     foldr collectExpressionOccurrences index pte.elements
-  ExpressionParArray pae ->
-    foldr collectExpressionOccurrences index pae.elements
   ExpressionFieldAccess fae ->
     collectExpressionOccurrences fae.object index
   ExpressionIndexAccess iae ->

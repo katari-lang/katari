@@ -982,10 +982,9 @@ data Expression (phase :: Phase) where
   ExpressionLiteral :: LiteralExpression phase -> Expression phase
   -- | Bare identifier reference.
   ExpressionVariable :: VariableExpression phase -> Expression phase
-  -- | Tuple literal @(e1, e2, ...)@.
+  -- | Seq literal @[e1, e2, ...]@ — the surface tuple/array form. Sequential
+  -- evaluation; widens to @array[T]@ on demand (tuple <: array).
   ExpressionTuple :: TupleExpression phase -> Expression phase
-  -- | Array literal @[e1, e2, ...]@.
-  ExpressionArray :: ArrayExpression phase -> Expression phase
   -- | Record literal @{ label = expr, label = expr, ... }@. The wire
   -- form is a plain JSON object. Distinguished from a block by the
   -- presence of @label = ...@ at the head of the braces — block
@@ -1014,10 +1013,8 @@ data Expression (phase :: Phase) where
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
   -- | Koka-style handle expression. Captures the continuation as its body.
   ExpressionHandle :: HandleExpression phase -> Expression phase
-  -- | Parallel tuple construction: @par (e1, e2, ...)@.
+  -- | Parallel seq construction: @par [e1, e2, ...]@.
   ExpressionParTuple :: ParTupleExpression phase -> Expression phase
-  -- | Parallel array construction: @par [e1, e2, ...]@.
-  ExpressionParArray :: ParArrayExpression phase -> Expression phase
   -- | Synthesised by the Identifier pass from a @FieldAccess@ chain whose
   -- left-most segment resolves to a module. See the comment on
   -- 'QualifiedReferenceExpression' for details. Parser never produces this
@@ -1029,7 +1026,6 @@ instance HasSourceSpan (Expression phase) where
     ExpressionLiteral expression -> expression.sourceSpan
     ExpressionVariable expression -> expression.sourceSpan
     ExpressionTuple expression -> expression.sourceSpan
-    ExpressionArray expression -> expression.sourceSpan
     ExpressionRecord expression -> expression.sourceSpan
     ExpressionCall expression -> expression.sourceSpan
     ExpressionBinaryOperator expression -> expression.sourceSpan
@@ -1043,7 +1039,6 @@ instance HasSourceSpan (Expression phase) where
     ExpressionTemplate expression -> expression.sourceSpan
     ExpressionHandle expression -> expression.sourceSpan
     ExpressionParTuple expression -> expression.sourceSpan
-    ExpressionParArray expression -> expression.sourceSpan
     ExpressionQualifiedReference expression -> expression.sourceSpan
 
 -- | Literal value expression: @42@, @\"foo\"@, @true@, @null@, ...
@@ -1142,8 +1137,8 @@ data UnaryOperatorExpression (phase :: Phase) = UnaryOperatorExpression
 instance HasSourceSpan (UnaryOperatorExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | Tuple literal @(e1, e2, ...)@. Sequential evaluation (left-to-right).
--- See 'ParTupleExpression' for the @par@ variant.
+-- | Seq literal @[e1, e2, ...]@ — the surface tuple/array form. Sequential
+-- evaluation (left-to-right). See 'ParTupleExpression' for the @par@ variant.
 data TupleExpression (phase :: Phase) = TupleExpression
   { elements :: [Expression phase],
     sourceSpan :: SourceSpan,
@@ -1151,17 +1146,6 @@ data TupleExpression (phase :: Phase) = TupleExpression
   }
 
 instance HasSourceSpan (TupleExpression phase) where
-  sourceSpanOf expression = expression.sourceSpan
-
--- | Array literal @[e1, e2, ...]@. Sequential evaluation. See
--- 'ParArrayExpression' for the @par@ variant.
-data ArrayExpression (phase :: Phase) = ArrayExpression
-  { elements :: [Expression phase],
-    sourceSpan :: SourceSpan,
-    typeOf :: ExpressionType phase
-  }
-
-instance HasSourceSpan (ArrayExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | Record literal @{ label = expr, label = expr, ... }@. Keys are
@@ -1176,7 +1160,7 @@ data RecordExpression (phase :: Phase) = RecordExpression
 instance HasSourceSpan (RecordExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | Parallel tuple construction: @par (e1, e2, ...)@.
+-- | Parallel seq construction: @par [e1, e2, ...]@.
 -- Each element is evaluated concurrently; results collected in order.
 data ParTupleExpression (phase :: Phase) = ParTupleExpression
   { elements :: [Expression phase],
@@ -1185,17 +1169,6 @@ data ParTupleExpression (phase :: Phase) = ParTupleExpression
   }
 
 instance HasSourceSpan (ParTupleExpression phase) where
-  sourceSpanOf expression = expression.sourceSpan
-
--- | Parallel array construction: @par [e1, e2, ...]@.
--- Each element is evaluated concurrently; results collected in order.
-data ParArrayExpression (phase :: Phase) = ParArrayExpression
-  { elements :: [Expression phase],
-    sourceSpan :: SourceSpan,
-    typeOf :: ExpressionType phase
-  }
-
-instance HasSourceSpan (ParArrayExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | @if cond { thenBlock } else { elseBlock }@. The @else@ branch is
@@ -1780,10 +1753,6 @@ deriving instance (EqPhase phase) => Eq (TupleExpression phase)
 
 deriving instance (ShowPhase phase) => Show (TupleExpression phase)
 
-deriving instance (EqPhase phase) => Eq (ArrayExpression phase)
-
-deriving instance (ShowPhase phase) => Show (ArrayExpression phase)
-
 deriving instance (EqPhase phase) => Eq (RecordExpression phase)
 
 deriving instance (ShowPhase phase) => Show (RecordExpression phase)
@@ -1791,10 +1760,6 @@ deriving instance (ShowPhase phase) => Show (RecordExpression phase)
 deriving instance (EqPhase phase) => Eq (ParTupleExpression phase)
 
 deriving instance (ShowPhase phase) => Show (ParTupleExpression phase)
-
-deriving instance (EqPhase phase) => Eq (ParArrayExpression phase)
-
-deriving instance (ShowPhase phase) => Show (ParArrayExpression phase)
 
 deriving instance (EqPhase phase) => Eq (IfExpression phase)
 

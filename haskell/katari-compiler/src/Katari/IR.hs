@@ -50,7 +50,6 @@ module Katari.IR
     ForBlock (..),
     HandleBlock (..),
     TupleBlock (..),
-    ArrayBlock (..),
     RecordBlock (..),
     Param (..),
     Handler (..),
@@ -233,14 +232,12 @@ data Block where
   -- state vars from the inherited parent scope, runs the body, and
   -- dispatches requests to handlers. Called via 'StatementCall'.
   BlockHandle :: HandleBlock -> Block
-  -- | Tuple construction. Each element is an independent block whose
-  -- trailing value becomes one component of the resulting tuple.
-  -- When @parallel = True@, element blocks run concurrently.
+  -- | Seq (tuple / array) construction — the unified ordered-sequence block.
+  -- Each element is an independent block whose trailing value becomes one
+  -- item of the resulting array Value (tuples and arrays share that runtime
+  -- form). When @parallel = True@, element blocks run concurrently. The sole
+  -- surface seq literal @[e1, ...]@ (and @par [...]@) lowers here.
   BlockTuple :: TupleBlock -> Block
-  -- | Array construction. Each element is an independent block whose
-  -- trailing value becomes one item in the resulting array.
-  -- When @parallel = True@, element blocks run concurrently.
-  BlockArray :: ArrayBlock -> Block
   -- | Record construction. Each entry is a (label, block) pair; the
   -- trailing value of each block becomes the entry's value. Entries
   -- are evaluated left-to-right (sequential — there's no parallel
@@ -552,9 +549,10 @@ instance ToJSON HandleBlock where
 instance FromJSON HandleBlock where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'BlockTuple'. Each element is a 'BlockId' whose trailing
--- value becomes one component of the tuple. When @parallel = True@,
--- element blocks are evaluated concurrently; results are collected in order.
+-- | Payload for 'BlockTuple' — the unified seq (tuple / array) block. Each
+-- element is a 'BlockId' whose trailing value becomes one item of the array
+-- Value. When @parallel = True@, element blocks are evaluated concurrently;
+-- results are collected in order.
 data TupleBlock = TupleBlock
   { parallel :: !Bool,
     elements :: [BlockId]
@@ -565,21 +563,6 @@ instance ToJSON TupleBlock where
   toJSON = genericToJSON irOptions
 
 instance FromJSON TupleBlock where
-  parseJSON = genericParseJSON irOptions
-
--- | Payload for 'BlockArray'. Each element is a 'BlockId' whose trailing
--- value becomes one item in the array. When @parallel = True@,
--- element blocks are evaluated concurrently; results are collected in order.
-data ArrayBlock = ArrayBlock
-  { parallel :: !Bool,
-    elements :: [BlockId]
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON ArrayBlock where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON ArrayBlock where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'BlockRecord'. Each entry is a @(label, BlockId)@

@@ -130,7 +130,6 @@ expressionTypes m = concatMap declTypes m.declarations
     exprTypes e =
       typeOfExpression e : case e of
         ExpressionTuple t -> concatMap exprTypes t.elements
-        ExpressionArray a -> concatMap exprTypes a.elements
         ExpressionCall c -> exprTypes c.callee ++ concatMap (exprTypes . (.value)) c.arguments
         ExpressionBinaryOperator b -> exprTypes b.left ++ exprTypes b.right
         ExpressionUnaryOperator u -> exprTypes u.operand
@@ -156,7 +155,6 @@ typeOfExpression = \case
   ExpressionLiteral x -> x.typeOf
   ExpressionVariable x -> x.typeOf
   ExpressionTuple x -> x.typeOf
-  ExpressionArray x -> x.typeOf
   ExpressionCall x -> x.typeOf
   ExpressionBinaryOperator x -> x.typeOf
   ExpressionUnaryOperator x -> x.typeOf
@@ -169,7 +167,6 @@ typeOfExpression = \case
   ExpressionTemplate x -> x.typeOf
   ExpressionHandle x -> x.typeOf
   ExpressionParTuple x -> x.typeOf
-  ExpressionParArray x -> x.typeOf
   ExpressionQualifiedReference x -> x.typeOf
 
 -- | Extract the head module from a 'ZonkResult' (single-module pipelines).

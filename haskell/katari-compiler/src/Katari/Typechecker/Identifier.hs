@@ -1547,7 +1547,6 @@ resolveExpression = \case
   ExpressionLiteral expression -> ExpressionLiteral <$> resolveLiteralExpr expression
   ExpressionVariable expression -> resolveVariableExpr expression
   ExpressionTuple expression -> ExpressionTuple <$> resolveTupleExpr expression
-  ExpressionArray expression -> ExpressionArray <$> resolveArrayExpr expression
   ExpressionRecord expression -> ExpressionRecord <$> resolveRecordExpr expression
   ExpressionCall expression -> ExpressionCall <$> resolveCallExpr expression
   ExpressionBinaryOperator expression -> resolveBinaryOperatorAsCall expression
@@ -1561,7 +1560,6 @@ resolveExpression = \case
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
   ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
   ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
-  ExpressionParArray expression -> ExpressionParArray <$> resolveParArrayExpr expression
   ExpressionQualifiedReference qref -> do
     -- The parser never produces this constructor on a Parsed AST.
     -- Surface as a 'K9999' invariant-violation diagnostic and fall
@@ -1613,16 +1611,6 @@ resolveTupleExpr TupleExpression {elements, sourceSpan} = do
         typeOf = ()
       }
 
-resolveArrayExpr :: ArrayExpression Parsed -> Identifier (ArrayExpression Identified)
-resolveArrayExpr ArrayExpression {elements, sourceSpan} = do
-  elements' <- mapM resolveExpression elements
-  pure
-    ArrayExpression
-      { elements = elements',
-        sourceSpan = sourceSpan,
-        typeOf = ()
-      }
-
 resolveRecordExpr :: RecordExpression Parsed -> Identifier (RecordExpression Identified)
 resolveRecordExpr RecordExpression {entries, sourceSpan} = do
   entries' <- mapM (\(lbl, e) -> (lbl,) <$> resolveExpression e) entries
@@ -1638,16 +1626,6 @@ resolveParTupleExpr ParTupleExpression {elements, sourceSpan} = do
   elements' <- mapM resolveExpression elements
   pure
     ParTupleExpression
-      { elements = elements',
-        sourceSpan = sourceSpan,
-        typeOf = ()
-      }
-
-resolveParArrayExpr :: ParArrayExpression Parsed -> Identifier (ParArrayExpression Identified)
-resolveParArrayExpr ParArrayExpression {elements, sourceSpan} = do
-  elements' <- mapM resolveExpression elements
-  pure
-    ParArrayExpression
       { elements = elements',
         sourceSpan = sourceSpan,
         typeOf = ()

@@ -112,13 +112,6 @@ blockSpec = describe "Block (sum)" $ do
           "body" .= object ["parallel" .= False, "elements" .= [1 :: Int, 2]]
         ]
 
-  it "BlockArray carries kind + body (ArrayBlock)" $ do
-    BlockArray ArrayBlock {parallel = True, elements = [BlockId 5]}
-      `shouldEncodeAs` object
-        [ "kind" .= ("blockArray" :: String),
-          "body" .= object ["parallel" .= True, "elements" .= [5 :: Int]]
-        ]
-
   it "round-trips all variants" $ do
     let userBody =
           UserBlock
@@ -147,7 +140,7 @@ blockSpec = describe "Block (sum)" $ do
     roundTrip (BlockFor ForBlock {parallel = False, iters = [], stateInits = [], bodyBlock = BlockId 0, thenBlock = Nothing})
     roundTrip (BlockHandle HandleBlock {parallel = False, stateInits = [], body = BlockId 0, handlers = [], thenBlock = Nothing})
     roundTrip (BlockTuple TupleBlock {parallel = False, elements = []})
-    roundTrip (BlockArray ArrayBlock {parallel = True, elements = [BlockId 1]})
+    roundTrip (BlockTuple TupleBlock {parallel = True, elements = [BlockId 1]})
 
 statementSpec :: Spec
 statementSpec = describe "Statement (sum)" $ do

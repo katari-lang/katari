@@ -1142,7 +1142,6 @@ lowerExpr = \case
       )
   AST.ExpressionCall callExpr -> lowerCall callExpr
   AST.ExpressionTuple tupleExpr -> lowerTupleExpr False tupleExpr.elements
-  AST.ExpressionArray arrayExpr -> lowerArrayExpr False arrayExpr.elements
   AST.ExpressionRecord recordExpr -> lowerRecordExpr recordExpr.entries
   AST.ExpressionFieldAccess fieldAccessExpr -> do
     object <- lowerExpr fieldAccessExpr.object
@@ -1159,7 +1158,6 @@ lowerExpr = \case
   AST.ExpressionFor forExpr -> lowerForExpr forExpr
   AST.ExpressionHandle handleExpr -> lowerHandleExpr handleExpr
   AST.ExpressionParTuple parTupleExpr -> lowerTupleExpr True parTupleExpr.elements
-  AST.ExpressionParArray parArrayExpr -> lowerArrayExpr True parArrayExpr.elements
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
     -- Qualified references never bind locally.
     resolveAsValue
@@ -1553,32 +1551,6 @@ lowerTupleExpr isParallel elements = do
         }
   pure out
 
--- | Lower an array expression (sequential or parallel) to a 'BlockArray'.
--- Each element is lowered into its own inline block.
-lowerArrayExpr :: Bool -> [AST.Expression Zonked] -> Lower VarId
-lowerArrayExpr isParallel elements = do
-  elementBlockIds <- mapM buildElementBlock elements
-  arrayBlockId <- freshBlockId
-  recordBlock
-    arrayBlockId
-    ( BlockArray
-        ( ArrayBlock
-            { parallel = isParallel,
-              elements = elementBlockIds
-            }
-        )
-    )
-    Nothing
-  out <- freshVarId Nothing
-  emit $
-    StatementCall
-      CallData
-        { block = arrayBlockId,
-          arguments = [],
-          output = Just out
-        }
-  pure out
-
 -- | Lower a record literal @{ label = expr, ... }@ to a 'BlockRecord'.
 -- Each entry's value expression is lowered into its own inline block;
 -- the runtime constructs the record by collecting their trailing
@@ -1755,8 +1727,6 @@ offsetBlockInBlock offsetB offsetV = \case
         }
   BlockTuple tupleBlock ->
     BlockTuple tupleBlock {elements = map offsetB tupleBlock.elements}
-  BlockArray arrayBlock ->
-    BlockArray arrayBlock {elements = map offsetB arrayBlock.elements}
   BlockRecord block ->
     BlockRecord block {entries = map (second offsetB) block.entries}
 

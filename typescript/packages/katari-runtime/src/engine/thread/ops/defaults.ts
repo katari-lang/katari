@@ -20,7 +20,7 @@ export function defaultCancel<T extends Thread>(ctx: StepCtx, t: T): void {
 
 /**
  * Variants that don't catch any ask kind use this — just bubble up to
- * their parent. Examples: TupleThread, ArrayThread, MatchThread.
+ * their parent. Examples: TupleThread, MatchThread.
  *
  * Note: leaf threads (PrimThread, CtorThread, DelegateThread) cannot
  * actually receive asks at runtime because they have no children. The

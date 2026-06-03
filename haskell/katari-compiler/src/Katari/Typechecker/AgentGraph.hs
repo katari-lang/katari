@@ -108,7 +108,6 @@ declarationDependencies moduleName = \case
       ExpressionLiteral _ -> Set.empty
       ExpressionVariable expression -> collectFromVariableRef expression.name
       ExpressionTuple expression -> Set.unions (map collectFromExpression expression.elements)
-      ExpressionArray expression -> Set.unions (map collectFromExpression expression.elements)
       ExpressionRecord expression -> Set.unions (map (collectFromExpression . snd) expression.entries)
       ExpressionCall expression ->
         collectFromExpression expression.callee
@@ -135,7 +134,6 @@ declarationDependencies moduleName = \case
           <> maybe Set.empty collectFromThenClause expression.thenClause
           <> collectFromBlock expression.body
       ExpressionParTuple expression -> Set.unions (map collectFromExpression expression.elements)
-      ExpressionParArray expression -> Set.unions (map collectFromExpression expression.elements)
       ExpressionFieldAccess expression -> collectFromExpression expression.object
       ExpressionIndexAccess expression ->
         collectFromExpression expression.array <> collectFromExpression expression.index
