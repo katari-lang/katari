@@ -258,15 +258,22 @@ getSubFieldTypes tag columnType env = case tag of
       Just (SemanticTypeFunction parameters _ _) ->
         [parameter.parameterType | (_, parameter) <- Map.toAscList parameters]
       _ -> []
-  CtorTagTupleN _ -> case columnType of
-    SemanticTypeTuple tupleTypes -> tupleTypes
-    _ -> []
+  CtorTagTupleN n -> case columnType of
+    -- Pad / truncate to the pattern's arity so the sub-pattern columns line
+    -- up even when it names fewer or more positions than the tuple type
+    -- (positions past the named length are 'unknown'); over an array the
+    -- element type repeats.
+    SemanticTypeTuple tupleTypes -> take n (tupleTypes ++ repeat SemanticTypeUnknown)
+    SemanticTypeArray element -> replicate n element
+    _ -> replicate n SemanticTypeUnknown
   CtorTagType narrowTag -> [typePatternTagToResolved narrowTag]
-  CtorTagRecordKeys keys ->
-    let valueType = case columnType of
-          SemanticTypeRecord v -> v
-          _ -> SemanticTypeUnknown
-     in replicate (length keys) valueType
+  CtorTagRecordKeys keys -> case columnType of
+    SemanticTypeRecord v -> replicate (length keys) v
+    -- An object pattern over an object subject can read each key's declared
+    -- field type; missing keys (width subtyping) fall back to 'unknown'.
+    SemanticTypeObject fields ->
+      map (\key -> Map.findWithDefault SemanticTypeUnknown key fields) keys
+    _ -> replicate (length keys) SemanticTypeUnknown
   _ -> []
 
 -- | The narrowed semantic type associated with a runtime type-guard tag.
@@ -324,14 +331,26 @@ tagCompatibleWithType tag ty env = case ty of
     CtorTagNull -> case ty of
       SemanticTypeNull -> True
       _ -> False
-    CtorTagTupleN n -> case ty of
-      SemanticTypeTuple es -> length es == n
+    CtorTagTupleN _ -> case ty of
+      -- No arity/length check: under the minimum-elements semantics a tuple
+      -- value may carry more positions than its type names, and tuple <:
+      -- array, so a tuple pattern of any arity can match some value of any
+      -- tuple- or array-typed subject (a long-enough value always exists).
+      SemanticTypeTuple _ -> True
+      SemanticTypeArray _ -> True
       _ -> False
     CtorTagData qualifiedName -> case ty of
       SemanticTypeData tid ->
         case Map.lookup qualifiedName env.constructors of
           Just cd -> cd.constructorTypeQName == tid
           Nothing -> False
+      -- data <: object <: record: an object- or record-typed subject can
+      -- hold a tagged data value at runtime, so a constructor pattern is
+      -- reachable there. Conservative — we do not refine by whether this
+      -- particular data is a subtype of the object; an over-broad
+      -- reachability only ever misses a warning, never raises a false error.
+      SemanticTypeObject _ -> True
+      SemanticTypeRecord _ -> True
       _ -> False
     -- Runtime type-guard patterns are always compatible: the guard runs
     -- at runtime against any value, narrowing from whatever the static
@@ -352,7 +371,11 @@ isCompleteSig seen ty env = case ty of
   SemanticTypeLiteralString s ->
     CtorTagLitStr s `elem` seen
   SemanticTypeTuple tupleTypes ->
-    CtorTagTupleN (length tupleTypes) `elem` seen
+    -- A tuple pattern of arity n matches *every* value of this type iff
+    -- n <= the named length (each value has at least that many positions),
+    -- so a single such pattern already forms a complete signature. A longer
+    -- pattern only covers the longer-than-named values and never completes.
+    any (\case CtorTagTupleN n -> n <= length tupleTypes; _ -> False) seen
   SemanticTypeData tid ->
     let ctorQNames = [qualifiedName | (qualifiedName, _) <- ctorsOfType env tid]
         seenQNames = [qualifiedName | CtorTagData qualifiedName <- seen]

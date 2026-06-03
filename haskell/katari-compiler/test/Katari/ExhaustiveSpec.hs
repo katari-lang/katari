@@ -74,6 +74,7 @@ spec = describe "Katari.Typechecker.Exhaustive" $ do
   unreachableArmTypeDisjoint
   refutableBindings
   validPatterns
+  unifiedLatticePatterns
 
 -- | K0290 — match expressions missing coverage.
 nonExhaustiveMatch :: Spec
@@ -297,3 +298,68 @@ validPatterns = describe "well-typed exhaustive matches produce no Exhaustive di
             "}"
           ]
     diags `shouldBe` []
+
+-- ---------------------------------------------------------------------------
+-- Unified type lattice: tuple <: array and data <: object <: record change
+-- which patterns are reachable under minimum-elements semantics (a value
+-- carries at least the named positions / fields, possibly more, and a value
+-- of an object / record type may actually be a tagged data). The checker must
+-- not flag those cross-shape arms as unreachable.
+--
+-- (Recognising a *tuple prefix* pattern as exhaustive — e.g. `(a, b)` covering
+-- every value of a 3-tuple type — additionally needs the match subject to
+-- resolve to its concrete tuple shape, which the current variable-based
+-- projection does not do for an arity-mismatched pattern; that is tracked
+-- separately and is not asserted here.)
+-- ---------------------------------------------------------------------------
+
+unifiedLatticePatterns :: Spec
+unifiedLatticePatterns = describe "unified lattice pattern coverage" $ do
+  it "a tuple pattern longer than the tuple type is reachable, not unreachable" $ do
+    -- (a, b, c) matches only the (integer, string) values that carry a third
+    -- position; those exist under minimum-elements, so the arm is reachable
+    -- (no K0292). The wildcard keeps the match exhaustive.
+    diags <-
+      runExhaustive $
+        mconcat
+          [ "agent f(t: (integer, string)) {\n",
+            "  match (t) {\n",
+            "    case (a, b, c) => { 0 }\n",
+            "    case _         => { 1 }\n",
+            "  }\n",
+            "}"
+          ]
+    diags `shouldBe` []
+
+  it "a tuple pattern over an array subject is reachable but not exhaustive" $ do
+    -- tuple <: array: an array value long enough matches (a, b), so the arm
+    -- is reachable (no K0292); but an array may be shorter, so the match is
+    -- non-exhaustive without a wildcard (K0290).
+    diags <-
+      runExhaustive $
+        mconcat
+          [ "agent f(xs: array[integer]) {\n",
+            "  match (xs) {\n",
+            "    case (a, b) => { 0 }\n",
+            "  }\n",
+            "}"
+          ]
+    hasCode "K0290" diags `shouldBe` True
+    hasCode "K0292" diags `shouldBe` False
+
+  it "a constructor pattern over a record subject is reachable (record may hold a data value)" $ do
+    -- data <: record: a record-typed subject can hold a tagged data value at
+    -- runtime, so foo(...) is reachable there and must not be flagged
+    -- unreachable. The wildcard keeps the match exhaustive.
+    diags <-
+      runExhaustive $
+        mconcat
+          [ "data foo(x: integer)\n",
+            "agent f(r: record[integer]) {\n",
+            "  match (r) {\n",
+            "    case foo(x = x) => { x }\n",
+            "    case _          => { 0 }\n",
+            "  }\n",
+            "}"
+          ]
+    hasCode "K0292" diags `shouldBe` False
