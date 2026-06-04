@@ -680,6 +680,7 @@ buildRequestRefs ctx effect =
   mapMaybe (buildRequestRef ctx) (Set.toList (Set.fromList (effectRequests effect)))
   where
     effectRequests = \case
+      SemanticEffectPure -> []
       SemanticEffectRequest qualifiedName -> [qualifiedName]
       SemanticEffectUnion branches -> concatMap effectRequests branches
 

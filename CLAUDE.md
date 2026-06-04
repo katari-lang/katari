@@ -59,7 +59,7 @@ diagnostic と IR (JSON 化可能) と Schema を出力する。
   → Katari.Lexer                   Char stream → [WithPos Token], 仮想セミコロン挿入
   → Katari.Parser                  Token stream → Module Parsed (megaparsec カスタムストリーム)
   → Katari.Typechecker.Identifier  名前解決, 5 id 名前空間 (VariableId / TypeId / ModuleId / RequestId / ConstructorId) 発行
-  → Katari.Typechecker.Check        bidirectional 型検査 (synth/check) + effect SCC 固定点 → Module Zonked
+  → Katari.Typechecker.Check        bidirectional 型検査 (synth/check) + effect 推論 (再帰=注釈必須・非再帰=単一パス) → Module Zonked
   → Katari.Typechecker.Exhaustive   網羅性 / 到達性検査 (Maranget)
   → Katari.Lowering                AST Zonked → IRModule (JSON 化可能)
   ┖ Katari.Schema                  Zonked module + type env → SchemaBundle (AI tool calling 用 JSON Schema)

@@ -165,11 +165,16 @@ unionSemantic = \case
 -- Once generics land, an effect-generic variable becomes another leaf of this
 -- tree (alongside 'SemanticEffectRequest').
 data SemanticEffect phase where
+  -- | The pure (no-effect) leaf — the surface @pure@. Like 'SemanticTypeNever'
+  -- for types, it is the canonical empty effect: it appears in 'SemanticEffect'
+  -- (so @with pure@ round-trips) but flattens to the empty 'Set' in the
+  -- normalised form. 'unionEffects' drops it from non-empty unions.
+  SemanticEffectPure :: SemanticEffect phase
   -- | A single concrete @req@ effect, by its qualified name.
   SemanticEffectRequest :: QualifiedName -> SemanticEffect phase
-  -- | Union of effects (@e1 | e2 | ...@). Convention: 0 or 2+ branches — an
-  -- empty union is the pure / no-effect set, and a singleton flattens to its
-  -- branch. Always build via 'unionEffects' to maintain this.
+  -- | Union of effects (@e1 | e2 | ...@). Convention: 2+ leaf branches (a
+  -- singleton flattens to its branch, an empty union collapses to
+  -- 'SemanticEffectPure'). Always build via 'unionEffects' to maintain this.
   SemanticEffectUnion :: [SemanticEffect phase] -> SemanticEffect phase
 
 deriving instance Show (SemanticEffect phase)
@@ -178,25 +183,28 @@ deriving instance Eq (SemanticEffect phase)
 
 deriving instance Ord (SemanticEffect phase)
 
--- | The empty (pure) effect — \"this expression performs no request\".
--- Identity for 'unionEffect'.
+-- | The empty (pure) effect — \"this expression performs no request\". The
+-- canonical empty effect (cf. 'SemanticTypeNever'); identity for 'unionEffect'.
 emptyEffect :: SemanticEffect phase
-emptyEffect = SemanticEffectUnion []
+emptyEffect = SemanticEffectPure
 
 -- | An effect containing exactly one concrete request.
 singletonEffect :: QualifiedName -> SemanticEffect phase
 singletonEffect = SemanticEffectRequest
 
--- | Smart union over effect trees: flattens nested unions so the result is a
--- single top-level union of leaves, collapsing a singleton to its branch and
--- an empty list to 'emptyEffect'. (Deduplication is left to normalisation —
--- the tree stays faithful to what was written.)
+-- | Smart union over effect trees: flattens nested unions and drops
+-- 'SemanticEffectPure' leaves, so the result is a single top-level union of
+-- non-pure leaves — collapsing a singleton to its branch and an empty result
+-- to 'SemanticEffectPure'. (Deduplication is left to normalisation — the tree
+-- stays faithful to what was written.)
 unionEffects :: [SemanticEffect phase] -> SemanticEffect phase
 unionEffects effects = case concatMap flatten effects of
+  [] -> SemanticEffectPure
   [single] -> single
   flat -> SemanticEffectUnion flat
   where
     flatten = \case
+      SemanticEffectPure -> []
       SemanticEffectUnion branches -> concatMap flatten branches
       leaf -> [leaf]
 

@@ -86,6 +86,9 @@ data CheckError
     CheckErrorNoSuchField SourceSpan Text
   | -- | A recursive agent (named here) is missing its mandatory return type.
     CheckErrorRecursiveReturn SourceSpan Text
+  | -- | A recursive agent (named here) is missing its mandatory @with@ clause
+    -- (use @with pure@ for a recursive agent that raises no requests).
+    CheckErrorRecursiveEffect SourceSpan Text
   | -- | A generic callable (named here) was referenced without instantiating
     -- its type parameters (@foo@ instead of @foo[...]@). First-class generics
     -- only: every use site must apply all type arguments.
@@ -130,6 +133,11 @@ toDiagnostic = \case
     diagnosticError
       "K0216"
       ("recursive agent '" <> name <> "' needs an explicit return type — it can't be inferred through the recursion")
+      sourceSpan
+  CheckErrorRecursiveEffect sourceSpan name ->
+    diagnosticError
+      "K0219"
+      ("recursive agent '" <> name <> "' needs an explicit 'with' clause — it can't be inferred through the recursion (use 'with pure' if it raises no requests)")
       sourceSpan
   CheckErrorMustInstantiate sourceSpan name ->
     diagnosticError
@@ -1159,29 +1167,67 @@ checkSCCDeclarations :: Text -> Set QualifiedName -> [Declaration Identified] ->
 checkSCCDeclarations moduleName sccQualifiedNames declarations = do
   let agents = [decl | DeclarationAgent decl <- declarations]
       nonAgents = [decl | decl <- declarations, not (isAgentDeclaration decl)]
+      -- A multi-member SCC, or a self-recursive singleton, is recursive: its
+      -- agents must seed their return signature (and pin their effect) up front
+      -- to break the cycle. Computed once and shared by the return-seeding and
+      -- effect passes.
+      recursive = Set.size sccQualifiedNames > 1 || any (isSelfRecursive moduleName) agents
   nonAgentResults <- catMaybes <$> mapM checkNonAgentDeclaration nonAgents
-  agentResults <- checkAgentBatch moduleName sccQualifiedNames agents
-  inferEffects sccQualifiedNames (nonAgentResults ++ agentResults)
+  agentResults <- checkAgentBatch recursive agents
+  inferEffects recursive sccQualifiedNames (nonAgentResults ++ agentResults)
 
--- | Infer each SCC agent's effect set by a least fixpoint over the agents'
--- bodies (the request-name lattice is finite, so it converges), check it
--- against any declared @with@ clause, and patch the agent signatures with the
--- final published effect. Non-agent results pass through unchanged.
-inferEffects :: Set QualifiedName -> [SCCResult] -> Check [SCCResult]
-inferEffects sccQualifiedNames results = do
+-- | Compute each SCC agent's published effect and check it against any declared
+-- @with@ clause, then patch the agent signatures. No fixpoint is needed:
+--
+--   * In a recursive SCC every agent is /pinned/ to its declared effect (or
+--     @∅@ when it has no @with@ clause). An effectful recursive agent without a
+--     @with@ clause therefore fails the coverage check below (K0212), which
+--     forces it to annotate — closing the soundness gap where an
+--     unannotated recursive agent would be seen as pure while a sibling passes
+--     it as a function argument.
+--   * A non-recursive singleton SCC has one agent that never references itself,
+--     so a single body walk (@blockEffect@) yields its inferred effect.
+--
+-- Non-agent results pass through unchanged.
+inferEffects :: Bool -> Set QualifiedName -> [SCCResult] -> Check [SCCResult]
+inferEffects recursive sccQualifiedNames results = do
   locals <- asks (.checkLocals)
   let externalLookup qualifiedName =
         effectOfSignature (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) locals)
       agentInfos =
-        [ (qualifiedName, agentBody, declaredEffect)
+        [ (qualifiedName, agentDecl.body, declaredEffect)
         | (qualifiedName, DeclarationAgent agentDecl, _) <- results,
-          let agentBody = agentDecl.body,
           let declaredEffect =
                 fmap (Set.fromList . mapMaybe (\request -> request.name.resolution)) agentDecl.withRequests
         ]
       agentSpans =
         Map.fromList [(qualifiedName, agentDecl.sourceSpan) | (qualifiedName, DeclarationAgent agentDecl, _) <- results]
-      (published, violations) = effectFixpoint externalLookup sccQualifiedNames agentInfos
+      bodies = Map.fromList [(qualifiedName, body) | (qualifiedName, body, _) <- agentInfos]
+      lookupWith effects requested
+        | Set.member requested sccQualifiedNames = Map.findWithDefault Set.empty requested effects
+        | otherwise = externalLookup requested
+      published =
+        Map.fromList
+          [ ( qualifiedName,
+              case declaredEffect of
+                Just declared -> declared
+                Nothing
+                  | recursive -> Set.empty
+                  | otherwise -> blockEffect (lookupWith Map.empty) body
+            )
+          | (qualifiedName, body, declaredEffect) <- agentInfos
+          ]
+      -- Only an /annotated/ agent can violate its @with@ clause: an unannotated
+      -- non-recursive agent's published effect IS its inferred effect (so it
+      -- never exceeds it), and a recursive agent with no @with@ already has the
+      -- dedicated K0219 diagnostic.
+      violations =
+        [ (qualifiedName, undeclared)
+        | (qualifiedName, _, Just declared) <- agentInfos,
+          let bodyEffect = blockEffect (lookupWith published) (bodies Map.! qualifiedName),
+          let undeclared = Set.difference bodyEffect declared,
+          not (Set.null undeclared)
+        ]
   forM_ violations $ \(qualifiedName, undeclared) ->
     emitError (CheckErrorUndeclaredEffect (Map.findWithDefault dummySpan qualifiedName agentSpans) (Set.toList undeclared))
   pure (map (patchResultEffect published) results)
@@ -1211,6 +1257,7 @@ effectFromSet requests = unionEffects (SemanticEffectRequest <$> Set.toList requ
 -- 'effectFromSet'). Effect inference works over these sets internally.
 effectRequestSet :: SemanticEffect Resolved -> Set QualifiedName
 effectRequestSet = \case
+  SemanticEffectPure -> Set.empty
   SemanticEffectRequest qualifiedName -> Set.singleton qualifiedName
   SemanticEffectUnion branches -> Set.unions (map effectRequestSet branches)
 
@@ -1297,9 +1344,8 @@ checkNonAgentDeclaration = \case
 -- SCC (or a self-recursive singleton) is recursive: every member must annotate
 -- its return type, seeded up front to break the recursion. A non-recursive
 -- singleton infers its return from the body.
-checkAgentBatch :: Text -> Set QualifiedName -> [AgentDeclaration Identified] -> Check [SCCResult]
-checkAgentBatch moduleName sccQualifiedNames agents = do
-  let recursive = Set.size sccQualifiedNames > 1 || any (isSelfRecursive moduleName) agents
+checkAgentBatch :: Bool -> [AgentDeclaration Identified] -> Check [SCCResult]
+checkAgentBatch recursive agents =
   if recursive
     then do
       seeds <- concat <$> mapM seedAgentSignature agents
@@ -1322,7 +1368,14 @@ seedAgentSignature AgentDeclaration {name, parameters, returnType, withRequests,
     Nothing -> do
       emitError (CheckErrorRecursiveReturn sourceSpan name.text)
       pure SemanticTypeUnknown
-  effect <- maybe (pure emptyEffect) elaborateRequestList withRequests
+  -- A recursive agent must declare its effect too (its return is already
+  -- mandatory): the effect cannot be inferred through the recursion. @with
+  -- pure@ declares no requests.
+  effect <- case withRequests of
+    Just requests -> elaborateRequestList requests
+    Nothing -> do
+      emitError (CheckErrorRecursiveEffect sourceSpan name.text)
+      pure emptyEffect
   pure (maybe [] (\qualifiedName -> [(qualifiedName, SemanticTypeFunction paramSig ret effect)]) (topLevelQName name))
 
 checkAgentResult :: AgentDeclaration Identified -> Check SCCResult
@@ -1394,7 +1447,7 @@ renderQName :: QualifiedName -> Text
 renderQName qualifiedName = qualifiedName.module_ <> "." <> qualifiedName.name
 
 -- ===========================================================================
--- Effect inference (per-SCC request fixpoint)
+-- Effect collection (single-pass; see 'inferEffects' for the SCC strategy)
 -- ===========================================================================
 
 -- | Each callable's effect (its raised request set), used while walking bodies.
@@ -1405,37 +1458,6 @@ effectOfSignature :: SemanticType Resolved -> Set QualifiedName
 effectOfSignature = \case
   SemanticTypeFunction _ _ effect -> effectRequestSet effect
   _ -> Set.empty
-
--- | Least fixpoint of the SCC agents' effects. Annotated agents are pinned to
--- their declared set (which breaks the recursion and is what callers see);
--- unannotated agents are iterated from @∅@ until stable (finite lattice ⇒
--- terminates). Returns the published effect per agent and, for each annotated
--- agent, the requests its body raises that the @with@ clause omits.
-effectFixpoint ::
-  EffectLookup ->
-  Set QualifiedName ->
-  [(QualifiedName, Block Zonked, Maybe (Set QualifiedName))] ->
-  (Map QualifiedName (Set QualifiedName), [(QualifiedName, Set QualifiedName)])
-effectFixpoint externalLookup sccQualifiedNames agents =
-  let declared = Map.fromList [(qualifiedName, d) | (qualifiedName, _, Just d) <- agents]
-      bodies = Map.fromList [(qualifiedName, body) | (qualifiedName, body, _) <- agents]
-      unannotated = [qualifiedName | (qualifiedName, _, Nothing) <- agents]
-      lookupWith estimate r
-        | Set.member r sccQualifiedNames = Map.findWithDefault Set.empty r (Map.union estimate declared)
-        | otherwise = externalLookup r
-      step estimate =
-        Map.fromList [(qualifiedName, blockEffect (lookupWith estimate) (bodies Map.! qualifiedName)) | qualifiedName <- unannotated]
-      loop estimate = let next = step estimate in if next == estimate then estimate else loop next
-      inferred = loop (Map.fromList [(qualifiedName, Set.empty) | qualifiedName <- unannotated])
-      published = Map.union declared inferred
-      violations =
-        [ (qualifiedName, undeclared)
-        | (qualifiedName, d) <- Map.toList declared,
-          let bodyEff = blockEffect (lookupWith inferred) (bodies Map.! qualifiedName),
-          let undeclared = Set.difference bodyEff d,
-          not (Set.null undeclared)
-        ]
-   in (published, violations)
 
 blockEffect :: EffectLookup -> Block Zonked -> Set QualifiedName
 blockEffect lookupEffect Block {statements, returnExpression} =

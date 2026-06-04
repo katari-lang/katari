@@ -2082,12 +2082,14 @@ parseRequests = do
   _ <- optional (try (parsePunctuation PunctuationPipe))
   pure (concat (first : rest))
 
--- | One term of an effect expression: a parenthesised sub-expression or a
--- single request name. Returns its flattened leaf list.
+-- | One term of an effect expression: the @pure@ literal (the empty effect, a
+-- contextual keyword), a parenthesised sub-expression, or a single request
+-- name. Returns its flattened leaf list (@pure@ contributes none).
 parseEffectTerm :: Parser [SyntacticRequest Parsed]
 parseEffectTerm =
   choice
-    [ try $
+    [ [] <$ parseSpecificIdentifier "pure",
+      try $
         between
           (parsePunctuation PunctuationLeftParenthesis)
           (parsePunctuation PunctuationRightParenthesis)

@@ -481,6 +481,7 @@ normaliseSemantic = \case
 -- analogue for effects: the @|@-tree collapses to set union.
 flattenEffect :: SemanticEffect Resolved -> Set QualifiedName
 flattenEffect = \case
+  SemanticEffectPure -> Set.empty
   SemanticEffectRequest qualifiedName -> Set.singleton qualifiedName
   SemanticEffectUnion branches -> Set.unions (map flattenEffect branches)
 

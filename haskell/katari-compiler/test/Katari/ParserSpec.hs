@@ -859,6 +859,10 @@ declarations = describe "declarations" $ do
     _ <- shouldSucceed "agent foo() with (req1 | req2) | req3 { 1 }"
     pure ()
 
+  it "parses the 'pure' effect literal" $ do
+    _ <- shouldSucceed "agent foo() -> integer with pure { 1 }"
+    pure ()
+
   it "parses a generic agent declaration" $ do
     _ <- shouldSucceed "agent identity[T](x: T) -> T { x }"
     pure ()

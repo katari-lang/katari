@@ -172,6 +172,14 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "requires an explicit 'with' clause on a recursive agent" $ do
+    let result = compileSync (singleSourceInput "agent loop(n: integer) -> integer { loop(n = n) }")
+    hasErrors result.diagnostics `shouldBe` True
+
+  it "accepts 'with pure' on a recursive agent that raises no requests" $ do
+    let result = compileSync (singleSourceInput "agent loop(n: integer) -> integer with pure { loop(n = n) }")
+    hasErrors result.diagnostics `shouldBe` False
+
   it "projects a tuple pattern through a generic scrutinee's bound" $ do
     -- `p : T` where `T extends [integer, string]`; matching `[a, b]` must
     -- expand the bound so `a : integer` (returned where integer is expected).

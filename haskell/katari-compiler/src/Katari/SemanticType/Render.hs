@@ -86,5 +86,8 @@ renderSemanticEffect = Text.intercalate " | " . leaves
   where
     leaves :: ST.SemanticEffect ST.Resolved -> [Text]
     leaves = \case
+      -- 'pure' elides to nothing here so a pure function renders as
+      -- @() -> R@ (no @with@ clause), matching the prior empty-effect output.
+      ST.SemanticEffectPure -> []
       ST.SemanticEffectRequest qualifiedName -> [qualifiedName.name]
       ST.SemanticEffectUnion branches -> concatMap leaves branches
