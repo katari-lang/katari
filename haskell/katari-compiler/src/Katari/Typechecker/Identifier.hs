@@ -1393,7 +1393,8 @@ resolveTypeName TypeNameNode {name, sourceSpan} = do
         -- type nor a request is the usual K0107.)
         lookupRequest name.text >>= \case
           Just (ResolvedConcreteRequest qualifiedName) -> pure (Just (ResolvedRequestName qualifiedName))
-          _ -> do
+          Just (ResolvedEffectGeneric genericsId) -> pure (Just (ResolvedEffectGenericName genericsId))
+          Nothing -> do
             emitError (ErrorNotAType name.sourceSpan name.text)
             pure Nothing
   pure

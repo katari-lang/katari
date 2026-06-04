@@ -32,7 +32,7 @@ module Katari.Typechecker.Check
   )
 where
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, zipWithM)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Data.List (transpose)
@@ -474,10 +474,12 @@ resolveTypeRef nameRef = case nameRef.resolution of
       Nothing ->
         pure (AsType SemanticTypeUnknown)
   Just (ResolvedGenericParam genericsId) -> pure (AsType (SemanticTypeGeneric genericsId))
-  -- A request name reaches a type position only via the Identifier's
-  -- effect-namespace fallback (an effect argument of a generic application).
-  -- It denotes an effect; 'expectType' rejects it in an ordinary type position.
+  -- A request / effect-generic name reaches a type position only via the
+  -- Identifier's effect-namespace fallback (an effect argument of a generic
+  -- application). Both denote effects; 'expectType' rejects them in an ordinary
+  -- type position.
   Just (ResolvedRequestName qualifiedName) -> pure (AsEffect (SemanticEffectRequest qualifiedName))
+  Just (ResolvedEffectGenericName genericsId) -> pure (AsEffect (SemanticEffectGeneric genericsId))
   Nothing -> pure (AsType SemanticTypeUnknown)
 
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
@@ -675,7 +677,7 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
       -- Process each (parameter, argument) pair by the parameter's kind: a type
       -- parameter elaborates its argument as a type (checked against its bound),
       -- an effect parameter elaborates it as an effect.
-      substitutions <- mapM (uncurry (applyTypeArgument sourceSpan)) (zip params typeArguments)
+      substitutions <- zipWithM (applyTypeArgument sourceSpan) params typeArguments
       let typeSubstitution = Map.fromList [(genericsId, argType) | Left (genericsId, argType) <- substitutions]
           effectSubstitution = Map.fromList [(genericsId, argEffect) | Right (genericsId, argEffect) <- substitutions]
       calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocal) resolution

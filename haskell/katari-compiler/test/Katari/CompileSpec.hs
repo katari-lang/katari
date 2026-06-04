@@ -222,6 +222,18 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "passes an effect generic as a bracket argument (nested combinators)" $ do
+    let src =
+          mconcat
+            [ "request log() -> integer\n",
+              "agent inner[effect F](body: agent () -> integer with F) -> integer with F { body() }\n",
+              "agent outer[effect E](task: agent () -> integer with E) -> integer with E { inner[E](body = task) }\n",
+              "agent worker() -> integer with log { log() }\n",
+              "agent main() -> integer with log { outer[log](task = worker) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
   it "rejects a request name used as a type (let annotation)" $ do
     let src =
           mconcat

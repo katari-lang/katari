@@ -63,6 +63,11 @@ data TypeResolution
   = ResolvedNamedType QualifiedName
   | ResolvedGenericParam GenericsId
   | ResolvedRequestName QualifiedName
+  | -- | An @effect@ generic parameter appearing in a type-ish position (an
+    -- effect argument of a generic application, e.g. @foo[E]@). Like
+    -- 'ResolvedRequestName' it denotes an effect, rejected in an ordinary type
+    -- position.
+    ResolvedEffectGenericName GenericsId
   deriving (Eq, Ord, Show)
 
 -- | How an /effect/ reference (a @with@-clause leaf — a

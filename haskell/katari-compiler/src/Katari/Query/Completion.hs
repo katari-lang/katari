@@ -455,7 +455,10 @@ typeResolutionItem snap name = \case
     pure CompletionItem {ciLabel = name, ciKind = CKTypeName, ciDetail = Nothing, ciDoc = Nothing}
   ResolvedGenericParam _ ->
     pure CompletionItem {ciLabel = name, ciKind = CKTypeName, ciDetail = Nothing, ciDoc = Nothing}
+  -- A request / effect-generic name (an effect argument) is not a type
+  -- completion.
   ResolvedRequestName _ -> Nothing
+  ResolvedEffectGenericName _ -> Nothing
 
 mkModuleItemFor ::
   QuerySnapshot ->
