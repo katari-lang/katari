@@ -1065,6 +1065,7 @@ resolveDataParameter DataParameter {..} = do
       { annotation = annotation,
         name = name,
         parameterType = parameterType',
+        optional = optional,
         sourceSpan = sourceSpan
       }
 

@@ -1402,11 +1402,17 @@ isAgentDeclaration = \case DeclarationAgent _ -> True; _ -> False
 checkNonAgentDeclaration :: Declaration Identified -> Check (Maybe SCCResult)
 checkNonAgentDeclaration = \case
   DeclarationData DataDeclaration {annotation, name, constructorName, typeName, typeParameters, parameters, sourceSpan} -> do
-    fields <- mapM (\DataParameter {name = fieldName, parameterType} -> (fieldName,) <$> elaborateType parameterType) parameters
+    fields <-
+      mapM
+        ( \DataParameter {name = fieldName, parameterType, optional} -> do
+            elaborated <- elaborateType parameterType
+            pure (fieldName, Parameter {parameterType = elaborated, optional = optional})
+        )
+        parameters
     let returnType = case typeName.resolution of
           Just (ResolvedNamedType qualifiedName) -> SemanticTypeData qualifiedName
           _ -> SemanticTypeUnknown
-        sig = functionType (requiredParameter <$> Map.fromList fields) returnType emptyEffect
+        sig = functionType (Map.fromList fields) returnType emptyEffect
         zonked =
           DeclarationData
             DataDeclaration
@@ -1563,8 +1569,8 @@ parameterSignatureOnly parameters =
       parameters
 
 retagDataParameter :: DataParameter Identified -> DataParameter Zonked
-retagDataParameter DataParameter {annotation, name, parameterType, sourceSpan} =
-  DataParameter {annotation = annotation, name = name, parameterType = retagSyntacticType parameterType, sourceSpan = sourceSpan}
+retagDataParameter DataParameter {annotation, name, parameterType, optional, sourceSpan} =
+  DataParameter {annotation = annotation, name = name, parameterType = retagSyntacticType parameterType, optional = optional, sourceSpan = sourceSpan}
 
 withQName :: NameRef Identified VariableRef -> Declaration Zonked -> SemanticType Resolved -> Maybe SCCResult
 withQName name zonked sig = (\qualifiedName -> (qualifiedName, zonked, sig)) <$> topLevelQName name

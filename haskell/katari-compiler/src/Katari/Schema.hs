@@ -319,7 +319,10 @@ data DataInfo = DataInfo
 -- @\@\"...\"@ annotation (if any) from the @data@ declaration.
 data DataFieldInfo = DataFieldInfo
   { fieldType :: SemanticType Resolved,
-    fieldAnnotation :: Maybe Text
+    fieldAnnotation :: Maybe Text,
+    -- | Whether the field is optional (@name ?: T@); optional fields are
+    -- excluded from the data object's JSON-Schema @required@ set.
+    fieldOptional :: Bool
   }
   deriving (Eq, Show)
 
@@ -360,7 +363,8 @@ buildDataDefs constructorMap topLevelTypes annotationsByQName =
                   DataFieldInfo
                     { fieldType = ty.parameterType,
                       fieldAnnotation =
-                        Map.findWithDefault Nothing label perFieldAnnotations
+                        Map.findWithDefault Nothing label perFieldAnnotations,
+                      fieldOptional = ty.optional
                     }
               )
               fieldTypes
@@ -445,7 +449,13 @@ toCore dataDefs visited = \case
             -- (it is a subtype of its open object view), so leave it open too.
             SchemaCoreObject
               { properties = properties,
-                required = Set.insert ctorDiscriminatorKey (Map.keysSet info.dataFields),
+                -- Optional fields (@name ?: T@) may be omitted from the value,
+                -- so they are excluded from @required@ (the @$constructor@ tag
+                -- is always required).
+                required =
+                  Set.insert
+                    ctorDiscriminatorKey
+                    (Map.keysSet (Map.filter (not . (.fieldOptional)) info.dataFields)),
                 additionalProperties = True
               }
     | otherwise -> SchemaCoreUnknown

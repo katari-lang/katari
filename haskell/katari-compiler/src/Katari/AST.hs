@@ -362,6 +362,11 @@ data DataParameter (phase :: Phase) = DataParameter
     -- rules: field labels live in a per-object namespace.
     name :: Text,
     parameterType :: SyntacticType phase,
+    -- | Whether this field was declared optional (@name ?: T@). An optional
+    -- field may be omitted when constructing the value and, like an optional
+    -- object field, accessing an absent one yields @null@; the parser widens
+    -- its type to @null | T@.
+    optional :: Bool,
     sourceSpan :: SourceSpan
   }
 

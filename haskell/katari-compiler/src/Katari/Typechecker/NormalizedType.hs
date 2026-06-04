@@ -193,10 +193,6 @@ data BareObj
   | RecordObj NormalizedType
   deriving (Eq, Show)
 
--- | A required (non-optional) normalized field.
-requiredNormalizedField :: NormalizedType -> NormalizedParameter
-requiredNormalizedField parameterType = NormalizedParameter {parameterType = parameterType, optional = False}
-
 -- | Normalise / denormalise a single object field (preserving optionality).
 normaliseField :: Parameter Resolved -> NormalizedParameter
 normaliseField field = NormalizedParameter (normaliseSemantic field.parameterType) field.optional
@@ -816,17 +812,18 @@ intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
 -- subtype check below stays well-founded because a recursive occurrence is
 -- compared by name (rule i) rather than re-expanded. Built once by the
 -- solver from the resolved constructor signatures.
-type DataFieldEnv = Map QualifiedName (Map Text NormalizedType)
+type DataFieldEnv = Map QualifiedName (Map Text NormalizedParameter)
 
 -- | Build a 'DataFieldEnv' from a resolved type environment. A @data@
 -- constructor is the unique entry whose qualified name equals its returned
 -- @data@ type's name (an ordinary agent returning a data value has a
 -- different name), so it is identified without a separate constructor table;
--- its parameter types become that data type's normalized fields.
+-- its parameters (type + optionality) become that data type's normalized
+-- fields — an optional field (@name ?: T@) may be omitted from the value.
 buildDataFieldEnv :: Map QualifiedName (SemanticType Resolved) -> DataFieldEnv
 buildDataFieldEnv typeEnv =
   Map.fromList
-    [ (dataQName, Map.map (normaliseSemantic . (.parameterType)) (functionParameters parameterObject))
+    [ (dataQName, Map.map normaliseField (functionParameters parameterObject))
       | (constructorQName, SemanticTypeFunction parameterObject (SemanticTypeData dataQName) _) <- Map.toList typeEnv,
         constructorQName == dataQName
     ]
@@ -893,7 +890,7 @@ subtypeNormalizedType env boundEnv = go
       where
         dataMatches qualifiedName =
           Set.member qualifiedName rightData
-            || subtypeBareObj (ClosedObj (Map.map requiredNormalizedField (dataObjectView qualifiedName))) rightBare
+            || subtypeBareObj (ClosedObj (dataObjectView qualifiedName)) rightBare
         dataObjectView qualifiedName = Map.findWithDefault Map.empty qualifiedName env
 
     subtypeBareObj leftBare rightBare = case (leftBare, rightBare) of
