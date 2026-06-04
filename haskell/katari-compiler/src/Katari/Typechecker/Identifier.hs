@@ -1385,9 +1385,17 @@ resolveTypeName TypeNameNode {name, sourceSpan} = do
   metadata <-
     lookupType name.text >>= \case
       Just resolution -> pure (Just resolution)
-      Nothing -> do
-        emitError (ErrorNotAType name.sourceSpan name.text)
-        pure Nothing
+      Nothing ->
+        -- Fall back to the effect namespace: a request name in a type position
+        -- is only meaningful as an effect argument of a generic application
+        -- (@foo[..., req_a | req_b]@); the checker reinterprets it there and
+        -- rejects it in an ordinary type position. (A name that is neither a
+        -- type nor a request is the usual K0107.)
+        lookupRequest name.text >>= \case
+          Just (ResolvedConcreteRequest qualifiedName) -> pure (Just (ResolvedRequestName qualifiedName))
+          _ -> do
+            emitError (ErrorNotAType name.sourceSpan name.text)
+            pure Nothing
   pure
     TypeNameNode
       { name = identifiedNameRef metadata name,

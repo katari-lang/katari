@@ -187,6 +187,50 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "instantiates an effect-generic agent at a call site" $ do
+    let src =
+          mconcat
+            [ "request log() -> integer\n",
+              "agent run[effect E](body: agent () -> integer with E) -> integer with E { body() }\n",
+              "agent logger() -> integer with log { log() }\n",
+              "agent main() -> integer with log { run[log](body = logger) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
+  it "rejects an argument whose effect violates the instantiated effect parameter" $ do
+    let src =
+          mconcat
+            [ "request log() -> integer\n",
+              "request audit() -> integer\n",
+              "agent run[effect E](body: agent () -> integer with E) -> integer with E { body() }\n",
+              "agent auditor() -> integer with audit { audit() }\n",
+              "agent main() -> integer with log { run[log](body = auditor) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
+  it "propagates the instantiated effect so a leaked effect is caught" $ do
+    let src =
+          mconcat
+            [ "request log() -> integer\n",
+              "request audit() -> integer\n",
+              "agent run[effect E](body: agent () -> integer with E) -> integer with E { body() }\n",
+              "agent auditor() -> integer with audit { audit() }\n",
+              "agent main() -> integer with log { run[audit](body = auditor) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
+  it "rejects a request name used as a type (let annotation)" $ do
+    let src =
+          mconcat
+            [ "request log() -> integer\n",
+              "agent main() -> integer { let x: log = 1\n x }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
   it "requires an explicit 'with' clause on a recursive agent" $ do
     let result = compileSync (singleSourceInput "agent loop(n: integer) -> integer { loop(n = n) }")
     hasErrors result.diagnostics `shouldBe` True

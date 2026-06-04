@@ -103,6 +103,14 @@ data CheckError
   | -- | A generic application supplied the wrong number of type arguments
     -- (expected, actual).
     CheckErrorTypeArgArity SourceSpan Int Int
+  | -- | An effect expression appears where a type is required (e.g. a request
+    -- name in a @let@ / parameter annotation, or at a type-parameter position).
+    CheckErrorEffectInTypePosition SourceSpan
+  | -- | A type expression appears where an effect is required (e.g. at an
+    -- effect-parameter position of a generic application).
+    CheckErrorTypeInEffectPosition SourceSpan
+  | -- | A union mixes type and effect operands.
+    CheckErrorMixedTypeEffectUnion SourceSpan
   | -- | A compiler-invariant violation (e.g. a node the Identifier pass should
     -- have eliminated). Should never fire on a well-formed AST.
     CheckErrorInternal SourceSpan Text
@@ -156,6 +164,12 @@ toDiagnostic = \case
       "K0218"
       ("wrong number of type arguments: expected " <> Text.pack (show expected) <> ", got " <> Text.pack (show actual))
       sourceSpan
+  CheckErrorEffectInTypePosition sourceSpan ->
+    diagnosticError "K0220" "an effect can't be used as a type here" sourceSpan
+  CheckErrorTypeInEffectPosition sourceSpan ->
+    diagnosticError "K0221" "a type can't be used as an effect here" sourceSpan
+  CheckErrorMixedTypeEffectUnion sourceSpan ->
+    diagnosticError "K0222" "a union can't mix types and effects" sourceSpan
   CheckErrorInternal sourceSpan what ->
     diagnosticError "K9999" ("internal typechecker invariant violated: " <> what) sourceSpan
 
@@ -189,7 +203,7 @@ data CheckEnv = CheckEnv
     -- to it is a \"must instantiate\" error, and @foo[args]@ substitutes the
     -- type arguments into its signature. (First-class generics only — node
     -- types never carry an un-applied scheme.)
-    checkGenericParams :: Map VariableResolution [(GenericsId, SemanticType Resolved)],
+    checkGenericParams :: Map VariableResolution [(GenericsId, GenericKind, SemanticType Resolved)],
     -- | The enclosing agent body's declared / expected return type, if any.
     checkExpectedReturn :: Maybe (SemanticType Resolved)
   }
@@ -263,7 +277,7 @@ buildBoundEnv parameters = Map.fromList . catMaybes <$> mapM one parameters
 -- whole module so cross-SCC callers can instantiate.
 buildModuleGenericParams ::
   [Declaration Identified] ->
-  Check (Map VariableResolution [(GenericsId, SemanticType Resolved)])
+  Check (Map VariableResolution [(GenericsId, GenericKind, SemanticType Resolved)])
 buildModuleGenericParams declarations =
   Map.fromList . catMaybes <$> mapM one declarations
   where
@@ -277,20 +291,25 @@ buildModuleGenericParams declarations =
         infos <- catMaybes <$> mapM paramInfo typeParameters
         pure (Just (resolution, infos))
       Nothing -> pure Nothing
-    paramInfo GenericParameter {name, upperBound} = case name.resolution of
+    paramInfo GenericParameter {name, kind, upperBound} = case name.resolution of
       Just (ResolvedGenericParam genericsId) -> do
         boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
-        pure (Just (genericsId, boundType))
+        pure (Just (genericsId, kind, boundType))
       _ -> pure Nothing
 
--- | Substitute concrete types for generic parameters throughout a type (used
--- to instantiate a generic callable's signature at @foo[args]@). Effects carry
--- no type generics yet, so they pass through unchanged.
-substituteGenerics :: Map GenericsId (SemanticType Resolved) -> SemanticType Resolved -> SemanticType Resolved
-substituteGenerics substitution = go
+-- | Substitute concrete types / effects for generic parameters throughout a
+-- type (used to instantiate a generic callable's signature at @foo[args]@):
+-- type generics from @typeSubstitution@, effect generics (inside function
+-- effects) from @effectSubstitution@.
+substituteGenerics ::
+  Map GenericsId (SemanticType Resolved) ->
+  Map GenericsId (SemanticEffect Resolved) ->
+  SemanticType Resolved ->
+  SemanticType Resolved
+substituteGenerics typeSubstitution effectSubstitution = go
   where
     go = \case
-      SemanticTypeGeneric genericsId -> Map.findWithDefault (SemanticTypeGeneric genericsId) genericsId substitution
+      SemanticTypeGeneric genericsId -> Map.findWithDefault (SemanticTypeGeneric genericsId) genericsId typeSubstitution
       SemanticTypeArray element -> SemanticTypeArray (go element)
       SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
       SemanticTypeUnion branches -> unionSemantic (map go branches)
@@ -300,8 +319,15 @@ substituteGenerics substitution = go
         SemanticTypeFunction
           (Map.map (\parameter -> parameter {parameterType = go parameter.parameterType}) parameters)
           (go returnType)
-          effect
+          (substituteEffect effectSubstitution effect)
       other -> other
+
+-- | Substitute concrete effects for effect generics throughout an effect tree.
+substituteEffect :: Map GenericsId (SemanticEffect Resolved) -> SemanticEffect Resolved -> SemanticEffect Resolved
+substituteEffect effectSubstitution = \case
+  SemanticEffectGeneric genericsId -> Map.findWithDefault (SemanticEffectGeneric genericsId) genericsId effectSubstitution
+  SemanticEffectUnion branches -> unionEffects (map (substituteEffect effectSubstitution) branches)
+  leaf -> leaf
 
 -- | The variable a callee resolves to, if it is a plain name / qualified
 -- reference (the only shapes that can name a generic callable).
@@ -313,7 +339,7 @@ calleeResolution = \case
 
 -- | The generic parameters of the callable a reference resolves to (empty for
 -- a monomorphic callable / a non-callable).
-genericParamsOf :: Maybe VariableResolution -> Check [(GenericsId, SemanticType Resolved)]
+genericParamsOf :: Maybe VariableResolution -> Check [(GenericsId, GenericKind, SemanticType Resolved)]
 genericParamsOf = \case
   Just resolution -> asks (Map.findWithDefault [] resolution . (.checkGenericParams))
   Nothing -> pure []
@@ -359,32 +385,79 @@ collectExits tags action = do
 
 -- | Elaborate a syntactic type into a resolved semantic type, expanding type
 -- synonyms transparently (cycles surface as a diagnostic).
+-- | The meaning of an elaborated syntactic-type expression: it denotes either
+-- a /type/ or an /effect/. Most syntactic positions want one specific kind
+-- (a @let@ annotation wants a type, a generic application's effect-parameter
+-- position wants an effect); a request name elaborates to an effect, so it is
+-- rejected wherever a type is required. The bracket arguments of a generic
+-- application are the one position that accepts either, dispatched by the
+-- callee's declared parameter kinds.
+data TypeOrEffect
+  = AsType (SemanticType Resolved)
+  | AsEffect (SemanticEffect Resolved)
+
+-- | Assert an elaboration denotes a type (the common case); an effect here is a
+-- kind error, recovered as @unknown@.
+expectType :: SourceSpan -> TypeOrEffect -> Check (SemanticType Resolved)
+expectType _ (AsType semanticType) = pure semanticType
+expectType sourceSpan (AsEffect _) = do
+  emitError (CheckErrorEffectInTypePosition sourceSpan)
+  pure SemanticTypeUnknown
+
+-- | Assert an elaboration denotes an effect; a type here is a kind error,
+-- recovered as the pure effect.
+expectEffect :: SourceSpan -> TypeOrEffect -> Check (SemanticEffect Resolved)
+expectEffect _ (AsEffect effect) = pure effect
+expectEffect sourceSpan (AsType _) = do
+  emitError (CheckErrorTypeInEffectPosition sourceSpan)
+  pure emptyEffect
+
+-- | Elaborate a syntactic type, asserting it denotes a type. The wrapper used
+-- by almost every caller (parameter / return / @let@ annotations, bounds,
+-- nested type positions) — an effect in any of these is a kind error.
 elaborateType :: SyntacticType Identified -> Check (SemanticType Resolved)
-elaborateType = \case
-  TypePrimitive PrimitiveTypeNode {kind} -> pure (primitiveToSemantic kind)
+elaborateType syntacticType =
+  elaborateTypeOrEffect syntacticType >>= expectType (sourceSpanOf syntacticType)
+
+-- | Elaborate a syntactic type into a type /or/ an effect. A bare request name
+-- (only reachable via the Identifier's effect-namespace fallback) denotes an
+-- effect; a union is all-type or all-effect (mixing them is an error); every
+-- other shape (array, tuple, function, record, object) is a type whose nested
+-- positions are themselves required to be types.
+elaborateTypeOrEffect :: SyntacticType Identified -> Check TypeOrEffect
+elaborateTypeOrEffect = \case
+  TypePrimitive PrimitiveTypeNode {kind} -> pure (AsType (primitiveToSemantic kind))
   TypeName TypeNameNode {name} -> resolveTypeRef name
   TypeQualified QualifiedTypeNode {target} -> resolveTypeRef target
   TypeFunction FunctionTypeNode {parameterTypes, returnType, withRequests} -> do
     parameterEntries <- mapM (\(label, pt) -> (,) label <$> elaborateType pt) parameterTypes
     returnSemantic <- elaborateType returnType
     requests <- elaborateRequestList withRequests
-    pure (SemanticTypeFunction (requiredParameter <$> Map.fromList parameterEntries) returnSemantic requests)
+    pure (AsType (SemanticTypeFunction (requiredParameter <$> Map.fromList parameterEntries) returnSemantic requests))
   TypeArray ArrayTypeNode {elementType} ->
-    SemanticTypeArray <$> elaborateType elementType
+    AsType . SemanticTypeArray <$> elaborateType elementType
   TypeTuple TupleTypeNode {elementTypes} ->
-    SemanticTypeTuple <$> mapM elaborateType elementTypes
-  TypeUnion TypeUnionNode {branches} ->
-    unionSemantic <$> mapM elaborateType branches
-  TypeLiteral TypeLiteralNode {value} -> pure (literalValueToSemantic value)
-  TypeNever _ -> pure SemanticTypeNever
-  TypeUnknown _ -> pure SemanticTypeUnknown
-  TypeFunctionAny _ -> pure SemanticTypeFunctionAny
+    AsType . SemanticTypeTuple <$> mapM elaborateType elementTypes
+  TypeUnion TypeUnionNode {branches, sourceSpan} -> do
+    elaborated <- mapM elaborateTypeOrEffect branches
+    let types = [t | AsType t <- elaborated]
+        effects = [e | AsEffect e <- elaborated]
+    case (types, effects) of
+      (_, []) -> pure (AsType (unionSemantic types))
+      ([], _) -> pure (AsEffect (unionEffects effects))
+      _ -> do
+        emitError (CheckErrorMixedTypeEffectUnion sourceSpan)
+        pure (AsType (unionSemantic types))
+  TypeLiteral TypeLiteralNode {value} -> pure (AsType (literalValueToSemantic value))
+  TypeNever _ -> pure (AsType SemanticTypeNever)
+  TypeUnknown _ -> pure (AsType SemanticTypeUnknown)
+  TypeFunctionAny _ -> pure (AsType SemanticTypeFunctionAny)
   TypeRecord RecordTypeNode {valueType} ->
-    SemanticTypeRecord <$> elaborateType valueType
+    AsType . SemanticTypeRecord <$> elaborateType valueType
   TypeObject ObjectTypeNode {fields} ->
-    SemanticTypeObject . Map.fromList <$> mapM (\(label, fieldSyntactic) -> (label,) <$> elaborateType fieldSyntactic) fields
+    AsType . SemanticTypeObject . Map.fromList <$> mapM (\(label, fieldSyntactic) -> (label,) <$> elaborateType fieldSyntactic) fields
 
-resolveTypeRef :: NameRef Identified TypeRef -> Check (SemanticType Resolved)
+resolveTypeRef :: NameRef Identified TypeRef -> Check TypeOrEffect
 resolveTypeRef nameRef = case nameRef.resolution of
   Just (ResolvedNamedType qualifiedName) -> do
     types <- asks (.checkTypeData)
@@ -394,18 +467,18 @@ resolveTypeRef nameRef = case nameRef.resolution of
         if Set.member qualifiedName visited
           then do
             emitError (CheckErrorTypeSynonymCycle nameRef.sourceSpan qualifiedName.name)
-            pure SemanticTypeUnknown
-          else local (\e -> e {checkSynonymVisited = Set.insert qualifiedName e.checkSynonymVisited}) (elaborateType rhs)
+            pure (AsType SemanticTypeUnknown)
+          else local (\e -> e {checkSynonymVisited = Set.insert qualifiedName e.checkSynonymVisited}) (elaborateTypeOrEffect rhs)
       Just TypeData {typeSynonymRhs = Nothing} ->
-        pure (SemanticTypeData qualifiedName)
+        pure (AsType (SemanticTypeData qualifiedName))
       Nothing ->
-        pure SemanticTypeUnknown
-  Just (ResolvedGenericParam genericsId) -> pure (SemanticTypeGeneric genericsId)
-  -- A request name in a type position only arises as an effect argument of a
-  -- generic application; the generic-application checker reinterprets it, so
-  -- reaching here (a request name used as an ordinary type) is meaningless.
-  Just (ResolvedRequestName _) -> pure SemanticTypeUnknown
-  Nothing -> pure SemanticTypeUnknown
+        pure (AsType SemanticTypeUnknown)
+  Just (ResolvedGenericParam genericsId) -> pure (AsType (SemanticTypeGeneric genericsId))
+  -- A request name reaches a type position only via the Identifier's
+  -- effect-namespace fallback (an effect argument of a generic application).
+  -- It denotes an effect; 'expectType' rejects it in an ordinary type position.
+  Just (ResolvedRequestName qualifiedName) -> pure (AsEffect (SemanticEffectRequest qualifiedName))
+  Nothing -> pure (AsType SemanticTypeUnknown)
 
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
 -- known requests contribute).
@@ -596,15 +669,17 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
         else emitError (CheckErrorTypeArgArity sourceSpan 0 (length typeArguments))
       pure (rebuilt callee' calleeType, calleeType)
     else do
-      argTypes <- mapM elaborateType typeArguments
-      if length argTypes == length params
+      if length typeArguments == length params
         then pure ()
-        else emitError (CheckErrorTypeArgArity sourceSpan (length params) (length argTypes))
-      let pairs = zip params argTypes
-      forM_ pairs $ \((_, bound), argType) -> subtypeAssert sourceSpan argType bound
+        else emitError (CheckErrorTypeArgArity sourceSpan (length params) (length typeArguments))
+      -- Process each (parameter, argument) pair by the parameter's kind: a type
+      -- parameter elaborates its argument as a type (checked against its bound),
+      -- an effect parameter elaborates it as an effect.
+      substitutions <- mapM (uncurry (applyTypeArgument sourceSpan)) (zip params typeArguments)
+      let typeSubstitution = Map.fromList [(genericsId, argType) | Left (genericsId, argType) <- substitutions]
+          effectSubstitution = Map.fromList [(genericsId, argEffect) | Right (genericsId, argEffect) <- substitutions]
       calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocal) resolution
-      let substitution = Map.fromList [(genericsId, argType) | ((genericsId, _), argType) <- pairs]
-          concreteType = substituteGenerics substitution calleeSig
+      let concreteType = substituteGenerics typeSubstitution effectSubstitution calleeSig
       calleeZonked <- retagGenericCallee callee concreteType
       pure (rebuilt calleeZonked concreteType, concreteType)
   where
@@ -616,6 +691,23 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
             sourceSpan = sourceSpan,
             typeOf = resultType
           }
+
+-- | Elaborate one generic argument according to its parameter's kind: a type
+-- parameter ('Left') checks the argument against its bound; an effect parameter
+-- ('Right') reinterprets the argument (a request-name expression) as an effect.
+applyTypeArgument ::
+  SourceSpan ->
+  (GenericsId, GenericKind, SemanticType Resolved) ->
+  SyntacticType Identified ->
+  Check (Either (GenericsId, SemanticType Resolved) (GenericsId, SemanticEffect Resolved))
+applyTypeArgument sourceSpan (genericsId, kind, bound) argument = case kind of
+  GenericKindType -> do
+    argType <- elaborateType argument
+    subtypeAssert sourceSpan argType bound
+    pure (Left (genericsId, argType))
+  GenericKindEffect -> do
+    argEffect <- elaborateTypeOrEffect argument >>= expectEffect (sourceSpanOf argument)
+    pure (Right (genericsId, argEffect))
 
 walkCallArgument :: CallArgument Identified -> Check (CallArgument Zonked, (Text, SemanticType Resolved))
 walkCallArgument CallArgument {label, value, sourceSpan} = do
@@ -1155,7 +1247,7 @@ checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primR
       zonked = Map.fromList [(qualifiedName, declaration) | (qualifiedName, declaration, _) <- results]
       signatures = Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- results]
       typeEnv = Map.union (Map.mapKeys ResolvedTopLevel signatures) localTypes
-      genericBounds = Map.fromList [(genericsId, bound) | params <- Map.elems genericParams, (genericsId, bound) <- params]
+      genericBounds = Map.fromList [(genericsId, bound) | params <- Map.elems genericParams, (genericsId, _kind, bound) <- params]
    in (zonked, signatures, typeEnv, genericBounds, map toDiagnostic errors)
 
 declarationInSCC :: Set QualifiedName -> Declaration Identified -> Bool
