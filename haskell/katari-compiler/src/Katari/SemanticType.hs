@@ -21,6 +21,7 @@ module Katari.SemanticType where
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Katari.Common (QualifiedName (..))
+import Katari.Id (GenericsId)
 
 -- ---------------------------------------------------------------------------
 -- Phase markers
@@ -91,9 +92,13 @@ data SemanticType phase where
   SemanticTypeTuple :: [SemanticType phase] -> SemanticType phase
   -- | Union of types. Convention: 0 or 2+ branches.
   SemanticTypeUnion :: [SemanticType phase] -> SemanticType phase
-  -- | Reference to a @data@ declaration. Generics are not supported, so no
-  -- parameter list.
+  -- | Reference to a @data@ declaration.
   SemanticTypeData :: QualifiedName -> SemanticType phase
+  -- | An in-scope generic type parameter, identified by its 'GenericsId'.
+  -- Abstract during the checking of a generic declaration's body (bounded
+  -- above by its @extends@ clause); replaced by a concrete type at every
+  -- instantiation site (@foo[int]@). Normalises to the @genericsLayer@.
+  SemanticTypeGeneric :: GenericsId -> SemanticType phase
   -- | Structural object type with named fields. Not surfaced in the
   -- syntactic AST: produced by the checker for structural "has field"
   -- constraints (e.g. field access on data values is encoded as

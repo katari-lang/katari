@@ -134,6 +134,17 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput "agent identity[T](x: T) -> T { x }")
     hasErrors result.diagnostics `shouldBe` False
 
+  it "expands a generic parameter's extends bound in subtyping" $ do
+    -- `T extends integer` means a value of `T` is a subtype of `integer`, so
+    -- returning `x : T` where `integer` is expected type-checks.
+    let result = compileSync (singleSourceInput "agent f[T extends integer](x: T) -> integer { x }")
+    hasErrors result.diagnostics `shouldBe` False
+
+  it "rejects returning an unbounded generic where a concrete type is expected" $ do
+    -- Without a bound (default `unknown`), `T` is not a subtype of `integer`.
+    let result = compileSync (singleSourceInput "agent f[T](x: T) -> integer { x }")
+    hasErrors result.diagnostics `shouldBe` True
+
   it "multi-line array literal does NOT require trailing comma" $ do
     let src =
           mconcat

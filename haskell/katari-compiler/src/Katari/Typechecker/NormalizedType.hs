@@ -36,6 +36,7 @@ module Katari.Typechecker.NormalizedType
     NormalizedParameter (..),
     DataFieldEnv,
     buildDataFieldEnv,
+    BoundEnv,
 
     -- * Helpers
     emptyLayered,
@@ -62,6 +63,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Common (QualifiedName)
+import Katari.Id (GenericsId)
 import Katari.SemanticType (Parameter (..), Resolved, SemanticEffect (..), SemanticType (..), unionEffects)
 
 -- ---------------------------------------------------------------------------
@@ -111,7 +113,13 @@ data LayeredType = LayeredType
     seqLayer :: BareSeq,
     -- | Map layer — object, record and @data@ merged (@data <: object <:
     -- record@). See 'MapSlot'.
-    mapLayer :: MapSlot
+    mapLayer :: MapSlot,
+    -- | Generics layer — the set of in-scope generic parameters this type
+    -- includes (each an abstract 'SemanticTypeGeneric'). Union is set union;
+    -- intersection is set intersection (incomplete but sound: narrowing
+    -- @T & int@ to @never@ only shrinks the meet). Subtyping expands each
+    -- generic to its declared upper bound (see 'subtypeNormalizedType').
+    genericsLayer :: Set GenericsId
   }
   deriving (Eq, Show)
 
@@ -239,7 +247,8 @@ emptyLayered =
       fileLayer = False,
       functionLayer = FunctionSlotAbsent,
       seqLayer = NoSeq,
-      mapLayer = emptyMapSlot
+      mapLayer = emptyMapSlot,
+      genericsLayer = Set.empty
     }
 
 -- | The empty map slot: no @data@ names, no structural object.
@@ -277,7 +286,8 @@ denormaliseBranches LayeredType {..} =
       fileBranches fileLayer,
       functionBranches functionLayer,
       seqBranches seqLayer,
-      mapBranches mapLayer
+      mapBranches mapLayer,
+      SemanticTypeGeneric <$> Set.toList genericsLayer
     ]
 
 numberBranches :: NumberSlot -> [SemanticType Resolved]
@@ -367,6 +377,7 @@ isEmptyLayered LayeredType {..} =
     && isEmptyFunction functionLayer
     && isEmptySeq seqLayer
     && isEmptyMap mapLayer
+    && Set.null genericsLayer
 
 isEmptyNumber :: NumberSlot -> Bool
 isEmptyNumber = \case
@@ -438,6 +449,8 @@ normaliseSemantic = \case
   -- are empty and a data only matches another data by name.
   SemanticTypeData typeId ->
     NormalizedTypeLayered emptyLayered {mapLayer = emptyMapSlot {dataNames = Set.singleton typeId}}
+  SemanticTypeGeneric genericsId ->
+    NormalizedTypeLayered emptyLayered {genericsLayer = Set.singleton genericsId}
   SemanticTypeObject fields ->
     NormalizedTypeLayered
       emptyLayered
@@ -493,7 +506,8 @@ unionLayered leftLayered rightLayered =
       fileLayer = leftLayered.fileLayer || rightLayered.fileLayer,
       functionLayer = unionFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
       seqLayer = unionSeq leftLayered.seqLayer rightLayered.seqLayer,
-      mapLayer = unionMap leftLayered.mapLayer rightLayered.mapLayer
+      mapLayer = unionMap leftLayered.mapLayer rightLayered.mapLayer,
+      genericsLayer = Set.union leftLayered.genericsLayer rightLayered.genericsLayer
     }
 
 unionNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
@@ -604,7 +618,10 @@ intersectLayered leftLayered rightLayered =
       fileLayer = leftLayered.fileLayer && rightLayered.fileLayer,
       functionLayer = intersectFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
       seqLayer = intersectSeq leftLayered.seqLayer rightLayered.seqLayer,
-      mapLayer = intersectMap leftLayered.mapLayer rightLayered.mapLayer
+      mapLayer = intersectMap leftLayered.mapLayer rightLayered.mapLayer,
+      -- Set intersection: incomplete (drops the genuine @T & int@ overlap to
+      -- @never@) but sound for the meet, which only narrows.
+      genericsLayer = Set.intersection leftLayered.genericsLayer rightLayered.genericsLayer
     }
 
 intersectNumberSlot :: NumberSlot -> NumberSlot -> NumberSlot
@@ -723,21 +740,36 @@ buildDataFieldEnv typeEnv =
         constructorQName == dataQName
     ]
 
--- | @subtypeNormalizedType env leftType rightType@ holds when every value of
--- @leftType@ is also a value of @rightType@. A per-layer check; the @env@ is
--- consulted only for the @data <: object@ edge. All the per-layer helpers are
--- nested in 'go''s @where@ so they share @env@ implicitly.
-subtypeNormalizedType :: DataFieldEnv -> NormalizedType -> NormalizedType -> Bool
-subtypeNormalizedType env = go
+-- | Read-only env mapping each in-scope generic parameter to the (normalized)
+-- upper bound of its @extends@ clause. Consulted by 'subtypeNormalizedType' to
+-- expand a generic on the subtype side. @Map.findWithDefault@ treats a missing
+-- entry as 'NormalizedTypeUnknown' (the default @extends unknown@).
+type BoundEnv = Map GenericsId NormalizedType
+
+-- | @subtypeNormalizedType env boundEnv leftType rightType@ holds when every
+-- value of @leftType@ is also a value of @rightType@. A per-layer check; @env@
+-- is consulted for the @data <: object@ edge and @boundEnv@ for generic
+-- expansion. All the per-layer helpers are nested in 'go''s @where@ so they
+-- share @env@ implicitly.
+subtypeNormalizedType :: DataFieldEnv -> BoundEnv -> NormalizedType -> NormalizedType -> Bool
+subtypeNormalizedType env boundEnv = go
   where
     go leftType rightType = case (leftType, rightType) of
       (_, NormalizedTypeUnknown) -> True
       (NormalizedTypeUnknown, _) -> False
       (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
-        subtypeLayered leftLayered rightLayered
+        -- Expand the LHS's generics (cancel those shared with the RHS, replace
+        -- the rest by their bounds) until none remain, then compare with the
+        -- RHS's generics dropped (a RHS-only generic cannot help cover the LHS
+        -- — sound, completeness-losing).
+        case expandLeftGenerics boundEnv rightLayered.genericsLayer leftLayered of
+          NormalizedTypeUnknown -> False
+          NormalizedTypeLayered leftExpanded ->
+            subtypeLayered leftExpanded rightLayered {genericsLayer = Set.empty}
 
     subtypeLayered leftLayered rightLayered =
-      subtypeNumberSlot leftLayered.numberLayer rightLayered.numberLayer
+      Set.isSubsetOf leftLayered.genericsLayer rightLayered.genericsLayer
+        && subtypeNumberSlot leftLayered.numberLayer rightLayered.numberLayer
         && subtypeStringSlot leftLayered.stringLayer rightLayered.stringLayer
         && Set.isSubsetOf leftLayered.booleanLayer rightLayered.booleanLayer
         && (not leftLayered.nullLayer || rightLayered.nullLayer)
@@ -810,6 +842,29 @@ subtypeNormalizedType env = go
         checkParameter (label, leftParameter) = case Map.lookup label rightShape.parameters of
           Just rightParameter -> go rightParameter.parameterType leftParameter.parameterType
           Nothing -> True
+
+-- | Expand a layered type's generics until its generics layer is empty, for
+-- use on the subtype (LHS) side. Generics also present on the RHS cancel (a
+-- generic is a subtype of itself); each remaining LHS-only generic is replaced
+-- by the union of its declared upper bound. A bound may itself introduce
+-- further generics, which are expanded on the next iteration — the @extends@
+-- relation is acyclic, so the loop terminates. A generic whose bound is
+-- 'NormalizedTypeUnknown' (the default) lifts the whole type to the top.
+expandLeftGenerics :: BoundEnv -> Set GenericsId -> LayeredType -> NormalizedType
+expandLeftGenerics boundEnv rhsGenerics = loop
+  where
+    loop layered
+      | Set.null layered.genericsLayer = NormalizedTypeLayered layered
+      | otherwise =
+          let lhsOnly = Set.difference layered.genericsLayer rhsGenerics
+              -- Drop all generics (shared ones cancel); re-add the LHS-only
+              -- ones via their bounds.
+              cleared = NormalizedTypeLayered layered {genericsLayer = Set.empty}
+              expanded = foldr (unionNT . boundOf) cleared (Set.toList lhsOnly)
+           in case expanded of
+                NormalizedTypeUnknown -> NormalizedTypeUnknown
+                NormalizedTypeLayered layered' -> loop layered'
+    boundOf genericsId = Map.findWithDefault NormalizedTypeUnknown genericsId boundEnv
 
 subtypeNumberSlot :: NumberSlot -> NumberSlot -> Bool
 subtypeNumberSlot leftSlot rightSlot = case (leftSlot, rightSlot) of

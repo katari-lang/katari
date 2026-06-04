@@ -452,6 +452,11 @@ toCore dataDefs visited = \case
   -- 'get_metadata' returns in its 'id' field.
   SemanticTypeFunction {} -> callableRefCore
   SemanticTypeFunctionAny -> callableRefCore
+  -- A raw generic parameter only reaches here from a not-yet-instantiated
+  -- generic signature (generic agents are not exposed directly as tools; an
+  -- instantiation substitutes the concrete type before schema generation).
+  -- Fall back to the permissive @unknown@ schema.
+  SemanticTypeGeneric _ -> SchemaCoreUnknown
   -- Records map to JSON Schema's @additionalProperties@ pattern:
   -- a plain object whose values all match @V@'s schema. The key type
   -- is fixed to @string@ at the Identifier pass in v0.1.0, so we

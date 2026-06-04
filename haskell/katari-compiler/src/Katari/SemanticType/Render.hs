@@ -47,6 +47,10 @@ renderSemanticType = render False
         let body = Text.intercalate " | " (map (render True) branches)
          in if parenthesise then "(" <> body <> ")" else body
       ST.SemanticTypeData qualifiedName -> qualifiedName.name
+      -- A raw generic parameter has no surface name in 'SemanticType' (the
+      -- name lives in the declaration); hover usually sees the instantiated
+      -- type instead, so a placeholder is sufficient here.
+      ST.SemanticTypeGeneric _ -> "<generic>"
       ST.SemanticTypeObject fields ->
         "{ "
           <> Text.intercalate

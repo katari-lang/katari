@@ -54,7 +54,8 @@ import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (TypeData (..))
 import Katari.Typechecker.AgentGraph (declarationDependencies)
 import Katari.Typechecker.NormalizedType
-  ( DataFieldEnv,
+  ( BoundEnv,
+    DataFieldEnv,
     buildDataFieldEnv,
     normaliseSemantic,
     subtypeNormalizedType,
@@ -144,6 +145,10 @@ data CheckEnv = CheckEnv
     -- | Prim rules (operator / array prims whose result type isn't a plain
     -- signature). Keyed by the prim's qualified name.
     checkPrimRules :: Map QualifiedName PrimRule,
+    -- | Upper bounds of the generic parameters currently in scope (the
+    -- enclosing generic declaration's @extends@ clauses, normalized). Empty
+    -- outside a generic body. Consulted by 'subtypeAssert' for bound expansion.
+    checkBoundEnv :: BoundEnv,
     -- | The enclosing agent body's declared / expected return type, if any.
     checkExpectedReturn :: Maybe (SemanticType Resolved)
   }
@@ -190,6 +195,25 @@ withLocals bindings action = do
 -- | Set the enclosing agent's expected return type.
 withExpectedReturn :: SemanticType Resolved -> Check a -> Check a
 withExpectedReturn expected = local (\e -> e {checkExpectedReturn = Just expected})
+
+-- | Extend the generic-bound environment for the duration of an action (used
+-- while checking a generic declaration's body, where its parameters are
+-- abstract but bounded above by their @extends@ clauses).
+withBoundEnv :: BoundEnv -> Check a -> Check a
+withBoundEnv boundEnv = local (\e -> e {checkBoundEnv = Map.union boundEnv e.checkBoundEnv})
+
+-- | Build the bound environment for a generic declaration's parameters: each
+-- parameter's 'GenericsId' mapped to its normalized @extends@ bound (default
+-- @unknown@). A bound may itself mention earlier generics; those normalise to
+-- the generics layer and are expanded transitively during subtyping.
+buildBoundEnv :: [GenericParameter Identified] -> Check BoundEnv
+buildBoundEnv parameters = Map.fromList . catMaybes <$> mapM one parameters
+  where
+    one GenericParameter {name, upperBound} = case name.resolution of
+      Just (ResolvedGenericParam genericsId) -> do
+        boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
+        pure (Just (genericsId, normaliseSemantic boundType))
+      _ -> pure Nothing
 
 -- | Record a pending exit value (a @break@ / @next@ payload) for the nearest
 -- enclosing scope to collect.
@@ -259,10 +283,10 @@ resolveTypeRef nameRef = case nameRef.resolution of
         pure (SemanticTypeData qualifiedName)
       Nothing ->
         pure SemanticTypeUnknown
-  -- Generic-parameter / request-as-effect-argument resolutions are produced
-  -- only once generics land; until then the Identifier never emits them, so
-  -- these arms are unreachable placeholders (TODO: generics steps D/E).
-  Just (ResolvedGenericParam _) -> pure SemanticTypeUnknown
+  Just (ResolvedGenericParam genericsId) -> pure (SemanticTypeGeneric genericsId)
+  -- A request name in a type position only arises as an effect argument of a
+  -- generic application; the generic-application checker reinterprets it, so
+  -- reaching here (a request name used as an ordinary type) is meaningless.
   Just (ResolvedRequestName _) -> pure SemanticTypeUnknown
   Nothing -> pure SemanticTypeUnknown
 
@@ -310,7 +334,8 @@ subtypeAssert sourceSpan actual expected
   | isUnknown actual || isUnknown expected = pure ()
   | otherwise = do
       dataFieldEnv <- asks (.checkDataFieldEnv)
-      let holds = subtypeNormalizedType dataFieldEnv (normaliseSemantic actual) (normaliseSemantic expected)
+      boundEnv <- asks (.checkBoundEnv)
+      let holds = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic actual) (normaliseSemantic expected)
       if holds then pure () else emitError (CheckErrorTypeMismatch sourceSpan actual expected)
   where
     isUnknown = \case SemanticTypeUnknown -> True; _ -> False
@@ -602,7 +627,8 @@ walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType
   -- A request handler body must transfer control with @break@ / @next@; falling
   -- through to a value (its type is not 'never') is a dedicated error.
   dataFieldEnv <- asks (.checkDataFieldEnv)
-  let isNever = subtypeNormalizedType dataFieldEnv (normaliseSemantic bodyType) (normaliseSemantic SemanticTypeNever)
+  boundEnv <- asks (.checkBoundEnv)
+  let isNever = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic bodyType) (normaliseSemantic SemanticTypeNever)
   case bodyType of
     SemanticTypeUnknown -> pure () -- error recovery: a prior diagnostic already fired
     _ | isNever -> pure ()
@@ -934,6 +960,7 @@ checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primR
             checkSynonymVisited = Set.empty,
             checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables,
             checkPrimRules = primRules,
+            checkBoundEnv = Map.empty,
             checkExpectedReturn = Nothing
           }
       sccDeclarations = filter (declarationInSCC sccQualifiedNames) moduleAST.declarations
@@ -1141,11 +1168,12 @@ checkAgentResult decl = do
 -- carries the seeded signature, and the annotation is mandatory.)
 checkAgentDeclaration :: AgentDeclaration Identified -> Check (Declaration Zonked, SemanticType Resolved)
 checkAgentDeclaration AgentDeclaration {annotation, name, typeParameters, parameters, returnType, withRequests, body, sourceSpan} = do
-  (parameters', paramSig, paramLocals) <- elaborateParameters parameters
+  boundEnv <- buildBoundEnv typeParameters
+  (parameters', paramSig, paramLocals) <- withBoundEnv boundEnv (elaborateParameters parameters)
   declaredReturn <- traverse elaborateType returnType
   effect <- maybe (pure emptyEffect) elaborateRequestList withRequests
   (body', returnSemantic) <-
-    withLocals paramLocals $ case declaredReturn of
+    withBoundEnv boundEnv $ withLocals paramLocals $ case declaredReturn of
       Just ret -> withExpectedReturn ret $ do
         (body', bodyType) <- walkBlock body
         subtypeAssert (sourceSpanOf body) bodyType ret
