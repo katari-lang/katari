@@ -682,6 +682,9 @@ buildRequestRefs ctx effect =
     effectRequests = \case
       SemanticEffectPure -> []
       SemanticEffectRequest qualifiedName -> [qualifiedName]
+      -- A not-yet-instantiated effect generic contributes no concrete request
+      -- to the schema (an instantiation substitutes it before schema gen).
+      SemanticEffectGeneric _ -> []
       SemanticEffectUnion branches -> concatMap effectRequests branches
 
 buildRequestRef :: SchemaContext -> QualifiedName -> Maybe RequestSchemaRef

@@ -172,6 +172,21 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "checks an effect-generic combinator (with E flows through the body)" $ do
+    let src = "agent run[effect E](body: agent () -> integer with E) -> integer with E { body() }\n"
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
+  it "rejects a body that raises an effect generic outside the 'with' clause" $ do
+    let src = "agent run[effect E](body: agent () -> integer with E) -> integer with pure { body() }\n"
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
+  it "rejects a type generic used in effect position ('with T')" $ do
+    let src = "agent run[T](body: agent () -> integer with T) -> integer { body() }\n"
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
   it "requires an explicit 'with' clause on a recursive agent" $ do
     let result = compileSync (singleSourceInput "agent loop(n: integer) -> integer { loop(n = n) }")
     hasErrors result.diagnostics `shouldBe` True

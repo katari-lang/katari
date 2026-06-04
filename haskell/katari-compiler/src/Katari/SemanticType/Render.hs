@@ -90,4 +90,7 @@ renderSemanticEffect = Text.intercalate " | " . leaves
       -- @() -> R@ (no @with@ clause), matching the prior empty-effect output.
       ST.SemanticEffectPure -> []
       ST.SemanticEffectRequest qualifiedName -> [qualifiedName.name]
+      -- An effect generic has no surface name in 'SemanticEffect' (it lives in
+      -- the declaration); a placeholder suffices for hover.
+      ST.SemanticEffectGeneric _ -> ["<effect>"]
       ST.SemanticEffectUnion branches -> concatMap leaves branches

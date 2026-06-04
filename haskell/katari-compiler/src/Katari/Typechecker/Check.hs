@@ -46,7 +46,7 @@ import Data.Text qualified as Text
 import Katari.AST
 import Katari.Common (LiteralValue (..), QualifiedName (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Id (GenericsId, TypeResolution (..), VariableResolution (..))
+import Katari.Id (EffectResolution (..), GenericsId, TypeResolution (..), VariableResolution (..))
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SemanticType.Render (renderSemanticType)
@@ -56,10 +56,16 @@ import Katari.Typechecker.AgentGraph (declarationDependencies)
 import Katari.Typechecker.NormalizedType
   ( BoundEnv,
     DataFieldEnv,
+    NormalizedEffect (..),
     buildDataFieldEnv,
     denormalise,
+    denormaliseEffect,
+    differenceNormalizedEffect,
     expandGenerics,
+    normaliseEffect,
     normaliseSemantic,
+    nullNormalizedEffect,
+    subtractConcrete,
     subtypeNormalizedType,
   )
 
@@ -75,8 +81,9 @@ data CheckError
   | -- | A variable reference did not resolve to a known binding (Identifier
     -- should have rejected this already; defensive).
     CheckErrorUnresolvedVariable SourceSpan Text
-  | -- | An agent's body raises requests outside its declared @with@ clause.
-    CheckErrorUndeclaredEffect SourceSpan [QualifiedName]
+  | -- | An agent's body raises effects (named here) outside its declared
+    -- @with@ clause.
+    CheckErrorUndeclaredEffect SourceSpan [Text]
   | -- | A request handler body falls through to a value instead of exiting
     -- with @break@ / @next@.
     CheckErrorHandlerMustExit SourceSpan
@@ -115,10 +122,10 @@ toDiagnostic = \case
       sourceSpan
   CheckErrorUnresolvedVariable sourceSpan name ->
     diagnosticError "K0211" ("unresolved variable '" <> name <> "'") sourceSpan
-  CheckErrorUndeclaredEffect sourceSpan requests ->
+  CheckErrorUndeclaredEffect sourceSpan effectNames ->
     diagnosticError
       "K0212"
-      ("this agent raises requests outside its 'with' clause: " <> Text.intercalate ", " (map renderQName requests))
+      ("this agent raises effects outside its 'with' clause: " <> Text.intercalate ", " effectNames)
       sourceSpan
   CheckErrorHandlerMustExit sourceSpan ->
     diagnosticError
@@ -406,10 +413,14 @@ elaborateRequestList :: [SyntacticRequest Identified] -> Check (SemanticEffect R
 elaborateRequestList syntacticRequests =
   pure
     ( unionEffects
-        [ SemanticEffectRequest qualifiedName
-          | SyntacticRequest {name = NameRef {resolution = Just qualifiedName}} <- syntacticRequests
+        [ effectLeaf resolution
+          | SyntacticRequest {name = NameRef {resolution = Just resolution}} <- syntacticRequests
         ]
     )
+  where
+    effectLeaf = \case
+      ResolvedConcreteRequest qualifiedName -> SemanticEffectRequest qualifiedName
+      ResolvedEffectGeneric genericsId -> SemanticEffectGeneric genericsId
 
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase
 primitiveToSemantic = \case
@@ -1195,16 +1206,16 @@ inferEffects recursive sccQualifiedNames results = do
   let externalLookup qualifiedName =
         effectOfSignature (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) locals)
       agentInfos =
-        [ (qualifiedName, agentDecl.body, declaredEffect)
+        [ (qualifiedName, agentDecl, declaredEffect)
         | (qualifiedName, DeclarationAgent agentDecl, _) <- results,
           let declaredEffect =
-                fmap (Set.fromList . mapMaybe (\request -> request.name.resolution)) agentDecl.withRequests
+                fmap (effectFromResolutions . mapMaybe (\request -> request.name.resolution)) agentDecl.withRequests
         ]
       agentSpans =
-        Map.fromList [(qualifiedName, agentDecl.sourceSpan) | (qualifiedName, DeclarationAgent agentDecl, _) <- results]
-      bodies = Map.fromList [(qualifiedName, body) | (qualifiedName, body, _) <- agentInfos]
+        Map.fromList [(qualifiedName, agentDecl.sourceSpan) | (qualifiedName, agentDecl, _) <- agentInfos]
+      bodies = Map.fromList [(qualifiedName, agentDecl.body) | (qualifiedName, agentDecl, _) <- agentInfos]
       lookupWith effects requested
-        | Set.member requested sccQualifiedNames = Map.findWithDefault Set.empty requested effects
+        | Set.member requested sccQualifiedNames = Map.findWithDefault mempty requested effects
         | otherwise = externalLookup requested
       published =
         Map.fromList
@@ -1212,54 +1223,58 @@ inferEffects recursive sccQualifiedNames results = do
               case declaredEffect of
                 Just declared -> declared
                 Nothing
-                  | recursive -> Set.empty
-                  | otherwise -> blockEffect (lookupWith Map.empty) body
+                  | recursive -> mempty
+                  | otherwise -> blockEffect (lookupWith Map.empty) agentDecl.body
             )
-          | (qualifiedName, body, declaredEffect) <- agentInfos
+          | (qualifiedName, agentDecl, declaredEffect) <- agentInfos
           ]
       -- Only an /annotated/ agent can violate its @with@ clause: an unannotated
       -- non-recursive agent's published effect IS its inferred effect (so it
       -- never exceeds it), and a recursive agent with no @with@ already has the
       -- dedicated K0219 diagnostic.
       violations =
-        [ (qualifiedName, undeclared)
-        | (qualifiedName, _, Just declared) <- agentInfos,
+        [ (qualifiedName, effectNames agentDecl undeclared)
+        | (qualifiedName, agentDecl, Just declared) <- agentInfos,
           let bodyEffect = blockEffect (lookupWith published) (bodies Map.! qualifiedName),
-          let undeclared = Set.difference bodyEffect declared,
-          not (Set.null undeclared)
+          let undeclared = differenceNormalizedEffect bodyEffect declared,
+          not (nullNormalizedEffect undeclared)
         ]
-  forM_ violations $ \(qualifiedName, undeclared) ->
-    emitError (CheckErrorUndeclaredEffect (Map.findWithDefault dummySpan qualifiedName agentSpans) (Set.toList undeclared))
+  forM_ violations $ \(qualifiedName, names) ->
+    emitError (CheckErrorUndeclaredEffect (Map.findWithDefault dummySpan qualifiedName agentSpans) names)
   pure (map (patchResultEffect published) results)
   where
     dummySpan = case results of
       ((_, declaration, _) : _) -> sourceSpanOf declaration
       [] -> error "inferEffects: no results"
+    -- Render an effect's undeclared elements: concrete requests by qualified
+    -- name, effect generics by their declared parameter name (from the agent's
+    -- generic list).
+    effectNames agentDecl effect =
+      map renderQName (Set.toList effect.effectConcrete)
+        ++ map (genericEffectName agentDecl) (Set.toList effect.effectGenerics)
+    genericEffectName agentDecl genericsId =
+      case [param.name.text | param <- agentDecl.typeParameters, param.name.resolution == Just (ResolvedGenericParam genericsId)] of
+        (name : _) -> name
+        [] -> "<effect-generic>"
 
-patchResultEffect :: Map QualifiedName (Set QualifiedName) -> SCCResult -> SCCResult
+-- | The normalised effect a @with@ clause declares, from its resolved leaves.
+effectFromResolutions :: [EffectResolution] -> NormalizedEffect
+effectFromResolutions resolutions =
+  NormalizedEffect
+    (Set.fromList [qualifiedName | ResolvedConcreteRequest qualifiedName <- resolutions])
+    (Set.fromList [genericsId | ResolvedEffectGeneric genericsId <- resolutions])
+
+patchResultEffect :: Map QualifiedName NormalizedEffect -> SCCResult -> SCCResult
 patchResultEffect published (qualifiedName, declaration, sig) =
   case Map.lookup qualifiedName published of
     Just effect -> (qualifiedName, declaration, setEffect effect sig)
     Nothing -> (qualifiedName, declaration, sig)
 
-setEffect :: Set QualifiedName -> SemanticType Resolved -> SemanticType Resolved
+setEffect :: NormalizedEffect -> SemanticType Resolved -> SemanticType Resolved
 setEffect effect = \case
   SemanticTypeFunction params ret _ ->
-    SemanticTypeFunction params ret (effectFromSet effect)
+    SemanticTypeFunction params ret (denormaliseEffect effect)
   other -> other
-
--- | Build an effect tree from a (normalised) concrete request set. The leaves
--- come out in qualified-name order for determinism.
-effectFromSet :: Set QualifiedName -> SemanticEffect Resolved
-effectFromSet requests = unionEffects (SemanticEffectRequest <$> Set.toList requests)
-
--- | Flatten an effect tree to its concrete request set (inverse of
--- 'effectFromSet'). Effect inference works over these sets internally.
-effectRequestSet :: SemanticEffect Resolved -> Set QualifiedName
-effectRequestSet = \case
-  SemanticEffectPure -> Set.empty
-  SemanticEffectRequest qualifiedName -> Set.singleton qualifiedName
-  SemanticEffectUnion branches -> Set.unions (map effectRequestSet branches)
 
 isAgentDeclaration :: Declaration phase -> Bool
 isAgentDeclaration = \case DeclarationAgent _ -> True; _ -> False
@@ -1289,7 +1304,7 @@ checkNonAgentDeclaration = \case
     (parameters', paramSig, _) <- elaborateParameters parameters
     ret <- elaborateType returnType
     let effect = case requestName.resolution of
-          Just qualifiedName | not (isThrowRequest qualifiedName) -> singletonEffect qualifiedName
+          Just (ResolvedConcreteRequest qualifiedName) | not (isThrowRequest qualifiedName) -> singletonEffect qualifiedName
           _ -> emptyEffect
         sig = SemanticTypeFunction paramSig ret effect
         zonked =
@@ -1450,76 +1465,79 @@ renderQName qualifiedName = qualifiedName.module_ <> "." <> qualifiedName.name
 -- Effect collection (single-pass; see 'inferEffects' for the SCC strategy)
 -- ===========================================================================
 
--- | Each callable's effect (its raised request set), used while walking bodies.
-type EffectLookup = QualifiedName -> Set QualifiedName
+-- | Each callable's effect (concrete requests + effect generics), used while
+-- walking bodies.
+type EffectLookup = QualifiedName -> NormalizedEffect
 
--- | Extract the concrete request set from a callable's function signature.
-effectOfSignature :: SemanticType Resolved -> Set QualifiedName
+-- | The effect a callable's function signature raises.
+effectOfSignature :: SemanticType Resolved -> NormalizedEffect
 effectOfSignature = \case
-  SemanticTypeFunction _ _ effect -> effectRequestSet effect
-  _ -> Set.empty
+  SemanticTypeFunction _ _ effect -> normaliseEffect effect
+  _ -> mempty
 
-blockEffect :: EffectLookup -> Block Zonked -> Set QualifiedName
+blockEffect :: EffectLookup -> Block Zonked -> NormalizedEffect
 blockEffect lookupEffect Block {statements, returnExpression} =
-  Set.unions (map (statementEffect lookupEffect) statements)
-    <> maybe Set.empty (exprEffect lookupEffect) returnExpression
+  foldMap (statementEffect lookupEffect) statements
+    <> maybe mempty (exprEffect lookupEffect) returnExpression
 
-statementEffect :: EffectLookup -> Statement Zonked -> Set QualifiedName
+statementEffect :: EffectLookup -> Statement Zonked -> NormalizedEffect
 statementEffect lookupEffect = \case
   StatementLet s -> exprEffect lookupEffect s.value
   StatementReturn s -> exprEffect lookupEffect s.value
   StatementExpression e -> exprEffect lookupEffect e
   StatementBreak s -> exprEffect lookupEffect s.value
-  StatementNext s -> exprEffect lookupEffect s.value <> Set.unions (map (exprEffect lookupEffect . (.value)) s.modifiers)
-  StatementForNext s -> Set.unions (map (exprEffect lookupEffect . (.value)) s.modifiers)
+  StatementNext s -> exprEffect lookupEffect s.value <> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
+  StatementForNext s -> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
   StatementForBreak s -> exprEffect lookupEffect s.value
   -- A nested @agent@ is its own callable; calling it contributes via its
   -- signature at the call site, so its body does not raise here.
-  StatementAgent _ -> Set.empty
-  StatementError _ -> Set.empty
+  StatementAgent _ -> mempty
+  StatementError _ -> mempty
 
-exprEffect :: EffectLookup -> Expression Zonked -> Set QualifiedName
+exprEffect :: EffectLookup -> Expression Zonked -> NormalizedEffect
 exprEffect lookupEffect = go
   where
     go = \case
-      ExpressionLiteral _ -> Set.empty
-      ExpressionVariable _ -> Set.empty
-      ExpressionQualifiedReference _ -> Set.empty
-      ExpressionTuple e -> Set.unions (map go e.elements)
-      ExpressionParTuple e -> Set.unions (map go e.elements)
-      ExpressionRecord e -> Set.unions (map (go . snd) e.entries)
-      ExpressionCall e -> calleeEffect e.callee <> Set.unions (map (go . (.value)) e.arguments)
-      ExpressionIf e -> go e.condition <> blockEffect lookupEffect e.thenBlock <> maybe Set.empty (blockEffect lookupEffect) e.elseBlock
-      ExpressionMatch e -> go e.subject <> Set.unions (map (blockEffect lookupEffect . (.body)) e.cases)
+      ExpressionLiteral _ -> mempty
+      ExpressionVariable _ -> mempty
+      ExpressionQualifiedReference _ -> mempty
+      ExpressionTuple e -> foldMap go e.elements
+      ExpressionParTuple e -> foldMap go e.elements
+      ExpressionRecord e -> foldMap (go . snd) e.entries
+      ExpressionCall e -> calleeEffect e.callee <> foldMap (go . (.value)) e.arguments
+      ExpressionIf e -> go e.condition <> blockEffect lookupEffect e.thenBlock <> maybe mempty (blockEffect lookupEffect) e.elseBlock
+      ExpressionMatch e -> go e.subject <> foldMap (blockEffect lookupEffect . (.body)) e.cases
       ExpressionFor e ->
-        Set.unions (map (go . (.source)) e.inBindings)
-          <> Set.unions (map (go . (.initial)) e.varBindings)
+        foldMap (go . (.source)) e.inBindings
+          <> foldMap (go . (.initial)) e.varBindings
           <> blockEffect lookupEffect e.body
-          <> maybe Set.empty (blockEffect lookupEffect) e.thenBlock
+          <> maybe mempty (blockEffect lookupEffect) e.thenBlock
       ExpressionBlock e -> blockEffect lookupEffect e.block
       ExpressionHandle e -> handleEffect e
       ExpressionFieldAccess e -> go e.object
       ExpressionTypeApplication e -> go e.callee
-      ExpressionTemplate e -> Set.unions (map templateEffect e.elements)
-      ExpressionBinaryOperator _ -> Set.empty
-      ExpressionUnaryOperator _ -> Set.empty
+      ExpressionTemplate e -> foldMap templateEffect e.elements
+      ExpressionBinaryOperator _ -> mempty
+      ExpressionUnaryOperator _ -> mempty
     -- Calling a callable raises that callable's effect. For an SCC-internal
-    -- callee the lookup uses the current fixpoint estimate; otherwise its
-    -- signature effect (carried on the reference's type).
+    -- callee the lookup uses the current estimate; otherwise its signature
+    -- effect (carried on the reference's type).
     calleeEffect = \case
       ExpressionVariable v -> maybe (effectOfSignature v.typeOf) lookupEffect (topLevelQName v.name)
       ExpressionQualifiedReference q -> maybe (effectOfSignature q.typeOf) lookupEffect (topLevelQName q.target)
       complex -> effectOfSignature (exprTypeOf complex)
-    -- A handle discharges the requests it handles: the body's effect minus the
-    -- handled set, plus the handlers' own bodies and the then-clause.
+    -- A handle discharges the concrete requests it names: the body's effect
+    -- with those requests subtracted (an abstract effect generic is NOT
+    -- discharged by a concrete handler, so it passes through), plus the
+    -- handlers' own bodies and the then-clause.
     handleEffect e =
-      let handled = Set.fromList (mapMaybe (\handler -> handler.name.resolution) e.handlers)
+      let handled = Set.fromList [qualifiedName | handler <- e.handlers, Just (ResolvedConcreteRequest qualifiedName) <- [handler.name.resolution]]
           bodyEff = blockEffect lookupEffect e.body
-          handlerEff = Set.unions (map (blockEffect lookupEffect . (.body)) e.handlers)
-          thenEff = maybe Set.empty (blockEffect lookupEffect . snd) e.thenClause
-       in Set.difference bodyEff handled <> handlerEff <> thenEff
+          handlerEff = foldMap (blockEffect lookupEffect . (.body)) e.handlers
+          thenEff = maybe mempty (blockEffect lookupEffect . snd) e.thenClause
+       in subtractConcrete handled bodyEff <> handlerEff <> thenEff
     templateEffect = \case
-      TemplateElementString _ -> Set.empty
+      TemplateElementString _ -> mempty
       TemplateElementExpression el -> go el.value
 
 -- | The resolved type stamped on a Zonked expression.

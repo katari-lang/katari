@@ -172,6 +172,10 @@ data SemanticEffect phase where
   SemanticEffectPure :: SemanticEffect phase
   -- | A single concrete @req@ effect, by its qualified name.
   SemanticEffectRequest :: QualifiedName -> SemanticEffect phase
+  -- | An in-scope @effect@ generic parameter, by its 'GenericsId'. Abstract
+  -- while checking a generic declaration's body; replaced by a concrete effect
+  -- at every instantiation site.
+  SemanticEffectGeneric :: GenericsId -> SemanticEffect phase
   -- | Union of effects (@e1 | e2 | ...@). Convention: 2+ leaf branches (a
   -- singleton flattens to its branch, an empty union collapses to
   -- 'SemanticEffectPure'). Always build via 'unionEffects' to maintain this.

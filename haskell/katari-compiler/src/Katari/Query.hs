@@ -89,7 +89,8 @@ import Katari.AST
     WildcardPattern (..),
   )
 import Katari.Id
-  ( QualifiedName (..),
+  ( EffectResolution (..),
+    QualifiedName (..),
     VariableResolution (..),
     renderQualifiedName,
   )
@@ -559,7 +560,7 @@ hoverFromRequestNameRef ::
 hoverFromRequestNameRef snap position nameRef
   | not (spanContains nameRef.sourceSpan position) = Nothing
   | otherwise = do
-      qualifiedName <- nameRef.resolution
+      ResolvedConcreteRequest qualifiedName <- nameRef.resolution
       requestData <- Map.lookup qualifiedName snap.requests
       let semanticType = lookupTopLevelType qualifiedName snap
       pure

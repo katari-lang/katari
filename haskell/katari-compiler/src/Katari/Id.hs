@@ -19,6 +19,9 @@ module Katari.Id
     -- * Type resolution
     TypeResolution (..),
 
+    -- * Effect resolution
+    EffectResolution (..),
+
     -- * Generics
     GenericsId (..),
 
@@ -60,6 +63,17 @@ data TypeResolution
   = ResolvedNamedType QualifiedName
   | ResolvedGenericParam GenericsId
   | ResolvedRequestName QualifiedName
+  deriving (Eq, Ord, Show)
+
+-- | How an /effect/ reference (a @with@-clause leaf — a
+-- 'Katari.AST.RequestRef' name) was resolved by the Identifier phase.
+--
+--   * 'ResolvedConcreteRequest' — a concrete @req@ declaration.
+--   * 'ResolvedEffectGeneric' — an in-scope @effect@ generic parameter,
+--     identified by its 'GenericsId'.
+data EffectResolution
+  = ResolvedConcreteRequest QualifiedName
+  | ResolvedEffectGeneric GenericsId
   deriving (Eq, Ord, Show)
 
 -- | Module-local generic-parameter identifier. Issued by the Identifier phase

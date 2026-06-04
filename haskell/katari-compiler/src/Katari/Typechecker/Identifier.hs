@@ -57,7 +57,8 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Id
-  ( GenericsId (..),
+  ( EffectResolution (..),
+    GenericsId (..),
     LocalVarId (..),
     QualifiedName (..),
     TypeResolution (..),
@@ -124,7 +125,11 @@ data SymbolEntry = SymbolEntry
     -- of a generic declaration's signature + body).
     typeSymbol :: Maybe TypeResolution,
     moduleSymbol :: Maybe Text,
-    requestSymbol :: Maybe QualifiedName,
+    -- | An effect-namespace binding (the target of a @with@-clause leaf): a
+    -- concrete @req@ ('ResolvedConcreteRequest') or an in-scope @effect@
+    -- generic parameter ('ResolvedEffectGeneric', registered in a local
+    -- frame for a generic declaration's signature + body).
+    requestSymbol :: Maybe EffectResolution,
     constructorSymbol :: Maybe QualifiedName
   }
   deriving (Eq, Show)
@@ -573,10 +578,13 @@ mergeSymbol newPos name existing incoming = do
     reportFromModule moduleName = do
       maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleName . (.modules))
       maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
-    reportFromRequest :: QualifiedName -> Identifier ()
-    reportFromRequest qualifiedName = do
-      maybeSpan <- gets (fmap (.requestSourceSpan) . Map.lookup qualifiedName . (.requests))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromRequest :: EffectResolution -> Identifier ()
+    reportFromRequest = \case
+      ResolvedConcreteRequest qualifiedName -> do
+        maybeSpan <- gets (fmap (.requestSourceSpan) . Map.lookup qualifiedName . (.requests))
+        maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+      -- Effect generics live only in local frames, never in the top-level merge.
+      ResolvedEffectGeneric _ -> pure ()
     reportFromConstructor :: QualifiedName -> Identifier ()
     reportFromConstructor qualifiedName = do
       maybeSpan <- gets (fmap (.constructorSourceSpan) . Map.lookup qualifiedName . (.constructors))
@@ -723,7 +731,7 @@ lookupType = lookupSlot (.typeSymbol)
 lookupModule :: Text -> Identifier (Maybe Text)
 lookupModule = lookupSlot (.moduleSymbol)
 
-lookupRequest :: Text -> Identifier (Maybe QualifiedName)
+lookupRequest :: Text -> Identifier (Maybe EffectResolution)
 lookupRequest = lookupSlot (.requestSymbol)
 
 lookupConstructor :: Text -> Identifier (Maybe QualifiedName)
@@ -741,7 +749,7 @@ lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
 lookupModuleExportType :: Text -> Text -> Identifier (Maybe TypeResolution)
 lookupModuleExportType = lookupModuleExportSlot (.typeSymbol)
 
-lookupModuleExportRequest :: Text -> Text -> Identifier (Maybe QualifiedName)
+lookupModuleExportRequest :: Text -> Text -> Identifier (Maybe EffectResolution)
 lookupModuleExportRequest = lookupModuleExportSlot (.requestSymbol)
 
 lookupModuleExportConstructor :: Text -> Text -> Identifier (Maybe QualifiedName)
@@ -921,23 +929,28 @@ resolveGenericParameter :: GenericParameter Parsed -> Identifier (GenericParamet
 resolveGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} = do
   upperBound' <- traverse resolveType upperBound
   genericsId <- freshGenericsId
-  let resolution = ResolvedGenericParam genericsId
+  -- A type parameter occupies the type namespace (referenced as @T@ in a type
+  -- position); an effect parameter occupies the effect namespace (referenced
+  -- as @E@ in a @with@ clause). The split is what rejects a kind mismatch
+  -- (@with T@ / @param: E@) at the Identifier stage.
+  let slotUpdate entry = case kind of
+        GenericKindType -> entry {typeSymbol = Just (ResolvedGenericParam genericsId)}
+        GenericKindEffect -> entry {requestSymbol = Just (ResolvedEffectGeneric genericsId)}
   modifyResolveContext $ \context ->
-    context {scopeStack = insertInnermostType name.text resolution context.scopeStack}
+    context {scopeStack = insertInnermost name.text slotUpdate context.scopeStack}
   pure
     GenericParameter
-      { name = identifiedNameRef (Just resolution) name,
+      { name = identifiedNameRef (Just (ResolvedGenericParam genericsId)) name,
         kind = kind,
         upperBound = upperBound',
         sourceSpan = sourceSpan
       }
   where
-    insertInnermostType insertName resolution = \case
-      [] -> [Map.singleton insertName (emptySymbolEntry {typeSymbol = Just resolution})]
+    insertInnermost insertName slotUpdate = \case
+      [] -> [Map.singleton insertName (slotUpdate emptySymbolEntry)]
       (innermost : remaining) ->
-        Map.insertWith mergeTypeSlot insertName (emptySymbolEntry {typeSymbol = Just resolution}) innermost
+        Map.insertWith (\_ old -> slotUpdate old) insertName (slotUpdate emptySymbolEntry) innermost
           : remaining
-    mergeTypeSlot newEntry oldEntry = oldEntry {typeSymbol = newEntry.typeSymbol}
 
 resolveRequest :: RequestDeclaration Parsed -> Identifier (RequestDeclaration Identified)
 resolveRequest RequestDeclaration {..} = do
@@ -1249,7 +1262,7 @@ resolveQualifiedRequestRef = \cases
 resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameRefResolution Identified RequestRef)
 resolveBareRequest nameRef =
   lookupRequest nameRef.text >>= \case
-    Just qualifiedName -> pure (Just qualifiedName)
+    Just resolution -> pure (Just resolution)
     Nothing -> do
       -- Distinguish "name does not exist" from "name exists but is not a
       -- request". The former is a generic K0102, the latter K0108.
@@ -1265,7 +1278,7 @@ resolveQualifiedRequest ::
   Identifier (NameRefResolution Identified RequestRef)
 resolveQualifiedRequest moduleName qualifierName nameRef =
   lookupModuleExportRequest moduleName nameRef.text >>= \case
-    Just qualifiedName -> pure (Just qualifiedName)
+    Just resolution -> pure (Just resolution)
     Nothing -> do
       emitError (ErrorUndefinedQualified nameRef.sourceSpan qualifierName nameRef.text)
       pure Nothing
@@ -2320,7 +2333,7 @@ identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames c
       let entry =
             emptySymbolEntry
               { variableSymbol = Just (ResolvedTopLevel qualifiedName),
-                requestSymbol = Just qualifiedName
+                requestSymbol = Just (ResolvedConcreteRequest qualifiedName)
               }
       insertSymbolEntry name.sourceSpan name.text entry table
 

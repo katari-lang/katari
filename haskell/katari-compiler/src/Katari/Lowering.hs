@@ -888,8 +888,8 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
 lowerHandler :: AST.RequestHandler Zonked -> Lower Handler
 lowerHandler hr = do
   reqQName <- case hr.name.resolution of
-    Just qualifiedName -> pure qualifiedName
-    Nothing -> do
+    Just (Id.ResolvedConcreteRequest qualifiedName) -> pure qualifiedName
+    _ -> do
       recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
       pure (QualifiedName "<unresolved>" hr.name.text)
   bodyBlockId <- freshBlockId

@@ -25,7 +25,8 @@ import Data.Kind (Type)
 import Data.Text (Text)
 import Katari.Common (LiteralValue (..), QualifiedName, TypePatternTag (..))
 import Katari.Id
-  ( TypeResolution (..),
+  ( EffectResolution (..),
+    TypeResolution (..),
     VariableResolution (..),
   )
 import Katari.SemanticType (Resolved, SemanticType)
@@ -82,7 +83,7 @@ type family NameRefResolution (phase :: Phase) (nameRefKind :: NameRefKind) :: T
   NameRefResolution _ TypeRef = Maybe TypeResolution
   NameRefResolution _ ModuleRef = Maybe Text
   NameRefResolution _ LabelRef = ()
-  NameRefResolution _ RequestRef = Maybe QualifiedName
+  NameRefResolution _ RequestRef = Maybe EffectResolution
   NameRefResolution _ ConstructorRef = Maybe QualifiedName
 
 -- | Expression node type metadata. Closed family: all phases are enumerated

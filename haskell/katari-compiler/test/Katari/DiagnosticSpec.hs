@@ -122,7 +122,7 @@ perPhaseConverterSpec = describe "per-phase toDiagnostic" $ do
             [ Check.CheckErrorTypeMismatch dummySpan SemanticTypeInteger SemanticTypeString,
               Check.CheckErrorTypeSynonymCycle dummySpan "Foo",
               Check.CheckErrorUnresolvedVariable dummySpan "x",
-              Check.CheckErrorUndeclaredEffect dummySpan [QualifiedName "test" "foo"],
+              Check.CheckErrorUndeclaredEffect dummySpan ["test.foo"],
               Check.CheckErrorHandlerMustExit dummySpan,
               Check.CheckErrorMissingArgument dummySpan "x",
               Check.CheckErrorNoSuchField dummySpan "x",

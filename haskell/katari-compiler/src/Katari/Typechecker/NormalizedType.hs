@@ -34,6 +34,15 @@ module Katari.Typechecker.NormalizedType
     FunctionSlot (..),
     FunctionShape (..),
     NormalizedParameter (..),
+    NormalizedEffect (..),
+    emptyNormalizedEffect,
+    unionNormalizedEffect,
+    subtractConcrete,
+    differenceNormalizedEffect,
+    nullNormalizedEffect,
+    normaliseEffect,
+    denormaliseEffect,
+    subtypeEffect,
     DataFieldEnv,
     buildDataFieldEnv,
     BoundEnv,
@@ -227,9 +236,91 @@ data NormalizedParameter = NormalizedParameter
 data FunctionShape = FunctionShape
   { parameters :: Map Text NormalizedParameter,
     returnType :: NormalizedType,
-    requests :: Set QualifiedName
+    requests :: NormalizedEffect
   }
   deriving (Eq, Show)
+
+-- | The normalised (flattened) form of an effect: the set of concrete @req@
+-- names plus the set of in-scope @effect@-generic parameters it includes. The
+-- @pure@ leaf contributes nothing. This is the canonical effect form used both
+-- in a function shape's @requests@ and by the checker's effect inference.
+data NormalizedEffect = NormalizedEffect
+  { effectConcrete :: Set QualifiedName,
+    effectGenerics :: Set GenericsId
+  }
+  deriving (Eq, Show)
+
+-- | The empty (pure) normalised effect.
+emptyNormalizedEffect :: NormalizedEffect
+emptyNormalizedEffect = NormalizedEffect Set.empty Set.empty
+
+instance Semigroup NormalizedEffect where
+  (<>) = unionNormalizedEffect
+
+instance Monoid NormalizedEffect where
+  mempty = emptyNormalizedEffect
+
+-- | Union of two normalised effects (per-set union).
+unionNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffect
+unionNormalizedEffect leftEffect rightEffect =
+  NormalizedEffect
+    (Set.union leftEffect.effectConcrete rightEffect.effectConcrete)
+    (Set.union leftEffect.effectGenerics rightEffect.effectGenerics)
+
+-- | Intersection of two normalised effects (per-set intersection; covariant
+-- meet of function shapes — loses completeness as elsewhere).
+intersectNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffect
+intersectNormalizedEffect leftEffect rightEffect =
+  NormalizedEffect
+    (Set.intersection leftEffect.effectConcrete rightEffect.effectConcrete)
+    (Set.intersection leftEffect.effectGenerics rightEffect.effectGenerics)
+
+-- | Remove a set of concrete @req@ names from an effect (used when a @handle@
+-- discharges the requests it names). Effect generics are left untouched — a
+-- concrete handler cannot statically discharge an abstract generic effect, and
+-- keeping it over-approximates the raised effect (sound).
+subtractConcrete :: Set QualifiedName -> NormalizedEffect -> NormalizedEffect
+subtractConcrete handled effect =
+  effect {effectConcrete = Set.difference effect.effectConcrete handled}
+
+-- | Per-set difference of two effects (used to report the elements a body
+-- raises beyond its declared @with@ clause).
+differenceNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffect
+differenceNormalizedEffect leftEffect rightEffect =
+  NormalizedEffect
+    (Set.difference leftEffect.effectConcrete rightEffect.effectConcrete)
+    (Set.difference leftEffect.effectGenerics rightEffect.effectGenerics)
+
+-- | True when an effect has no concrete requests and no generics (pure).
+nullNormalizedEffect :: NormalizedEffect -> Bool
+nullNormalizedEffect effect = Set.null effect.effectConcrete && Set.null effect.effectGenerics
+
+-- | @subtypeEffect left right@ — every effect of @left@ is permitted by
+-- @right@. Effect generics are unbounded, so (mirroring the type rule but
+-- without bound expansion) a generic on the left cancels only against the same
+-- generic on the right; any left-only generic fails. Concrete requests are
+-- compared by subset. Right-only generics / requests are harmless slack.
+subtypeEffect :: NormalizedEffect -> NormalizedEffect -> Bool
+subtypeEffect leftEffect rightEffect =
+  Set.isSubsetOf leftEffect.effectGenerics rightEffect.effectGenerics
+    && Set.isSubsetOf leftEffect.effectConcrete rightEffect.effectConcrete
+
+-- | Flatten a (resolved) effect tree to its normalised form.
+normaliseEffect :: SemanticEffect Resolved -> NormalizedEffect
+normaliseEffect = \case
+  SemanticEffectPure -> emptyNormalizedEffect
+  SemanticEffectRequest qualifiedName -> NormalizedEffect (Set.singleton qualifiedName) Set.empty
+  SemanticEffectGeneric genericsId -> NormalizedEffect Set.empty (Set.singleton genericsId)
+  SemanticEffectUnion branches -> foldr (unionNormalizedEffect . normaliseEffect) emptyNormalizedEffect branches
+
+-- | Rebuild an effect tree from a normalised effect (concrete leaves then
+-- generic leaves, in id order, for determinism).
+denormaliseEffect :: NormalizedEffect -> SemanticEffect Resolved
+denormaliseEffect effect =
+  unionEffects
+    ( (SemanticEffectRequest <$> Set.toList effect.effectConcrete)
+        ++ (SemanticEffectGeneric <$> Set.toList effect.effectGenerics)
+    )
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -335,7 +426,7 @@ functionBranches = \case
             parameters
         )
         (denormalise returnType)
-        (unionEffects (SemanticEffectRequest <$> Set.toList requests))
+        (denormaliseEffect requests)
 
 seqBranches :: BareSeq -> [SemanticType Resolved]
 seqBranches = \case
@@ -470,20 +561,11 @@ normaliseSemantic = \case
                   (\parameter -> NormalizedParameter {parameterType = normaliseSemantic parameter.parameterType, optional = parameter.optional})
                   parameterMap,
               returnType = normaliseSemantic returnType,
-              requests = flattenEffect effect
+              requests = normaliseEffect effect
             }
      in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
   SemanticTypeUnion branches ->
     foldr (unionNT . normaliseSemantic) (NormalizedTypeLayered emptyLayered) branches
-
--- | Flatten an effect tree into its canonical set of concrete request names —
--- the normalised (lattice) form of an effect. The product-normalisation
--- analogue for effects: the @|@-tree collapses to set union.
-flattenEffect :: SemanticEffect Resolved -> Set QualifiedName
-flattenEffect = \case
-  SemanticEffectPure -> Set.empty
-  SemanticEffectRequest qualifiedName -> Set.singleton qualifiedName
-  SemanticEffectUnion branches -> Set.unions (map flattenEffect branches)
 
 -- ---------------------------------------------------------------------------
 -- Union (least upper bound)
@@ -588,7 +670,7 @@ unionFunctionShape leftShape rightShape =
       parameters =
         Map.unionWith unionParameter leftShape.parameters rightShape.parameters,
       returnType = unionNT leftShape.returnType rightShape.returnType,
-      requests = Set.union leftShape.requests rightShape.requests
+      requests = unionNormalizedEffect leftShape.requests rightShape.requests
     }
   where
     unionParameter leftParameter rightParameter =
@@ -690,7 +772,7 @@ intersectFunctionShape leftShape rightShape =
       parameters =
         Map.intersectionWith intersectParameter leftShape.parameters rightShape.parameters,
       returnType = intersectNT leftShape.returnType rightShape.returnType,
-      requests = Set.union leftShape.requests rightShape.requests
+      requests = intersectNormalizedEffect leftShape.requests rightShape.requests
     }
   where
     intersectParameter leftParameter rightParameter =
@@ -837,7 +919,7 @@ subtypeNormalizedType env boundEnv = go
       Set.fromList requiredLeftLabels `Set.isSubsetOf` Map.keysSet rightShape.parameters
         && all checkParameter (Map.toList leftShape.parameters)
         && go leftShape.returnType rightShape.returnType
-        && Set.isSubsetOf leftShape.requests rightShape.requests
+        && subtypeEffect leftShape.requests rightShape.requests
       where
         requiredLeftLabels =
           [label | (label, parameter) <- Map.toList leftShape.parameters, not parameter.optional]
