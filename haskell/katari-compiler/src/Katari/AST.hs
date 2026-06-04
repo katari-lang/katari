@@ -362,11 +362,13 @@ data DataParameter (phase :: Phase) = DataParameter
     -- rules: field labels live in a per-object namespace.
     name :: Text,
     parameterType :: SyntacticType phase,
-    -- | Whether this field was declared optional (@name ?: T@). An optional
-    -- field may be omitted when constructing the value and, like an optional
-    -- object field, accessing an absent one yields @null@; the parser widens
-    -- its type to @null | T@.
-    optional :: Bool,
+    -- | An optional literal default (mirrors 'ParameterBinding'). A field with
+    -- a default may be omitted when constructing the value — the runtime fills
+    -- the default — so it is optional. The @name ?: T@ sugar desugars to a
+    -- @null@ default with the type widened to @null | T@; an explicit
+    -- @name: T = literal@ keeps type @T@ and fills @literal@. A field with no
+    -- default is required.
+    defaultValue :: Maybe ParameterDefault,
     sourceSpan :: SourceSpan
   }
 

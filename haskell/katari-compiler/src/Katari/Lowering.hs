@@ -630,7 +630,7 @@ lowerOneDeclaration moduleName = \case
   AST.DeclarationAgent decl -> resolveDeclaration decl.name $ \_variableResolution blockId ->
     lowerAgentDeclaration decl blockId
   AST.DeclarationData decl ->
-    lowerWrapperCallable decl.name decl.annotation [(p.name, p.annotation, Nothing) | p <- decl.parameters] decl.name.text $
+    lowerWrapperCallable decl.name decl.annotation [(p.name, p.annotation, (.value) <$> p.defaultValue) | p <- decl.parameters] decl.name.text $
       \variableResolution -> do
         ctorQName <- lookupConstructorQName variableResolution
         innerBlk <- freshBlockId

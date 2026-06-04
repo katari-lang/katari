@@ -38,7 +38,7 @@ import Control.Monad.State.Strict
 import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -1404,9 +1404,14 @@ checkNonAgentDeclaration = \case
   DeclarationData DataDeclaration {annotation, name, constructorName, typeName, typeParameters, parameters, sourceSpan} -> do
     fields <-
       mapM
-        ( \DataParameter {name = fieldName, parameterType, optional} -> do
+        ( \DataParameter {name = fieldName, parameterType, defaultValue, sourceSpan = fieldSpan} -> do
             elaborated <- elaborateType parameterType
-            pure (fieldName, Parameter {parameterType = elaborated, optional = optional})
+            -- A default literal must be a subtype of the field type (mirrors the
+            -- parameter-default check); a field with a default is optional.
+            case defaultValue of
+              Just paramDefault -> subtypeAssert fieldSpan (literalValueToSemantic paramDefault.value) elaborated
+              Nothing -> pure ()
+            pure (fieldName, Parameter {parameterType = elaborated, optional = isJust defaultValue})
         )
         parameters
     let returnType = case typeName.resolution of
@@ -1569,8 +1574,8 @@ parameterSignatureOnly parameters =
       parameters
 
 retagDataParameter :: DataParameter Identified -> DataParameter Zonked
-retagDataParameter DataParameter {annotation, name, parameterType, optional, sourceSpan} =
-  DataParameter {annotation = annotation, name = name, parameterType = retagSyntacticType parameterType, optional = optional, sourceSpan = sourceSpan}
+retagDataParameter DataParameter {annotation, name, parameterType, defaultValue, sourceSpan} =
+  DataParameter {annotation = annotation, name = name, parameterType = retagSyntacticType parameterType, defaultValue = defaultValue, sourceSpan = sourceSpan}
 
 withQName :: NameRef Identified VariableRef -> Declaration Zonked -> SemanticType Resolved -> Maybe SCCResult
 withQName name zonked sig = (\qualifiedName -> (qualifiedName, zonked, sig)) <$> topLevelQName name

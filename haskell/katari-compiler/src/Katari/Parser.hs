@@ -676,22 +676,26 @@ parseDataDeclarationParameter = parseWithSpan $ do
   isOptional <- isJust <$> optional (parsePunctuation PunctuationQuestion)
   parsePunctuation PunctuationColon
   baseType <- parseType
+  explicitDefault <- optional parseParameterDefault
   pure $ \sourceSpan ->
-    -- @name ?: T@ widens the field type to @null | T@ (mirroring the @?:@
-    -- parameter desugaring) and marks the field optional.
-    let parameterType
+    -- @name ?: T@ desugars to a @null@ default with the type widened to
+    -- @null | T@ (mirroring the @?:@ parameter desugaring); an explicit
+    -- @name: T = literal@ keeps type @T@ and fills @literal@.
+    let (parameterType, defaultValue)
           | isOptional =
-              TypeUnion
-                TypeUnionNode
-                  { branches = [TypePrimitive PrimitiveTypeNode {kind = PrimitiveTypeKindNull, sourceSpan = sourceSpan}, baseType],
-                    sourceSpan = sourceSpan
-                  }
-          | otherwise = baseType
+              ( TypeUnion
+                  TypeUnionNode
+                    { branches = [TypePrimitive PrimitiveTypeNode {kind = PrimitiveTypeKindNull, sourceSpan = sourceSpan}, baseType],
+                      sourceSpan = sourceSpan
+                    },
+                Just ParameterDefault {value = LiteralValueNull, sourceSpan = sourceSpan}
+              )
+          | otherwise = (baseType, explicitDefault)
      in DataParameter
           { annotation = annotation,
             name = name,
             parameterType = parameterType,
-            optional = isOptional,
+            defaultValue = defaultValue,
             sourceSpan = sourceSpan
           }
 
