@@ -455,8 +455,16 @@ elaborateTypeOrEffect = \case
   TypeRecord RecordTypeNode {valueType} ->
     AsType . SemanticTypeRecord <$> elaborateType valueType
   TypeObject ObjectTypeNode {fields} ->
+    -- An optional field @l?: T@ widens to @null | T@ (an absent / null value is
+    -- admissible), mirroring the @x ?: T@ parameter desugaring.
     AsType . SemanticTypeObject . Map.fromList
-      <$> mapM (\(label, fieldSyntactic, isOptional) -> (\fieldType -> (label, Parameter fieldType isOptional)) <$> elaborateType fieldSyntactic) fields
+      <$> mapM
+        ( \(label, fieldSyntactic, isOptional) -> do
+            elaborated <- elaborateType fieldSyntactic
+            let fieldType = if isOptional then unionSemantic [SemanticTypeNull, elaborated] else elaborated
+            pure (label, Parameter fieldType isOptional)
+        )
+        fields
 
 resolveTypeRef :: NameRef Identified TypeRef -> Check TypeOrEffect
 resolveTypeRef nameRef = case nameRef.resolution of
@@ -1178,10 +1186,9 @@ seqElementType = \case
 fieldType :: SourceSpan -> SemanticType Resolved -> Text -> Check (SemanticType Resolved)
 fieldType sourceSpan subject label = case subject of
   SemanticTypeObject fields -> case Map.lookup label fields of
-    -- Reading an optional field may find it absent, which surfaces as 'null'.
-    Just field
-      | field.optional -> pure (unionSemantic [field.parameterType, SemanticTypeNull])
-      | otherwise -> pure field.parameterType
+    -- The field type already carries 'null' for an optional field (it widened
+    -- at elaboration), so the read type is just the field type.
+    Just field -> pure field.parameterType
     Nothing -> missing
   SemanticTypeRecord valueType -> pure valueType
   SemanticTypeData qualifiedName ->

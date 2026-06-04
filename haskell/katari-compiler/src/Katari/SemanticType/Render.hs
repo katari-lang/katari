@@ -55,13 +55,13 @@ renderSemanticType = render False
         "{ "
           <> Text.intercalate
             ", "
-            [k <> (if field.optional then "?: " else ": ") <> render False field.parameterType | (k, field) <- Map.toAscList fields]
+            [k <> renderField field | (k, field) <- Map.toAscList fields]
           <> " }"
       ST.SemanticTypeFunction parameters returnType effects ->
         let parameterText =
               Text.intercalate
                 ", "
-                [ k <> (if parameter.optional then "?: " else ": ") <> render False parameter.parameterType
+                [ k <> renderField parameter
                   | (k, parameter) <- Map.toAscList parameters
                 ]
             effectsText = renderSemanticEffect effects
@@ -75,6 +75,17 @@ renderSemanticType = render False
                        else " with " <> effectsText
                    )
          in if parenthesise then "(" <> body <> ")" else body
+    -- A parameter / object field. An optional one renders @?: T@ with @null@
+    -- elided from its type (the @?@ already conveys it), undoing the @null | T@
+    -- widening; a required one renders @: T@.
+    renderField :: ST.Parameter ST.Resolved -> Text
+    renderField field
+      | field.optional = "?: " <> render False (stripNull field.parameterType)
+      | otherwise = ": " <> render False field.parameterType
+    stripNull :: ST.SemanticType ST.Resolved -> ST.SemanticType ST.Resolved
+    stripNull = \case
+      ST.SemanticTypeUnion branches -> ST.unionSemantic (filter (/= ST.SemanticTypeNull) branches)
+      other -> other
 
 -- | Render a 'SemanticEffect' as @a | b | c@ (the surface @with@ syntax),
 -- flattening the union tree. The empty (pure) effect renders to the empty

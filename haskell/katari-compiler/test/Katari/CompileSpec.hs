@@ -267,6 +267,21 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "accepts an optional '?:' parameter omitted, given, or null" $ do
+    let src =
+          mconcat
+            [ "agent f(x ?: integer) -> integer { 0 }\n",
+              "agent main() -> integer { f() ; f(x = 5) ; f(x = null) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
+  it "types a '?:' parameter's variable as 'null | T'" $ do
+    -- The body returns @x@ (typed @null | integer@) where @integer@ is expected.
+    let src = "agent f(x ?: integer) -> integer { x }\n"
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
   it "requires an explicit 'with' clause on a recursive agent" $ do
     let result = compileSync (singleSourceInput "agent loop(n: integer) -> integer { loop(n = n) }")
     hasErrors result.diagnostics `shouldBe` True

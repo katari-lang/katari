@@ -2149,18 +2149,31 @@ parseParameterBinding :: Parser (ParameterBinding Parsed)
 parseParameterBinding = parseWithSpan $ do
   annotation <- parseAnnotation
   name <- parseNameRef
-  typeAnnotation <-
+  isOptional <- isJust <$> optional (parsePunctuation PunctuationQuestion)
+  baseType <-
     label "a type annotation — every parameter needs ': type' (e.g. 'x: integer')" $
-      Just <$> (parsePunctuation PunctuationColon *> parseType)
-  defaultValue <- optional parseParameterDefault
+      parsePunctuation PunctuationColon *> parseType
+  explicitDefault <- optional parseParameterDefault
   pure $ \sourceSpan ->
-    ParameterBinding
-      { annotation = annotation,
-        name = name,
-        typeAnnotation = typeAnnotation,
-        defaultValue = defaultValue,
-        sourceSpan = sourceSpan
-      }
+    -- @x ?: T@ desugars to @x: (null | T) = null@: the parameter is optional,
+    -- its variable is typed @null | T@, and an absent argument is @null@.
+    let (typeAnnotation, defaultValue)
+          | isOptional =
+              ( TypeUnion
+                  TypeUnionNode
+                    { branches = [TypePrimitive PrimitiveTypeNode {kind = PrimitiveTypeKindNull, sourceSpan = sourceSpan}, baseType],
+                      sourceSpan = sourceSpan
+                    },
+                Just ParameterDefault {value = LiteralValueNull, sourceSpan = sourceSpan}
+              )
+          | otherwise = (baseType, explicitDefault)
+     in ParameterBinding
+          { annotation = annotation,
+            name = name,
+            typeAnnotation = Just typeAnnotation,
+            defaultValue = defaultValue,
+            sourceSpan = sourceSpan
+          }
 
 parseParameterDefault :: Parser ParameterDefault
 parseParameterDefault = parseWithSpan $ do
