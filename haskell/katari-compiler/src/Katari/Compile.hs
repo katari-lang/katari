@@ -53,7 +53,7 @@ import Katari.AST
   )
 import Katari.Diagnostic (Diagnostic, hasErrors)
 import Katari.IR qualified
-import Katari.Id (QualifiedName (..), VariableResolution (..))
+import Katari.Id (GenericsId, QualifiedName (..), VariableResolution (..))
 import Katari.Lexer qualified as Lexer
 import Katari.Lowering (ModuleLoweringResult, lowerModule, mergeModuleLowerings)
 import Katari.Lowering qualified as Lowering
@@ -188,7 +188,7 @@ compile emitLog input = do
   -- see the note on parallelism in 'typecheckModules'.
   let primRules = Map.mapMaybe (.variablePrimRule) idResult.variables
       knownRequests = Map.keysSet idResult.requests
-  (zonkedModulesMap, typeEnvMap, typecheckDiags) <-
+  (zonkedModulesMap, typeEnvMap, genericBoundsMap, typecheckDiags) <-
     typecheckModules emitLog idResult primRules knownRequests orderedModules directDeps
 
   -- Exhaustiveness.
@@ -205,7 +205,8 @@ compile emitLog input = do
                 ExhaustiveEnv
                   { constructors = idResult.constructors,
                     topLevelTypes = topLevelTypes,
-                    localTypeEnv = Map.findWithDefault Map.empty moduleName typeEnvMap
+                    localTypeEnv = Map.findWithDefault Map.empty moduleName typeEnvMap,
+                    genericBounds = Map.findWithDefault Map.empty moduleName genericBoundsMap
                   }
                 moduleAST
             | (moduleName, moduleAST) <- Map.toList zonkedModulesMap
@@ -457,6 +458,7 @@ data TypecheckTaskResult = TypecheckTaskResult
   { taskZonkedModule :: Module Zonked,
     taskTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
     taskExportedTypes :: Map QualifiedName (SemanticType Resolved),
+    taskGenericBounds :: Map GenericsId (SemanticType Resolved),
     taskDiagnostics :: [Diagnostic]
   }
 
@@ -479,6 +481,7 @@ typecheckModules ::
   IO
     ( Map ModuleName (Module Zonked),
       Map ModuleName (Map VariableResolution (SemanticType Resolved)),
+      Map ModuleName (Map GenericsId (SemanticType Resolved)),
       [Diagnostic]
     )
 typecheckModules emitLog idResult primRules knownRequests orderedModules directDeps = do
@@ -486,6 +489,7 @@ typecheckModules emitLog idResult primRules knownRequests orderedModules directD
   pure
     ( Map.map (.taskZonkedModule) results,
       Map.map (.taskTypeEnvironment) results,
+      Map.map (.taskGenericBounds) results,
       concatMap (.taskDiagnostics) (Map.elems results)
     )
   where
@@ -546,6 +550,7 @@ typecheckOne idResult primRules knownRequests moduleName importedTypes =
         { taskZonkedModule = result.zonkedModule,
           taskTypeEnvironment = result.localTypeEnv,
           taskExportedTypes = result.moduleInterface.exportedTypes,
+          taskGenericBounds = result.genericBounds,
           taskDiagnostics = result.diagnostics
         }
 

@@ -54,6 +54,7 @@ module Katari.Typechecker.NormalizedType
     unionNT,
     intersectNT,
     subtypeNormalizedType,
+    expandGenerics,
   )
 where
 
@@ -850,6 +851,16 @@ subtypeNormalizedType env boundEnv = go
 -- further generics, which are expanded on the next iteration — the @extends@
 -- relation is acyclic, so the loop terminates. A generic whose bound is
 -- 'NormalizedTypeUnknown' (the default) lifts the whole type to the top.
+-- | Expand a type's outermost generics to their declared bounds (no
+-- cancellation set), leaving generics nested inside other layers untouched.
+-- Used to project a generic scrutinee in a @match@: @T extends [int, string]@
+-- becomes the tuple shape so a tuple pattern can read its components. The
+-- recursion that walks into nested patterns expands each level in turn, so a
+-- nested generic is handled when it becomes the next scrutinee.
+expandGenerics :: BoundEnv -> NormalizedType -> NormalizedType
+expandGenerics _ NormalizedTypeUnknown = NormalizedTypeUnknown
+expandGenerics boundEnv (NormalizedTypeLayered layered) = expandLeftGenerics boundEnv Set.empty layered
+
 expandLeftGenerics :: BoundEnv -> Set GenericsId -> LayeredType -> NormalizedType
 expandLeftGenerics boundEnv rhsGenerics = loop
   where

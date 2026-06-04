@@ -37,7 +37,7 @@ import Katari.AST
     retagSyntacticType,
   )
 import Katari.Diagnostic (Diagnostic)
-import Katari.Id (QualifiedName (..), VariableResolution (..))
+import Katari.Id (GenericsId, QualifiedName (..), VariableResolution (..))
 import Katari.Prim (PrimRule)
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (emptySourceSpan)
@@ -82,6 +82,10 @@ data ModuleTypecheckResult = ModuleTypecheckResult
     -- | The exported top-level types — what other modules see during
     -- their own typecheck.
     moduleInterface :: ModuleInterface,
+    -- | This module's generic parameters' elaborated @extends@ bounds (keyed
+    -- by 'GenericsId'), for the exhaustiveness checker to expand a generic
+    -- scrutinee. 'GenericsId's are module-local, so this stays per-module.
+    genericBounds :: Map GenericsId (SemanticType Resolved),
     diagnostics :: [Diagnostic]
   }
 
@@ -104,6 +108,7 @@ typecheckModule subject =
           { sccImportedTypes = subject.importedTypes,
             sccTypeEnv = Map.empty,
             sccDeclarations = Map.empty,
+            sccGenericBounds = Map.empty,
             sccDiagnostics = []
           }
       final = foldl' (runOneSCC subject) initial allSCCs
@@ -119,6 +124,7 @@ typecheckModule subject =
         { zonkedModule = assembledModule,
           localTypeEnv = ownedTypeEnv,
           moduleInterface = moduleInterface_,
+          genericBounds = final.sccGenericBounds,
           diagnostics = final.sccDiagnostics
         }
 
@@ -130,6 +136,7 @@ data SCCAccumulator = SCCAccumulator
   { sccImportedTypes :: Map QualifiedName (SemanticType Resolved),
     sccTypeEnv :: Map VariableResolution (SemanticType Resolved),
     sccDeclarations :: Map QualifiedName (Declaration Zonked),
+    sccGenericBounds :: Map GenericsId (SemanticType Resolved),
     sccDiagnostics :: [Diagnostic]
   }
 
@@ -139,7 +146,7 @@ runOneSCC ::
   Set QualifiedName ->
   SCCAccumulator
 runOneSCC subject accum sccQNames =
-  let (zonkedDeclarations, signatures, typeEnv, diagnostics) =
+  let (zonkedDeclarations, signatures, typeEnv, genericBounds_, diagnostics) =
         checkSCC
           subject.moduleName
           accum.sccImportedTypes
@@ -151,6 +158,7 @@ runOneSCC subject accum sccQNames =
         { sccImportedTypes = Map.union accum.sccImportedTypes signatures,
           sccTypeEnv = Map.union accum.sccTypeEnv typeEnv,
           sccDeclarations = Map.union accum.sccDeclarations zonkedDeclarations,
+          sccGenericBounds = Map.union accum.sccGenericBounds genericBounds_,
           sccDiagnostics = accum.sccDiagnostics <> diagnostics
         }
 

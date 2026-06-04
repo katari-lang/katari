@@ -57,6 +57,8 @@ import Katari.Typechecker.NormalizedType
   ( BoundEnv,
     DataFieldEnv,
     buildDataFieldEnv,
+    denormalise,
+    expandGenerics,
     normaliseSemantic,
     subtypeNormalizedType,
   )
@@ -947,6 +949,15 @@ elaborateParameters parameters = do
 -- | Walk a pattern against a known subject type, returning the zonked pattern
 -- and the variable bindings it introduces. The subject type is concrete (it
 -- was synthesised), so projection is a direct structural read.
+-- | Expand a match scrutinee's outermost generics to their bounds (via the
+-- normalized form), so a structured pattern can project through a generic type
+-- (e.g. @T extends [int, string]@ becomes the tuple shape). Generics nested
+-- inside layers survive and are expanded when they become the next scrutinee.
+expandScrutinee :: SemanticType Resolved -> Check (SemanticType Resolved)
+expandScrutinee subject = do
+  boundEnv <- asks (.checkBoundEnv)
+  pure (denormalise (expandGenerics boundEnv (normaliseSemantic subject)))
+
 walkPattern :: SemanticType Resolved -> Pattern Identified -> Check (Pattern Zonked, [(VariableResolution, SemanticType Resolved)])
 walkPattern subject = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
@@ -961,7 +972,11 @@ walkPattern subject = \case
   PatternLiteral LiteralPattern {value, sourceSpan} ->
     pure (PatternLiteral LiteralPattern {value = value, sourceSpan = sourceSpan, typeOf = literalValueToSemantic value}, [])
   PatternTuple TuplePattern {elements, sourceSpan} -> do
-    let componentTypes = projectTupleComponents (length elements) subject
+    -- Structured pattern: expand the scrutinee's outermost generics to their
+    -- bounds first, so a generic @T extends [..]@ projects through the tuple
+    -- layer. Components keep any nested generics, expanded at the next level.
+    expanded <- expandScrutinee subject
+    let componentTypes = projectTupleComponents (length elements) expanded
     walked <- mapM (\(componentType, element) -> walkPattern componentType element) (zip componentTypes elements)
     let patternType = SemanticTypeTuple (map (patternTypeOf . fst) walked)
     pure (PatternTuple TuplePattern {elements = map fst walked, sourceSpan = sourceSpan, typeOf = patternType}, concatMap snd walked)
@@ -982,9 +997,12 @@ walkPattern subject = \case
     (inner', bindings) <- walkPattern narrowedType inner
     pure (PatternType TypePattern {typeTag = typeTag, inner = inner', sourceSpan = sourceSpan, typeOf = narrowedType}, bindings)
   PatternRecord RecordPattern {entries, sourceSpan} -> do
+    -- Structured pattern: expand the scrutinee's generics so a generic
+    -- @T extends { .. }@ projects through the map layer for field lookup.
+    expanded <- expandScrutinee subject
     walked <-
       forM entries $ \(entryLabel, entryPattern) -> do
-        valueSubject <- fieldType sourceSpan subject entryLabel
+        valueSubject <- fieldType sourceSpan expanded entryLabel
         (entryPattern', bindings) <- walkPattern valueSubject entryPattern
         pure ((entryLabel, entryPattern'), bindings)
     pure (PatternRecord RecordPattern {entries = map fst walked, sourceSpan = sourceSpan, typeOf = subject}, concatMap snd walked)
@@ -1085,6 +1103,10 @@ checkSCC ::
     Map QualifiedName (SemanticType Resolved),
     -- | Every binding's type, top-level + local (for the Query / hover layer).
     Map VariableResolution (SemanticType Resolved),
+    -- | Each module generic parameter's elaborated @extends@ bound (keyed by
+    -- 'GenericsId'). Module-wide (same for every SCC). Used by the
+    -- exhaustiveness checker to expand a generic scrutinee to its bound.
+    Map GenericsId (SemanticType Resolved),
     [Diagnostic]
   )
 checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primRules =
@@ -1106,13 +1128,16 @@ checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primR
       -- threading the lists through the SCC accumulator.
       checkAction = do
         genericParams <- buildModuleGenericParams moduleAST.declarations
-        local (\e -> e {checkGenericParams = genericParams}) $
-          checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations
-      (results, errors, localTypes) = runCheck env checkAction
+        results <-
+          local (\e -> e {checkGenericParams = genericParams}) $
+            checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations
+        pure (results, genericParams)
+      ((results, genericParams), errors, localTypes) = runCheck env checkAction
       zonked = Map.fromList [(qualifiedName, declaration) | (qualifiedName, declaration, _) <- results]
       signatures = Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- results]
       typeEnv = Map.union (Map.mapKeys ResolvedTopLevel signatures) localTypes
-   in (zonked, signatures, typeEnv, map toDiagnostic errors)
+      genericBounds = Map.fromList [(genericsId, bound) | params <- Map.elems genericParams, (genericsId, bound) <- params]
+   in (zonked, signatures, typeEnv, genericBounds, map toDiagnostic errors)
 
 declarationInSCC :: Set QualifiedName -> Declaration Identified -> Bool
 declarationInSCC sccQualifiedNames declaration = case declarationVarName declaration of

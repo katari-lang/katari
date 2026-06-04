@@ -172,6 +172,20 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "projects a tuple pattern through a generic scrutinee's bound" $ do
+    -- `p : T` where `T extends [integer, string]`; matching `[a, b]` must
+    -- expand the bound so `a : integer` (returned where integer is expected).
+    let src =
+          mconcat
+            [ "agent f[T extends [integer, string]](p: T) -> integer {\n",
+              "  match (p) {\n",
+              "    case [a, b] => { a }\n",
+              "  }\n",
+              "}\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
   it "multi-line array literal does NOT require trailing comma" $ do
     let src =
           mconcat

@@ -36,7 +36,8 @@ import Katari.AST qualified as AST
 import Katari.Common (LiteralValue (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError, diagnosticWarning)
 import Katari.Id
-  ( QualifiedName (..),
+  ( GenericsId,
+    QualifiedName (..),
     VariableResolution (..),
   )
 import Katari.SemanticType
@@ -46,6 +47,7 @@ import Katari.SemanticType
   )
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (ConstructorData (..))
+import Katari.Typechecker.NormalizedType (BoundEnv, denormalise, expandGenerics, normaliseSemantic)
 
 -- | Cross-module context the checker needs while walking a single module:
 -- the constructors and top-level types reachable from the module (own +
@@ -53,7 +55,12 @@ import Katari.Typechecker.Identifier (ConstructorData (..))
 data ExhaustiveEnv = ExhaustiveEnv
   { constructors :: Map QualifiedName ConstructorData,
     topLevelTypes :: Map QualifiedName (SemanticType Resolved),
-    localTypeEnv :: Map VariableResolution (SemanticType Resolved)
+    localTypeEnv :: Map VariableResolution (SemanticType Resolved),
+    -- | The module's generic parameters' @extends@ bounds (keyed by
+    -- 'GenericsId'). A generic scrutinee is expanded to its bound before its
+    -- shape is examined, so a structured pattern over @T extends [..]@ is
+    -- soundly checked against the bound's shapes.
+    genericBounds :: Map GenericsId (SemanticType Resolved)
   }
 
 -- ===========================================================================
@@ -145,12 +152,19 @@ newtype PatMatrix = PatMatrix [PatRow]
 -- for each column (left-to-right) plus the per-module 'ExhaustiveEnv'.
 data TypeCtx = TypeCtx
   { columnTypes :: [SemanticType Resolved],
-    env :: ExhaustiveEnv
+    env :: ExhaustiveEnv,
+    -- | The module's generic bounds, normalized once (so each column read can
+    -- expand a generic scrutinee to its bound).
+    boundEnv :: BoundEnv
   }
 
+-- | The head column's subject type, with its outermost generics expanded to
+-- their bounds so the shape checks (signature completeness, tag compatibility)
+-- see the bound's concrete shapes. Sound: a generic's values are a subset of
+-- its bound's, so a pattern set covering the bound covers the generic.
 headColumnType :: TypeCtx -> SemanticType Resolved
 headColumnType context = case context.columnTypes of
-  (t : _) -> t
+  (t : _) -> denormalise (expandGenerics context.boundEnv (normaliseSemantic t))
   [] -> SemanticTypeUnknown
 
 -- ===========================================================================
@@ -530,7 +544,7 @@ typePatternTagName = \case
 checkMatch :: ExhaustiveEnv -> AST.MatchExpression Zonked -> [ExhaustiveError]
 checkMatch env me =
   let subjectType = getExpressionType me.subject
-      context = TypeCtx {columnTypes = [subjectType], env = env}
+      context = TypeCtx {columnTypes = [subjectType], env = env, boundEnv = Map.map normaliseSemantic env.genericBounds}
       arms = me.cases
       armHeads = map (\arm -> patternToHead env arm.pattern) arms
       armRows = [PatRow [h] arm.sourceSpan | (arm, h) <- zip arms armHeads]
@@ -557,7 +571,7 @@ checkIrrefutable ::
   [ExhaustiveError]
 checkIrrefutable env pattern subjectType =
   let headPat = patternToHead env pattern
-      context = TypeCtx {columnTypes = [subjectType], env = env}
+      context = TypeCtx {columnTypes = [subjectType], env = env, boundEnv = Map.map normaliseSemantic env.genericBounds}
       sourceSpan = sourceSpanOf pattern
       row = PatRow [headPat] sourceSpan
    in if useful context (PatMatrix [row]) [PatHeadWildcard]
