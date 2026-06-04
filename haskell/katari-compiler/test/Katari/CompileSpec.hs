@@ -128,6 +128,12 @@ happyPathSpec = describe "well-formed single-module input" $ do
     isJust result.irModule `shouldBe` True
     isJust result.schemaEntries `shouldBe` True
 
+  it "resolves a generic agent's type-parameter references (no undefined-type error)" $ do
+    -- A reference to `T` in the signature/body must resolve to the declared
+    -- generic parameter, not surface as an undefined-type error.
+    let result = compileSync (singleSourceInput "agent identity[T](x: T) -> T { x }")
+    hasErrors result.diagnostics `shouldBe` False
+
   it "multi-line array literal does NOT require trailing comma" $ do
     let src =
           mconcat

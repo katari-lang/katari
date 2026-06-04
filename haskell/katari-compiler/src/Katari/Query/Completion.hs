@@ -47,7 +47,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST (Module (..), Phase (Zonked))
-import Katari.Id (QualifiedName (..), VariableResolution (..))
+import Katari.Id (QualifiedName (..), TypeResolution (..), VariableResolution (..))
 import Katari.SemanticType (Parameter (..), Resolved, SemanticType (..))
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (Position, SourceSpan (..))
@@ -162,16 +162,8 @@ completionsAt snap filePath position =
                   ciDoc = Nothing
                 }
 
-    mkTypeItem :: Text -> QualifiedName -> Maybe CompletionItem
-    mkTypeItem name qualifiedName = do
-      _ <- Map.lookup qualifiedName snap.types
-      pure
-        CompletionItem
-          { ciLabel = name,
-            ciKind = CKTypeName,
-            ciDetail = Nothing,
-            ciDoc = Nothing
-          }
+    mkTypeItem :: Text -> TypeResolution -> Maybe CompletionItem
+    mkTypeItem name = typeResolutionItem snap name
 
     mkModuleItem :: Text -> Text -> Maybe CompletionItem
     mkModuleItem name moduleName = do
@@ -448,17 +440,22 @@ mkVariableItemFor snap name variableResolution = case variableResolution of
 mkTypeItemFor ::
   QuerySnapshot ->
   Text ->
-  QualifiedName ->
+  TypeResolution ->
   Maybe CompletionItem
-mkTypeItemFor snap name qualifiedName = do
-  _ <- Map.lookup qualifiedName snap.types
-  pure
-    CompletionItem
-      { ciLabel = name,
-        ciKind = CKTypeName,
-        ciDetail = Nothing,
-        ciDoc = Nothing
-      }
+mkTypeItemFor = typeResolutionItem
+
+-- | A completion item for a resolved type reference: a top-level named type
+-- (looked up in the snapshot) or an in-scope generic parameter. Request-name
+-- resolutions (only meaningful in effect-argument position) never reach the
+-- type-completion path.
+typeResolutionItem :: QuerySnapshot -> Text -> TypeResolution -> Maybe CompletionItem
+typeResolutionItem snap name = \case
+  ResolvedNamedType qualifiedName -> do
+    _ <- Map.lookup qualifiedName snap.types
+    pure CompletionItem {ciLabel = name, ciKind = CKTypeName, ciDetail = Nothing, ciDoc = Nothing}
+  ResolvedGenericParam _ ->
+    pure CompletionItem {ciLabel = name, ciKind = CKTypeName, ciDetail = Nothing, ciDoc = Nothing}
+  ResolvedRequestName _ -> Nothing
 
 mkModuleItemFor ::
   QuerySnapshot ->

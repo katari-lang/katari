@@ -57,7 +57,8 @@ import Data.Text qualified as T
 import Katari.AST
 import Katari.Diagnostic (Diagnostic (..), DiagnosticNote (..), diagnosticError)
 import Katari.Id
-  ( LocalVarId (..),
+  ( GenericsId (..),
+    LocalVarId (..),
     QualifiedName (..),
     TypeResolution (..),
     VariableResolution (..),
@@ -117,7 +118,11 @@ import Katari.Typechecker.ScopeIndex (ScopeFrame (..))
 -- @variableSymbol@.
 data SymbolEntry = SymbolEntry
   { variableSymbol :: Maybe VariableResolution,
-    typeSymbol :: Maybe QualifiedName,
+    -- | A type-namespace binding: a top-level @data@ / synonym
+    -- ('ResolvedNamedType') or an in-scope generic parameter
+    -- ('ResolvedGenericParam', registered in a local frame for the duration
+    -- of a generic declaration's signature + body).
+    typeSymbol :: Maybe TypeResolution,
     moduleSymbol :: Maybe Text,
     requestSymbol :: Maybe QualifiedName,
     constructorSymbol :: Maybe QualifiedName
@@ -138,7 +143,7 @@ singletonVariable :: VariableResolution -> SymbolEntry
 singletonVariable resolution = emptySymbolEntry {variableSymbol = Just resolution}
 
 singletonType :: QualifiedName -> SymbolEntry
-singletonType qualifiedName = emptySymbolEntry {typeSymbol = Just qualifiedName}
+singletonType qualifiedName = emptySymbolEntry {typeSymbol = Just (ResolvedNamedType qualifiedName)}
 
 singletonModule :: Text -> SymbolEntry
 singletonModule moduleName = emptySymbolEntry {moduleSymbol = Just moduleName}
@@ -404,6 +409,7 @@ toDiagnostic = \case
 
 data IdentifierState = IdentifierState
   { nextLocalVarId :: Int,
+    nextGenericsId :: Int,
     variables :: Map QualifiedName VariableData,
     types :: Map QualifiedName TypeData,
     modules :: Map Text ModuleData,
@@ -446,6 +452,7 @@ initialIdentifierState :: IdentifierState
 initialIdentifierState =
   IdentifierState
     { nextLocalVarId = 0,
+      nextGenericsId = 0,
       variables = Map.empty,
       types = Map.empty,
       modules = Map.empty,
@@ -478,6 +485,13 @@ freshLocalVarId = do
   let localVarId = LocalVarId state.nextLocalVarId
   put state {nextLocalVarId = state.nextLocalVarId + 1}
   pure localVarId
+
+freshGenericsId :: Identifier GenericsId
+freshGenericsId = do
+  state <- get
+  let genericsId = GenericsId state.nextGenericsId
+  put state {nextGenericsId = state.nextGenericsId + 1}
+  pure genericsId
 
 registerType :: QualifiedName -> TypeData -> Identifier ()
 registerType qualifiedName typeData = do
@@ -547,10 +561,14 @@ mergeSymbol newPos name existing incoming = do
         maybeSpan <- gets (fmap (.variableSourceSpan) . Map.lookup qualifiedName . (.variables))
         maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
       ResolvedLocal _ -> pure ()
-    reportFromType :: QualifiedName -> Identifier ()
-    reportFromType qualifiedName = do
-      maybeSpan <- gets (fmap (.typeSourceSpan) . Map.lookup qualifiedName . (.types))
-      maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+    reportFromType :: TypeResolution -> Identifier ()
+    reportFromType = \case
+      ResolvedNamedType qualifiedName -> do
+        maybeSpan <- gets (fmap (.typeSourceSpan) . Map.lookup qualifiedName . (.types))
+        maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
+      -- Generic parameters / request-names live only in local frames, never in
+      -- the top-level merge path, so there is no prior top-level span to point at.
+      _ -> pure ()
     reportFromModule :: Text -> Identifier ()
     reportFromModule moduleName = do
       maybeSpan <- gets (fmap (.moduleSourceSpan) . Map.lookup moduleName . (.modules))
@@ -699,7 +717,7 @@ lookupSlot getSlot name = do
 lookupVariable :: Text -> Identifier (Maybe VariableResolution)
 lookupVariable = lookupSlot (.variableSymbol)
 
-lookupType :: Text -> Identifier (Maybe QualifiedName)
+lookupType :: Text -> Identifier (Maybe TypeResolution)
 lookupType = lookupSlot (.typeSymbol)
 
 lookupModule :: Text -> Identifier (Maybe Text)
@@ -720,7 +738,7 @@ lookupModuleExportVariable :: Text -> Text -> Identifier (Maybe VariableResoluti
 lookupModuleExportVariable = lookupModuleExportSlot (.variableSymbol)
 
 -- | Look up the type slot of @name@ in the export table of @moduleName@.
-lookupModuleExportType :: Text -> Text -> Identifier (Maybe QualifiedName)
+lookupModuleExportType :: Text -> Text -> Identifier (Maybe TypeResolution)
 lookupModuleExportType = lookupModuleExportSlot (.typeSymbol)
 
 lookupModuleExportRequest :: Text -> Text -> Identifier (Maybe QualifiedName)
@@ -824,7 +842,7 @@ liftSignatureVariable = liftSignature lookupVariableResolution
 -- | Counterpart of 'liftSignatureVariable' for type signatures (enum / data
 -- type role / type synonym name).
 liftSignatureType :: NameRef Parsed TypeRef -> Identifier (NameRef Identified TypeRef)
-liftSignatureType = liftSignature (fmap (fmap ResolvedNamedType) . lookupType)
+liftSignatureType = liftSignature lookupType
 
 liftSignatureRequest :: NameRef Parsed RequestRef -> Identifier (NameRef Identified RequestRef)
 liftSignatureRequest = liftSignature lookupRequest
@@ -864,37 +882,62 @@ resolveSignatureBody parameters returnType withRequests body =
 resolveAgent :: AgentDeclaration Parsed -> Identifier (AgentDeclaration Identified)
 resolveAgent AgentDeclaration {..} = do
   name' <- liftSignatureVariable name
-  typeParameters' <- mapM resolveGenericParameter typeParameters
-  (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
-  pure
-    AgentDeclaration
-      { annotation = annotation,
-        name = name',
-        typeParameters = typeParameters',
-        parameters = parameters',
-        returnType = returnType',
-        withRequests = withRequests',
-        body = body',
-        sourceSpan = sourceSpan
-      }
+  withGenericParameters sourceSpan typeParameters $ \typeParameters' -> do
+    (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
+    pure
+      AgentDeclaration
+        { annotation = annotation,
+          name = name',
+          typeParameters = typeParameters',
+          parameters = parameters',
+          returnType = returnType',
+          withRequests = withRequests',
+          body = body',
+          sourceSpan = sourceSpan
+        }
 
--- | Resolve a generic-parameter declaration.
---
--- Step B (structural): the binder is not yet bound into scope — it resolves to
--- 'Nothing' and references to it elsewhere do not yet succeed. Full generic
--- resolution (issuing a 'GenericsId' and registering the binder so signature /
--- body references resolve) lands in a later step. The @extends@ bound is
--- resolved best-effort.
+-- | Run @action@ with @params@ bound as generic type parameters in a fresh
+-- scope frame, so references in the signature / body resolve to their
+-- 'GenericsId' and the bindings are popped when the declaration ends. A
+-- monomorphic declaration (no generics) adds no frame, keeping non-generic
+-- resolution byte-identical.
+withGenericParameters ::
+  SourceSpan ->
+  [GenericParameter Parsed] ->
+  ([GenericParameter Identified] -> Identifier a) ->
+  Identifier a
+withGenericParameters _ [] action = action []
+withGenericParameters span_ params action =
+  withScopeFrameAt span_ $ do
+    params' <- mapM resolveGenericParameter params
+    action params'
+
+-- | Resolve a generic-parameter declaration: issue a fresh 'GenericsId',
+-- resolve its @extends@ bound (with earlier generics — but not this one —
+-- in scope, so @T extends T@ fails to resolve; @extends@ is non-recursive,
+-- which keeps the subtype bound-expansion loop terminating), then register
+-- the binder in the innermost frame as a type symbol pointing at the id.
 resolveGenericParameter :: GenericParameter Parsed -> Identifier (GenericParameter Identified)
 resolveGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} = do
   upperBound' <- traverse resolveType upperBound
+  genericsId <- freshGenericsId
+  let resolution = ResolvedGenericParam genericsId
+  modifyResolveContext $ \context ->
+    context {scopeStack = insertInnermostType name.text resolution context.scopeStack}
   pure
     GenericParameter
-      { name = identifiedNameRef Nothing name,
+      { name = identifiedNameRef (Just resolution) name,
         kind = kind,
         upperBound = upperBound',
         sourceSpan = sourceSpan
       }
+  where
+    insertInnermostType insertName resolution = \case
+      [] -> [Map.singleton insertName (emptySymbolEntry {typeSymbol = Just resolution})]
+      (innermost : remaining) ->
+        Map.insertWith mergeTypeSlot insertName (emptySymbolEntry {typeSymbol = Just resolution}) innermost
+          : remaining
+    mergeTypeSlot newEntry oldEntry = oldEntry {typeSymbol = newEntry.typeSymbol}
 
 resolveRequest :: RequestDeclaration Parsed -> Identifier (RequestDeclaration Identified)
 resolveRequest RequestDeclaration {..} = do
@@ -988,18 +1031,18 @@ resolveData DataDeclaration {..} = do
   name' <- liftSignatureVariable name
   typeName' <- liftSignatureType typeName
   constructorName' <- liftSignatureConstructor constructorName
-  typeParameters' <- mapM resolveGenericParameter typeParameters
-  parameters' <- mapM resolveDataParameter parameters
-  pure
-    DataDeclaration
-      { annotation = annotation,
-        name = name',
-        constructorName = constructorName',
-        typeName = typeName',
-        typeParameters = typeParameters',
-        parameters = parameters',
-        sourceSpan = sourceSpan
-      }
+  withGenericParameters sourceSpan typeParameters $ \typeParameters' -> do
+    parameters' <- mapM resolveDataParameter parameters
+    pure
+      DataDeclaration
+        { annotation = annotation,
+          name = name',
+          constructorName = constructorName',
+          typeName = typeName',
+          typeParameters = typeParameters',
+          parameters = parameters',
+          sourceSpan = sourceSpan
+        }
 
 resolveDataParameter :: DataParameter Parsed -> Identifier (DataParameter Identified)
 resolveDataParameter DataParameter {..} = do
@@ -1021,11 +1064,12 @@ resolveTypeSynonym ::
 resolveTypeSynonym TypeSynonymDeclaration {..} = do
   name' <- liftSignatureType name
   rhs' <- resolveType rhs
-  -- Look up the QualifiedName internally to patch the TypeData.
-  maybeQualifiedName <- lookupType name.text
-  case maybeQualifiedName of
-    Just qualifiedName -> updateTypeSynonymRhs qualifiedName rhs'
-    Nothing -> pure ()
+  -- Look up the QualifiedName internally to patch the TypeData. A synonym
+  -- name is always a top-level named type ('ResolvedNamedType').
+  maybeResolution <- lookupType name.text
+  case maybeResolution of
+    Just (ResolvedNamedType qualifiedName) -> updateTypeSynonymRhs qualifiedName rhs'
+    _ -> pure ()
   pure
     TypeSynonymDeclaration
       { name = name',
@@ -1327,7 +1371,7 @@ resolveTypeName :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
 resolveTypeName TypeNameNode {name, sourceSpan} = do
   metadata <-
     lookupType name.text >>= \case
-      Just qualifiedName -> pure (Just (ResolvedNamedType qualifiedName))
+      Just resolution -> pure (Just resolution)
       Nothing -> do
         emitError (ErrorNotAType name.sourceSpan name.text)
         pure Nothing
@@ -1348,7 +1392,7 @@ resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
   typeMetadata <- case maybeModuleName of
     Just moduleName ->
       lookupModuleExportType moduleName target.text >>= \case
-        Just qualifiedName -> pure (Just (ResolvedNamedType qualifiedName))
+        Just resolution -> pure (Just resolution)
         Nothing -> do
           emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
           pure Nothing
@@ -1511,19 +1555,19 @@ resolveLet LetStatement {pattern, value, sourceSpan} = do
 resolveAgentStatement :: AgentStatement Parsed -> Identifier (AgentStatement Identified)
 resolveAgentStatement AgentStatement {annotation, name, typeParameters, parameters, returnType, withRequests, body, sourceSpan} = do
   name' <- bindLocalVariable name
-  typeParameters' <- mapM resolveGenericParameter typeParameters
-  (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
-  pure
-    AgentStatement
-      { annotation = annotation,
-        name = name',
-        typeParameters = typeParameters',
-        parameters = parameters',
-        returnType = returnType',
-        withRequests = withRequests',
-        body = body',
-        sourceSpan = sourceSpan
-      }
+  withGenericParameters sourceSpan typeParameters $ \typeParameters' -> do
+    (parameters', returnType', withRequests', body') <- resolveSignatureBody parameters returnType withRequests body
+    pure
+      AgentStatement
+        { annotation = annotation,
+          name = name',
+          typeParameters = typeParameters',
+          parameters = parameters',
+          returnType = returnType',
+          withRequests = withRequests',
+          body = body',
+          sourceSpan = sourceSpan
+        }
 
 resolveReturn :: ReturnStatement Parsed -> Identifier (ReturnStatement Identified)
 resolveReturn ReturnStatement {value, sourceSpan} = do
@@ -2316,7 +2360,7 @@ identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames c
       let entry =
             emptySymbolEntry
               { variableSymbol = Just (ResolvedTopLevel qualifiedName),
-                typeSymbol = Just qualifiedName,
+                typeSymbol = Just (ResolvedNamedType qualifiedName),
                 constructorSymbol = Just qualifiedName
               }
       insertSymbolEntry name.sourceSpan name.text entry table
@@ -2453,8 +2497,8 @@ identifyModule allModuleData depExportTables allModuleNames trustedStdlibNames c
               Nothing -> do
                 emitError (ErrorImportNameNotFound importPos item.name targetModuleName)
                 pure table
-              Just qualifiedName ->
-                insertSymbolEntry importPos item.name (singletonType qualifiedName) table
+              Just typeResolution ->
+                insertSymbolEntry importPos item.name (emptySymbolEntry {typeSymbol = Just typeResolution}) table
 
 -- ---------------------------------------------------------------------------
 -- Import-cycle detection
