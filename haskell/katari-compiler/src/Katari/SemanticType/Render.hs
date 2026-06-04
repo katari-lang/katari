@@ -57,13 +57,18 @@ renderSemanticType = render False
             ", "
             [k <> renderField field | (k, field) <- Map.toAscList fields]
           <> " }"
-      ST.SemanticTypeFunction parameters returnType effects ->
-        let parameterText =
-              Text.intercalate
-                ", "
-                [ k <> renderField parameter
-                  | (k, parameter) <- Map.toAscList parameters
-                ]
+      ST.SemanticTypeFunction parameterType returnType effects ->
+        let -- The usual parameter type is an object (named params), rendered as
+            -- @l1: T1, l2: T2@; a spread signature makes it some other type,
+            -- rendered as @...T@.
+            parameterText = case parameterType of
+              ST.SemanticTypeObject parameters ->
+                Text.intercalate
+                  ", "
+                  [ k <> renderField parameter
+                    | (k, parameter) <- Map.toAscList parameters
+                  ]
+              other -> "..." <> render False other
             effectsText = renderSemanticEffect effects
             body =
               "("

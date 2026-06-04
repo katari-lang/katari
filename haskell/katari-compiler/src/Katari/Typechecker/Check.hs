@@ -315,9 +315,9 @@ substituteGenerics typeSubstitution effectSubstitution = go
       SemanticTypeUnion branches -> unionSemantic (map go branches)
       SemanticTypeRecord valueType -> SemanticTypeRecord (go valueType)
       SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
-      SemanticTypeFunction parameters returnType effect ->
+      SemanticTypeFunction parameterType returnType effect ->
         SemanticTypeFunction
-          (Map.map (\parameter -> parameter {parameterType = go parameter.parameterType}) parameters)
+          (go parameterType)
           (go returnType)
           (substituteEffect effectSubstitution effect)
       other -> other
@@ -433,7 +433,7 @@ elaborateTypeOrEffect = \case
     parameterEntries <- mapM (\(label, pt) -> (,) label <$> elaborateType pt) parameterTypes
     returnSemantic <- elaborateType returnType
     requests <- elaborateRequestList withRequests
-    pure (AsType (SemanticTypeFunction (requiredParameter <$> Map.fromList parameterEntries) returnSemantic requests))
+    pure (AsType (functionType (requiredParameter <$> Map.fromList parameterEntries) returnSemantic requests))
   TypeArray ArrayTypeNode {elementType} ->
     AsType . SemanticTypeArray <$> elaborateType elementType
   TypeTuple TupleTypeNode {elementTypes} ->
@@ -738,13 +738,25 @@ calleePrimRule = \case
 -- subtype of its parameter; the result is the declared return type.
 applyNormalCall :: SourceSpan -> SemanticType Resolved -> Map Text (SemanticType Resolved) -> Check (SemanticType Resolved)
 applyNormalCall sourceSpan calleeType argTypes = case calleeType of
-  SemanticTypeFunction params returnType _ -> do
-    forM_ (Map.toList params) $ \(label, parameter) ->
-      case Map.lookup label argTypes of
-        Just argType -> subtypeAssert sourceSpan argType parameter.parameterType
-        Nothing
-          | parameter.optional -> pure ()
-          | otherwise -> emitError (CheckErrorMissingArgument sourceSpan label)
+  SemanticTypeFunction parameterType returnType _ -> do
+    -- A call @foo(l1 = e1, l2 = e2)@ builds the argument object
+    -- @{l1: τ1, l2: τ2}@ and requires it to be a subtype of the callee's
+    -- parameter type. For the common case where the parameter type is an
+    -- object (named parameters) we walk it field-by-field to give precise
+    -- missing-argument / per-argument-mismatch diagnostics; any extra named
+    -- argument is silently allowed (width subtyping). For a non-object
+    -- parameter type (only via a spread signature) we fall back to a single
+    -- structural subtype assertion of the whole argument object.
+    case parameterType of
+      SemanticTypeObject params ->
+        forM_ (Map.toList params) $ \(label, parameter) ->
+          case Map.lookup label argTypes of
+            Just argType -> subtypeAssert sourceSpan argType parameter.parameterType
+            Nothing
+              | parameter.optional -> pure ()
+              | otherwise -> emitError (CheckErrorMissingArgument sourceSpan label)
+      _ ->
+        subtypeAssert sourceSpan (SemanticTypeObject (requiredParameter <$> argTypes)) parameterType
     pure returnType
   SemanticTypeFunctionAny -> pure SemanticTypeUnknown
   SemanticTypeUnknown -> pure SemanticTypeUnknown
@@ -1017,8 +1029,8 @@ walkLocalAgent AgentStatement {annotation, name, typeParameters, parameters, ret
         Just ret -> withExpectedReturn ret (walkBlock body)
         Nothing -> walkBlock body
   let returnSemantic = maybe bodyType id declaredReturn
-      functionType = SemanticTypeFunction paramSig returnSemantic emptyEffect
-      bindings = maybe [] (\resolution -> [(resolution, functionType)]) name.resolution
+      agentType = SemanticTypeFunction paramSig returnSemantic emptyEffect
+      bindings = maybe [] (\resolution -> [(resolution, agentType)]) name.resolution
   pure
     ( StatementAgent
         AgentStatement
@@ -1038,12 +1050,14 @@ walkLocalAgent AgentStatement {annotation, name, typeParameters, parameters, ret
 -- parameter map, and the env bindings for the parameters.
 elaborateParameters ::
   [ParameterBinding Identified] ->
-  Check ([ParameterBinding Zonked], Map Text (Parameter Resolved), [(VariableResolution, SemanticType Resolved)])
+  Check ([ParameterBinding Zonked], SemanticType Resolved, [(VariableResolution, SemanticType Resolved)])
 elaborateParameters parameters = do
   walked <- mapM walkOne parameters
   pure
     ( map (\(p, _, _) -> p) walked,
-      Map.fromList [entry | (_, entry, _) <- walked],
+      -- The parameter signature is a single (object) type — the type of the
+      -- argument record a call must supply.
+      SemanticTypeObject (Map.fromList [entry | (_, entry, _) <- walked]),
       mapMaybe (\(_, _, binding) -> binding) walked
     )
   where
@@ -1153,7 +1167,7 @@ constructorFieldTypes :: Maybe QualifiedName -> Check (Map Text (SemanticType Re
 constructorFieldTypes = \case
   Just qualifiedName ->
     lookupLocal (ResolvedTopLevel qualifiedName) >>= \case
-      Just (SemanticTypeFunction params _ _) -> pure (Map.map (.parameterType) params)
+      Just (SemanticTypeFunction parameterObject _ _) -> pure (Map.map (.parameterType) (functionParameters parameterObject))
       _ -> pure Map.empty
   Nothing -> pure Map.empty
 
@@ -1392,7 +1406,7 @@ checkNonAgentDeclaration = \case
     let returnType = case typeName.resolution of
           Just (ResolvedNamedType qualifiedName) -> SemanticTypeData qualifiedName
           _ -> SemanticTypeUnknown
-        sig = SemanticTypeFunction (requiredParameter <$> Map.fromList fields) returnType emptyEffect
+        sig = functionType (requiredParameter <$> Map.fromList fields) returnType emptyEffect
         zonked =
           DeclarationData
             DataDeclaration
@@ -1538,9 +1552,9 @@ checkAgentDeclaration AgentDeclaration {annotation, name, typeParameters, parame
 -- | Elaborate just the parameter types into a signature map (no zonked output,
 -- no default-value subtype check — used for the recursive pre-seed so its
 -- diagnostics don't double with the real check).
-parameterSignatureOnly :: [ParameterBinding Identified] -> Check (Map Text (Parameter Resolved))
+parameterSignatureOnly :: [ParameterBinding Identified] -> Check (SemanticType Resolved)
 parameterSignatureOnly parameters =
-  Map.fromList
+  SemanticTypeObject . Map.fromList
     <$> mapM
       ( \ParameterBinding {name, typeAnnotation, defaultValue} -> do
           paramType <- maybe (pure SemanticTypeUnknown) elaborateType typeAnnotation

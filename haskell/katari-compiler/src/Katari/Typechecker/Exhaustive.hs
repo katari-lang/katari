@@ -44,6 +44,7 @@ import Katari.SemanticType
   ( Parameter (..),
     Resolved,
     SemanticType (..),
+    functionParameters,
   )
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (ConstructorData (..))
@@ -269,8 +270,8 @@ getSubFieldTypes :: CtorTag -> SemanticType Resolved -> ExhaustiveEnv -> [Semant
 getSubFieldTypes tag columnType env = case tag of
   CtorTagData qualifiedName ->
     case Map.lookup qualifiedName env.topLevelTypes of
-      Just (SemanticTypeFunction parameters _ _) ->
-        [parameter.parameterType | (_, parameter) <- Map.toAscList parameters]
+      Just (SemanticTypeFunction parameterObject _ _) ->
+        [parameter.parameterType | (_, parameter) <- Map.toAscList (functionParameters parameterObject)]
       _ -> []
   CtorTagTupleN n -> case columnType of
     -- Pad / truncate to the pattern's arity so the sub-pattern columns line
@@ -418,7 +419,7 @@ ctorsOfType env typeQName =
 lookupCtorArity :: ExhaustiveEnv -> QualifiedName -> Int
 lookupCtorArity env qualifiedName =
   case Map.lookup qualifiedName env.topLevelTypes of
-    Just (SemanticTypeFunction parameters _ _) -> Map.size parameters
+    Just (SemanticTypeFunction parameterObject _ _) -> Map.size (functionParameters parameterObject)
     _ -> 0
 
 -- ===========================================================================

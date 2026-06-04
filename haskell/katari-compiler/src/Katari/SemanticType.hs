@@ -19,6 +19,7 @@
 module Katari.SemanticType where
 
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Katari.Common (QualifiedName (..))
 import Katari.Id (GenericsId)
@@ -69,15 +70,18 @@ data SemanticType phase where
   SemanticTypeLiteralInteger :: Integer -> SemanticType phase
   SemanticTypeLiteralString :: Text -> SemanticType phase
   SemanticTypeLiteralBoolean :: Bool -> SemanticType phase
-  -- Composite types. Function parameters are keyed by label; their order is
-  -- not significant (named-parameter calling convention). Each 'Parameter'
-  -- carries its type and whether it is /optional/ (declared with a default):
-  -- a call site may omit an optional parameter — the runtime fills the
-  -- declared default — so the subtype rule does not demand it. Two functions
-  -- are equal when their parameters (type + optionality), return, and
-  -- effects all match.
+  -- Composite types. A function's parameter signature is a /single/
+  -- 'SemanticType' — the type of the argument record. The type system places
+  -- no constraint on what it is (object / tuple / never / unknown all type),
+  -- but the surface language only ever constructs an object there: a call
+  -- @foo(l1=e1, l2=e2)@ builds the object @{l1=e1, l2=e2}@ and requires it to
+  -- be a subtype of the parameter type, and a definition @agent foo(l1: T1)@
+  -- elaborates the parameter type to the object @{l1: T1}@. (Spread —
+  -- @foo(...obj: ObjType)@ / @foo(...[1,\"x\"])@ — is what lets a tuple etc.
+  -- actually reach the parameter slot.) Two functions are equal when their
+  -- parameter type, return, and effects all match.
   SemanticTypeFunction ::
-    Map Text (Parameter phase) ->
+    SemanticType phase ->
     SemanticType phase ->
     SemanticEffect phase ->
     SemanticType phase
@@ -139,6 +143,26 @@ deriving instance Ord (Parameter phase)
 -- constructor signatures) where optionality does not arise.
 requiredParameter :: SemanticType phase -> Parameter phase
 requiredParameter parameterType = Parameter {parameterType = parameterType, optional = False}
+
+-- | Build a function type from a /labelled-parameter map/ by wrapping it in
+-- the parameter object. Most construction sites (agent / request / external /
+-- prim signatures, call-site argument records) think in terms of named
+-- parameters; this hides the \"parameter type is a single object\" encoding.
+functionType ::
+  Map Text (Parameter phase) ->
+  SemanticType phase ->
+  SemanticEffect phase ->
+  SemanticType phase
+functionType parameters = SemanticTypeFunction (SemanticTypeObject parameters)
+
+-- | Extract the labelled-parameter map from a function's parameter type,
+-- assuming the object encoding. Returns the fields when the parameter type is
+-- an object; for any other parameter type (tuple / never / unknown — reachable
+-- only via spread) there are no named parameters, so the empty map is returned.
+functionParameters :: SemanticType phase -> Map Text (Parameter phase)
+functionParameters = \case
+  SemanticTypeObject fields -> fields
+  _ -> Map.empty
 
 -- | Smart constructor for 'SemanticTypeUnion'. The convention is that a
 -- union always has 0 or 2+ branches; a singleton list is flattened to its

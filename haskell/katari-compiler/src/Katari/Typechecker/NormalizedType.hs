@@ -74,7 +74,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Common (QualifiedName)
 import Katari.Id (GenericsId)
-import Katari.SemanticType (Parameter (..), Resolved, SemanticEffect (..), SemanticType (..), unionEffects)
+import Katari.SemanticType (Parameter (..), Resolved, SemanticEffect (..), SemanticType (..), functionParameters, unionEffects)
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType
@@ -247,8 +247,14 @@ data NormalizedParameter = NormalizedParameter
   }
   deriving (Eq, Show)
 
+-- | Concrete function shape. The parameter signature is a /single/
+-- 'NormalizedType' (the type of the argument value, usually a 'ClosedObj' of
+-- named params, but possibly a tuple etc. via spread). Function subtyping is
+-- contravariant on this parameter type — and because the object lattice
+-- already handles per-label width and optionality, no label-specific rule is
+-- needed here.
 data FunctionShape = FunctionShape
-  { parameters :: Map Text NormalizedParameter,
+  { parameter :: NormalizedType,
     returnType :: NormalizedType,
     requests :: NormalizedEffect
   }
@@ -433,12 +439,9 @@ functionBranches = \case
   FunctionSlotOf shape -> [makeFunction shape]
   FunctionSlotAny -> [SemanticTypeFunctionAny]
   where
-    makeFunction FunctionShape {parameters, returnType, requests} =
+    makeFunction FunctionShape {parameter, returnType, requests} =
       SemanticTypeFunction
-        ( Map.map
-            (\normalizedParameter -> Parameter {parameterType = denormalise normalizedParameter.parameterType, optional = normalizedParameter.optional})
-            parameters
-        )
+        (denormalise parameter)
         (denormalise returnType)
         (denormaliseEffect requests)
 
@@ -567,13 +570,10 @@ normaliseSemantic = \case
       emptyLayered
         { mapLayer = emptyMapSlot {bare = RecordObj (normaliseSemantic valueType)}
         }
-  SemanticTypeFunction parameterMap returnType effect ->
+  SemanticTypeFunction parameterType returnType effect ->
     let shape =
           FunctionShape
-            { parameters =
-                Map.map
-                  (\parameter -> NormalizedParameter {parameterType = normaliseSemantic parameter.parameterType, optional = parameter.optional})
-                  parameterMap,
+            { parameter = normaliseSemantic parameterType,
               returnType = normaliseSemantic returnType,
               requests = normaliseEffect effect
             }
@@ -679,23 +679,14 @@ unionFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
 unionFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 unionFunctionShape leftShape rightShape =
   FunctionShape
-    { -- contravariant in args: union of function types intersects per-label
-      -- types (union of label sets). A common label is optional in the
-      -- union only when optional in both branches; a label present in just
-      -- one branch keeps its own optionality (Map.unionWith passes it
-      -- through), which is exactly right — it is absent from the other
-      -- branch, so omitting it stays legal there.
-      parameters =
-        Map.unionWith unionParameter leftShape.parameters rightShape.parameters,
+    { -- Contravariant in the parameter: the union of two function types accepts
+      -- only arguments both accept, i.e. the /intersection/ of their parameter
+      -- types. (Per-label width / optionality is handled inside the object
+      -- lattice by 'intersectNT'.)
+      parameter = intersectNT leftShape.parameter rightShape.parameter,
       returnType = unionNT leftShape.returnType rightShape.returnType,
       requests = unionNormalizedEffect leftShape.requests rightShape.requests
     }
-  where
-    unionParameter leftParameter rightParameter =
-      NormalizedParameter
-        { parameterType = intersectNT leftParameter.parameterType rightParameter.parameterType,
-          optional = leftParameter.optional && rightParameter.optional
-        }
 
 -- ---------------------------------------------------------------------------
 -- Intersection (greatest lower bound)
@@ -783,21 +774,14 @@ intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
 intersectFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
 intersectFunctionShape leftShape rightShape =
   FunctionShape
-    { -- contravariant in args: intersection of function types unions per-label
-      -- types (intersection of label sets — labels present on only one side
-      -- are dropped). Dually to union, the meet takes the /more optional/
-      -- choice: a common parameter is optional when optional on either side.
-      parameters =
-        Map.intersectionWith intersectParameter leftShape.parameters rightShape.parameters,
+    { -- Contravariant in the parameter: the intersection of two function types
+      -- accepts arguments either accepts, i.e. the /union/ of their parameter
+      -- types. (Per-label width / optionality is handled inside the object
+      -- lattice by 'unionNT'.)
+      parameter = unionNT leftShape.parameter rightShape.parameter,
       returnType = intersectNT leftShape.returnType rightShape.returnType,
       requests = intersectNormalizedEffect leftShape.requests rightShape.requests
     }
-  where
-    intersectParameter leftParameter rightParameter =
-      NormalizedParameter
-        { parameterType = unionNT leftParameter.parameterType rightParameter.parameterType,
-          optional = leftParameter.optional || rightParameter.optional
-        }
 
 -- | Intersection (meet) of map layers. Data names are intersected; 'bare'
 -- parts meet via 'intersectBareObj'.
@@ -842,8 +826,8 @@ type DataFieldEnv = Map QualifiedName (Map Text NormalizedType)
 buildDataFieldEnv :: Map QualifiedName (SemanticType Resolved) -> DataFieldEnv
 buildDataFieldEnv typeEnv =
   Map.fromList
-    [ (dataQName, Map.map (normaliseSemantic . (.parameterType)) parameters)
-      | (constructorQName, SemanticTypeFunction parameters (SemanticTypeData dataQName) _) <- Map.toList typeEnv,
+    [ (dataQName, Map.map (normaliseSemantic . (.parameterType)) (functionParameters parameterObject))
+      | (constructorQName, SemanticTypeFunction parameterObject (SemanticTypeData dataQName) _) <- Map.toList typeEnv,
         constructorQName == dataQName
     ]
 
@@ -941,19 +925,13 @@ subtypeNormalizedType env boundEnv = go
       (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
         subtypeFunctionShape leftShape rightShape
 
-    -- Contravariant params (required-label subset, optional left labels may be
-    -- omitted on the right), covariant return, covariant request set.
+    -- Contravariant parameter, covariant return, covariant request set. The
+    -- parameter type is a single type; the object lattice (via 'go') handles
+    -- per-label width / optionality, so this is just a contravariant edge.
     subtypeFunctionShape leftShape rightShape =
-      Set.fromList requiredLeftLabels `Set.isSubsetOf` Map.keysSet rightShape.parameters
-        && all checkParameter (Map.toList leftShape.parameters)
+      go rightShape.parameter leftShape.parameter
         && go leftShape.returnType rightShape.returnType
         && subtypeEffect leftShape.requests rightShape.requests
-      where
-        requiredLeftLabels =
-          [label | (label, parameter) <- Map.toList leftShape.parameters, not parameter.optional]
-        checkParameter (label, leftParameter) = case Map.lookup label rightShape.parameters of
-          Just rightParameter -> go rightParameter.parameterType leftParameter.parameterType
-          Nothing -> True
 
 -- | Expand a layered type's generics until its generics layer is empty, for
 -- use on the subtype (LHS) side. Generics also present on the RHS cancel (a

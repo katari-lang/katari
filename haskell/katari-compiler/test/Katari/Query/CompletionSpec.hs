@@ -9,7 +9,7 @@ import Data.Text qualified as Text
 import Katari.Compile qualified as C
 import Katari.Query qualified as Query
 import Katari.Query.Completion
-import Katari.SemanticType (SemanticType (..), emptyEffect, requiredParameter)
+import Katari.SemanticType (SemanticType (..), emptyEffect, functionType, requiredParameter)
 import Katari.SourceSpan (Position (..))
 import Katari.TestSupport (compileSync)
 import Test.Hspec
@@ -260,12 +260,12 @@ spec = describe "Katari.Query.Completion" $ do
     -- `(name: string, age: integer) -> string`. The intersection is
     -- `{name}` (only label common to both branches).
     let fn1 =
-          SemanticTypeFunction
+          functionType
             (Map.singleton "name" (requiredParameter SemanticTypeString))
             SemanticTypeString
             emptyEffect
         fn2 =
-          SemanticTypeFunction
+          functionType
             ( Map.fromList
                 [ ("name", requiredParameter SemanticTypeString),
                   ("age", requiredParameter SemanticTypeInteger)

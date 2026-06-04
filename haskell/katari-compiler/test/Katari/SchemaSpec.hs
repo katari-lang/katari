@@ -16,6 +16,7 @@ import Katari.SemanticType
   ( Resolved,
     SemanticType (..),
     emptyEffect,
+    functionType,
     requiredParameter,
   )
 import Test.Hspec
@@ -97,7 +98,7 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
 
   it "function types emit a callable-reference object with required $agent: string" $ do
     let t =
-          SemanticTypeFunction
+          functionType
             Map.empty
             SemanticTypeNull
             emptyEffect

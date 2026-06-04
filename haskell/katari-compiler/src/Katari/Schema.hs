@@ -36,7 +36,6 @@ module Katari.Schema
   )
 where
 
-import Control.Monad (join)
 import Data.Aeson
   ( FromJSON (..),
     Options (..),
@@ -80,6 +79,7 @@ import Katari.SemanticType
     Resolved,
     SemanticEffect (..),
     SemanticType (..),
+    functionParameters,
   )
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
@@ -369,8 +369,9 @@ buildDataDefs constructorMap topLevelTypes annotationsByQName =
       | (ctorQName, cd) <- Map.toList constructorMap,
         let perFieldAnnotations =
               Map.findWithDefault Map.empty ctorQName annotationsByQName,
-        Just (SemanticTypeFunction fieldTypes _ _) <-
-          [Map.lookup ctorQName topLevelTypes]
+        Just (SemanticTypeFunction paramObject _ _) <-
+          [Map.lookup ctorQName topLevelTypes],
+        let fieldTypes = functionParameters paramObject
     ]
 
 -- ===========================================================================
@@ -580,22 +581,21 @@ buildVariableEntry ::
   (QualifiedName, VariableData) ->
   Maybe SchemaEntry
 buildVariableEntry ctx (qualifiedName, variableData) = do
-  SemanticTypeFunction parameters returnType requestSet <-
+  SemanticTypeFunction parameterType returnType requestSet <-
     Map.lookup qualifiedName ctx.topLevelTypes
-  let paramTypes = (.parameterType) <$> parameters
   -- Credential (secret) types must never surface in an AI tool-calling
   -- schema — the AI must not be able to inspect credential shapes. Drop any
   -- callable whose parameters or result mention @secret@ (directly or
   -- transitively through a data field). The callable stays callable in the
   -- IR; only its schema is withheld from the bundle.
-  if any (mentionsSecret ctx.dataDefs Set.empty) (returnType : Map.elems paramTypes)
+  if any (mentionsSecret ctx.dataDefs Set.empty) [returnType, parameterType]
     then Nothing
     else
       pure
         SchemaEntry
           { name = renderQualifiedName qualifiedName,
             description = variableData.variableAnnotation,
-            input = buildInputObject ctx.dataDefs parameters variableData.variableParameterAnnotations,
+            input = buildInputObject ctx.dataDefs parameterType variableData.variableParameterAnnotations,
             output = toJsonSchema ctx.dataDefs Set.empty returnType,
             requests = buildRequestRefs ctx requestSet
           }
@@ -612,8 +612,8 @@ mentionsSecret dataDefs visited = \case
   SemanticTypeUnion branches -> any recurse branches
   SemanticTypeObject fields -> any (recurse . (.parameterType)) (Map.elems fields)
   SemanticTypeRecord valueType -> recurse valueType
-  SemanticTypeFunction parameters returnType _ ->
-    any (recurse . (.parameterType)) (Map.elems parameters) || recurse returnType
+  SemanticTypeFunction parameterType returnType _ ->
+    recurse parameterType || recurse returnType
   SemanticTypeData qualifiedName
     | Set.member qualifiedName visited -> False
     | Just info <- Map.lookup qualifiedName dataDefs ->
@@ -625,35 +625,44 @@ mentionsSecret dataDefs visited = \case
   where
     recurse = mentionsSecret dataDefs visited
 
--- | Build a JSON Schema object describing the input parameters of any
--- callable. Lowering-facing variant of 'paramObject' that takes the raw
--- per-label annotations (Lowering doesn't always have a
--- @[ParameterBinding Zonked]@ — e.g. for prim wrappers it knows only
--- @(label, optionalAnnotation)@). Returns a wrapped 'JsonSchema' for
--- direct insertion into 'AgentBlock.inputSchema'.
+-- | Build a JSON Schema describing the input of any callable. The input is a
+-- /single/ value whose type is the function's parameter type; the schema is
+-- whatever that type maps to. The usual case is an object (named parameters),
+-- and there the raw per-label annotations are overlaid as field descriptions;
+-- but a spread signature (@agent foo(...xs: [string, number])@) makes the
+-- parameter type a tuple (or anything else), in which case the input schema is
+-- simply that type's schema and the (label-keyed) annotations do not apply.
+-- Lowering doesn't always have a @[ParameterBinding Zonked]@ — e.g. for prim
+-- wrappers it knows only @(label, optionalAnnotation)@ — hence the raw-pair
+-- annotation form. Returns a wrapped 'JsonSchema' for direct insertion into
+-- 'AgentBlock.inputSchema'.
 buildInputObject ::
   DataDefs ->
-  Map Text (Parameter Resolved) ->
+  SemanticType Resolved ->
   [(Text, Maybe Text)] ->
   JsonSchema
-buildInputObject dataDefs parameters labelsAndAnnotations =
-  let annotationByLabel = Map.fromList labelsAndAnnotations
-      properties =
-        Map.mapWithKey
-          ( \label parameter ->
-              let ann = Map.findWithDefault Nothing label annotationByLabel
-               in withDesc ann (toJsonSchema dataDefs Set.empty parameter.parameterType)
+buildInputObject dataDefs parameterType labelsAndAnnotations = case parameterType of
+  SemanticTypeObject parameters ->
+    let annotationByLabel = Map.fromList labelsAndAnnotations
+        properties =
+          Map.mapWithKey
+            ( \label parameter ->
+                let ann = Map.findWithDefault Nothing label annotationByLabel
+                 in withDesc ann (toJsonSchema dataDefs Set.empty parameter.parameterType)
+            )
+            parameters
+     in plain
+          ( SchemaCoreObject
+              { properties = properties,
+                -- Optional parameters (those with a default) may be omitted by
+                -- the caller, so they are excluded from @required@.
+                required = Map.keysSet (Map.filter (not . (.optional)) parameters),
+                additionalProperties = True
+              }
           )
-          parameters
-   in plain
-        ( SchemaCoreObject
-            { properties = properties,
-              -- Optional parameters (those with a default) may be omitted by
-              -- the caller, so they are excluded from @required@.
-              required = Map.keysSet (Map.filter (not . (.optional)) parameters),
-              additionalProperties = True
-            }
-        )
+  -- Non-object parameter type (only reachable via a spread signature): the
+  -- input is just a value of that type; per-label annotations don't apply.
+  _ -> toJsonSchema dataDefs Set.empty parameterType
 
 -- | Build the output schema for a callable's return type. Thin wrapper
 -- around 'toJsonSchema' exposed alongside 'buildInputObject' so
@@ -692,25 +701,16 @@ buildRequestRefs ctx effect =
 buildRequestRef :: SchemaContext -> QualifiedName -> Maybe RequestSchemaRef
 buildRequestRef ctx qualifiedName = do
   rd <- Map.lookup qualifiedName ctx.requestData
-  SemanticTypeFunction parameters returnType _ <-
+  SemanticTypeFunction parameterType returnType _ <-
     Map.lookup qualifiedName ctx.topLevelTypes
-  let paramTypes = (.parameterType) <$> parameters
-      inputCore =
-        SchemaCoreObject
-          { properties =
-              Map.mapWithKey
-                ( \label t ->
-                    let annotation = join (Map.lookup label rd.requestParameterAnnotations)
-                     in withDesc annotation (toJsonSchema ctx.dataDefs Set.empty t)
-                )
-                paramTypes,
-            required = Map.keysSet (Map.filter (not . (.optional)) parameters),
-            additionalProperties = True
-          }
   pure
     RequestSchemaRef
       { name = renderQualifiedName qualifiedName,
-        input = plain inputCore,
+        input =
+          buildInputObject
+            ctx.dataDefs
+            parameterType
+            (Map.toList rd.requestParameterAnnotations),
         output = toJsonSchema ctx.dataDefs Set.empty returnType
       }
 

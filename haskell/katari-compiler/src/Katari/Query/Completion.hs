@@ -48,7 +48,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.AST (Module (..), Phase (Zonked))
 import Katari.Id (QualifiedName (..), TypeResolution (..), VariableResolution (..))
-import Katari.SemanticType (Parameter (..), Resolved, SemanticType (..))
+import Katari.SemanticType (Parameter (..), Resolved, SemanticType (..), functionParameters)
 import Katari.SemanticType.Render (renderSemanticType)
 import Katari.SourceSpan (Position, SourceSpan (..))
 import Katari.Typechecker.Identifier
@@ -306,7 +306,7 @@ dataConstructorParameters snap typeQName = do
       ]
   ctorType <- lookupTopLevelType ctorQName snap
   case ctorType of
-    SemanticTypeFunction parameters _ _ -> Just ((.parameterType) <$> parameters)
+    SemanticTypeFunction parameterObject _ _ -> Just ((.parameterType) <$> functionParameters parameterObject)
     _ -> Nothing
 
 -- | Smart join of multiple resolved branch types into a single
@@ -393,7 +393,7 @@ completionsOfCallLabels ty usedLabels =
   where
     labelsOf :: SemTy -> Set Text
     labelsOf = \case
-      SemanticTypeFunction parameters _ _ -> Map.keysSet parameters
+      SemanticTypeFunction parameterObject _ _ -> Map.keysSet (functionParameters parameterObject)
       SemanticTypeUnion branches ->
         case map labelsOf branches of
           [] -> Set.empty
