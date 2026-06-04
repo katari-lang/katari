@@ -184,6 +184,7 @@ data Punctuation where
   PunctuationArrow :: Punctuation
   PunctuationFatArrow :: Punctuation
   PunctuationPipe :: Punctuation
+  PunctuationQuestion :: Punctuation
   deriving (Eq, Ord, Show)
 
 -- | Binary / unary operators recognised at the lexical level. The
@@ -624,6 +625,7 @@ lexPunctuationOrOperator =
       KatariTokenPunctuation PunctuationRightBracket <$ char ']',
       KatariTokenPunctuation PunctuationComma <$ char ',',
       KatariTokenPunctuation PunctuationColon <$ char ':',
+      KatariTokenPunctuation PunctuationQuestion <$ char '?',
       KatariTokenPunctuation PunctuationDot <$ char '.',
       KatariTokenPunctuation PunctuationAt <$ char '@',
       KatariTokenPunctuation PunctuationEquals <$ char '=',
@@ -1058,6 +1060,7 @@ showPunctuation = \case
   PunctuationRightBrace -> "}"
   PunctuationComma -> ","
   PunctuationColon -> ":"
+  PunctuationQuestion -> "?"
   PunctuationDot -> "."
   PunctuationAt -> "@"
   PunctuationEquals -> "="

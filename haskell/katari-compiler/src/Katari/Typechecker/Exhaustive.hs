@@ -286,7 +286,7 @@ getSubFieldTypes tag columnType env = case tag of
     -- An object pattern over an object subject can read each key's declared
     -- field type; missing keys (width subtyping) fall back to 'unknown'.
     SemanticTypeObject fields ->
-      map (\key -> Map.findWithDefault SemanticTypeUnknown key fields) keys
+      map (\key -> maybe SemanticTypeUnknown (.parameterType) (Map.lookup key fields)) keys
     _ -> replicate (length keys) SemanticTypeUnknown
   _ -> []
 

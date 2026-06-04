@@ -416,8 +416,10 @@ toCore dataDefs visited = \case
     -- value of @{x: T}@ may legitimately carry more. @additionalProperties@ is
     -- always permissive (the schema must not reject those extra properties).
     SchemaCoreObject
-      { properties = Map.map (toJsonSchema dataDefs visited) fields,
-        required = Map.keysSet fields,
+      { properties = Map.map (\field -> toJsonSchema dataDefs visited field.parameterType) fields,
+        -- Optional fields are omitted from @required@ (a JSON value may leave
+        -- them out).
+        required = Map.keysSet (Map.filter (\field -> not field.optional) fields),
         additionalProperties = True
       }
   SemanticTypeUnion branches ->
@@ -608,7 +610,7 @@ mentionsSecret dataDefs visited = \case
   SemanticTypeArray element -> recurse element
   SemanticTypeTuple elements -> any recurse elements
   SemanticTypeUnion branches -> any recurse branches
-  SemanticTypeObject fields -> any recurse (Map.elems fields)
+  SemanticTypeObject fields -> any (recurse . (.parameterType)) (Map.elems fields)
   SemanticTypeRecord valueType -> recurse valueType
   SemanticTypeFunction parameters returnType _ ->
     any (recurse . (.parameterType)) (Map.elems parameters) || recurse returnType

@@ -104,7 +104,7 @@ data SemanticType phase where
   -- constraints (e.g. field access on data values is encoded as
   -- @T \<: SemanticTypeObject {label: t_field}@). Convertible to / from
   -- JSON schema style records.
-  SemanticTypeObject :: Map Text (SemanticType phase) -> SemanticType phase
+  SemanticTypeObject :: Map Text (Parameter phase) -> SemanticType phase
   -- | @record[V]@ — homogeneous map from string keys to values of
   -- type @V@. Keys are implicitly @string@ because the wire form is
   -- plain JSON object syntax and JSON object keys are always
@@ -118,10 +118,11 @@ deriving instance Eq (SemanticType phase)
 
 deriving instance Ord (SemanticType phase)
 
--- | A single function parameter: its type plus whether it is optional
--- (declared with a default, hence omittable at call sites). Folding
--- optionality into the parameter map (rather than a parallel label set)
--- keeps the invariant "every optional label has a type" by construction.
+-- | A single function parameter — /and/ a structural object field: its type
+-- plus whether it is optional (a parameter with a default, hence omittable at
+-- call sites; an object field that may be absent — accessing an absent
+-- optional field yields @null@). Function parameter signatures and object types
+-- share this record because a parameter signature is, semantically, an object.
 data Parameter phase = Parameter
   { parameterType :: SemanticType phase,
     optional :: Bool

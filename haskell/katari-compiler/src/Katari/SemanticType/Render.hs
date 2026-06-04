@@ -55,7 +55,7 @@ renderSemanticType = render False
         "{ "
           <> Text.intercalate
             ", "
-            [k <> ": " <> render False v | (k, v) <- Map.toAscList fields]
+            [k <> (if field.optional then "?: " else ": ") <> render False field.parameterType | (k, field) <- Map.toAscList fields]
           <> " }"
       ST.SemanticTypeFunction parameters returnType effects ->
         let parameterText =

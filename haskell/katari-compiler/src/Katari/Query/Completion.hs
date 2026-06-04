@@ -283,7 +283,7 @@ fieldTypeOf snap ty field = case ty of
   SemanticTypeData typeId -> do
     parameters <- dataConstructorParameters snap typeId
     Map.lookup field parameters
-  SemanticTypeObject fields -> Map.lookup field fields
+  SemanticTypeObject fields -> (.parameterType) <$> Map.lookup field fields
   SemanticTypeUnion branches -> do
     let projected = mapMaybe (\branch -> fieldTypeOf snap branch field) branches
     if length projected == length branches
@@ -352,7 +352,7 @@ completionsOfFields snap ty =
       fieldsOf = \case
         SemanticTypeData typeId ->
           fromMaybe Map.empty (dataConstructorParameters snap typeId)
-        SemanticTypeObject m -> m
+        SemanticTypeObject m -> Map.map (.parameterType) m
         SemanticTypeUnion branches ->
           let perBranch = map fieldsOf branches
               common label = all (Map.member label) perBranch

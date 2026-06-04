@@ -905,8 +905,11 @@ instance HasSourceSpan (RecordTypeNode p) where
 -- are bare text in source order; label resolution is type-directed, exactly
 -- like 'FunctionTypeNode' parameters. The set of named fields is the
 -- /minimum/ a value must carry — extra fields are allowed by width subtyping.
+-- | An object type's fields. Each entry is @(label, fieldType, optional)@ —
+-- @optional@ is set by the surface @label?: T@ marker (the field may be
+-- absent).
 data ObjectTypeNode (phase :: Phase) = ObjectTypeNode
-  { fields :: [(Text, SyntacticType phase)],
+  { fields :: [(Text, SyntacticType phase, Bool)],
     sourceSpan :: SourceSpan
   }
 
@@ -1481,7 +1484,7 @@ retagSyntacticType = \case
   TypeObject ObjectTypeNode {fields, sourceSpan} ->
     TypeObject
       ObjectTypeNode
-        { fields = [(label, retagSyntacticType subType) | (label, subType) <- fields],
+        { fields = [(label, retagSyntacticType subType, optional) | (label, subType, optional) <- fields],
           sourceSpan = sourceSpan
         }
 

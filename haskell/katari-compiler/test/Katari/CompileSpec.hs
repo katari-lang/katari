@@ -243,6 +243,30 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput src)
     hasErrors result.diagnostics `shouldBe` True
 
+  it "allows omitting an optional object field at a call site" $ do
+    let src =
+          mconcat
+            [ "agent f(o: { x: integer, y?: string }) -> integer { o.x }\n",
+              "agent main() -> integer { f(o = { x = 1 }) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
+  it "rejects an object value missing a required field" $ do
+    let src =
+          mconcat
+            [ "agent f(o: { x: integer, y?: string }) -> integer { o.x }\n",
+              "agent main() -> integer { f(o = { y = \"a\" }) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
+  it "types an optional field access as 'T | null'" $ do
+    -- Returning @o.y@ (typed @string | null@) where @string@ is expected fails.
+    let src = "agent f(o: { x: integer, y?: string }) -> string { o.y }\n"
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
   it "requires an explicit 'with' clause on a recursive agent" $ do
     let result = compileSync (singleSourceInput "agent loop(n: integer) -> integer { loop(n = n) }")
     hasErrors result.diagnostics `shouldBe` True

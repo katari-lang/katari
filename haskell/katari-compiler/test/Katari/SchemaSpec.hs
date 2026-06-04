@@ -16,6 +16,7 @@ import Katari.SemanticType
   ( Resolved,
     SemanticType (..),
     emptyEffect,
+    requiredParameter,
   )
 import Test.Hspec
 
@@ -82,8 +83,8 @@ toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
     let t =
           SemanticTypeObject $
             Map.fromList
-              [ ("name", SemanticTypeString),
-                ("age", SemanticTypeInteger)
+              [ ("name", requiredParameter SemanticTypeString),
+                ("age", requiredParameter SemanticTypeInteger)
               ]
     case simpleToJson t of
       SchemaCoreObject {properties, required, additionalProperties} -> do

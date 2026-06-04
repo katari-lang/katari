@@ -1833,7 +1833,7 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
         [pr] -> case pr.typeAnnotation of
-          Just (TypeObject n) -> map fst n.fields `shouldBe` ["x", "y"]
+          Just (TypeObject n) -> map (\(label, _, _) -> label) n.fields `shouldBe` ["x", "y"]
           _ -> expectationFailure "expected TypeObject"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"

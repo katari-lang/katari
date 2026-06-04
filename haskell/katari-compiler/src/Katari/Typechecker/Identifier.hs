@@ -1368,7 +1368,7 @@ resolveType = \case
             }
       )
   TypeObject ObjectTypeNode {fields, sourceSpan} -> do
-    fields' <- mapM (\(label, fieldType) -> (label,) <$> resolveType fieldType) fields
+    fields' <- mapM (\(label, fieldType, isOptional) -> (\resolved -> (label, resolved, isOptional)) <$> resolveType fieldType) fields
     pure
       ( TypeObject
           ObjectTypeNode

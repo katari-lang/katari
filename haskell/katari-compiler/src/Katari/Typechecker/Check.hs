@@ -314,7 +314,7 @@ substituteGenerics typeSubstitution effectSubstitution = go
       SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
       SemanticTypeUnion branches -> unionSemantic (map go branches)
       SemanticTypeRecord valueType -> SemanticTypeRecord (go valueType)
-      SemanticTypeObject fields -> SemanticTypeObject (Map.map go fields)
+      SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
       SemanticTypeFunction parameters returnType effect ->
         SemanticTypeFunction
           (Map.map (\parameter -> parameter {parameterType = go parameter.parameterType}) parameters)
@@ -455,7 +455,8 @@ elaborateTypeOrEffect = \case
   TypeRecord RecordTypeNode {valueType} ->
     AsType . SemanticTypeRecord <$> elaborateType valueType
   TypeObject ObjectTypeNode {fields} ->
-    AsType . SemanticTypeObject . Map.fromList <$> mapM (\(label, fieldSyntactic) -> (label,) <$> elaborateType fieldSyntactic) fields
+    AsType . SemanticTypeObject . Map.fromList
+      <$> mapM (\(label, fieldSyntactic, isOptional) -> (\fieldType -> (label, Parameter fieldType isOptional)) <$> elaborateType fieldSyntactic) fields
 
 resolveTypeRef :: NameRef Identified TypeRef -> Check TypeOrEffect
 resolveTypeRef nameRef = case nameRef.resolution of
@@ -574,7 +575,7 @@ synthExpr = \case
     pure (ExpressionParTuple ParTupleExpression {elements = map fst walked, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
   ExpressionRecord RecordExpression {entries, sourceSpan} -> do
     walked <- mapM (\(label, e) -> (,) label <$> synthExpr e) entries
-    let semantic = SemanticTypeObject (Map.fromList [(label, snd we) | (label, we) <- walked])
+    let semantic = SemanticTypeObject (Map.fromList [(label, requiredParameter (snd we)) | (label, we) <- walked])
     pure
       ( ExpressionRecord RecordExpression {entries = [(label, fst we) | (label, we) <- walked], sourceSpan = sourceSpan, typeOf = semantic},
         semantic
@@ -1177,7 +1178,10 @@ seqElementType = \case
 fieldType :: SourceSpan -> SemanticType Resolved -> Text -> Check (SemanticType Resolved)
 fieldType sourceSpan subject label = case subject of
   SemanticTypeObject fields -> case Map.lookup label fields of
-    Just t -> pure t
+    -- Reading an optional field may find it absent, which surfaces as 'null'.
+    Just field
+      | field.optional -> pure (unionSemantic [field.parameterType, SemanticTypeNull])
+      | otherwise -> pure field.parameterType
     Nothing -> missing
   SemanticTypeRecord valueType -> pure valueType
   SemanticTypeData qualifiedName ->

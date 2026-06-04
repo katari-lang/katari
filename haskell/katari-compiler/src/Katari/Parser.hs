@@ -28,6 +28,7 @@ import Control.Monad.Reader (Reader, asks, local, runReader)
 import Control.Monad.State.Strict (StateT, get, modify', runStateT)
 import Data.Foldable (foldl')
 import Data.List.NonEmpty qualified as NE
+import Data.Maybe (isJust)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -2036,12 +2037,13 @@ parseObjectType = parseWithSpan $ do
           sourceSpan = sourceSpan
         }
 
-parseObjectTypeField :: Parser (Text, SyntacticType Parsed)
+parseObjectTypeField :: Parser (Text, SyntacticType Parsed, Bool)
 parseObjectTypeField = do
   fieldLabel <- parseIdentifier
+  isOptional <- isJust <$> optional (parsePunctuation PunctuationQuestion)
   parsePunctuation PunctuationColon
   fieldType <- parseType
-  pure (fieldLabel, fieldType)
+  pure (fieldLabel, fieldType, isOptional)
 
 -- | @[A, B, ...]@ — a tuple type (the ordered seq layer named by minimum
 -- positions). @[]@ is the empty tuple type; @[T]@ a one-element tuple. The

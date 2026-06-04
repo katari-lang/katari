@@ -184,11 +184,25 @@ data BareSeq
 --     (more fields = subtype, via width).
 --   * @'RecordObj' v@ — a homogeneous @record[V]@; the top of the structural
 --     part (@{l: T} <: record[⋃T]@), absorbs closed objects on union.
+-- | The structural object's fields reuse 'NormalizedParameter' (a parameter
+-- signature is, semantically, an object): each field is a type plus whether it
+-- is optional (may be absent).
 data BareObj
   = NoObj
-  | ClosedObj (Map Text NormalizedType)
+  | ClosedObj (Map Text NormalizedParameter)
   | RecordObj NormalizedType
   deriving (Eq, Show)
+
+-- | A required (non-optional) normalized field.
+requiredNormalizedField :: NormalizedType -> NormalizedParameter
+requiredNormalizedField parameterType = NormalizedParameter {parameterType = parameterType, optional = False}
+
+-- | Normalise / denormalise a single object field (preserving optionality).
+normaliseField :: Parameter Resolved -> NormalizedParameter
+normaliseField field = NormalizedParameter (normaliseSemantic field.parameterType) field.optional
+
+denormaliseField :: NormalizedParameter -> Parameter Resolved
+denormaliseField field = Parameter (denormalise field.parameterType) field.optional
 
 -- | Map layer — object, record and @data@ merged into one layer.
 --
@@ -439,7 +453,7 @@ mapBranches MapSlot {dataNames, bare} =
   [SemanticTypeData qualifiedName | qualifiedName <- Set.toList dataNames]
     ++ case bare of
       NoObj -> []
-      ClosedObj fields -> [SemanticTypeObject (Map.map denormalise fields)]
+      ClosedObj fields -> [SemanticTypeObject (Map.map denormaliseField fields)]
       RecordObj valueType -> [SemanticTypeRecord (denormalise valueType)]
 
 -- ---------------------------------------------------------------------------
@@ -546,7 +560,7 @@ normaliseSemantic = \case
   SemanticTypeObject fields ->
     NormalizedTypeLayered
       emptyLayered
-        { mapLayer = emptyMapSlot {bare = ClosedObj (Map.map normaliseSemantic fields)}
+        { mapLayer = emptyMapSlot {bare = ClosedObj (Map.map normaliseField fields)}
         }
   SemanticTypeRecord valueType ->
     NormalizedTypeLayered
@@ -635,13 +649,17 @@ unionBareObj :: BareObj -> BareObj -> BareObj
 unionBareObj leftBare rightBare = case (leftBare, rightBare) of
   (NoObj, other) -> other
   (other, NoObj) -> other
-  -- covariant join: keep only common labels, types unioned (width).
+  -- covariant join: keep only common labels, types unioned (width); a label
+  -- optional in either operand is optional in the join.
   (ClosedObj leftFields, ClosedObj rightFields) ->
-    ClosedObj (Map.intersectionWith unionNT leftFields rightFields)
+    ClosedObj (Map.intersectionWith unionField leftFields rightFields)
   (RecordObj leftValue, RecordObj rightValue) -> RecordObj (unionNT leftValue rightValue)
   -- a record absorbs a closed object: every field value joins into V.
-  (ClosedObj fields, RecordObj value) -> RecordObj (foldr unionNT value (Map.elems fields))
-  (RecordObj value, ClosedObj fields) -> RecordObj (foldr unionNT value (Map.elems fields))
+  (ClosedObj fields, RecordObj value) -> RecordObj (foldr (unionNT . (.parameterType)) value (Map.elems fields))
+  (RecordObj value, ClosedObj fields) -> RecordObj (foldr (unionNT . (.parameterType)) value (Map.elems fields))
+  where
+    unionField leftField rightField =
+      NormalizedParameter (unionNT leftField.parameterType rightField.parameterType) (leftField.optional || rightField.optional)
 
 -- | Union of function slots.
 --
@@ -791,13 +809,18 @@ intersectBareObj :: BareObj -> BareObj -> BareObj
 intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
   (NoObj, _) -> NoObj
   (_, NoObj) -> NoObj
-  -- meet: union of labels, common intersected, single-side kept.
+  -- meet: union of labels, common intersected, single-side kept; a common
+  -- label is optional only when optional in both operands.
   (ClosedObj leftFields, ClosedObj rightFields) ->
-    ClosedObj (Map.unionWith intersectNT leftFields rightFields)
+    ClosedObj (Map.unionWith intersectField leftFields rightFields)
   (RecordObj leftValue, RecordObj rightValue) -> RecordObj (intersectNT leftValue rightValue)
   -- record ∩ closed object: keep the object, each field intersected with V.
-  (ClosedObj fields, RecordObj value) -> ClosedObj (Map.map (`intersectNT` value) fields)
-  (RecordObj value, ClosedObj fields) -> ClosedObj (Map.map (intersectNT value) fields)
+  (ClosedObj fields, RecordObj value) -> ClosedObj (Map.map (intersectFieldType (`intersectNT` value)) fields)
+  (RecordObj value, ClosedObj fields) -> ClosedObj (Map.map (intersectFieldType (intersectNT value)) fields)
+  where
+    intersectField leftField rightField =
+      NormalizedParameter (intersectNT leftField.parameterType rightField.parameterType) (leftField.optional && rightField.optional)
+    intersectFieldType f field = NormalizedParameter (f field.parameterType) field.optional
 
 -- ---------------------------------------------------------------------------
 -- Subtype check
@@ -886,24 +909,29 @@ subtypeNormalizedType env boundEnv = go
       where
         dataMatches qualifiedName =
           Set.member qualifiedName rightData
-            || subtypeBareObj (ClosedObj (dataObjectView qualifiedName)) rightBare
+            || subtypeBareObj (ClosedObj (Map.map requiredNormalizedField (dataObjectView qualifiedName))) rightBare
         dataObjectView qualifiedName = Map.findWithDefault Map.empty qualifiedName env
 
     subtypeBareObj leftBare rightBare = case (leftBare, rightBare) of
       (NoObj, _) -> True
       (_, NoObj) -> False
       (ClosedObj leftFields, ClosedObj rightFields) ->
-        -- width: every field of right is in left with a compatible type.
+        -- width: every required field of right is present in left with a
+        -- compatible type; a right field that is optional may be absent in
+        -- left, and a left field that is optional cannot satisfy a required
+        -- right field (it might be absent). Left's extra fields are ignored.
         all (checkField leftFields) (Map.toList rightFields)
       (ClosedObj leftFields, RecordObj rightValue) ->
-        all (`go` rightValue) (Map.elems leftFields)
+        all (\field -> go field.parameterType rightValue) (Map.elems leftFields)
       (RecordObj _, ClosedObj _) -> False
       (RecordObj leftValue, RecordObj rightValue) -> go leftValue rightValue
       where
-        checkField leftFields (fieldName, rightFieldType) =
+        checkField leftFields (fieldName, rightField) =
           case Map.lookup fieldName leftFields of
-            Just leftFieldType -> go leftFieldType rightFieldType
-            Nothing -> False
+            Just leftField ->
+              (rightField.optional || not leftField.optional)
+                && go leftField.parameterType rightField.parameterType
+            Nothing -> rightField.optional
 
     subtypeFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
       (FunctionSlotAbsent, _) -> True
