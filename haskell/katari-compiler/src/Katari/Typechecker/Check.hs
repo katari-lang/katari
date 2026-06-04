@@ -46,7 +46,7 @@ import Data.Text qualified as Text
 import Katari.AST
 import Katari.Common (LiteralValue (..), QualifiedName (..), TypePatternTag (..))
 import Katari.Diagnostic (Diagnostic, diagnosticError)
-import Katari.Id (TypeResolution (..), VariableResolution (..))
+import Katari.Id (GenericsId, TypeResolution (..), VariableResolution (..))
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SemanticType.Render (renderSemanticType)
@@ -84,6 +84,13 @@ data CheckError
     CheckErrorNoSuchField SourceSpan Text
   | -- | A recursive agent (named here) is missing its mandatory return type.
     CheckErrorRecursiveReturn SourceSpan Text
+  | -- | A generic callable (named here) was referenced without instantiating
+    -- its type parameters (@foo@ instead of @foo[...]@). First-class generics
+    -- only: every use site must apply all type arguments.
+    CheckErrorMustInstantiate SourceSpan Text
+  | -- | A generic application supplied the wrong number of type arguments
+    -- (expected, actual).
+    CheckErrorTypeArgArity SourceSpan Int Int
   | -- | A compiler-invariant violation (e.g. a node the Identifier pass should
     -- have eliminated). Should never fire on a well-formed AST.
     CheckErrorInternal SourceSpan Text
@@ -122,6 +129,16 @@ toDiagnostic = \case
       "K0216"
       ("recursive agent '" <> name <> "' needs an explicit return type — it can't be inferred through the recursion")
       sourceSpan
+  CheckErrorMustInstantiate sourceSpan name ->
+    diagnosticError
+      "K0217"
+      ("generic callable '" <> name <> "' must be instantiated with type arguments (write '" <> name <> "[...]')")
+      sourceSpan
+  CheckErrorTypeArgArity sourceSpan expected actual ->
+    diagnosticError
+      "K0218"
+      ("wrong number of type arguments: expected " <> Text.pack (show expected) <> ", got " <> Text.pack (show actual))
+      sourceSpan
   CheckErrorInternal sourceSpan what ->
     diagnosticError "K9999" ("internal typechecker invariant violated: " <> what) sourceSpan
 
@@ -149,6 +166,13 @@ data CheckEnv = CheckEnv
     -- enclosing generic declaration's @extends@ clauses, normalized). Empty
     -- outside a generic body. Consulted by 'subtypeAssert' for bound expansion.
     checkBoundEnv :: BoundEnv,
+    -- | Per-callable generic parameter lists (in declaration order: each
+    -- parameter's 'GenericsId' + its bound), for every generic callable in the
+    -- module. A non-empty entry marks a callable as generic: a bare reference
+    -- to it is a \"must instantiate\" error, and @foo[args]@ substitutes the
+    -- type arguments into its signature. (First-class generics only — node
+    -- types never carry an un-applied scheme.)
+    checkGenericParams :: Map VariableResolution [(GenericsId, SemanticType Resolved)],
     -- | The enclosing agent body's declared / expected return type, if any.
     checkExpectedReturn :: Maybe (SemanticType Resolved)
   }
@@ -214,6 +238,82 @@ buildBoundEnv parameters = Map.fromList . catMaybes <$> mapM one parameters
         boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
         pure (Just (genericsId, normaliseSemantic boundType))
       _ -> pure Nothing
+
+-- | Gather every generic callable in the module: its 'VariableResolution'
+-- mapped to its parameters in declaration order (each parameter's 'GenericsId'
+-- + its elaborated @extends@ bound). A non-empty list marks the callable as
+-- generic (must be instantiated at use sites). Built once per SCC over the
+-- whole module so cross-SCC callers can instantiate.
+buildModuleGenericParams ::
+  [Declaration Identified] ->
+  Check (Map VariableResolution [(GenericsId, SemanticType Resolved)])
+buildModuleGenericParams declarations =
+  Map.fromList . catMaybes <$> mapM one declarations
+  where
+    one = \case
+      DeclarationAgent decl -> fromParams decl.name decl.typeParameters
+      DeclarationData decl -> fromParams decl.name decl.typeParameters
+      _ -> pure Nothing
+    fromParams _ [] = pure Nothing
+    fromParams nameRef typeParameters = case nameRef.resolution of
+      Just resolution -> do
+        infos <- catMaybes <$> mapM paramInfo typeParameters
+        pure (Just (resolution, infos))
+      Nothing -> pure Nothing
+    paramInfo GenericParameter {name, upperBound} = case name.resolution of
+      Just (ResolvedGenericParam genericsId) -> do
+        boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
+        pure (Just (genericsId, boundType))
+      _ -> pure Nothing
+
+-- | Substitute concrete types for generic parameters throughout a type (used
+-- to instantiate a generic callable's signature at @foo[args]@). Effects carry
+-- no type generics yet, so they pass through unchanged.
+substituteGenerics :: Map GenericsId (SemanticType Resolved) -> SemanticType Resolved -> SemanticType Resolved
+substituteGenerics substitution = go
+  where
+    go = \case
+      SemanticTypeGeneric genericsId -> Map.findWithDefault (SemanticTypeGeneric genericsId) genericsId substitution
+      SemanticTypeArray element -> SemanticTypeArray (go element)
+      SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
+      SemanticTypeUnion branches -> unionSemantic (map go branches)
+      SemanticTypeRecord valueType -> SemanticTypeRecord (go valueType)
+      SemanticTypeObject fields -> SemanticTypeObject (Map.map go fields)
+      SemanticTypeFunction parameters returnType effect ->
+        SemanticTypeFunction
+          (Map.map (\parameter -> parameter {parameterType = go parameter.parameterType}) parameters)
+          (go returnType)
+          effect
+      other -> other
+
+-- | The variable a callee resolves to, if it is a plain name / qualified
+-- reference (the only shapes that can name a generic callable).
+calleeResolution :: Expression Identified -> Maybe VariableResolution
+calleeResolution = \case
+  ExpressionVariable variable -> variable.name.resolution
+  ExpressionQualifiedReference reference -> reference.target.resolution
+  _ -> Nothing
+
+-- | The generic parameters of the callable a reference resolves to (empty for
+-- a monomorphic callable / a non-callable).
+genericParamsOf :: Maybe VariableResolution -> Check [(GenericsId, SemanticType Resolved)]
+genericParamsOf = \case
+  Just resolution -> asks (Map.findWithDefault [] resolution . (.checkGenericParams))
+  Nothing -> pure []
+
+-- | Rebuild a generic application's callee as a zonked node carrying the
+-- instantiated (concrete) type, bypassing the bare-reference \"must
+-- instantiate\" check (this IS the instantiation).
+retagGenericCallee :: Expression Identified -> SemanticType Resolved -> Check (Expression Zonked)
+retagGenericCallee callee concreteType = case callee of
+  ExpressionVariable VariableExpression {name, sourceSpan} ->
+    pure (ExpressionVariable VariableExpression {name = retagNameRef name, sourceSpan = sourceSpan, typeOf = concreteType})
+  ExpressionQualifiedReference QualifiedReferenceExpression {moduleQualifier, target, sourceSpan} ->
+    pure
+      ( ExpressionQualifiedReference
+          QualifiedReferenceExpression {moduleQualifier = retagNameRef moduleQualifier, target = retagNameRef target, sourceSpan = sourceSpan, typeOf = concreteType}
+      )
+  _ -> fst <$> synthExpr callee
 
 -- | Record a pending exit value (a @break@ / @next@ payload) for the nearest
 -- enclosing scope to collect.
@@ -359,10 +459,10 @@ synthExpr = \case
     let semantic = literalValueToSemantic value
      in pure (ExpressionLiteral LiteralExpression {value = value, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
   ExpressionVariable VariableExpression {name, sourceSpan} -> do
-    semantic <- lookupVariableType sourceSpan name.text name.resolution
+    semantic <- referenceType sourceSpan name.text name.resolution
     pure (ExpressionVariable VariableExpression {name = retagNameRef name, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
   ExpressionQualifiedReference QualifiedReferenceExpression {moduleQualifier, target, sourceSpan} -> do
-    semantic <- lookupVariableType sourceSpan target.text target.resolution
+    semantic <- referenceType sourceSpan target.text target.resolution
     pure
       ( ExpressionQualifiedReference
           QualifiedReferenceExpression {moduleQualifier = retagNameRef moduleQualifier, target = retagNameRef target, sourceSpan = sourceSpan, typeOf = semantic},
@@ -398,21 +498,7 @@ synthExpr = \case
       ( ExpressionFieldAccess FieldAccessExpression {object = object', fieldName = retagNameRef fieldName, sourceSpan = sourceSpan, typeOf = semantic},
         semantic
       )
-  ExpressionTypeApplication TypeApplicationExpression {callee, typeArguments, sourceSpan} -> do
-    -- Step B (structural): the callee's type passes through unchanged. Type-
-    -- argument substitution and the "generic must be instantiated" check land
-    -- in a later step.
-    (callee', calleeType) <- synthExpr callee
-    pure
-      ( ExpressionTypeApplication
-          TypeApplicationExpression
-            { callee = callee',
-              typeArguments = map retagSyntacticType typeArguments,
-              sourceSpan = sourceSpan,
-              typeOf = calleeType
-            },
-        calleeType
-      )
+  ExpressionTypeApplication typeApp -> synthGenericApplication typeApp
   ExpressionTemplate TemplateExpression {elements, sourceSpan} -> do
     walked <- mapM walkTemplateElement elements
     let interpolated = mapMaybe snd walked
@@ -428,6 +514,18 @@ lookupVariableType :: SourceSpan -> Text -> Maybe VariableResolution -> Check (S
 lookupVariableType _ _ = \case
   Just resolution -> maybe SemanticTypeUnknown id <$> lookupLocal resolution
   Nothing -> pure SemanticTypeUnknown
+
+-- | The type of a value reference, rejecting a bare reference to a generic
+-- callable (which must be instantiated as @foo[...]@ — the application case
+-- handles that separately and never reaches here).
+referenceType :: SourceSpan -> Text -> Maybe VariableResolution -> Check (SemanticType Resolved)
+referenceType sourceSpan text resolution = do
+  params <- genericParamsOf resolution
+  if null params
+    then lookupVariableType sourceSpan text resolution
+    else do
+      emitError (CheckErrorMustInstantiate sourceSpan text)
+      pure SemanticTypeUnknown
 
 -- | A form that the Identifier pass should have eliminated — record an
 -- internal-invariant diagnostic and yield a @null@ placeholder.
@@ -460,6 +558,43 @@ synthCall CallExpression {callee, arguments, sourceSpan} = do
     Just rule | rule /= PrimRuleSimple -> applyPrimRule rule argTypes sourceSpan
     _ -> applyNormalCall sourceSpan calleeType argTypes
   pure (ExpressionCall CallExpression {callee = callee', arguments = arguments', sourceSpan = sourceSpan, typeOf = result}, result)
+
+-- | Synthesise a generic application @callee[T1, ...]@: look up the callee's
+-- generic parameters, elaborate the type arguments, check each against its
+-- bound, and substitute them into the callee's signature to get a concrete
+-- type. A non-generic callee with type arguments is an arity error.
+synthGenericApplication :: TypeApplicationExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthGenericApplication TypeApplicationExpression {callee, typeArguments, sourceSpan} = do
+  let resolution = calleeResolution callee
+  params <- genericParamsOf resolution
+  if null params
+    then do
+      (callee', calleeType) <- synthExpr callee
+      if null typeArguments
+        then pure ()
+        else emitError (CheckErrorTypeArgArity sourceSpan 0 (length typeArguments))
+      pure (rebuilt callee' calleeType, calleeType)
+    else do
+      argTypes <- mapM elaborateType typeArguments
+      if length argTypes == length params
+        then pure ()
+        else emitError (CheckErrorTypeArgArity sourceSpan (length params) (length argTypes))
+      let pairs = zip params argTypes
+      forM_ pairs $ \((_, bound), argType) -> subtypeAssert sourceSpan argType bound
+      calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocal) resolution
+      let substitution = Map.fromList [(genericsId, argType) | ((genericsId, _), argType) <- pairs]
+          concreteType = substituteGenerics substitution calleeSig
+      calleeZonked <- retagGenericCallee callee concreteType
+      pure (rebuilt calleeZonked concreteType, concreteType)
+  where
+    rebuilt calleeZonked resultType =
+      ExpressionTypeApplication
+        TypeApplicationExpression
+          { callee = calleeZonked,
+            typeArguments = map retagSyntacticType typeArguments,
+            sourceSpan = sourceSpan,
+            typeOf = resultType
+          }
 
 walkCallArgument :: CallArgument Identified -> Check (CallArgument Zonked, (Text, SemanticType Resolved))
 walkCallArgument CallArgument {label, value, sourceSpan} = do
@@ -961,10 +1096,19 @@ checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primR
             checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables,
             checkPrimRules = primRules,
             checkBoundEnv = Map.empty,
+            checkGenericParams = Map.empty,
             checkExpectedReturn = Nothing
           }
       sccDeclarations = filter (declarationInSCC sccQualifiedNames) moduleAST.declarations
-      (results, errors, localTypes) = runCheck env (checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations)
+      -- Generic-parameter lists are gathered from the WHOLE module's
+      -- declarations (not just this SCC), so a caller in a later SCC can
+      -- instantiate a generic callable defined in an earlier one without
+      -- threading the lists through the SCC accumulator.
+      checkAction = do
+        genericParams <- buildModuleGenericParams moduleAST.declarations
+        local (\e -> e {checkGenericParams = genericParams}) $
+          checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations
+      (results, errors, localTypes) = runCheck env checkAction
       zonked = Map.fromList [(qualifiedName, declaration) | (qualifiedName, declaration, _) <- results]
       signatures = Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- results]
       typeEnv = Map.union (Map.mapKeys ResolvedTopLevel signatures) localTypes

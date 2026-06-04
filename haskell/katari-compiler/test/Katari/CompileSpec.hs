@@ -145,6 +145,33 @@ happyPathSpec = describe "well-formed single-module input" $ do
     let result = compileSync (singleSourceInput "agent f[T](x: T) -> integer { x }")
     hasErrors result.diagnostics `shouldBe` True
 
+  it "instantiates a generic agent at a call site" $ do
+    let src =
+          mconcat
+            [ "agent identity[T](x: T) -> T { x }\n",
+              "agent main() -> integer { identity[integer](x = 3) }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` False
+
+  it "rejects an argument that violates the instantiated parameter type" $ do
+    let src =
+          mconcat
+            [ "agent identity[T](x: T) -> T { x }\n",
+              "agent main() -> string { identity[integer](x = \"oops\") }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
+  it "rejects a bare (un-instantiated) generic reference" $ do
+    let src =
+          mconcat
+            [ "agent identity[T](x: T) -> T { x }\n",
+              "agent main() -> agent { identity }\n"
+            ]
+    let result = compileSync (singleSourceInput src)
+    hasErrors result.diagnostics `shouldBe` True
+
   it "multi-line array literal does NOT require trailing comma" $ do
     let src =
           mconcat
