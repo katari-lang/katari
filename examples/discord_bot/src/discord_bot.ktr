@@ -36,13 +36,40 @@ agent run_python(code: string) -> string with get_e2b_key {
   e2b_exec(code = code, api_key = get_e2b_key())
 }
 
-@"Infer over the history, letting the model call any of the tools; the ext runs the tool-call feedback loop, dispatching the chosen tool via delegate. `tool_metas[i]` is `get_metadata(tools[i])` (name / description / input schema)."
-external infer_with_tools(
+@"One inference step's decision: a final reply text for the user."
+data step_final(text: string)
+
+@"One inference step's decision: call a tool — @tool_index@ selects it from the tools array, @args@ is the record the model produced for it (validated at dispatch)."
+data step_call(tool_index: integer, args: {})
+
+@"One model step over the history + tool schemas. Returns the model's decision (a final reply or a tool call); the loop that feeds tool results back lives in Katari (`infer_with_tools`), not the sidecar. `tool_metas[i]` is `get_metadata(tools[i])` (name / description / input schema)."
+external infer_step(
   client: ai_client,
   history: array[turn],
-  tools: array[agent (code: string) -> string with get_e2b_key],
   tool_metas: array[agent_metadata]
-) -> string from "FFI:discord_bot.infer_with_tools"
+) -> step_final | step_call from "FFI:discord_bot.infer_step"
+
+@"Run the tool-using model loop IN KATARI: derive each tool's schema with get_metadata, then up to @max_steps@ times ask the model for a step; on a tool call, dynamically dispatch the chosen tool by value via call_agent (validating the model's args against the tool's schema) and feed its output back as a new turn; on a final answer, return it. Generic over the tools' shared effect @E@ — calling a tool raises @E@, tracked right through this agent's signature."
+agent infer_with_tools[effect E](
+  history: array[turn],
+  tools: array[agent (...never) -> unknown with E],
+  max_steps: integer
+) -> string with E | get_ai_client | error_invalid_argument {
+  let tool_metas = for (let tool in tools, var metas: array[agent_metadata] = array.empty()) {
+    next with { metas = array.append(array = metas, value = get_metadata(value = tool)) }
+  } then { metas }
+  for (let _step in array.range(count = max_steps), var conversation: array[turn] = history) {
+    match (infer_step(client = get_ai_client(), history = conversation, tool_metas = tool_metas)) {
+      case step_final(text = reply) => { break reply }
+      case step_call(tool_index = tool_index, args = args) => {
+        let tool = array.get(array = tools, index = tool_index)
+        let result = call_agent[unknown, E](target = tool, args = args)
+        let result_turn = turn(role = "tool", text = to_string(value = result))
+        next with { conversation = array.append(array = conversation, value = result_turn) }
+      }
+    }
+  } then { "(no final answer within the step budget)" }
+}
 
 @"Post a message to a channel using the ambient Discord client."
 agent send_message(channel_id: string, text: string) -> null with get_discord_client {
@@ -55,16 +82,13 @@ agent deliver(text: string, channel_id: string) -> null with on_message {
 }
 
 @"Serve a channel forever, raising on_message for each message. Just provide the channel + a handler."
-agent watch_messages(channel_id: string) -> never with on_message, get_discord_client {
+agent watch_messages(channel_id: string) -> never with on_message | get_discord_client {
   discord_watch(client = get_discord_client(), channel_id = channel_id, on_message = deliver)
 }
 
-@"Run the tool-using model once over a history (its last turn is the user's task). Each tool's schema comes from get_metadata, mapped over the tools array."
-agent ask(history: array[turn], tools: array[agent (code: string) -> string with get_e2b_key]) -> string with get_ai_client, get_e2b_key {
-  let tool_metas = for (let t in tools, var acc = array.empty()) {
-    next with { acc = array.append(array = acc, value = get_metadata(value = t)) }
-  } then { acc }
-  infer_with_tools(client = get_ai_client(), history = history, tools = tools, tool_metas = tool_metas)
+@"Run the tool-using model loop over a history (its last turn is the user's task). The tools all share the @get_e2b_key@ effect, which `infer_with_tools[get_e2b_key]` tracks through to here."
+agent ask(history: array[turn], tools: array[agent (...never) -> unknown with get_e2b_key]) -> string with get_ai_client | get_e2b_key | error_invalid_argument {
+  infer_with_tools[get_e2b_key](history = history, tools = tools, max_steps = 8)
 }
 
 @"Standalone entry to test the tool loop from the CLI (no Discord): katari run discord_bot.solve --args '{\"task\": \"...\"}'."
@@ -107,7 +131,7 @@ agent main(channel_id: string) -> string {
       next discord
     }
   }
-  handle (var history = array.empty()) {
+  handle (var history: array[turn] = array.empty()) {
     request on_message(text: string, channel_id: string) {
       let asked = array.append(array = history, value = turn(role = "user", text = text))
       let reply = ai_infer(client = get_ai_client(), history = asked)
