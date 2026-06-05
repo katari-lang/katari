@@ -18,6 +18,7 @@
 // created — `literalToValue` reads it from the shard's `state.snapshot`.
 
 import type { LiteralValue, QualifiedName } from "../ir/types.js";
+import type { Json } from "../json.js";
 import { hashText } from "../storage/hash.js";
 
 /** Owner module of a value reference. `project` is ambient (not carried). */
@@ -73,7 +74,11 @@ export type Value =
   // cross-shard mark-sweep). There is no machine-local closure VALUE form — the
   // shard-local dispatch record (`state.closures`) is keyed by the engine's
   // `closure:N` agent def id, never by a Value.
-  | { kind: "closure"; ref: RefRep }
+  // `generics` (when present) is the resolved generic substitution attached by
+  // a `foo[args]` instantiation (statementApplyGenerics): a map from the
+  // callee's GenericsId (as a string key) to the proper JSON Schema of its type
+  // argument. `get_metadata` fills the callee's GenericSchema with it.
+  | { kind: "closure"; ref: RefRep; generics?: Record<string, Json> }
   // Top-level callable reference (agent / prim / ctor / external). An agent
   // value is the EXTERNAL form: it carries the snapshot it resolves against
   // (`qualifiedName@snapshot` on the wire), set when the value is born — from
@@ -82,7 +87,14 @@ export type Value =
   // for IR-entries / dispatch lookup. `snapshot` is absent only for an
   // internal-form value that leaked to the boundary (delegating it then fails
   // with an un-stamped-target error — the same "not found" outcome).
-  | { kind: "agentLiteral"; qualifiedName: QualifiedName; snapshot?: string };
+  | {
+      kind: "agentLiteral";
+      qualifiedName: QualifiedName;
+      snapshot?: string;
+      // Resolved generic substitution (see the `closure` variant) attached by a
+      // `foo[args]` instantiation.
+      generics?: Record<string, Json>;
+    };
 
 /** A closure carried by content-addressed ref (its serialized body+env blob). */
 export type ClosureValue = Extract<Value, { kind: "closure" }>;

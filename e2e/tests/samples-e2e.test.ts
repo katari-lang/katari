@@ -367,4 +367,15 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     const result = await applyAndRun("spread", "26-spread");
     expect(result).toBe("(3, 4) sum=7");
   });
+
+  itE2E(
+    "27-generic-schema: get_metadata on identity[integer] fills the $generic placeholder",
+    async () => {
+      const result = await applyAndRun("generic_schema", "27-generic-schema");
+      const schema = JSON.parse(result);
+      // The T placeholder is specialised to integer; no $generic remains.
+      expect(schema.properties.x).toEqual({ type: "integer" });
+      expect(result).not.toContain("$generic");
+    },
+  );
 });

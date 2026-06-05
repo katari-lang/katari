@@ -15,7 +15,9 @@
 // itself stays uniform — no special agent-call statement variant.
 
 import type { Block, BlockId, CallData, Statement, UserBlock, VarId } from "../../../ir/types.js";
+import type { Json } from "../../../json.js";
 import type { AskKind, ModMap } from "../../event.js";
+import { fillGenericSchema } from "../../generics.js";
 import type { CallId, ScopeId } from "../../id.js";
 import { tryMatch } from "../../pattern.js";
 import { spawnChild, spawnMakeClosure } from "../../spawn.js";
@@ -179,6 +181,25 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
       for (const [varId, value] of Object.entries(bindings)) {
         setValueInScope(ctx, t.scopeId, Number(varId), value);
       }
+      return "advance";
+    }
+    case "statementApplyGenerics": {
+      // Attach a resolved generic substitution to an agent / closure value. The
+      // template schemas may carry `$generic` placeholders referencing the
+      // enclosing agent's parameters; fill them with the ambient substitution
+      // (empty until delegation records one — concrete `foo[int]` args carry no
+      // placeholders, so the fill is a no-op there).
+      const source = lookupValue(ctx, t.scopeId, stmt.body.source);
+      const ambient: Record<string, Json> = {};
+      const generics: Record<string, Json> = {};
+      for (const [genericsId, schemaJson] of stmt.body.generics) {
+        generics[String(genericsId)] = fillGenericSchema(ambient, JSON.parse(schemaJson) as Json);
+      }
+      const withGenerics =
+        source.kind === "agentLiteral" || source.kind === "closure"
+          ? { ...source, generics }
+          : source;
+      setValueInScope(ctx, t.scopeId, stmt.body.output, withGenerics);
       return "advance";
     }
     case "statementExit": {

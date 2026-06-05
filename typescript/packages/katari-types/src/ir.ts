@@ -383,6 +383,24 @@ export type BindPatternData = {
   pattern: MatchPattern;
 };
 
+/**
+ * Payload for `statementApplyGenerics`. Attaches a generic substitution to an
+ * agent / closure value: `source` is the bare callable value (from a
+ * `foo[args]` instantiation), `generics` maps each callee `GenericsId` (the
+ * first element) to the JSON-encoded GenericSchema of its type argument (the
+ * second). The runtime fills any `$generic` placeholders in those schemas with
+ * the thread's ambient substitution, then writes a copy of the value carrying
+ * the resolved substitution to `output` (consulted by `get_metadata`).
+ */
+export type ApplyGenericsData = {
+  source: VarId;
+  generics: [GenericsId, string][];
+  output: VarId;
+};
+
+/** A generic-parameter id (the runtime key for a generic substitution). */
+export type GenericsId = number;
+
 // ─── Statement (sumOptions, "body" payload key) ────────────────────────────
 
 export type Statement =
@@ -391,4 +409,5 @@ export type Statement =
   | { kind: "statementLoadLiteral"; body: LoadLiteralData }
   | { kind: "statementExit"; body: ExitData }
   | { kind: "statementCont"; body: ContData }
-  | { kind: "statementBindPattern"; body: BindPatternData };
+  | { kind: "statementBindPattern"; body: BindPatternData }
+  | { kind: "statementApplyGenerics"; body: ApplyGenericsData };

@@ -7,6 +7,7 @@
 
 export type {
   AgentBlock,
+  ApplyGenericsData,
   BindPatternData,
   Block,
   BlockId,

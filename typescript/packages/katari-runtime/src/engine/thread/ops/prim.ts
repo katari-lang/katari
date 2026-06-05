@@ -17,6 +17,7 @@ import { encodeCoreAgentDefId } from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import { decodeClosureBlob } from "../../closure-codec.js";
 import { RecoverableEngineError } from "../../errors.js";
+import { fillGenericSchema } from "../../generics.js";
 import type { AskId, CallId } from "../../id.js";
 import { executePrim, PrimRaiseRequest } from "../../prim.js";
 import type { StepCtx } from "../../step-ctx.js";
@@ -170,6 +171,15 @@ async function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Pr
     throw new RecoverableEngineError("prim get_metadata: missing argument 'value'");
   }
   const meta = await resolveCallableMetadata(ctx, value);
+  // If the callable value carries a generic substitution (from a `foo[args]`
+  // instantiation), specialise its GenericSchema — replace each `$generic`
+  // placeholder with the substituted type's concrete schema.
+  const generics =
+    value.kind === "agentLiteral" || value.kind === "closure" ? value.generics : undefined;
+  const fill = (schemaJson: string): string =>
+    generics === undefined
+      ? schemaJson
+      : JSON.stringify(fillGenericSchema(generics, JSON.parse(schemaJson)));
   return {
     kind: "record",
     ctor: "primitive.agent_metadata",
@@ -177,8 +187,8 @@ async function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Pr
       name: mkString(meta.name),
       id: mkString(meta.id),
       description: mkString(meta.description ?? ""),
-      input: mkString(meta.inputSchema),
-      output: mkString(meta.outputSchema),
+      input: mkString(fill(meta.inputSchema)),
+      output: mkString(fill(meta.outputSchema)),
     },
   };
 }

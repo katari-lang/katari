@@ -1,0 +1,9 @@
+@"Identity over any type."
+agent identity[T](x: T) -> T { x }
+
+@"get_metadata on identity[integer] yields a schema specialised to integer."
+agent main() -> string {
+  let f = identity[integer]
+  let m = get_metadata(value = f)
+  m.input
+}
