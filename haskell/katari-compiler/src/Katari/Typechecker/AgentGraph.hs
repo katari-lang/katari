@@ -100,7 +100,9 @@ declarationDependencies moduleName = \case
         collectFromExpression statement.value
           <> Set.unions (map collectFromModifier statement.modifiers)
       StatementBreak statement -> collectFromExpression statement.value
-      StatementForNext statement -> Set.unions (map collectFromModifier statement.modifiers)
+      StatementForNext statement ->
+        collectFromExpression statement.value
+          <> Set.unions (map collectFromModifier statement.modifiers)
       StatementForBreak statement -> collectFromExpression statement.value
       StatementError _ -> Set.empty
 
@@ -127,7 +129,7 @@ declarationDependencies moduleName = \case
         Set.unions (map collectFromForInBinding expression.inBindings)
           <> Set.unions (map collectFromForVarBinding expression.varBindings)
           <> collectFromBlock expression.body
-          <> maybe Set.empty collectFromBlock expression.thenBlock
+          <> maybe Set.empty collectFromThenClause expression.thenBlock
       ExpressionBlock expression -> collectFromBlock expression.block
       ExpressionHandle expression ->
         Set.unions (map collectFromStateVariable expression.stateVariables)

@@ -32,7 +32,7 @@ module Katari.Typechecker.Check
   )
 where
 
-import Control.Monad (forM, forM_, zipWithM)
+import Control.Monad (forM, forM_, when, zipWithM)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Data.List (transpose)
@@ -88,6 +88,16 @@ data CheckError
   | -- | A request handler body falls through to a value instead of exiting
     -- with @break@ / @next@.
     CheckErrorHandlerMustExit SourceSpan
+  | -- | A @for@ body falls through to a value instead of exiting with
+    -- @next@ / @break@ (every iteration must contribute a mapped value via
+    -- @next@ or short-circuit via @break@).
+    CheckErrorForBodyMustExit SourceSpan
+  | -- | A @par for@ uses @var@ loop state, which parallel iterations can't
+    -- order deterministically.
+    CheckErrorParallelForState SourceSpan
+  | -- | A @par for@ uses @break@, which has no well-defined ordering across
+    -- concurrent iterations.
+    CheckErrorParallelForBreak SourceSpan
   | -- | A call omits a required (non-defaulted) argument.
     CheckErrorMissingArgument SourceSpan Text
   | -- | Field access on a value whose type lacks the named field.
@@ -146,6 +156,21 @@ toDiagnostic = \case
     diagnosticError
       "K0213"
       "a request handler must exit with 'break' or 'next' — it cannot fall through to a value"
+      sourceSpan
+  CheckErrorForBodyMustExit sourceSpan ->
+    diagnosticError
+      "K0225"
+      "a 'for' body must exit with 'next' or 'break' — it cannot fall through to a value"
+      sourceSpan
+  CheckErrorParallelForState sourceSpan ->
+    diagnosticError
+      "K0226"
+      "a 'par for' cannot use 'var' loop state ('next ... with') — parallel iterations have no deterministic order"
+      sourceSpan
+  CheckErrorParallelForBreak sourceSpan ->
+    diagnosticError
+      "K0227"
+      "a 'par for' cannot use 'break' — early exit has no well-defined meaning across concurrent iterations"
       sourceSpan
   CheckErrorMissingArgument sourceSpan label ->
     diagnosticError "K0214" ("missing required argument '" <> label <> "'") sourceSpan
@@ -217,7 +242,11 @@ data CheckEnv = CheckEnv
 
 -- | Where a non-local control transfer goes — used to collect the value types
 -- a @for@ / handle expression can produce via @break@ / @next@.
-data ExitTag = ForBreakTag | HandleBreakTag | HandleNextTag
+--
+-- 'ForNextTag' carries the values a @for@ body emits via @next v@; the
+-- surrounding @for@ unions them into the loop's mapped element type
+-- (and hence its @array[...]@ output type).
+data ExitTag = ForBreakTag | ForNextTag | HandleBreakTag | HandleNextTag
   deriving (Eq, Show)
 
 data ExitRecord = ExitRecord ExitTag (SemanticType Resolved)
@@ -894,20 +923,43 @@ walkCaseArm subjectType CaseArm {pattern, body, sourceSpan} = do
   (body', bodyType) <- withLocals bindings (walkBlock body)
   pure (CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}, bodyType)
 
+-- | A @for@ collects each iteration's @next v@ into an ordered array (its
+-- mapped output). The element type is the union of the body's @next@ values;
+-- the output type is @array[that]@, post-processed by the optional @then@
+-- clause (which binds the mapped array) and unioned with any @break@ values.
+-- The body must transfer control on every path (like a request handler).
 synthFor :: ForExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
 synthFor ForExpression {parallel, inBindings, varBindings, body, thenBlock, sourceSpan} = do
   (inBindings', inLocals) <- unzipBindings <$> mapM walkForInBinding inBindings
   (varBindings', varLocals) <- unzipBindings <$> mapM walkForVarBinding varBindings
   let loopLocals = inLocals ++ varLocals
-  ((body', thenBlock', thenType), breakTypes) <-
-    collectExits [ForBreakTag] $
-      withLocals loopLocals $ do
-        (body', _) <- walkBlock body
-        (thenBlock', thenType) <- case thenBlock of
-          Just b -> do (b', ty) <- walkBlock b; pure (Just b', ty)
-          Nothing -> pure (Nothing, SemanticTypeNull)
-        pure (body', thenBlock', thenType)
-  let semantic = unionSemantic (thenType : breakTypes)
+  -- Walk the body, peeling off its @break@ values (ForBreakTag) and its mapped
+  -- @next@ values (ForNextTag). Both tags are consumed here so neither leaks to
+  -- an enclosing scope.
+  ((body', bodyType), bodyExits) <-
+    collectExitsTagged [ForBreakTag, ForNextTag] $
+      withLocals loopLocals (walkBlock body)
+  assertMustExit (sourceSpanOf body) bodyType CheckErrorForBodyMustExit
+  let breakTypes = [semantic | ExitRecord ForBreakTag semantic <- bodyExits]
+      nextTypes = [semantic | ExitRecord ForNextTag semantic <- bodyExits]
+      mappedArray = SemanticTypeArray (unionSemantic nextTypes)
+  -- @par for@ restrictions: parallel iterations cannot carry ordered loop state
+  -- or short-circuit via break.
+  when (parallel && not (null varBindings)) $
+    emitError (CheckErrorParallelForState sourceSpan)
+  when (parallel && not (null breakTypes)) $
+    emitError (CheckErrorParallelForBreak sourceSpan)
+  -- The @then@ clause shares the loop's frame (sees state vars) and binds the
+  -- mapped array via its optional pattern.
+  (thenBlock', thenType) <- withLocals loopLocals $ case thenBlock of
+    Nothing -> pure (Nothing, Nothing)
+    Just (maybePattern, thenBody) -> do
+      (pattern', bindings) <- case maybePattern of
+        Just p -> do (p', bs) <- walkPattern mappedArray p; pure (Just p', bs)
+        Nothing -> pure (Nothing, [])
+      (thenBody', thenBodyType) <- withLocals bindings (walkBlock thenBody)
+      pure (Just (pattern', thenBody'), Just thenBodyType)
+  let semantic = unionSemantic (breakTypes ++ [maybe mappedArray id thenType])
   pure
     ( ExpressionFor ForExpression {parallel = parallel, inBindings = inBindings', varBindings = varBindings', body = body', thenBlock = thenBlock', sourceSpan = sourceSpan, typeOf = semantic},
       semantic
@@ -967,19 +1019,27 @@ walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpa
       binding
     )
 
+-- | A body that must transfer control (a request handler body or a @for@
+-- body) cannot fall through to a value: assert its type is 'never', else emit
+-- @mkError@ at @sourceSpan@. 'SemanticTypeUnknown' is treated as
+-- already-errored (a prior diagnostic fired during recovery).
+assertMustExit :: SourceSpan -> SemanticType Resolved -> (SourceSpan -> CheckError) -> Check ()
+assertMustExit sourceSpan bodyType mkError = do
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  boundEnv <- asks (.checkBoundEnv)
+  let isNever = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic bodyType) (normaliseSemantic SemanticTypeNever)
+  case bodyType of
+    SemanticTypeUnknown -> pure ()
+    _ | isNever -> pure ()
+    _ -> emitError (mkError sourceSpan)
+
 walkRequestHandler :: RequestHandler Identified -> Check (RequestHandler Zonked)
 walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
   (parameters', _, paramLocals) <- elaborateParameters parameters
   (body', bodyType) <- withLocals paramLocals (walkBlock body)
   -- A request handler body must transfer control with @break@ / @next@; falling
   -- through to a value (its type is not 'never') is a dedicated error.
-  dataFieldEnv <- asks (.checkDataFieldEnv)
-  boundEnv <- asks (.checkBoundEnv)
-  let isNever = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic bodyType) (normaliseSemantic SemanticTypeNever)
-  case bodyType of
-    SemanticTypeUnknown -> pure () -- error recovery: a prior diagnostic already fired
-    _ | isNever -> pure ()
-    _ -> emitError (CheckErrorHandlerMustExit (sourceSpanOf body))
+  assertMustExit (sourceSpanOf body) bodyType CheckErrorHandlerMustExit
   pure
     RequestHandler
       { moduleQualifier = fmap retagNameRef moduleQualifier,
@@ -1065,9 +1125,11 @@ walkStatement = \case
     (value', valueType) <- synthExpr value
     recordExit ForBreakTag valueType
     pure (StatementForBreak ForBreakStatement {value = value', sourceSpan = sourceSpan}, [], [])
-  StatementForNext ForNextStatement {modifiers, sourceSpan} -> do
+  StatementForNext ForNextStatement {value, modifiers, sourceSpan} -> do
+    (value', valueType) <- synthExpr value
     modifiers' <- mapM walkModifier modifiers
-    pure (StatementForNext ForNextStatement {modifiers = modifiers', sourceSpan = sourceSpan}, [], [])
+    recordExit ForNextTag valueType
+    pure (StatementForNext ForNextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}, [], [])
   StatementAgent agentStatement -> walkLocalAgent agentStatement
   StatementError span_ -> pure (StatementError span_, [], [])
 
@@ -1733,7 +1795,7 @@ statementEffect lookupEffect = \case
   StatementExpression e -> exprEffect lookupEffect e
   StatementBreak s -> exprEffect lookupEffect s.value
   StatementNext s -> exprEffect lookupEffect s.value <> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
-  StatementForNext s -> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
+  StatementForNext s -> exprEffect lookupEffect s.value <> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
   StatementForBreak s -> exprEffect lookupEffect s.value
   -- A nested @agent@ is its own callable; calling it contributes via its
   -- signature at the call site, so its body does not raise here.
@@ -1757,7 +1819,7 @@ exprEffect lookupEffect = go
         foldMap (go . (.source)) e.inBindings
           <> foldMap (go . (.initial)) e.varBindings
           <> blockEffect lookupEffect e.body
-          <> maybe mempty (blockEffect lookupEffect) e.thenBlock
+          <> maybe mempty (blockEffect lookupEffect . snd) e.thenBlock
       ExpressionBlock e -> blockEffect lookupEffect e.block
       ExpressionHandle e -> handleEffect e
       ExpressionFieldAccess e -> go e.object

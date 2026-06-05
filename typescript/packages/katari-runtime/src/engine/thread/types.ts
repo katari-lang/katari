@@ -169,15 +169,27 @@ export type PostCancelAction =
 export type ForThread = Common & {
   kind: "for";
   blockId: BlockId;
+  /** Sequential cursor: the index of the iteration currently running. */
   currentIndex: number;
+  /** Total iteration count (Cartesian product of the iter sources). */
+  total: number;
   /** Iter source array values resolved at construction. */
   iterableSnapshot: Value[];
+  /**
+   * Mapped output accumulator: each iteration's `next v` value, keyed by its
+   * iteration index so parallel completions stay in source order. Assembled
+   * into an array (the loop's value, or the then-clause's input) on
+   * completion.
+   */
+  collected: Record<number, Value>;
+  /** CallId → iteration index, so an inbound `next-for` knows which slot to fill. */
+  iterIndexByCallId: Record<CallId, number>;
   postCancelActions: Record<CallId, PostCancelAction>;
-  /** Set when a `break-for` ask was caught. */
+  /** Set when a `break-for` ask was caught (short-circuits to this value). */
   pendingReturn?: Value;
   /**
    * CallId of the spawned then-block child, when one exists. Set in
-   * `emitForDone` at the moment the then-block is spawned; consulted in
+   * `emitForResult` at the moment the then-block is spawned; consulted in
    * `done` to tell a then-block completion apart from an iteration
    * body completion. `null` when there is no then-block or it has not
    * yet been spawned.

@@ -401,9 +401,10 @@ hoverFromStatement snap moduleName position = \case
   StatementForBreak ForBreakStatement {value, sourceSpan}
     | spanContains sourceSpan position ->
         hoverFromExpression snap moduleName position value
-  StatementForNext ForNextStatement {modifiers, sourceSpan}
+  StatementForNext ForNextStatement {value, modifiers, sourceSpan}
     | spanContains sourceSpan position ->
-        listToMaybe (mapMaybe (hoverFromModifier snap moduleName position) modifiers)
+        hoverFromExpression snap moduleName position value
+          `orElse` listToMaybe (mapMaybe (hoverFromModifier snap moduleName position) modifiers)
   _ -> Nothing
 
 hoverFromModifier :: QuerySnapshot -> Text -> Position -> Modifier Zonked -> Maybe HoverInfo
@@ -453,7 +454,7 @@ hoverFromExpression snap moduleName position expression
         listToMaybe (mapMaybe (hoverFromExpression snap moduleName position . (.source)) fe.inBindings)
           `orElse` listToMaybe (mapMaybe (hoverFromForVarBinding snap moduleName position) fe.varBindings)
           `orElse` hoverFromBlock snap moduleName position fe.body
-          `orElse` (fe.thenBlock >>= hoverFromBlock snap moduleName position)
+          `orElse` (fe.thenBlock >>= hoverFromBlock snap moduleName position . snd)
       ExpressionBlock be ->
         hoverFromBlock snap moduleName position be.block
       ExpressionTuple te ->
@@ -637,9 +638,10 @@ refFromStatement position = \case
   StatementForBreak ForBreakStatement {value, sourceSpan}
     | spanContains sourceSpan position ->
         refFromExpression position value
-  StatementForNext ForNextStatement {modifiers, sourceSpan}
+  StatementForNext ForNextStatement {value, modifiers, sourceSpan}
     | spanContains sourceSpan position ->
-        listToMaybe (mapMaybe (refFromModifier position) modifiers)
+        refFromExpression position value
+          `orElse` listToMaybe (mapMaybe (refFromModifier position) modifiers)
   _ -> Nothing
 
 refFromModifier :: Position -> Modifier Zonked -> Maybe ResolvedReference
@@ -675,7 +677,7 @@ refFromExpression position expression
         listToMaybe (mapMaybe (refFromExpression position . (.source)) fe.inBindings)
           `orElse` listToMaybe (mapMaybe (refFromForVarBinding position) fe.varBindings)
           `orElse` refFromBlock position fe.body
-          `orElse` (fe.thenBlock >>= refFromBlock position)
+          `orElse` (fe.thenBlock >>= refFromBlock position . snd)
       ExpressionBlock be ->
         refFromBlock position be.block
       ExpressionTuple te ->
@@ -765,8 +767,8 @@ collectStatementOccurrences statement index = case statement of
     foldr collectModifierOccurrences (collectExpressionOccurrences nextStatement.value index) nextStatement.modifiers
   StatementForBreak ForBreakStatement {value} ->
     collectExpressionOccurrences value index
-  StatementForNext ForNextStatement {modifiers} ->
-    foldr collectModifierOccurrences index modifiers
+  StatementForNext ForNextStatement {value, modifiers} ->
+    foldr collectModifierOccurrences (collectExpressionOccurrences value index) modifiers
   _ -> index
 
 collectModifierOccurrences :: Modifier Zonked -> OccurrenceIndex -> OccurrenceIndex
@@ -801,7 +803,7 @@ collectExpressionOccurrences expression index = case expression of
     let withInBindings = foldr (collectExpressionOccurrences . (.source)) index fe.inBindings
         withVarBindings = foldr collectForVarBindingOccurrences withInBindings fe.varBindings
         withBody = collectBlockOccurrences fe.body withVarBindings
-     in maybe withBody (`collectBlockOccurrences` withBody) fe.thenBlock
+     in maybe withBody (\(_, thenBlock) -> collectBlockOccurrences thenBlock withBody) fe.thenBlock
   ExpressionBlock be ->
     collectBlockOccurrences be.block index
   ExpressionTuple te ->

@@ -627,7 +627,9 @@ walkStatement env = \case
     walkExpression env fbs.value
   AST.StatementExpression expr ->
     walkExpression env expr
-  AST.StatementForNext _ -> []
+  AST.StatementForNext fns ->
+    walkExpression env fns.value
+      ++ concatMap (walkExpression env . (.value)) fns.modifiers
   AST.StatementError _ -> []
 
 walkExpression :: ExhaustiveEnv -> AST.Expression Zonked -> [ExhaustiveError]
@@ -640,7 +642,13 @@ walkExpression env = \case
     concatMap (walkForInBinding env) fe.inBindings
       ++ concatMap (walkExpression env . (.initial)) fe.varBindings
       ++ walkBlock env fe.body
-      ++ maybe [] (walkBlock env) fe.thenBlock
+      ++ maybe
+        []
+        ( \(maybePattern, thenBlock) ->
+            maybe [] (\pat -> checkIrrefutable env pat SemanticTypeUnknown) maybePattern
+              ++ walkBlock env thenBlock
+        )
+        fe.thenBlock
   AST.ExpressionIf ie ->
     walkExpression env ie.condition
       ++ walkBlock env ie.thenBlock

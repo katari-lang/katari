@@ -389,7 +389,7 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
   it "lowers a simple for loop with one in-binding" $ do
     (irMod, errs) <-
       lowerSource
-        "agent main() { let arr = [1, 2, 3]; for (let x in arr) { x } }"
+        "agent main() { let arr = [1, 2, 3]; for (let x in arr) { next x } }"
     errs `shouldBe` []
     let allForBlocks = findAllForBlocks irMod
     case allForBlocks of
@@ -405,7 +405,7 @@ stage2Spec = describe "Stage 2 \8212 control flow" $ do
         Text.unlines
           [ "agent main() {",
             "  let arr = [1, 2, 3]",
-            "  for (let x in arr) { x } then { 0 }",
+            "  for (let x in arr) { next x } then { 0 }",
             "}"
           ]
     errs `shouldBe` []
@@ -643,10 +643,12 @@ stage5Spec = describe "Stage 5 \8212 for / state / next" $ do
     (irMod, errs) <-
       lowerSource $
         Text.unlines
-          [ "agent main() -> integer | null {",
+          [ "agent main() -> integer | array[integer] {",
             "  for (let x in [1,2,3]) {",
             "    if (x == 2) {",
             "      break x",
+            "    } else {",
+            "      next x",
             "    }",
             "  }",
             "}"

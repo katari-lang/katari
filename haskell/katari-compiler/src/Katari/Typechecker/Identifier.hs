@@ -1621,9 +1621,10 @@ resolveBreak BreakStatement {value, sourceSpan} = do
   pure BreakStatement {value = value', sourceSpan = sourceSpan}
 
 resolveForNext :: ForNextStatement Parsed -> Identifier (ForNextStatement Identified)
-resolveForNext ForNextStatement {modifiers, sourceSpan} = do
+resolveForNext ForNextStatement {value, modifiers, sourceSpan} = do
+  value' <- resolveExpression value
   modifiers' <- mapM resolveModifier modifiers
-  pure ForNextStatement {modifiers = modifiers', sourceSpan = sourceSpan}
+  pure ForNextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}
 
 resolveForBreak :: ForBreakStatement Parsed -> Identifier (ForBreakStatement Identified)
 resolveForBreak ForBreakStatement {value, sourceSpan} = do
@@ -1949,7 +1950,17 @@ resolveForExpr ForExpression {parallel, inBindings, varBindings, body, thenBlock
         inBindingsResolvedSources
     varBindings' <- mapM resolveForVarBinding varBindings
     body' <- resolveBlock body
-    thenBlock' <- traverse resolveBlock thenBlock
+    -- The @then@ clause shares the loop's frame (so it sees state vars).
+    -- Its own pattern + block introduce a nested frame for the mapped-array
+    -- pattern bindings. Mirrors a handle's @then@ clause.
+    thenBlock' <-
+      traverse
+        ( \(maybePattern, block) -> withScopeFrameAt block.sourceSpan $ do
+            maybePattern' <- traverse resolvePattern maybePattern
+            block' <- resolveBlock block
+            pure (maybePattern', block')
+        )
+        thenBlock
     pure
       ForExpression
         { parallel = parallel,

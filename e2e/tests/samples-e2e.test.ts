@@ -211,6 +211,11 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     expect(result).toBe("sum = 6");
   });
 
+  itE2E("30-formap: for mapping / parallel / then-pattern / break", async () => {
+    const result = await applyAndRun("formap", "30-formap");
+    expect(result).toBe("a0=11 a2=13 b1=4 c=4 d1=8 e0=101");
+  });
+
   itE2E("07-abs-and-mod: manhattan with negative literals + mod = 11", async () => {
     const result = await applyAndRun("abs-and-mod", "07-abs-and-mod");
     expect(result).toBe(11);

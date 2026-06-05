@@ -142,7 +142,10 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       kind: "for" as const,
       blockId: args.blockId,
       currentIndex: 0,
+      total: 0,
       iterableSnapshot: [],
+      collected: {},
+      iterIndexByCallId: {},
       postCancelActions: {},
       thenCallId: null,
     }))

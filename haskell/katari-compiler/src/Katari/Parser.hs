@@ -1081,8 +1081,9 @@ parseNext = parseWithSpan $ do
 parseForNext :: Parser (ForNextStatement Parsed)
 parseForNext = parseWithSpan $ do
   parseKeyword KeywordNext
+  expression <- parseOptionalExitValue
   modifiers <- option [] (parseKeyword KeywordWith *> parseModifiers)
-  pure $ \sourceSpan -> ForNextStatement {modifiers = modifiers, sourceSpan = sourceSpan}
+  pure $ \sourceSpan -> ForNextStatement {value = expression, modifiers = modifiers, sourceSpan = sourceSpan}
 
 parseBreak :: Parser (BreakStatement Parsed)
 parseBreak = parseWithSpan $ do
@@ -1566,7 +1567,7 @@ parseForExpression parallel = parseWithSpan $ do
       (parsePunctuation PunctuationRightParenthesis)
       parseForBindings
   body <- parseWithBreakContext BreakContextFor parseBlock
-  thenBlock <- optional (parseKeyword KeywordThen *> parseBlock)
+  thenBlock <- optional parseThenClause
   pure $ \sourceSpan ->
     ExpressionFor
       ForExpression

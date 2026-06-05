@@ -475,8 +475,9 @@ data Statement (phase :: Phase) where
   -- | @break v@ inside a request handler — exits the @handle@ scope with
   -- value @v@.
   StatementBreak :: BreakStatement phase -> Statement phase
-  -- | @next@ (no value) inside a @for@ body — proceed to the next
-  -- iteration, optionally updating loop @var@ state.
+  -- | @next [v] [with ...]@ inside a @for@ body — proceed to the next
+  -- iteration, contributing @v@ (default @null@) to the loop's mapped
+  -- output array and optionally updating loop @var@ state.
   StatementForNext :: ForNextStatement phase -> Statement phase
   -- | @break v@ inside a @for@ body — exit the loop with value @v@.
   StatementForBreak :: ForBreakStatement phase -> Statement phase
@@ -563,11 +564,14 @@ data BreakStatement (phase :: Phase) = BreakStatement
 instance HasSourceSpan (BreakStatement phase) where
   sourceSpanOf statement = statement.sourceSpan
 
--- | @next [with var = expr, ...]@ inside a @for@ body — proceeds to the
--- next iteration. Unlike 'NextStatement' there is no carried value;
--- 'modifiers' update loop @var@ bindings.
+-- | @next [v] [with var = expr, ...]@ inside a @for@ body — proceeds to
+-- the next iteration. The carried value @v@ (defaulting to @null@ when
+-- omitted) becomes this iteration's element in the loop's mapped output
+-- array; 'modifiers' update loop @var@ bindings. Mirrors 'NextStatement'
+-- (a request handler's @next@) so the two contexts stay symmetric.
 data ForNextStatement (phase :: Phase) = ForNextStatement
-  { modifiers :: [Modifier phase],
+  { value :: Expression phase,
+    modifiers :: [Modifier phase],
     sourceSpan :: SourceSpan
   }
 
@@ -1261,16 +1265,22 @@ data MatchExpression (phase :: Phase) = MatchExpression
 instance HasSourceSpan (MatchExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | @[par] for (pat in src; var x = init; ...) { body } [then { fin }]@.
--- Combines iteration over sources with mutable loop state. The overall
--- type is the union of @break@ types and the @then@-block type (or @null@
--- when there is no @then@).
+-- | @[par] for (pat in src; var x = init; ...) { body } [then [(pat)] { fin }]@.
+-- Iterates over sources, collecting each @next@'s value into an ordered
+-- output array (a mapping). The optional @then@ clause receives that
+-- array (bound by @pat@, if present) and may post-process it; state vars
+-- remain in scope. Without @then@ the expression's value /is/ the mapped
+-- array. The overall type is the union of @break@ types and the @then@
+-- type (or the mapped-array type when there is no @then@).
 data ForExpression (phase :: Phase) = ForExpression
   { parallel :: !Bool,
     inBindings :: [ForInBinding phase],
     varBindings :: [ForVarBinding phase],
     body :: Block phase,
-    thenBlock :: Maybe (Block phase),
+    -- | Optional @then@ clause: the same shape as a handle's
+    -- 'thenClause' — an optional pattern binding the mapped array plus a
+    -- block.
+    thenBlock :: Maybe (Maybe (Pattern phase), Block phase),
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }

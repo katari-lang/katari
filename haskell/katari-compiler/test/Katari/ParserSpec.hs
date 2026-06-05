@@ -704,9 +704,14 @@ nextAndBreak = describe "next and break" $ do
       "agent main() { break 0; }"
       "'break' is only allowed inside"
 
-  -- ForCtx / HandleCtx cross-errors
-  it "rejects next-with-value inside for (ForCtx)" $ do
-    shouldFail "agent main() { for (let x in xs) { next 42; } }"
+  -- ForCtx: `next v` carries the iteration's mapped value (mirrors handler `next`).
+  it "parses for-next with value (ForCtx)" $ do
+    _ <- shouldSucceed "agent main() { for (let x in xs) { next 42; } }"
+    pure ()
+
+  it "parses for-next with value and modifiers (ForCtx)" $ do
+    _ <- shouldSucceed "agent main() { for (let x in xs, var a = 0) { next x with { a = a + 1 }; } }"
+    pure ()
 
   it "accepts bare next inside request handler (defaults to next null)" $ do
     -- Bare `next` is shorthand for `next null` (the requestor is resumed

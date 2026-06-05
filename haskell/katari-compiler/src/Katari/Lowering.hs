@@ -17,7 +17,7 @@ module Katari.Lowering
   )
 where
 
-import Control.Monad (foldM, forM, forM_, mapAndUnzipM)
+import Control.Monad (foldM, forM, mapAndUnzipM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
@@ -1151,8 +1151,9 @@ lowerStmt = \case
     emit (StatementCont ContData {contKind = ContKindNext, value = Just var, modifiers = modPairs})
     pure True
   AST.StatementForNext stmt -> do
+    var <- lowerExpr stmt.value
     modPairs <- mapM lowerModifier stmt.modifiers
-    emit (StatementCont ContData {contKind = ContKindForNext, value = Nothing, modifiers = modPairs})
+    emit (StatementCont ContData {contKind = ContKindForNext, value = Just var, modifiers = modPairs})
     pure True
   AST.StatementExpression expr -> do
     _ <- lowerExpr expr
@@ -1503,11 +1504,12 @@ lowerForExpr forExpression = do
   iters <- lowerForIters forExpression.inBindings
   (stateInits, stateLocals) <- lowerForStates forExpression.varBindings
   bodyBlockId <- buildForBody iters stateLocals forExpression.body
-  -- The @then@ block sees state vars (their final value after the loop)
-  -- but not iter vars (iteration is over). Mirrors the surface semantics:
-  -- `for (x in xs, var acc = 0) { ... } then { acc }` — `acc` is the
-  -- accumulator's final value; `x` is no longer bound.
-  thenBlockId <- traverse (buildForThenBlock stateLocals) forExpression.thenBlock
+  -- The @then@ clause sees state vars (their final value after the loop)
+  -- but not iter vars (iteration is over). Its optional pattern binds the
+  -- loop's mapped output array. Mirrors the surface semantics:
+  -- `for (x in xs) { next x } then (xs2) { ... }` — `xs2` is the mapped
+  -- array; `for (x in xs, var acc = 0) { ... } then { acc }` reads state.
+  thenBlockId <- traverse (buildForThenClause stateLocals) forExpression.thenBlock
   let iterPairs = map (\(e, s, _) -> (e, s)) iters
   forBlockId <- freshBlockId
   recordBlock
@@ -1602,21 +1604,32 @@ buildForBody iters stateLocals body = do
   recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
--- | Build the @then { ... }@ block of a @for@ expression. Differs from
--- 'buildInlineBlock' in that the caller passes the @for@'s state-var
--- locals so the @then@ block can resolve references to them; iter vars
--- intentionally are NOT in scope.
-buildForThenBlock :: [(Id.VariableResolution, VarId)] -> AST.Block Zonked -> Lower BlockId
-buildForThenBlock stateLocals body = do
+-- | Build the @then [(pat)] { ... }@ clause of a @for@ expression. The
+-- runtime spawns this block with the loop's mapped output array as its
+-- single input value; the optional pattern destructures that array (the
+-- destructure statement is emitted INSIDE the block, before the body, so it
+-- reads the block's input var). The caller passes the @for@'s state-var
+-- locals so the body can resolve references to them; iter vars intentionally
+-- are NOT in scope. Mirrors 'lowerThenClause' (a handle's @then@).
+buildForThenClause ::
+  [(Id.VariableResolution, VarId)] ->
+  (Maybe (AST.Pattern Zonked), AST.Block Zonked) ->
+  Lower BlockId
+buildForThenClause stateLocals (maybePattern, body) = do
   blockId <- freshBlockId
-  withLocals stateLocals $ do
-    (statements, trailing) <- lowerBlockBody body
-    let userBlock =
-          defaultUserBlock
-            { statements = statements,
-              trailing = trailing
-            }
-    recordBlock blockId (BlockUser userBlock) Nothing
+  paramVar <- freshVarId (Just "value")
+  (trailing, statements) <- runWithFreshBuffer $ do
+    paramLocals <- case maybePattern of
+      Just pat -> destructurePattern paramVar pat
+      Nothing -> pure []
+    withLocals (stateLocals ++ paramLocals) (lowerBlockInto body)
+  let userBlock =
+        defaultUserBlock
+          { input = Just paramVar,
+            statements = statements,
+            trailing = trailing
+          }
+  recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
 -- ===========================================================================
