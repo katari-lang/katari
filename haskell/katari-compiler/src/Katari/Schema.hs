@@ -24,6 +24,7 @@ module Katari.Schema
     -- * Lowering-facing helpers (per-agent schema computation)
     buildInputObject,
     buildOutputSchema,
+    buildRequestsSchema,
     jsonSchemaToText,
 
     -- * Generics
@@ -714,6 +715,40 @@ buildOutputSchema ::
   SemanticType Resolved ->
   JsonSchema
 buildOutputSchema dataDefs = toJsonSchema dataDefs Set.empty
+
+-- | Build the runtime requests /GenericSchema/ for a callable's effect: a JSON
+-- array whose elements are concrete request descriptors @{name, input,
+-- output}@, plus a @{"$generic": id}@ placeholder for every not-yet-instantiated
+-- effect generic. At an instantiation site @get_metadata@ fills each placeholder
+-- with the substituted effect's own request array (see 'fillRequestsSchema' in
+-- the runtime). Unlike 'buildRequestRefs' this needs only @dataDefs@ +
+-- @topLevelTypes@ (no per-parameter annotations), so Lowering can call it
+-- without a full 'SchemaContext'.
+buildRequestsSchema ::
+  DataDefs ->
+  Map QualifiedName (SemanticType Resolved) ->
+  SemanticEffect Resolved ->
+  Value
+buildRequestsSchema dataDefs topLevelTypes effect =
+  toJSON (mapMaybe requestJson (dedupe concreteNames) ++ map placeholder (dedupe genericIds))
+  where
+    (concreteNames, genericIds) = collect effect
+    collect = \case
+      SemanticEffectPure -> ([], [])
+      SemanticEffectRequest qualifiedName -> ([qualifiedName], [])
+      SemanticEffectGeneric genericsId -> ([], [genericsId])
+      SemanticEffectUnion branches -> mconcat (map collect branches)
+    dedupe :: (Ord a) => [a] -> [a]
+    dedupe = Set.toList . Set.fromList
+    placeholder genericsId = object [Key.fromText genericPlaceholderKey .= genericsId]
+    requestJson qualifiedName = do
+      SemanticTypeFunction parameterType returnType _ <- Map.lookup qualifiedName topLevelTypes
+      pure $
+        object
+          [ "name" .= renderQualifiedName qualifiedName,
+            "input" .= buildInputObject dataDefs parameterType [],
+            "output" .= toJsonSchema dataDefs Set.empty returnType
+          ]
 
 -- | Aeson-encode a 'JsonSchema' to a strict 'Text'. Used by Lowering to
 -- persist precomputed schemas in 'AgentBlock.inputSchema' /

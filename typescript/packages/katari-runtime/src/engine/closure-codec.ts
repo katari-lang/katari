@@ -56,6 +56,8 @@ export type ClosureMetadata = {
   description?: string;
   inputSchema: string;
   outputSchema: string;
+  /** Aeson-encoded requests GenericSchema (array; may carry `$generic`s). */
+  requestsSchema: string;
 };
 
 /** One captured scope, frozen for transport. Ids are the issuer's (string
@@ -228,5 +230,6 @@ function agentBlockMetadata(state: State, blockId: BlockId): ClosureMetadata {
     description: body.description,
     inputSchema: body.inputSchema,
     outputSchema: body.outputSchema,
+    requestsSchema: body.requestsSchema,
   };
 }

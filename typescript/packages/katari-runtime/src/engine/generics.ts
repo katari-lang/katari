@@ -41,3 +41,38 @@ export function fillGenericSchema(substitution: GenericSubstitution, schema: Jso
   }
   return out;
 }
+
+/**
+ * Fill a requests GenericSchema — a JSON array whose elements are concrete
+ * request descriptors `{name, input, output}` interleaved with effect-generic
+ * placeholders `{"$generic": id}`. Each placeholder is replaced by the
+ * substituted effect's own request array (spliced in, flattening one level);
+ * an unsubstituted placeholder is dropped. Duplicate requests (by `name`) are
+ * collapsed, keeping first occurrence. Returns a placeholder-free array.
+ */
+export function fillRequestsSchema(substitution: GenericSubstitution, requests: Json): Json {
+  const elements = Array.isArray(requests) ? requests : [];
+  const collected: Json[] = [];
+  for (const element of elements) {
+    if (element !== null && typeof element === "object" && !Array.isArray(element)) {
+      const placeholder = element[GENERIC_PLACEHOLDER_KEY];
+      if (placeholder !== undefined) {
+        const replacement = substitution[String(placeholder)];
+        if (Array.isArray(replacement)) collected.push(...replacement);
+        continue;
+      }
+    }
+    collected.push(element);
+  }
+  const seen = new Set<string>();
+  return collected.filter((request) => {
+    const name =
+      request !== null && typeof request === "object" && !Array.isArray(request)
+        ? request["name"]
+        : undefined;
+    const key = typeof name === "string" ? name : JSON.stringify(request);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}

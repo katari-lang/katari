@@ -73,6 +73,7 @@ function agentBlock(
       description: undefined,
       inputSchema: "{}",
       outputSchema: "{}",
+      requestsSchema: "[]",
     },
   };
 }

@@ -1,0 +1,14 @@
+@"A capability the runner may need."
+request log(message: string) -> integer
+
+@"Runs a task that raises some effect E — generic over the effect."
+agent runner[effect E](task: agent() -> integer with E) -> integer with E {
+  task()
+}
+
+@"get_metadata on runner[log] yields requests specialised to the log request."
+agent main() -> string {
+  let f = runner[log]
+  let m = get_metadata(value = f)
+  m.requests
+}

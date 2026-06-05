@@ -147,6 +147,13 @@ export type AgentBlock = {
   inputSchema: string;
   /** Aeson-encoded JSON Schema string for the agent's return type. */
   outputSchema: string;
+  /**
+   * Aeson-encoded requests GenericSchema: a JSON array of concrete request
+   * descriptors plus a `{"$generic": id}` placeholder per effect-generic
+   * parameter, filled by `get_metadata` at the instantiation site. `"[]"` for
+   * a pure agent.
+   */
+  requestsSchema: string;
 };
 
 // ─── Block (sumOptions, "body" payload key) ────────────────────────────────

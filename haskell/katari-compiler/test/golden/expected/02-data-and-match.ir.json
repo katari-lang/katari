@@ -8,7 +8,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}",
         "name": "point",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"x\",\"y\"],\"type\":\"object\"}",
-        "qualifiedName": "main.point"
+        "qualifiedName": "main.point",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -20,7 +21,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"pt\":{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"main.point\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"pt\"],\"type\":\"object\"}",
         "name": "project_x",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "main.project_x"
+        "qualifiedName": "main.project_x",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -32,7 +34,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "sub",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.sub"
+        "qualifiedName": "primitive.sub",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -48,7 +51,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"value\":{}},\"required\":[\"array\",\"value\"],\"type\":\"object\"}",
         "name": "contains",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.array.contains"
+        "qualifiedName": "primitive.array.contains",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -64,7 +68,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"value\":{}},\"required\":[\"array\",\"value\"],\"type\":\"object\"}",
         "name": "index_of",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.array.index_of"
+        "qualifiedName": "primitive.array.index_of",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -80,7 +85,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
         "name": "get",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.env.get"
+        "qualifiedName": "primitive.env.get",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"},\"name\":\"primitive.env_not_found\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -92,7 +98,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"],\"type\":\"object\"}",
         "name": "get_secret",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.env.get_secret"
+        "qualifiedName": "primitive.env.get_secret",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"},\"name\":\"primitive.env_not_found\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -104,7 +111,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"is_secret\":{\"type\":\"boolean\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"is_secret\",\"key\",\"value\"],\"type\":\"object\"}",
         "name": "set",
         "outputSchema": "{\"type\":\"null\"}",
-        "qualifiedName": "primitive.env.set"
+        "qualifiedName": "primitive.env.set",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -156,7 +164,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"type\":\"object\"}",
         "name": "parse",
         "outputSchema": "{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]}",
-        "qualifiedName": "primitive.json.parse"
+        "qualifiedName": "primitive.json.parse",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.json_parse_error\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -172,7 +181,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "stringify",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.json.stringify"
+        "qualifiedName": "primitive.json.stringify",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -188,7 +198,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "abs",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.math.abs"
+        "qualifiedName": "primitive.math.abs",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -204,7 +215,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "min",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.math.min"
+        "qualifiedName": "primitive.math.min",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -220,7 +232,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "max",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.math.max"
+        "qualifiedName": "primitive.math.max",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -232,7 +245,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "mul",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.mul"
+        "qualifiedName": "primitive.mul",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -248,7 +262,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "floor",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.math.floor"
+        "qualifiedName": "primitive.math.floor",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -264,7 +279,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "ceil",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.math.ceil"
+        "qualifiedName": "primitive.math.ceil",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -280,7 +296,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "round",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.math.round"
+        "qualifiedName": "primitive.math.round",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -296,7 +313,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "empty",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
-        "qualifiedName": "primitive.record.empty"
+        "qualifiedName": "primitive.record.empty",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -312,7 +330,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "get",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.record.get"
+        "qualifiedName": "primitive.record.get",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -332,7 +351,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"value\":{}},\"required\":[\"key\",\"record\",\"value\"],\"type\":\"object\"}",
         "name": "set",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
-        "qualifiedName": "primitive.record.set"
+        "qualifiedName": "primitive.record.set",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -348,7 +368,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "remove",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
-        "qualifiedName": "primitive.record.remove"
+        "qualifiedName": "primitive.record.remove",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -364,7 +385,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
         "name": "keys",
         "outputSchema": "{\"items\":{\"type\":\"string\"},\"type\":\"array\"}",
-        "qualifiedName": "primitive.record.keys"
+        "qualifiedName": "primitive.record.keys",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -380,7 +402,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "has",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.record.has"
+        "qualifiedName": "primitive.record.has",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -396,7 +419,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
         "name": "size",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.record.size"
+        "qualifiedName": "primitive.record.size",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -408,7 +432,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "mod",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.mod"
+        "qualifiedName": "primitive.mod",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -424,7 +449,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "length",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.string.length"
+        "qualifiedName": "primitive.string.length",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -440,7 +466,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"end\":{\"type\":\"integer\"},\"start\":{\"type\":\"integer\"},\"value\":{\"type\":\"string\"}},\"required\":[\"end\",\"start\",\"value\"],\"type\":\"object\"}",
         "name": "slice",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.slice"
+        "qualifiedName": "primitive.string.slice",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -456,7 +483,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"substring\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"substring\",\"value\"],\"type\":\"object\"}",
         "name": "contains",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.string.contains"
+        "qualifiedName": "primitive.string.contains",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -472,7 +500,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"prefix\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"prefix\",\"value\"],\"type\":\"object\"}",
         "name": "starts_with",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.string.starts_with"
+        "qualifiedName": "primitive.string.starts_with",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -488,7 +517,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"suffix\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"suffix\",\"value\"],\"type\":\"object\"}",
         "name": "ends_with",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.string.ends_with"
+        "qualifiedName": "primitive.string.ends_with",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -508,7 +538,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"substring\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"substring\",\"value\"],\"type\":\"object\"}",
         "name": "index_of",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.string.index_of"
+        "qualifiedName": "primitive.string.index_of",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -524,7 +555,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "upper",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.upper"
+        "qualifiedName": "primitive.string.upper",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -540,7 +572,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "lower",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.lower"
+        "qualifiedName": "primitive.string.lower",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -556,7 +589,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "trim",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.trim"
+        "qualifiedName": "primitive.string.trim",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -572,7 +606,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"separator\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"separator\",\"value\"],\"type\":\"object\"}",
         "name": "split",
         "outputSchema": "{\"items\":{\"type\":\"string\"},\"type\":\"array\"}",
-        "qualifiedName": "primitive.string.split"
+        "qualifiedName": "primitive.string.split",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -584,7 +619,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "div",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.div"
+        "qualifiedName": "primitive.div",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -600,7 +636,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"parts\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"},\"separator\":{\"type\":\"string\"}},\"required\":[\"parts\",\"separator\"],\"type\":\"object\"}",
         "name": "join",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.join"
+        "qualifiedName": "primitive.string.join",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -616,7 +653,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"pattern\":{\"type\":\"string\"},\"replacement\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"pattern\",\"replacement\",\"value\"],\"type\":\"object\"}",
         "name": "replace",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.replace"
+        "qualifiedName": "primitive.string.replace",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -636,7 +674,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "neg",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.neg"
+        "qualifiedName": "primitive.neg",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -656,7 +695,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "eq",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.eq"
+        "qualifiedName": "primitive.eq",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -672,7 +712,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{},\"rhs\":{}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ne",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.ne"
+        "qualifiedName": "primitive.ne",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -688,7 +729,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "lt",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.lt"
+        "qualifiedName": "primitive.lt",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -704,7 +746,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "le",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.le"
+        "qualifiedName": "primitive.le",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -720,7 +763,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "gt",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.gt"
+        "qualifiedName": "primitive.gt",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -743,7 +787,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "ge",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.ge"
+        "qualifiedName": "primitive.ge",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -759,7 +804,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "and",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.and"
+        "qualifiedName": "primitive.and",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -775,7 +821,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"boolean\"},\"rhs\":{\"type\":\"boolean\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "or",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.or"
+        "qualifiedName": "primitive.or",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -791,7 +838,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "not",
         "outputSchema": "{\"type\":\"boolean\"}",
-        "qualifiedName": "primitive.not"
+        "qualifiedName": "primitive.not",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -807,7 +855,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"string\"},\"rhs\":{\"type\":\"string\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "concat",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.concat"
+        "qualifiedName": "primitive.concat",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -831,7 +880,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "type_of",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.type_of"
+        "qualifiedName": "primitive.type_of",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -847,7 +897,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "to_string",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.to_string"
+        "qualifiedName": "primitive.to_string",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -863,7 +914,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}",
         "name": "from_string_error",
         "outputSchema": "{\"not\":{}}",
-        "qualifiedName": "primitive.from_string_error"
+        "qualifiedName": "primitive.from_string_error",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.from_string_error\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -875,7 +927,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"type\":\"object\"}",
         "name": "from_string",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.from_string"
+        "qualifiedName": "primitive.from_string",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.from_string_error\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -891,7 +944,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "format",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.format"
+        "qualifiedName": "primitive.format",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -907,7 +961,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"additionalProperties\":true,\"properties\":{\"$ref\":{},\"as\":{\"const\":\"file\"},\"hash\":{\"type\":\"string\"},\"size\":{\"type\":\"integer\"}},\"required\":[\"$ref\",\"as\",\"hash\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "file_to_string",
         "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.file_to_string"
+        "qualifiedName": "primitive.file_to_string",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -955,7 +1010,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "string_to_file",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$ref\":{},\"as\":{\"const\":\"file\"},\"hash\":{\"type\":\"string\"},\"size\":{\"type\":\"integer\"}},\"required\":[\"$ref\",\"as\",\"hash\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.string_to_file"
+        "qualifiedName": "primitive.string_to_file",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -970,7 +1026,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"index\":{\"type\":\"integer\"},\"tuple\":{}},\"required\":[\"index\",\"tuple\"],\"type\":\"object\"}",
         "name": "tuple_get",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.tuple_get"
+        "qualifiedName": "primitive.tuple_get",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -985,7 +1042,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"field\":{\"type\":\"string\"},\"object\":{}},\"required\":[\"field\",\"object\"],\"type\":\"object\"}",
         "name": "get_field",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.get_field"
+        "qualifiedName": "primitive.get_field",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1000,8 +1058,9 @@
         "entryBody": 58,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"additionalProperties\":true,\"properties\":{\"$agent\":{\"type\":\"string\"}},\"required\":[\"$agent\"],\"type\":\"object\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "get_metadata",
-        "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.get_metadata"
+        "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"},\"requests\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\",\"requests\"],\"type\":\"object\"}",
+        "qualifiedName": "primitive.get_metadata",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1017,7 +1076,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}",
         "name": "call_agent_error",
         "outputSchema": "{\"not\":{}}",
-        "qualifiedName": "primitive.call_agent_error"
+        "qualifiedName": "primitive.call_agent_error",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.call_agent_error\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -1053,7 +1113,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"args\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"name\":{\"type\":\"string\"}},\"required\":[\"args\",\"name\"],\"type\":\"object\"}",
         "name": "call_agent",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.call_agent"
+        "qualifiedName": "primitive.call_agent",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.call_agent_error\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -1069,7 +1130,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"msg\":{\"type\":\"string\"}},\"required\":[\"msg\"],\"type\":\"object\"}",
         "name": "throw",
         "outputSchema": "{\"not\":{}}",
-        "qualifiedName": "primitive.throw"
+        "qualifiedName": "primitive.throw",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1081,7 +1143,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"}",
         "name": "env_not_found",
         "outputSchema": "{\"not\":{}}",
-        "qualifiedName": "primitive.env_not_found"
+        "qualifiedName": "primitive.env_not_found",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"env_key\":{\"type\":\"string\"}},\"required\":[\"env_key\"],\"type\":\"object\"},\"name\":\"primitive.env_not_found\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -1093,7 +1156,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "json_null",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_null"
+        "qualifiedName": "primitive.json_null",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1105,7 +1169,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"boolean\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "json_boolean",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_boolean"
+        "qualifiedName": "primitive.json_boolean",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1117,7 +1182,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "json_integer",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_integer"
+        "qualifiedName": "primitive.json_integer",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1129,7 +1195,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "json_number",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_number"
+        "qualifiedName": "primitive.json_number",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1141,7 +1208,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "json_string",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_string"
+        "qualifiedName": "primitive.json_string",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1153,7 +1221,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"items\"],\"type\":\"object\"}",
         "name": "json_array",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_array"
+        "qualifiedName": "primitive.json_array",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1162,10 +1231,11 @@
         "defaults": {},
         "description": "AI metadata of a callable (name / id / description / I-O schema).",
         "entryBody": 72,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"},\"requests\":{\"type\":\"string\"}},\"required\":[\"description\",\"id\",\"input\",\"name\",\"output\",\"requests\"],\"type\":\"object\"}",
         "name": "agent_metadata",
-        "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.agent_metadata"
+        "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.agent_metadata\"},\"description\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"output\":{\"type\":\"string\"},\"requests\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"description\",\"id\",\"input\",\"name\",\"output\",\"requests\"],\"type\":\"object\"}",
+        "qualifiedName": "primitive.agent_metadata",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1177,7 +1247,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"entries\"],\"type\":\"object\"}",
         "name": "json_object",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}",
-        "qualifiedName": "primitive.json_object"
+        "qualifiedName": "primitive.json_object",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1189,7 +1260,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}",
         "name": "json_parse_error",
         "outputSchema": "{\"not\":{}}",
-        "qualifiedName": "primitive.json_parse_error"
+        "qualifiedName": "primitive.json_parse_error",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.json_parse_error\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -1233,7 +1305,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "add",
         "outputSchema": "{\"type\":\"number\"}",
-        "qualifiedName": "primitive.add"
+        "qualifiedName": "primitive.add",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1265,7 +1338,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"index\":{\"type\":\"integer\"}},\"required\":[\"array\",\"index\"],\"type\":\"object\"}",
         "name": "get",
         "outputSchema": "{}",
-        "qualifiedName": "primitive.array.get"
+        "qualifiedName": "primitive.array.get",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1281,7 +1355,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "length",
         "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.array.length"
+        "qualifiedName": "primitive.array.length",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1297,7 +1372,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "empty",
         "outputSchema": "{\"items\":{\"not\":{}},\"type\":\"array\"}",
-        "qualifiedName": "primitive.array.empty"
+        "qualifiedName": "primitive.array.empty",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1317,7 +1393,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "of",
         "outputSchema": "{\"items\":{},\"type\":\"array\"}",
-        "qualifiedName": "primitive.array.of"
+        "qualifiedName": "primitive.array.of",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1333,7 +1410,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"value\":{}},\"required\":[\"array\",\"value\"],\"type\":\"object\"}",
         "name": "append",
         "outputSchema": "{\"items\":{},\"type\":\"array\"}",
-        "qualifiedName": "primitive.array.append"
+        "qualifiedName": "primitive.array.append",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1349,7 +1427,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"items\":{},\"type\":\"array\"},\"rhs\":{\"items\":{},\"type\":\"array\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "concat",
         "outputSchema": "{\"items\":{},\"type\":\"array\"}",
-        "qualifiedName": "primitive.array.concat"
+        "qualifiedName": "primitive.array.concat",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1365,7 +1444,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"},\"end\":{\"type\":\"integer\"},\"start\":{\"type\":\"integer\"}},\"required\":[\"array\",\"end\",\"start\"],\"type\":\"object\"}",
         "name": "slice",
         "outputSchema": "{\"items\":{},\"type\":\"array\"}",
-        "qualifiedName": "primitive.array.slice"
+        "qualifiedName": "primitive.array.slice",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     },
@@ -1381,7 +1461,8 @@
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"array\":{\"items\":{},\"type\":\"array\"}},\"required\":[\"array\"],\"type\":\"object\"}",
         "name": "reverse",
         "outputSchema": "{\"items\":{},\"type\":\"array\"}",
-        "qualifiedName": "primitive.array.reverse"
+        "qualifiedName": "primitive.array.reverse",
+        "requestsSchema": "[]"
       },
       "kind": "blockAgent"
     }

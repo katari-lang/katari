@@ -389,4 +389,18 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       expect(result).not.toContain("$generic");
     },
   );
+
+  itE2E(
+    "29-effect-generic-schema: get_metadata on runner[log] fills the effect $generic placeholder with log's request",
+    async () => {
+      const result = await applyAndRun("effect_generic_schema", "29-effect-generic-schema");
+      const requests = JSON.parse(result);
+      // The effect placeholder for E is replaced by the log request descriptor.
+      expect(Array.isArray(requests)).toBe(true);
+      expect(requests).toHaveLength(1);
+      expect(requests[0].name).toContain("log");
+      expect(requests[0].input.properties.message).toEqual({ type: "string" });
+      expect(result).not.toContain("$generic");
+    },
+  );
 });

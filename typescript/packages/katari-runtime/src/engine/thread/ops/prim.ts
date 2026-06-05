@@ -17,7 +17,7 @@ import { encodeCoreAgentDefId } from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
 import { decodeClosureBlob } from "../../closure-codec.js";
 import { RecoverableEngineError } from "../../errors.js";
-import { fillGenericSchema } from "../../generics.js";
+import { fillGenericSchema, fillRequestsSchema } from "../../generics.js";
 import type { AskId, CallId } from "../../id.js";
 import { executePrim, PrimRaiseRequest } from "../../prim.js";
 import type { StepCtx } from "../../step-ctx.js";
@@ -162,6 +162,8 @@ type CallableMetadata = {
   description?: string;
   inputSchema: string;
   outputSchema: string;
+  /** Aeson-encoded requests GenericSchema (array; may carry `$generic`s). */
+  requestsSchema: string;
   /** Dispatch identity surfaced to AI tool calls (qname / closure:<hash>). */
   id: string;
 };
@@ -181,6 +183,12 @@ async function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Pr
     generics === undefined
       ? schemaJson
       : JSON.stringify(fillGenericSchema(generics, JSON.parse(schemaJson)));
+  // The requests array fills differently: each `$generic` effect placeholder
+  // splices in the substituted effect's request array (see fillRequestsSchema).
+  const fillRequests = (requestsJson: string): string =>
+    generics === undefined
+      ? requestsJson
+      : JSON.stringify(fillRequestsSchema(generics, JSON.parse(requestsJson)));
   return {
     kind: "record",
     ctor: "primitive.agent_metadata",
@@ -190,6 +198,7 @@ async function executeGetMetadata(ctx: StepCtx, args: Record<string, Value>): Pr
       description: mkString(meta.description ?? ""),
       input: mkString(fill(meta.inputSchema)),
       output: mkString(fill(meta.outputSchema)),
+      requests: mkString(fillRequests(meta.requestsSchema)),
     },
   };
 }
@@ -204,6 +213,7 @@ async function resolveCallableMetadata(ctx: StepCtx, value: Value): Promise<Call
         description: block.description,
         inputSchema: block.inputSchema,
         outputSchema: block.outputSchema,
+        requestsSchema: block.requestsSchema,
         // The dispatch handle surfaced to tool calls — the external form
         // (`qname@snapshot`), identical to the agent value's wire `$agent`.
         id: encodeCoreAgentDefId({
@@ -224,6 +234,7 @@ async function resolveCallableMetadata(ctx: StepCtx, value: Value): Promise<Call
         description: m.description,
         inputSchema: m.inputSchema,
         outputSchema: m.outputSchema,
+        requestsSchema: m.requestsSchema,
         // The dispatch handle, identical to the closure value's wire form +
         // delegate target — `closureref:<ref id>` (cf. a top-level agent's
         // `id` = its qname). The ref id, not the content hash.

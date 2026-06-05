@@ -120,6 +120,9 @@
         },
         "output": {
           "type": "string"
+        },
+        "requests": {
+          "type": "string"
         }
       },
       "required": [
@@ -127,7 +130,8 @@
         "id",
         "input",
         "name",
-        "output"
+        "output",
+        "requests"
       ],
       "type": "object"
     },
@@ -152,6 +156,9 @@
         },
         "output": {
           "type": "string"
+        },
+        "requests": {
+          "type": "string"
         }
       },
       "required": [
@@ -160,7 +167,8 @@
         "id",
         "input",
         "name",
-        "output"
+        "output",
+        "requests"
       ],
       "type": "object"
     },
@@ -599,6 +607,9 @@
         },
         "output": {
           "type": "string"
+        },
+        "requests": {
+          "type": "string"
         }
       },
       "required": [
@@ -607,7 +618,8 @@
         "id",
         "input",
         "name",
-        "output"
+        "output",
+        "requests"
       ],
       "type": "object"
     },

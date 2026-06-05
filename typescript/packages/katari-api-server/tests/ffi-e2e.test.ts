@@ -38,6 +38,7 @@ function callsExtIR(): IRModule {
         description: undefined,
         inputSchema: "{}",
         outputSchema: '{"type":"string"}',
+        requestsSchema: "[]",
       },
     },
     2: {

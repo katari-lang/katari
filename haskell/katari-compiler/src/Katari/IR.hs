@@ -303,7 +303,13 @@ data AgentBlock = AgentBlock
     inputSchema :: Text,
     -- | Aeson-encoded JSON Schema string describing the agent's
     -- output (return type).
-    outputSchema :: Text
+    outputSchema :: Text,
+    -- | Aeson-encoded requests /GenericSchema/: a JSON array of the
+    -- concrete request descriptors this agent may raise, plus a
+    -- @{"$generic": id}@ placeholder per effect-generic parameter. At an
+    -- instantiation site @get_metadata@ fills the placeholders with the
+    -- substituted effects' request arrays. @"[]"@ for a pure agent.
+    requestsSchema :: Text
   }
   deriving (Eq, Show, Generic)
 

@@ -62,6 +62,7 @@ primStdlibSource =
       "  description: string,",
       "  input: string,",
       "  output: string,",
+      "  requests: string,",
       ")",
       "",
       "// Arithmetic (operand-aware: integer + integer = integer).",

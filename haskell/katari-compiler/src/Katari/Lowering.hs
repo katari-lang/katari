@@ -21,12 +21,14 @@ import Control.Monad (foldM, forM, forM_, mapAndUnzipM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
-import Data.Aeson (FromJSON (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, defaultOptions, encode, genericParseJSON, genericToJSON)
+import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Bifunctor (Bifunctor (..))
 import Data.Foldable (for_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
+import Data.Text.Encoding qualified as Encoding
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -380,7 +382,7 @@ runWithFreshBuffer action = do
 schemasForVariable ::
   Id.VariableResolution ->
   [(Text, Maybe Text)] ->
-  Lower (Text, Text)
+  Lower (Text, Text, Text)
 schemasForVariable variableResolution labelsAndAnnotations = do
   env <- ask
   let resolved = case variableResolution of
@@ -388,7 +390,7 @@ schemasForVariable variableResolution labelsAndAnnotations = do
         Id.ResolvedLocal _ -> Map.lookup variableResolution env.localTypeEnv
   case resolved of
     Just functionType -> schemasForFunctionType functionType labelsAndAnnotations
-    Nothing -> pure ("{}", "{}")
+    Nothing -> pure ("{}", "{}", "[]")
 
 -- | Direct variant of 'schemasForVariable' for call sites that already
 -- hold the resolved function type (e.g. prim wrappers, which read it
@@ -396,17 +398,24 @@ schemasForVariable variableResolution labelsAndAnnotations = do
 schemasForFunctionType ::
   SemanticType Resolved ->
   [(Text, Maybe Text)] ->
-  Lower (Text, Text)
+  Lower (Text, Text, Text)
 schemasForFunctionType functionType labelsAndAnnotations = do
   dd <- asks (.dataDefs)
+  topLevelTypes <- asks (.topLevelTypes)
   case functionType of
-    SemanticTypeFunction parameters returnType _ ->
+    SemanticTypeFunction parameters returnType requestSet ->
       pure
         ( Schema.jsonSchemaToText
             (Schema.buildInputObject dd parameters labelsAndAnnotations),
-          Schema.jsonSchemaToText (Schema.buildOutputSchema dd returnType)
+          Schema.jsonSchemaToText (Schema.buildOutputSchema dd returnType),
+          encodeValueText (Schema.buildRequestsSchema dd topLevelTypes requestSet)
         )
-    _ -> pure ("{}", "{}")
+    _ -> pure ("{}", "{}", "[]")
+
+-- | Aeson-encode a JSON 'Value' to strict 'Text' (for embedding a precomputed
+-- requests schema in 'AgentBlock.requestsSchema').
+encodeValueText :: Value -> Text
+encodeValueText = Encoding.decodeUtf8 . LazyByteString.toStrict . encode
 
 -- ===========================================================================
 -- UserBlock default template
@@ -605,8 +614,9 @@ writeWrapperAgent ::
   Maybe Text ->
   Text ->
   Text ->
+  Text ->
   Lower ()
-writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputSchemaJson outputSchemaJson =
+writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputSchemaJson outputSchemaJson requestsSchemaJson =
   -- A wrapper just fills any defaulted parameter the caller omitted (when the
   -- incoming value is a record) and hands the value to its leaf body, which
   -- reads the named fields directly — no var binding here.
@@ -620,7 +630,8 @@ writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputS
             name = simpleName,
             description = desc,
             inputSchema = inputSchemaJson,
-            outputSchema = outputSchemaJson
+            outputSchema = outputSchemaJson,
+            requestsSchema = requestsSchemaJson
           }
     )
     (Just (hint <> ":agent"))
@@ -753,7 +764,7 @@ lowerWrapperCallable nameRef annotation parameterInfos hint mkLeaf =
   resolveDeclaration nameRef $ \variableResolution agentBlk -> do
     qname <- requireAgentQName nameRef.text agentBlk
     innerBlk <- mkLeaf variableResolution
-    (inputSchema, outputSchema) <-
+    (inputSchema, outputSchema, requestsSchema) <-
       schemasForVariable variableResolution [(label, annotation') | (label, annotation', _) <- parameterInfos]
     writeWrapperAgent
       agentBlk
@@ -765,6 +776,7 @@ lowerWrapperCallable nameRef annotation parameterInfos hint mkLeaf =
       annotation
       inputSchema
       outputSchema
+      requestsSchema
 
 -- | Look up the constructor 'QualifiedName' for a data declaration's
 -- 'VariableResolution'. The constructor must have been registered by
@@ -843,9 +855,9 @@ lowerAgentLike ::
 lowerAgentLike name mVariableResolution description parameters body blockId = do
   let labelsAndAnnotations = [(pb.name.text, pb.annotation) | pb <- parameters]
   (bodyInput, agentDefaults, prelude) <- agentInputBinding parameters
-  (inputSchema, outputSchema) <- case mVariableResolution of
+  (inputSchema, outputSchema, requestsSchema) <- case mVariableResolution of
     Just variableResolution -> schemasForVariable variableResolution labelsAndAnnotations
-    Nothing -> pure ("{}", "{}")
+    Nothing -> pure ("{}", "{}", "[]")
   lowerSimpleAgent
     blockId
     name
@@ -856,6 +868,7 @@ lowerAgentLike name mVariableResolution description parameters body blockId = do
     description
     inputSchema
     outputSchema
+    requestsSchema
 
 -- | Compute how an agent consumes its single incoming argument value: the
 -- body's input var, the agent's default-fill map, and a prelude (run inside
@@ -919,8 +932,9 @@ lowerSimpleAgent ::
   Maybe Text ->
   Text ->
   Text ->
+  Text ->
   Lower ()
-lowerSimpleAgent blockId name bodyInput agentDefaults prelude blk description inputSchema outputSchema = do
+lowerSimpleAgent blockId name bodyInput agentDefaults prelude blk description inputSchema outputSchema requestsSchema = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- prelude
     withLocals locals (lowerBlockInto blk)
@@ -952,7 +966,8 @@ lowerSimpleAgent blockId name bodyInput agentDefaults prelude blk description in
             name = name,
             description = description,
             inputSchema = inputSchema,
-            outputSchema = outputSchema
+            outputSchema = outputSchema,
+            requestsSchema = requestsSchema
           }
   recordBlock blockId (BlockAgent agent) (Just name)
 
@@ -1206,23 +1221,28 @@ lowerExpr = \case
   -- Generic instantiation @foo[args]@: the callee value carries a generic
   -- substitution (consulted by @get_metadata@ to specialise its schema). The
   -- callable code itself is generic-erased, so we lower the bare callee and
-  -- attach the substitution template — each callee 'GenericsId' mapped to its
-  -- type argument's (Generic)Schema. A non-generic application (empty type
-  -- substitution) is a plain pass-through. (Effect-generic arguments are not
-  -- yet surfaced in the schema — TODO with the requests-GenericSchema work.)
+  -- attach the substitution template — each callee 'GenericsId' mapped to the
+  -- (Generic)Schema of its argument: a type parameter to its type schema, an
+  -- effect parameter to the requests array of the substituted effect. A
+  -- non-generic application (no substitutions) is a plain pass-through.
   AST.ExpressionTypeApplication typeApplicationExpr -> do
     sourceVar <- lowerExpr typeApplicationExpr.callee
-    let (typeSubstitution, _effectSubstitution) = typeApplicationExpr.instantiation
-    case typeSubstitution of
-      [] -> pure sourceVar
+    let (typeSubstitution, effectSubstitution) = typeApplicationExpr.instantiation
+    case (typeSubstitution, effectSubstitution) of
+      ([], []) -> pure sourceVar
       _ -> do
         dataDefs <- asks (.dataDefs)
-        let template =
+        topLevelTypes <- asks (.topLevelTypes)
+        let typeTemplate =
               [ (genericsId, Schema.jsonSchemaToText (Schema.buildOutputSchema dataDefs argType))
                 | (genericsId, argType) <- typeSubstitution
               ]
+            effectTemplate =
+              [ (genericsId, encodeValueText (Schema.buildRequestsSchema dataDefs topLevelTypes argEffect))
+                | (genericsId, argEffect) <- effectSubstitution
+              ]
         out <- freshVarId Nothing
-        emit (StatementApplyGenerics ApplyGenericsData {source = sourceVar, generics = template, output = out})
+        emit (StatementApplyGenerics ApplyGenericsData {source = sourceVar, generics = typeTemplate ++ effectTemplate, output = out})
         pure out
   AST.ExpressionTemplate templateExpr -> lowerTemplate templateExpr
   AST.ExpressionBlock blockExpr -> lowerBlockExpr blockExpr

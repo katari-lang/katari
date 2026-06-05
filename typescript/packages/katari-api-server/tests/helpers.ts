@@ -41,6 +41,7 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
         description: undefined,
         inputSchema: "{}",
         outputSchema: '{"type":"string"}',
+        requestsSchema: "[]",
       },
     },
     1: {
@@ -91,6 +92,7 @@ export function produceFileIR(returnFile: boolean): IRModule {
         description: undefined,
         inputSchema: "{}",
         outputSchema: "{}",
+        requestsSchema: "[]",
       },
     },
     1: {
