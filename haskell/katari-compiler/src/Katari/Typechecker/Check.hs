@@ -298,14 +298,30 @@ buildModuleGenericParams declarations =
     fromParams _ [] = pure Nothing
     fromParams nameRef typeParameters = case nameRef.resolution of
       Just resolution -> do
-        infos <- catMaybes <$> mapM paramInfo typeParameters
+        infos <- genericParamInfos typeParameters
         pure (Just (resolution, infos))
       Nothing -> pure Nothing
+
+-- | A generic declaration's parameters in order: each parameter's 'GenericsId',
+-- its kind (type / effect), and its elaborated @extends@ bound (default
+-- @unknown@). Shared by the module-level pass and local generic agents.
+genericParamInfos :: [GenericParameter Identified] -> Check [(GenericsId, GenericKind, SemanticType Resolved)]
+genericParamInfos = fmap catMaybes . mapM paramInfo
+  where
     paramInfo GenericParameter {name, kind, upperBound} = case name.resolution of
       Just (ResolvedGenericParam genericsId) -> do
         boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
         pure (Just (genericsId, kind, boundType))
       _ -> pure Nothing
+
+-- | Extend the per-callable generic-parameter map for the duration of an
+-- action. Used to bring a /local/ generic agent's parameters into scope (both
+-- inside its own body, for recursive @inner[T]@ calls, and in the enclosing
+-- block after its declaration).
+withGenericParams :: [(VariableResolution, [(GenericsId, GenericKind, SemanticType Resolved)])] -> Check a -> Check a
+withGenericParams [] action = action
+withGenericParams bindings action =
+  local (\e -> e {checkGenericParams = Map.union (Map.fromList bindings) e.checkGenericParams}) action
 
 -- | Substitute concrete types / effects for generic parameters throughout a
 -- type (used to instantiate a generic callable's signature at @foo[args]@):
@@ -989,43 +1005,47 @@ walkStatements [] returnExpression = do
   tail' <- traverse synthExpr returnExpression
   pure ([], tail')
 walkStatements (statement : rest) returnExpression = do
-  (statement', bindings) <- walkStatement statement
-  (rest', tail') <- withLocals bindings (walkStatements rest returnExpression)
+  (statement', bindings, genericBindings) <- walkStatement statement
+  (rest', tail') <- withLocals bindings (withGenericParams genericBindings (walkStatements rest returnExpression))
   pure (statement' : rest', tail')
 
-walkStatement :: Statement Identified -> Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)])
+-- | Walk a statement, returning its zonked form, the local-variable bindings it
+-- introduces, and any generic-parameter registrations (a local generic agent).
+walkStatement ::
+  Statement Identified ->
+  Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)], [(VariableResolution, [(GenericsId, GenericKind, SemanticType Resolved)])])
 walkStatement = \case
   StatementLet LetStatement {pattern, value, sourceSpan} -> do
     (value', valueType) <- synthExpr value
     (pattern', bindings) <- walkPattern valueType pattern
-    pure (StatementLet LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}, bindings)
+    pure (StatementLet LetStatement {pattern = pattern', value = value', sourceSpan = sourceSpan}, bindings, [])
   StatementReturn ReturnStatement {value, sourceSpan} -> do
     expected <- asks (.checkExpectedReturn)
     value' <- case expected of
       Just t -> checkExpr value t
       Nothing -> fst <$> synthExpr value
-    pure (StatementReturn ReturnStatement {value = value', sourceSpan = sourceSpan}, [])
+    pure (StatementReturn ReturnStatement {value = value', sourceSpan = sourceSpan}, [], [])
   StatementExpression expr -> do
     (expr', _) <- synthExpr expr
-    pure (StatementExpression expr', [])
+    pure (StatementExpression expr', [], [])
   StatementBreak BreakStatement {value, sourceSpan} -> do
     (value', valueType) <- synthExpr value
     recordExit HandleBreakTag valueType
-    pure (StatementBreak BreakStatement {value = value', sourceSpan = sourceSpan}, [])
+    pure (StatementBreak BreakStatement {value = value', sourceSpan = sourceSpan}, [], [])
   StatementNext NextStatement {value, modifiers, sourceSpan} -> do
     (value', valueType) <- synthExpr value
     modifiers' <- mapM walkModifier modifiers
     recordExit HandleNextTag valueType
-    pure (StatementNext NextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}, [])
+    pure (StatementNext NextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}, [], [])
   StatementForBreak ForBreakStatement {value, sourceSpan} -> do
     (value', valueType) <- synthExpr value
     recordExit ForBreakTag valueType
-    pure (StatementForBreak ForBreakStatement {value = value', sourceSpan = sourceSpan}, [])
+    pure (StatementForBreak ForBreakStatement {value = value', sourceSpan = sourceSpan}, [], [])
   StatementForNext ForNextStatement {modifiers, sourceSpan} -> do
     modifiers' <- mapM walkModifier modifiers
-    pure (StatementForNext ForNextStatement {modifiers = modifiers', sourceSpan = sourceSpan}, [])
+    pure (StatementForNext ForNextStatement {modifiers = modifiers', sourceSpan = sourceSpan}, [], [])
   StatementAgent agentStatement -> walkLocalAgent agentStatement
-  StatementError span_ -> pure (StatementError span_, [])
+  StatementError span_ -> pure (StatementError span_, [], [])
 
 walkModifier :: Modifier Identified -> Check (Modifier Zonked)
 walkModifier Modifier {name, value, sourceSpan} = do
@@ -1057,35 +1077,46 @@ walkInitializer name typeAnnotation initial = do
 -- | A nested @agent@ statement. Elaborate its signature, bind its parameters,
 -- check its body, and bind the agent's own name to its function type for the
 -- rest of the scope. Effects are computed by the SCC effect pass (not here).
-walkLocalAgent :: AgentStatement Identified -> Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)])
+walkLocalAgent ::
+  AgentStatement Identified ->
+  Check (Statement Zonked, [(VariableResolution, SemanticType Resolved)], [(VariableResolution, [(GenericsId, GenericKind, SemanticType Resolved)])])
 walkLocalAgent AgentStatement {annotation, name, typeParameters, parameters, returnType, withRequests, body, sourceSpan} = do
-  (parameters', paramSig, paramLocals) <- elaborateParameters parameters
-  declaredReturn <- traverse elaborateType returnType
-  -- Recursive local agents need their return annotation; bind the signature up
-  -- front when one is present so recursive calls resolve.
-  let selfBinding ret = maybe [] (\resolution -> [(resolution, SemanticTypeFunction paramSig ret emptyEffect)]) name.resolution
-  (body', bodyType) <-
-    withLocals (paramLocals ++ maybe [] selfBinding declaredReturn) $
-      case declaredReturn of
-        Just ret -> withExpectedReturn ret (walkBlock body)
-        Nothing -> walkBlock body
-  let returnSemantic = maybe bodyType id declaredReturn
-      agentType = SemanticTypeFunction paramSig returnSemantic emptyEffect
-      bindings = maybe [] (\resolution -> [(resolution, agentType)]) name.resolution
-  pure
-    ( StatementAgent
-        AgentStatement
-          { annotation = annotation,
-            name = retagNameRef name,
-            typeParameters = map retagGenericParameter typeParameters,
-            parameters = parameters',
-            returnType = fmap retagSyntacticType returnType,
-            withRequests = fmap (fmap retagSyntacticRequest) withRequests,
-            body = body',
-            sourceSpan = sourceSpan
-          },
-      bindings
-    )
+  -- A local generic agent registers its own parameters (so @inner[T]@ resolves,
+  -- both for recursive calls inside its body and for use sites after its
+  -- declaration), and elaborates its signature / body under its @extends@ bound
+  -- environment.
+  boundEnv <- buildBoundEnv typeParameters
+  genericParams <- genericParamInfos typeParameters
+  let genericBinding = maybe [] (\resolution -> [(resolution, genericParams)]) name.resolution
+  (zonked, bindings) <- withGenericParams genericBinding $ withBoundEnv boundEnv $ do
+    (parameters', paramSig, paramLocals) <- elaborateParameters parameters
+    declaredReturn <- traverse elaborateType returnType
+    -- Recursive local agents need their return annotation; bind the signature up
+    -- front when one is present so recursive calls resolve.
+    let selfBinding ret = maybe [] (\resolution -> [(resolution, SemanticTypeFunction paramSig ret emptyEffect)]) name.resolution
+    (body', bodyType) <-
+      withLocals (paramLocals ++ maybe [] selfBinding declaredReturn) $
+        case declaredReturn of
+          Just ret -> withExpectedReturn ret (walkBlock body)
+          Nothing -> walkBlock body
+    let returnSemantic = maybe bodyType id declaredReturn
+        agentType = SemanticTypeFunction paramSig returnSemantic emptyEffect
+        localBindings = maybe [] (\resolution -> [(resolution, agentType)]) name.resolution
+    pure
+      ( StatementAgent
+          AgentStatement
+            { annotation = annotation,
+              name = retagNameRef name,
+              typeParameters = map retagGenericParameter typeParameters,
+              parameters = parameters',
+              returnType = fmap retagSyntacticType returnType,
+              withRequests = fmap (fmap retagSyntacticRequest) withRequests,
+              body = body',
+              sourceSpan = sourceSpan
+            },
+        localBindings
+      )
+  pure (zonked, bindings, genericBinding)
 
 -- | Elaborate a parameter list into zonked params, the function-signature
 -- parameter map, and the env bindings for the parameters.
