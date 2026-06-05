@@ -246,6 +246,12 @@ export type SpawnAgentRootArgs = {
    * runs in a fresh isolated scope.
    */
   capturedScopeId?: import("./id.js").ScopeId | null;
+  /**
+   * The activation's ambient generic substitution (from the inbound delegate's
+   * `generics`), recorded on the agent's root scope for `statementApplyGenerics`
+   * inside the body to resolve `foo[T]` placeholders against.
+   */
+  ambientGenerics?: Record<string, import("../json.js").Json>;
 };
 
 /**
@@ -267,6 +273,7 @@ export function spawnAgentRoot(ctx: StepCtx, args: SpawnAgentRootArgs): ThreadId
     id: newScopeId,
     parentId: args.capturedScopeId ?? null,
     values: {},
+    ...(args.ambientGenerics !== undefined ? { ambientGenerics: args.ambientGenerics } : {}),
   };
   ctx.state.scopeCount++;
 

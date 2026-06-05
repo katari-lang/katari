@@ -17,6 +17,7 @@
 // onto the cross-module bus.
 
 import type { AgentDefId } from "../agent-def-id.js";
+import type { Json } from "../json.js";
 import type { Endpoint } from "./endpoint.js";
 import type { AskId, CallId, DelegationId, EscalationId, ThreadId } from "./id.js";
 import type { Value } from "./value.js";
@@ -30,6 +31,13 @@ export type ExternalEventPayload =
       delegationId: DelegationId;
       agentDefId: AgentDefId;
       args: Record<string, Value>;
+      /**
+       * The callee value's resolved generic substitution (from a `foo[args]`
+       * instantiation), recorded by the receiver as the new agent activation's
+       * ambient substitution — used to fill the `$generic` placeholders a
+       * `foo[T]` inside the body leaves behind. Absent for a non-generic call.
+       */
+      generics?: Record<string, Json>;
     }
   | {
       /** Successful completion of a `delegate`. */

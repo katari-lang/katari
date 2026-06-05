@@ -261,6 +261,7 @@ function translateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): v
       args: p.args,
       delegationId: p.delegationId,
       capturedScopeId: target.capturedScopeId,
+      ambientGenerics: p.generics,
     });
     ctx.state.delegations[p.delegationId] = agentThreadId;
     ctx.state.delegationSenders[p.delegationId] = event.from;

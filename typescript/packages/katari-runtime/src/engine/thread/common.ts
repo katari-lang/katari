@@ -10,6 +10,7 @@
 
 import { encodeCoreAgentDefId, THROW_REQUEST_QNAME } from "../../agent-def-id.js";
 import type { Block, BlockId, BlockInput } from "../../ir/types.js";
+import type { Json } from "../../json.js";
 import { type AskId, type CallId, createEscalationId, type ScopeId, type ThreadId } from "../id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
@@ -507,6 +508,25 @@ export function lookupValue(ctx: StepCtx, scopeId: ScopeId, varId: number): Valu
     cur = sc.parentId;
   }
   throw new Error(`engine: var ${varId} not found in scope ${scopeId} or ancestors`);
+}
+
+/**
+ * Find the ambient generic substitution in scope — the nearest `ambientGenerics`
+ * walking the scope chain from `scopeId` (the enclosing agent activation set it
+ * on its root scope). Returns an empty map when none is in scope (a non-generic
+ * activation), in which case a `statementApplyGenerics` fill is a no-op.
+ */
+export function lookupAmbientGenerics(ctx: StepCtx, scopeId: ScopeId): Record<string, Json> {
+  let cur: ScopeId | null = scopeId;
+  let depth = 0;
+  while (cur !== null) {
+    if (depth++ > MAX_SCOPE_DEPTH) break;
+    const sc = ctx.state.scopes[cur] as Scope | undefined;
+    if (sc === undefined) break;
+    if (sc.ambientGenerics !== undefined) return sc.ambientGenerics;
+    cur = sc.parentId;
+  }
+  return {};
 }
 
 // ─── Common Thread defaults (for spawn) ────────────────────────────────────

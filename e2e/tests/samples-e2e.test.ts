@@ -378,4 +378,15 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       expect(result).not.toContain("$generic");
     },
   );
+
+  itE2E(
+    "28-ambient-generic: identity[T] inside describe[integer] resolves T via the ambient substitution",
+    async () => {
+      const result = await applyAndRun("ambient_generic", "28-ambient-generic");
+      const schema = JSON.parse(result);
+      // The outer T = integer flows through the delegation's ambient generics.
+      expect(schema.properties.x).toEqual({ type: "integer" });
+      expect(result).not.toContain("$generic");
+    },
+  );
 });

@@ -1,0 +1,7 @@
+[package]
+name = "ambient_generic"
+
+[runtime]
+url = "http://localhost:8000"
+
+[dependencies]

@@ -27,6 +27,7 @@ import {
   allocAskId,
   commonRemoveChild,
   emitThrowEscalate,
+  lookupAmbientGenerics,
   lookupValue,
   setValueInScope,
   writeArgsIntoChildScope,
@@ -190,7 +191,7 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
       // (empty until delegation records one — concrete `foo[int]` args carry no
       // placeholders, so the fill is a no-op there).
       const source = lookupValue(ctx, t.scopeId, stmt.body.source);
-      const ambient: Record<string, Json> = {};
+      const ambient = lookupAmbientGenerics(ctx, t.scopeId);
       const generics: Record<string, Json> = {};
       for (const [genericsId, schemaJson] of stmt.body.generics) {
         generics[String(genericsId)] = fillGenericSchema(ambient, JSON.parse(schemaJson) as Json);

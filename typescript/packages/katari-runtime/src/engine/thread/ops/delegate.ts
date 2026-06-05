@@ -117,7 +117,7 @@ function emitInitialDelegate(ctx: StepCtx, t: DelegateThread, block: DelegateBlo
   // Register on the sender side so inbound delegateAck / terminateAck
   // can be routed back here.
   ctx.state.pendingDelegateOut[t.delegationId] = t.id;
-  const { peer, agentDefId } = resolveTarget(ctx, t, block);
+  const { peer, agentDefId, generics } = resolveTarget(ctx, t, block);
   ctx.emit({
     from: ctx.state.selfEndpoint,
     to: peer,
@@ -126,6 +126,7 @@ function emitInitialDelegate(ctx: StepCtx, t: DelegateThread, block: DelegateBlo
       delegationId: t.delegationId,
       agentDefId,
       args: { ...t.args },
+      ...(generics !== undefined ? { generics } : {}),
     },
   });
 }
@@ -137,6 +138,7 @@ function resolveTarget(
 ): {
   peer: Endpoint;
   agentDefId: import("../../../agent-def-id.js").AgentDefId;
+  generics?: Record<string, import("../../../json.js").Json>;
 } {
   const target = block.target;
   switch (target.kind) {
@@ -197,11 +199,13 @@ function resolveTarget(
           return {
             peer: ctx.state.selfEndpoint,
             agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname, snapshot }),
+            generics: value.generics,
           };
         }
         return {
           peer: ctx.state.ffiTargetEndpoint,
           agentDefId: encodeFfiAgentDefId({ kind: "qname", value: qname, snapshot }),
+          generics: value.generics,
         };
       }
       if (value.kind === "closure") {
@@ -212,6 +216,7 @@ function resolveTarget(
         return {
           peer: ctx.state.selfEndpoint,
           agentDefId: encodeCoreAgentDefId({ kind: "closureRef", id: value.ref.id }),
+          generics: value.generics,
         };
       }
       throw new Error(
