@@ -225,25 +225,18 @@ function pushCallEvent(ctx: StepCtx, t: UserThread, callId: CallId, call: CallDa
 }
 
 function isStructuralBlock(kind: Block["kind"]): boolean {
-  switch (kind) {
-    case "blockHandle":
-    case "blockFor":
-    case "blockMatch":
-    case "blockTuple":
-    case "blockRecord":
-      // A record block builds its value from entry expressions that reference
-      // the caller's locals (and, under the single-value calling convention,
-      // every named call's argument record references the in-scope arg vars),
-      // so it must inherit the caller scope rather than run isolated.
-      return true;
-    case "blockDelegate":
-      // BlockDelegate may reference a runtime value at a VarId in the
-      // caller's scope (DelegateTargetValue); inherit so the lookup
-      // resolves. For static targets the inheritance is harmless.
-      return true;
-    default:
-      return false;
-  }
+  // A child spawned by a StatementCall inherits the caller's scope (inline)
+  // unless it is an agent boundary. Every block a user thread can call
+  // directly computes a value in-thread and references the caller's locals —
+  // match / for / handle arms and conditions, tuple / record entries, and a
+  // BlockDelegate's callee VarId all need the caller scope. Only `blockAgent`
+  // cuts scope (the agent isolates its own), so it alone runs isolated.
+  //
+  // Defaulting to structural (rather than enumerating the structural kinds)
+  // is deliberate: the old enumeration silently omitted `blockRecord`, which
+  // was a latent scope bug. Any new value-computing block kind is correct by
+  // default here; only a genuine new boundary needs to be added below.
+  return kind !== "blockAgent";
 }
 
 function resolveArgs(ctx: StepCtx, scopeId: ScopeId, call: CallData): Record<string, Value> {
