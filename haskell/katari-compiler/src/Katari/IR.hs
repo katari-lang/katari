@@ -51,8 +51,6 @@ module Katari.IR
     HandleBlock (..),
     TupleBlock (..),
     RecordBlock (..),
-    Param (..),
-    BlockInput (..),
     Handler (..),
     MatchArm (..),
     MatchPattern (..),
@@ -63,6 +61,7 @@ module Katari.IR
     CallData (..),
     MakeClosureData (..),
     ApplyGenericsData (..),
+    GetFieldData (..),
     ExitData (..),
     ContData (..),
     LoadLiteralData (..),
@@ -271,9 +270,11 @@ data AgentBlock = AgentBlock
     -- appears in 'IRModule.entries'; for local / closure agents it is a
     -- compiler-synthesized fresh name.
     qualifiedName :: QualifiedName,
-    -- | How the single incoming argument value binds into the agent scope
-    -- (named destructure or @...@ spread).
-    input :: BlockInput,
+    -- | Optional-parameter defaults, by label. When the single incoming
+    -- argument value is a record, the runtime fills any of these labels the
+    -- caller omitted before handing the value on to 'entryBody'. (An agent
+    -- binds no var of its own — its body / leaf reads the value.)
+    defaults :: Map Text LiteralValue,
     -- | The 'BlockId' of the agent body. Typically a 'BlockUser'
     -- (inline) or 'BlockHandle' for @where { handlers }@ agents.
     entryBody :: BlockId,
@@ -364,11 +365,16 @@ instance FromJSON DelegateTarget where
 -- (inherits parent scope, catches nothing). Agent boundaries are
 -- represented by 'BlockAgent' instead.
 data UserBlock = UserBlock
-  { -- | How the single incoming argument value binds into scope. Meaningful
-    -- for handler blocks ('InputNamed' over the req args) and break / then
-    -- value blocks ('InputSpread' of the break value); @InputNamed []@ for
-    -- plain inline blocks that take no argument.
-    input :: BlockInput,
+  { -- | The var the single incoming argument value binds to (after any
+    -- 'defaults' fill), if the block consumes one. A handler / then / spread
+    -- body binds it (req-args record / break value / @...obj@); a named
+    -- agent body binds it and reads its fields via 'StatementGetField'; a
+    -- plain inline block takes no argument ('Nothing').
+    input :: Maybe VarId,
+    -- | Optional-parameter defaults, by label (see 'AgentBlock.defaults'):
+    -- filled into the incoming value when it is a record. Empty for blocks
+    -- whose defaults were already applied by their enclosing agent.
+    defaults :: Map Text LiteralValue,
     statements :: [Statement],
     -- | Tail value when the block completes normally (Rust-style trailing
     -- expression). 'Nothing' means the block has no value.
@@ -381,46 +387,6 @@ instance ToJSON UserBlock where
 
 instance FromJSON UserBlock where
   parseJSON = genericParseJSON irOptions
-
--- | A label-bound param of an 'InputNamed' block. The block's single
--- incoming argument value is treated as a record; 'label' selects the
--- field, which is bound to 'var'.
-data Param = Param
-  { label :: Text,
-    var :: VarId,
-    -- | Literal default for an optional parameter. When the incoming
-    -- argument record omits this label, the runtime binds @var@ to this
-    -- value instead. 'Nothing' for required parameters (and omitted from
-    -- the JSON via @omitNothingFields@, so non-optional params are
-    -- unaffected).
-    defaultValue :: Maybe LiteralValue
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON Param where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON Param where
-  parseJSON = genericParseJSON irOptions
-
--- | How a block binds its single incoming argument value into scope. Under
--- the unified single-value calling convention every block receives exactly
--- one value; this says how to consume it.
-data BlockInput where
-  -- | Treat the incoming value as a record and destructure it by label,
-  -- filling each 'Param''s default when its label is absent. The empty list
-  -- is the argument-less case (inline / match / for bodies).
-  InputNamed :: [Param] -> BlockInput
-  -- | Bind the whole incoming value to this single var (the @...obj@ spread
-  -- parameter form, and the break / then value blocks). No destructuring.
-  InputSpread :: VarId -> BlockInput
-  deriving (Eq, Show, Generic)
-
-instance ToJSON BlockInput where
-  toJSON = genericToJSON sumOptions
-
-instance FromJSON BlockInput where
-  parseJSON = genericParseJSON sumOptions
 
 -- | A request handler inside a 'HandleData'. Handler dispatch compares the
 -- raised request's 'QualifiedName' against this 'request' field; on equality
@@ -472,6 +438,11 @@ data Statement where
   -- the resolved substitution, consulted by @get_metadata@ to specialise the
   -- callee's schema.
   StatementApplyGenerics :: ApplyGenericsData -> Statement
+  -- | Read a single field out of a record value: bind @output@ to
+  -- @source@'s @field@ entry (or @null@ when absent). The runtime reads it
+  -- inline — no cross-thread call. Used to bind named parameters from the
+  -- block's incoming argument record, and for surface @obj.field@ access.
+  StatementGetField :: GetFieldData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -535,6 +506,21 @@ instance ToJSON ApplyGenericsData where
   toJSON = genericToJSON irOptions
 
 instance FromJSON ApplyGenericsData where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'StatementGetField'. Binds @output@ to @source@'s record
+-- field @field@.
+data GetFieldData = GetFieldData
+  { source :: VarId,
+    field :: Text,
+    output :: VarId
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON GetFieldData where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON GetFieldData where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'BlockMatch'. The runtime creates a management thread,

@@ -179,7 +179,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
       Just ub -> do
         ub.statements `shouldBe` []
         ub.trailing `shouldBe` Nothing
-        ub.input `shouldBe` InputNamed []
+        ub.input `shouldBe` Nothing
 
   it "lowers an integer literal as StatementLoadLiteral with the integer value" $ do
     (irMod, errs) <- lowerSource "agent main() { 42 }"
@@ -264,9 +264,9 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
           ]
     errs `shouldBe` []
     let Just ub = agentBody "main" irMod
-        loads = literalLoads ub
-    -- Among the literal loads should be the field name "x".
-    LiteralValueString "x" `elem` map (.value) loads `shouldBe` True
+        getFields = [g | StatementGetField g <- ub.statements]
+    -- Field access @p.x@ lowers to a StatementGetField reading "x".
+    map (.field) getFields `shouldContain` ["x"]
 
 callTargetBlockId :: CallData -> BlockId
 callTargetBlockId c = c.block

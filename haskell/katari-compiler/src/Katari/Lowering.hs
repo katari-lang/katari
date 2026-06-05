@@ -17,7 +17,7 @@ module Katari.Lowering
   )
 where
 
-import Control.Monad (foldM, forM, mapAndUnzipM)
+import Control.Monad (foldM, forM, forM_, mapAndUnzipM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.Reader (ReaderT, ask, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, gets, modify, runState)
@@ -407,7 +407,8 @@ schemasForFunctionType functionType labelsAndAnnotations = do
 defaultUserBlock :: UserBlock
 defaultUserBlock =
   UserBlock
-    { input = InputNamed [],
+    { input = Nothing,
+      defaults = Map.empty,
       statements = [],
       trailing = Nothing
     }
@@ -593,19 +594,16 @@ writeWrapperAgent ::
   Text ->
   Text ->
   Lower ()
-writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputSchemaJson outputSchemaJson = do
-  paramVars <- mapM (\_ -> freshVarId Nothing) paramSpecs
-  let wrapperParams =
-        zipWith
-          (\(label, parameterDefault) var -> Param {label = label, var = var, defaultValue = parameterDefault})
-          paramSpecs
-          paramVars
+writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputSchemaJson outputSchemaJson =
+  -- A wrapper just fills any defaulted parameter the caller omitted (when the
+  -- incoming value is a record) and hands the value to its leaf body, which
+  -- reads the named fields directly — no var binding here.
   recordBlock
     agentBlk
     ( BlockAgent
         AgentBlock
           { qualifiedName = qname,
-            input = InputNamed wrapperParams,
+            defaults = Map.fromList [(label, d) | (label, Just d) <- paramSpecs],
             entryBody = innerBlk,
             name = simpleName,
             description = desc,
@@ -831,28 +829,57 @@ lowerAgentLike ::
   BlockId ->
   Lower ()
 lowerAgentLike name mVariableResolution description parameters body blockId = do
-  paramBindings <- mapM bindParam parameters
-  let paramVars = map fst paramBindings
-      paramPrelude = combineParamPreludes (map snd paramBindings)
-      labelsAndAnnotations = [(pb.name.text, pb.annotation) | pb <- parameters]
-      -- A sole spread parameter @...obj: T@ binds the whole incoming value to
-      -- @obj@'s var; otherwise the named params are destructured from the
-      -- argument record.
-      input = case (parameters, paramVars) of
-        ([pb], [param]) | pb.spread -> InputSpread param.var
-        _ -> InputNamed paramVars
+  let labelsAndAnnotations = [(pb.name.text, pb.annotation) | pb <- parameters]
+  (bodyInput, agentDefaults, prelude) <- agentInputBinding parameters
   (inputSchema, outputSchema) <- case mVariableResolution of
     Just variableResolution -> schemasForVariable variableResolution labelsAndAnnotations
     Nothing -> pure ("{}", "{}")
   lowerSimpleAgent
     blockId
     name
-    input
-    paramPrelude
+    bodyInput
+    agentDefaults
+    prelude
     body
     description
     inputSchema
     outputSchema
+
+-- | Compute how an agent consumes its single incoming argument value: the
+-- body's input var, the agent's default-fill map, and a prelude (run inside
+-- the body buffer) that emits the per-parameter field reads and returns the
+-- locals they bind.
+--
+--   * A sole spread parameter @...obj: T@ binds the whole value to @obj@'s var
+--     (no field reads, no defaults).
+--   * Otherwise the value is a record: a fresh input var holds it, each named
+--     parameter is read out of it with a 'StatementGetField', and the agent
+--     carries the defaulted parameters' literals.
+agentInputBinding ::
+  [AST.ParameterBinding Zonked] ->
+  Lower (Maybe VarId, Map Text LiteralValue, Lower [(Id.VariableResolution, VarId)])
+agentInputBinding parameters = case parameters of
+  [] -> pure (Nothing, Map.empty, pure [])
+  [pb] | pb.spread -> do
+    objVar <- freshVarId (Just pb.name.text)
+    pure (Just objVar, Map.empty, bindParamLocal pb objVar)
+  _ -> do
+    inputVar <- freshVarId (Just "args")
+    paramVars <- mapM (\pb -> (pb,) <$> freshVarId (Just pb.name.text)) parameters
+    let agentDefaults = Map.fromList [(pb.name.text, pd.value) | (pb, _) <- paramVars, Just pd <- [pb.defaultValue]]
+        prelude = do
+          forM_ paramVars $ \(pb, paramVar) ->
+            emit (StatementGetField GetFieldData {source = inputVar, field = pb.name.text, output = paramVar})
+          concat <$> mapM (\(pb, paramVar) -> bindParamLocal pb paramVar) paramVars
+    pure (Just inputVar, agentDefaults, prelude)
+
+-- | The local binding a parameter introduces (its resolved variable → IR var).
+bindParamLocal :: AST.ParameterBinding Zonked -> VarId -> Lower [(Id.VariableResolution, VarId)]
+bindParamLocal pb var = case pb.name.resolution of
+  Just variableResolution -> pure [(variableResolution, var)]
+  Nothing -> do
+    recordError (LoweringErrorUnresolvedVariable pb.sourceSpan pb.name.text)
+    pure []
 
 -- | Plain agent (no @where@). Emits a 'BlockAgent' wrapper at @blockId@ that
 -- references an inner 'BlockUser' holding the actual body statements.
@@ -868,23 +895,26 @@ lowerAgentLike name mVariableResolution description parameters body blockId = do
 lowerSimpleAgent ::
   BlockId ->
   Text ->
-  BlockInput ->
+  Maybe VarId ->
+  Map Text LiteralValue ->
   Lower [(Id.VariableResolution, VarId)] ->
   AST.Block Zonked ->
   Maybe Text ->
   Text ->
   Text ->
   Lower ()
-lowerSimpleAgent blockId name input prelude blk description inputSchema outputSchema = do
+lowerSimpleAgent blockId name bodyInput agentDefaults prelude blk description inputSchema outputSchema = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- prelude
     withLocals locals (lowerBlockInto blk)
   -- Allocate the inner BlockUser body, then wrap it in a BlockAgent at
-  -- @blockId@ (the externally-callable id).
+  -- @blockId@ (the externally-callable id). The agent fills defaults into the
+  -- incoming value; the body binds it and reads its fields (already emitted by
+  -- the prelude into @statements@).
   bodyBlockId <- freshBlockId
   let bodyBlock =
         defaultUserBlock
-          { input = input,
+          { input = bodyInput,
             statements = statements,
             trailing = trailing
           }
@@ -900,7 +930,7 @@ lowerSimpleAgent blockId name input prelude blk description inputSchema outputSc
       agent =
         AgentBlock
           { qualifiedName = qname,
-            input = input,
+            defaults = agentDefaults,
             entryBody = bodyBlockId,
             name = name,
             description = description,
@@ -923,9 +953,10 @@ lowerHandler hr = do
       recordError (LoweringErrorUnresolvedVariable hr.sourceSpan hr.name.text)
       pure (QualifiedName "<unresolved>" hr.name.text)
   bodyBlockId <- freshBlockId
-  paramBindings <- mapM bindParam hr.parameters
-  let reqParamVars = map fst paramBindings
-      paramPrelude = combineParamPreludes (map snd paramBindings)
+  -- A handler consumes the request's argument record exactly like an agent
+  -- consumes its call: bind it, read each req param out by field, fill the
+  -- req's parameter defaults.
+  (handlerInput, handlerDefaults, paramPrelude) <- agentInputBinding hr.parameters
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- paramPrelude
     withLocals locals (lowerBlockInto hr.body)
@@ -939,7 +970,8 @@ lowerHandler hr = do
         _ -> statements
       userBlock =
         defaultUserBlock
-          { input = InputNamed reqParamVars,
+          { input = handlerInput,
+            defaults = handlerDefaults,
             statements = finalStatements
           }
   recordBlock bodyBlockId (BlockUser userBlock) (Just hr.name.text)
@@ -965,39 +997,15 @@ lowerThenClause = \case
       (statements, trailing) <- lowerBlockBody blk
       let userBlock =
             defaultUserBlock
-              { -- The then-block receives the body's tail under the @value@
-                -- label (the runtime spawns it with @{value: <break value>}@).
-                input = InputNamed [Param {label = "value", var = paramVar, defaultValue = Nothing}],
+              { -- The then-block receives the body's tail value directly bound
+                -- to its param var (the runtime spawns it with that value).
+                input = Just paramVar,
                 statements = statements,
                 trailing = trailing
               }
       recordBlock blockId (BlockUser userBlock) Nothing
     pure (Just blockId)
 
--- | Bind a function parameter: allocate the param's IR var (the slot the
--- runtime populates) and return a deferred destructuring action.
---
--- The 'Param' is allocated immediately so callers can install the agent /
--- handler signature before the body runs. The 'Lower' action — to be run
--- inside the body's statement buffer — emits any 'tuple_get' / 'get_field'
--- projections needed for non-variable patterns and returns the
--- @(VariableResolution, VarId)@ pairs introduced.
-bindParam :: AST.ParameterBinding Zonked -> Lower (Param, Lower [(Id.VariableResolution, VarId)])
-bindParam pb = do
-  var <- freshVarId (Just pb.name.text)
-  -- Parameters are plain bindings: the variable resolves directly to the
-  -- param slot, so there is nothing to destructure — just bind the name.
-  let bindLocals = case pb.name.resolution of
-        Just variableResolution -> pure [(variableResolution, var)]
-        Nothing -> do
-          recordError (LoweringErrorUnresolvedVariable pb.sourceSpan pb.name.text)
-          pure []
-  pure (Param {label = pb.name.text, var = var, defaultValue = (.value) <$> pb.defaultValue}, bindLocals)
-
--- | Compose multiple parameter destructuring actions into a single
--- prelude that can be threaded into a body buffer.
-combineParamPreludes :: [Lower [(Id.VariableResolution, VarId)]] -> Lower [(Id.VariableResolution, VarId)]
-combineParamPreludes acts = concat <$> sequence acts
 
 -- | Allocate a fresh IR var for an incoming value and destructure it by
 -- emitting a single 'StatementBindPattern'. Returns the fresh 'VarId' and the
@@ -1177,8 +1185,9 @@ lowerExpr = \case
   AST.ExpressionRecord recordExpr -> lowerRecordExpr recordExpr.entries
   AST.ExpressionFieldAccess fieldAccessExpr -> do
     object <- lowerExpr fieldAccessExpr.object
-    fieldVar <- emitLoadLiteral (LiteralValueString fieldAccessExpr.fieldName.text)
-    emitPrimCall "get_field" [("object", object), ("field", fieldVar)]
+    out <- freshVarId Nothing
+    emit (StatementGetField GetFieldData {source = object, field = fieldAccessExpr.fieldName.text, output = out})
+    pure out
   -- Generic instantiation @foo[args]@: the callee value carries a generic
   -- substitution (consulted by @get_metadata@ to specialise its schema). The
   -- callable code itself is generic-erased, so we lower the bare callee and
@@ -1733,15 +1742,12 @@ offsetVarId (VarId base) (VarId original) = VarId (base + original)
 offsetBlockInBlock :: (BlockId -> BlockId) -> (VarId -> VarId) -> Block -> Block
 offsetBlockInBlock offsetB offsetV = \case
   BlockAgent agent ->
-    BlockAgent
-      agent
-        { input = offsetBlockInput offsetV agent.input,
-          entryBody = offsetB agent.entryBody
-        }
+    -- 'defaults' are literals (no vars); only the entry body is offset.
+    BlockAgent agent {entryBody = offsetB agent.entryBody}
   BlockUser user ->
     BlockUser
       user
-        { input = offsetBlockInput offsetV user.input,
+        { input = fmap offsetV user.input,
           statements = map (offsetStatement offsetB offsetV) user.statements,
           trailing = fmap offsetV user.trailing
         }
@@ -1784,13 +1790,6 @@ offsetBlockInBlock offsetB offsetV = \case
   BlockRecord block ->
     BlockRecord block {entries = map (second offsetB) block.entries}
 
-offsetParam :: (VarId -> VarId) -> Param -> Param
-offsetParam offsetV param = param {var = offsetV param.var}
-
-offsetBlockInput :: (VarId -> VarId) -> BlockInput -> BlockInput
-offsetBlockInput offsetV = \case
-  InputNamed params -> InputNamed (map (offsetParam offsetV) params)
-  InputSpread var -> InputSpread (offsetV var)
 
 offsetStatement :: (BlockId -> BlockId) -> (VarId -> VarId) -> Statement -> Statement
 offsetStatement offsetB offsetV = \case
@@ -1829,7 +1828,12 @@ offsetStatement offsetB offsetV = \case
         { source = offsetV applyData.source,
           output = offsetV applyData.output
         }
-
+  StatementGetField getFieldData ->
+    StatementGetField
+      getFieldData
+        { source = offsetV getFieldData.source,
+          output = offsetV getFieldData.output
+        }
 
 offsetArm :: (BlockId -> BlockId) -> (VarId -> VarId) -> MatchArm -> MatchArm
 offsetArm offsetB offsetV arm =

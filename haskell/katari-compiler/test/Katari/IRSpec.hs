@@ -46,7 +46,8 @@ blockSpec = describe "Block (sum)" $ do
   it "BlockUser nests UserBlock under 'body'" $ do
     let userBlock =
           UserBlock
-            { input = InputNamed [Param {label = "x", var = VarId 0, defaultValue = Nothing}],
+            { input = Just (VarId 0),
+              defaults = Map.empty,
               statements = [],
               trailing = Just (VarId 1)
             }
@@ -55,11 +56,8 @@ blockSpec = describe "Block (sum)" $ do
         [ "kind" .= ("blockUser" :: String),
           "body"
             .= object
-              [ "input"
-                  .= object
-                    [ "kind" .= ("inputNamed" :: String),
-                      "body" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]]
-                    ],
+              [ "input" .= (0 :: Int),
+                "defaults" .= object [],
                 "statements" .= ([] :: [Value]),
                 "trailing" .= (1 :: Int)
               ]
@@ -119,12 +117,14 @@ blockSpec = describe "Block (sum)" $ do
   it "round-trips all variants" $ do
     let userBody =
           UserBlock
-            { input = InputNamed [],
+            { input = Nothing,
+              defaults = Map.empty,
               statements = [],
               trailing = Nothing
             }
     roundTrip (BlockUser userBody)
-    roundTrip (BlockUser userBody {input = InputSpread (VarId 3)})
+    roundTrip (BlockUser userBody {input = Just (VarId 3)})
+    roundTrip (BlockUser userBody {defaults = Map.fromList [("x", LiteralValueInteger 5)]})
     roundTrip (BlockPrim "add")
     roundTrip (BlockRequest (QualifiedName "main" "log"))
     roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetInternal (QualifiedName "main" "agent")})
@@ -300,7 +300,8 @@ moduleSpec = describe "IRModule" $ do
     let block =
           BlockUser
             UserBlock
-              { input = InputNamed [],
+              { input = Nothing,
+                defaults = Map.empty,
                 statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
                 trailing = Nothing
               }
