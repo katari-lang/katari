@@ -324,12 +324,15 @@ export type MakeClosureThread = Common & {
  */
 export type CallAgentThread = Common & {
   kind: "callAgent";
-  /** Original @name@ string preserved for diagnostics + cancel path. */
-  nameStr: string;
   /**
-   * The inner of the user-supplied @args@ record (a `record[unknown]`
-   * at the type level). Kept verbatim until @create@ runs so the
-   * resolved target's input schema can drive the per-key validation.
+   * The callable VALUE to invoke (an `agentLiteral` or `closure`; it carries
+   * the dispatch identity + any generic substitution). Resolved at @create@.
+   */
+  target: Value;
+  /**
+   * The user-supplied @args@ record (dynamically built, e.g. from an AI). Kept
+   * verbatim until @create@, where it is validated against the target's input
+   * schema (specialised to the target's generics) before the delegate fires.
    */
   argsRecord: Record<string, Value>;
   /**

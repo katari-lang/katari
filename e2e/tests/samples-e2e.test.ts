@@ -336,7 +336,7 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
   );
 
   itE2E(
-    "22-call-agent: dynamic dispatch + schema validation surfaces call_agent_error on bad args",
+    "22-call-agent: dynamic dispatch + schema validation surfaces error_invalid_argument on bad args",
     async () => {
       const result = await applyAndRun("call_agent", "22-call-agent");
       expect(result).toMatch(/^ok=hello, alice; bad=err: /);
@@ -346,8 +346,8 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
   itE2E(
     "23-call-closure: dispatch a local closure via its get_metadata id (closureref round-trip)",
     async () => {
-      // name → metadata → `closureref:<id>` → call_agent resolves the closure
-      // blob, validates args, and runs it: the AI-tool-calling round-trip.
+      // call_agent takes the closure VALUE, resolves its blob,
+      // validates args, and runs it: the dynamic-dispatch round-trip.
       const result = await applyAndRun("call_closure", "23-call-closure");
       expect(result).toBe("hi bob");
     },

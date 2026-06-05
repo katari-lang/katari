@@ -3,31 +3,22 @@ agent greeter(name: string) -> string {
   f"hello, ${name}"
 }
 
-@"Invoke the greeter dynamically and return whatever it produced. call_agent takes the EXTERNAL dispatch id (`qualified.name@snapshot`), which we read off get_metadata — a bare name is rejected. The handle scope catches a call_agent_error and substitutes a diagnostic string."
-agent try_call(args: record[unknown]) -> string {
+@"Invoke the greeter dynamically with a runtime-built args record. call_agent takes the callable VALUE (greeter) + a dynamic args record, validating the args against greeter's input schema; bad args raise error_invalid_argument, which the handle scope catches and turns into a diagnostic string."
+agent try_call(args: {}) -> string {
   handle {
-    request call_agent_error(message: string) {
+    request error_invalid_argument(message: string) {
       break f"err: ${message}"
     }
   }
-  match (get_metadata(value = greeter)) {
-    case agent_metadata(name = _, id = id, description = _, input = _, output = _) => {
-      match (call_agent(name = id, args = args)) {
-        case string(s) => { s }
-        case _ => { "non-string return" }
-      }
-    }
+  match (call_agent[string, pure](target = greeter, args = args)) {
+    case string(s) => { s }
+    case _ => { "non-string return" }
   }
 }
 
-@"Demonstrates dynamic dispatch + per-call schema validation via the call_agent prim."
+@"Demonstrates dynamic dispatch + per-call schema validation via call_agent."
 agent main() -> string {
-  let good_args = record.set(
-    record = record.empty(),
-    key = "name",
-    value = "alice",
-  )
-  let ok_value = try_call(args = good_args)
-  let err_value = try_call(args = record.empty())
+  let ok_value = try_call(args = { name = "alice" })
+  let err_value = try_call(args = { wrong = "oops" })
   f"ok=${ok_value}; bad=${err_value}"
 }

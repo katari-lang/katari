@@ -19,7 +19,7 @@ import {
 import type { StepCtx } from "./step-ctx.js";
 import { newCommonFields, setChild } from "./thread/common.js";
 import type { Thread } from "./thread/types.js";
-import { inlineText, type Value } from "./value.js";
+import { NULL_VALUE, type Value } from "./value.js";
 
 /**
  * Decide where the freshly-allocated child scope's parentId should point.
@@ -96,12 +96,12 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       // into a dedicated CallAgentThread for this one well-known name.
       if (b.body === "primitive.call_agent") {
         const argRec = args.argument?.kind === "record" ? args.argument.entries : {};
-        const nameArg = argRec["name"];
+        const targetArg = argRec["target"];
         const argsArg = argRec["args"];
         return {
           ...common,
           kind: "callAgent" as const,
-          nameStr: nameArg !== undefined && nameArg.kind === "string" ? inlineText(nameArg) : "",
+          target: targetArg ?? NULL_VALUE,
           argsRecord: argsArg !== undefined && argsArg.kind === "record" ? argsArg.entries : {},
           inboundEscalations: {},
         };

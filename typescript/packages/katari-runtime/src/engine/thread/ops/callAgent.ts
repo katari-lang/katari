@@ -1,46 +1,41 @@
-// CallAgentThread ops — runtime side of the @call_agent(name, args)@
-// primitive.
+// CallAgentThread ops — runtime side of the
+// @call_agent[R, effect E](target, args)@ primitive.
 //
 // On create:
-//   1. Resolve @nameStr@ into a callable identity. @nameStr@ is always the
-//      EXTERNAL dispatch handle — exactly what `get_metadata` returns and an
-//      agent value carries on the wire (call_agent is only for an id that came
-//      through a string/RawValue; a statically-known agent is called by value):
-//      - "module.agent@snapshot" → a top-level callable. The bare qname (sans
-//        `@snapshot`) keys irModule.entries; a BARE id is rejected (it's the
-//        internal namespace — ambiguous as a wire id).
-//      - "closureref:<id>" → a content-ref closure: fetch its blob (the input
-//        schema lives there) + dispatch by the ref; CORE materializes it.
-//   2. Read the target's `AgentBlock` to get `inputSchema` (and the
-//      runtime endpoint — internal CORE loopback vs. external FFI).
-//   3. Validate @argsRecord@ against the inputSchema; collect all
-//      mismatches into one diagnostic string.
-//   4. On success: emit an outbound `delegate` event with the args
-//      record splatted into the per-label arguments the target
-//      expects. Wait for the matching `delegateAck` (translated by
-//      the runner into a `done` event).
-//   5. On any of (a) unresolvable name, (b) target isn't an AgentBlock,
-//      (c) validation errors: raise the `primitive.call_agent_error`
-//      request upward and enter "waiting for cancel" state, just like
-//      `PrimRaiseRequest` does for ordinary prims.
+//   1. Resolve the @target@ VALUE into a callable identity (mirrors
+//      DelegateThread's value dispatch): an `agentLiteral` dispatches
+//      CORE-internal when its qname is in the IR entries (else FFI); a
+//      `closure` always dispatches on CORE (fetch its blob for the input
+//      schema). The value also carries any generic substitution.
+//   2. Read the target's input schema, specialise it to the value's generics,
+//      and validate @argsRecord@ against it; collect mismatches into one
+//      diagnostic string.
+//   3. On success: emit an outbound `delegate` event — @argsRecord@ becomes the
+//      target's single argument value, the generics ride along — and wait for
+//      the matching `delegateAck` (translated by the runner into a `done`).
+//   4. On (a) an un-callable target, or (b) validation errors: raise the
+//      `primitive.error_invalid_argument` request upward and enter the
+//      "waiting for cancel" state, just like `PrimRaiseRequest` for ordinary
+//      prims.
 //
 // Inbound asks (escalates from the peer) are forwarded upward as
 // `ask` events to our parent, mirroring DelegateThread.
 
 import {
   type AgentDefId,
-  decodeCoreAgentDefId,
   encodeCoreAgentDefId,
+  encodeFfiAgentDefId,
 } from "../../../agent-def-id.js";
-import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
+import type { AgentBlock, BlockId } from "../../../ir/types.js";
 import type { Json } from "../../../json.js";
 import { valueToRaw } from "../../../value-codec.js";
 import { decodeClosureBlob } from "../../closure-codec.js";
 import type { Endpoint } from "../../endpoint.js";
+import { fillGenericSchema } from "../../generics.js";
 import { type AskId, createDelegationId } from "../../id.js";
 import { relaxedSchemaFromString, validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { mkRecord, mkString, type RefRep, type Value } from "../../value.js";
+import { mkRecord, mkString, type Value } from "../../value.js";
 import { allocAskId, deleteThread } from "../common.js";
 import type { CallAgentThread, Thread } from "../types.js";
 import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
@@ -54,7 +49,7 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
       return;
     }
 
-    const schemaErrors = validateArgs(t.argsRecord, resolved.inputSchema);
+    const schemaErrors = validateArgs(t.argsRecord, resolved.inputSchema, resolved.generics);
     if (schemaErrors.length > 0) {
       raiseCallAgentError(
         ctx,
@@ -64,8 +59,9 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
       return;
     }
 
-    // Schema validated → emit the delegate event. The args record is
-    // splatted as the per-label call args the target expects.
+    // Schema validated → emit the delegate event. The args record becomes the
+    // target's single argument value; the target's generic substitution rides
+    // along so it runs specialised.
     const delegationId = createDelegationId();
     t.delegationId = delegationId;
     ctx.state.pendingDelegateOut[delegationId] = t.id;
@@ -77,6 +73,7 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
         delegationId,
         agentDefId: resolved.agentDefId,
         argument: mkRecord({ ...t.argsRecord }),
+        ...(resolved.generics !== undefined ? { generics: resolved.generics } : {}),
       },
     });
   },
@@ -179,91 +176,70 @@ type Resolved =
       kind: "ok";
       peer: Endpoint;
       agentDefId: AgentDefId;
-      /** The target's input schema (compiled JSON Schema string) for arg
-       *  validation — from the IR for a qname, from the blob for a closure. */
+      /** The target value's generic substitution, carried through to the
+       *  delegate (and used to specialise `inputSchema` before validation). */
+      generics?: Record<string, Json>;
+      /** The target's input schema (compiled JSON Schema string, possibly
+       *  carrying `$generic` placeholders) — from the IR for an agent value,
+       *  from the blob for a closure. */
       inputSchema: string;
     }
   | { kind: "error"; message: string };
 
+// Resolve the call target from the supplied VALUE (mirrors DelegateThread's
+// value dispatch), additionally surfacing the input schema so create() can
+// validate the dynamic args. An agent value dispatches CORE-internal when its
+// qname is in the IR entries, else FFI; a closure always dispatches on CORE.
 async function resolveTarget(ctx: StepCtx, t: CallAgentThread): Promise<Resolved> {
-  // A content-ref closure (the dispatch handle a closure value / `get_metadata`
-  // carries). Fetch its blob to read the declared input schema — the body block
-  // lives in the blob, not the IR — then dispatch by the ref id; CORE
-  // materializes it into a fresh shard on the inbound delegate.
-  const closureRefPrefix = "closureref:";
-  if (t.nameStr.startsWith(closureRefPrefix)) {
-    const refId = t.nameStr.slice(closureRefPrefix.length);
-    if (refId === "") {
-      return { kind: "error", message: `call_agent: empty closure ref in '${t.nameStr}'` };
+  const target = t.target;
+  if (target.kind === "agentLiteral") {
+    const qname = target.qualifiedName;
+    const snapshot = target.snapshot;
+    const blockId = ctx.state.irModule.entries[qname];
+    if (blockId === undefined) {
+      return {
+        kind: "ok",
+        peer: ctx.state.ffiTargetEndpoint,
+        agentDefId: encodeFfiAgentDefId({ kind: "qname", value: qname, snapshot }),
+        generics: target.generics,
+        // An FFI target's schema isn't on the CORE side; skip validation (the
+        // sidecar validates). An open schema accepts anything.
+        inputSchema: "{}",
+      };
     }
-    const ref: RefRep = { kind: "ref", module: "core", id: refId, hash: "", size: 0 };
+    const block = requireAgentBlock(ctx, blockId, qname);
+    if (block === null) {
+      return { kind: "error", message: `call_agent: target '${qname}' is not an agent block` };
+    }
+    return {
+      kind: "ok",
+      peer: ctx.state.selfEndpoint,
+      agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname, snapshot }),
+      generics: target.generics,
+      inputSchema: block.inputSchema,
+    };
+  }
+  if (target.kind === "closure") {
     let inputSchema: string;
     try {
-      inputSchema = decodeClosureBlob(await ctx.materialize(ref)).metadata.inputSchema;
+      inputSchema = decodeClosureBlob(await ctx.materialize(target.ref)).metadata.inputSchema;
     } catch (e) {
       return {
         kind: "error",
-        message: `call_agent: closure ref '${refId}' not resolvable: ${e instanceof Error ? e.message : String(e)}`,
+        message: `call_agent: closure '${target.ref.id}' not resolvable: ${e instanceof Error ? e.message : String(e)}`,
       };
     }
     return {
       kind: "ok",
       peer: ctx.state.selfEndpoint,
-      agentDefId: encodeCoreAgentDefId({ kind: "closureRef", id: refId }),
+      agentDefId: encodeCoreAgentDefId({ kind: "closureRef", id: target.ref.id }),
+      generics: target.generics,
       inputSchema,
     };
   }
-  if (t.nameStr === "") {
-    return {
-      kind: "error",
-      message: "call_agent: name must be a non-empty string",
-    };
-  }
-
-  // Otherwise a qualified name. call_agent only ever takes an id that arrived
-  // as a string / RawValue — i.e. the EXTERNAL form, which always carries its
-  // snapshot (`qualified.name@snapshot`). A bare qname is the INTERNAL id and is
-  // rejected: a statically-known agent is dispatched by calling its (first-class)
-  // value directly — call_agent is only for an id you got as a string, which is
-  // always `get_metadata.id` (external). (The in-shard `closure:N` form is
-  // engine-internal and never a user-facing name.)
-  const decoded = decodeCoreAgentDefId(t.nameStr as AgentDefId);
-  if (decoded.kind !== "qname") {
-    return { kind: "error", message: `call_agent: '${t.nameStr}' is not an agent name` };
-  }
-  if (decoded.snapshot === undefined) {
-    return {
-      kind: "error",
-      message: `call_agent: '${t.nameStr}' is a bare name — call_agent needs the external id (\`qualified.name@snapshot\` / \`closureref:<id>\`, e.g. from get_metadata)`,
-    };
-  }
-  // The bare id (sans `@snapshot`) is the IR-entries lookup key; the snapshot
-  // rides through to the delegate target.
-  const qname: QualifiedName = decoded.value;
-  const snapshot = decoded.snapshot;
-  const blockId = ctx.state.irModule.entries[qname];
-  if (blockId === undefined) {
-    return {
-      kind: "error",
-      message: `call_agent: name '${qname}' not found in irModule.entries`,
-    };
-  }
-  const agentBlock = requireAgentBlock(ctx, blockId, qname);
-  if (agentBlock === null) {
-    return {
-      kind: "error",
-      message: `call_agent: target '${qname}' is not an agent block`,
-    };
-  }
-  // Decide internal vs. external by entries presence + sidecar metadata.
-  // For now, every entry resolves to internal CORE loopback (the wrapper
-  // agent created by the compiler eventually trampolines to the
-  // external / prim / data leaf as needed).
   return {
-    kind: "ok",
-    peer: ctx.state.selfEndpoint,
-    agentDefId: encodeCoreAgentDefId({ kind: "qname", value: qname, snapshot }),
-    inputSchema: agentBlock.inputSchema,
+    kind: "error",
+    message: `call_agent: target is not a callable value (got ${target.kind})`,
   };
 }
 
@@ -282,14 +258,24 @@ function requireAgentBlock(ctx: StepCtx, blockId: BlockId, hint: string): AgentB
   return block.body;
 }
 
-function validateArgs(argsRecord: Record<string, Value>, inputSchema: string): string[] {
+function validateArgs(
+  argsRecord: Record<string, Value>,
+  inputSchema: string,
+  generics: Record<string, Json> | undefined,
+): string[] {
   let schema: Json;
   try {
-    // Relax string nodes to also accept a `$ref as:"string"` envelope: a
-    // runtime arg may be a promoted (content-ref) string while the schema says
-    // `{type:"string"}`. Callables need no relaxation — agents and closures
-    // both serialise as `$agent`, matching the callable schema as-is.
-    schema = relaxedSchemaFromString(inputSchema);
+    // Specialise the target's schema to its generic substitution first (the
+    // value carries it), so `foo[int]`'s args validate against `int`, not the
+    // `$generic` placeholder. Then relax string nodes to also accept a
+    // `$ref as:"string"` envelope (a promoted content-ref string vs a
+    // `{type:"string"}` schema). Callables need no relaxation — agents and
+    // closures both serialise as `$agent`, matching the callable schema as-is.
+    const filled =
+      generics === undefined
+        ? inputSchema
+        : JSON.stringify(fillGenericSchema(generics, JSON.parse(inputSchema)));
+    schema = relaxedSchemaFromString(filled);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return [`failed to parse inputSchema as JSON: ${msg}`];
@@ -319,7 +305,7 @@ function raiseCallAgentError(ctx: StepCtx, t: CallAgentThread, message: string):
     askId,
     askKind: {
       kind: "request",
-      reqId: "primitive.call_agent_error",
+      reqId: "primitive.error_invalid_argument",
       argument: mkRecord({ message: mkString(message) }),
     },
     childCallId: t.parentCallId,
