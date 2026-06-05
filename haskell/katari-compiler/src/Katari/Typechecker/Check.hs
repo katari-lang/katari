@@ -397,13 +397,23 @@ recordExit tag semantic = modify' $ \s -> s {stateExits = ExitRecord tag semanti
 -- handle, etc.).
 collectExits :: [ExitTag] -> Check a -> Check (a, [SemanticType Resolved])
 collectExits tags action = do
+  (result, records) <- collectExitsTagged tags action
+  pure (result, [semantic | ExitRecord _ semantic <- records])
+
+-- | Like 'collectExits' but returns the matched exit /records/ (tags kept), so
+-- a scope that consumes several tags can treat them differently — e.g. a handle
+-- scope consumes both its @break@ and @next@ exits (so neither leaks to an
+-- outer scope) but only @break@ values determine the scope's result type.
+collectExitsTagged :: [ExitTag] -> Check a -> Check (a, [ExitRecord])
+collectExitsTagged tags action = do
   before <- gets (.stateExits)
   result <- action
   after <- gets (.stateExits)
   let added = take (length after - length before) after
       (matching, rest) = foldr partition ([], []) added
-      partition rec@(ExitRecord tag semantic) (yes, no) =
-        if tag `elem` tags then (semantic : yes, no) else (yes, rec : no)
+      partition record (yes, no) =
+        let ExitRecord tag _ = record
+         in if tag `elem` tags then (record : yes, no) else (yes, record : no)
   modify' $ \s -> s {stateExits = rest ++ before}
   pure (result, matching)
 
@@ -924,8 +934,12 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
 synthHandle :: HandleExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
 synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan} = do
   (stateVariables', stateLocals) <- unzipBindings <$> mapM walkStateVariable stateVariables
-  ((body', bodyType, handlers', thenClause', thenType), breakTypes) <-
-    collectExits [HandleBreakTag, HandleNextTag] $
+  -- Consume both the handle scope's @break@ and @next@ exits (so neither leaks
+  -- to an outer scope), but only @break@ values feed the scope's result type:
+  -- @next v@ resumes the asker with @v@, it does not make the scope evaluate to
+  -- @v@ (mirrors how a @for@ scope's value is its breaks ∪ then, not its nexts).
+  ((body', bodyType, handlers', thenClause', thenType), exitRecords) <-
+    collectExitsTagged [HandleBreakTag, HandleNextTag] $
       withLocals stateLocals $ do
         (body', bodyType) <- walkBlock body
         handlers' <- mapM walkRequestHandler handlers
@@ -938,7 +952,8 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
             (thenBody', thenBodyType) <- withLocals bindings (walkBlock thenBody)
             pure (Just (pattern', thenBody'), Just thenBodyType)
         pure (body', bodyType, handlers', thenClause', thenType)
-  let semantic = unionSemantic (maybe bodyType id thenType : breakTypes)
+  let breakTypes = [semantic | ExitRecord HandleBreakTag semantic <- exitRecords]
+      semantic = unionSemantic (maybe bodyType id thenType : breakTypes)
   pure
     ( ExpressionHandle HandleExpression {parallel = parallel, stateVariables = stateVariables', handlers = handlers', thenClause = thenClause', body = body', sourceSpan = sourceSpan, typeOf = semantic},
       semantic

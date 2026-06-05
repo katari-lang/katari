@@ -333,6 +333,22 @@ export async function executePrim(
     }
     case "primitive.array.empty":
       return { kind: "array", elements: [] };
+    case "primitive.array.range": {
+      const count = req(args, "count");
+      if (count.kind !== "number") {
+        throw new RecoverableEngineError(
+          `prim array.range: count must be an integer, got ${count.kind}`,
+        );
+      }
+      const n = Math.max(0, Math.floor(count.value));
+      return {
+        kind: "array",
+        elements: Array.from({ length: n }, (_unused, index) => ({
+          kind: "number" as const,
+          value: index,
+        })),
+      };
+    }
     case "primitive.array.of":
       return { kind: "array", elements: [req(args, "value")] };
     case "primitive.array.append": {

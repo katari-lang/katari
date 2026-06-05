@@ -1672,6 +1672,29 @@
     "requests": []
   },
   {
+    "description": "The integers @[0, 1, ..., count - 1]@ (empty when @count <= 0@). Handy as a fixed-count loop driver: @for (let i in array.range(count = n), ...)@.",
+    "input": {
+      "additionalProperties": true,
+      "properties": {
+        "count": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.array.range",
+    "output": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "requests": []
+  },
+  {
     "description": "The array reversed.",
     "input": {
       "additionalProperties": true,

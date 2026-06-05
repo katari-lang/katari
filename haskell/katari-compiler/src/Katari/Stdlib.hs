@@ -237,6 +237,8 @@ arrayStdlibSource =
       "primitive length(array: array[unknown]) -> integer",
       "@\"The empty array. Its element type is `never` (the empty array has no elements), which is a subtype of every `array[T]`, so it can seed a typed accumulator: `var history = array.empty()` grown with `array.append`.\"",
       "primitive empty() -> array[never]",
+      "@\"The integers @[0, 1, ..., count - 1]@ (empty when @count <= 0@). Handy as a fixed-count loop driver: @for (let i in array.range(count = n), ...)@.\"",
+      "primitive range(count: integer) -> array[integer]",
       "@\"A single-element array carrying @value@.\"",
       "primitive of(value: unknown) -> array[unknown] using array_shape",
       "@\"Append @value@ to the end, returning a fresh array (arrays are immutable).\"",
