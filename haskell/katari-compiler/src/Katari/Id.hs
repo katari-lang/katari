@@ -31,6 +31,7 @@ module Katari.Id
   )
 where
 
+import Data.Aeson (FromJSON (..), ToJSON (..))
 import Katari.Common (QualifiedName (..), renderQualifiedName)
 
 -- | How a variable reference was resolved by the Identifier phase.
@@ -89,3 +90,13 @@ data EffectResolution
 -- normalized form) without relying on its surface name.
 newtype GenericsId = GenericsId Int
   deriving (Eq, Ord, Show)
+
+-- | A 'GenericsId' serialises as its bare integer — it is the runtime key for
+-- a generic placeholder in a @GenericSchema@ and for an agent / closure value's
+-- generic substitution map. Stable within a compiled bundle (module-local
+-- numbering, but each agent's schema + substitutions agree by construction).
+instance ToJSON GenericsId where
+  toJSON (GenericsId n) = toJSON n
+
+instance FromJSON GenericsId where
+  parseJSON = fmap GenericsId . parseJSON

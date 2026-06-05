@@ -26,6 +26,9 @@ module Katari.Schema
     buildOutputSchema,
     jsonSchemaToText,
 
+    -- * Generics
+    fillGenericSchema,
+
     -- * Per-module schema builder
     SchemaContext (..),
     buildModuleSchemas,
@@ -50,6 +53,7 @@ import Data.Aeson
     (.:?),
     (.=),
   )
+import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types qualified
 import Data.ByteString.Lazy qualified as LazyByteString
@@ -70,7 +74,8 @@ import Katari.AST
     Phase (Zonked),
   )
 import Katari.Id
-  ( QualifiedName (..),
+  ( GenericsId,
+    QualifiedName (..),
     VariableResolution (..),
     renderQualifiedName,
   )
@@ -200,6 +205,12 @@ data SchemaCore where
   SchemaCoreUnion :: {anyOf :: [JsonSchema]} -> SchemaCore
   SchemaCoreUnknown :: SchemaCore
   SchemaCoreNever :: SchemaCore
+  -- | A generic-parameter placeholder, keyed by its 'GenericsId'. Produced
+  -- when a 'SemanticTypeGeneric' has no concrete type yet; a schema that
+  -- contains one is a /GenericSchema/. 'fillGenericSchema' replaces each
+  -- placeholder with the substitution's concrete schema to recover a proper
+  -- (placeholder-free) schema. Serialises as @{"$generic": \<id>}@.
+  SchemaCoreGeneric :: GenericsId -> SchemaCore
   deriving (Eq, Show, Generic)
 
 instance ToJSON SchemaCore where
@@ -232,21 +243,20 @@ instance ToJSON SchemaCore where
     SchemaCoreUnion {anyOf} -> object ["anyOf" .= anyOf]
     SchemaCoreUnknown -> Object KeyMap.empty
     SchemaCoreNever -> object ["not" .= Object KeyMap.empty]
+    SchemaCoreGeneric genericsId -> object [Key.fromText genericPlaceholderKey .= genericsId]
 
 instance FromJSON SchemaCore where
   parseJSON = withObject "SchemaCore" $ \obj -> do
+    mGeneric <- obj .:? Key.fromText genericPlaceholderKey
     mNot <- obj .:? "not"
-    case mNot of
-      Just (Object _) -> pure SchemaCoreNever
+    mAnyOf <- obj .:? "anyOf"
+    mConst <- obj .:? "const"
+    case (mGeneric, mNot, mAnyOf, mConst) of
+      (Just genericsId, _, _, _) -> pure (SchemaCoreGeneric genericsId)
+      (_, Just (Object _), _, _) -> pure SchemaCoreNever
+      (_, _, Just xs, _) -> pure SchemaCoreUnion {anyOf = xs}
+      (_, _, _, Just v) -> pure SchemaCoreConst {value = v}
       _ -> do
-        mAnyOf <- obj .:? "anyOf"
-        case mAnyOf of
-          Just xs -> pure SchemaCoreUnion {anyOf = xs}
-          Nothing -> do
-            mConst <- obj .:? "const"
-            case mConst of
-              Just v -> pure SchemaCoreConst {value = v}
-              Nothing -> do
                 mType <- obj .:? "type" :: Data.Aeson.Types.Parser (Maybe Text)
                 case mType of
                   Just "null" -> pure SchemaCoreNull
@@ -459,11 +469,11 @@ toCore dataDefs visited = \case
   -- 'get_metadata' returns in its 'id' field.
   SemanticTypeFunction {} -> callableRefCore
   SemanticTypeFunctionAny -> callableRefCore
-  -- A raw generic parameter only reaches here from a not-yet-instantiated
-  -- generic signature (generic agents are not exposed directly as tools; an
-  -- instantiation substitutes the concrete type before schema generation).
-  -- Fall back to the permissive @unknown@ schema.
-  SemanticTypeGeneric _ -> SchemaCoreUnknown
+  -- A generic parameter becomes a placeholder keyed by its 'GenericsId',
+  -- making this schema a /GenericSchema/. 'fillGenericSchema' replaces it with
+  -- the concrete type's schema at instantiation time (e.g. at @get_metadata@
+  -- on an agent value that carries a generic substitution).
+  SemanticTypeGeneric genericsId -> SchemaCoreGeneric genericsId
   -- Records map to JSON Schema's @additionalProperties@ pattern:
   -- a plain object whose values all match @V@'s schema. The key type
   -- is fixed to @string@ at the Identifier pass in v0.1.0, so we
@@ -483,6 +493,34 @@ toCore dataDefs visited = \case
 -- arm of a union.
 ctorDiscriminatorKey :: Text
 ctorDiscriminatorKey = "$constructor"
+
+-- | Reserved JSON-Schema property name marking a generic-parameter placeholder
+-- ('SchemaCoreGeneric'). Its value is the 'GenericsId' integer. A schema that
+-- contains any @{"$generic": n}@ is a /GenericSchema/; 'fillGenericSchema'
+-- replaces them to recover a proper schema.
+genericPlaceholderKey :: Text
+genericPlaceholderKey = "$generic"
+
+-- | Replace every generic placeholder ('SchemaCoreGeneric') in a GenericSchema
+-- with the substitution's concrete schema, recovering a proper schema. A
+-- placeholder whose 'GenericsId' is absent from the map is left unchanged (a
+-- partial fill — still a GenericSchema). The substitution schemas must
+-- themselves be proper (placeholder-free); this is the single function both the
+-- compiler and the runtime use to instantiate a generic agent's schema.
+fillGenericSchema :: Map GenericsId JsonSchema -> JsonSchema -> JsonSchema
+fillGenericSchema substitution = goSchema
+  where
+    goSchema schema = case schema.core of
+      SchemaCoreGeneric genericsId
+        | Just concrete <- Map.lookup genericsId substitution -> concrete
+      _ -> schema {core = goCore schema.core}
+    goCore = \case
+      SchemaCoreArray {items} -> SchemaCoreArray {items = goSchema items}
+      SchemaCoreTuple {prefixItems} -> SchemaCoreTuple {prefixItems = map goSchema prefixItems}
+      SchemaCoreObject {properties, required, additionalProperties} ->
+        SchemaCoreObject {properties = Map.map goSchema properties, required = required, additionalProperties = additionalProperties}
+      SchemaCoreUnion {anyOf} -> SchemaCoreUnion {anyOf = map goSchema anyOf}
+      other -> other
 
 -- | Reserved JSON-Schema property name carrying a callable reference.
 -- The value is the same string the @get_metadata@ prim returns in its

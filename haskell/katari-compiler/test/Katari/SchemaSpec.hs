@@ -11,6 +11,7 @@ import Data.Text (Text)
 import Katari.Compile (CompileInput (..), CompileResult (..), SourceEntry (..))
 import Katari.TestSupport (compileSync)
 import Katari.Diagnostic (Diagnostic (..))
+import Katari.Id (GenericsId (..))
 import Katari.Schema
 import Katari.SemanticType
   ( Resolved,
@@ -47,6 +48,24 @@ spec = describe "Katari.Schema" $ do
   schemaCoreJsonSpec
   descriptionEndToEndSpec
   secretGuardSpec
+  genericSchemaSpec
+
+genericSchemaSpec :: Spec
+genericSchemaSpec = describe "GenericSchema (placeholders + fill)" $ do
+  let toS = toJsonSchema Map.empty Set.empty
+  it "a generic type becomes a $generic placeholder" $ do
+    SemanticTypeGeneric (GenericsId 0) `shouldHaveCore` SchemaCoreGeneric (GenericsId 0)
+  it "$generic round-trips through JSON" $ do
+    let s = toS (SemanticTypeGeneric (GenericsId 3))
+    Aeson.decode (Aeson.encode s) `shouldBe` Just s
+  it "fillGenericSchema replaces placeholders (including nested) with the substitution" $ do
+    -- @[T]@ filled with @T := integer@ equals @[integer]@.
+    let generic = toS (SemanticTypeArray (SemanticTypeGeneric (GenericsId 0)))
+        filled = fillGenericSchema (Map.singleton (GenericsId 0) (toS SemanticTypeInteger)) generic
+    filled `shouldBe` toS (SemanticTypeArray SemanticTypeInteger)
+  it "fillGenericSchema leaves un-substituted placeholders unchanged (partial fill)" $ do
+    let generic = toS (SemanticTypeGeneric (GenericsId 1))
+    fillGenericSchema (Map.singleton (GenericsId 0) (toS SemanticTypeInteger)) generic `shouldBe` generic
 
 toJsonSchemaSpec :: Spec
 toJsonSchemaSpec = describe "toJsonSchema (SemanticType -> JsonSchema)" $ do
