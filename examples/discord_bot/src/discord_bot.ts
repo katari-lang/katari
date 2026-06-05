@@ -239,79 +239,59 @@ type KatariAgentMetadata = {
   input: KatariString;
 };
 
+// One model step: given the conversation + the tools' schemas, return the
+// model's decision (a step_final reply, or a step_call naming a tool by INDEX
+// into the tools array + the args it chose). The loop that runs the chosen
+// tool and feeds its output back lives in Katari (`infer_with_tools`), which
+// dispatches the tool by value via call_agent — so the sidecar never touches
+// the tool agent values, only their metadata.
 katari.agent<{
   client: AiClient;
   history: RawValue;
-  tools: RawValue; // array of agent values to dispatch
   tool_metas: RawValue; // array of agent_metadata; tool_metas[i] describes tools[i]
-}>("infer_with_tools", async (ctx) => {
+}>("infer_step", async (ctx) => {
   const url = geminiEndpoint(ctx.args.client);
 
-  const toolAgents = ctx.args.tools;
   const toolMetas = ctx.args.tool_metas;
-  if (!Array.isArray(toolAgents) || !Array.isArray(toolMetas)) {
-    throw new Error("infer_with_tools: tools / tool_metas must be arrays");
+  if (!Array.isArray(toolMetas)) {
+    throw new Error("infer_step: tool_metas must be an array");
   }
-  // Zip the parallel arrays the ktr built (Katari mapped get_metadata over tools).
-  const tools: ToolSpec[] = [];
-  for (let i = 0; i < toolAgents.length; i++) {
-    const meta = toolMetas[i] as KatariAgentMetadata;
-    tools.push({
-      name: await ctx.readString(meta.name),
-      description: await ctx.readString(meta.description),
-      parameters: sanitizeSchemaForGemini(JSON.parse(await ctx.readString(meta.input))),
-      agent: toolAgents[i] as KatariAgent,
-    });
-  }
-  const byName = new Map(tools.map((t) => [t.name, t]));
-  const functionDeclarations = tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }));
+  const functionDeclarations = await Promise.all(
+    toolMetas.map(async (raw) => {
+      const meta = raw as KatariAgentMetadata;
+      return {
+        name: await ctx.readString(meta.name),
+        description: await ctx.readString(meta.description),
+        parameters: sanitizeSchemaForGemini(JSON.parse(await ctx.readString(meta.input))),
+      };
+    }),
+  );
+  const indexByName = new Map(functionDeclarations.map((d, i) => [d.name, i]));
 
-  // The conversation so far (its last turn is the user's task). The tool-call /
-  // tool-response turns appended in the loop are local to this call — only the
-  // final answer flows back; Katari owns the persisted history.
   const contents = await historyToContents((v) => ctx.readString(v), ctx.args.history);
-
-  for (let step = 0; step < GEMINI_TOOL_MAX_STEPS; step++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ contents, tools: [{ functionDeclarations }] }),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`infer_with_tools: gemini ${res.status}: ${detail}`);
-    }
-    const data = (await res.json()) as {
-      candidates?: { content?: Turn }[];
-    };
-    const content = data.candidates?.[0]?.content;
-    const parts = content?.parts ?? [];
-    const calls = parts.flatMap((p) => ("functionCall" in p ? [p.functionCall] : []));
-
-    if (calls.length === 0) {
-      return parts.flatMap((p) => ("text" in p ? [p.text] : [])).join("");
-    }
-
-    // Record the model's tool-call turn, run each tool, feed the results back.
-    if (content) contents.push(content);
-    const responseParts: GeminiPart[] = [];
-    for (const call of calls) {
-      const spec = byName.get(call.name);
-      let result: string;
-      if (spec === undefined) {
-        result = `error: unknown tool '${call.name}'`;
-      } else {
-        const raw = await ctx.delegate(spec.agent, call.args ?? {});
-        result = typeof raw === "string" ? raw : JSON.stringify(raw);
-      }
-      responseParts.push({ functionResponse: { name: call.name, response: { result } } });
-    }
-    contents.push({ role: "user", parts: responseParts });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ contents, tools: [{ functionDeclarations }] }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`infer_step: gemini ${res.status}: ${detail}`);
   }
+  const data = (await res.json()) as { candidates?: { content?: Turn }[] };
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  const calls = parts.flatMap((p) => ("functionCall" in p ? [p.functionCall] : []));
 
-  return `(stopped: the model kept calling tools past ${GEMINI_TOOL_MAX_STEPS} steps)`;
+  if (calls.length === 0) {
+    const text = parts.flatMap((p) => ("text" in p ? [p.text] : [])).join("");
+    return { $constructor: "discord_bot.step_final", text } as RawValue;
+  }
+  // The model wants a tool: report WHICH (by index into the tools array) and
+  // the args it produced; Katari validates + dispatches it via call_agent.
+  const call = calls[0];
+  return {
+    $constructor: "discord_bot.step_call",
+    tool_index: indexByName.get(call.name) ?? 0,
+    args: (call.args ?? {}) as RawValue,
+  } as RawValue;
 });
