@@ -124,7 +124,7 @@ export function produceFileIR(returnFile: boolean): IRModule {
         ],
       },
     },
-    2: { kind: "blockPrim", body: "string_to_file" },
+    2: { kind: "blockPrim", body: "primitive.string_to_file" },
     3: { kind: "blockRecord", body: { entries: [["value", 4 as BlockId]] } },
     4: {
       kind: "blockUser",
