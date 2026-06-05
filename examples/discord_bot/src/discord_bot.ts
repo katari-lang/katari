@@ -197,17 +197,6 @@ katari.agent<{ code: KatariString; api_key: Secret }>("e2b_exec", async (ctx) =>
   }
 });
 
-/** A tool the model can call: its function-declaration for Gemini + the Katari
- *  agent to dispatch when the model calls it. */
-type ToolSpec = {
-  name: string;
-  description: string;
-  parameters: unknown; // JSON Schema object (from get_metadata's `input`)
-  agent: KatariAgent;
-};
-
-const GEMINI_TOOL_MAX_STEPS = 8;
-
 // The compiler emits a correct draft-07 JSON Schema, but Gemini's
 // functionDeclarations.parameters only accepts an OpenAPI subset and 400s on
 // keywords like `additionalProperties` / `$schema`. Strip those per-provider
