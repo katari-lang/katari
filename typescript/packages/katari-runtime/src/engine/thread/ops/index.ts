@@ -14,6 +14,7 @@ import { callAgentOps } from "./callAgent.js";
 import { ctorOps } from "./ctor.js";
 import { delegateOps } from "./delegate.js";
 import { forOps } from "./for.js";
+import { getFieldOps } from "./getField.js";
 import { handleOps } from "./handle.js";
 import { makeClosureOps } from "./make-closure.js";
 import { matchOps } from "./match.js";
@@ -33,6 +34,7 @@ const opsTable: Record<ThreadKind, ThreadOps<any>> = {
   tuple: tupleOps,
   record: recordOps,
   match: matchOps,
+  getField: getFieldOps,
   user: userOps,
   for: forOps,
   request: requestOps,

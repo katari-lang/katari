@@ -23,7 +23,7 @@ export const requestOps: ThreadOps<RequestThread> = {
       kind: "ask",
       target: t.parent,
       askId,
-      askKind: { kind: "request", reqId: t.reqId, args: { ...t.args } },
+      askKind: { kind: "request", reqId: t.reqId, argument: t.argument },
       childCallId: t.parentCallId,
     });
   },

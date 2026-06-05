@@ -79,7 +79,7 @@ function spawnElement(ctx: StepCtx, t: CollectingThread, index: number, blockId:
     parentId: t.id,
     parentCallId: index as CallId,
     blockId,
-    callArgs: {},
+    argument: undefined,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
 }

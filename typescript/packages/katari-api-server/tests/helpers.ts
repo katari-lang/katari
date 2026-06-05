@@ -35,7 +35,7 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
       kind: "blockAgent",
       body: {
         qualifiedName: irName === "" ? "main" : `${irName}.main`,
-        input: { kind: "inputNamed", body: [] },
+        defaults: {},
         entryBody: 1,
         name: "main",
         description: undefined,
@@ -46,7 +46,7 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
     1: {
       kind: "blockUser",
       body: {
-        input: { kind: "inputNamed", body: [] },
+        defaults: {},
         statements: [
           {
             kind: "statementLoadLiteral",
@@ -85,7 +85,7 @@ export function produceFileIR(returnFile: boolean): IRModule {
       kind: "blockAgent",
       body: {
         qualifiedName: "main",
-        input: { kind: "inputNamed", body: [] },
+        defaults: {},
         entryBody: 1,
         name: "main",
         description: undefined,
@@ -96,7 +96,7 @@ export function produceFileIR(returnFile: boolean): IRModule {
     1: {
       kind: "blockUser",
       body: {
-        input: { kind: "inputNamed", body: [] },
+        defaults: {},
         statements: [
           {
             kind: "statementLoadLiteral",
@@ -128,7 +128,7 @@ export function produceFileIR(returnFile: boolean): IRModule {
     3: { kind: "blockRecord", body: { entries: [["value", 4 as BlockId]] } },
     4: {
       kind: "blockUser",
-      body: { input: { kind: "inputNamed", body: [] }, statements: [], trailing: 0 as VarId },
+      body: { defaults: {}, statements: [], trailing: 0 as VarId },
     },
   };
   return {

@@ -32,6 +32,8 @@ import {
   encryptValueTree,
   type Logger,
   type Module,
+  mkRecord,
+  recordEntries,
   THROW_REQUEST_QNAME,
   tryInlineString,
   type Value,
@@ -98,7 +100,10 @@ export class ApiModule implements Module {
 
       case "escalate":
         if (event.payload.agentDefId === THROW_AGENT_DEF_ID) {
-          return await this.handleThrowEscalate(event.payload.delegationId, event.payload.args);
+          return await this.handleThrowEscalate(
+            event.payload.delegationId,
+            recordEntries(event.payload.argument),
+          );
         }
         // A user-facing capability escalate. The raiser (CORE) owns the live
         // `escalations` row; the API records its own per-run operator view
@@ -211,7 +216,7 @@ export class ApiModule implements Module {
           value: input.qualifiedName,
           snapshot: snapshotId,
         }),
-        args: input.args,
+        argument: mkRecord(input.args),
       },
     });
     return { runId: runEntityId as unknown as RunId };
@@ -290,7 +295,7 @@ export class ApiModule implements Module {
         runId: run.id,
         escalationId: payload.escalationId,
         agentDefId: payload.agentDefId,
-        args: encryptValueRecord(payload.args),
+        args: encryptValueRecord(recordEntries(payload.argument)),
         createdAt: new Date().toISOString(),
       });
     });

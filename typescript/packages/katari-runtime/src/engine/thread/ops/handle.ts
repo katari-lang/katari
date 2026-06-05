@@ -60,7 +60,7 @@ export const handleOps: ThreadOps<HandleThread> = {
       parentId: t.id,
       parentCallId: mainCallId,
       blockId: block.body,
-      callArgs: {},
+      argument: undefined,
       scopeMode: { mode: "inline", parentScopeId: t.scopeId },
     });
   },
@@ -146,7 +146,7 @@ export const handleOps: ThreadOps<HandleThread> = {
         const action: PendingAction = {
           kind: "ask",
           reqId: kind.reqId,
-          args: { ...kind.args },
+          argument: kind.argument,
           askId,
           askerCallId: childCallId,
         };
@@ -234,7 +234,7 @@ function isBusy(t: HandleThread): boolean {
 function runAction(ctx: StepCtx, t: HandleThread, action: PendingAction): void {
   switch (action.kind) {
     case "ask":
-      spawnHandlerBody(ctx, t, action.reqId, action.args, action.askId, action.askerCallId);
+      spawnHandlerBody(ctx, t, action.reqId, action.argument, action.askId, action.askerCallId);
       return;
     case "thenClause":
       spawnThenClauseOrFinish(ctx, t, action.mainResultValue);
@@ -246,7 +246,7 @@ function spawnHandlerBody(
   ctx: StepCtx,
   t: HandleThread,
   reqId: QualifiedName,
-  args: Record<string, Value>,
+  argument: Value | undefined,
   askId: AskId,
   askerCallId: CallId,
 ): void {
@@ -263,17 +263,15 @@ function spawnHandlerBody(
     askId,
     askerCallId,
   };
-  // Spawn inline; callArgs become the handler-body's parameter values.
+  // Spawn inline; the req's argument value becomes the handler body's input.
   const childId = spawnChild(ctx, {
     parentId: t.id,
     parentCallId: callId,
     blockId: handler.handlerBody,
-    callArgs: args,
+    argument,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
-  // Write call args into the new child's scope by parameter label so the
-  // handler body's user thread can read them.
-  writeArgsIntoChildScope(ctx, childId, handler.handlerBody, args);
+  writeArgsIntoChildScope(ctx, childId, handler.handlerBody, argument);
 }
 
 function spawnThenClauseOrFinish(ctx: StepCtx, t: HandleThread, mainResultValue: Value): void {
@@ -292,11 +290,11 @@ function spawnThenClauseOrFinish(ctx: StepCtx, t: HandleThread, mainResultValue:
     parentId: t.id,
     parentCallId: callId,
     blockId: block.thenBlock,
-    callArgs: { value: mainResultValue },
+    argument: mainResultValue,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
-  // Bind the thenClause's `value` parameter into its scope.
-  writeArgsIntoChildScope(ctx, childId, block.thenBlock, { value: mainResultValue });
+  // The then-block binds the break value directly to its input var.
+  writeArgsIntoChildScope(ctx, childId, block.thenBlock, mainResultValue);
 }
 
 function handleBreak(ctx: StepCtx, t: HandleThread, value: Value): void {

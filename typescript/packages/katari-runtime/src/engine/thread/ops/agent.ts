@@ -19,15 +19,16 @@ import type { AgentBlock, Block, BlockId } from "../../../ir/types.js";
 import type { CallId } from "../../id.js";
 import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { literalToValue, type Value } from "../../value.js";
+import type { Value } from "../../value.js";
 import {
   beginCancel,
-  bindInputIntoScope,
   commonRemoveChild,
   emitAgentRootCompletion,
   emitEscalateUpward,
+  fillDefaults,
   hasChildren,
   proxyAskToParent,
+  writeArgsIntoChildScope,
 } from "../common.js";
 import type { AgentThread } from "../types.js";
 import { defaultAskAckProxy, defaultCancel } from "./defaults.js";
@@ -38,31 +39,20 @@ const BODY_CALL_ID = 0 as CallId;
 export const agentOps: ThreadOps<AgentThread> = {
   create(ctx, t) {
     const block = getAgentBlock(ctx, t.blockId);
-    // Fill in defaults for any optional parameter the caller omitted. The
-    // filled args are used both for the scope binding below (so an inline
-    // body sees them via the inherited scope chain) and for the entryBody's
-    // callArgs (so a leaf body — delegate / prim / request / ctor, which
-    // consumes callArgs by label — sees them too).
-    const filledArgs: Record<string, Value> = { ...t.args };
-    if (block.input.kind === "inputNamed") {
-      for (const param of block.input.body) {
-        if (filledArgs[param.label] === undefined && param.defaultValue !== undefined) {
-          filledArgs[param.label] = literalToValue(param.defaultValue, ctx.state.snapshot);
-        }
-      }
-    }
-    // Bind args into our own scope (named destructure or whole-value spread)
-    // so the body (inline child) can see them via the inherited scope chain.
-    bindInputIntoScope(ctx, t.scopeId, block.input, filledArgs);
-    // Spawn the body as a child. The body block is expected to be a
-    // BlockUser (inline) — we inherit our scope so args are visible.
-    spawnChild(ctx, {
+    // Fill any optional-parameter default the caller omitted (when the incoming
+    // value is a record), then hand the value to the entry body. The agent
+    // binds no var of its own — the body / leaf consumes the value.
+    const argument = fillDefaults(ctx, t.argument, block.defaults);
+    const childId = spawnChild(ctx, {
       parentId: t.id,
       parentCallId: BODY_CALL_ID,
       blockId: block.entryBody,
-      callArgs: { ...filledArgs },
+      argument,
       scopeMode: { mode: "inline", parentScopeId: t.scopeId },
     });
+    // The body (a BlockUser) binds the filled value to its own input var, if
+    // any; a leaf entry body (prim / ctor) reads the value directly instead.
+    writeArgsIntoChildScope(ctx, childId, block.entryBody, argument);
   },
 
   done(ctx, t, callId, value) {

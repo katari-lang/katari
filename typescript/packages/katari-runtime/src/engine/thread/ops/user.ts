@@ -228,7 +228,10 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
 }
 
 function pushCallEvent(ctx: StepCtx, t: UserThread, callId: CallId, call: CallData): void {
-  const args = resolveArgs(ctx, t.scopeId, call);
+  // The single argument value the caller built (a record for a named call, the
+  // spread value directly, or absent for an argument-less internal call).
+  const argument =
+    call.argument !== undefined ? lookupValue(ctx, t.scopeId, call.argument) : undefined;
   const block = ctx.state.irModule.blocks[String(call.block)] as Block | undefined;
   if (block === undefined) {
     throw new Error(`engine.user: block ${call.block} not found`);
@@ -240,10 +243,10 @@ function pushCallEvent(ctx: StepCtx, t: UserThread, callId: CallId, call: CallDa
     parentId: t.id,
     parentCallId: callId,
     blockId: call.block as BlockId,
-    callArgs: args,
+    argument,
     scopeMode,
   });
-  writeArgsIntoChildScope(ctx, childId, call.block as BlockId, args);
+  writeArgsIntoChildScope(ctx, childId, call.block as BlockId, argument);
 }
 
 function isStructuralBlock(kind: Block["kind"]): boolean {
@@ -259,16 +262,6 @@ function isStructuralBlock(kind: Block["kind"]): boolean {
   // was a latent scope bug. Any new value-computing block kind is correct by
   // default here; only a genuine new boundary needs to be added below.
   return kind !== "blockAgent";
-}
-
-function resolveArgs(ctx: StepCtx, scopeId: ScopeId, call: CallData): Record<string, Value> {
-  // The unified calling convention passes a single argument value. For a named
-  // call the caller built it as a record (a `blockRecord`); we destructure its
-  // entries back into the label-keyed args the callee binds by. An
-  // argument-less call (`call.argument` absent) passes no args.
-  if (call.argument === undefined) return {};
-  const value = lookupValue(ctx, scopeId, call.argument);
-  return value.kind === "record" ? { ...value.entries } : {};
 }
 
 function resolveModifiers(ctx: StepCtx, scopeId: ScopeId, mods: [VarId, VarId][]): ModMap {

@@ -68,7 +68,7 @@ function spawnEntry(ctx: StepCtx, t: RecordThread, index: number, blockId: Block
     parentId: t.id,
     parentCallId: index as CallId,
     blockId,
-    callArgs: {},
+    argument: undefined,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
 }

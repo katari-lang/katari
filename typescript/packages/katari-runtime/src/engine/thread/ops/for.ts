@@ -216,7 +216,7 @@ function spawnBody(ctx: StepCtx, t: ForThread): void {
     parentId: t.id,
     parentCallId: callId,
     blockId: block.bodyBlock,
-    callArgs: {},
+    argument: undefined,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
 }
@@ -238,7 +238,7 @@ function spawnParallelBody(
     parentId: t.id,
     parentCallId: callId,
     blockId: block.bodyBlock,
-    callArgs: {},
+    argument: undefined,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
   // Decode iter indices and write into the child's scope.
@@ -269,7 +269,7 @@ function emitForDone(ctx: StepCtx, t: ForThread, value: Value): void {
       parentId: t.id,
       parentCallId: thenCallId,
       blockId: block.thenBlock,
-      callArgs: {},
+      argument: undefined,
       scopeMode: { mode: "inline", parentScopeId: t.scopeId },
     });
     return;

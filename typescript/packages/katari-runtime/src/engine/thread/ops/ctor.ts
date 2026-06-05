@@ -2,6 +2,7 @@
 // constructor) and emits done.
 
 import type { CallId } from "../../id.js";
+import { recordEntries } from "../common.js";
 import type { CtorThread } from "../types.js";
 import {
   defaultAskAckProxy,
@@ -20,7 +21,7 @@ export const ctorOps: ThreadOps<CtorThread> = {
       callId: t.parentCallId,
       value: {
         kind: "record",
-        entries: { ...t.args },
+        entries: { ...recordEntries(t.argument) },
         ctor: t.ctorId,
       },
     });

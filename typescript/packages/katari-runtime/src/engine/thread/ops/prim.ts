@@ -21,8 +21,8 @@ import { fillGenericSchema } from "../../generics.js";
 import type { AskId, CallId } from "../../id.js";
 import { executePrim, PrimRaiseRequest } from "../../prim.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { mkString, type Value } from "../../value.js";
-import { allocAskId, deleteThread, emitThrowEscalate } from "../common.js";
+import { mkRecord, mkString, type Value } from "../../value.js";
+import { allocAskId, deleteThread, emitThrowEscalate, recordEntries } from "../common.js";
 import type { PrimThread, Thread } from "../types.js";
 import { defaultAskProxy } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
@@ -37,10 +37,11 @@ export const primOps: ThreadOps<PrimThread> = {
       // `executePrim` is async because content-transform prims (concat)
       // may materialize ref bytes; `ctx.materialize` is the injected,
       // deterministic content-addressed read.
+      const args = recordEntries(t.argument);
       value =
         t.primName === "primitive.get_metadata"
-          ? await executeGetMetadata(ctx, t.args)
-          : await executePrim(t.primName, t.args, ctx.materialize, ctx.putBlob);
+          ? await executeGetMetadata(ctx, args)
+          : await executePrim(t.primName, args, ctx.materialize, ctx.putBlob);
     } catch (err) {
       if (err instanceof PrimRaiseRequest) {
         emitPrimRaise(ctx, t, err);
@@ -141,7 +142,7 @@ function emitPrimRaise(ctx: StepCtx, t: PrimThread, err: PrimRaiseRequest): void
     askKind: {
       kind: "request",
       reqId: err.reqId,
-      args: { ...err.args },
+      argument: mkRecord({ ...err.args }),
     },
     childCallId: t.parentCallId,
   });

@@ -70,7 +70,7 @@ export type AgentThread = Common & {
   /** BlockId of the BlockAgent we represent. */
   blockId: BlockId;
   /** Args this agent was called with (passed into the body's scope at create). */
-  args: Record<string, Value>;
+  argument: Value | undefined;
   /**
    * Delegation id that landed us here. Used to look up the sender in
    * `state.delegationSenders` when emitting delegateAck/terminateAck/escalate.
@@ -149,7 +149,7 @@ export type PendingAction =
   | {
       kind: "ask";
       reqId: QualifiedName;
-      args: Record<string, Value>;
+      argument: Value | undefined;
       askId: AskId;
       askerCallId: CallId;
     }
@@ -190,10 +190,22 @@ export type MatchThread = Common & {
   blockId: BlockId;
 };
 
+/**
+ * GetFieldThread: reads one field out of a record value. Spawned inline by a
+ * StatementCall targeting a `blockGetField`; reads its `source` var from the
+ * inherited scope and `done`s the field value (or null) to its parent. A
+ * thread (not an inline statement) so the read can grow an async path once
+ * file / blob / stream sources need materialising.
+ */
+export type GetFieldThread = Common & {
+  kind: "getField";
+  blockId: BlockId;
+};
+
 export type RequestThread = Common & {
   kind: "request";
   reqId: QualifiedName;
-  args: Record<string, Value>;
+  argument: Value | undefined;
   /** Set after the initial ask has been emitted. */
   pendingAskId?: AskId;
 };
@@ -223,7 +235,7 @@ export type DelegateThread = Common & {
   /** BlockId of the BlockDelegate that spawned us (target lives in the block). */
   blockId: BlockId;
   /** Args passed in the delegate event. */
-  args: Record<string, Value>;
+  argument: Value | undefined;
   /** Delegation id issued by us at create time. */
   delegationId: DelegationId;
   /**
@@ -239,7 +251,7 @@ export type DelegateThread = Common & {
 export type PrimThread = Common & {
   kind: "prim";
   primName: string;
-  args: Record<string, Value>;
+  argument: Value | undefined;
   /**
    * Set after the prim raised a custom request (e.g. `json_parse_error`)
    * and the corresponding `ask` was emitted upward. The thread stays
@@ -254,7 +266,7 @@ export type PrimThread = Common & {
 export type CtorThread = Common & {
   kind: "ctor";
   ctorId: QualifiedName;
-  args: Record<string, Value>;
+  argument: Value | undefined;
 };
 
 /**
@@ -377,6 +389,7 @@ export type Thread =
   | CtorThread
   | MakeClosureThread
   | TupleThread
-  | RecordThread;
+  | RecordThread
+  | GetFieldThread;
 
 export type ThreadKind = Thread["kind"];

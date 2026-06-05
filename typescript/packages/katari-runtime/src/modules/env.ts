@@ -30,7 +30,14 @@ import type { Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEscalationId, type DelegationId, type EscalationId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import { mkSecret, mkString, tryInlineString, type Value } from "../engine/value.js";
+import {
+  mkRecord,
+  mkSecret,
+  mkString,
+  recordEntries,
+  tryInlineString,
+  type Value,
+} from "../engine/value.js";
 import type { Module } from "../module.js";
 import { decryptSecret, encryptSecret } from "../secret-crypto.js";
 import type { EnvStore } from "../sidecar/env-store.js";
@@ -97,13 +104,23 @@ export class EnvModule implements Module {
         const dispatchName = decodeFfiAgentDefId(p.agentDefId).value;
         switch (dispatchName) {
           case ENV_DISPATCH_GET:
-            await this.handleGet(event.from, p.delegationId, p.args, /*secret=*/ false);
+            await this.handleGet(
+              event.from,
+              p.delegationId,
+              recordEntries(p.argument),
+              /*secret=*/ false,
+            );
             return { outbound: [] };
           case ENV_DISPATCH_GET_SECRET:
-            await this.handleGet(event.from, p.delegationId, p.args, /*secret=*/ true);
+            await this.handleGet(
+              event.from,
+              p.delegationId,
+              recordEntries(p.argument),
+              /*secret=*/ true,
+            );
             return { outbound: [] };
           case ENV_DISPATCH_SET:
-            await this.handleSet(event.from, p.delegationId, p.args);
+            await this.handleSet(event.from, p.delegationId, recordEntries(p.argument));
             return { outbound: [] };
           default:
             this.logger.log("warn", "env: unknown dispatch name", { dispatchName });
@@ -214,7 +231,7 @@ export class EnvModule implements Module {
           kind: "qname",
           value: ENV_NOT_FOUND_QNAME,
         }),
-        args: { env_key: mkString(key) },
+        argument: mkRecord({ env_key: mkString(key) }),
       },
     });
   }
@@ -237,7 +254,7 @@ export class EnvModule implements Module {
           kind: "qname",
           value: THROW_REQUEST_QNAME,
         }),
-        args: { msg: mkString(message) },
+        argument: mkRecord({ msg: mkString(message) }),
       },
     });
   }

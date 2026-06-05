@@ -53,7 +53,7 @@ import {
   type EscalationId,
 } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
-import { collectRefs, mkString, type Value } from "../engine/value.js";
+import { collectRefs, mkRecord, mkString, recordEntries, type Value } from "../engine/value.js";
 import type { Module } from "../module.js";
 import type { Sidecar } from "../sidecar/sidecar.js";
 import type { FfiStore } from "../sidecar/store.js";
@@ -247,7 +247,8 @@ export class FfiModule implements Module {
 
   private async handleInboundDelegate(event: ExternalEvent): Promise<void> {
     if (event.payload.kind !== "delegate") return;
-    const { delegationId, args } = event.payload;
+    const { delegationId, argument } = event.payload;
+    const args = recordEntries(argument);
     // CORE stamped the snapshot onto the target (`ext.qname@snapshot`) so the
     // bus could carry it; the sidecar's handler registry is keyed by the bare
     // qname, so we strip it here. The snapshot lives on the store row's
@@ -435,7 +436,8 @@ export class FfiModule implements Module {
    */
   private async handleInboundEscalate(event: ExternalEvent): Promise<void> {
     if (event.payload.kind !== "escalate") return;
-    const { delegationId, escalationId, agentDefId, args } = event.payload;
+    const { delegationId, escalationId, agentDefId, argument } = event.payload;
+    const args = recordEntries(argument);
     const childRow = await this.store.getDelegation(delegationId);
     if (childRow === null) {
       this.logger.log("debug", "ffi: escalate for unknown child delegation", {
@@ -481,7 +483,7 @@ export class FfiModule implements Module {
         delegationId: childRow.parentExtDelegationId,
         escalationId,
         agentDefId,
-        args,
+        argument: mkRecord(args),
       },
     });
   }
@@ -570,7 +572,7 @@ export class FfiModule implements Module {
             delegationId: msg.delegationId,
             escalationId: createEscalationId(),
             agentDefId: encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME }),
-            args: { msg: mkString(msg.message) },
+            argument: mkRecord({ msg: mkString(msg.message) }),
           },
         });
         return;
@@ -633,7 +635,7 @@ export class FfiModule implements Module {
             kind: "delegate",
             delegationId: msg.delegationId,
             agentDefId,
-            args: convertedArgs,
+            argument: mkRecord(convertedArgs),
           },
         });
         return;

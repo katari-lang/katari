@@ -40,7 +40,7 @@ import {
   dispatchDone,
 } from "./thread/ops/index.js";
 import type { Thread } from "./thread/types.js";
-import { mkString } from "./value.js";
+import { mkRecord, mkString } from "./value.js";
 
 /**
  * Process a single inbound event against `state` and drain only the
@@ -103,7 +103,7 @@ function applyTranslateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Even
             delegationId: event.payload.delegationId,
             escalationId: createEscalationId(),
             agentDefId: encodeCoreAgentDefId({ kind: "qname", value: THROW_REQUEST_QNAME }),
-            args: { msg: mkString(err.message) },
+            argument: mkRecord({ msg: mkString(err.message) }),
           },
         });
       }
@@ -258,7 +258,7 @@ function translateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): v
     const target = resolveDelegateTarget(ctx, p.agentDefId, p.delegationId);
     const agentThreadId = spawnAgentRoot(ctx, {
       blockId: target.blockId,
-      args: p.args,
+      argument: p.argument,
       delegationId: p.delegationId,
       capturedScopeId: target.capturedScopeId,
       ambientGenerics: p.generics,
@@ -376,7 +376,7 @@ function translateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): v
       askKind: {
         kind: "request",
         reqId: resolveRequestReqId(ctx, p.agentDefId),
-        args: { ...p.args },
+        argument: p.argument,
       },
       childCallId: sender.parentCallId,
     });

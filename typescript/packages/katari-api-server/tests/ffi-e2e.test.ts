@@ -32,7 +32,7 @@ function callsExtIR(): IRModule {
       kind: "blockAgent",
       body: {
         qualifiedName: "test.main",
-        input: { kind: "inputNamed", body: [] },
+        defaults: {},
         entryBody: 2,
         name: "main",
         description: undefined,
@@ -43,7 +43,7 @@ function callsExtIR(): IRModule {
     2: {
       kind: "blockUser",
       body: {
-        input: { kind: "inputNamed", body: [] },
+        defaults: {},
         statements: [{ kind: "statementCall", body: { block: 3, output: v0 } }],
         trailing: v0,
       },

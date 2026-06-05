@@ -30,7 +30,7 @@ export type ExternalEventPayload =
       kind: "delegate";
       delegationId: DelegationId;
       agentDefId: AgentDefId;
-      args: Record<string, Value>;
+      argument: Value | undefined;
       /**
        * The callee value's resolved generic substitution (from a `foo[args]`
        * instantiation), recorded by the receiver as the new agent activation's
@@ -70,7 +70,7 @@ export type ExternalEventPayload =
       delegationId: DelegationId;
       escalationId: EscalationId;
       agentDefId: AgentDefId;
-      args: Record<string, Value>;
+      argument: Value | undefined;
     }
   | {
       /** Reply to an `escalate`. Matched via `escalationId`. */
@@ -111,7 +111,7 @@ export type ModMap = Record<number, Value>;
  * children and emits `done` upward (no askAck travels back).
  */
 export type AskKind =
-  | { kind: "request"; reqId: QualifiedName; args: Record<string, Value> }
+  | { kind: "request"; reqId: QualifiedName; argument: Value | undefined }
   | { kind: "next"; value: Value; mods: ModMap }
   | { kind: "next-for"; value: Value; mods: ModMap }
   | { kind: "return"; value: Value }

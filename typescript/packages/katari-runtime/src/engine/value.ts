@@ -145,6 +145,20 @@ export function collectRefs(value: Value): RefHandle[] {
 // the (many) call sites terse and centralise the rep handling so the Phase D
 // materialize path (ref → fetch) has one place to grow.
 
+/** Construct a record value from a label→value map. */
+export function mkRecord(entries: Record<string, Value>): Value {
+  return { kind: "record", entries };
+}
+
+/**
+ * The label→value entries of a value when it is a record, else an empty map.
+ * The bus / leaves read their named arguments out of the single argument value
+ * through this.
+ */
+export function recordEntries(value: Value | undefined): Record<string, Value> {
+  return value !== undefined && value.kind === "record" ? value.entries : {};
+}
+
 /** Construct an inline `string` value. */
 export function mkString(text: string): Value {
   return { kind: "string", rep: { kind: "inline", text } };

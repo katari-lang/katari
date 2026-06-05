@@ -37,7 +37,8 @@ export type SpawnArgs = {
   parentId: ThreadId;
   parentCallId: CallId;
   blockId: BlockId;
-  callArgs: Record<string, Value>;
+  /** The single argument value passed to the child (the unified convention). */
+  argument: Value | undefined;
   scopeMode: SpawnScopeMode;
 };
 
@@ -94,8 +95,9 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       // outside the synchronous-leaf shape PrimThread assumes. Pivot
       // into a dedicated CallAgentThread for this one well-known name.
       if (b.body === "primitive.call_agent") {
-        const nameArg = args.callArgs["name"];
-        const argsArg = args.callArgs["args"];
+        const argRec = args.argument?.kind === "record" ? args.argument.entries : {};
+        const nameArg = argRec["name"];
+        const argsArg = argRec["args"];
         return {
           ...common,
           kind: "callAgent" as const,
@@ -108,22 +110,27 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
         ...common,
         kind: "prim" as const,
         primName: b.body,
-        args: args.callArgs,
+        argument: args.argument,
       };
     })
     .with({ kind: "blockConstructor" }, (b) => ({
       ...common,
       kind: "ctor" as const,
       ctorId: b.body,
-      args: args.callArgs,
+      argument: args.argument,
     }))
     .with({ kind: "blockDelegate" }, () => ({
       ...common,
       kind: "delegate" as const,
       blockId: args.blockId,
-      args: args.callArgs,
+      argument: args.argument,
       delegationId: createDelegationId(),
       inboundEscalations: {},
+    }))
+    .with({ kind: "blockGetField" }, () => ({
+      ...common,
+      kind: "getField" as const,
+      blockId: args.blockId,
     }))
     .with({ kind: "blockMatch" }, () => ({
       ...common,
@@ -165,7 +172,7 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
       ...common,
       kind: "request" as const,
       reqId: b.body,
-      args: args.callArgs,
+      argument: args.argument,
     }))
     .with({ kind: "blockAgent" }, () => {
       // Should not be reached: callers reach a BlockAgent only via
@@ -237,7 +244,7 @@ export function spawnMakeClosure(ctx: StepCtx, args: SpawnMakeClosureArgs): Thre
 
 export type SpawnAgentRootArgs = {
   blockId: BlockId;
-  args: Record<string, Value>;
+  argument: Value | undefined;
   delegationId: DelegationId;
   /**
    * Optional parent scope. When set, the new agent's scope inherits from
@@ -288,7 +295,7 @@ export function spawnAgentRoot(ctx: StepCtx, args: SpawnAgentRootArgs): ThreadId
     ...common,
     kind: "agent",
     blockId: args.blockId,
-    args: { ...args.args },
+    argument: args.argument,
     delegationId: args.delegationId,
     outboundEscalations: {},
   };

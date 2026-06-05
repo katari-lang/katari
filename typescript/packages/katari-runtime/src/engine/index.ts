@@ -83,8 +83,10 @@ export {
   inlineText,
   isBytesValue,
   literalToValue,
+  mkRecord,
   mkSecret,
   mkString,
   NULL_VALUE,
+  recordEntries,
   tryInlineString,
 } from "./value.js";

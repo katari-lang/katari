@@ -77,33 +77,7 @@ export type ExitKind = "exitKindReturn" | "exitKindBreak" | "exitKindForBreak";
 
 export type ContKind = "contKindNext" | "contKindForNext";
 
-// ─── Param / Handler (irOptions → flat record) ───────────────────────────────
-
-export type Param = {
-  label: string;
-  var: VarId;
-  /**
-   * Literal default for an optional parameter. When the incoming argument
-   * record omits this label, the runtime binds `var` to this value instead.
-   * Omitted from the JSON (and absent here) for required parameters.
-   */
-  defaultValue?: LiteralValue;
-};
-
-/**
- * How a block binds its single incoming argument value into scope. Under the
- * unified single-value calling convention every block receives exactly one
- * value; this says how to consume it.
- *
- *   - `inputNamed`: treat the incoming value as a record and destructure it by
- *     label, filling each Param's default when its label is absent. The empty
- *     list is the argument-less case (inline / match / for bodies).
- *   - `inputSpread`: bind the whole incoming value to a single var (the
- *     `...obj` spread parameter form, and break / then value blocks).
- */
-export type BlockInput =
-  | { kind: "inputNamed"; body: Param[] }
-  | { kind: "inputSpread"; body: VarId };
+// ─── Handler (irOptions → flat record) ───────────────────────────────────────
 
 /**
  * A request handler inside a HandleData.
@@ -123,11 +97,17 @@ export type Handler = {
 
 export type UserBlock = {
   /**
-   * How the single incoming argument value binds into scope. `inputNamed`
-   * over the req args for handler blocks, `inputSpread` of the break value
-   * for then-clause blocks, and `inputNamed []` for plain inline blocks.
+   * The var the single incoming argument value binds to (after `defaults`
+   * fill), if the block consumes one — a handler binds the req-args record, a
+   * then-block the break value, a spread body the whole `...obj`, a named
+   * agent body the record it reads fields from. Absent for plain inline blocks.
    */
-  input: BlockInput;
+  input?: VarId;
+  /**
+   * Optional-parameter defaults by label, filled into the incoming value when
+   * it is a record (see AgentBlock.defaults).
+   */
+  defaults: Record<string, LiteralValue>;
   statements: Statement[];
   trailing?: VarId;
 };
@@ -146,8 +126,12 @@ export type AgentBlock = {
    * fresh name once Phase 3.7 lands.
    */
   qualifiedName: QualifiedName;
-  /** How the single incoming argument value binds into the agent scope. */
-  input: BlockInput;
+  /**
+   * Optional-parameter defaults by label. When the single incoming argument
+   * value is a record, the runtime fills any of these the caller omitted before
+   * handing the value to `entryBody`. (An agent binds no var of its own.)
+   */
+  defaults: Record<string, LiteralValue>;
   /** BlockId of the body. Typically a `blockUser` (inline) or `blockHandle`. */
   entryBody: BlockId;
   /**
@@ -183,6 +167,7 @@ export type Block =
   | { kind: "blockHandle"; body: HandleBlock }
   | { kind: "blockTuple"; body: TupleBlock }
   | { kind: "blockRecord"; body: RecordBlock }
+  | { kind: "blockGetField"; body: GetFieldBlock }
   | { kind: "blockAgent"; body: AgentBlock }
   | { kind: "blockDelegate"; body: DelegateBlock };
 
@@ -356,6 +341,17 @@ export type TupleBlock = {
   parallel: boolean;
   /** Each element is an inline block computing one value. */
   elements: BlockId[];
+};
+
+/**
+ * Payload for `blockGetField`. Reads `source` (a record value, looked up in
+ * the inherited scope, like `blockMatch.subject`) and yields `source.field`
+ * (or null when absent) as the block's value. Used for surface `obj.field` and
+ * to bind named parameters from a block's incoming argument record.
+ */
+export type GetFieldBlock = {
+  source: VarId;
+  field: string;
 };
 
 /** Payload for blockRecord. Entries are evaluated left-to-right

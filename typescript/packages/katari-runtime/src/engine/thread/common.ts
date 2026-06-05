@@ -9,12 +9,15 @@
 // that each op delegates into.
 
 import { encodeCoreAgentDefId, THROW_REQUEST_QNAME } from "../../agent-def-id.js";
-import type { Block, BlockId, BlockInput } from "../../ir/types.js";
+import type { Block, BlockId, LiteralValue, UserBlock } from "../../ir/types.js";
 import type { Json } from "../../json.js";
 import { type AskId, type CallId, createEscalationId, type ScopeId, type ThreadId } from "../id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
-import { mkString, type Value } from "../value.js";
+import { literalToValue, mkRecord, mkString, type Value } from "../value.js";
+
+export { recordEntries } from "../value.js";
+
 import type { AskIdMap, Thread, ThreadStatus } from "./types.js";
 
 // ─── Thread lookups ────────────────────────────────────────────────────────
@@ -282,7 +285,7 @@ export function emitEscalateUpward(
       delegationId: t.delegationId,
       escalationId,
       agentDefId: wireId,
-      args: { ...askKind.args },
+      argument: askKind.argument,
     },
   });
 }
@@ -412,7 +415,7 @@ export function emitThrowEscalate(ctx: StepCtx, t: Thread, message: string): voi
     askKind: {
       kind: "request",
       reqId: THROW_REQUEST_QNAME,
-      args: { msg: mkString(message) },
+      argument: mkRecord({ msg: mkString(message) }),
     },
     childCallId: t.parentCallId,
   });
@@ -449,37 +452,51 @@ export function writeArgsIntoChildScope(
   ctx: StepCtx,
   childId: ThreadId,
   blockId: BlockId,
-  args: Record<string, Value>,
+  argument: Value | undefined,
 ): void {
   const b = ctx.state.irModule.blocks[String(blockId)] as Block | undefined;
   if (b === undefined || b.kind !== "blockUser") return;
   const child = ctx.state.threads[childId];
   if (child === undefined) return;
-  bindInputIntoScope(ctx, child.scopeId, b.body.input, args);
+  bindBlockInput(ctx, child.scopeId, b.body, argument);
 }
 
 /**
- * Bind a block's single incoming argument value into `scopeId` according to
- * its `BlockInput`. The argument is carried as a `Record<label, Value>` (the
- * destructured record); for `inputNamed` each param reads its label (callers
- * pre-fill defaults), for `inputSpread` the whole record is rebound as a
- * single record value.
+ * Fill a block's optional-parameter defaults into the incoming value when it is
+ * a record (the caller may have omitted them); other values pass through.
  */
-export function bindInputIntoScope(
+export function fillDefaults(
+  ctx: StepCtx,
+  argument: Value | undefined,
+  defaults: Record<string, LiteralValue>,
+): Value | undefined {
+  const labels = Object.keys(defaults ?? {});
+  if (argument === undefined || argument.kind !== "record" || labels.length === 0) {
+    return argument;
+  }
+  const entries: Record<string, Value> = { ...argument.entries };
+  for (const label of labels) {
+    if (entries[label] === undefined) {
+      entries[label] = literalToValue(defaults[label]!, ctx.state.snapshot);
+    }
+  }
+  return { kind: "record", entries };
+}
+
+/**
+ * Bind a user block's single incoming argument value into `scopeId`: fill its
+ * defaults (when the value is a record), then bind it to the block's `input`
+ * var if it consumes one (a named body reads its fields via `BlockGetField`).
+ */
+export function bindBlockInput(
   ctx: StepCtx,
   scopeId: ScopeId,
-  input: BlockInput,
-  args: Record<string, Value>,
+  block: UserBlock,
+  argument: Value | undefined,
 ): void {
-  if (input.kind === "inputSpread") {
-    setValueInScope(ctx, scopeId, input.body, { kind: "record", entries: { ...args } });
-    return;
-  }
-  for (const param of input.body) {
-    const v = args[param.label];
-    if (v !== undefined) {
-      setValueInScope(ctx, scopeId, param.var, v);
-    }
+  const filled = fillDefaults(ctx, argument, block.defaults);
+  if (block.input !== undefined && filled !== undefined) {
+    setValueInScope(ctx, scopeId, block.input, filled);
   }
 }
 

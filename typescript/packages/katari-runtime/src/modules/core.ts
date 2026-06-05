@@ -47,7 +47,7 @@ import {
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
 import type { RefFetcher, RefPutter } from "../engine/step-ctx.js";
-import { collectRefs, type RefRep } from "../engine/value.js";
+import { collectRefs, type RefRep, recordEntries } from "../engine/value.js";
 import type { IRModule } from "../ir/types.js";
 import type { Module } from "../module.js";
 import type { ValueStore } from "../storage/value-store.js";
@@ -171,7 +171,7 @@ export class CoreModule implements Module {
           delegationId: delegatePayload.delegationId,
           module: "core",
           agentDefId: requestedAgentDefId ?? null,
-          args: encryptValueRecord(delegatePayload.args),
+          args: encryptValueRecord(recordEntries(delegatePayload.argument)),
           state: "running",
           createdAt: now,
           updatedAt: now,
@@ -499,7 +499,7 @@ export class CoreModule implements Module {
       parentEntityId: shardId as unknown as EntityId,
       targetModule: this.moduleOf(state, ev.to),
       agentDefId: payload.agentDefId,
-      args: encryptValueRecord(payload.args),
+      args: encryptValueRecord(recordEntries(payload.argument)),
       state: "running",
       createdAt: now,
       updatedAt: now,
@@ -518,7 +518,7 @@ export class CoreModule implements Module {
       id: payload.escalationId,
       entityId: shardId as unknown as EntityId,
       agentDefId: payload.agentDefId,
-      args: encryptValueRecord(payload.args),
+      args: encryptValueRecord(recordEntries(payload.argument)),
       createdAt: new Date().toISOString(),
     });
   }

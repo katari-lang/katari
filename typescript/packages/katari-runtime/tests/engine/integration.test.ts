@@ -17,7 +17,7 @@ import {
 } from "../../src/engine/index.js";
 import { encodeCoreAgentDefId } from "../../src/agent-def-id.js";
 import type {
-  BlockInput,
+  LiteralValue,
   IRModule,
   Block,
   Statement,
@@ -36,23 +36,38 @@ function ir(blocks: Record<number, Block>, entries: Record<string, number> = {})
   };
 }
 
-// Wrap a list of label-bound params as the `inputNamed` form of BlockInput.
-function named(params: Extract<BlockInput, { kind: "inputNamed" }>["body"]): BlockInput {
-  return { kind: "inputNamed", body: params };
+function userBlock(args: {
+  input?: VarId;
+  defaults?: Record<string, LiteralValue>;
+  statements: Statement[];
+  trailing?: VarId;
+}): Block {
+  return {
+    kind: "blockUser",
+    body: {
+      input: args.input,
+      defaults: args.defaults ?? {},
+      statements: args.statements,
+      trailing: args.trailing,
+    },
+  };
 }
 
-function userBlock(
-  args: Pick<UserBlock, "input" | "statements" | "trailing">,
+// A field-read block: yields source.field (read from the inherited scope).
+function getFieldBlock(source: VarId, field: string): Block {
+  return { kind: "blockGetField", body: { source, field } };
+}
+
+function agentBlock(
+  qualifiedName: string,
+  entryBody: number,
+  defaults: Record<string, LiteralValue> = {},
 ): Block {
-  return { kind: "blockUser", body: args };
-}
-
-function agentBlock(qualifiedName: string, entryBody: number, input: BlockInput = named([])): Block {
   return {
     kind: "blockAgent",
     body: {
       qualifiedName,
-      input,
+      defaults,
       entryBody,
       name: qualifiedName,
       description: undefined,
@@ -83,14 +98,12 @@ describe("engine integration: end-to-end via external delegate", () => {
       { kind: "statementCall", body: { block: 100, argument: argRec, output: out } },
     ];
     const userBlk = userBlock({
-      input: named([]),
       statements: stmts,
       trailing: out,
     });
 
     const elementBlock = (v: VarId, n: number): Block =>
       userBlock({
-        input: named([]),
         statements: [
           { kind: "statementLoadLiteral", body: { output: v, value: { kind: "literalValueInteger", integer: n } } },
         ],
@@ -119,7 +132,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           kind: "qname",
           value: "main",
         }),
-        args: {},
+        argument: undefined,
         delegationId,
       },
     };
@@ -138,30 +151,20 @@ describe("engine integration: end-to-end via external delegate", () => {
   });
 
   it("omitted optional parameter is filled from its defaultValue", async () => {
+    const inputVar = 1 as VarId;
     const x = 0 as VarId;
-    // agent echo(x: integer = 42) -> integer { x }
-    const echoAgent: Block = {
-      kind: "blockAgent",
-      body: {
-        qualifiedName: "echo",
-        input: named([
-          { label: "x", var: x, defaultValue: { kind: "literalValueInteger", integer: 42 } },
-        ]),
-        entryBody: 2,
-        name: "echo",
-        description: undefined,
-        inputSchema: "{}",
-        outputSchema: "{}",
-      },
-    };
+    // agent echo(x: integer = 42) -> integer { x } — the agent fills x's default
+    // (when the incoming record omits it); the body reads x via BlockGetField.
+    const echoAgent = agentBlock("echo", 2, { x: { kind: "literalValueInteger", integer: 42 } });
     const echoBody = userBlock({
-      input: named([
-        { label: "x", var: x, defaultValue: { kind: "literalValueInteger", integer: 42 } },
-      ]),
-      statements: [],
+      input: inputVar,
+      statements: [{ kind: "statementCall", body: { block: 3, output: x } }],
       trailing: x,
     });
-    const module = ir({ 1: echoAgent, 2: echoBody }, { echo: 1 });
+    const module = ir(
+      { 1: echoAgent, 2: echoBody, 3: getFieldBlock(inputVar, "x") },
+      { echo: 1 },
+    );
 
     const run = async (args: Record<string, { kind: "number"; value: number }>) => {
       const result = await applyEvent(createState(module), {
@@ -170,7 +173,7 @@ describe("engine integration: end-to-end via external delegate", () => {
         payload: {
           kind: "delegate",
           agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "echo" }),
-          args,
+          argument: { kind: "record", entries: args },
           delegationId: createDelegationId(),
         },
       });
@@ -196,7 +199,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           kind: "qname",
           value: "missing",
         }),
-        args: {},
+        argument: undefined,
         delegationId,
       },
     });
@@ -219,7 +222,6 @@ describe("engine integration: end-to-end via external delegate", () => {
 
     // helper(): returns 7 directly.
     const helperBody = userBlock({
-      input: named([]),
       statements: [
         {
           kind: "statementLoadLiteral",
@@ -232,7 +234,6 @@ describe("engine integration: end-to-end via external delegate", () => {
     // main(): loads an agent literal for `helper`, then dispatches via
     // a per-call-site BlockDelegate{TargetValue helperLit}.
     const mainBody = userBlock({
-      input: named([]),
       statements: [
         {
           kind: "statementLoadLiteral",
@@ -365,7 +366,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           value: "main",
           snapshot: "test-snap",
         }),
-        args: {},
+        argument: undefined,
         delegationId,
       },
     });
@@ -400,10 +401,9 @@ describe("engine integration: end-to-end via external delegate", () => {
     const out = 2 as VarId;
 
     // closure body (BlockAgent → UserBlock): returns the captured `base`.
-    const closureBody = userBlock({ input: named([]), statements: [], trailing: base });
+    const closureBody = userBlock({ statements: [], trailing: base });
 
     const mainBody = userBlock({
-      input: named([]),
       statements: [
         {
           kind: "statementLoadLiteral",
@@ -532,7 +532,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       payload: {
         kind: "delegate",
         agentDefId: encodeCoreAgentDefId({ kind: "qname", value: "main", snapshot: "test-snap" }),
-        args: {},
+        argument: undefined,
         delegationId,
       },
     });
@@ -570,7 +570,6 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     ];
     const userBlk = userBlock({
-      input: named([]),
       statements: stmts,
       trailing: v0,
     });
@@ -602,7 +601,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           kind: "qname",
           value: "main",
         }),
-        args: {},
+        argument: undefined,
         delegationId,
       },
     });

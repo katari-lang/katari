@@ -40,7 +40,7 @@ import type { Endpoint } from "../../endpoint.js";
 import { type AskId, createDelegationId } from "../../id.js";
 import { relaxedSchemaFromString, validateAgainstSchema } from "../../schema-validate.js";
 import type { StepCtx } from "../../step-ctx.js";
-import { mkString, type RefRep, type Value } from "../../value.js";
+import { mkRecord, mkString, type RefRep, type Value } from "../../value.js";
 import { allocAskId, deleteThread } from "../common.js";
 import type { CallAgentThread, Thread } from "../types.js";
 import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
@@ -76,7 +76,7 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
         kind: "delegate",
         delegationId,
         agentDefId: resolved.agentDefId,
-        args: { ...t.argsRecord },
+        argument: mkRecord({ ...t.argsRecord }),
       },
     });
   },
@@ -320,9 +320,7 @@ function raiseCallAgentError(ctx: StepCtx, t: CallAgentThread, message: string):
     askKind: {
       kind: "request",
       reqId: "primitive.call_agent_error",
-      args: {
-        message: mkString(message),
-      },
+      argument: mkRecord({ message: mkString(message) }),
     },
     childCallId: t.parentCallId,
   });

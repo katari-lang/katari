@@ -125,7 +125,7 @@ function emitInitialDelegate(ctx: StepCtx, t: DelegateThread, block: DelegateBlo
       kind: "delegate",
       delegationId: t.delegationId,
       agentDefId,
-      args: { ...t.args },
+      argument: t.argument,
       ...(generics !== undefined ? { generics } : {}),
     },
   });

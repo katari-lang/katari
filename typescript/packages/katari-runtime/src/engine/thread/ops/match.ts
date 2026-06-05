@@ -81,7 +81,7 @@ function spawnArm(ctx: StepCtx, t: MatchThread, blockId: BlockId): void {
     parentId: t.id,
     parentCallId: 0 as CallId,
     blockId,
-    callArgs: {},
+    argument: undefined,
     scopeMode: { mode: "inline", parentScopeId: t.scopeId },
   });
 }
