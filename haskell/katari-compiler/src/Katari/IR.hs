@@ -51,6 +51,7 @@ module Katari.IR
     HandleBlock (..),
     TupleBlock (..),
     RecordBlock (..),
+    GetFieldBlock (..),
     Handler (..),
     MatchArm (..),
     MatchPattern (..),
@@ -61,7 +62,6 @@ module Katari.IR
     CallData (..),
     MakeClosureData (..),
     ApplyGenericsData (..),
-    GetFieldData (..),
     ExitData (..),
     ContData (..),
     LoadLiteralData (..),
@@ -255,6 +255,14 @@ data Block where
   -- 'target' (CORE loopback for internal targets, FFI for external,
   -- runtime value resolution for value targets).
   BlockDelegate :: DelegateBlock -> Block
+  -- | Read one field out of a record value. Like 'BlockMatch', it reads its
+  -- 'source' var from the inherited (caller) scope — a structural, in-thread
+  -- block — and its trailing value is @source.field@ (or @null@ when absent).
+  -- Used to bind named parameters from the block's incoming argument record
+  -- and for surface @obj.field@ access. Being a block (not a statement) lets
+  -- the read reference an arbitrary in-scope var directly, and leaves room to
+  -- make the read async once @file@ / blob / stream sources need materialising.
+  BlockGetField :: GetFieldBlock -> Block
   deriving (Eq, Show, Generic)
 
 instance ToJSON Block where
@@ -438,11 +446,6 @@ data Statement where
   -- the resolved substitution, consulted by @get_metadata@ to specialise the
   -- callee's schema.
   StatementApplyGenerics :: ApplyGenericsData -> Statement
-  -- | Read a single field out of a record value: bind @output@ to
-  -- @source@'s @field@ entry (or @null@ when absent). The runtime reads it
-  -- inline — no cross-thread call. Used to bind named parameters from the
-  -- block's incoming argument record, and for surface @obj.field@ access.
-  StatementGetField :: GetFieldData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -508,19 +511,18 @@ instance ToJSON ApplyGenericsData where
 instance FromJSON ApplyGenericsData where
   parseJSON = genericParseJSON irOptions
 
--- | Payload for 'StatementGetField'. Binds @output@ to @source@'s record
--- field @field@.
-data GetFieldData = GetFieldData
+-- | Payload for 'BlockGetField'. Reads @source@ (a record value, looked up in
+-- the inherited scope) and yields @source.field@ as the block's value.
+data GetFieldBlock = GetFieldBlock
   { source :: VarId,
-    field :: Text,
-    output :: VarId
+    field :: Text
   }
   deriving (Eq, Show, Generic)
 
-instance ToJSON GetFieldData where
+instance ToJSON GetFieldBlock where
   toJSON = genericToJSON irOptions
 
-instance FromJSON GetFieldData where
+instance FromJSON GetFieldBlock where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'BlockMatch'. The runtime creates a management thread,

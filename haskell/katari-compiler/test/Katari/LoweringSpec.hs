@@ -263,10 +263,9 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-        getFields = [g | StatementGetField g <- ub.statements]
-    -- Field access @p.x@ lowers to a StatementGetField reading "x".
-    map (.field) getFields `shouldContain` ["x"]
+    -- Field access @p.x@ lowers to a BlockGetField reading "x".
+    let getFieldBlocks = [g | BlockGetField g <- Map.elems irMod.blocks]
+    map (.field) getFieldBlocks `shouldContain` ["x"]
 
 callTargetBlockId :: CallData -> BlockId
 callTargetBlockId c = c.block

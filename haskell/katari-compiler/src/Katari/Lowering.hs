@@ -317,6 +317,18 @@ wrapVarInBlock var = do
   recordBlock blockId (BlockUser (defaultUserBlock {trailing = Just var})) Nothing
   pure blockId
 
+-- | Read a record field: allocate a 'BlockGetField' over @source@ (read from
+-- the inherited scope) and call it, returning the var its value lands in. Used
+-- both for surface @obj.field@ and for binding named parameters out of a
+-- block's incoming argument record.
+emitGetField :: VarId -> Text -> Lower VarId
+emitGetField source field = do
+  blockId <- freshBlockId
+  recordBlock blockId (BlockGetField GetFieldBlock {source = source, field = field}) Nothing
+  out <- freshVarId Nothing
+  emit (StatementCall CallData {block = blockId, argument = Nothing, output = Just out})
+  pure out
+
 -- | Build the QualifiedName for a prim dispatch name. Bare names
 -- (e.g. "get_field") live in module "primitive"; qualified names
 -- (e.g. "json.parse") are split at the last dot.
@@ -865,12 +877,17 @@ agentInputBinding parameters = case parameters of
     pure (Just objVar, Map.empty, bindParamLocal pb objVar)
   _ -> do
     inputVar <- freshVarId (Just "args")
-    paramVars <- mapM (\pb -> (pb,) <$> freshVarId (Just pb.name.text)) parameters
-    let agentDefaults = Map.fromList [(pb.name.text, pd.value) | (pb, _) <- paramVars, Just pd <- [pb.defaultValue]]
-        prelude = do
-          forM_ paramVars $ \(pb, paramVar) ->
-            emit (StatementGetField GetFieldData {source = inputVar, field = pb.name.text, output = paramVar})
-          concat <$> mapM (\(pb, paramVar) -> bindParamLocal pb paramVar) paramVars
+    let agentDefaults = Map.fromList [(pb.name.text, pd.value) | pb <- parameters, Just pd <- [pb.defaultValue]]
+        -- Each named param is read out of the incoming record into a fresh var
+        -- (the 'BlockGetField' output), which becomes the param's slot.
+        prelude =
+          concat
+            <$> forM
+              parameters
+              ( \pb -> do
+                  paramVar <- emitGetField inputVar pb.name.text
+                  bindParamLocal pb paramVar
+              )
     pure (Just inputVar, agentDefaults, prelude)
 
 -- | The local binding a parameter introduces (its resolved variable → IR var).
@@ -1185,9 +1202,7 @@ lowerExpr = \case
   AST.ExpressionRecord recordExpr -> lowerRecordExpr recordExpr.entries
   AST.ExpressionFieldAccess fieldAccessExpr -> do
     object <- lowerExpr fieldAccessExpr.object
-    out <- freshVarId Nothing
-    emit (StatementGetField GetFieldData {source = object, field = fieldAccessExpr.fieldName.text, output = out})
-    pure out
+    emitGetField object fieldAccessExpr.fieldName.text
   -- Generic instantiation @foo[args]@: the callee value carries a generic
   -- substitution (consulted by @get_metadata@ to specialise its schema). The
   -- callable code itself is generic-erased, so we lower the bare callee and
@@ -1789,6 +1804,8 @@ offsetBlockInBlock offsetB offsetV = \case
     BlockTuple tupleBlock {elements = map offsetB tupleBlock.elements}
   BlockRecord block ->
     BlockRecord block {entries = map (second offsetB) block.entries}
+  BlockGetField block ->
+    BlockGetField block {source = offsetV block.source}
 
 
 offsetStatement :: (BlockId -> BlockId) -> (VarId -> VarId) -> Statement -> Statement
@@ -1827,12 +1844,6 @@ offsetStatement offsetB offsetV = \case
       applyData
         { source = offsetV applyData.source,
           output = offsetV applyData.output
-        }
-  StatementGetField getFieldData ->
-    StatementGetField
-      getFieldData
-        { source = offsetV getFieldData.source,
-          output = offsetV getFieldData.output
         }
 
 offsetArm :: (BlockId -> BlockId) -> (VarId -> VarId) -> MatchArm -> MatchArm
