@@ -69,6 +69,10 @@ data TypeResolution
     -- 'ResolvedRequestName' it denotes an effect, rejected in an ordinary type
     -- position.
     ResolvedEffectGenericName GenericsId
+  | -- | The @pure@ keyword in an effect-argument position (@foo[..., pure]@):
+    -- the empty effect. @pure@ names only an effect, so it resolves
+    -- unambiguously here and is rejected in an ordinary type position.
+    ResolvedPureEffect
   deriving (Eq, Ord, Show)
 
 -- | How an /effect/ reference (a @with@-clause leaf — a

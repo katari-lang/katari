@@ -1403,6 +1403,8 @@ resolveTypeName TypeNameNode {name, sourceSpan} = do
         lookupRequest name.text >>= \case
           Just (ResolvedConcreteRequest qualifiedName) -> pure (Just (ResolvedRequestName qualifiedName))
           Just (ResolvedEffectGeneric genericsId) -> pure (Just (ResolvedEffectGenericName genericsId))
+          -- @pure@ is the empty effect; only meaningful as an effect argument.
+          Nothing | name.text == "pure" -> pure (Just ResolvedPureEffect)
           Nothing -> do
             emitError (ErrorNotAType name.sourceSpan name.text)
             pure Nothing

@@ -523,6 +523,7 @@ resolveTypeRef nameRef = case nameRef.resolution of
   -- type position.
   Just (ResolvedRequestName qualifiedName) -> pure (AsEffect (SemanticEffectRequest qualifiedName))
   Just (ResolvedEffectGenericName genericsId) -> pure (AsEffect (SemanticEffectGeneric genericsId))
+  Just ResolvedPureEffect -> pure (AsEffect SemanticEffectPure)
   Nothing -> pure (AsType SemanticTypeUnknown)
 
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
