@@ -135,7 +135,7 @@
     "requests": []
   },
   {
-    "description": "Dynamically invoke a callable by name. @name@ is the callable handle from @get_metadata@'s @id@: a qualified agent name (@module.agent@) or a closure ref (@closureref:<id>@); @args@ is a record matching the target's parameter list. Raises @call_agent_error@ on unknown names or schema-invalid args.",
+    "description": "Invoke a callable value with a runtime-built args record, validating the args against the target's input schema (specialised to the target's generics). Raises @error_invalid_argument@ on schema-invalid args. @R@ / @E@ are the target's return type / effect.",
     "input": {
       "additionalProperties": true,
       "properties": {
@@ -145,56 +145,28 @@
           "required": [],
           "type": "object"
         },
-        "name": {
-          "type": "string"
+        "target": {
+          "additionalProperties": true,
+          "properties": {
+            "$agent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$agent"
+          ],
+          "type": "object"
         }
       },
       "required": [
         "args",
-        "name"
+        "target"
       ],
       "type": "object"
     },
     "name": "primitive.call_agent",
-    "output": {},
-    "requests": [
-      {
-        "input": {
-          "additionalProperties": true,
-          "properties": {
-            "message": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "message"
-          ],
-          "type": "object"
-        },
-        "name": "primitive.call_agent_error",
-        "output": {
-          "not": {}
-        }
-      }
-    ]
-  },
-  {
-    "description": "Raised by @call_agent@ when the name fails to resolve to a known callable, or the supplied args fail the target's input schema. Handle via @request call_agent_error(message) { ... }@.",
-    "input": {
-      "additionalProperties": true,
-      "properties": {
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "message"
-      ],
-      "type": "object"
-    },
-    "name": "primitive.call_agent_error",
     "output": {
-      "not": {}
+      "$generic": 0
     },
     "requests": [
       {
@@ -210,7 +182,7 @@
           ],
           "type": "object"
         },
-        "name": "primitive.call_agent_error",
+        "name": "primitive.error_invalid_argument",
         "output": {
           "not": {}
         }
@@ -323,6 +295,45 @@
       "type": "boolean"
     },
     "requests": []
+  },
+  {
+    "description": "Raised by @call_agent@ when the supplied args fail the target's input schema. Handle via @request error_invalid_argument(message) { ... }@.",
+    "input": {
+      "additionalProperties": true,
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "primitive.error_invalid_argument",
+    "output": {
+      "not": {}
+    },
+    "requests": [
+      {
+        "input": {
+          "additionalProperties": true,
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "name": "primitive.error_invalid_argument",
+        "output": {
+          "not": {}
+        }
+      }
+    ]
   },
   {
     "description": "Read a file's bytes back as a UTF-8 string.",

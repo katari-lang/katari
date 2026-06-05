@@ -25,6 +25,7 @@ import Katari.AST
     DataDeclaration (..),
     Declaration (..),
     ExternalAgentDeclaration (..),
+    GenericKind,
     Module (..),
     NameRef (..),
     NameRefKind (VariableRef),
@@ -41,6 +42,7 @@ import Katari.Id (GenericsId, QualifiedName (..), VariableResolution (..))
 import Katari.Prim (PrimRule)
 import Katari.SemanticType (Resolved, SemanticType)
 import Katari.SourceSpan (emptySourceSpan)
+import Katari.TypeScheme (TypeScheme)
 import Katari.Typechecker.AgentGraph (agentSCCs)
 import Katari.Typechecker.Check (checkSCC)
 import Katari.Typechecker.Identifier
@@ -68,8 +70,10 @@ data TypecheckSubject = TypecheckSubject
     -- | Prim rules reachable from this module. CG looks up call sites
     -- against this map to specialise prim behaviour.
     primRules :: Map QualifiedName PrimRule,
-    -- | Resolved types coming from already-typechecked dependencies.
-    importedTypes :: Map QualifiedName (SemanticType Resolved)
+    -- | Resolved schemes coming from already-typechecked dependencies (and the
+    -- ambient stdlib); a generic callable's scheme carries its quantifiers, so
+    -- it can be instantiated in this module.
+    importedTypes :: Map QualifiedName TypeScheme
   }
 
 -- | Per-module typecheck output.
@@ -118,7 +122,7 @@ typecheckModule subject =
         extractModuleInterface
           subject.moduleName
           subject.ownVariables
-          final.sccTypeEnv
+          final.sccImportedTypes
       ownedTypeEnv = removeImported subject.importedTypes final.sccTypeEnv
    in ModuleTypecheckResult
         { zonkedModule = assembledModule,
@@ -133,7 +137,7 @@ typecheckModule subject =
 -- ---------------------------------------------------------------------------
 
 data SCCAccumulator = SCCAccumulator
-  { sccImportedTypes :: Map QualifiedName (SemanticType Resolved),
+  { sccImportedTypes :: Map QualifiedName TypeScheme,
     sccTypeEnv :: Map VariableResolution (SemanticType Resolved),
     sccDeclarations :: Map QualifiedName (Declaration Zonked),
     sccGenericBounds :: Map GenericsId (SemanticType Resolved),
@@ -199,7 +203,7 @@ extractSCCInterface sccQNames typeEnv =
     ]
 
 removeImported ::
-  Map QualifiedName (SemanticType Resolved) ->
+  Map QualifiedName scheme ->
   Map VariableResolution (SemanticType Resolved) ->
   Map VariableResolution (SemanticType Resolved)
 removeImported importedTypes fullEnv =

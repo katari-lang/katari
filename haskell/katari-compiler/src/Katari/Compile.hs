@@ -52,6 +52,7 @@ import Katari.AST
     Phase (Identified, Parsed, Zonked),
   )
 import Katari.Diagnostic (Diagnostic, hasErrors)
+import Katari.TypeScheme (TypeScheme)
 import Katari.IR qualified
 import Katari.Id (GenericsId, QualifiedName (..), VariableResolution (..))
 import Katari.Lexer qualified as Lexer
@@ -457,7 +458,10 @@ compilationOrder trustedStdlibNames moduleMap = concat (compilationLevels truste
 data TypecheckTaskResult = TypecheckTaskResult
   { taskZonkedModule :: Module Zonked,
     taskTypeEnvironment :: Map VariableResolution (SemanticType Resolved),
-    taskExportedTypes :: Map QualifiedName (SemanticType Resolved),
+    -- | The module's exported callable schemes (generics carried within), fed
+    -- forward so importers (and the ambient-stdlib seeding) can instantiate
+    -- this module's generic callables.
+    taskExportedTypes :: Map QualifiedName TypeScheme,
     taskGenericBounds :: Map GenericsId (SemanticType Resolved),
     taskDiagnostics :: [Diagnostic]
   }
@@ -511,6 +515,9 @@ typecheckModules emitLog idResult primRules knownRequests orderedModules directD
               | stdlibName <- Set.toList Stdlib.stdlibModuleNames,
                 stdlibName /= moduleName
             ]
+          -- Schemes (types + their generics) travel the dep + ambient-stdlib
+          -- path, so an imported / stdlib generic callable (e.g. the ambient
+          -- @call_agent@) can be instantiated in this module.
           importedTypes =
             Map.unions
               [ Map.findWithDefault Map.empty depName exportedSoFar
@@ -527,7 +534,7 @@ typecheckOne ::
   Map QualifiedName PrimRule ->
   Set QualifiedName ->
   ModuleName ->
-  Map QualifiedName (SemanticType Resolved) ->
+  Map QualifiedName TypeScheme ->
   TypecheckTaskResult
 typecheckOne idResult primRules knownRequests moduleName importedTypes =
   let moduleAST =

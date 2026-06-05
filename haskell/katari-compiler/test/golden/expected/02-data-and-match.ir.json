@@ -1071,13 +1071,13 @@
     "59": {
       "body": {
         "defaults": {},
-        "description": "Raised by @call_agent@ when the name fails to resolve to a known callable, or the supplied args fail the target's input schema. Handle via @request call_agent_error(message) { ... }@.",
+        "description": "Raised by @call_agent@ when the supplied args fail the target's input schema. Handle via @request error_invalid_argument(message) { ... }@.",
         "entryBody": 74,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}",
-        "name": "call_agent_error",
+        "name": "error_invalid_argument",
         "outputSchema": "{\"not\":{}}",
-        "qualifiedName": "primitive.call_agent_error",
-        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.call_agent_error\",\"output\":{\"not\":{}}}]"
+        "qualifiedName": "primitive.error_invalid_argument",
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.error_invalid_argument\",\"output\":{\"not\":{}}}]"
       },
       "kind": "blockAgent"
     },
@@ -1108,13 +1108,13 @@
     "60": {
       "body": {
         "defaults": {},
-        "description": "Dynamically invoke a callable by name. @name@ is the callable handle from @get_metadata@'s @id@: a qualified agent name (@module.agent@) or a closure ref (@closureref:<id>@); @args@ is a record matching the target's parameter list. Raises @call_agent_error@ on unknown names or schema-invalid args.",
+        "description": "Invoke a callable value with a runtime-built args record, validating the args against the target's input schema (specialised to the target's generics). Raises @error_invalid_argument@ on schema-invalid args. @R@ / @E@ are the target's return type / effect.",
         "entryBody": 61,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"args\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"name\":{\"type\":\"string\"}},\"required\":[\"args\",\"name\"],\"type\":\"object\"}",
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"args\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"target\":{\"additionalProperties\":true,\"properties\":{\"$agent\":{\"type\":\"string\"}},\"required\":[\"$agent\"],\"type\":\"object\"}},\"required\":[\"args\",\"target\"],\"type\":\"object\"}",
         "name": "call_agent",
-        "outputSchema": "{}",
+        "outputSchema": "{\"$generic\":0}",
         "qualifiedName": "primitive.call_agent",
-        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.call_agent_error\",\"output\":{\"not\":{}}}]"
+        "requestsSchema": "[{\"input\":{\"additionalProperties\":true,\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"},\"name\":\"primitive.error_invalid_argument\",\"output\":{\"not\":{}}},{\"$generic\":1}]"
       },
       "kind": "blockAgent"
     },
@@ -1274,7 +1274,7 @@
       "kind": "blockRequest"
     },
     "74": {
-      "body": "primitive.call_agent_error",
+      "body": "primitive.error_invalid_argument",
       "kind": "blockRequest"
     },
     "75": {
@@ -1484,7 +1484,6 @@
     "primitive.array.reverse": 99,
     "primitive.array.slice": 97,
     "primitive.call_agent": 60,
-    "primitive.call_agent_error": 59,
     "primitive.concat": 38,
     "primitive.div": 16,
     "primitive.env.get": 105,
@@ -1492,6 +1491,7 @@
     "primitive.env.set": 107,
     "primitive.env_not_found": 63,
     "primitive.eq": 20,
+    "primitive.error_invalid_argument": 59,
     "primitive.file_to_string": 49,
     "primitive.format": 47,
     "primitive.from_string": 45,
@@ -1672,7 +1672,7 @@
       "56": "prim:primitive.get_field:leaf",
       "57": "prim:get_metadata:agent",
       "58": "prim:primitive.get_metadata:leaf",
-      "59": "call_agent_error:agent",
+      "59": "error_invalid_argument:agent",
       "6": "project_x.body",
       "60": "prim:call_agent:agent",
       "61": "prim:primitive.call_agent:leaf",
@@ -1689,7 +1689,7 @@
       "71": "json_parse_error:agent",
       "72": "agent_metadata:ctor",
       "73": "from_string_error:request",
-      "74": "call_agent_error:request",
+      "74": "error_invalid_argument:request",
       "75": "throw:request",
       "76": "env_not_found:request",
       "77": "json_null:ctor",

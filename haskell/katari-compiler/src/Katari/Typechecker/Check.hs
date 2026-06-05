@@ -50,6 +50,7 @@ import Katari.Id (EffectResolution (..), GenericsId, TypeResolution (..), Variab
 import Katari.Prim (PrimRule (..))
 import Katari.SemanticType
 import Katari.SemanticType.Render (renderSemanticType)
+import Katari.TypeScheme (TypeScheme (..), monoScheme)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (TypeData (..))
 import Katari.Typechecker.AgentGraph (declarationDependencies)
@@ -196,10 +197,13 @@ data CheckEnv = CheckEnv
     checkDataFieldEnv :: DataFieldEnv,
     -- | Type synonyms currently being expanded (cycle detection).
     checkSynonymVisited :: Set QualifiedName,
-    -- | Local variable types — parameters, @let@ bindings, pattern bindings,
-    -- state vars — and the module's own + imported top-level callable
-    -- signatures, all keyed by 'VariableResolution'.
-    checkLocals :: Map VariableResolution (SemanticType Resolved),
+    -- | Local variable /schemes/ — parameters, @let@ bindings, pattern
+    -- bindings, state vars (all 'monoScheme'), and the module's own + imported
+    -- top-level callable schemes (a generic callable carries its quantifiers
+    -- here). Keyed by 'VariableResolution'. A scheme with non-empty quantifiers
+    -- marks a generic callable: a bare reference is a \"must instantiate\"
+    -- error, and @foo[args]@ substitutes the type arguments into its body.
+    checkLocals :: Map VariableResolution TypeScheme,
     -- | Prim rules (operator / array prims whose result type isn't a plain
     -- signature). Keyed by the prim's qualified name.
     checkPrimRules :: Map QualifiedName PrimRule,
@@ -207,13 +211,6 @@ data CheckEnv = CheckEnv
     -- enclosing generic declaration's @extends@ clauses, normalized). Empty
     -- outside a generic body. Consulted by 'subtypeAssert' for bound expansion.
     checkBoundEnv :: BoundEnv,
-    -- | Per-callable generic parameter lists (in declaration order: each
-    -- parameter's 'GenericsId' + its bound), for every generic callable in the
-    -- module. A non-empty entry marks a callable as generic: a bare reference
-    -- to it is a \"must instantiate\" error, and @foo[args]@ substitutes the
-    -- type arguments into its signature. (First-class generics only — node
-    -- types never carry an un-applied scheme.)
-    checkGenericParams :: Map VariableResolution [(GenericsId, GenericKind, SemanticType Resolved)],
     -- | The enclosing agent body's declared / expected return type, if any.
     checkExpectedReturn :: Maybe (SemanticType Resolved)
   }
@@ -247,14 +244,26 @@ runCheck env action =
 emitError :: CheckError -> Check ()
 emitError err = modify' $ \s -> s {stateErrors = err : s.stateErrors}
 
-lookupLocal :: VariableResolution -> Check (Maybe (SemanticType Resolved))
+-- | The scheme a resolution is bound to (generic callables carry quantifiers).
+lookupLocal :: VariableResolution -> Check (Maybe TypeScheme)
 lookupLocal resolution = asks (Map.lookup resolution . (.checkLocals))
 
--- | Extend the local environment for the duration of an action, and record the
--- bindings in 'stateLocalTypes' (un-scoped) for the Query layer.
+-- | The body type a resolution is bound to (its scheme's body, quantifiers
+-- dropped). For the common case where the caller wants the plain type.
+lookupLocalType :: VariableResolution -> Check (Maybe (SemanticType Resolved))
+lookupLocalType resolution = fmap (.schemeBody) <$> lookupLocal resolution
+
+-- | Extend the local environment with monomorphic bindings (parameters, @let@,
+-- pattern, state vars) for the duration of an action, recording them in
+-- 'stateLocalTypes' (un-scoped) for the Query layer.
 withLocals :: [(VariableResolution, SemanticType Resolved)] -> Check a -> Check a
-withLocals bindings action = do
-  modify' $ \s -> s {stateLocalTypes = Map.union (Map.fromList bindings) s.stateLocalTypes}
+withLocals bindings = withSchemes [(resolution, monoScheme semanticType) | (resolution, semanticType) <- bindings]
+
+-- | Extend the local environment with full schemes (top-level callable
+-- signatures and local generic agents, whose schemes may carry quantifiers).
+withSchemes :: [(VariableResolution, TypeScheme)] -> Check a -> Check a
+withSchemes bindings action = do
+  modify' $ \s -> s {stateLocalTypes = Map.union (Map.fromList [(resolution, scheme.schemeBody) | (resolution, scheme) <- bindings]) s.stateLocalTypes}
   local (\e -> e {checkLocals = Map.union (Map.fromList bindings) e.checkLocals}) action
 
 -- | Set the enclosing agent's expected return type.
@@ -316,15 +325,6 @@ genericParamInfos = fmap catMaybes . mapM paramInfo
         pure (Just (genericsId, kind, boundType))
       _ -> pure Nothing
 
--- | Extend the per-callable generic-parameter map for the duration of an
--- action. Used to bring a /local/ generic agent's parameters into scope (both
--- inside its own body, for recursive @inner[T]@ calls, and in the enclosing
--- block after its declaration).
-withGenericParams :: [(VariableResolution, [(GenericsId, GenericKind, SemanticType Resolved)])] -> Check a -> Check a
-withGenericParams [] action = action
-withGenericParams bindings action =
-  local (\e -> e {checkGenericParams = Map.union (Map.fromList bindings) e.checkGenericParams}) action
-
 -- | Substitute concrete types / effects for generic parameters throughout a
 -- type (used to instantiate a generic callable's signature at @foo[args]@):
 -- type generics from @typeSubstitution@, effect generics (inside function
@@ -369,7 +369,7 @@ calleeResolution = \case
 -- a monomorphic callable / a non-callable).
 genericParamsOf :: Maybe VariableResolution -> Check [(GenericsId, GenericKind, SemanticType Resolved)]
 genericParamsOf = \case
-  Just resolution -> asks (Map.findWithDefault [] resolution . (.checkGenericParams))
+  Just resolution -> maybe [] (.schemeQuantifiers) <$> lookupLocal resolution
   Nothing -> pure []
 
 -- | Rebuild a generic application's callee as a zonked node carrying the
@@ -651,7 +651,7 @@ synthExpr = \case
 -- @unknown@ silently — re-reporting it here would duplicate the diagnostic.
 lookupVariableType :: SourceSpan -> Text -> Maybe VariableResolution -> Check (SemanticType Resolved)
 lookupVariableType _ _ = \case
-  Just resolution -> maybe SemanticTypeUnknown id <$> lookupLocal resolution
+  Just resolution -> maybe SemanticTypeUnknown id <$> lookupLocalType resolution
   Nothing -> pure SemanticTypeUnknown
 
 -- | The type of a value reference, rejecting a bare reference to a generic
@@ -748,7 +748,7 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
       substitutions <- zipWithM (applyTypeArgument sourceSpan) params typeArguments
       let typeSubstitution = Map.fromList [(genericsId, argType) | Left (genericsId, argType) <- substitutions]
           effectSubstitution = Map.fromList [(genericsId, argEffect) | Right (genericsId, argEffect) <- substitutions]
-      calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocal) resolution
+      calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocalType) resolution
       let concreteType = substituteGenerics typeSubstitution effectSubstitution calleeSig
       calleeZonked <- retagGenericCallee callee concreteType
       pure (rebuilt calleeZonked concreteType (Map.toList typeSubstitution, Map.toList effectSubstitution), concreteType)
@@ -1009,7 +1009,12 @@ walkStatements [] returnExpression = do
   pure ([], tail')
 walkStatements (statement : rest) returnExpression = do
   (statement', bindings, genericBindings) <- walkStatement statement
-  (rest', tail') <- withLocals bindings (withGenericParams genericBindings (walkStatements rest returnExpression))
+  -- Fold each binding's type with any quantifiers the same statement introduced
+  -- (a local generic agent) into one scheme, so subsequent statements + the
+  -- tail see the binding with its generics.
+  let genericMap = Map.fromList genericBindings
+      schemeBindings = [(resolution, TypeScheme (Map.findWithDefault [] resolution genericMap) semanticType) | (resolution, semanticType) <- bindings]
+  (rest', tail') <- withSchemes schemeBindings (walkStatements rest returnExpression)
   pure (statement' : rest', tail')
 
 -- | Walk a statement, returning its zonked form, the local-variable bindings it
@@ -1091,17 +1096,19 @@ walkLocalAgent AgentStatement {annotation, name, typeParameters, parameters, ret
   boundEnv <- buildBoundEnv typeParameters
   genericParams <- genericParamInfos typeParameters
   let genericBinding = maybe [] (\resolution -> [(resolution, genericParams)]) name.resolution
-  (zonked, bindings) <- withGenericParams genericBinding $ withBoundEnv boundEnv $ do
+  (zonked, bindings) <- withBoundEnv boundEnv $ do
     (parameters', paramSig, paramLocals) <- elaborateParameters parameters
     declaredReturn <- traverse elaborateType returnType
-    -- Recursive local agents need their return annotation; bind the signature up
-    -- front when one is present so recursive calls resolve.
-    let selfBinding ret = maybe [] (\resolution -> [(resolution, SemanticTypeFunction paramSig ret emptyEffect)]) name.resolution
+    -- Recursive local agents need their return annotation; bind the signature
+    -- scheme (carrying this agent's own quantifiers) up front when one is
+    -- present, so recursive @inner[T]@ calls inside the body resolve.
+    let selfScheme ret = maybe [] (\resolution -> [(resolution, TypeScheme genericParams (SemanticTypeFunction paramSig ret emptyEffect))]) name.resolution
     (body', bodyType) <-
-      withLocals (paramLocals ++ maybe [] selfBinding declaredReturn) $
-        case declaredReturn of
-          Just ret -> withExpectedReturn ret (walkBlock body)
-          Nothing -> walkBlock body
+      withSchemes (maybe [] selfScheme declaredReturn) $
+        withLocals paramLocals $
+          case declaredReturn of
+            Just ret -> withExpectedReturn ret (walkBlock body)
+            Nothing -> walkBlock body
     let returnSemantic = maybe bodyType id declaredReturn
         agentType = SemanticTypeFunction paramSig returnSemantic emptyEffect
         localBindings = maybe [] (\resolution -> [(resolution, agentType)]) name.resolution
@@ -1252,7 +1259,7 @@ typePatternTagToSemantic = \case
 constructorFieldTypes :: Maybe QualifiedName -> Check (Map Text (SemanticType Resolved))
 constructorFieldTypes = \case
   Just qualifiedName ->
-    lookupLocal (ResolvedTopLevel qualifiedName) >>= \case
+    lookupLocalType (ResolvedTopLevel qualifiedName) >>= \case
       Just (SemanticTypeFunction parameterObject _ _) -> pure (Map.map (.parameterType) (functionParameters parameterObject))
       _ -> pure Map.empty
   Nothing -> pure Map.empty
@@ -1315,16 +1322,19 @@ fieldType sourceSpan subject label = case subject of
 checkSCC ::
   -- | Module name (for self-recursion detection).
   Text ->
-  -- | Resolved callable signatures seen so far (imports + earlier SCCs).
-  Map QualifiedName (SemanticType Resolved) ->
+  -- | Resolved callable /schemes/ seen so far (imports + earlier SCCs); a
+  -- generic callable's scheme carries its quantifiers, so it can be
+  -- instantiated here regardless of which module (or the ambient stdlib)
+  -- defined it.
+  Map QualifiedName TypeScheme ->
   Module Identified ->
   -- | The qualified names this SCC owns.
   Set QualifiedName ->
   Map QualifiedName TypeData ->
   Map QualifiedName PrimRule ->
   ( Map QualifiedName (Declaration Zonked),
-    -- | Top-level signatures the SCC owns (extends the resolved environment).
-    Map QualifiedName (SemanticType Resolved),
+    -- | Top-level schemes the SCC owns (extends the resolved environment).
+    Map QualifiedName TypeScheme,
     -- | Every binding's type, top-level + local (for the Query / hover layer).
     Map VariableResolution (SemanticType Resolved),
     -- | Each module generic parameter's elaborated @extends@ bound (keyed by
@@ -1337,30 +1347,29 @@ checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primR
   let env =
         CheckEnv
           { checkTypeData = typeData,
-            checkDataFieldEnv = buildDataFieldEnv resolvedCallables,
+            checkDataFieldEnv = buildDataFieldEnv (Map.map (.schemeBody) resolvedCallables),
             checkSynonymVisited = Set.empty,
             checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables,
             checkPrimRules = primRules,
             checkBoundEnv = Map.empty,
-            checkGenericParams = Map.empty,
             checkExpectedReturn = Nothing
           }
       sccDeclarations = filter (declarationInSCC sccQualifiedNames) moduleAST.declarations
-      -- Generic-parameter lists are gathered from the WHOLE module's
-      -- declarations (not just this SCC), so a caller in a later SCC can
-      -- instantiate a generic callable defined in an earlier one without
-      -- threading the lists through the SCC accumulator.
+      -- The whole module's per-callable quantifiers (gathered once), used to
+      -- wrap each own callable's inferred type back into a 'TypeScheme' for
+      -- re-export, and to derive the generic bounds for the exhaustiveness
+      -- checker. (Imported callables' quantifiers already ride in their schemes
+      -- via 'checkLocals'.)
       checkAction = do
-        genericParams <- buildModuleGenericParams moduleAST.declarations
-        results <-
-          local (\e -> e {checkGenericParams = genericParams}) $
-            checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations
-        pure (results, genericParams)
-      ((results, genericParams), errors, localTypes) = runCheck env checkAction
+        ownGenericParams <- buildModuleGenericParams moduleAST.declarations
+        results <- checkSCCDeclarations moduleName sccQualifiedNames sccDeclarations
+        pure (results, ownGenericParams)
+      ((results, ownGenericParams), errors, localTypes) = runCheck env checkAction
+      quantifiersFor qualifiedName = Map.findWithDefault [] (ResolvedTopLevel qualifiedName) ownGenericParams
       zonked = Map.fromList [(qualifiedName, declaration) | (qualifiedName, declaration, _) <- results]
-      signatures = Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- results]
-      typeEnv = Map.union (Map.mapKeys ResolvedTopLevel signatures) localTypes
-      genericBounds = Map.fromList [(genericsId, bound) | params <- Map.elems genericParams, (genericsId, _kind, bound) <- params]
+      signatures = Map.fromList [(qualifiedName, TypeScheme (quantifiersFor qualifiedName) sig) | (qualifiedName, _, sig) <- results]
+      typeEnv = Map.union (Map.mapKeys ResolvedTopLevel (Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- results])) localTypes
+      genericBounds = Map.fromList [(genericsId, bound) | params <- Map.elems ownGenericParams, (genericsId, _kind, bound) <- params]
    in (zonked, signatures, typeEnv, genericBounds, map toDiagnostic errors)
 
 declarationInSCC :: Set QualifiedName -> Declaration Identified -> Bool
@@ -1407,7 +1416,7 @@ checkSCCDeclarations moduleName sccQualifiedNames declarations = do
 -- Non-agent results pass through unchanged.
 inferEffects :: Bool -> Set QualifiedName -> [SCCResult] -> Check [SCCResult]
 inferEffects recursive sccQualifiedNames results = do
-  locals <- asks (.checkLocals)
+  locals <- asks (Map.map (.schemeBody) . (.checkLocals))
   let externalLookup qualifiedName =
         effectOfSignature (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) locals)
       agentInfos =
