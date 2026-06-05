@@ -672,6 +672,12 @@ parseDataDeclaration annotation = parseWithSpan $ do
 parseDataDeclarationParameter :: Parser (DataParameter Parsed)
 parseDataDeclarationParameter = parseWithSpan $ do
   annotation <- parseAnnotation
+  -- @data@ constructors always build an object value, so a spread field
+  -- (@...args: [..]@) would break the runtime representation — reject it with
+  -- a clear message rather than the generic \"expected a field name\" error.
+  optional (parsePunctuation PunctuationEllipsis) >>= \case
+    Just _ -> fail "a 'data' declaration cannot have a spread field ('...'); its fields must be named"
+    Nothing -> pure ()
   name <- parseIdentifier
   isOptional <- isJust <$> optional (parsePunctuation PunctuationQuestion)
   parsePunctuation PunctuationColon
@@ -1225,7 +1231,10 @@ fuseNegativeLiteral operator operand fullSpan = case (operator, operand) of
 -- covering just the operator syntax. Final node spans are built by
 -- 'applyPostfixOperation' as @primary.start ↦ postfix.end@.
 data Postfix where
-  PostfixCall :: [CallArgument Parsed] -> SourceSpan -> Postfix
+  -- | A call: either a named-argument list @f(a=.., b=..)@ or a single spread
+  -- argument @f(...e)@ (the 'Maybe' is 'Just' for the latter, with the list
+  -- empty).
+  PostfixCall :: [CallArgument Parsed] -> Maybe (Expression Parsed) -> SourceSpan -> Postfix
   PostfixField :: NameRef Parsed LabelRef -> SourceSpan -> Postfix
   PostfixTypeApplication :: [SyntacticType Parsed] -> SourceSpan -> Postfix
 
@@ -1245,8 +1254,17 @@ parsePostfix =
 
 parseCallPostfix :: Parser Postfix
 parseCallPostfix = parseWithSpan $ do
-  arguments <- parseParenthesizedList parseCallArgument
-  pure (PostfixCall arguments)
+  (arguments, spreadArg) <-
+    between
+      (parsePunctuation PunctuationLeftParenthesis)
+      (parsePunctuation PunctuationRightParenthesis)
+      ( choice
+          -- @f(...e)@: a single spread argument value.
+          [ ([],) . Just <$> (parsePunctuation PunctuationEllipsis *> parseExpression),
+            (,Nothing) <$> (parseCallArgument `sepEndBy` parseComma)
+          ]
+      )
+  pure (PostfixCall arguments spreadArg)
 
 parseFieldPostfix :: Parser Postfix
 parseFieldPostfix = parseWithSpan $ do
@@ -1267,11 +1285,12 @@ parseTypeApplicationPostfix = parseWithSpan $ do
 
 applyPostfixOperation :: Expression Parsed -> Postfix -> Expression Parsed
 applyPostfixOperation expression = \case
-  PostfixCall arguments postfixSpan ->
+  PostfixCall arguments spreadArg postfixSpan ->
     ExpressionCall
       CallExpression
         { callee = expression,
           arguments = arguments,
+          spreadArgument = spreadArg,
           sourceSpan = mergePostfixSpan expression postfixSpan,
           typeOf = ()
         }
@@ -1908,18 +1927,28 @@ parseAgentType = parseWithSpan $ do
   parseKeyword KeywordAgent
   parameterized <-
     optional . try $ do
-      parameterTypes <- parseParenthesizedList parseFunctionTypeParameter
+      (parameterTypes, spreadParam) <-
+        between
+          (parsePunctuation PunctuationLeftParenthesis)
+          (parsePunctuation PunctuationRightParenthesis)
+          ( choice
+              -- @agent(...T) -> R@: the parameter type is @T@ directly.
+              [ ([],) . Just <$> (parsePunctuation PunctuationEllipsis *> parseType),
+                (,Nothing) <$> (parseFunctionTypeParameter `sepEndBy` parseComma)
+              ]
+          )
       parsePunctuation PunctuationArrow
       returnType <- parseType
       requests <- option [] (parseKeyword KeywordWith *> parseRequests)
-      pure (parameterTypes, returnType, requests)
+      pure (parameterTypes, spreadParam, returnType, requests)
   pure $ \sourceSpan -> case parameterized of
     Nothing ->
       TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
-    Just (parameterTypes, returnType, requests) ->
+    Just (parameterTypes, spreadParam, returnType, requests) ->
       TypeFunction
         FunctionTypeNode
           { parameterTypes = parameterTypes,
+            spreadParameter = spreadParam,
             returnType = returnType,
             withRequests = requests,
             sourceSpan = sourceSpan
@@ -2164,6 +2193,7 @@ parseParameterList =
 parseParameterBinding :: Parser (ParameterBinding Parsed)
 parseParameterBinding = parseWithSpan $ do
   annotation <- parseAnnotation
+  isSpread <- isJust <$> optional (parsePunctuation PunctuationEllipsis)
   name <- parseNameRef
   isOptional <- isJust <$> optional (parsePunctuation PunctuationQuestion)
   baseType <-
@@ -2173,6 +2203,8 @@ parseParameterBinding = parseWithSpan $ do
   pure $ \sourceSpan ->
     -- @x ?: T@ desugars to @x: (null | T) = null@: the parameter is optional,
     -- its variable is typed @null | T@, and an absent argument is @null@.
+    -- A spread parameter @...obj: T@ binds the whole argument value; it takes
+    -- no @?:@ / default (its type is @T@ as written).
     let (typeAnnotation, defaultValue)
           | isOptional =
               ( TypeUnion
@@ -2188,6 +2220,7 @@ parseParameterBinding = parseWithSpan $ do
             name = name,
             typeAnnotation = Just typeAnnotation,
             defaultValue = defaultValue,
+            spread = isSpread,
             sourceSpan = sourceSpan
           }
 

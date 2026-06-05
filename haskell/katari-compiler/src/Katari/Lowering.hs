@@ -835,13 +835,19 @@ lowerAgentLike name mVariableResolution description parameters body blockId = do
   let paramVars = map fst paramBindings
       paramPrelude = combineParamPreludes (map snd paramBindings)
       labelsAndAnnotations = [(pb.name.text, pb.annotation) | pb <- parameters]
+      -- A sole spread parameter @...obj: T@ binds the whole incoming value to
+      -- @obj@'s var; otherwise the named params are destructured from the
+      -- argument record.
+      input = case (parameters, paramVars) of
+        ([pb], [param]) | pb.spread -> InputSpread param.var
+        _ -> InputNamed paramVars
   (inputSchema, outputSchema) <- case mVariableResolution of
     Just variableResolution -> schemasForVariable variableResolution labelsAndAnnotations
     Nothing -> pure ("{}", "{}")
   lowerSimpleAgent
     blockId
     name
-    paramVars
+    input
     paramPrelude
     body
     description
@@ -862,14 +868,14 @@ lowerAgentLike name mVariableResolution description parameters body blockId = do
 lowerSimpleAgent ::
   BlockId ->
   Text ->
-  [Param] ->
+  BlockInput ->
   Lower [(Id.VariableResolution, VarId)] ->
   AST.Block Zonked ->
   Maybe Text ->
   Text ->
   Text ->
   Lower ()
-lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outputSchema = do
+lowerSimpleAgent blockId name input prelude blk description inputSchema outputSchema = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- prelude
     withLocals locals (lowerBlockInto blk)
@@ -878,7 +884,7 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
   bodyBlockId <- freshBlockId
   let bodyBlock =
         defaultUserBlock
-          { input = InputNamed paramVars,
+          { input = input,
             statements = statements,
             trailing = trailing
           }
@@ -894,7 +900,7 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
       agent =
         AgentBlock
           { qualifiedName = qname,
-            input = InputNamed paramVars,
+            input = input,
             entryBody = bodyBlockId,
             name = name,
             description = description,
@@ -1206,15 +1212,19 @@ lowerExpr = \case
 -- helpers, not by this path.
 lowerCall :: AST.CallExpression Zonked -> Lower VarId
 lowerCall callExpression = do
-  argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
-  let labeledArgs = zip (map (.label.text) callExpression.arguments) argVars
   calleeVar <- lowerExpr callExpression.callee
   delegateBlk <- freshBlockId
   recordBlock
     delegateBlk
     (BlockDelegate DelegateBlock {target = DelegateTargetValue calleeVar})
     Nothing
-  argument <- emitArgumentRecord labeledArgs
+  -- A spread call @foo(...e)@ passes @e@'s value directly as the single
+  -- argument; a named call builds the argument record from its labelled args.
+  argument <- case callExpression.spreadArgument of
+    Just spreadExpr -> Just <$> lowerExpr spreadExpr
+    Nothing -> do
+      argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
+      emitArgumentRecord (zip (map (.label.text) callExpression.arguments) argVars)
   out <- freshVarId Nothing
   emit
     ( StatementCall

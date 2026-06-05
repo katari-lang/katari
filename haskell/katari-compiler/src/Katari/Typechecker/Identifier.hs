@@ -1109,7 +1109,10 @@ updateTypeSynonymRhs qualifiedName rhs = modify $ \state ->
 -- ---------------------------------------------------------------------------
 
 resolveParameter :: ParameterBinding Parsed -> Identifier (ParameterBinding Identified)
-resolveParameter ParameterBinding {annotation, name, typeAnnotation, defaultValue, sourceSpan} = do
+resolveParameter ParameterBinding {annotation, name, typeAnnotation, defaultValue, spread, sourceSpan} = do
+  -- A spread parameter @...obj: T@ binds @obj@ as an ordinary local of type
+  -- @T@ (it is not a call-site label), so name resolution is identical to a
+  -- normal parameter.
   name' <- bindLocalVariable name
   typeAnnotation' <- traverse resolveType typeAnnotation
   pure
@@ -1118,6 +1121,7 @@ resolveParameter ParameterBinding {annotation, name, typeAnnotation, defaultValu
         name = name',
         typeAnnotation = typeAnnotation',
         defaultValue = defaultValue,
+        spread = spread,
         sourceSpan = sourceSpan
       }
 
@@ -1428,13 +1432,15 @@ resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
       }
 
 resolveFunctionType :: FunctionTypeNode Parsed -> Identifier (FunctionTypeNode Identified)
-resolveFunctionType FunctionTypeNode {parameterTypes, returnType, withRequests, sourceSpan} = do
+resolveFunctionType FunctionTypeNode {parameterTypes, spreadParameter, returnType, withRequests, sourceSpan} = do
   parameterTypes' <- mapM (\(label, parameterType) -> (label,) <$> resolveType parameterType) parameterTypes
+  spreadParameter' <- traverse resolveType spreadParameter
   returnType' <- resolveType returnType
   withRequests' <- mapM resolveSyntacticRequest withRequests
   pure
     FunctionTypeNode
       { parameterTypes = parameterTypes',
+        spreadParameter = spreadParameter',
         returnType = returnType',
         withRequests = withRequests',
         sourceSpan = sourceSpan
@@ -1724,13 +1730,15 @@ resolveParTupleExpr ParTupleExpression {elements, sourceSpan} = do
       }
 
 resolveCallExpr :: CallExpression Parsed -> Identifier (CallExpression Identified)
-resolveCallExpr CallExpression {callee, arguments, sourceSpan} = do
+resolveCallExpr CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
   callee' <- resolveExpression callee
   arguments' <- mapM resolveCallArgument arguments
+  spreadArgument' <- traverse resolveExpression spreadArgument
   pure
     CallExpression
       { callee = callee',
         arguments = arguments',
+        spreadArgument = spreadArgument',
         sourceSpan = sourceSpan,
         typeOf = ()
       }
@@ -1849,6 +1857,7 @@ mkPrimCall primName metadata outerSpan operatorSpan arguments =
               }
             | (label, value) <- arguments
           ],
+        spreadArgument = Nothing,
         sourceSpan = outerSpan,
         typeOf = ()
       }

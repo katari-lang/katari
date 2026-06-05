@@ -693,6 +693,11 @@ data ParameterBinding (phase :: Phase) = ParameterBinding
     -- | Optional literal default. Its presence makes the parameter
     -- optional (omittable at the call site).
     defaultValue :: Maybe ParameterDefault,
+    -- | A spread parameter @...name: T@: @name@ binds the /whole/ argument
+    -- value (of type @T@) rather than a single labelled field. A spread
+    -- parameter must be the sole parameter of its callable (enforced by the
+    -- checker); it has no default and no @?:@.
+    spread :: Bool,
     sourceSpan :: SourceSpan
   }
 
@@ -938,6 +943,11 @@ instance HasSourceSpan (TypeNameNode p) where
 data FunctionTypeNode (phase :: Phase) = FunctionTypeNode
   { -- | Function-parameter labels live in a per-object namespace.
     parameterTypes :: [(Text, SyntacticType phase)],
+    -- | A spread parameter type @agent(...T) -> R@: the function's parameter
+    -- type /is/ @T@ (typically an object, but any type), not the object built
+    -- from labelled params. Mutually exclusive with 'parameterTypes' (when
+    -- 'Just', 'parameterTypes' is empty).
+    spreadParameter :: Maybe (SyntacticType phase),
     returnType :: SyntacticType phase,
     withRequests :: [SyntacticRequest phase],
     sourceSpan :: SourceSpan
@@ -1106,6 +1116,10 @@ instance HasSourceSpan (VariableExpression phase) where
 data CallExpression (phase :: Phase) = CallExpression
   { callee :: Expression phase,
     arguments :: [CallArgument phase],
+    -- | A spread call @foo(...e)@: the single argument value is @e@ directly
+    -- rather than a record built from labelled 'arguments'. Mutually
+    -- exclusive with 'arguments' (when 'Just', 'arguments' is empty).
+    spreadArgument :: Maybe (Expression phase),
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }
@@ -1439,13 +1453,14 @@ retagSyntacticType = \case
         { name = retagNameRef name,
           sourceSpan = sourceSpan
         }
-  TypeFunction FunctionTypeNode {parameterTypes, returnType, withRequests, sourceSpan} ->
+  TypeFunction FunctionTypeNode {parameterTypes, spreadParameter, returnType, withRequests, sourceSpan} ->
     TypeFunction
       FunctionTypeNode
         { parameterTypes =
             [ (label, retagSyntacticType subType)
               | (label, subType) <- parameterTypes
             ],
+          spreadParameter = retagSyntacticType <$> spreadParameter,
           returnType = retagSyntacticType returnType,
           withRequests = retagSyntacticRequest <$> withRequests,
           sourceSpan = sourceSpan

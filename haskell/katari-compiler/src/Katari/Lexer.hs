@@ -179,6 +179,10 @@ data Punctuation where
   PunctuationComma :: Punctuation
   PunctuationColon :: Punctuation
   PunctuationDot :: Punctuation
+  -- | @...@ — the spread marker (parameter / argument / function-type
+  -- spread). Lexed atomically, ahead of 'PunctuationDot', so @...@ never
+  -- tokenises as three dots.
+  PunctuationEllipsis :: Punctuation
   PunctuationAt :: Punctuation
   PunctuationEquals :: Punctuation
   PunctuationArrow :: Punctuation
@@ -626,6 +630,7 @@ lexPunctuationOrOperator =
       KatariTokenPunctuation PunctuationComma <$ char ',',
       KatariTokenPunctuation PunctuationColon <$ char ':',
       KatariTokenPunctuation PunctuationQuestion <$ char '?',
+      KatariTokenPunctuation PunctuationEllipsis <$ string "...",
       KatariTokenPunctuation PunctuationDot <$ char '.',
       KatariTokenPunctuation PunctuationAt <$ char '@',
       KatariTokenPunctuation PunctuationEquals <$ char '=',
@@ -1061,6 +1066,7 @@ showPunctuation = \case
   PunctuationComma -> ","
   PunctuationColon -> ":"
   PunctuationQuestion -> "?"
+  PunctuationEllipsis -> "..."
   PunctuationDot -> "."
   PunctuationAt -> "@"
   PunctuationEquals -> "="

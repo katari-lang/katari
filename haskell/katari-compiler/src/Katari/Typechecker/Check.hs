@@ -111,6 +111,12 @@ data CheckError
     CheckErrorTypeInEffectPosition SourceSpan
   | -- | A union mixes type and effect operands.
     CheckErrorMixedTypeEffectUnion SourceSpan
+  | -- | A spread parameter (@...obj: T@) is not the sole parameter of its
+    -- callable (mixing spread with named params, or multiple spreads, is not
+    -- allowed).
+    CheckErrorSpreadParameterMustBeSole SourceSpan
+  | -- | A spread call argument (@foo(...e)@) is mixed with named arguments.
+    CheckErrorSpreadArgumentMustBeSole SourceSpan
   | -- | A compiler-invariant violation (e.g. a node the Identifier pass should
     -- have eliminated). Should never fire on a well-formed AST.
     CheckErrorInternal SourceSpan Text
@@ -170,6 +176,10 @@ toDiagnostic = \case
     diagnosticError "K0221" "a type can't be used as an effect here" sourceSpan
   CheckErrorMixedTypeEffectUnion sourceSpan ->
     diagnosticError "K0222" "a union can't mix types and effects" sourceSpan
+  CheckErrorSpreadParameterMustBeSole sourceSpan ->
+    diagnosticError "K0223" "a spread parameter ('...obj: T') must be the only parameter" sourceSpan
+  CheckErrorSpreadArgumentMustBeSole sourceSpan ->
+    diagnosticError "K0224" "a spread argument ('...e') can't be mixed with named arguments" sourceSpan
   CheckErrorInternal sourceSpan what ->
     diagnosticError "K9999" ("internal typechecker invariant violated: " <> what) sourceSpan
 
@@ -429,11 +439,17 @@ elaborateTypeOrEffect = \case
   TypePrimitive PrimitiveTypeNode {kind} -> pure (AsType (primitiveToSemantic kind))
   TypeName TypeNameNode {name} -> resolveTypeRef name
   TypeQualified QualifiedTypeNode {target} -> resolveTypeRef target
-  TypeFunction FunctionTypeNode {parameterTypes, returnType, withRequests} -> do
-    parameterEntries <- mapM (\(label, pt) -> (,) label <$> elaborateType pt) parameterTypes
+  TypeFunction FunctionTypeNode {parameterTypes, spreadParameter, returnType, withRequests} -> do
     returnSemantic <- elaborateType returnType
     requests <- elaborateRequestList withRequests
-    pure (AsType (functionType (requiredParameter <$> Map.fromList parameterEntries) returnSemantic requests))
+    -- @agent(...T) -> R@: the parameter type is @T@ directly; otherwise it is
+    -- the object built from the labelled parameter types.
+    parameterSemantic <- case spreadParameter of
+      Just spreadType -> elaborateType spreadType
+      Nothing -> do
+        parameterEntries <- mapM (\(label, pt) -> (,) label <$> elaborateType pt) parameterTypes
+        pure (SemanticTypeObject (requiredParameter <$> Map.fromList parameterEntries))
+    pure (AsType (SemanticTypeFunction parameterSemantic returnSemantic requests))
   TypeArray ArrayTypeNode {elementType} ->
     AsType . SemanticTypeArray <$> elaborateType elementType
   TypeTuple TupleTypeNode {elementTypes} ->
@@ -653,16 +669,41 @@ walkTemplateElement = \case
 -- ---------------------------------------------------------------------------
 
 synthCall :: CallExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
-synthCall CallExpression {callee, arguments, sourceSpan} = do
+synthCall CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
   (callee', calleeType) <- synthExpr callee
-  walkedArgs <- mapM walkCallArgument arguments
-  let arguments' = map fst walkedArgs
-      argTypes = Map.fromList [(label, argType) | (_, (label, argType)) <- walkedArgs]
-  primRule <- calleePrimRule callee
-  result <- case primRule of
-    Just rule | rule /= PrimRuleSimple -> applyPrimRule rule argTypes sourceSpan
-    _ -> applyNormalCall sourceSpan calleeType argTypes
-  pure (ExpressionCall CallExpression {callee = callee', arguments = arguments', sourceSpan = sourceSpan, typeOf = result}, result)
+  case spreadArgument of
+    -- Spread call @foo(...e)@: the single argument value is @e@; require its
+    -- type to be a subtype of the callee's parameter type. (Prim result rules
+    -- don't apply — prims are called with named args.)
+    Just spreadExpr -> do
+      (spreadExpr', spreadType) <- synthExpr spreadExpr
+      result <- applySpreadCall sourceSpan calleeType spreadType
+      pure
+        ( ExpressionCall CallExpression {callee = callee', arguments = [], spreadArgument = Just spreadExpr', sourceSpan = sourceSpan, typeOf = result},
+          result
+        )
+    Nothing -> do
+      walkedArgs <- mapM walkCallArgument arguments
+      let arguments' = map fst walkedArgs
+          argTypes = Map.fromList [(label, argType) | (_, (label, argType)) <- walkedArgs]
+      primRule <- calleePrimRule callee
+      result <- case primRule of
+        Just rule | rule /= PrimRuleSimple -> applyPrimRule rule argTypes sourceSpan
+        _ -> applyNormalCall sourceSpan calleeType argTypes
+      pure (ExpressionCall CallExpression {callee = callee', arguments = arguments', spreadArgument = Nothing, sourceSpan = sourceSpan, typeOf = result}, result)
+
+-- | Spread call: the whole argument value (@spreadType@) must be a subtype of
+-- the callee's parameter type; the result is the callee's return type.
+applySpreadCall :: SourceSpan -> SemanticType Resolved -> SemanticType Resolved -> Check (SemanticType Resolved)
+applySpreadCall sourceSpan calleeType spreadType = case calleeType of
+  SemanticTypeFunction parameterType returnType _ -> do
+    subtypeAssert sourceSpan spreadType parameterType
+    pure returnType
+  SemanticTypeFunctionAny -> pure SemanticTypeUnknown
+  SemanticTypeUnknown -> pure SemanticTypeUnknown
+  _ -> do
+    emitError (CheckErrorTypeMismatch sourceSpan calleeType SemanticTypeFunctionAny)
+    pure SemanticTypeUnknown
 
 -- | Synthesise a generic application @callee[T1, ...]@: look up the callee's
 -- generic parameters, elaborate the type arguments, check each against its
@@ -1053,15 +1094,25 @@ elaborateParameters ::
   Check ([ParameterBinding Zonked], SemanticType Resolved, [(VariableResolution, SemanticType Resolved)])
 elaborateParameters parameters = do
   walked <- mapM walkOne parameters
-  pure
-    ( map (\(p, _, _) -> p) walked,
-      -- The parameter signature is a single (object) type — the type of the
-      -- argument record a call must supply.
-      SemanticTypeObject (Map.fromList [entry | (_, entry, _) <- walked]),
-      mapMaybe (\(_, _, binding) -> binding) walked
-    )
+  let rebuilts = [p | (p, _, _, _) <- walked]
+      bindings = mapMaybe (\(_, _, binding, _) -> binding) walked
+      namedEntries = [entry | (_, entry, _, isSpread) <- walked, not isSpread]
+      spreads = [(entry, span) | (ParameterBinding {sourceSpan = span}, entry, _, True) <- walked]
+  paramSig <- case spreads of
+    -- A sole spread parameter @...obj: T@: the parameter signature /is/ @T@
+    -- (whatever it elaborates to — usually an object, but possibly a tuple),
+    -- not the object built from labelled params.
+    [((_, parameter), _)] | length walked == 1 -> pure parameter.parameterType
+    -- A spread mixed with other params (or multiple spreads): reject, and fall
+    -- back to the named-only object so checking continues.
+    ((_, span) : _) -> do
+      emitError (CheckErrorSpreadParameterMustBeSole span)
+      pure (SemanticTypeObject (Map.fromList namedEntries))
+    -- No spread: the parameter signature is the object of labelled params.
+    [] -> pure (SemanticTypeObject (Map.fromList namedEntries))
+  pure (rebuilts, paramSig, bindings)
   where
-    walkOne ParameterBinding {annotation, name, typeAnnotation, defaultValue, sourceSpan} = do
+    walkOne ParameterBinding {annotation, name, typeAnnotation, defaultValue, spread, sourceSpan} = do
       paramType <- maybe (pure SemanticTypeUnknown) elaborateType typeAnnotation
       case defaultValue of
         Just paramDefault -> subtypeAssert sourceSpan (literalValueToSemantic paramDefault.value) paramType
@@ -1073,10 +1124,11 @@ elaborateParameters parameters = do
                 name = retagNameRef name,
                 typeAnnotation = fmap retagSyntacticType typeAnnotation,
                 defaultValue = defaultValue,
+                spread = spread,
                 sourceSpan = sourceSpan
               }
           binding = fmap (\resolution -> (resolution, paramType)) name.resolution
-      pure (rebuilt, (name.text, parameter), binding)
+      pure (rebuilt, (name.text, parameter), binding, spread)
 
 -- ---------------------------------------------------------------------------
 -- Patterns (projection over a known subject type)
@@ -1564,14 +1616,17 @@ checkAgentDeclaration AgentDeclaration {annotation, name, typeParameters, parame
 -- no default-value subtype check — used for the recursive pre-seed so its
 -- diagnostics don't double with the real check).
 parameterSignatureOnly :: [ParameterBinding Identified] -> Check (SemanticType Resolved)
-parameterSignatureOnly parameters =
-  SemanticTypeObject . Map.fromList
-    <$> mapM
-      ( \ParameterBinding {name, typeAnnotation, defaultValue} -> do
-          paramType <- maybe (pure SemanticTypeUnknown) elaborateType typeAnnotation
-          pure (name.text, Parameter {parameterType = paramType, optional = case defaultValue of Just _ -> True; Nothing -> False})
-      )
-      parameters
+parameterSignatureOnly parameters = case parameters of
+  -- A sole spread parameter @...obj: T@: the signature is @T@ directly.
+  [ParameterBinding {typeAnnotation = Just spreadType, spread = True}] -> elaborateType spreadType
+  _ ->
+    SemanticTypeObject . Map.fromList
+      <$> mapM
+        ( \ParameterBinding {name, typeAnnotation, defaultValue} -> do
+            paramType <- maybe (pure SemanticTypeUnknown) elaborateType typeAnnotation
+            pure (name.text, Parameter {parameterType = paramType, optional = case defaultValue of Just _ -> True; Nothing -> False})
+        )
+        parameters
 
 retagDataParameter :: DataParameter Identified -> DataParameter Zonked
 retagDataParameter DataParameter {annotation, name, parameterType, defaultValue, sourceSpan} =
