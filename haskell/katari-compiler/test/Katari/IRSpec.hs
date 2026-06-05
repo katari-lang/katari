@@ -46,7 +46,7 @@ blockSpec = describe "Block (sum)" $ do
   it "BlockUser nests UserBlock under 'body'" $ do
     let userBlock =
           UserBlock
-            { parameters = [Param {label = "x", var = VarId 0, defaultValue = Nothing}],
+            { input = InputNamed [Param {label = "x", var = VarId 0, defaultValue = Nothing}],
               statements = [],
               trailing = Just (VarId 1)
             }
@@ -55,7 +55,11 @@ blockSpec = describe "Block (sum)" $ do
         [ "kind" .= ("blockUser" :: String),
           "body"
             .= object
-              [ "parameters" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]],
+              [ "input"
+                  .= object
+                    [ "kind" .= ("inputNamed" :: String),
+                      "body" .= [object ["label" .= ("x" :: String), "var" .= (0 :: Int)]]
+                    ],
                 "statements" .= ([] :: [Value]),
                 "trailing" .= (1 :: Int)
               ]
@@ -115,11 +119,12 @@ blockSpec = describe "Block (sum)" $ do
   it "round-trips all variants" $ do
     let userBody =
           UserBlock
-            { parameters = [],
+            { input = InputNamed [],
               statements = [],
               trailing = Nothing
             }
     roundTrip (BlockUser userBody)
+    roundTrip (BlockUser userBody {input = InputSpread (VarId 3)})
     roundTrip (BlockPrim "add")
     roundTrip (BlockRequest (QualifiedName "main" "log"))
     roundTrip (BlockDelegate DelegateBlock {target = DelegateTargetInternal (QualifiedName "main" "agent")})
@@ -148,7 +153,7 @@ statementSpec = describe "Statement (sum)" $ do
     StatementCall
       CallData
         { block = BlockId 7,
-          arguments = [Arg {label = "x", var = VarId 1}],
+          argument = Just (VarId 1),
           output = Just (VarId 2)
         }
       `shouldEncodeAs` object
@@ -156,7 +161,7 @@ statementSpec = describe "Statement (sum)" $ do
           "body"
             .= object
               [ "block" .= (7 :: Int),
-                "arguments" .= [object ["label" .= ("x" :: String), "var" .= (1 :: Int)]],
+                "argument" .= (1 :: Int),
                 "output" .= (2 :: Int)
               ]
         ]
@@ -215,7 +220,7 @@ statementSpec = describe "Statement (sum)" $ do
       StatementCall
         CallData
           { block = BlockId 0,
-            arguments = [],
+            argument = Nothing,
             output = Nothing
           }
     roundTrip $ StatementMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0}
@@ -237,13 +242,12 @@ callTargetSpec :: Spec
 callTargetSpec = describe "CallData (inline block target)" $ do
   it "encodes block id directly under body" $ do
     StatementCall
-      CallData {block = BlockId 5, arguments = [], output = Nothing}
+      CallData {block = BlockId 5, argument = Nothing, output = Nothing}
       `shouldEncodeAs` object
         [ "kind" .= ("statementCall" :: String),
           "body"
             .= object
-              [ "block" .= (5 :: Int),
-                "arguments" .= ([] :: [Aeson.Value])
+              [ "block" .= (5 :: Int)
               ]
         ]
 
@@ -296,7 +300,7 @@ moduleSpec = describe "IRModule" $ do
     let block =
           BlockUser
             UserBlock
-              { parameters = [],
+              { input = InputNamed [],
                 statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
                 trailing = Nothing
               }

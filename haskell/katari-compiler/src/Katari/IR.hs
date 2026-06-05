@@ -52,6 +52,7 @@ module Katari.IR
     TupleBlock (..),
     RecordBlock (..),
     Param (..),
+    BlockInput (..),
     Handler (..),
     MatchArm (..),
     MatchPattern (..),
@@ -65,7 +66,6 @@ module Katari.IR
     ContData (..),
     LoadLiteralData (..),
     LiteralValue (..),
-    Arg (..),
     BindPatternData (..),
     ExitKind (..),
     ContKind (..),
@@ -269,8 +269,9 @@ data AgentBlock = AgentBlock
     -- appears in 'IRModule.entries'; for local / closure agents it is a
     -- compiler-synthesized fresh name.
     qualifiedName :: QualifiedName,
-    -- | Labeled parameters. Caller binds args here.
-    parameters :: [Param],
+    -- | How the single incoming argument value binds into the agent scope
+    -- (named destructure or @...@ spread).
+    input :: BlockInput,
     -- | The 'BlockId' of the agent body. Typically a 'BlockUser'
     -- (inline) or 'BlockHandle' for @where { handlers }@ agents.
     entryBody :: BlockId,
@@ -361,9 +362,11 @@ instance FromJSON DelegateTarget where
 -- (inherits parent scope, catches nothing). Agent boundaries are
 -- represented by 'BlockAgent' instead.
 data UserBlock = UserBlock
-  { -- | Labeled parameters. Meaningful for handler / then-clause blocks
-    -- (req args / break value); empty for plain inline blocks.
-    parameters :: [Param],
+  { -- | How the single incoming argument value binds into scope. Meaningful
+    -- for handler blocks ('InputNamed' over the req args) and break / then
+    -- value blocks ('InputSpread' of the break value); @InputNamed []@ for
+    -- plain inline blocks that take no argument.
+    input :: BlockInput,
     statements :: [Statement],
     -- | Tail value when the block completes normally (Rust-style trailing
     -- expression). 'Nothing' means the block has no value.
@@ -377,14 +380,17 @@ instance ToJSON UserBlock where
 instance FromJSON UserBlock where
   parseJSON = genericParseJSON irOptions
 
--- | A label-bound param. The @label@ is what callers use in 'Arg'.
+-- | A label-bound param of an 'InputNamed' block. The block's single
+-- incoming argument value is treated as a record; 'label' selects the
+-- field, which is bound to 'var'.
 data Param = Param
   { label :: Text,
     var :: VarId,
-    -- | Literal default for an optional parameter. When the caller omits
-    -- this label, the runtime binds @var@ to this value instead. 'Nothing'
-    -- for required parameters (and omitted from the JSON via
-    -- @omitNothingFields@, so non-optional params are unaffected).
+    -- | Literal default for an optional parameter. When the incoming
+    -- argument record omits this label, the runtime binds @var@ to this
+    -- value instead. 'Nothing' for required parameters (and omitted from
+    -- the JSON via @omitNothingFields@, so non-optional params are
+    -- unaffected).
     defaultValue :: Maybe LiteralValue
   }
   deriving (Eq, Show, Generic)
@@ -394,6 +400,25 @@ instance ToJSON Param where
 
 instance FromJSON Param where
   parseJSON = genericParseJSON irOptions
+
+-- | How a block binds its single incoming argument value into scope. Under
+-- the unified single-value calling convention every block receives exactly
+-- one value; this says how to consume it.
+data BlockInput where
+  -- | Treat the incoming value as a record and destructure it by label,
+  -- filling each 'Param''s default when its label is absent. The empty list
+  -- is the argument-less case (inline / match / for bodies).
+  InputNamed :: [Param] -> BlockInput
+  -- | Bind the whole incoming value to this single var (the @...obj@ spread
+  -- parameter form, and the break / then value blocks). No destructuring.
+  InputSpread :: VarId -> BlockInput
+  deriving (Eq, Show, Generic)
+
+instance ToJSON BlockInput where
+  toJSON = genericToJSON sumOptions
+
+instance FromJSON BlockInput where
+  parseJSON = genericParseJSON sumOptions
 
 -- | A request handler inside a 'HandleData'. Handler dispatch compares the
 -- raised request's 'QualifiedName' against this 'request' field; on equality
@@ -451,7 +476,13 @@ instance FromJSON Statement where
 -- dispatches on the target block's kind.
 data CallData = CallData
   { block :: BlockId,
-    arguments :: [Arg],
+    -- | The single argument value passed to the callee (the unified
+    -- calling convention — a block receives exactly one value). For a
+    -- named call @foo(l1=e1, l2=e2)@ the caller builds the argument
+    -- record @{l1, l2}@; for a spread call @foo(...e)@ it is @e@'s value
+    -- directly; 'Nothing' for an argument-less internal call (inline /
+    -- match / for body).
+    argument :: Maybe VarId,
     -- | Output var receives the callee's trailing value. 'Nothing' = drop.
     output :: Maybe VarId
   }
@@ -637,22 +668,6 @@ instance FromJSON BindPatternData where
   parseJSON = genericParseJSON irOptions
 
 -- | A single labeled argument passed at a call site. Katari calls are
--- keyword-style: every argument has a surface 'label' (matched against
--- the callee's parameter name) and a 'var' carrying the IR slot whose
--- value is passed in. Order in the argument list is irrelevant for the
--- runtime; only labels matter.
-data Arg = Arg
-  { label :: Text,
-    var :: VarId
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON Arg where
-  toJSON = genericToJSON irOptions
-
-instance FromJSON Arg where
-  parseJSON = genericParseJSON irOptions
-
 -- | What an 'SMatch' arm matches against. The runtime walks the
 -- pattern tree against the subject, binding matched sub-values to the
 -- 'VarId's introduced by 'MPVariable' along the way; on success it

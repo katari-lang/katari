@@ -96,6 +96,22 @@ allDelegateValueCalls ub irMod =
       DelegateTargetValue _ <- [db.target]
   ]
 
+-- | The labels of the argument record a call passes. Under the single-value
+-- calling convention a named call @f(a=.., b=..)@ builds a 'BlockRecord'
+-- @{a, b}@ into one var and passes it as the call's single 'argument'; this
+-- recovers that record's labels by finding the 'BlockRecord' whose output is
+-- the argument var.
+argLabels :: UserBlock -> IRModule -> CallData -> [Text]
+argLabels ub irMod call = case call.argument of
+  Nothing -> []
+  Just argVar ->
+    concat
+      [ map fst rb.entries
+        | StatementCall c <- ub.statements,
+          c.output == Just argVar,
+          Just (BlockRecord rb) <- [Map.lookup c.block irMod.blocks]
+      ]
+
 -- | Entries excluding builtin prims (the @"primitive"@ family of modules).
 -- Useful for tests that want to assert on user-defined declarations only.
 userEntries :: IRModule -> [QualifiedName]
@@ -163,7 +179,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
       Just ub -> do
         ub.statements `shouldBe` []
         ub.trailing `shouldBe` Nothing
-        ub.parameters `shouldBe` []
+        ub.input `shouldBe` InputNamed []
 
   it "lowers an integer literal as StatementLoadLiteral with the integer value" $ do
     (irMod, errs) <- lowerSource "agent main() { 42 }"
@@ -186,7 +202,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     agentLits `shouldContain` [QualifiedName "primitive" "add"]
     case allDelegateValueCalls ub irMod of
       [addCall] -> do
-        map (.label) addCall.arguments `shouldMatchList` ["lhs", "rhs"]
+        argLabels ub irMod addCall `shouldMatchList` ["lhs", "rhs"]
         addCall.output `shouldBe` ub.trailing
       _ -> expectationFailure "expected exactly one delegate-via-value call (the add op)"
 
@@ -198,7 +214,7 @@ stage1Spec = describe "Stage 1 — literals / arithmetic" $ do
     agentLits `shouldContain` [QualifiedName "primitive" "neg"]
     case allDelegateValueCalls ub irMod of
       [c] -> do
-        map (.label) c.arguments `shouldBe` ["value"]
+        argLabels ub irMod c `shouldBe` ["value"]
         c.output `shouldBe` ub.trailing
       _ -> expectationFailure "expected exactly one delegate-via-value call (the neg op)"
     let intLits = [d.value | d <- literalLoads ub, case d.value of LiteralValueInteger _ -> True; _ -> False]
@@ -929,7 +945,7 @@ stage8Spec = describe "Stage 8 \8212 edge cases" $ do
     let ctorVar = (head ctorLits).output
         ctorCalls = agentCallsViaValue ctorVar ub irMod
     case ctorCalls of
-      [c] -> map (.label) c.arguments `shouldMatchList` ["x", "y"]
+      [c] -> argLabels ub irMod c `shouldMatchList` ["x", "y"]
       _ -> expectationFailure "expected exactly one delegate-via-value call on the ctor literal"
 
   it "nested literal pattern lowers to MatchPatternConstructor with MatchPatternLiteral inner" $ do

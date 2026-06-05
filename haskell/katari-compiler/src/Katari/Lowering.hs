@@ -279,8 +279,8 @@ resolveAsValue canBeLocal resolution sourceSpan nameText hint = case resolution 
 -- (LiteralValueAgent → DelegateTargetValue). The prim is resolved by
 -- QualifiedName at runtime through IRModule.entries, so no cross-module
 -- BlockId dependency is needed.
-emitPrimCall :: Text -> [Arg] -> Lower VarId
-emitPrimCall primName arguments = do
+emitPrimCall :: Text -> [(Text, VarId)] -> Lower VarId
+emitPrimCall primName labeledArgs = do
   let qname = primQualifiedName primName
   calleeVar <- freshVarId Nothing
   emit (StatementLoadLiteral LoadLiteralData {output = calleeVar, value = LiteralValueAgent qname})
@@ -289,9 +289,33 @@ emitPrimCall primName arguments = do
     delegateBlk
     (BlockDelegate DelegateBlock {target = DelegateTargetValue calleeVar})
     Nothing
+  argument <- emitArgumentRecord labeledArgs
   out <- freshVarId Nothing
-  emit (StatementCall CallData {block = delegateBlk, arguments = arguments, output = Just out})
+  emit (StatementCall CallData {block = delegateBlk, argument = argument, output = Just out})
   pure out
+
+-- | Build the single argument value for a named call from its already-lowered
+-- @(label, var)@ pairs: collect them into a record Value (via 'BlockRecord').
+-- An empty argument list lowers to 'Nothing' (an argument-less call).
+emitArgumentRecord :: [(Text, VarId)] -> Lower (Maybe VarId)
+emitArgumentRecord [] = pure Nothing
+emitArgumentRecord labeledVars = do
+  entryBlocks <- mapM (\(label, var) -> (label,) <$> wrapVarInBlock var) labeledVars
+  recordBlockId <- freshBlockId
+  recordBlock recordBlockId (BlockRecord RecordBlock {entries = entryBlocks}) Nothing
+  out <- freshVarId Nothing
+  emit (StatementCall CallData {block = recordBlockId, argument = Nothing, output = Just out})
+  pure (Just out)
+
+-- | Wrap an already-bound 'VarId' in a trivial inline block whose trailing
+-- value is that var (the block inherits the lexical scope, so the var is in
+-- scope). Used to feed existing values into 'BlockRecord' / 'BlockTuple'
+-- entry slots, which expect a block per entry.
+wrapVarInBlock :: VarId -> Lower BlockId
+wrapVarInBlock var = do
+  blockId <- freshBlockId
+  recordBlock blockId (BlockUser (defaultUserBlock {trailing = Just var})) Nothing
+  pure blockId
 
 -- | Build the QualifiedName for a prim dispatch name. Bare names
 -- (e.g. "get_field") live in module "primitive"; qualified names
@@ -383,7 +407,7 @@ schemasForFunctionType functionType labelsAndAnnotations = do
 defaultUserBlock :: UserBlock
 defaultUserBlock =
   UserBlock
-    { parameters = [],
+    { input = InputNamed [],
       statements = [],
       trailing = Nothing
     }
@@ -581,7 +605,7 @@ writeWrapperAgent agentBlk qname paramSpecs innerBlk hint simpleName desc inputS
     ( BlockAgent
         AgentBlock
           { qualifiedName = qname,
-            parameters = wrapperParams,
+            input = InputNamed wrapperParams,
             entryBody = innerBlk,
             name = simpleName,
             description = desc,
@@ -854,7 +878,7 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
   bodyBlockId <- freshBlockId
   let bodyBlock =
         defaultUserBlock
-          { parameters = paramVars,
+          { input = InputNamed paramVars,
             statements = statements,
             trailing = trailing
           }
@@ -870,7 +894,7 @@ lowerSimpleAgent blockId name paramVars prelude blk description inputSchema outp
       agent =
         AgentBlock
           { qualifiedName = qname,
-            parameters = paramVars,
+            input = InputNamed paramVars,
             entryBody = bodyBlockId,
             name = name,
             description = description,
@@ -909,7 +933,7 @@ lowerHandler hr = do
         _ -> statements
       userBlock =
         defaultUserBlock
-          { parameters = reqParamVars,
+          { input = InputNamed reqParamVars,
             statements = finalStatements
           }
   recordBlock bodyBlockId (BlockUser userBlock) (Just hr.name.text)
@@ -935,7 +959,9 @@ lowerThenClause = \case
       (statements, trailing) <- lowerBlockBody blk
       let userBlock =
             defaultUserBlock
-              { parameters = [Param {label = "value", var = paramVar, defaultValue = Nothing}],
+              { -- The then-block receives the body's tail as a single value
+                -- bound directly to its param var (not a named record).
+                input = InputSpread paramVar,
                 statements = statements,
                 trailing = trailing
               }
@@ -1146,7 +1172,7 @@ lowerExpr = \case
   AST.ExpressionFieldAccess fieldAccessExpr -> do
     object <- lowerExpr fieldAccessExpr.object
     fieldVar <- emitLoadLiteral (LiteralValueString fieldAccessExpr.fieldName.text)
-    emitPrimCall "get_field" [Arg "object" object, Arg "field" fieldVar]
+    emitPrimCall "get_field" [("object", object), ("field", fieldVar)]
   -- Generics are erased at runtime: lower the callee and drop the type
   -- arguments (no monomorphisation).
   AST.ExpressionTypeApplication typeApplicationExpr -> lowerExpr typeApplicationExpr.callee
@@ -1181,17 +1207,18 @@ lowerExpr = \case
 lowerCall :: AST.CallExpression Zonked -> Lower VarId
 lowerCall callExpression = do
   argVars <- mapM (lowerExpr . (.value)) callExpression.arguments
-  let callArgs = zipWith Arg (map (.label.text) callExpression.arguments) argVars
+  let labeledArgs = zip (map (.label.text) callExpression.arguments) argVars
   calleeVar <- lowerExpr callExpression.callee
   delegateBlk <- freshBlockId
   recordBlock
     delegateBlk
     (BlockDelegate DelegateBlock {target = DelegateTargetValue calleeVar})
     Nothing
+  argument <- emitArgumentRecord labeledArgs
   out <- freshVarId Nothing
   emit
     ( StatementCall
-        CallData {block = delegateBlk, arguments = callArgs, output = Just out}
+        CallData {block = delegateBlk, argument = argument, output = Just out}
     )
   pure out
 
@@ -1207,11 +1234,11 @@ lowerTemplate templateExpression = do
       initVar <- stringify firstVarId
       foldM concatStep initVar rest
   where
-    stringify v = emitPrimCall "format" [Arg "value" v]
+    stringify v = emitPrimCall "format" [("value", v)]
 
     concatStep lhs rhsRaw = do
       rhs <- stringify rhsRaw
-      emitPrimCall "concat" [Arg "lhs" lhs, Arg "rhs" rhs]
+      emitPrimCall "concat" [("lhs", lhs), ("rhs", rhs)]
 
 lowerTemplateElement :: AST.TemplateElement Zonked -> Lower VarId
 lowerTemplateElement = \case
@@ -1233,7 +1260,7 @@ lowerBlockExpr blockExpression = do
     StatementCall
       CallData
         { block = childBlockId,
-          arguments = [],
+          argument = Nothing,
           output = Just out
         }
   pure out
@@ -1282,7 +1309,7 @@ lowerIfExpr ifExpression = do
     StatementCall
       CallData
         { block = matchBlockId,
-          arguments = [],
+          argument = Nothing,
           output = Just out
         }
   pure out
@@ -1320,7 +1347,7 @@ lowerMatchExpr matchExpression = do
     StatementCall
       CallData
         { block = matchBlockId,
-          arguments = [],
+          argument = Nothing,
           output = Just out
         }
   pure out
@@ -1429,7 +1456,7 @@ lowerForExpr forExpression = do
     StatementCall
       CallData
         { block = forBlockId,
-          arguments = [],
+          argument = Nothing,
           output = Just out
         }
   pure out
@@ -1545,7 +1572,7 @@ lowerTupleExpr isParallel elements = do
     StatementCall
       CallData
         { block = tupleBlockId,
-          arguments = [],
+          argument = Nothing,
           output = Just out
         }
   pure out
@@ -1568,7 +1595,7 @@ lowerRecordExpr entries = do
     StatementCall
       CallData
         { block = recordBlockId,
-          arguments = [],
+          argument = Nothing,
           output = Just out
         }
   pure out
@@ -1628,7 +1655,7 @@ lowerHandleExpr handleExpr = do
       StatementCall
         CallData
           { block = handleBlockId,
-            arguments = [],
+            argument = Nothing,
             output = Just out
           }
     pure out
@@ -1680,13 +1707,13 @@ offsetBlockInBlock offsetB offsetV = \case
   BlockAgent agent ->
     BlockAgent
       agent
-        { parameters = map (offsetParam offsetV) agent.parameters,
+        { input = offsetBlockInput offsetV agent.input,
           entryBody = offsetB agent.entryBody
         }
   BlockUser user ->
     BlockUser
       user
-        { parameters = map (offsetParam offsetV) user.parameters,
+        { input = offsetBlockInput offsetV user.input,
           statements = map (offsetStatement offsetB offsetV) user.statements,
           trailing = fmap offsetV user.trailing
         }
@@ -1732,13 +1759,18 @@ offsetBlockInBlock offsetB offsetV = \case
 offsetParam :: (VarId -> VarId) -> Param -> Param
 offsetParam offsetV param = param {var = offsetV param.var}
 
+offsetBlockInput :: (VarId -> VarId) -> BlockInput -> BlockInput
+offsetBlockInput offsetV = \case
+  InputNamed params -> InputNamed (map (offsetParam offsetV) params)
+  InputSpread var -> InputSpread (offsetV var)
+
 offsetStatement :: (BlockId -> BlockId) -> (VarId -> VarId) -> Statement -> Statement
 offsetStatement offsetB offsetV = \case
   StatementCall callData ->
     StatementCall
       callData
         { block = offsetB callData.block,
-          arguments = map (offsetArg offsetV) callData.arguments,
+          argument = fmap offsetV callData.argument,
           output = fmap offsetV callData.output
         }
   StatementMakeClosure closureData ->
@@ -1764,8 +1796,6 @@ offsetStatement offsetB offsetV = \case
           pattern = offsetMatchPattern offsetV bindData.pattern
         }
 
-offsetArg :: (VarId -> VarId) -> Arg -> Arg
-offsetArg offsetV arg = arg {var = offsetV arg.var}
 
 offsetArm :: (BlockId -> BlockId) -> (VarId -> VarId) -> MatchArm -> MatchArm
 offsetArm offsetB offsetV arm =
