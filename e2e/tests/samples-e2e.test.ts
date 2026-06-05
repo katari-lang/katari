@@ -362,4 +362,9 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     const result = await applyAndRun("default_args", "25-default-args");
     expect(result).toBe("hi ada! | hi bob? | 11 | 15");
   });
+
+  itE2E("26-spread: ...obj receivers bound to the whole object, passed via ...pt", async () => {
+    const result = await applyAndRun("spread", "26-spread");
+    expect(result).toBe("(3, 4) sum=7");
+  });
 });

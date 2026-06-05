@@ -1,0 +1,17 @@
+@"Format a point. Receives the whole argument object via spread."
+agent show_point(...p: {x: integer, y: integer}) -> string {
+  f"(${to_string(value = p.x)}, ${to_string(value = p.y)})"
+}
+
+@"Sum a point's coordinates (another spread receiver)."
+agent point_sum(...p: {x: integer, y: integer}) -> integer {
+  p.x + p.y
+}
+
+@"Build a point object and pass it to spread-receiving agents via ...obj."
+agent main() -> string {
+  let pt = { x = 3, y = 4 }
+  let shown = show_point(...pt)
+  let total = point_sum(...pt)
+  f"${shown} sum=${to_string(value = total)}"
+}
