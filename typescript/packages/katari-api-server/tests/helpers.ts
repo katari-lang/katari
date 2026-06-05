@@ -35,7 +35,7 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
       kind: "blockAgent",
       body: {
         qualifiedName: irName === "" ? "main" : `${irName}.main`,
-        parameters: [],
+        input: { kind: "inputNamed", body: [] },
         entryBody: 1,
         name: "main",
         description: undefined,
@@ -46,7 +46,7 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
     1: {
       kind: "blockUser",
       body: {
-        parameters: [],
+        input: { kind: "inputNamed", body: [] },
         statements: [
           {
             kind: "statementLoadLiteral",
@@ -85,7 +85,7 @@ export function produceFileIR(returnFile: boolean): IRModule {
       kind: "blockAgent",
       body: {
         qualifiedName: "main",
-        parameters: [],
+        input: { kind: "inputNamed", body: [] },
         entryBody: 1,
         name: "main",
         description: undefined,
@@ -96,17 +96,24 @@ export function produceFileIR(returnFile: boolean): IRModule {
     1: {
       kind: "blockUser",
       body: {
-        parameters: [],
+        input: { kind: "inputNamed", body: [] },
         statements: [
           {
             kind: "statementLoadLiteral",
             body: { output: 0 as VarId, value: { kind: "literalValueString", string: "gc-bytes" } },
           },
+          // Single-value convention: build the argument record { value } (block 3
+          // over element block 4, which yields the in-scope string var) and pass
+          // it to the string_to_file prim.
+          {
+            kind: "statementCall",
+            body: { block: 3 as BlockId, output: 2 as VarId },
+          },
           {
             kind: "statementCall",
             body: {
               block: 2 as BlockId,
-              arguments: [{ label: "value", var: 0 as VarId }],
+              argument: 2 as VarId,
               output: 1 as VarId,
             },
           },
@@ -118,6 +125,11 @@ export function produceFileIR(returnFile: boolean): IRModule {
       },
     },
     2: { kind: "blockPrim", body: "string_to_file" },
+    3: { kind: "blockRecord", body: { entries: [["value", 4 as BlockId]] } },
+    4: {
+      kind: "blockUser",
+      body: { input: { kind: "inputNamed", body: [] }, statements: [], trailing: 0 as VarId },
+    },
   };
   return {
     metadata: { schemaVersion: 1 },
