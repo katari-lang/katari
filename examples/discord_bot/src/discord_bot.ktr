@@ -17,7 +17,7 @@ request get_e2b_key() -> secret
 request on_message(text: string, channel_id: string) -> null
 
 @"Infer a reply given the whole conversation history (its last turn is the new user message). The history lives in Katari — no session handle in the sidecar."
-external ai_infer(client: ai_client, history: array[turn]) -> string from "FFI:discord_bot.ai_infer"
+external ai_infer(client: ai_client, history: array[message]) -> string from "FFI:discord_bot.ai_infer"
 
 @"Connect to Discord and log in; returns an opaque client handle."
 external create_discord_client(token: secret) -> string from "FFI:discord_bot.create_discord_client"
@@ -39,33 +39,59 @@ agent run_python(code: string) -> string with get_e2b_key {
 @"One inference step's decision: a final reply text for the user."
 data step_final(text: string)
 
-@"One inference step's decision: call a tool — @tool_index@ selects it from the tools array, @args@ is the record the model produced for it (validated at dispatch)."
-data step_call(tool_index: integer, args: {})
+@"One tool the model wants to invoke this step — @tool_index@ selects it from the tools array (for dispatch), @name@ is its function name (for the model-facing call/response record), @thought_signature@ is Gemini's opaque reasoning token that must be replayed on the call turn, @args@ is the record the model produced for it (validated at dispatch)."
+data tool_call(tool_index: integer, name: string, thought_signature: string, args: {})
 
-@"One model step over the history + tool schemas. Returns the model's decision (a final reply or a tool call); the loop that feeds tool results back lives in Katari (`infer_with_tools`), not the sidecar. `tool_metas[i]` is `get_metadata(tools[i])` (name / description / input schema)."
+@"One inference step's decision: invoke a batch of tools. The model may request several at once; they are dispatched in parallel and their results fed back together."
+data step_call(calls: array[tool_call])
+
+@"A tool's output for the model, keyed by the tool @name@ so it round-trips to the model as a function response."
+data tool_result(name: string, text: string)
+
+@"A conversation turn recording the model's tool-call batch — replayed so the next step shows the model what it already asked for."
+data call_turn(calls: array[tool_call])
+
+@"A conversation turn carrying the results of a tool-call batch."
+data result_turn(results: array[tool_result])
+
+// One conversation-history element: a plain text turn, the model's tool-call
+// turn, or a tool-result turn. The sidecar maps each to the matching Gemini
+// content parts (text / functionCall / functionResponse), so the
+// function-calling loop actually closes. (Type synonyms take no @"..." docs.)
+type message = turn | call_turn | result_turn
+
+@"One model step over the history + tool schemas. Returns the model's decision (a final reply, or a batch of tool calls); the loop that dispatches the tools and feeds their results back lives in Katari (`infer_with_tools`), not the sidecar. `tool_metas[i]` is `get_metadata(tools[i])` (name / description / input schema)."
 external infer_step(
   client: ai_client,
-  history: array[turn],
+  history: array[message],
   tool_metas: array[agent_metadata]
 ) -> step_final | step_call from "FFI:discord_bot.infer_step"
 
-@"Run the tool-using model loop IN KATARI: derive each tool's schema with get_metadata, then up to @max_steps@ times ask the model for a step; on a tool call, dynamically dispatch the chosen tool by value via call_agent (validating the model's args against the tool's schema) and feed its output back as a new turn; on a final answer, return it. Generic over the tools' shared effect @E@ — calling a tool raises @E@, tracked right through this agent's signature."
+@"Run the tool-using model loop IN KATARI: derive each tool's schema with get_metadata, then up to @max_steps@ times ask the model for a step; on a batch of tool calls, dispatch them all CONCURRENTLY with `parallel for` — each call dynamically resolves its tool by index and invokes it by value via call_agent (validating the model's args against the tool's schema) — then feed every result back as a new turn; on a final answer, return it. Generic over the tools' shared effect @E@ — calling a tool raises @E@, tracked right through this agent's signature."
 agent infer_with_tools[effect E](
-  history: array[turn],
+  history: array[message],
   tools: array[agent (...never) -> unknown with E],
   max_steps: integer
 ) -> string with E | get_ai_client | error_invalid_argument {
-  let tool_metas = for (let tool in tools, var metas: array[agent_metadata] = array.empty()) {
-    next with { metas = array.append(array = metas, value = get_metadata(value = tool)) }
-  } then { metas }
-  for (let _step in array.range(count = max_steps), var conversation: array[turn] = history) {
+  let tool_metas = for (let tool in tools) { next get_metadata(value = tool) }
+  for (let _step in array.range(count = max_steps), var conversation: array[message] = history) {
     match (infer_step(client = get_ai_client(), history = conversation, tool_metas = tool_metas)) {
       case step_final(text = reply) => { break reply }
-      case step_call(tool_index = tool_index, args = args) => {
-        let tool = array.get(array = tools, index = tool_index)
-        let result = call_agent[unknown, E](target = tool, args = args)
-        let result_turn = turn(role = "tool", text = to_string(value = result))
-        next with { conversation = array.append(array = conversation, value = result_turn) }
+      case step_call(calls = calls) => {
+        // Dispatch every requested tool in parallel; results come back in
+        // request order (parallel for collects each `next` value by index),
+        // each tagged with its tool name so it round-trips as a functionResponse.
+        let results = parallel for (let call in calls) {
+          next tool_result(
+            name = call.name,
+            text = to_string(value = call_agent[unknown, E](target = array.get(array = tools, index = call.tool_index), args = call.args)),
+          )
+        }
+        // Record BOTH the model's call turn and the results turn, so the next
+        // step replays the full functionCall / functionResponse exchange and the
+        // model actually sees its tools' output (instead of re-calling forever).
+        let with_calls = array.append(array = conversation, value = call_turn(calls = calls))
+        next with { conversation = array.append(array = with_calls, value = result_turn(results = results)) }
       }
     }
   } then { "(no final answer within the step budget)" }
@@ -87,7 +113,7 @@ agent watch_messages(channel_id: string) -> never with on_message | get_discord_
 }
 
 @"Run the tool-using model loop over a history (its last turn is the user's task). The tools all share the @get_e2b_key@ effect, which `infer_with_tools[get_e2b_key]` tracks through to here."
-agent ask(history: array[turn], tools: array[agent (...never) -> unknown with get_e2b_key]) -> string with get_ai_client | get_e2b_key | error_invalid_argument {
+agent ask(history: array[message], tools: array[agent (...never) -> unknown with get_e2b_key]) -> string with get_ai_client | get_e2b_key | error_invalid_argument {
   infer_with_tools[get_e2b_key](history = history, tools = tools, max_steps = 8)
 }
 
@@ -110,7 +136,7 @@ agent solve(task: string) -> string {
   }
   ask(
     history = array.append(array = array.empty(), value = turn(role = "user", text = task)),
-    tools = array.of(value = run_python),
+    tools = [run_python],
   )
 }
 
@@ -131,7 +157,7 @@ agent main(channel_id: string) -> string {
       next discord
     }
   }
-  handle (var history: array[turn] = array.empty()) {
+  handle (var history: array[message] = array.empty()) {
     request on_message(text: string, channel_id: string) {
       let asked = array.append(array = history, value = turn(role = "user", text = text))
       let reply = ai_infer(client = get_ai_client(), history = asked)

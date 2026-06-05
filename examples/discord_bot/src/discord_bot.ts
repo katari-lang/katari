@@ -15,16 +15,27 @@
 
 import { Sandbox } from "@e2b/code-interpreter";
 import { Client, Events, GatewayIntentBits, type Message } from "discord.js";
-import katari, { type KatariAgent, type KatariString, type RawValue } from "@katari-lang/port";
+import katari, {
+  isKatariString,
+  type KatariAgent,
+  type KatariString,
+  type RawValue,
+} from "@katari-lang/port";
 
 type Secret = { $secret: string };
 
 // ── AI ──────────────────────────────────────────────────────────────────────
 
-/** One part of a Gemini turn: plain text, a tool call, or a tool result. */
+/** One part of a Gemini turn: plain text, a tool call, or a tool result.
+ *  Gemini 3 attaches a `thoughtSignature` (an opaque token tied to the model's
+ *  reasoning) to functionCall parts; it MUST be replayed verbatim on the next
+ *  request or the API 400s ("Function call is missing a thought_signature"). */
 type GeminiPart =
   | { text: string }
-  | { functionCall: { name: string; args: Record<string, RawValue> } }
+  | {
+      functionCall: { name: string; args: Record<string, RawValue> };
+      thoughtSignature?: string;
+    }
   | { functionResponse: { name: string; response: { result: string } } };
 
 /** One turn in a conversation, in Gemini's `contents` shape. */
@@ -40,19 +51,82 @@ type AiClient = {
  *  be a content ref if the runtime promoted a large string. */
 type KatariTurn = { role: KatariString; text: KatariString };
 
-/** Format a Katari conversation history (an `array[turn]`) into Gemini `contents`. */
+/** Deep-resolve any KatariString (inline or `$ref`) nested in a model-produced
+ *  args object, so the echoed `functionCall` carries plain JSON (the runtime may
+ *  have promoted a large string field — e.g. code — to a content ref). */
+async function resolveDeep(
+  readString: (value: KatariString) => Promise<string>,
+  value: RawValue,
+): Promise<RawValue> {
+  if (isKatariString(value)) return readString(value);
+  if (Array.isArray(value)) return Promise.all(value.map((v) => resolveDeep(readString, v)));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, RawValue> = {};
+    for (const [key, v] of Object.entries(value as Record<string, RawValue>)) {
+      out[key] = await resolveDeep(readString, v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Format a Katari conversation history (`array[message]`) into Gemini
+ *  `contents`. A `turn` is plain text; a `call_turn` replays the model's
+ *  `functionCall` parts; a `result_turn` carries `functionResponse` parts — so
+ *  the function-calling loop CLOSES (the model sees its own call + the tool
+ *  output) instead of re-calling the tool forever. */
 async function historyToContents(
   readString: (value: KatariString) => Promise<string>,
   history: RawValue,
 ): Promise<Turn[]> {
   if (!Array.isArray(history)) {
-    throw new Error("ai_infer: history must be an array of turns");
+    throw new Error("ai_infer: history must be an array of messages");
   }
   const contents: Turn[] = [];
   for (const raw of history) {
-    const t = raw as KatariTurn;
-    const role = (await readString(t.role)) === "model" ? "model" : "user";
-    contents.push({ role, parts: [{ text: await readString(t.text) }] });
+    const ctor = (raw as Record<string, RawValue>).$constructor;
+    if (ctor === "discord_bot.call_turn") {
+      const calls = (raw as { calls?: RawValue }).calls;
+      const list = Array.isArray(calls) ? calls : [];
+      const parts = await Promise.all(
+        list.map(async (c) => {
+          const call = c as Record<string, RawValue>;
+          const signature =
+            call.thought_signature !== undefined
+              ? await readString(call.thought_signature as KatariString)
+              : "";
+          const part: GeminiPart = {
+            functionCall: {
+              name: await readString(call.name as KatariString),
+              args: (await resolveDeep(readString, call.args ?? {})) as Record<string, RawValue>,
+            },
+          };
+          // Replay the model's thought signature verbatim (Gemini 3 requires it).
+          if (signature !== "") part.thoughtSignature = signature;
+          return part;
+        }),
+      );
+      contents.push({ role: "model", parts });
+    } else if (ctor === "discord_bot.result_turn") {
+      const results = (raw as { results?: RawValue }).results;
+      const list = Array.isArray(results) ? results : [];
+      const parts = await Promise.all(
+        list.map(async (r) => {
+          const result = r as Record<string, RawValue>;
+          return {
+            functionResponse: {
+              name: await readString(result.name as KatariString),
+              response: { result: await readString(result.text as KatariString) },
+            },
+          };
+        }),
+      );
+      contents.push({ role: "user", parts });
+    } else {
+      const t = raw as KatariTurn;
+      const role = (await readString(t.role)) === "model" ? "model" : "user";
+      contents.push({ role, parts: [{ text: await readString(t.text) }] });
+    }
   }
   return contents;
 }
@@ -229,11 +303,13 @@ type KatariAgentMetadata = {
 };
 
 // One model step: given the conversation + the tools' schemas, return the
-// model's decision (a step_final reply, or a step_call naming a tool by INDEX
-// into the tools array + the args it chose). The loop that runs the chosen
-// tool and feeds its output back lives in Katari (`infer_with_tools`), which
-// dispatches the tool by value via call_agent — so the sidecar never touches
-// the tool agent values, only their metadata.
+// model's decision (a step_final reply, or a step_call carrying a BATCH of tool
+// calls — each naming a tool by INDEX into the tools array + the args it chose).
+// The loop that runs the chosen tools and feeds their output back lives in
+// Katari (`infer_with_tools`), which dispatches each tool by value via
+// call_agent — so the sidecar never touches the tool agent values, only their
+// metadata. Gemini routinely emits several functionCall parts in one turn; we
+// pass them all through and let Katari fan them out with `parallel for`.
 katari.agent<{
   client: AiClient;
   history: RawValue;
@@ -269,18 +345,29 @@ katari.agent<{
   }
   const data = (await res.json()) as { candidates?: { content?: Turn }[] };
   const parts = data.candidates?.[0]?.content?.parts ?? [];
-  const calls = parts.flatMap((p) => ("functionCall" in p ? [p.functionCall] : []));
+  // Keep each functionCall WITH its thoughtSignature — Gemini 3 requires it
+  // replayed on the model turn we feed back next step.
+  const calls = parts.flatMap((p) =>
+    "functionCall" in p
+      ? [{ name: p.functionCall.name, args: p.functionCall.args, thoughtSignature: p.thoughtSignature }]
+      : [],
+  );
 
   if (calls.length === 0) {
     const text = parts.flatMap((p) => ("text" in p ? [p.text] : [])).join("");
     return { $constructor: "discord_bot.step_final", text } as RawValue;
   }
-  // The model wants a tool: report WHICH (by index into the tools array) and
-  // the args it produced; Katari validates + dispatches it via call_agent.
-  const call = calls[0];
+  // The model wants tools: report the whole batch — each call names its tool by
+  // index into the tools array + the args it produced; Katari validates each and
+  // dispatches them in parallel via call_agent.
   return {
     $constructor: "discord_bot.step_call",
-    tool_index: indexByName.get(call.name) ?? 0,
-    args: (call.args ?? {}) as RawValue,
+    calls: calls.map((call) => ({
+      $constructor: "discord_bot.tool_call",
+      tool_index: indexByName.get(call.name) ?? 0,
+      name: call.name,
+      thought_signature: call.thoughtSignature ?? "",
+      args: (call.args ?? {}) as RawValue,
+    })),
   } as RawValue;
 });
