@@ -300,6 +300,7 @@ data ImportItemKind where
 data ExternalAgentDeclaration (phase :: Phase) = ExternalAgentDeclaration
   { annotation :: Maybe Text,
     name :: NameRef phase VariableRef,
+    typeParameters :: [GenericParameter phase],
     parameters :: [ParameterBinding phase],
     returnType :: SyntacticType phase,
     withRequests :: [SyntacticRequest phase],
@@ -327,6 +328,7 @@ instance HasSourceSpan (ExternalAgentDeclaration phase) where
 data PrimAgentDeclaration (phase :: Phase) = PrimAgentDeclaration
   { annotation :: Maybe Text,
     name :: NameRef phase VariableRef,
+    typeParameters :: [GenericParameter phase],
     parameters :: [ParameterBinding phase],
     returnType :: SyntacticType phase,
     withRequests :: [SyntacticRequest phase],

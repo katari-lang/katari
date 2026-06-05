@@ -294,6 +294,8 @@ buildModuleGenericParams declarations =
     one = \case
       DeclarationAgent decl -> fromParams decl.name decl.typeParameters
       DeclarationData decl -> fromParams decl.name decl.typeParameters
+      DeclarationPrimAgent decl -> fromParams decl.name decl.typeParameters
+      DeclarationExternalAgent decl -> fromParams decl.name decl.typeParameters
       _ -> pure Nothing
     fromParams _ [] = pure Nothing
     fromParams nameRef typeParameters = case nameRef.resolution of
@@ -1532,7 +1534,7 @@ checkNonAgentDeclaration = \case
                 sourceSpan = sourceSpan
               }
     pure (withQName name zonked sig)
-  DeclarationExternalAgent ExternalAgentDeclaration {annotation, name, parameters, returnType, withRequests, endpoint, dispatchName, sourceSpan} -> do
+  DeclarationExternalAgent ExternalAgentDeclaration {annotation, name, typeParameters, parameters, returnType, withRequests, endpoint, dispatchName, sourceSpan} -> do
     (parameters', paramSig, _) <- elaborateParameters parameters
     ret <- elaborateType returnType
     effect <- elaborateRequestList withRequests
@@ -1542,6 +1544,7 @@ checkNonAgentDeclaration = \case
             ExternalAgentDeclaration
               { annotation = annotation,
                 name = retagNameRef name,
+                typeParameters = map retagGenericParameter typeParameters,
                 parameters = parameters',
                 returnType = retagSyntacticType returnType,
                 withRequests = map retagSyntacticRequest withRequests,
@@ -1550,7 +1553,7 @@ checkNonAgentDeclaration = \case
                 sourceSpan = sourceSpan
               }
     pure (withQName name zonked sig)
-  DeclarationPrimAgent PrimAgentDeclaration {annotation, name, parameters, returnType, withRequests, using, sourceSpan} -> do
+  DeclarationPrimAgent PrimAgentDeclaration {annotation, name, typeParameters, parameters, returnType, withRequests, using, sourceSpan} -> do
     (parameters', paramSig, _) <- elaborateParameters parameters
     ret <- elaborateType returnType
     effect <- elaborateRequestList withRequests
@@ -1560,6 +1563,7 @@ checkNonAgentDeclaration = \case
             PrimAgentDeclaration
               { annotation = annotation,
                 name = retagNameRef name,
+                typeParameters = map retagGenericParameter typeParameters,
                 parameters = parameters',
                 returnType = retagSyntacticType returnType,
                 withRequests = map retagSyntacticRequest withRequests,

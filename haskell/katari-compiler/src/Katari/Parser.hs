@@ -573,6 +573,7 @@ parseExternalAgentDeclaration :: Maybe Text -> Parser (ExternalAgentDeclaration 
 parseExternalAgentDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordExternal
   name <- parseNameRef
+  typeParameters <- parseGenericParameters
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
   returnType <- parseType
@@ -592,6 +593,7 @@ parseExternalAgentDeclaration annotation = parseWithSpan $ do
     ExternalAgentDeclaration
       { annotation = annotation,
         name = name,
+        typeParameters = typeParameters,
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,
@@ -627,6 +629,7 @@ parsePrimAgentDeclaration :: Maybe Text -> Parser (PrimAgentDeclaration Parsed)
 parsePrimAgentDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordPrimitive
   name <- parseNameRef
+  typeParameters <- parseGenericParameters
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
   returnType <- parseType
@@ -636,6 +639,7 @@ parsePrimAgentDeclaration annotation = parseWithSpan $ do
     PrimAgentDeclaration
       { annotation = annotation,
         name = name,
+        typeParameters = typeParameters,
         parameters = parameters,
         returnType = returnType,
         withRequests = requests,

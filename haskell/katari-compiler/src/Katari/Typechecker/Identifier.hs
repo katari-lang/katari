@@ -976,21 +976,23 @@ resolveExternalAgent ExternalAgentDeclaration {..} = do
     Nothing -> emitError (ErrorMissingExternalAgentAnnotation sourceSpan name.text)
     Just t | T.null (T.strip t) -> emitError (ErrorEmptyExternalAgentAnnotation sourceSpan name.text)
     _ -> pure ()
-  withScopeFrameAt sourceSpan $ do
-    parameters' <- mapM resolveParameter parameters
-    returnType' <- resolveType returnType
-    withRequests' <- mapM resolveSyntacticRequest withRequests
-    pure
-      ExternalAgentDeclaration
-        { annotation = annotation,
-          name = name',
-          parameters = parameters',
-          returnType = returnType',
-          withRequests = withRequests',
-          endpoint = endpoint,
-          dispatchName = dispatchName,
-          sourceSpan = sourceSpan
-        }
+  withGenericParameters sourceSpan typeParameters $ \typeParameters' ->
+    withScopeFrameAt sourceSpan $ do
+      parameters' <- mapM resolveParameter parameters
+      returnType' <- resolveType returnType
+      withRequests' <- mapM resolveSyntacticRequest withRequests
+      pure
+        ExternalAgentDeclaration
+          { annotation = annotation,
+            name = name',
+            typeParameters = typeParameters',
+            parameters = parameters',
+            returnType = returnType',
+            withRequests = withRequests',
+            endpoint = endpoint,
+            dispatchName = dispatchName,
+            sourceSpan = sourceSpan
+          }
 
 -- | Resolve a @prim agent@ declaration. Mirrors 'resolveExternalAgent'
 -- but additionally validates the optional @using@ clause and stamps the
@@ -1020,20 +1022,22 @@ resolvePrimAgent PrimAgentDeclaration {..} = do
               s.variables
         }
     _ -> pure ()
-  withScopeFrameAt sourceSpan $ do
-    parameters' <- mapM resolveParameter parameters
-    returnType' <- resolveType returnType
-    withRequests' <- mapM resolveSyntacticRequest withRequests
-    pure
-      PrimAgentDeclaration
-        { annotation = annotation,
-          name = name',
-          parameters = parameters',
-          returnType = returnType',
-          withRequests = withRequests',
-          using = using,
-          sourceSpan = sourceSpan
-        }
+  withGenericParameters sourceSpan typeParameters $ \typeParameters' ->
+    withScopeFrameAt sourceSpan $ do
+      parameters' <- mapM resolveParameter parameters
+      returnType' <- resolveType returnType
+      withRequests' <- mapM resolveSyntacticRequest withRequests
+      pure
+        PrimAgentDeclaration
+          { annotation = annotation,
+            name = name',
+            typeParameters = typeParameters',
+            parameters = parameters',
+            returnType = returnType',
+            withRequests = withRequests',
+            using = using,
+            sourceSpan = sourceSpan
+          }
 
 -- | Resolve a @data ctor(name: type, ...)@ declaration. Fills in the
 -- variable-role name and resolves each parameter's type. The type-role id
