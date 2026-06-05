@@ -17,6 +17,7 @@ import {
 } from "../../src/engine/index.js";
 import { encodeCoreAgentDefId } from "../../src/agent-def-id.js";
 import type {
+  BlockInput,
   IRModule,
   Block,
   Statement,
@@ -35,18 +36,23 @@ function ir(blocks: Record<number, Block>, entries: Record<string, number> = {})
   };
 }
 
+// Wrap a list of label-bound params as the `inputNamed` form of BlockInput.
+function named(params: Extract<BlockInput, { kind: "inputNamed" }>["body"]): BlockInput {
+  return { kind: "inputNamed", body: params };
+}
+
 function userBlock(
-  args: Pick<UserBlock, "parameters" | "statements" | "trailing">,
+  args: Pick<UserBlock, "input" | "statements" | "trailing">,
 ): Block {
   return { kind: "blockUser", body: args };
 }
 
-function agentBlock(qualifiedName: string, entryBody: number): Block {
+function agentBlock(qualifiedName: string, entryBody: number, input: BlockInput = named([])): Block {
   return {
     kind: "blockAgent",
     body: {
       qualifiedName,
-      parameters: [],
+      input,
       entryBody,
       name: qualifiedName,
       description: undefined,
@@ -64,36 +70,41 @@ const API_ENDPOINT = endpoint("api://test");
 
 describe("engine integration: end-to-end via external delegate", () => {
   it("user thread calls add(2,3); engine emits delegateAck with 5", async () => {
-    const v0 = 0 as VarId;
-    const v1 = 1 as VarId;
     const out = 2 as VarId;
+    const argRec = 3 as VarId;
+    const e0 = 4 as VarId;
+    const e1 = 5 as VarId;
 
+    // Single-value calling convention: build the argument record {lhs, rhs}
+    // (BlockRecord 101 over self-contained element blocks 102/103, each
+    // computing its literal) then call add with the record as its argument.
     const stmts: Statement[] = [
-      { kind: "statementLoadLiteral", body: { output: v0, value: { kind: "literalValueInteger", integer: 2 } } },
-      { kind: "statementLoadLiteral", body: { output: v1, value: { kind: "literalValueInteger", integer: 3 } } },
-      {
-        kind: "statementCall",
-        body: {
-          block: 100,
-          arguments: [
-            { label: "lhs", var: v0 },
-            { label: "rhs", var: v1 },
-          ],
-          output: out,
-        },
-      },
+      { kind: "statementCall", body: { block: 101, output: argRec } },
+      { kind: "statementCall", body: { block: 100, argument: argRec, output: out } },
     ];
     const userBlk = userBlock({
-      parameters: [],
+      input: named([]),
       statements: stmts,
       trailing: out,
     });
+
+    const elementBlock = (v: VarId, n: number): Block =>
+      userBlock({
+        input: named([]),
+        statements: [
+          { kind: "statementLoadLiteral", body: { output: v, value: { kind: "literalValueInteger", integer: n } } },
+        ],
+        trailing: v,
+      });
 
     const module = ir({
       // Entry block: BlockAgent wrapping the body BlockUser at id 2.
       1: agentBlock("main", 2),
       2: userBlk,
       100: primBlock("primitive.add"),
+      101: { kind: "blockRecord", body: { entries: [["lhs", 102], ["rhs", 103]] } },
+      102: elementBlock(e0, 2),
+      103: elementBlock(e1, 3),
     }, { main: 1 });
 
     const state = createState(module);
@@ -133,9 +144,9 @@ describe("engine integration: end-to-end via external delegate", () => {
       kind: "blockAgent",
       body: {
         qualifiedName: "echo",
-        parameters: [
+        input: named([
           { label: "x", var: x, defaultValue: { kind: "literalValueInteger", integer: 42 } },
-        ],
+        ]),
         entryBody: 2,
         name: "echo",
         description: undefined,
@@ -144,9 +155,9 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     };
     const echoBody = userBlock({
-      parameters: [
+      input: named([
         { label: "x", var: x, defaultValue: { kind: "literalValueInteger", integer: 42 } },
-      ],
+      ]),
       statements: [],
       trailing: x,
     });
@@ -208,7 +219,7 @@ describe("engine integration: end-to-end via external delegate", () => {
 
     // helper(): returns 7 directly.
     const helperBody = userBlock({
-      parameters: [],
+      input: named([]),
       statements: [
         {
           kind: "statementLoadLiteral",
@@ -221,7 +232,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     // main(): loads an agent literal for `helper`, then dispatches via
     // a per-call-site BlockDelegate{TargetValue helperLit}.
     const mainBody = userBlock({
-      parameters: [],
+      input: named([]),
       statements: [
         {
           kind: "statementLoadLiteral",
@@ -237,7 +248,7 @@ describe("engine integration: end-to-end via external delegate", () => {
           kind: "statementCall",
           body: {
             block: 5,
-            arguments: [],
+
             output: out1,
           },
         },
@@ -389,17 +400,17 @@ describe("engine integration: end-to-end via external delegate", () => {
     const out = 2 as VarId;
 
     // closure body (BlockAgent → UserBlock): returns the captured `base`.
-    const closureBody = userBlock({ parameters: [], statements: [], trailing: base });
+    const closureBody = userBlock({ input: named([]), statements: [], trailing: base });
 
     const mainBody = userBlock({
-      parameters: [],
+      input: named([]),
       statements: [
         {
           kind: "statementLoadLiteral",
           body: { output: base, value: { kind: "literalValueInteger", integer: 10 } },
         },
         { kind: "statementMakeClosure", body: { output: clos, block: 10 } },
-        { kind: "statementCall", body: { block: 20, arguments: [], output: out } },
+        { kind: "statementCall", body: { block: 20, output: out } },
       ],
       trailing: out,
     });
@@ -553,13 +564,13 @@ describe("engine integration: end-to-end via external delegate", () => {
         kind: "statementCall",
         body: {
           block: 200,
-          arguments: [],
+
           output: v0,
         },
       },
     ];
     const userBlk = userBlock({
-      parameters: [],
+      input: named([]),
       statements: stmts,
       trailing: v0,
     });

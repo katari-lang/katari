@@ -49,7 +49,7 @@ function agentBlock(id: number): Block {
     kind: "blockAgent",
     body: {
       qualifiedName: `m.agent${id}`,
-      parameters: [],
+      input: { kind: "inputNamed", body: [] },
       entryBody: 0,
       name: `agent${id}`,
       description: `desc${id}`,

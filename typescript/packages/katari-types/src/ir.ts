@@ -83,12 +83,27 @@ export type Param = {
   label: string;
   var: VarId;
   /**
-   * Literal default for an optional parameter. When the caller omits this
-   * label, the runtime binds `var` to this value instead. Omitted from the
-   * JSON (and absent here) for required parameters.
+   * Literal default for an optional parameter. When the incoming argument
+   * record omits this label, the runtime binds `var` to this value instead.
+   * Omitted from the JSON (and absent here) for required parameters.
    */
   defaultValue?: LiteralValue;
 };
+
+/**
+ * How a block binds its single incoming argument value into scope. Under the
+ * unified single-value calling convention every block receives exactly one
+ * value; this says how to consume it.
+ *
+ *   - `inputNamed`: treat the incoming value as a record and destructure it by
+ *     label, filling each Param's default when its label is absent. The empty
+ *     list is the argument-less case (inline / match / for bodies).
+ *   - `inputSpread`: bind the whole incoming value to a single var (the
+ *     `...obj` spread parameter form, and break / then value blocks).
+ */
+export type BlockInput =
+  | { kind: "inputNamed"; body: Param[] }
+  | { kind: "inputSpread"; body: VarId };
 
 /**
  * A request handler inside a HandleData.
@@ -108,10 +123,11 @@ export type Handler = {
 
 export type UserBlock = {
   /**
-   * Labeled parameters. Meaningful for handler / then-clause blocks
-   * (req args / break value); empty for plain inline blocks.
+   * How the single incoming argument value binds into scope. `inputNamed`
+   * over the req args for handler blocks, `inputSpread` of the break value
+   * for then-clause blocks, and `inputNamed []` for plain inline blocks.
    */
-  parameters: Param[];
+  input: BlockInput;
   statements: Statement[];
   trailing?: VarId;
 };
@@ -130,7 +146,8 @@ export type AgentBlock = {
    * fresh name once Phase 3.7 lands.
    */
   qualifiedName: QualifiedName;
-  parameters: Param[];
+  /** How the single incoming argument value binds into the agent scope. */
+  input: BlockInput;
   /** BlockId of the body. Typically a `blockUser` (inline) or `blockHandle`. */
   entryBody: BlockId;
   /**
@@ -203,13 +220,6 @@ export type ExternalDispatch = {
   dispatchName: string;
 };
 
-// ─── Arg (irOptions → flat record) ───────────────────────────────────────────
-
-export type Arg = {
-  label: string;
-  var: VarId;
-};
-
 // ─── LiteralValue (sumOptions, GADT record ctors → flat) ─────────────────────
 
 export type LiteralValue =
@@ -279,7 +289,13 @@ export type MatchArm = {
  */
 export type CallData = {
   block: BlockId;
-  arguments: Arg[];
+  /**
+   * The single argument value passed to the callee. For a named call
+   * `foo(l1=e1, l2=e2)` the caller builds the record `{l1, l2}` (via a
+   * `blockRecord`) into one var; for a spread call `foo(...e)` it is `e`'s
+   * value directly; absent for an argument-less internal call.
+   */
+  argument?: VarId;
   output?: VarId;
 };
 

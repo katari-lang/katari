@@ -7,10 +7,10 @@
 
 export type {
   AgentBlock,
-  Arg,
   BindPatternData,
   Block,
   BlockId,
+  BlockInput,
   CallData,
   ContData,
   ContKind,

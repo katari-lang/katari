@@ -959,9 +959,9 @@ lowerThenClause = \case
       (statements, trailing) <- lowerBlockBody blk
       let userBlock =
             defaultUserBlock
-              { -- The then-block receives the body's tail as a single value
-                -- bound directly to its param var (not a named record).
-                input = InputSpread paramVar,
+              { -- The then-block receives the body's tail under the @value@
+                -- label (the runtime spawns it with @{value: <break value>}@).
+                input = InputNamed [Param {label = "value", var = paramVar, defaultValue = Nothing}],
                 statements = statements,
                 trailing = trailing
               }

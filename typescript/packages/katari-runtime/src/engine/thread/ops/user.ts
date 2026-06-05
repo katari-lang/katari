@@ -230,6 +230,11 @@ function isStructuralBlock(kind: Block["kind"]): boolean {
     case "blockFor":
     case "blockMatch":
     case "blockTuple":
+    case "blockRecord":
+      // A record block builds its value from entry expressions that reference
+      // the caller's locals (and, under the single-value calling convention,
+      // every named call's argument record references the in-scope arg vars),
+      // so it must inherit the caller scope rather than run isolated.
       return true;
     case "blockDelegate":
       // BlockDelegate may reference a runtime value at a VarId in the
@@ -242,11 +247,13 @@ function isStructuralBlock(kind: Block["kind"]): boolean {
 }
 
 function resolveArgs(ctx: StepCtx, scopeId: ScopeId, call: CallData): Record<string, Value> {
-  const out: Record<string, Value> = {};
-  for (const arg of call.arguments) {
-    out[arg.label] = lookupValue(ctx, scopeId, arg.var);
-  }
-  return out;
+  // The unified calling convention passes a single argument value. For a named
+  // call the caller built it as a record (a `blockRecord`); we destructure its
+  // entries back into the label-keyed args the callee binds by. An
+  // argument-less call (`call.argument` absent) passes no args.
+  if (call.argument === undefined) return {};
+  const value = lookupValue(ctx, scopeId, call.argument);
+  return value.kind === "record" ? { ...value.entries } : {};
 }
 
 function resolveModifiers(ctx: StepCtx, scopeId: ScopeId, mods: [VarId, VarId][]): ModMap {

@@ -22,12 +22,12 @@ import type { StepCtx } from "../../step-ctx.js";
 import { literalToValue, type Value } from "../../value.js";
 import {
   beginCancel,
+  bindInputIntoScope,
   commonRemoveChild,
   emitAgentRootCompletion,
   emitEscalateUpward,
   hasChildren,
   proxyAskToParent,
-  setValueInScope,
 } from "../common.js";
 import type { AgentThread } from "../types.js";
 import { defaultAskAckProxy, defaultCancel } from "./defaults.js";
@@ -44,19 +44,16 @@ export const agentOps: ThreadOps<AgentThread> = {
     // callArgs (so a leaf body — delegate / prim / request / ctor, which
     // consumes callArgs by label — sees them too).
     const filledArgs: Record<string, Value> = { ...t.args };
-    for (const param of block.parameters) {
-      if (filledArgs[param.label] === undefined && param.defaultValue !== undefined) {
-        filledArgs[param.label] = literalToValue(param.defaultValue, ctx.state.snapshot);
+    if (block.input.kind === "inputNamed") {
+      for (const param of block.input.body) {
+        if (filledArgs[param.label] === undefined && param.defaultValue !== undefined) {
+          filledArgs[param.label] = literalToValue(param.defaultValue, ctx.state.snapshot);
+        }
       }
     }
-    // Bind args into our own scope by parameter label so the body
-    // (inline child) can see them via the inherited scope chain.
-    for (const param of block.parameters) {
-      const v = filledArgs[param.label];
-      if (v !== undefined) {
-        setValueInScope(ctx, t.scopeId, param.var, v);
-      }
-    }
+    // Bind args into our own scope (named destructure or whole-value spread)
+    // so the body (inline child) can see them via the inherited scope chain.
+    bindInputIntoScope(ctx, t.scopeId, block.input, filledArgs);
     // Spawn the body as a child. The body block is expected to be a
     // BlockUser (inline) — we inherit our scope so args are visible.
     spawnChild(ctx, {

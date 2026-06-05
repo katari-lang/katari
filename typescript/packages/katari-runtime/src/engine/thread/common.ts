@@ -9,7 +9,7 @@
 // that each op delegates into.
 
 import { encodeCoreAgentDefId, THROW_REQUEST_QNAME } from "../../agent-def-id.js";
-import type { Block, BlockId } from "../../ir/types.js";
+import type { Block, BlockId, BlockInput } from "../../ir/types.js";
 import { type AskId, type CallId, createEscalationId, type ScopeId, type ThreadId } from "../id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
@@ -454,10 +454,30 @@ export function writeArgsIntoChildScope(
   if (b === undefined || b.kind !== "blockUser") return;
   const child = ctx.state.threads[childId];
   if (child === undefined) return;
-  for (const param of b.body.parameters) {
+  bindInputIntoScope(ctx, child.scopeId, b.body.input, args);
+}
+
+/**
+ * Bind a block's single incoming argument value into `scopeId` according to
+ * its `BlockInput`. The argument is carried as a `Record<label, Value>` (the
+ * destructured record); for `inputNamed` each param reads its label (callers
+ * pre-fill defaults), for `inputSpread` the whole record is rebound as a
+ * single record value.
+ */
+export function bindInputIntoScope(
+  ctx: StepCtx,
+  scopeId: ScopeId,
+  input: BlockInput,
+  args: Record<string, Value>,
+): void {
+  if (input.kind === "inputSpread") {
+    setValueInScope(ctx, scopeId, input.body, { kind: "record", entries: { ...args } });
+    return;
+  }
+  for (const param of input.body) {
     const v = args[param.label];
     if (v !== undefined) {
-      setValueInScope(ctx, child.scopeId, param.var, v);
+      setValueInScope(ctx, scopeId, param.var, v);
     }
   }
 }
