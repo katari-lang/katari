@@ -2017,6 +2017,7 @@ resolveTypeApplicationExpr TypeApplicationExpression {callee, typeArguments, sou
     TypeApplicationExpression
       { callee = callee',
         typeArguments = typeArguments',
+        instantiation = (),
         sourceSpan = sourceSpan,
         typeOf = ()
       }

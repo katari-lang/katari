@@ -735,7 +735,7 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
       if null typeArguments
         then pure ()
         else emitError (CheckErrorTypeArgArity sourceSpan 0 (length typeArguments))
-      pure (rebuilt callee' calleeType, calleeType)
+      pure (rebuilt callee' calleeType ([], []), calleeType)
     else do
       if length typeArguments == length params
         then pure ()
@@ -749,13 +749,14 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
       calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocal) resolution
       let concreteType = substituteGenerics typeSubstitution effectSubstitution calleeSig
       calleeZonked <- retagGenericCallee callee concreteType
-      pure (rebuilt calleeZonked concreteType, concreteType)
+      pure (rebuilt calleeZonked concreteType (Map.toList typeSubstitution, Map.toList effectSubstitution), concreteType)
   where
-    rebuilt calleeZonked resultType =
+    rebuilt calleeZonked resultType instantiation =
       ExpressionTypeApplication
         TypeApplicationExpression
           { callee = calleeZonked,
             typeArguments = map retagSyntacticType typeArguments,
+            instantiation = instantiation,
             sourceSpan = sourceSpan,
             typeOf = resultType
           }

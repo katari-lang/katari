@@ -26,10 +26,11 @@ import Data.Text (Text)
 import Katari.Common (LiteralValue (..), QualifiedName, TypePatternTag (..))
 import Katari.Id
   ( EffectResolution (..),
+    GenericsId,
     TypeResolution (..),
     VariableResolution (..),
   )
-import Katari.SemanticType (Resolved, SemanticType)
+import Katari.SemanticType (Resolved, SemanticEffect, SemanticType)
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 
 -- ---------------------------------------------------------------------------
@@ -101,6 +102,16 @@ type family PatternType (phase :: Phase) :: Type where
   PatternType Parsed = ()
   PatternType Identified = ()
   PatternType Zonked = SemanticType Resolved
+
+-- | The resolved generic substitution a @foo[args]@ application performs,
+-- attached to its 'TypeApplicationExpression' at 'Zonked' so Lowering can build
+-- the runtime generic-substitution template (the callee's 'GenericsId's mapped
+-- to the schema / request-set of each resolved type / effect argument). Empty
+-- of meaning before 'Zonked'.
+type family GenericInstantiation (phase :: Phase) :: Type where
+  GenericInstantiation Parsed = ()
+  GenericInstantiation Identified = ()
+  GenericInstantiation Zonked = ([(GenericsId, SemanticType Resolved)], [(GenericsId, SemanticEffect Resolved)])
 
 -- ---------------------------------------------------------------------------
 -- NameRef: a name with phase-dependent resolution metadata attached.
@@ -1323,6 +1334,9 @@ instance HasSourceSpan (FieldAccessExpression phase) where
 data TypeApplicationExpression (phase :: Phase) = TypeApplicationExpression
   { callee :: Expression phase,
     typeArguments :: [SyntacticType phase],
+    -- | The resolved substitution (callee generic → type / effect argument),
+    -- filled by the checker at 'Zonked' for Lowering.
+    instantiation :: GenericInstantiation phase,
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }
@@ -1565,7 +1579,8 @@ class
     Eq (NameRefResolution phase RequestRef),
     Eq (NameRefResolution phase ConstructorRef),
     Eq (ExpressionType phase),
-    Eq (PatternType phase)
+    Eq (PatternType phase),
+    Eq (GenericInstantiation phase)
   ) =>
   EqPhase phase
 
@@ -1577,7 +1592,8 @@ instance
     Eq (NameRefResolution phase RequestRef),
     Eq (NameRefResolution phase ConstructorRef),
     Eq (ExpressionType phase),
-    Eq (PatternType phase)
+    Eq (PatternType phase),
+    Eq (GenericInstantiation phase)
   ) =>
   EqPhase phase
 
@@ -1593,7 +1609,8 @@ class
     Show (NameRefResolution phase RequestRef),
     Show (NameRefResolution phase ConstructorRef),
     Show (ExpressionType phase),
-    Show (PatternType phase)
+    Show (PatternType phase),
+    Show (GenericInstantiation phase)
   ) =>
   ShowPhase phase
 
@@ -1605,7 +1622,8 @@ instance
     Show (NameRefResolution phase RequestRef),
     Show (NameRefResolution phase ConstructorRef),
     Show (ExpressionType phase),
-    Show (PatternType phase)
+    Show (PatternType phase),
+    Show (GenericInstantiation phase)
   ) =>
   ShowPhase phase
 

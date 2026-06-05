@@ -1179,9 +1179,27 @@ lowerExpr = \case
     object <- lowerExpr fieldAccessExpr.object
     fieldVar <- emitLoadLiteral (LiteralValueString fieldAccessExpr.fieldName.text)
     emitPrimCall "get_field" [("object", object), ("field", fieldVar)]
-  -- Generics are erased at runtime: lower the callee and drop the type
-  -- arguments (no monomorphisation).
-  AST.ExpressionTypeApplication typeApplicationExpr -> lowerExpr typeApplicationExpr.callee
+  -- Generic instantiation @foo[args]@: the callee value carries a generic
+  -- substitution (consulted by @get_metadata@ to specialise its schema). The
+  -- callable code itself is generic-erased, so we lower the bare callee and
+  -- attach the substitution template — each callee 'GenericsId' mapped to its
+  -- type argument's (Generic)Schema. A non-generic application (empty type
+  -- substitution) is a plain pass-through. (Effect-generic arguments are not
+  -- yet surfaced in the schema — TODO with the requests-GenericSchema work.)
+  AST.ExpressionTypeApplication typeApplicationExpr -> do
+    sourceVar <- lowerExpr typeApplicationExpr.callee
+    let (typeSubstitution, _effectSubstitution) = typeApplicationExpr.instantiation
+    case typeSubstitution of
+      [] -> pure sourceVar
+      _ -> do
+        dataDefs <- asks (.dataDefs)
+        let template =
+              [ (genericsId, Schema.jsonSchemaToText (Schema.buildOutputSchema dataDefs argType))
+                | (genericsId, argType) <- typeSubstitution
+              ]
+        out <- freshVarId Nothing
+        emit (StatementApplyGenerics ApplyGenericsData {source = sourceVar, generics = template, output = out})
+        pure out
   AST.ExpressionTemplate templateExpr -> lowerTemplate templateExpr
   AST.ExpressionBlock blockExpr -> lowerBlockExpr blockExpr
   AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr
@@ -1804,6 +1822,12 @@ offsetStatement offsetB offsetV = \case
       bindData
         { source = offsetV bindData.source,
           pattern = offsetMatchPattern offsetV bindData.pattern
+        }
+  StatementApplyGenerics applyData ->
+    StatementApplyGenerics
+      applyData
+        { source = offsetV applyData.source,
+          output = offsetV applyData.output
         }
 
 

@@ -62,6 +62,7 @@ module Katari.IR
     Statement (..),
     CallData (..),
     MakeClosureData (..),
+    ApplyGenericsData (..),
     ExitData (..),
     ContData (..),
     LoadLiteralData (..),
@@ -89,6 +90,7 @@ import Data.Text (Text)
 import Data.Word (Word32)
 import GHC.Generics (Generic)
 import Katari.Common (LiteralValue (..), QualifiedName (..), TypePatternTag (..), lowerHead, renderQualifiedName)
+import Katari.Id (GenericsId)
 
 -- ===========================================================================
 -- Identifiers
@@ -461,6 +463,15 @@ data Statement where
   -- 'BlockMatch' there is no @defaultArm@; the pattern is irrefutable
   -- (guaranteed by the exhaustiveness checker — K0291 / Phase 16).
   StatementBindPattern :: BindPatternData -> Statement
+  -- | Attach a generic substitution to an agent / closure value: @source@ is
+  -- the bare callable value (from a @foo[args]@ instantiation), @generics@ maps
+  -- each of the callee's 'GenericsId's to the JSON-encoded /GenericSchema/ of
+  -- its type argument (which may itself contain @$generic@ placeholders for
+  -- the enclosing agent's parameters, resolved against the ambient substitution
+  -- at runtime). The runtime produces in @output@ a copy of the value carrying
+  -- the resolved substitution, consulted by @get_metadata@ to specialise the
+  -- callee's schema.
+  StatementApplyGenerics :: ApplyGenericsData -> Statement
   deriving (Eq, Show, Generic)
 
 instance ToJSON Statement where
@@ -507,6 +518,23 @@ instance ToJSON MakeClosureData where
   toJSON = genericToJSON irOptions
 
 instance FromJSON MakeClosureData where
+  parseJSON = genericParseJSON irOptions
+
+-- | Payload for 'StatementApplyGenerics'. @generics@ is the per-instantiation
+-- template: each callee 'GenericsId' paired with the JSON-encoded GenericSchema
+-- of its type argument. A list (not a map) so the JSON is a plain array of
+-- @[id, schema]@ pairs, independent of 'GenericsId' key encoding.
+data ApplyGenericsData = ApplyGenericsData
+  { source :: VarId,
+    generics :: [(GenericsId, Text)],
+    output :: VarId
+  }
+  deriving (Eq, Show, Generic)
+
+instance ToJSON ApplyGenericsData where
+  toJSON = genericToJSON irOptions
+
+instance FromJSON ApplyGenericsData where
   parseJSON = genericParseJSON irOptions
 
 -- | Payload for 'BlockMatch'. The runtime creates a management thread,

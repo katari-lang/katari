@@ -1307,6 +1307,7 @@ applyPostfixOperation expression = \case
       TypeApplicationExpression
         { callee = expression,
           typeArguments = arguments,
+          instantiation = (),
           sourceSpan = mergePostfixSpan expression postfixSpan,
           typeOf = ()
         }
