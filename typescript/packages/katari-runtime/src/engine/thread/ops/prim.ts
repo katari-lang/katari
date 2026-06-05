@@ -38,10 +38,18 @@ export const primOps: ThreadOps<PrimThread> = {
       // may materialize ref bytes; `ctx.materialize` is the injected,
       // deterministic content-addressed read.
       const args = recordEntries(t.argument);
+      // Pass `putBlob` only when a real value store is wired: explicit
+      // producers (`string_to_file`) then surface a clear no-store error, and
+      // transparent large-string promotion falls back to inline.
       value =
         t.primName === "primitive.get_metadata"
           ? await executeGetMetadata(ctx, args)
-          : await executePrim(t.primName, args, ctx.materialize, ctx.putBlob);
+          : await executePrim(
+              t.primName,
+              args,
+              ctx.materialize,
+              ctx.valueStoreWired ? ctx.putBlob : undefined,
+            );
     } catch (err) {
       if (err instanceof PrimRaiseRequest) {
         emitPrimRaise(ctx, t, err);

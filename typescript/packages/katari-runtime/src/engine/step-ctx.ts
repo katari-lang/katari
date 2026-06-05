@@ -69,6 +69,14 @@ export const noRefPutter: RefPutter = () => {
 export interface StepCtx {
   /** Live engine state for this step (mutated in place). */
   readonly state: State;
+  /**
+   * Whether a real value store is wired (`putBlob` can persist). False when
+   * the host injected the default `noRefPutter` (tests / store-less harnesses).
+   * Transparent producers (e.g. large-string promotion) consult this to fall
+   * back to inline instead of throwing; explicit producers still call
+   * `putBlob` and surface the no-store error.
+   */
+  readonly valueStoreWired: boolean;
   /** Schedule another internal event to be processed in this applyEvent. */
   enqueue(event: InternalEventPayload): void;
   /** Push an outbound event (caller will forward externally). */
@@ -122,6 +130,7 @@ export function makeStepCtx(
 ): StepCtx {
   return {
     state,
+    valueStoreWired: putRef !== noRefPutter,
     enqueue(event) {
       buffers.queue.push(event);
     },

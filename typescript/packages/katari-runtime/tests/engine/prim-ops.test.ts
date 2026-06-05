@@ -20,6 +20,7 @@ import {
   type PrimThread,
 } from "../../src/engine/index.js";
 import { executePrim, valueEquals } from "../../src/engine/prim.js";
+import type { RefPutter } from "../../src/engine/step-ctx.js";
 import { type BytesRep, mkSecret, mkString, type Value } from "../../src/engine/value.js";
 
 const M = async (_rep: BytesRep): Promise<Uint8Array> => {
@@ -349,6 +350,61 @@ describe("engine: file prims", () => {
     expect(await executePrim("primitive.math.ceil", { value: num1(2.1) }, M)).toEqual(num1(3));
     expect(await executePrim("primitive.math.round", { value: num1(2.5) }, M)).toEqual(num1(3));
     expect(await executePrim("primitive.math.round", { value: num1(-2.5) }, M)).toEqual(num1(-3));
+  });
+});
+
+describe("engine: large-string promotion", () => {
+  // Fake value-store putter: returns a deterministic ref so a test can assert a
+  // string was promoted (rep.kind === "ref") without wiring a real store.
+  const fakePut: RefPutter = async (bytes) => ({
+    kind: "ref",
+    module: "core",
+    id: `blob-${bytes.length}`,
+    hash: `hash-${bytes.length}`,
+    size: bytes.length,
+  });
+
+  const big = "x".repeat(5000); // exceeds the 4096-byte inline threshold
+
+  it("to_string promotes a large result to a ref when a store is wired", async () => {
+    const r = await executePrim("primitive.to_string", { value: mkString(big) }, M, fakePut);
+    expect(r.kind).toBe("string");
+    if (r.kind === "string") expect(r.rep.kind).toBe("ref");
+  });
+
+  it("concat promotes when the joined result exceeds the threshold", async () => {
+    const half = "y".repeat(3000);
+    const r = await executePrim(
+      "primitive.concat",
+      { lhs: mkString(half), rhs: mkString(half) },
+      M,
+      fakePut,
+    );
+    expect(r.kind).toBe("string");
+    if (r.kind === "string") expect(r.rep.kind).toBe("ref");
+  });
+
+  it("keeps small strings inline even with a store wired", async () => {
+    const r = await executePrim("primitive.to_string", { value: mkString("small") }, M, fakePut);
+    expect(r).toEqual(mkString('"small"'));
+  });
+
+  it("falls back to inline when no store is wired (put omitted)", async () => {
+    const r = await executePrim("primitive.to_string", { value: mkString(big) }, M);
+    expect(r.kind).toBe("string");
+    if (r.kind === "string") expect(r.rep.kind).toBe("inline");
+  });
+
+  it("does not promote a tainted (secret) concat — secrets stay inline", async () => {
+    const half = "z".repeat(3000);
+    const r = await executePrim(
+      "primitive.concat",
+      { lhs: mkSecret(half), rhs: mkString(half) },
+      M,
+      fakePut,
+    );
+    expect(r.kind).toBe("secret");
+    if (r.kind === "secret") expect(r.rep.kind).toBe("inline");
   });
 });
 

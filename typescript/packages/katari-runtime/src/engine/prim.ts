@@ -92,6 +92,30 @@ async function deepFields(
 }
 
 /**
+ * Strings at or below this UTF-8 byte length stay inline; larger ones are
+ * promoted to a content-addressed blob so they ship small across every
+ * boundary (IPC to a sidecar, cross-shard messages, checkpoints) and are
+ * materialized only when bytes are actually needed.
+ */
+const STRING_PROMOTE_THRESHOLD_BYTES = 4096;
+
+/**
+ * Build a `string` Value from freshly produced text, promoting it to a blob
+ * ref when it exceeds the inline threshold and a value store is wired (`put`
+ * present). This is the "promote at birth" point: a large string produced by a
+ * content-transform prim (`to_string`, `concat`, `string.*`, `file_to_string`)
+ * becomes a ref here, so it stays a ref everywhere downstream — scope,
+ * checkpoints, and the wire — instead of being re-shipped inline each step.
+ * Content-addressing dedups, so the same content never re-uploads.
+ */
+async function mkStringMaybePromote(text: string, put: RefPutter | undefined): Promise<Value> {
+  if (put === undefined) return mkString(text);
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length <= STRING_PROMOTE_THRESHOLD_BYTES) return mkString(text);
+  return { kind: "string", rep: await put(bytes, "string") };
+}
+
+/**
  * Thrown by a primitive to raise a specific (never-returning) request
  * instead of returning a value. The PrimThread catches this and emits
  * the corresponding `ask` upward; this thread then waits in a
@@ -186,7 +210,8 @@ export async function executePrim(
           (await materializeText(lhs.rep, materialize)) +
           (await materializeText(rhs.rep, materialize));
         const tainted = lhs.kind === "secret" || rhs.kind === "secret";
-        return tainted ? mkSecret(joined) : mkString(joined);
+        // Secrets stay inline (inline-only in v0.1.0); plain strings promote.
+        return tainted ? mkSecret(joined) : await mkStringMaybePromote(joined, put);
       }
       throw new RecoverableEngineError("prim concat: invalid args");
     }
@@ -203,7 +228,10 @@ export async function executePrim(
           "prim to_string: refusing to stringify a secret value (would launder taint)",
         );
       }
-      return mkString(JSON.stringify(valueToRaw(await materializeValueDeep(v, materialize))));
+      return mkStringMaybePromote(
+        JSON.stringify(valueToRaw(await materializeValueDeep(v, materialize))),
+        put,
+      );
     }
     case "primitive.from_string": {
       const text = req(args, "text");
@@ -255,7 +283,7 @@ export async function executePrim(
           `prim file_to_string: argument must be a file, got ${v?.kind ?? "nothing"}`,
         );
       }
-      return mkString(new TextDecoder().decode(await materialize(v.rep)));
+      return mkStringMaybePromote(new TextDecoder().decode(await materialize(v.rep)), put);
     }
     case "primitive.string_to_file": {
       // Write a string's bytes to a new content blob and hand back a `file`
@@ -418,7 +446,7 @@ export async function executePrim(
       if (start.kind !== "number" || end.kind !== "number") {
         throw new RecoverableEngineError("prim string.slice: start/end must be integers");
       }
-      return mkString([...s].slice(start.value, end.value).join(""));
+      return mkStringMaybePromote([...s].slice(start.value, end.value).join(""), put);
     }
     case "primitive.string.contains": {
       const s = await materializeValueText(req(args, "value"), materialize);
@@ -450,15 +478,15 @@ export async function executePrim(
     }
     case "primitive.string.upper": {
       const s = await materializeValueText(req(args, "value"), materialize);
-      return mkString(s.toUpperCase());
+      return mkStringMaybePromote(s.toUpperCase(), put);
     }
     case "primitive.string.lower": {
       const s = await materializeValueText(req(args, "value"), materialize);
-      return mkString(s.toLowerCase());
+      return mkStringMaybePromote(s.toLowerCase(), put);
     }
     case "primitive.string.trim": {
       const s = await materializeValueText(req(args, "value"), materialize);
-      return mkString(s.trim());
+      return mkStringMaybePromote(s.trim(), put);
     }
     case "primitive.string.split": {
       const s = await materializeValueText(req(args, "value"), materialize);
@@ -476,13 +504,13 @@ export async function executePrim(
       for (const part of parts.elements) {
         pieces.push(await materializeValueText(part, materialize));
       }
-      return mkString(pieces.join(separator));
+      return mkStringMaybePromote(pieces.join(separator), put);
     }
     case "primitive.string.replace": {
       const s = await materializeValueText(req(args, "value"), materialize);
       const pattern = await materializeValueText(req(args, "pattern"), materialize);
       const replacement = await materializeValueText(req(args, "replacement"), materialize);
-      return mkString(s.replaceAll(pattern, replacement));
+      return mkStringMaybePromote(s.replaceAll(pattern, replacement), put);
     }
     // ── math.* ──
     case "primitive.math.abs": {
