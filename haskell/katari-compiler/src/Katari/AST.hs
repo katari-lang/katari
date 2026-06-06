@@ -258,6 +258,7 @@ data RequestDeclaration (phase :: Phase) = RequestDeclaration
     name :: NameRef phase VariableRef,
     -- | Same identifier, viewed as a request-namespace symbol.
     requestName :: NameRef phase RequestRef,
+    typeParameters :: [GenericParameter phase],
     parameters :: [ParameterBinding phase],
     returnType :: SyntacticType phase,
     sourceSpan :: SourceSpan

@@ -552,6 +552,7 @@ parseRequestDeclaration :: Maybe Text -> Parser (RequestDeclaration Parsed)
 parseRequestDeclaration annotation = parseWithSpan $ do
   parseKeyword KeywordRequest
   name <- parseNameRef
+  typeParameters <- parseGenericParameters
   parameters <- parseParameterList
   parsePunctuation PunctuationArrow
   returnType <- parseType
@@ -560,6 +561,7 @@ parseRequestDeclaration annotation = parseWithSpan $ do
       { annotation = annotation,
         name = name,
         requestName = retagParsedNameRef name,
+        typeParameters = typeParameters,
         parameters = parameters,
         returnType = returnType,
         sourceSpan = sourceSpan

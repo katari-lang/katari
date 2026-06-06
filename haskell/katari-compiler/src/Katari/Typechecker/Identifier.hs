@@ -958,6 +958,9 @@ resolveRequest RequestDeclaration {..} = do
   name' <- liftSignatureVariable name
   reqestName' <- liftSignatureRequest requestName
   withScopeFrameAt sourceSpan $ do
+    -- Register the generic parameters first so they are in scope for the
+    -- parameter / return types (@request foo[A, R](x: A) -> R@).
+    typeParameters' <- mapM resolveGenericParameter typeParameters
     parameters' <- mapM resolveParameter parameters
     returnType' <- resolveType returnType
     pure
@@ -965,6 +968,7 @@ resolveRequest RequestDeclaration {..} = do
         { annotation = annotation,
           name = name',
           requestName = reqestName',
+          typeParameters = typeParameters',
           parameters = parameters',
           returnType = returnType',
           sourceSpan = sourceSpan

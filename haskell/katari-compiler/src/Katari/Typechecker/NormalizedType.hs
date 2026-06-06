@@ -1067,24 +1067,34 @@ dataParamIdsOf env qualifiedName = maybe [] (.dataParamIds) (Map.lookup qualifie
 -- @null | T@ for a @?:@ field).
 buildDataFieldEnv :: Map QualifiedName (SemanticType Resolved) -> DataFieldEnv
 buildDataFieldEnv typeEnv =
-  let dataDecls =
-        [ (dataQName, mapMaybe argGenericId returnArgs, Map.map (.parameterType) (functionParameters parameterObject))
+  let -- @data@ constructors: the entry whose return is its own data type. Its
+      -- fields are the value's object view; each field is a covariant (positive)
+      -- position for variance inference.
+      dataDecls =
+        [ (dataQName, mapMaybe argGenericId returnArgs, fields, [(fieldType, Pos) | fieldType <- Map.elems fields])
           | (constructorQName, SemanticTypeFunction parameterObject (SemanticTypeData dataQName returnArgs) _) <- Map.toList typeEnv,
-            constructorQName == dataQName
+            constructorQName == dataQName,
+            let fields = Map.map (.parameterType) (functionParameters parameterObject)
         ]
-      paramIdsByName = Map.fromList [(qn, paramIds) | (qn, paramIds, _) <- dataDecls]
-      fieldsByName = Map.fromList [(qn, fields) | (qn, _, fields) <- dataDecls]
-      variancesByName = inferVariances paramIdsByName fieldsByName
+      -- @request@ declarations: the entry whose own effect is itself. The effect
+      -- sits in a negative position, so the request parameter is covariant (scan
+      -- at 'Pos') and the return contravariant (scan at 'Neg'); the self-effect
+      -- itself is not scanned. Requests have no object-view fields.
+      requestDecls =
+        [ (requestQName, mapMaybe argGenericId selfArgs, [(parameterObject, Pos), (returnType, Neg)])
+          | (entryQName, SemanticTypeFunction parameterObject returnType (SemanticEffectRequest requestQName selfArgs)) <- Map.toList typeEnv,
+            entryQName == requestQName
+        ]
+      paramIdsByName =
+        Map.fromList ([(qn, ids) | (qn, ids, _, _) <- dataDecls] ++ [(qn, ids) | (qn, ids, _) <- requestDecls])
+      scanTargetsByName =
+        Map.fromList ([(qn, targets) | (qn, _, _, targets) <- dataDecls] ++ [(qn, targets) | (qn, _, targets) <- requestDecls])
+      variancesByName = inferVariances paramIdsByName scanTargetsByName
+      info qn ids fields = DataInfo {dataParamIds = ids, dataVariances = Map.findWithDefault [] qn variancesByName, dataFields = fields}
    in Map.fromList
-        [ ( dataQName,
-            DataInfo
-              { dataParamIds = paramIds,
-                dataVariances = Map.findWithDefault [] dataQName variancesByName,
-                dataFields = fields
-              }
-          )
-          | (dataQName, paramIds, fields) <- dataDecls
-        ]
+        ( [(qn, info qn ids fields) | (qn, ids, fields, _) <- dataDecls]
+            ++ [(qn, info qn ids Map.empty) | (qn, ids, _) <- requestDecls]
+        )
   where
     argGenericId = \case
       SemanticGenericArgumentType (SemanticTypeGeneric genericsId) -> Just genericsId
@@ -1110,16 +1120,16 @@ flipPolarity = \case Pos -> Neg; Neg -> Pos
 -- widen toward 'Invariant', so the iteration converges.
 inferVariances ::
   Map QualifiedName [GenericsId] ->
-  Map QualifiedName (Map Text (SemanticType Resolved)) ->
+  Map QualifiedName [(SemanticType Resolved, Polarity)] ->
   Map QualifiedName [Variance]
-inferVariances paramIdsByName fieldsByName = fixpoint (Map.map (map (const Bivariant)) paramIdsByName)
+inferVariances paramIdsByName scanTargetsByName = fixpoint (Map.map (map (const Bivariant)) paramIdsByName)
   where
     fixpoint estimates =
-      let next = Map.mapWithKey (\dataQName paramIds -> map (paramVariance estimates dataQName) paramIds) paramIdsByName
+      let next = Map.mapWithKey (\declQName paramIds -> map (paramVariance estimates declQName) paramIds) paramIdsByName
        in if next == estimates then next else fixpoint next
-    paramVariance estimates dataQName paramId =
+    paramVariance estimates declQName paramId =
       signsToVariance
-        (foldMap (signsOfType estimates paramId Pos) (Map.elems (Map.findWithDefault Map.empty dataQName fieldsByName)))
+        (foldMap (\(scanType, polarity) -> signsOfType estimates paramId polarity scanType) (Map.findWithDefault [] declQName scanTargetsByName))
 
 signsToVariance :: Set Polarity -> Variance
 signsToVariance signs

@@ -346,6 +346,7 @@ buildModuleGenericParams declarations =
       DeclarationData decl -> fromParams decl.name decl.typeParameters
       DeclarationPrimAgent decl -> fromParams decl.name decl.typeParameters
       DeclarationExternalAgent decl -> fromParams decl.name decl.typeParameters
+      DeclarationRequest decl -> fromParams decl.name decl.typeParameters
       _ -> pure Nothing
     fromParams _ [] = pure Nothing
     fromParams nameRef typeParameters = case nameRef.resolution of
@@ -1681,11 +1682,21 @@ checkNonAgentDeclaration = \case
                 sourceSpan = sourceSpan
               }
     pure (withQName name zonked sig)
-  DeclarationRequest RequestDeclaration {annotation, name, requestName, parameters, returnType, sourceSpan} -> do
+  DeclarationRequest RequestDeclaration {annotation, name, requestName, typeParameters, parameters, returnType, sourceSpan} -> do
     (parameters', paramSig, _) <- elaborateParameters parameters
     ret <- elaborateType returnType
-    let effect = case requestName.resolution of
-          Just (ResolvedConcreteRequest qualifiedName) | not (isThrowRequest qualifiedName) -> singletonEffect qualifiedName
+    let -- The request's own effect is itself applied to its generic parameters
+        -- (@request foo[A] … → with foo[A]@); an instantiation @foo[int]@
+        -- substitutes them, exactly like a generic data's return type.
+        selfArgs =
+          [ case parameter.kind of
+              GenericKindType -> SemanticGenericArgumentType (SemanticTypeGeneric genericsId)
+              GenericKindEffect -> SemanticGenericArgumentEffect (SemanticEffectGeneric genericsId)
+            | parameter <- typeParameters,
+              Just (ResolvedGenericParam genericsId) <- [parameter.name.resolution]
+          ]
+        effect = case requestName.resolution of
+          Just (ResolvedConcreteRequest qualifiedName) | not (isThrowRequest qualifiedName) -> SemanticEffectRequest qualifiedName selfArgs
           _ -> emptyEffect
         sig = SemanticTypeFunction paramSig ret effect
         zonked =
@@ -1694,6 +1705,7 @@ checkNonAgentDeclaration = \case
               { annotation = annotation,
                 name = retagNameRef name,
                 requestName = retagNameRef requestName,
+                typeParameters = map retagGenericParameter typeParameters,
                 parameters = parameters',
                 returnType = retagSyntacticType returnType,
                 sourceSpan = sourceSpan
