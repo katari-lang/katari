@@ -198,7 +198,9 @@ jsonStdlibSource =
     [ "@\"Parse a JSON-encoded string into a `json` value. Raises `json_parse_error` on malformed input.\"",
       "primitive parse(text: string) -> json with json_parse_error",
       "@\"Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).\"",
-      "primitive stringify(value: json) -> string"
+      "primitive stringify(value: json) -> string",
+      "@\"Reflect a runtime value into the `json` union: string / number / boolean / null pass through, arrays and (untagged) records / objects map recursively. Use it to embed dynamic data (e.g. a model's tool arguments) into a `json` request you build in Katari. Throws if the value is (or nests) a secret, a closure, or a tagged `data` value other than a `json_*` constructor.\"",
+      "primitive of(value: unknown) -> json"
     ]
 
 -- | The @primitive.record@ sub-module source. Users call these as

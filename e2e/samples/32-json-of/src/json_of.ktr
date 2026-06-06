@@ -1,0 +1,5 @@
+@"json.of reflects a dynamic (untagged) record/array/scalar into the json union, so it can be stringified — the bridge for embedding runtime values into a json you build in Katari."
+agent main() -> string {
+  let dynamic = { items = [1, 2, 3] }
+  json.stringify(value = json.of(value = dynamic))
+}

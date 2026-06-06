@@ -675,6 +675,10 @@ export async function executePrim(
       const raw = jsonTaggedToRaw(await materializeValueDeep(value, materialize));
       return mkString(JSON.stringify(raw));
     }
+    case "primitive.json.of": {
+      const value = req(args, "value");
+      return valueToJsonTagged(await materializeValueDeep(value, materialize));
+    }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
   }
@@ -745,6 +749,68 @@ function jsonToTagged(raw: unknown): Value {
     };
   }
   throw new RecoverableEngineError(`prim json.parse: unexpected JSON value of type ${typeof raw}`);
+}
+
+// In-memory `Value` → tagged `json` value (the `json.of` reflection). The value
+// is already materialized (refs resolved), so strings are inline. Scalars map to
+// their `json_*` constructor; arrays and untagged records recurse; a value that
+// is already a `json_*` tagged record passes through unchanged. Anything that
+// cannot be JSON (a secret — refused to avoid laundering taint — a closure /
+// agent / file, or some other tagged `data` value) raises.
+const JSON_CTORS = new Set([
+  JSON_NULL_QNAME,
+  JSON_BOOLEAN_QNAME,
+  JSON_INTEGER_QNAME,
+  JSON_NUMBER_QNAME,
+  JSON_STRING_QNAME,
+  JSON_ARRAY_QNAME,
+  JSON_OBJECT_QNAME,
+]);
+function valueToJsonTagged(value: Value): Value {
+  switch (value.kind) {
+    case "null":
+      return { kind: "record", ctor: JSON_NULL_QNAME, entries: {} };
+    case "boolean":
+      return { kind: "record", ctor: JSON_BOOLEAN_QNAME, entries: { value } };
+    case "number":
+      return {
+        kind: "record",
+        ctor: Number.isInteger(value.value) ? JSON_INTEGER_QNAME : JSON_NUMBER_QNAME,
+        entries: { value },
+      };
+    case "string":
+      return { kind: "record", ctor: JSON_STRING_QNAME, entries: { value } };
+    case "array":
+      return {
+        kind: "record",
+        ctor: JSON_ARRAY_QNAME,
+        entries: { items: { kind: "array", elements: value.elements.map(valueToJsonTagged) } },
+      };
+    case "record": {
+      // Already a json value? Pass it through (idempotent).
+      if (value.ctor !== undefined && JSON_CTORS.has(value.ctor)) return value;
+      if (value.ctor !== undefined) {
+        throw new RecoverableEngineError(
+          `prim json.of: cannot encode a tagged '${value.ctor}' value as JSON (only json_* / plain records)`,
+        );
+      }
+      const entries: Record<string, Value> = {};
+      for (const [key, field] of Object.entries(value.entries)) {
+        entries[key] = valueToJsonTagged(field);
+      }
+      return {
+        kind: "record",
+        ctor: JSON_OBJECT_QNAME,
+        entries: { entries: { kind: "record", entries } },
+      };
+    }
+    case "secret":
+      throw new RecoverableEngineError(
+        "prim json.of: refusing to encode a secret value (would launder taint)",
+      );
+    default:
+      throw new RecoverableEngineError(`prim json.of: cannot encode a ${value.kind} value as JSON`);
+  }
 }
 
 // Tagged `json` value → JSON-encodable raw. The compiler's `json` type

@@ -178,8 +178,25 @@
     "112": {
       "body": {
         "defaults": {},
-        "description": "Absolute value (integer when the operand is integer).",
+        "description": "Reflect a runtime value into the `json` union: string / number / boolean / null pass through, arrays and (untagged) records / objects map recursively. Use it to embed dynamic data (e.g. a model's tool arguments) into a `json` request you build in Katari. Throws if the value is (or nests) a secret, a closure, or a tagged `data` value other than a `json_*` constructor.",
         "entryBody": 113,
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "of",
+        "outputSchema": "{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_array\"},\"items\":{\"items\":{\"anyOf\":[{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_null\"}},\"required\":[\"$constructor\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_boolean\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_integer\"},\"value\":{\"type\":\"integer\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_number\"},\"value\":{\"type\":\"number\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"$constructor\",\"value\"],\"type\":\"object\"},{},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]},\"type\":\"array\"}},\"required\":[\"$constructor\",\"items\"],\"type\":\"object\"},{\"additionalProperties\":true,\"properties\":{\"$constructor\":{\"const\":\"primitive.json_object\"},\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"$constructor\",\"entries\"],\"type\":\"object\"}]}",
+        "qualifiedName": "primitive.json.of",
+        "requestsSchema": "[]"
+      },
+      "kind": "blockAgent"
+    },
+    "113": {
+      "body": "primitive.json.of",
+      "kind": "blockPrim"
+    },
+    "114": {
+      "body": {
+        "defaults": {},
+        "description": "Absolute value (integer when the operand is integer).",
+        "entryBody": 115,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "abs",
         "outputSchema": "{\"type\":\"number\"}",
@@ -188,15 +205,15 @@
       },
       "kind": "blockAgent"
     },
-    "113": {
+    "115": {
       "body": "primitive.math.abs",
       "kind": "blockPrim"
     },
-    "114": {
+    "116": {
       "body": {
         "defaults": {},
         "description": "The smaller of two numbers (integer when both are integers).",
-        "entryBody": 115,
+        "entryBody": 117,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "min",
         "outputSchema": "{\"type\":\"number\"}",
@@ -205,15 +222,15 @@
       },
       "kind": "blockAgent"
     },
-    "115": {
+    "117": {
       "body": "primitive.math.min",
       "kind": "blockPrim"
     },
-    "116": {
+    "118": {
       "body": {
         "defaults": {},
         "description": "The larger of two numbers (integer when both are integers).",
-        "entryBody": 117,
+        "entryBody": 119,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"lhs\":{\"type\":\"number\"},\"rhs\":{\"type\":\"number\"}},\"required\":[\"lhs\",\"rhs\"],\"type\":\"object\"}",
         "name": "max",
         "outputSchema": "{\"type\":\"number\"}",
@@ -222,25 +239,8 @@
       },
       "kind": "blockAgent"
     },
-    "117": {
-      "body": "primitive.math.max",
-      "kind": "blockPrim"
-    },
-    "118": {
-      "body": {
-        "defaults": {},
-        "description": "Round down to the nearest integer.",
-        "entryBody": 119,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "floor",
-        "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.math.floor",
-        "requestsSchema": "[]"
-      },
-      "kind": "blockAgent"
-    },
     "119": {
-      "body": "primitive.math.floor",
+      "body": "primitive.math.max",
       "kind": "blockPrim"
     },
     "12": {
@@ -250,8 +250,25 @@
     "120": {
       "body": {
         "defaults": {},
-        "description": "Round up to the nearest integer.",
+        "description": "Round down to the nearest integer.",
         "entryBody": 121,
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "floor",
+        "outputSchema": "{\"type\":\"integer\"}",
+        "qualifiedName": "primitive.math.floor",
+        "requestsSchema": "[]"
+      },
+      "kind": "blockAgent"
+    },
+    "121": {
+      "body": "primitive.math.floor",
+      "kind": "blockPrim"
+    },
+    "122": {
+      "body": {
+        "defaults": {},
+        "description": "Round up to the nearest integer.",
+        "entryBody": 123,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "ceil",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -260,15 +277,15 @@
       },
       "kind": "blockAgent"
     },
-    "121": {
+    "123": {
       "body": "primitive.math.ceil",
       "kind": "blockPrim"
     },
-    "122": {
+    "124": {
       "body": {
         "defaults": {},
         "description": "Round to the nearest integer (ties away from zero).",
-        "entryBody": 123,
+        "entryBody": 125,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"number\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "round",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -277,15 +294,15 @@
       },
       "kind": "blockAgent"
     },
-    "123": {
+    "125": {
       "body": "primitive.math.round",
       "kind": "blockPrim"
     },
-    "124": {
+    "126": {
       "body": {
         "defaults": {},
         "description": "Construct an empty record.",
-        "entryBody": 125,
+        "entryBody": 127,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
         "name": "empty",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
@@ -294,15 +311,15 @@
       },
       "kind": "blockAgent"
     },
-    "125": {
+    "127": {
       "body": "primitive.record.empty",
       "kind": "blockPrim"
     },
-    "126": {
+    "128": {
       "body": {
         "defaults": {},
         "description": "Retrieve a record entry by key. Returns null when the key is absent.",
-        "entryBody": 127,
+        "entryBody": 129,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "get",
         "outputSchema": "{}",
@@ -311,25 +328,8 @@
       },
       "kind": "blockAgent"
     },
-    "127": {
-      "body": "primitive.record.get",
-      "kind": "blockPrim"
-    },
-    "128": {
-      "body": {
-        "defaults": {},
-        "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
-        "entryBody": 129,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"value\":{}},\"required\":[\"key\",\"record\",\"value\"],\"type\":\"object\"}",
-        "name": "set",
-        "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
-        "qualifiedName": "primitive.record.set",
-        "requestsSchema": "[]"
-      },
-      "kind": "blockAgent"
-    },
     "129": {
-      "body": "primitive.record.set",
+      "body": "primitive.record.get",
       "kind": "blockPrim"
     },
     "13": {
@@ -348,8 +348,25 @@
     "130": {
       "body": {
         "defaults": {},
-        "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
+        "description": "Insert or replace an entry, returning a fresh record (records are immutable).",
         "entryBody": 131,
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"},\"value\":{}},\"required\":[\"key\",\"record\",\"value\"],\"type\":\"object\"}",
+        "name": "set",
+        "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
+        "qualifiedName": "primitive.record.set",
+        "requestsSchema": "[]"
+      },
+      "kind": "blockAgent"
+    },
+    "131": {
+      "body": "primitive.record.set",
+      "kind": "blockPrim"
+    },
+    "132": {
+      "body": {
+        "defaults": {},
+        "description": "Remove an entry by key. Returns the record unchanged when the key is absent.",
+        "entryBody": 133,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "remove",
         "outputSchema": "{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}",
@@ -358,15 +375,15 @@
       },
       "kind": "blockAgent"
     },
-    "131": {
+    "133": {
       "body": "primitive.record.remove",
       "kind": "blockPrim"
     },
-    "132": {
+    "134": {
       "body": {
         "defaults": {},
         "description": "List the keys present in the record (insertion order is not guaranteed).",
-        "entryBody": 133,
+        "entryBody": 135,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
         "name": "keys",
         "outputSchema": "{\"items\":{\"type\":\"string\"},\"type\":\"array\"}",
@@ -375,15 +392,15 @@
       },
       "kind": "blockAgent"
     },
-    "133": {
+    "135": {
       "body": "primitive.record.keys",
       "kind": "blockPrim"
     },
-    "134": {
+    "136": {
       "body": {
         "defaults": {},
         "description": "True if the record carries an entry under the given key.",
-        "entryBody": 135,
+        "entryBody": 137,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"key\":{\"type\":\"string\"},\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"key\",\"record\"],\"type\":\"object\"}",
         "name": "has",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -392,15 +409,15 @@
       },
       "kind": "blockAgent"
     },
-    "135": {
+    "137": {
       "body": "primitive.record.has",
       "kind": "blockPrim"
     },
-    "136": {
+    "138": {
       "body": {
         "defaults": {},
         "description": "Number of entries in the record.",
-        "entryBody": 137,
+        "entryBody": 139,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"record\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"record\"],\"type\":\"object\"}",
         "name": "size",
         "outputSchema": "{\"type\":\"integer\"}",
@@ -409,25 +426,8 @@
       },
       "kind": "blockAgent"
     },
-    "137": {
-      "body": "primitive.record.size",
-      "kind": "blockPrim"
-    },
-    "138": {
-      "body": {
-        "defaults": {},
-        "description": "Number of Unicode code points in the string.",
-        "entryBody": 139,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
-        "name": "length",
-        "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.string.length",
-        "requestsSchema": "[]"
-      },
-      "kind": "blockAgent"
-    },
     "139": {
-      "body": "primitive.string.length",
+      "body": "primitive.record.size",
       "kind": "blockPrim"
     },
     "14": {
@@ -437,8 +437,25 @@
     "140": {
       "body": {
         "defaults": {},
-        "description": "The sub-string from @start@ (inclusive) to @end@ (exclusive), counted in code points.",
+        "description": "Number of Unicode code points in the string.",
         "entryBody": 141,
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
+        "name": "length",
+        "outputSchema": "{\"type\":\"integer\"}",
+        "qualifiedName": "primitive.string.length",
+        "requestsSchema": "[]"
+      },
+      "kind": "blockAgent"
+    },
+    "141": {
+      "body": "primitive.string.length",
+      "kind": "blockPrim"
+    },
+    "142": {
+      "body": {
+        "defaults": {},
+        "description": "The sub-string from @start@ (inclusive) to @end@ (exclusive), counted in code points.",
+        "entryBody": 143,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"end\":{\"type\":\"integer\"},\"start\":{\"type\":\"integer\"},\"value\":{\"type\":\"string\"}},\"required\":[\"end\",\"start\",\"value\"],\"type\":\"object\"}",
         "name": "slice",
         "outputSchema": "{\"type\":\"string\"}",
@@ -447,15 +464,15 @@
       },
       "kind": "blockAgent"
     },
-    "141": {
+    "143": {
       "body": "primitive.string.slice",
       "kind": "blockPrim"
     },
-    "142": {
+    "144": {
       "body": {
         "defaults": {},
         "description": "True if @substring@ occurs anywhere in @value@.",
-        "entryBody": 143,
+        "entryBody": 145,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"substring\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"substring\",\"value\"],\"type\":\"object\"}",
         "name": "contains",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -464,15 +481,15 @@
       },
       "kind": "blockAgent"
     },
-    "143": {
+    "145": {
       "body": "primitive.string.contains",
       "kind": "blockPrim"
     },
-    "144": {
+    "146": {
       "body": {
         "defaults": {},
         "description": "True if @value@ begins with @prefix@.",
-        "entryBody": 145,
+        "entryBody": 147,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"prefix\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"prefix\",\"value\"],\"type\":\"object\"}",
         "name": "starts_with",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -481,15 +498,15 @@
       },
       "kind": "blockAgent"
     },
-    "145": {
+    "147": {
       "body": "primitive.string.starts_with",
       "kind": "blockPrim"
     },
-    "146": {
+    "148": {
       "body": {
         "defaults": {},
         "description": "True if @value@ ends with @suffix@.",
-        "entryBody": 147,
+        "entryBody": 149,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"suffix\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"suffix\",\"value\"],\"type\":\"object\"}",
         "name": "ends_with",
         "outputSchema": "{\"type\":\"boolean\"}",
@@ -498,25 +515,8 @@
       },
       "kind": "blockAgent"
     },
-    "147": {
-      "body": "primitive.string.ends_with",
-      "kind": "blockPrim"
-    },
-    "148": {
-      "body": {
-        "defaults": {},
-        "description": "Code-point index of the first occurrence of @substring@, or -1 if absent.",
-        "entryBody": 149,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"substring\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"substring\",\"value\"],\"type\":\"object\"}",
-        "name": "index_of",
-        "outputSchema": "{\"type\":\"integer\"}",
-        "qualifiedName": "primitive.string.index_of",
-        "requestsSchema": "[]"
-      },
-      "kind": "blockAgent"
-    },
     "149": {
-      "body": "primitive.string.index_of",
+      "body": "primitive.string.ends_with",
       "kind": "blockPrim"
     },
     "15": {
@@ -535,8 +535,25 @@
     "150": {
       "body": {
         "defaults": {},
-        "description": "Upper-case the string.",
+        "description": "Code-point index of the first occurrence of @substring@, or -1 if absent.",
         "entryBody": 151,
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"substring\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"substring\",\"value\"],\"type\":\"object\"}",
+        "name": "index_of",
+        "outputSchema": "{\"type\":\"integer\"}",
+        "qualifiedName": "primitive.string.index_of",
+        "requestsSchema": "[]"
+      },
+      "kind": "blockAgent"
+    },
+    "151": {
+      "body": "primitive.string.index_of",
+      "kind": "blockPrim"
+    },
+    "152": {
+      "body": {
+        "defaults": {},
+        "description": "Upper-case the string.",
+        "entryBody": 153,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "upper",
         "outputSchema": "{\"type\":\"string\"}",
@@ -545,15 +562,15 @@
       },
       "kind": "blockAgent"
     },
-    "151": {
+    "153": {
       "body": "primitive.string.upper",
       "kind": "blockPrim"
     },
-    "152": {
+    "154": {
       "body": {
         "defaults": {},
         "description": "Lower-case the string.",
-        "entryBody": 153,
+        "entryBody": 155,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "lower",
         "outputSchema": "{\"type\":\"string\"}",
@@ -562,15 +579,15 @@
       },
       "kind": "blockAgent"
     },
-    "153": {
+    "155": {
       "body": "primitive.string.lower",
       "kind": "blockPrim"
     },
-    "154": {
+    "156": {
       "body": {
         "defaults": {},
         "description": "Strip leading and trailing whitespace.",
-        "entryBody": 155,
+        "entryBody": 157,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"type\":\"object\"}",
         "name": "trim",
         "outputSchema": "{\"type\":\"string\"}",
@@ -579,15 +596,15 @@
       },
       "kind": "blockAgent"
     },
-    "155": {
+    "157": {
       "body": "primitive.string.trim",
       "kind": "blockPrim"
     },
-    "156": {
+    "158": {
       "body": {
         "defaults": {},
         "description": "Split on every occurrence of @separator@. An empty separator splits into code points.",
-        "entryBody": 157,
+        "entryBody": 159,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"separator\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"separator\",\"value\"],\"type\":\"object\"}",
         "name": "split",
         "outputSchema": "{\"items\":{\"type\":\"string\"},\"type\":\"array\"}",
@@ -596,25 +613,8 @@
       },
       "kind": "blockAgent"
     },
-    "157": {
-      "body": "primitive.string.split",
-      "kind": "blockPrim"
-    },
-    "158": {
-      "body": {
-        "defaults": {},
-        "description": "Join the parts with @separator@ between them.",
-        "entryBody": 159,
-        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"parts\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"},\"separator\":{\"type\":\"string\"}},\"required\":[\"parts\",\"separator\"],\"type\":\"object\"}",
-        "name": "join",
-        "outputSchema": "{\"type\":\"string\"}",
-        "qualifiedName": "primitive.string.join",
-        "requestsSchema": "[]"
-      },
-      "kind": "blockAgent"
-    },
     "159": {
-      "body": "primitive.string.join",
+      "body": "primitive.string.split",
       "kind": "blockPrim"
     },
     "16": {
@@ -624,8 +624,25 @@
     "160": {
       "body": {
         "defaults": {},
-        "description": "Replace every occurrence of @pattern@ with @replacement@ (literal, not a regex).",
+        "description": "Join the parts with @separator@ between them.",
         "entryBody": 161,
+        "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"parts\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"},\"separator\":{\"type\":\"string\"}},\"required\":[\"parts\",\"separator\"],\"type\":\"object\"}",
+        "name": "join",
+        "outputSchema": "{\"type\":\"string\"}",
+        "qualifiedName": "primitive.string.join",
+        "requestsSchema": "[]"
+      },
+      "kind": "blockAgent"
+    },
+    "161": {
+      "body": "primitive.string.join",
+      "kind": "blockPrim"
+    },
+    "162": {
+      "body": {
+        "defaults": {},
+        "description": "Replace every occurrence of @pattern@ with @replacement@ (literal, not a regex).",
+        "entryBody": 163,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"pattern\":{\"type\":\"string\"},\"replacement\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"pattern\",\"replacement\",\"value\"],\"type\":\"object\"}",
         "name": "replace",
         "outputSchema": "{\"type\":\"string\"}",
@@ -634,7 +651,7 @@
       },
       "kind": "blockAgent"
     },
-    "161": {
+    "163": {
       "body": "primitive.string.replace",
       "kind": "blockPrim"
     },
@@ -1448,6 +1465,7 @@
     "primitive.get_field": 50,
     "primitive.get_metadata": 52,
     "primitive.gt": 23,
+    "primitive.json.of": 112,
     "primitive.json.parse": 108,
     "primitive.json.stringify": 110,
     "primitive.json_array": 64,
@@ -1460,37 +1478,37 @@
     "primitive.json_string": 63,
     "primitive.le": 21,
     "primitive.lt": 19,
-    "primitive.math.abs": 112,
-    "primitive.math.ceil": 120,
-    "primitive.math.floor": 118,
-    "primitive.math.max": 116,
-    "primitive.math.min": 114,
-    "primitive.math.round": 122,
+    "primitive.math.abs": 114,
+    "primitive.math.ceil": 122,
+    "primitive.math.floor": 120,
+    "primitive.math.max": 118,
+    "primitive.math.min": 116,
+    "primitive.math.round": 124,
     "primitive.mod": 9,
     "primitive.mul": 7,
     "primitive.ne": 17,
     "primitive.neg": 13,
     "primitive.not": 31,
     "primitive.or": 29,
-    "primitive.record.empty": 124,
-    "primitive.record.get": 126,
-    "primitive.record.has": 134,
-    "primitive.record.keys": 132,
-    "primitive.record.remove": 130,
-    "primitive.record.set": 128,
-    "primitive.record.size": 136,
-    "primitive.string.contains": 142,
-    "primitive.string.ends_with": 146,
-    "primitive.string.index_of": 148,
-    "primitive.string.join": 158,
-    "primitive.string.length": 138,
-    "primitive.string.lower": 152,
-    "primitive.string.replace": 160,
-    "primitive.string.slice": 140,
-    "primitive.string.split": 156,
-    "primitive.string.starts_with": 144,
-    "primitive.string.trim": 154,
-    "primitive.string.upper": 150,
+    "primitive.record.empty": 126,
+    "primitive.record.get": 128,
+    "primitive.record.has": 136,
+    "primitive.record.keys": 134,
+    "primitive.record.remove": 132,
+    "primitive.record.set": 130,
+    "primitive.record.size": 138,
+    "primitive.string.contains": 144,
+    "primitive.string.ends_with": 148,
+    "primitive.string.index_of": 150,
+    "primitive.string.join": 160,
+    "primitive.string.length": 140,
+    "primitive.string.lower": 154,
+    "primitive.string.replace": 162,
+    "primitive.string.slice": 142,
+    "primitive.string.split": 158,
+    "primitive.string.starts_with": 146,
+    "primitive.string.trim": 156,
+    "primitive.string.upper": 152,
     "primitive.string_to_file": 46,
     "primitive.sub": 5,
     "primitive.throw": 57,
@@ -1519,61 +1537,63 @@
       "11": "prim:div:agent",
       "110": "prim:stringify:agent",
       "111": "prim:primitive.json.stringify:leaf",
-      "112": "prim:abs:agent",
-      "113": "prim:primitive.math.abs:leaf",
-      "114": "prim:min:agent",
-      "115": "prim:primitive.math.min:leaf",
-      "116": "prim:max:agent",
-      "117": "prim:primitive.math.max:leaf",
-      "118": "prim:floor:agent",
-      "119": "prim:primitive.math.floor:leaf",
+      "112": "prim:of:agent",
+      "113": "prim:primitive.json.of:leaf",
+      "114": "prim:abs:agent",
+      "115": "prim:primitive.math.abs:leaf",
+      "116": "prim:min:agent",
+      "117": "prim:primitive.math.min:leaf",
+      "118": "prim:max:agent",
+      "119": "prim:primitive.math.max:leaf",
       "12": "prim:primitive.div:leaf",
-      "120": "prim:ceil:agent",
-      "121": "prim:primitive.math.ceil:leaf",
-      "122": "prim:round:agent",
-      "123": "prim:primitive.math.round:leaf",
-      "124": "prim:empty:agent",
-      "125": "prim:primitive.record.empty:leaf",
-      "126": "prim:get:agent",
-      "127": "prim:primitive.record.get:leaf",
-      "128": "prim:set:agent",
-      "129": "prim:primitive.record.set:leaf",
+      "120": "prim:floor:agent",
+      "121": "prim:primitive.math.floor:leaf",
+      "122": "prim:ceil:agent",
+      "123": "prim:primitive.math.ceil:leaf",
+      "124": "prim:round:agent",
+      "125": "prim:primitive.math.round:leaf",
+      "126": "prim:empty:agent",
+      "127": "prim:primitive.record.empty:leaf",
+      "128": "prim:get:agent",
+      "129": "prim:primitive.record.get:leaf",
       "13": "prim:neg:agent",
-      "130": "prim:remove:agent",
-      "131": "prim:primitive.record.remove:leaf",
-      "132": "prim:keys:agent",
-      "133": "prim:primitive.record.keys:leaf",
-      "134": "prim:has:agent",
-      "135": "prim:primitive.record.has:leaf",
-      "136": "prim:size:agent",
-      "137": "prim:primitive.record.size:leaf",
-      "138": "prim:length:agent",
-      "139": "prim:primitive.string.length:leaf",
+      "130": "prim:set:agent",
+      "131": "prim:primitive.record.set:leaf",
+      "132": "prim:remove:agent",
+      "133": "prim:primitive.record.remove:leaf",
+      "134": "prim:keys:agent",
+      "135": "prim:primitive.record.keys:leaf",
+      "136": "prim:has:agent",
+      "137": "prim:primitive.record.has:leaf",
+      "138": "prim:size:agent",
+      "139": "prim:primitive.record.size:leaf",
       "14": "prim:primitive.neg:leaf",
-      "140": "prim:slice:agent",
-      "141": "prim:primitive.string.slice:leaf",
-      "142": "prim:contains:agent",
-      "143": "prim:primitive.string.contains:leaf",
-      "144": "prim:starts_with:agent",
-      "145": "prim:primitive.string.starts_with:leaf",
-      "146": "prim:ends_with:agent",
-      "147": "prim:primitive.string.ends_with:leaf",
-      "148": "prim:index_of:agent",
-      "149": "prim:primitive.string.index_of:leaf",
+      "140": "prim:length:agent",
+      "141": "prim:primitive.string.length:leaf",
+      "142": "prim:slice:agent",
+      "143": "prim:primitive.string.slice:leaf",
+      "144": "prim:contains:agent",
+      "145": "prim:primitive.string.contains:leaf",
+      "146": "prim:starts_with:agent",
+      "147": "prim:primitive.string.starts_with:leaf",
+      "148": "prim:ends_with:agent",
+      "149": "prim:primitive.string.ends_with:leaf",
       "15": "prim:eq:agent",
-      "150": "prim:upper:agent",
-      "151": "prim:primitive.string.upper:leaf",
-      "152": "prim:lower:agent",
-      "153": "prim:primitive.string.lower:leaf",
-      "154": "prim:trim:agent",
-      "155": "prim:primitive.string.trim:leaf",
-      "156": "prim:split:agent",
-      "157": "prim:primitive.string.split:leaf",
-      "158": "prim:join:agent",
-      "159": "prim:primitive.string.join:leaf",
+      "150": "prim:index_of:agent",
+      "151": "prim:primitive.string.index_of:leaf",
+      "152": "prim:upper:agent",
+      "153": "prim:primitive.string.upper:leaf",
+      "154": "prim:lower:agent",
+      "155": "prim:primitive.string.lower:leaf",
+      "156": "prim:trim:agent",
+      "157": "prim:primitive.string.trim:leaf",
+      "158": "prim:split:agent",
+      "159": "prim:primitive.string.split:leaf",
       "16": "prim:primitive.eq:leaf",
-      "160": "prim:replace:agent",
-      "161": "prim:primitive.string.replace:leaf",
+      "160": "prim:join:agent",
+      "161": "prim:primitive.string.join:leaf",
+      "162": "prim:replace:agent",
+      "163": "prim:primitive.string.replace:leaf",
       "17": "prim:ne:agent",
       "18": "prim:primitive.ne:leaf",
       "19": "prim:lt:agent",
