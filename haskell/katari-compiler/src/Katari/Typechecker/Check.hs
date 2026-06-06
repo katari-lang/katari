@@ -214,7 +214,7 @@ toDiagnostic = \case
     diagnosticError "K0224" "a spread argument ('...e') can't be mixed with named arguments" sourceSpan
   CheckErrorVarianceMismatch sourceSpan name declared ->
     diagnosticError
-      "K0225"
+      "K0228"
       ("type parameter '" <> name <> "' is declared '" <> declared <> "' but is not used that way (its inferred variance is incompatible)")
       sourceSpan
   CheckErrorInternal sourceSpan what ->

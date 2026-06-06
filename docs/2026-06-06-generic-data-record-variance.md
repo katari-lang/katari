@@ -1,8 +1,29 @@
 # Generic `data` + `record` simplification + type-application syntax + variance
 
-Status: **design** (2026-06-06). Implementation follows once the open questions
-below are settled. Motivated by the AI-library abstraction (needs `model[S]`,
-`session[S]`) and a confirmed soundness hole in `object <: record[V]`.
+Status: **implemented** (2026-06-06, branch `generic-data-record-variance`).
+All decisions below shipped; compiler 585/0, e2e 29/29. Motivated by the
+AI-library abstraction (needs `model[S]`, `session[S]`) and a confirmed
+soundness hole in `object <: record[V]`.
+
+Implementation notes (as shipped):
+- `record` is nullary; `unknown` is now a sound top (`subtypeAssert` only skips
+  when the *expected* type is `unknown`).
+- `SemanticTypeData` carries `[SemanticGenericArgument]` (type ∪ effect);
+  `MapSlot.dataApps :: Map QualifiedName [NormalizedGenericArg]`.
+- Variance is threaded (P1) via `DataFieldEnv` (now `Map QualifiedName DataInfo`)
+  through `normaliseSemantic` / `unionNT` / `intersectNT` / `subtypeNormalizedType`
+  — they all take the env. `DataInfo` stores param ids + variances + *un-normalized*
+  fields (breaks the build-env-vs-normalize circularity).
+- Variance inferred by a position-sign scan (`signsOfType`/`signsOfEffect` →
+  `signsToVariance`) + least-fixpoint (`inferVariances`). Explicit `in`/`out`
+  (`DeclaredVariance` on `GenericParameter`) checked `inferred <: declared`
+  (K0225). `out` is parsed contextually; `in` reuses the keyword.
+- Type-application syntax: `TypeApplication TypeArray [T]` for `array[T]`,
+  `TypeApplication (TypeName d) [..]` for generic data; args elaborate to type or
+  effect by their own resolution.
+- Field-access and match-binding substitute the use site's args into field types
+  (`box[integer].value : integer`). Schema substitutes args into field schemas.
+  IR erases generics (data is a tagged object). Golden: `05-generic-data`.
 
 ## 0. Summary of decisions
 
