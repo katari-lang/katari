@@ -59,6 +59,7 @@ import Katari.Typechecker.NormalizedType
     DataFieldEnv,
     NormalizedEffect (..),
     buildDataFieldEnv,
+    dataParamIdsOf,
     denormalise,
     denormaliseEffect,
     differenceNormalizedEffect,
@@ -315,7 +316,8 @@ buildBoundEnv parameters = Map.fromList . catMaybes <$> mapM one parameters
     one GenericParameter {name, upperBound} = case name.resolution of
       Just (ResolvedGenericParam genericsId) -> do
         boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
-        pure (Just (genericsId, normaliseSemantic boundType))
+        dataFieldEnv <- asks (.checkDataFieldEnv)
+        pure (Just (genericsId, normaliseSemantic dataFieldEnv boundType))
       _ -> pure Nothing
 
 -- | Gather every generic callable in the module: its 'VariableResolution'
@@ -353,38 +355,6 @@ genericParamInfos = fmap catMaybes . mapM paramInfo
         boundType <- maybe (pure SemanticTypeUnknown) elaborateType upperBound
         pure (Just (genericsId, kind, boundType))
       _ -> pure Nothing
-
--- | Substitute concrete types / effects for generic parameters throughout a
--- type (used to instantiate a generic callable's signature at @foo[args]@):
--- type generics from @typeSubstitution@, effect generics (inside function
--- effects) from @effectSubstitution@.
-substituteGenerics ::
-  Map GenericsId (SemanticType Resolved) ->
-  Map GenericsId (SemanticEffect Resolved) ->
-  SemanticType Resolved ->
-  SemanticType Resolved
-substituteGenerics typeSubstitution effectSubstitution = go
-  where
-    go = \case
-      SemanticTypeGeneric genericsId -> Map.findWithDefault (SemanticTypeGeneric genericsId) genericsId typeSubstitution
-      SemanticTypeArray element -> SemanticTypeArray (go element)
-      SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
-      SemanticTypeUnion branches -> unionSemantic (map go branches)
-      SemanticTypeRecord -> SemanticTypeRecord
-      SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
-      SemanticTypeFunction parameterType returnType effect ->
-        SemanticTypeFunction
-          (go parameterType)
-          (go returnType)
-          (substituteEffect effectSubstitution effect)
-      other -> other
-
--- | Substitute concrete effects for effect generics throughout an effect tree.
-substituteEffect :: Map GenericsId (SemanticEffect Resolved) -> SemanticEffect Resolved -> SemanticEffect Resolved
-substituteEffect effectSubstitution = \case
-  SemanticEffectGeneric genericsId -> Map.findWithDefault (SemanticEffectGeneric genericsId) genericsId effectSubstitution
-  SemanticEffectUnion branches -> unionEffects (map (substituteEffect effectSubstitution) branches)
-  leaf -> leaf
 
 -- | The variable a callee resolves to, if it is a plain name / qualified
 -- reference (the only shapes that can name a generic callable).
@@ -544,7 +514,9 @@ resolveTypeRef nameRef = case nameRef.resolution of
             pure (AsType SemanticTypeUnknown)
           else local (\e -> e {checkSynonymVisited = Set.insert qualifiedName e.checkSynonymVisited}) (elaborateTypeOrEffect rhs)
       Just TypeData {typeSynonymRhs = Nothing} ->
-        pure (AsType (SemanticTypeData qualifiedName))
+        -- A bare data name (no @[...]@). Generic data applied to explicit args
+        -- comes through 'TypeApplication' (Phase 1); here the arg list is empty.
+        pure (AsType (SemanticTypeData qualifiedName []))
       Nothing ->
         pure (AsType SemanticTypeUnknown)
   Just (ResolvedGenericParam genericsId) -> pure (AsType (SemanticTypeGeneric genericsId))
@@ -608,7 +580,7 @@ subtypeAssert sourceSpan actual expected
   | otherwise = do
       dataFieldEnv <- asks (.checkDataFieldEnv)
       boundEnv <- asks (.checkBoundEnv)
-      let holds = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic actual) (normaliseSemantic expected)
+      let holds = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic dataFieldEnv actual) (normaliseSemantic dataFieldEnv expected)
       if holds then pure () else emitError (CheckErrorTypeMismatch sourceSpan actual expected)
   where
     isUnknown = \case SemanticTypeUnknown -> True; _ -> False
@@ -1024,7 +996,7 @@ assertMustExit :: SourceSpan -> SemanticType Resolved -> (SourceSpan -> CheckErr
 assertMustExit sourceSpan bodyType mkError = do
   dataFieldEnv <- asks (.checkDataFieldEnv)
   boundEnv <- asks (.checkBoundEnv)
-  let isNever = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic bodyType) (normaliseSemantic SemanticTypeNever)
+  let isNever = subtypeNormalizedType dataFieldEnv boundEnv (normaliseSemantic dataFieldEnv bodyType) (normaliseSemantic dataFieldEnv SemanticTypeNever)
   case bodyType of
     SemanticTypeUnknown -> pure ()
     _ | isNever -> pure ()
@@ -1260,7 +1232,8 @@ elaborateParameters parameters = do
 expandScrutinee :: SemanticType Resolved -> Check (SemanticType Resolved)
 expandScrutinee subject = do
   boundEnv <- asks (.checkBoundEnv)
-  pure (denormalise (expandGenerics boundEnv (normaliseSemantic subject)))
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  pure (denormalise (expandGenerics dataFieldEnv boundEnv (normaliseSemantic dataFieldEnv subject)))
 
 walkPattern :: SemanticType Resolved -> Pattern Identified -> Check (Pattern Zonked, [(VariableResolution, SemanticType Resolved)])
 walkPattern subject = \case
@@ -1291,7 +1264,7 @@ walkPattern subject = \case
         let fieldSubject = Map.findWithDefault SemanticTypeUnknown label.text fieldSubjects
         (sub', bindings) <- walkPattern fieldSubject sub
         pure ((retagNameRef label, sub'), bindings)
-    let patternType = maybe SemanticTypeUnknown SemanticTypeData constructorName.resolution
+    let patternType = maybe SemanticTypeUnknown (\qualifiedName -> SemanticTypeData qualifiedName []) constructorName.resolution
     pure
       ( PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier = fmap retagNameRef moduleQualifier, constructorName = retagNameRef constructorName, parameters = map fst walked, sourceSpan = sourceSpan, typeOf = patternType},
         concatMap snd walked
@@ -1373,10 +1346,17 @@ fieldType sourceSpan subject label = case subject of
     Just field -> pure field.parameterType
     Nothing -> missing
   SemanticTypeRecord -> pure SemanticTypeUnknown
-  SemanticTypeData qualifiedName ->
+  SemanticTypeData qualifiedName arguments ->
     constructorFieldTypes (Just qualifiedName) >>= \fields ->
       case Map.lookup label fields of
-        Just t -> pure t
+        -- Specialise the declared field type by the application args (so
+        -- @box[integer].x@ reads @integer@, not the abstract parameter).
+        Just t -> do
+          dataFieldEnv <- asks (.checkDataFieldEnv)
+          let paramIds = dataParamIdsOf dataFieldEnv qualifiedName
+              typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
+              effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
+          pure (substituteGenerics typeSubstitution effectSubstitution t)
         Nothing -> missing
   SemanticTypeUnion branches -> unionSemantic <$> mapM (\b -> fieldType sourceSpan b label) branches
   SemanticTypeUnknown -> pure SemanticTypeUnknown
@@ -1584,8 +1564,19 @@ checkNonAgentDeclaration = \case
             pure (fieldName, Parameter {parameterType = elaborated, optional = isJust defaultValue})
         )
         parameters
-    let returnType = case typeName.resolution of
-          Just (ResolvedNamedType qualifiedName) -> SemanticTypeData qualifiedName
+    let -- The constructor returns the data applied to its own generic
+        -- parameters (@data foo[T] -> foo[T]@). These self-applied args are how
+        -- 'buildDataFieldEnv' recovers the parameter ids (and an instantiation
+        -- @foo[int]@ substitutes them).
+        selfArgs =
+          [ case parameter.kind of
+              GenericKindType -> SemanticGenericArgumentType (SemanticTypeGeneric genericsId)
+              GenericKindEffect -> SemanticGenericArgumentEffect (SemanticEffectGeneric genericsId)
+            | parameter <- typeParameters,
+              Just (ResolvedGenericParam genericsId) <- [parameter.name.resolution]
+          ]
+        returnType = case typeName.resolution of
+          Just (ResolvedNamedType qualifiedName) -> SemanticTypeData qualifiedName selfArgs
           _ -> SemanticTypeUnknown
         sig = functionType (Map.fromList fields) returnType emptyEffect
         zonked =

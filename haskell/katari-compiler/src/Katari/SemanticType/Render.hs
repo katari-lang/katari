@@ -45,7 +45,10 @@ renderSemanticType = render False
       ST.SemanticTypeUnion branches ->
         let body = Text.intercalate " | " (map (render True) branches)
          in if parenthesise then "(" <> body <> ")" else body
-      ST.SemanticTypeData qualifiedName -> qualifiedName.name
+      ST.SemanticTypeData qualifiedName arguments
+        | null arguments -> qualifiedName.name
+        | otherwise ->
+            qualifiedName.name <> "[" <> Text.intercalate ", " (map renderArgument arguments) <> "]"
       -- A raw generic parameter has no surface name in 'SemanticType' (the
       -- name lives in the declaration); hover usually sees the instantiated
       -- type instead, so a placeholder is sufficient here.
@@ -90,6 +93,12 @@ renderSemanticType = render False
     stripNull = \case
       ST.SemanticTypeUnion branches -> ST.unionSemantic (filter (/= ST.SemanticTypeNull) branches)
       other -> other
+    -- A generic @data@ argument: a type renders as itself, an effect as its
+    -- @with@-style text.
+    renderArgument :: ST.SemanticGenericArgument ST.Resolved -> Text
+    renderArgument = \case
+      ST.SemanticGenericArgumentType argumentType -> render False argumentType
+      ST.SemanticGenericArgumentEffect argumentEffect -> renderSemanticEffect argumentEffect
 
 -- | Render a 'SemanticEffect' as @a | b | c@ (the surface @with@ syntax),
 -- flattening the union tree. The empty (pure) effect renders to the empty

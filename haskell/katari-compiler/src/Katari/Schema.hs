@@ -84,8 +84,10 @@ import Katari.SemanticType
   ( Parameter (..),
     Resolved,
     SemanticEffect (..),
+    SemanticGenericArgument (..),
     SemanticType (..),
     functionParameters,
+    substituteGenerics,
   )
 import Katari.Typechecker.Identifier
   ( ConstructorData (..),
@@ -322,6 +324,9 @@ withDesc d JsonSchema {core, title, examples} =
 -- the original @data@ declaration.
 data DataInfo = DataInfo
   { dataQName :: QualifiedName,
+    -- | Generic parameter ids (positional, matching the application args), so a
+    -- @foo[args]@ reference substitutes them into the field types below.
+    dataParamIds :: [GenericsId],
     dataFields :: Map Text DataFieldInfo
   }
   deriving (Eq, Show)
@@ -366,6 +371,7 @@ buildDataDefs constructorMap topLevelTypes annotationsByQName =
     [ ( cd.constructorTypeQName,
         DataInfo
           ctorQName
+          (mapMaybe argGenericId returnArgs)
           ( Map.mapWithKey
               ( \label ty ->
                   DataFieldInfo
@@ -380,10 +386,15 @@ buildDataDefs constructorMap topLevelTypes annotationsByQName =
       | (ctorQName, cd) <- Map.toList constructorMap,
         let perFieldAnnotations =
               Map.findWithDefault Map.empty ctorQName annotationsByQName,
-        Just (SemanticTypeFunction paramObject _ _) <-
+        Just (SemanticTypeFunction paramObject (SemanticTypeData _ returnArgs) _) <-
           [Map.lookup ctorQName topLevelTypes],
         let fieldTypes = functionParameters paramObject
     ]
+  where
+    argGenericId = \case
+      SemanticGenericArgumentType (SemanticTypeGeneric genericsId) -> Just genericsId
+      SemanticGenericArgumentEffect (SemanticEffectGeneric genericsId) -> Just genericsId
+      _ -> Nothing
 
 -- ===========================================================================
 -- SemanticType -> JsonSchema
@@ -436,17 +447,21 @@ toCore dataDefs visited = \case
       }
   SemanticTypeUnion branches ->
     compactUnion (map (toCore dataDefs visited) branches)
-  SemanticTypeData typeId
+  SemanticTypeData typeId arguments
     | Set.member typeId visited ->
         -- Circular reference: break the cycle with an open schema.
         SchemaCoreUnknown
     | Just info <- Map.lookup typeId dataDefs ->
         let visited' = Set.insert typeId visited
             qnameStr = renderQualifiedName info.dataQName
+            -- Specialise a generic @data@: substitute the application args for
+            -- its parameters in each field type before emitting the schema.
+            typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip info.dataParamIds arguments]
+            effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip info.dataParamIds arguments]
             fieldProps =
               Map.map
                 ( \fi ->
-                    withDesc fi.fieldAnnotation (toJsonSchema dataDefs visited' fi.fieldType)
+                    withDesc fi.fieldAnnotation (toJsonSchema dataDefs visited' (substituteGenerics typeSubstitution effectSubstitution fi.fieldType))
                 )
                 info.dataFields
             ctorProp = plain SchemaCoreConst {value = toJSON qnameStr}
@@ -657,16 +672,22 @@ mentionsSecret dataDefs visited = \case
   SemanticTypeRecord -> False
   SemanticTypeFunction parameterType returnType _ ->
     recurse parameterType || recurse returnType
-  SemanticTypeData qualifiedName
-    | Set.member qualifiedName visited -> False
+  -- A generic arg can carry @secret@ (e.g. @box[secret]@), so check the args
+  -- directly in addition to the (un-substituted) field types.
+  SemanticTypeData qualifiedName arguments
+    | Set.member qualifiedName visited -> any argMentionsSecret arguments
     | Just info <- Map.lookup qualifiedName dataDefs ->
-        any
-          (mentionsSecret dataDefs (Set.insert qualifiedName visited) . (.fieldType))
-          (Map.elems info.dataFields)
-    | otherwise -> False
+        any argMentionsSecret arguments
+          || any
+            (mentionsSecret dataDefs (Set.insert qualifiedName visited) . (.fieldType))
+            (Map.elems info.dataFields)
+    | otherwise -> any argMentionsSecret arguments
   _ -> False
   where
     recurse = mentionsSecret dataDefs visited
+    argMentionsSecret = \case
+      SemanticGenericArgumentType argumentType -> recurse argumentType
+      SemanticGenericArgumentEffect _ -> False
 
 -- | Build a JSON Schema describing the input of any callable. The input is a
 -- /single/ value whose type is the function's parameter type; the schema is

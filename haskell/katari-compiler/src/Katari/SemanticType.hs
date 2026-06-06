@@ -96,8 +96,12 @@ data SemanticType phase where
   SemanticTypeTuple :: [SemanticType phase] -> SemanticType phase
   -- | Union of types. Convention: 0 or 2+ branches.
   SemanticTypeUnion :: [SemanticType phase] -> SemanticType phase
-  -- | Reference to a @data@ declaration.
-  SemanticTypeData :: QualifiedName -> SemanticType phase
+  -- | Reference to a (possibly generic) @data@ declaration applied to its
+  -- type / effect arguments (empty for a non-generic data). Positional, matching
+  -- the declaration's @typeParameters@; each is a type or effect
+  -- ('SemanticGenericArgument'). Field types come from substituting these for the
+  -- data's generic parameters.
+  SemanticTypeData :: QualifiedName -> [SemanticGenericArgument phase] -> SemanticType phase
   -- | An in-scope generic type parameter, identified by its 'GenericsId'.
   -- Abstract during the checking of a generic declaration's body (bounded
   -- above by its @extends@ clause); replaced by a concrete type at every
@@ -212,6 +216,56 @@ deriving instance Show (SemanticEffect phase)
 deriving instance Eq (SemanticEffect phase)
 
 deriving instance Ord (SemanticEffect phase)
+
+-- | One argument applied to a generic @data@ at a use site — a type or an
+-- effect (a @data@ may be generic over both, mirroring generic callables).
+-- Positional; the declaration's @typeParameters@ give each slot's kind.
+data SemanticGenericArgument phase where
+  SemanticGenericArgumentType :: SemanticType phase -> SemanticGenericArgument phase
+  SemanticGenericArgumentEffect :: SemanticEffect phase -> SemanticGenericArgument phase
+
+deriving instance Show (SemanticGenericArgument phase)
+
+deriving instance Eq (SemanticGenericArgument phase)
+
+deriving instance Ord (SemanticGenericArgument phase)
+
+-- | Substitute concrete types / effects for generic parameters throughout a
+-- type (used to instantiate a generic callable's signature at @foo[args]@ and a
+-- generic @data@'s field types at @data foo[args]@): type generics from
+-- @typeSubstitution@, effect generics (inside function effects and @data@ args)
+-- from @effectSubstitution@.
+substituteGenerics ::
+  Map GenericsId (SemanticType Resolved) ->
+  Map GenericsId (SemanticEffect Resolved) ->
+  SemanticType Resolved ->
+  SemanticType Resolved
+substituteGenerics typeSubstitution effectSubstitution = go
+  where
+    go = \case
+      SemanticTypeGeneric genericsId -> Map.findWithDefault (SemanticTypeGeneric genericsId) genericsId typeSubstitution
+      SemanticTypeArray element -> SemanticTypeArray (go element)
+      SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
+      SemanticTypeUnion branches -> unionSemantic (map go branches)
+      SemanticTypeRecord -> SemanticTypeRecord
+      SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
+      SemanticTypeData qualifiedName arguments -> SemanticTypeData qualifiedName (map goArg arguments)
+      SemanticTypeFunction parameterType returnType effect ->
+        SemanticTypeFunction
+          (go parameterType)
+          (go returnType)
+          (substituteEffect effectSubstitution effect)
+      other -> other
+    goArg = \case
+      SemanticGenericArgumentType semanticType -> SemanticGenericArgumentType (go semanticType)
+      SemanticGenericArgumentEffect semanticEffect -> SemanticGenericArgumentEffect (substituteEffect effectSubstitution semanticEffect)
+
+-- | Substitute concrete effects for effect generics throughout an effect tree.
+substituteEffect :: Map GenericsId (SemanticEffect Resolved) -> SemanticEffect Resolved -> SemanticEffect Resolved
+substituteEffect effectSubstitution = \case
+  SemanticEffectGeneric genericsId -> Map.findWithDefault (SemanticEffectGeneric genericsId) genericsId effectSubstitution
+  SemanticEffectUnion branches -> unionEffects (map (substituteEffect effectSubstitution) branches)
+  leaf -> leaf
 
 -- | The empty (pure) effect — \"this expression performs no request\". The
 -- canonical empty effect (cf. 'SemanticTypeNever'); identity for 'unionEffect'.

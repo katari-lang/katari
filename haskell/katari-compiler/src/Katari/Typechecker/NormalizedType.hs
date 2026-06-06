@@ -45,6 +45,7 @@ module Katari.Typechecker.NormalizedType
     subtypeEffect,
     DataFieldEnv,
     buildDataFieldEnv,
+    dataParamIdsOf,
     BoundEnv,
 
     -- * Helpers
@@ -69,12 +70,13 @@ where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Katari.Common (QualifiedName)
 import Katari.Id (GenericsId)
-import Katari.SemanticType (Parameter (..), Resolved, SemanticEffect (..), SemanticType (..), functionParameters, unionEffects)
+import Katari.SemanticType (Parameter (..), Resolved, SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), functionParameters, substituteGenerics, unionEffects)
 
 -- ---------------------------------------------------------------------------
 -- NormalizedType
@@ -200,24 +202,40 @@ requiredNormalizedField :: NormalizedType -> NormalizedParameter
 requiredNormalizedField parameterType = NormalizedParameter {parameterType = parameterType, optional = False}
 
 -- | Normalise / denormalise a single object field (preserving optionality).
-normaliseField :: Parameter Resolved -> NormalizedParameter
-normaliseField field = NormalizedParameter (normaliseSemantic field.parameterType) field.optional
+normaliseField :: DataFieldEnv -> Parameter Resolved -> NormalizedParameter
+normaliseField env field = NormalizedParameter (normaliseSemantic env field.parameterType) field.optional
 
 denormaliseField :: NormalizedParameter -> Parameter Resolved
 denormaliseField field = Parameter (denormalise field.parameterType) field.optional
 
+-- | Variance of a generic parameter — how the whole type relates when the arg
+-- at that position is replaced by a subtype. Lattice @bivariant \<:
+-- {covariant, contravariant} \<: invariant@ (bivariant most permissive,
+-- invariant most restrictive). Drives union / intersect / subtype of two
+-- applications of the same generic @data@.
+data Variance = Covariant | Contravariant | Invariant | Bivariant
+  deriving (Eq, Show)
+
+-- | One argument applied to a generic @data@ in the normalised form — a
+-- normalised type or effect (mirrors 'SemanticGenericArgument').
+data NormalizedGenericArg
+  = NormalizedGenericArgType NormalizedType
+  | NormalizedGenericArgEffect NormalizedEffect
+  deriving (Eq, Show)
+
 -- | Map layer — object, record and @data@ merged into one layer.
 --
---   * 'dataNames' is the set of @data@ type names inhabiting this type (the
---     discriminated-union part). Only the /name/ is stored — a data's
---     concrete fields are looked up on demand from an external env during
---     subtyping (the @data <: object@ rule), which keeps the normalized form
---     finite even for recursive @data@ (e.g. @data tree(left: tree)@) and
---     keeps union / intersect env-free.
---   * 'bare' is the structural part ('BareObj'). Data names are kept separate
---     from 'bare' (not absorbed into a record).
+--   * 'dataApps' maps each @data@ type name inhabiting this type (the
+--     discriminated-union part) to its applied type / effect arguments (empty
+--     for non-generic @data@). One entry per name: two applications of the same
+--     @data@ with differing args are combined per the parameters' variance
+--     (see 'unionBareObj'-level data handling), collapsing to one entry or to
+--     'NormalizedTypeUnknown' (invariant mismatch). A data's concrete fields are
+--     looked up on demand from the data env during subtyping (the @data \<:
+--     object@ rule, args substituted), keeping recursive @data@ finite.
+--   * 'bare' is the structural part ('BareObj'), kept separate from data names.
 data MapSlot = MapSlot
-  { dataNames :: Set QualifiedName,
+  { dataApps :: Map QualifiedName [NormalizedGenericArg],
     bare :: BareObj
   }
   deriving (Eq, Show)
@@ -367,7 +385,19 @@ emptyLayered =
 
 -- | The empty map slot: no @data@ names, no structural object.
 emptyMapSlot :: MapSlot
-emptyMapSlot = MapSlot {dataNames = Set.empty, bare = NoObj}
+emptyMapSlot = MapSlot {dataApps = Map.empty, bare = NoObj}
+
+-- | Denormalise a generic argument back to its 'SemanticGenericArgument'.
+denormaliseArg :: NormalizedGenericArg -> SemanticGenericArgument Resolved
+denormaliseArg = \case
+  NormalizedGenericArgType normalizedType -> SemanticGenericArgumentType (denormalise normalizedType)
+  NormalizedGenericArgEffect normalizedEffect -> SemanticGenericArgumentEffect (denormaliseEffect normalizedEffect)
+
+-- | Normalise a generic argument (a type or an effect).
+normaliseArg :: DataFieldEnv -> SemanticGenericArgument Resolved -> NormalizedGenericArg
+normaliseArg env = \case
+  SemanticGenericArgumentType semanticType -> NormalizedGenericArgType (normaliseSemantic env semanticType)
+  SemanticGenericArgumentEffect semanticEffect -> NormalizedGenericArgEffect (normaliseEffect semanticEffect)
 
 -- ---------------------------------------------------------------------------
 -- Denormalisation: NormalizedType -> SemanticType Resolved
@@ -454,8 +484,8 @@ seqBranches = \case
   Array elementType -> [SemanticTypeArray (denormalise elementType)]
 
 mapBranches :: MapSlot -> [SemanticType Resolved]
-mapBranches MapSlot {dataNames, bare} =
-  [SemanticTypeData qualifiedName | qualifiedName <- Set.toList dataNames]
+mapBranches MapSlot {dataApps, bare} =
+  [SemanticTypeData qualifiedName (map denormaliseArg arguments) | (qualifiedName, arguments) <- Map.toList dataApps]
     ++ case bare of
       NoObj -> []
       ClosedObj fields -> [SemanticTypeObject (Map.map denormaliseField fields)]
@@ -511,7 +541,7 @@ isEmptyFunction = \case
   _ -> False
 
 isEmptyMap :: MapSlot -> Bool
-isEmptyMap (MapSlot dataNames bare) = Set.null dataNames && case bare of
+isEmptyMap (MapSlot dataApps bare) = Map.null dataApps && case bare of
   NoObj -> True
   _ -> False
 
@@ -523,80 +553,86 @@ isEmptyMap (MapSlot dataNames bare) = Set.null dataNames && case bare of
 -- the canonical 'NormalizedType'. Inverse direction of 'denormalise', though
 -- the round-trip is not the identity (the product-normalisation rule
 -- collapses cross-component correlation in tuple unions).
-normaliseSemantic :: SemanticType Resolved -> NormalizedType
-normaliseSemantic = \case
-  SemanticTypeUnknown -> NormalizedTypeUnknown
-  SemanticTypeNever -> NormalizedTypeLayered emptyLayered
-  -- function-top: the only layer that's non-empty is the function
-  -- layer set to 'FunctionSlotAny'. This is the top element of the
-  -- function lattice — every concrete function shape is a subtype.
-  SemanticTypeFunctionAny ->
-    NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotAny}
-  SemanticTypeNull -> NormalizedTypeLayered emptyLayered {nullLayer = True}
-  SemanticTypeBoolean ->
-    NormalizedTypeLayered emptyLayered {booleanLayer = Set.fromList [True, False]}
-  SemanticTypeInteger ->
-    NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}
-  SemanticTypeNumber ->
-    NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotNumber}
-  SemanticTypeString ->
-    NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny}
-  SemanticTypeSecret ->
-    NormalizedTypeLayered emptyLayered {secretLayer = True}
-  SemanticTypeFile ->
-    NormalizedTypeLayered emptyLayered {fileLayer = True}
-  SemanticTypeLiteralInteger value ->
-    NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton value)}
-  SemanticTypeLiteralString value ->
-    NormalizedTypeLayered emptyLayered {stringLayer = StringSlotLiterals (Set.singleton value)}
-  SemanticTypeLiteralBoolean value ->
-    NormalizedTypeLayered emptyLayered {booleanLayer = Set.singleton value}
-  SemanticTypeArray element ->
-    NormalizedTypeLayered emptyLayered {seqLayer = Array (normaliseSemantic element)}
-  SemanticTypeTuple elements ->
-    NormalizedTypeLayered emptyLayered {seqLayer = Tuple (normaliseSemantic <$> elements)}
-  -- TODO(#48): fill the data's concrete fields via the read-only data-fields
-  -- env so the @data <: object@ (rule ii) edge can fire. For now the fields
-  -- are empty and a data only matches another data by name.
-  SemanticTypeData typeId ->
-    NormalizedTypeLayered emptyLayered {mapLayer = emptyMapSlot {dataNames = Set.singleton typeId}}
-  SemanticTypeGeneric genericsId ->
-    NormalizedTypeLayered emptyLayered {genericsLayer = Set.singleton genericsId}
-  SemanticTypeObject fields ->
-    NormalizedTypeLayered
-      emptyLayered
-        { mapLayer = emptyMapSlot {bare = ClosedObj (Map.map normaliseField fields)}
-        }
-  SemanticTypeRecord ->
-    NormalizedTypeLayered
-      emptyLayered
-        { mapLayer = emptyMapSlot {bare = RecordObj}
-        }
-  SemanticTypeFunction parameterType returnType effect ->
-    let shape =
-          FunctionShape
-            { parameter = normaliseSemantic parameterType,
-              returnType = normaliseSemantic returnType,
-              requests = normaliseEffect effect
+normaliseSemantic :: DataFieldEnv -> SemanticType Resolved -> NormalizedType
+normaliseSemantic env = go
+  where
+    go = \case
+      SemanticTypeUnknown -> NormalizedTypeUnknown
+      SemanticTypeNever -> NormalizedTypeLayered emptyLayered
+      -- function-top: the only layer that's non-empty is the function
+      -- layer set to 'FunctionSlotAny'. This is the top element of the
+      -- function lattice — every concrete function shape is a subtype.
+      SemanticTypeFunctionAny ->
+        NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotAny}
+      SemanticTypeNull -> NormalizedTypeLayered emptyLayered {nullLayer = True}
+      SemanticTypeBoolean ->
+        NormalizedTypeLayered emptyLayered {booleanLayer = Set.fromList [True, False]}
+      SemanticTypeInteger ->
+        NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotInteger}
+      SemanticTypeNumber ->
+        NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotNumber}
+      SemanticTypeString ->
+        NormalizedTypeLayered emptyLayered {stringLayer = StringSlotAny}
+      SemanticTypeSecret ->
+        NormalizedTypeLayered emptyLayered {secretLayer = True}
+      SemanticTypeFile ->
+        NormalizedTypeLayered emptyLayered {fileLayer = True}
+      SemanticTypeLiteralInteger value ->
+        NormalizedTypeLayered emptyLayered {numberLayer = NumberSlotLiterals (Set.singleton value)}
+      SemanticTypeLiteralString value ->
+        NormalizedTypeLayered emptyLayered {stringLayer = StringSlotLiterals (Set.singleton value)}
+      SemanticTypeLiteralBoolean value ->
+        NormalizedTypeLayered emptyLayered {booleanLayer = Set.singleton value}
+      SemanticTypeArray element ->
+        NormalizedTypeLayered emptyLayered {seqLayer = Array (go element)}
+      SemanticTypeTuple elements ->
+        NormalizedTypeLayered emptyLayered {seqLayer = Tuple (go <$> elements)}
+      SemanticTypeData typeId arguments ->
+        NormalizedTypeLayered emptyLayered {mapLayer = emptyMapSlot {dataApps = Map.singleton typeId (map (normaliseArg env) arguments)}}
+      SemanticTypeGeneric genericsId ->
+        NormalizedTypeLayered emptyLayered {genericsLayer = Set.singleton genericsId}
+      SemanticTypeObject fields ->
+        NormalizedTypeLayered
+          emptyLayered
+            { mapLayer = emptyMapSlot {bare = ClosedObj (Map.map (normaliseField env) fields)}
             }
-     in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
-  SemanticTypeUnion branches ->
-    foldr (unionNT . normaliseSemantic) (NormalizedTypeLayered emptyLayered) branches
+      SemanticTypeRecord ->
+        NormalizedTypeLayered
+          emptyLayered
+            { mapLayer = emptyMapSlot {bare = RecordObj}
+            }
+      SemanticTypeFunction parameterType returnType effect ->
+        let shape =
+              FunctionShape
+                { parameter = go parameterType,
+                  returnType = go returnType,
+                  requests = normaliseEffect effect
+                }
+         in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
+      SemanticTypeUnion branches ->
+        foldr (unionNT env . go) (NormalizedTypeLayered emptyLayered) branches
 
 -- ---------------------------------------------------------------------------
 -- Union (least upper bound)
 -- ---------------------------------------------------------------------------
 
--- | Pointwise union of two normalized types.
-unionNT :: NormalizedType -> NormalizedType -> NormalizedType
-unionNT leftType rightType = case (leftType, rightType) of
+-- | Pointwise union of two normalized types. Carries the data env so the
+-- @data@ layer can combine same-name applications by their parameters' variance.
+unionNT :: DataFieldEnv -> NormalizedType -> NormalizedType -> NormalizedType
+unionNT env leftType rightType = case (leftType, rightType) of
   (NormalizedTypeUnknown, _) -> NormalizedTypeUnknown
   (_, NormalizedTypeUnknown) -> NormalizedTypeUnknown
   (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
-    NormalizedTypeLayered (unionLayered leftLayered rightLayered)
+    -- The map layer's @data@ combine can fail (invariant args mismatch), in
+    -- which case the whole union has no representable supertype but @unknown@.
+    case unionMap env leftLayered.mapLayer rightLayered.mapLayer of
+      Nothing -> NormalizedTypeUnknown
+      Just mergedMap -> NormalizedTypeLayered (unionLayered env leftLayered rightLayered) {mapLayer = mergedMap}
 
-unionLayered :: LayeredType -> LayeredType -> LayeredType
-unionLayered leftLayered rightLayered =
+-- | Union of every non-map layer (the map layer is handled by 'unionMap' in
+-- 'unionNT', since it may collapse the whole type to @unknown@).
+unionLayered :: DataFieldEnv -> LayeredType -> LayeredType -> LayeredType
+unionLayered env leftLayered rightLayered =
   LayeredType
     { numberLayer = unionNumberSlot leftLayered.numberLayer rightLayered.numberLayer,
       stringLayer = unionStringSlot leftLayered.stringLayer rightLayered.stringLayer,
@@ -604,9 +640,9 @@ unionLayered leftLayered rightLayered =
       nullLayer = leftLayered.nullLayer || rightLayered.nullLayer,
       secretLayer = leftLayered.secretLayer || rightLayered.secretLayer,
       fileLayer = leftLayered.fileLayer || rightLayered.fileLayer,
-      functionLayer = unionFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
-      seqLayer = unionSeq leftLayered.seqLayer rightLayered.seqLayer,
-      mapLayer = unionMap leftLayered.mapLayer rightLayered.mapLayer,
+      functionLayer = unionFunctionLayer env leftLayered.functionLayer rightLayered.functionLayer,
+      seqLayer = unionSeq env leftLayered.seqLayer rightLayered.seqLayer,
+      mapLayer = emptyMapSlot, -- overwritten by 'unionNT'
       genericsLayer = Set.union leftLayered.genericsLayer rightLayered.genericsLayer
     }
 
@@ -630,25 +666,92 @@ unionStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 -- | Union (join) of sequence layers. Same-arity tuples union pointwise;
 -- different arities coexist. An @array@ absorbs tuples (their element types
 -- join into the homogeneous element).
-unionSeq :: BareSeq -> BareSeq -> BareSeq
-unionSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
+unionSeq :: DataFieldEnv -> BareSeq -> BareSeq -> BareSeq
+unionSeq env leftSeq rightSeq = case (leftSeq, rightSeq) of
   (NoSeq, other) -> other
   (other, NoSeq) -> other
   -- join collapses to the common prefix (shorter length), positions unioned.
-  (Tuple leftElements, Tuple rightElements) -> Tuple (zipWith unionNT leftElements rightElements)
-  (Array leftElement, Array rightElement) -> Array (unionNT leftElement rightElement)
+  (Tuple leftElements, Tuple rightElements) -> Tuple (zipWith (unionNT env) leftElements rightElements)
+  (Array leftElement, Array rightElement) -> Array (unionNT env leftElement rightElement)
   -- an array absorbs a tuple: all element types join into the homogeneous element.
-  (Tuple elements, Array element) -> Array (foldr unionNT element elements)
-  (Array element, Tuple elements) -> Array (foldr unionNT element elements)
+  (Tuple elements, Array element) -> Array (foldr (unionNT env) element elements)
+  (Array element, Tuple elements) -> Array (foldr (unionNT env) element elements)
 
--- | Union (join) of map layers. Data names are unioned (kept separate);
--- 'bare' parts join via 'unionBareObj'.
-unionMap :: MapSlot -> MapSlot -> MapSlot
-unionMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
-  MapSlot (Set.union leftData rightData) (unionBareObj leftBare rightBare)
+-- | Union (join) of map layers. Distinct data names coexist; a shared data name
+-- combines its args by the parameters' variance. 'Nothing' signals an
+-- invariant-arg mismatch (no representable supertype but @unknown@).
+unionMap :: DataFieldEnv -> MapSlot -> MapSlot -> Maybe MapSlot
+unionMap env (MapSlot leftData leftBare) (MapSlot rightData rightBare) = do
+  mergedData <- unionDataApps env leftData rightData
+  pure (MapSlot mergedData (unionBareObj env leftBare rightBare))
 
-unionBareObj :: BareObj -> BareObj -> BareObj
-unionBareObj leftBare rightBare = case (leftBare, rightBare) of
+-- | Combine two @data@-application maps for a union. Shared names combine
+-- arg-wise by variance; distinct names coexist. 'Nothing' = invariant mismatch.
+unionDataApps ::
+  DataFieldEnv ->
+  Map QualifiedName [NormalizedGenericArg] ->
+  Map QualifiedName [NormalizedGenericArg] ->
+  Maybe (Map QualifiedName [NormalizedGenericArg])
+unionDataApps env leftData rightData =
+  fmap Map.fromList . traverse combine . Set.toList $ Set.union (Map.keysSet leftData) (Map.keysSet rightData)
+  where
+    combine dataQName = case (Map.lookup dataQName leftData, Map.lookup dataQName rightData) of
+      (Just leftArgs, Just rightArgs) ->
+        (dataQName,) <$> combineArgs (unionArg env) (variancesOfList' env dataQName) leftArgs rightArgs
+      (Just leftArgs, Nothing) -> Just (dataQName, leftArgs)
+      (Nothing, Just rightArgs) -> Just (dataQName, rightArgs)
+      (Nothing, Nothing) -> Nothing
+
+-- | Combine two arg lists position-wise with @per@; 'Nothing' if a position
+-- fails (invariant mismatch) or the arities differ.
+combineArgs ::
+  (Variance -> NormalizedGenericArg -> NormalizedGenericArg -> Maybe NormalizedGenericArg) ->
+  [Variance] ->
+  [NormalizedGenericArg] ->
+  [NormalizedGenericArg] ->
+  Maybe [NormalizedGenericArg]
+combineArgs per variances leftArgs rightArgs
+  | length leftArgs /= length rightArgs = Nothing
+  | otherwise = sequence (zipWith3 per variances leftArgs rightArgs)
+
+-- | Union-combine one @data@ argument by its variance. Covariant / bivariant
+-- join; contravariant meet; invariant requires equality.
+unionArg :: DataFieldEnv -> Variance -> NormalizedGenericArg -> NormalizedGenericArg -> Maybe NormalizedGenericArg
+unionArg env variance leftArg rightArg = case variance of
+  Covariant -> Just (joinArg env leftArg rightArg)
+  Bivariant -> Just (joinArg env leftArg rightArg)
+  Contravariant -> Just (meetArg env leftArg rightArg)
+  Invariant -> if leftArg == rightArg then Just leftArg else Nothing
+
+-- | Intersect-combine one @data@ argument by its variance (dual of 'unionArg').
+intersectArg :: DataFieldEnv -> Variance -> NormalizedGenericArg -> NormalizedGenericArg -> Maybe NormalizedGenericArg
+intersectArg env variance leftArg rightArg = case variance of
+  Covariant -> Just (meetArg env leftArg rightArg)
+  Bivariant -> Just (meetArg env leftArg rightArg)
+  Contravariant -> Just (joinArg env leftArg rightArg)
+  Invariant -> if leftArg == rightArg then Just leftArg else Nothing
+
+-- | Join (union) of one argument. Mixed kinds cannot occur (same parameter slot).
+joinArg :: DataFieldEnv -> NormalizedGenericArg -> NormalizedGenericArg -> NormalizedGenericArg
+joinArg env leftArg rightArg = case (leftArg, rightArg) of
+  (NormalizedGenericArgType a, NormalizedGenericArgType b) -> NormalizedGenericArgType (unionNT env a b)
+  (NormalizedGenericArgEffect a, NormalizedGenericArgEffect b) -> NormalizedGenericArgEffect (unionNormalizedEffect a b)
+  _ -> leftArg
+
+-- | Meet (intersection) of one argument.
+meetArg :: DataFieldEnv -> NormalizedGenericArg -> NormalizedGenericArg -> NormalizedGenericArg
+meetArg env leftArg rightArg = case (leftArg, rightArg) of
+  (NormalizedGenericArgType a, NormalizedGenericArgType b) -> NormalizedGenericArgType (intersectNT env a b)
+  (NormalizedGenericArgEffect a, NormalizedGenericArgEffect b) -> NormalizedGenericArgEffect (intersectNormalizedEffect a b)
+  _ -> leftArg
+
+-- | Variances of a data, padded with 'Invariant' so a longer arg list still
+-- combines soundly (the conservative default).
+variancesOfList' :: DataFieldEnv -> QualifiedName -> [Variance]
+variancesOfList' env dataQName = variancesOf env dataQName ++ repeat Invariant
+
+unionBareObj :: DataFieldEnv -> BareObj -> BareObj -> BareObj
+unionBareObj env leftBare rightBare = case (leftBare, rightBare) of
   (NoObj, other) -> other
   (other, NoObj) -> other
   -- covariant join: keep only common labels, types unioned (width); a label
@@ -660,32 +763,32 @@ unionBareObj leftBare rightBare = case (leftBare, rightBare) of
   (_, RecordObj) -> RecordObj
   where
     unionField leftField rightField =
-      NormalizedParameter (unionNT leftField.parameterType rightField.parameterType) (leftField.optional || rightField.optional)
+      NormalizedParameter (unionNT env leftField.parameterType rightField.parameterType) (leftField.optional || rightField.optional)
 
 -- | Union of function slots.
 --
 -- Per the user-specified rule: take the **union** of label sets, with each
 -- common label's type **intersected** (contravariant in args). Labels only
 -- in one side are kept as-is. Requests are unioned.
-unionFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
-unionFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
+unionFunctionLayer :: DataFieldEnv -> FunctionSlot -> FunctionSlot -> FunctionSlot
+unionFunctionLayer env leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, other) -> other
   (other, FunctionSlotAbsent) -> other
   -- 'function' (top of the function lattice) absorbs any specific shape.
   (FunctionSlotAny, _) -> FunctionSlotAny
   (_, FunctionSlotAny) -> FunctionSlotAny
   (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
-    FunctionSlotOf (unionFunctionShape leftShape rightShape)
+    FunctionSlotOf (unionFunctionShape env leftShape rightShape)
 
-unionFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
-unionFunctionShape leftShape rightShape =
+unionFunctionShape :: DataFieldEnv -> FunctionShape -> FunctionShape -> FunctionShape
+unionFunctionShape env leftShape rightShape =
   FunctionShape
     { -- Contravariant in the parameter: the union of two function types accepts
       -- only arguments both accept, i.e. the /intersection/ of their parameter
       -- types. (Per-label width / optionality is handled inside the object
       -- lattice by 'intersectNT'.)
-      parameter = intersectNT leftShape.parameter rightShape.parameter,
-      returnType = unionNT leftShape.returnType rightShape.returnType,
+      parameter = intersectNT env leftShape.parameter rightShape.parameter,
+      returnType = unionNT env leftShape.returnType rightShape.returnType,
       requests = unionNormalizedEffect leftShape.requests rightShape.requests
     }
 
@@ -693,16 +796,17 @@ unionFunctionShape leftShape rightShape =
 -- Intersection (greatest lower bound)
 -- ---------------------------------------------------------------------------
 
--- | Pointwise intersection of two normalized types.
-intersectNT :: NormalizedType -> NormalizedType -> NormalizedType
-intersectNT leftType rightType = case (leftType, rightType) of
+-- | Pointwise intersection of two normalized types. Carries the data env for
+-- the variance-aware @data@ combine.
+intersectNT :: DataFieldEnv -> NormalizedType -> NormalizedType -> NormalizedType
+intersectNT env leftType rightType = case (leftType, rightType) of
   (NormalizedTypeUnknown, other) -> other
   (other, NormalizedTypeUnknown) -> other
   (NormalizedTypeLayered leftLayered, NormalizedTypeLayered rightLayered) ->
-    NormalizedTypeLayered (intersectLayered leftLayered rightLayered)
+    NormalizedTypeLayered (intersectLayered env leftLayered rightLayered)
 
-intersectLayered :: LayeredType -> LayeredType -> LayeredType
-intersectLayered leftLayered rightLayered =
+intersectLayered :: DataFieldEnv -> LayeredType -> LayeredType -> LayeredType
+intersectLayered env leftLayered rightLayered =
   LayeredType
     { numberLayer = intersectNumberSlot leftLayered.numberLayer rightLayered.numberLayer,
       stringLayer = intersectStringSlot leftLayered.stringLayer rightLayered.stringLayer,
@@ -710,9 +814,9 @@ intersectLayered leftLayered rightLayered =
       nullLayer = leftLayered.nullLayer && rightLayered.nullLayer,
       secretLayer = leftLayered.secretLayer && rightLayered.secretLayer,
       fileLayer = leftLayered.fileLayer && rightLayered.fileLayer,
-      functionLayer = intersectFunctionLayer leftLayered.functionLayer rightLayered.functionLayer,
-      seqLayer = intersectSeq leftLayered.seqLayer rightLayered.seqLayer,
-      mapLayer = intersectMap leftLayered.mapLayer rightLayered.mapLayer,
+      functionLayer = intersectFunctionLayer env leftLayered.functionLayer rightLayered.functionLayer,
+      seqLayer = intersectSeq env leftLayered.seqLayer rightLayered.seqLayer,
+      mapLayer = intersectMap env leftLayered.mapLayer rightLayered.mapLayer,
       -- Set intersection: incomplete (drops the genuine @T & int@ overlap to
       -- @never@) but sound for the meet, which only narrows.
       genericsLayer = Set.intersection leftLayered.genericsLayer rightLayered.genericsLayer
@@ -736,33 +840,33 @@ intersectStringSlot leftSlot rightSlot = case (leftSlot, rightSlot) of
 
 -- | Intersection (meet) of sequence layers. A @tuple ∩ array@ keeps the
 -- tuple shape, intersecting each position with the array's element type.
-intersectSeq :: BareSeq -> BareSeq -> BareSeq
-intersectSeq leftSeq rightSeq = case (leftSeq, rightSeq) of
+intersectSeq :: DataFieldEnv -> BareSeq -> BareSeq -> BareSeq
+intersectSeq env leftSeq rightSeq = case (leftSeq, rightSeq) of
   (NoSeq, _) -> NoSeq
   (_, NoSeq) -> NoSeq
   -- meet extends to all positions (longer length), common positions intersected.
-  (Tuple leftElements, Tuple rightElements) -> Tuple (intersectTupleElements leftElements rightElements)
-  (Array leftElement, Array rightElement) -> Array (intersectNT leftElement rightElement)
+  (Tuple leftElements, Tuple rightElements) -> Tuple (intersectTupleElements env leftElements rightElements)
+  (Array leftElement, Array rightElement) -> Array (intersectNT env leftElement rightElement)
   -- a tuple ∩ array keeps the tuple, each position intersected with the element.
-  (Tuple elements, Array element) -> Tuple (map (`intersectNT` element) elements)
-  (Array element, Tuple elements) -> Tuple (map (intersectNT element) elements)
+  (Tuple elements, Array element) -> Tuple (map (\e -> intersectNT env e element) elements)
+  (Array element, Tuple elements) -> Tuple (map (intersectNT env element) elements)
 
 -- | Per-position intersection of two tuples: common positions intersected,
 -- trailing positions of the longer tuple kept (max length).
-intersectTupleElements :: [NormalizedType] -> [NormalizedType] -> [NormalizedType]
-intersectTupleElements leftElements rightElements = case (leftElements, rightElements) of
+intersectTupleElements :: DataFieldEnv -> [NormalizedType] -> [NormalizedType] -> [NormalizedType]
+intersectTupleElements env leftElements rightElements = case (leftElements, rightElements) of
   ([], rest) -> rest
   (rest, []) -> rest
   (left : leftRest, right : rightRest) ->
-    intersectNT left right : intersectTupleElements leftRest rightRest
+    intersectNT env left right : intersectTupleElements env leftRest rightRest
 
 -- | Intersection of function slots.
 --
 -- Per the user-specified rule: take the **intersection** of label sets,
 -- with each common label's type **unioned** (contravariant in args).
 -- Requests are unioned per the spec.
-intersectFunctionLayer :: FunctionSlot -> FunctionSlot -> FunctionSlot
-intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
+intersectFunctionLayer :: DataFieldEnv -> FunctionSlot -> FunctionSlot -> FunctionSlot
+intersectFunctionLayer env leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAbsent, _) -> FunctionSlotAbsent
   (_, FunctionSlotAbsent) -> FunctionSlotAbsent
   -- 'function' is the function-lattice top; intersecting with it is
@@ -770,28 +874,45 @@ intersectFunctionLayer leftSlot rightSlot = case (leftSlot, rightSlot) of
   (FunctionSlotAny, other) -> other
   (other, FunctionSlotAny) -> other
   (FunctionSlotOf leftShape, FunctionSlotOf rightShape) ->
-    FunctionSlotOf (intersectFunctionShape leftShape rightShape)
+    FunctionSlotOf (intersectFunctionShape env leftShape rightShape)
 
-intersectFunctionShape :: FunctionShape -> FunctionShape -> FunctionShape
-intersectFunctionShape leftShape rightShape =
+intersectFunctionShape :: DataFieldEnv -> FunctionShape -> FunctionShape -> FunctionShape
+intersectFunctionShape env leftShape rightShape =
   FunctionShape
     { -- Contravariant in the parameter: the intersection of two function types
       -- accepts arguments either accepts, i.e. the /union/ of their parameter
       -- types. (Per-label width / optionality is handled inside the object
       -- lattice by 'unionNT'.)
-      parameter = unionNT leftShape.parameter rightShape.parameter,
-      returnType = intersectNT leftShape.returnType rightShape.returnType,
+      parameter = unionNT env leftShape.parameter rightShape.parameter,
+      returnType = intersectNT env leftShape.returnType rightShape.returnType,
       requests = intersectNormalizedEffect leftShape.requests rightShape.requests
     }
 
--- | Intersection (meet) of map layers. Data names are intersected; 'bare'
--- parts meet via 'intersectBareObj'.
-intersectMap :: MapSlot -> MapSlot -> MapSlot
-intersectMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
-  MapSlot (Set.intersection leftData rightData) (intersectBareObj leftBare rightBare)
+-- | Intersection (meet) of map layers. Only shared data names survive (a value
+-- inhabiting both must be of a data both name), each combining its args by
+-- variance (an invariant mismatch drops the name — empty meet); 'bare' parts
+-- meet via 'intersectBareObj'.
+intersectMap :: DataFieldEnv -> MapSlot -> MapSlot -> MapSlot
+intersectMap env (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
+  MapSlot (intersectDataApps env leftData rightData) (intersectBareObj env leftBare rightBare)
 
-intersectBareObj :: BareObj -> BareObj -> BareObj
-intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
+-- | Combine two @data@-application maps for an intersection: only shared names,
+-- args combined by variance; an invariant mismatch drops the name (empty meet).
+intersectDataApps ::
+  DataFieldEnv ->
+  Map QualifiedName [NormalizedGenericArg] ->
+  Map QualifiedName [NormalizedGenericArg] ->
+  Map QualifiedName [NormalizedGenericArg]
+intersectDataApps env leftData rightData =
+  Map.fromList
+    [ (dataQName, combined)
+      | (dataQName, leftArgs) <- Map.toList leftData,
+        Just rightArgs <- [Map.lookup dataQName rightData],
+        Just combined <- [combineArgs (intersectArg env) (variancesOfList' env dataQName) leftArgs rightArgs]
+    ]
+
+intersectBareObj :: DataFieldEnv -> BareObj -> BareObj -> BareObj
+intersectBareObj env leftBare rightBare = case (leftBare, rightBare) of
   (NoObj, _) -> NoObj
   (_, NoObj) -> NoObj
   -- meet: union of labels, common intersected, single-side kept; a common
@@ -803,39 +924,168 @@ intersectBareObj leftBare rightBare = case (leftBare, rightBare) of
   (other, RecordObj) -> other
   where
     intersectField leftField rightField =
-      NormalizedParameter (intersectNT leftField.parameterType rightField.parameterType) (leftField.optional && rightField.optional)
-    intersectFieldType f field = NormalizedParameter (f field.parameterType) field.optional
+      NormalizedParameter (intersectNT env leftField.parameterType rightField.parameterType) (leftField.optional && rightField.optional)
 
 -- ---------------------------------------------------------------------------
 -- Subtype check
 -- ---------------------------------------------------------------------------
 
--- | Read-only env mapping each @data@ type's qualified name to its
--- normalized fields (an object view). Recursive @data@ references inside a
--- field normalize to name-only map slots, so each entry is finite; the
--- subtype check below stays well-founded because a recursive occurrence is
--- compared by name (rule i) rather than re-expanded. Built once by the
--- solver from the resolved constructor signatures.
-type DataFieldEnv = Map QualifiedName (Map Text NormalizedType)
+-- | Per-@data@ info consulted by the lattice ops:
+--
+--   * 'dataParamIds' — the generic parameters' ids, positional (matching the
+--     declaration's @typeParameters@ and the application args).
+--   * 'dataVariances' — each parameter's variance (inferred from field
+--     positions, see 'inferVariances'), positional.
+--   * 'dataFields' — the constructor's field types, kept **un-normalized**
+--     (generics intact) so subtyping can substitute a use site's args into them
+--     before normalising; storing them normalised would require the very env we
+--     are building (a circularity).
+data DataInfo = DataInfo
+  { dataParamIds :: [GenericsId],
+    dataVariances :: [Variance],
+    dataFields :: Map Text (SemanticType Resolved)
+  }
+  deriving (Show)
+
+-- | Read-only env mapping each @data@ type's qualified name to its 'DataInfo'.
+-- Built once from the resolved constructor signatures, threaded through
+-- normalize / union / intersect / subtype so a generic @data@'s args drive both
+-- the variance combine and the @data \<: object@ field view. Recursive @data@
+-- references inside a field stay well-founded: the subtype check compares a
+-- recursive occurrence by name + args (rule i) rather than re-expanding.
+type DataFieldEnv = Map QualifiedName DataInfo
+
+-- | A data's parameter variances (positional); empty (→ treated as invariant by
+-- the combine) for an unknown / non-generic data.
+variancesOf :: DataFieldEnv -> QualifiedName -> [Variance]
+variancesOf env qualifiedName = maybe [] (.dataVariances) (Map.lookup qualifiedName env)
+
+-- | A data's generic parameter ids (positional), for substituting a use site's
+-- application args into its field types (field access / match binding). Empty
+-- for an unknown / non-generic data.
+dataParamIdsOf :: DataFieldEnv -> QualifiedName -> [GenericsId]
+dataParamIdsOf env qualifiedName = maybe [] (.dataParamIds) (Map.lookup qualifiedName env)
 
 -- | Build a 'DataFieldEnv' from a resolved type environment. A @data@
 -- constructor is the unique entry whose qualified name equals its returned
--- @data@ type's name (an ordinary agent returning a data value has a
--- different name), so it is identified without a separate constructor table;
--- its parameter types become that data type's normalized fields.
+-- @data@ type's name; its parameter types become that data's (un-normalized)
+-- fields, and its return type @data foo[T…]@ carries the parameter ids (each a
+-- self-applied @SemanticTypeGeneric@ / @SemanticEffectGeneric@). Variances are
+-- inferred from field positions (see 'inferVariances').
 --
--- Every field is a /present/ field of the value: a constructor fills any
--- omitted optional / defaulted field, so a constructed value always carries
--- all declared fields. Optionality lives only on the constructor's call
--- signature (the caller may omit), not on the value's object view — the field
--- type already reflects the rest (@null | T@ for a @?:@ field).
+-- Every field is a /present/ field of the value (a constructor fills any
+-- omitted optional / defaulted field), so optionality lives on the call
+-- signature, not the value's object view (the field type already reflects it,
+-- @null | T@ for a @?:@ field).
 buildDataFieldEnv :: Map QualifiedName (SemanticType Resolved) -> DataFieldEnv
 buildDataFieldEnv typeEnv =
-  Map.fromList
-    [ (dataQName, Map.map (normaliseSemantic . (.parameterType)) (functionParameters parameterObject))
-      | (constructorQName, SemanticTypeFunction parameterObject (SemanticTypeData dataQName) _) <- Map.toList typeEnv,
-        constructorQName == dataQName
-    ]
+  let dataDecls =
+        [ (dataQName, mapMaybe argGenericId returnArgs, Map.map (.parameterType) (functionParameters parameterObject))
+          | (constructorQName, SemanticTypeFunction parameterObject (SemanticTypeData dataQName returnArgs) _) <- Map.toList typeEnv,
+            constructorQName == dataQName
+        ]
+      paramIdsByName = Map.fromList [(qn, paramIds) | (qn, paramIds, _) <- dataDecls]
+      fieldsByName = Map.fromList [(qn, fields) | (qn, _, fields) <- dataDecls]
+      variancesByName = inferVariances paramIdsByName fieldsByName
+   in Map.fromList
+        [ ( dataQName,
+            DataInfo
+              { dataParamIds = paramIds,
+                dataVariances = Map.findWithDefault [] dataQName variancesByName,
+                dataFields = fields
+              }
+          )
+          | (dataQName, paramIds, fields) <- dataDecls
+        ]
+  where
+    argGenericId = \case
+      SemanticGenericArgumentType (SemanticTypeGeneric genericsId) -> Just genericsId
+      SemanticGenericArgumentEffect (SemanticEffectGeneric genericsId) -> Just genericsId
+      _ -> Nothing
+
+-- ---------------------------------------------------------------------------
+-- Variance inference
+-- ---------------------------------------------------------------------------
+
+-- | A position's polarity during the variance scan. A generic parameter is
+-- covariant if it only ever occurs positively, contravariant if only
+-- negatively, invariant if both, bivariant if never.
+data Polarity = Pos | Neg
+  deriving (Eq, Ord, Show)
+
+flipPolarity :: Polarity -> Polarity
+flipPolarity = \case Pos -> Neg; Neg -> Pos
+
+-- | Infer each @data@'s parameter variances by a position-sign scan over its
+-- field types, with a least-fixpoint over (mutually) recursive @data@
+-- references. Parameters start at 'Bivariant' (no occurrence yet) and only ever
+-- widen toward 'Invariant', so the iteration converges.
+inferVariances ::
+  Map QualifiedName [GenericsId] ->
+  Map QualifiedName (Map Text (SemanticType Resolved)) ->
+  Map QualifiedName [Variance]
+inferVariances paramIdsByName fieldsByName = fixpoint (Map.map (map (const Bivariant)) paramIdsByName)
+  where
+    fixpoint estimates =
+      let next = Map.mapWithKey (\dataQName paramIds -> map (paramVariance estimates dataQName) paramIds) paramIdsByName
+       in if next == estimates then next else fixpoint next
+    paramVariance estimates dataQName paramId =
+      signsToVariance
+        (foldMap (signsOfType estimates paramId Pos) (Map.elems (Map.findWithDefault Map.empty dataQName fieldsByName)))
+
+signsToVariance :: Set Polarity -> Variance
+signsToVariance signs
+  | signs == Set.fromList [Pos, Neg] = Invariant
+  | signs == Set.singleton Pos = Covariant
+  | signs == Set.singleton Neg = Contravariant
+  | otherwise = Bivariant
+
+-- | The set of polarities at which @target@ (a type- or effect-generic id)
+-- occurs in @semanticType@, given the ambient polarity. Nested @data@ args
+-- compose the ambient polarity with that arg's (estimated) variance.
+signsOfType :: Map QualifiedName [Variance] -> GenericsId -> Polarity -> SemanticType Resolved -> Set Polarity
+signsOfType estimates target polarity = \case
+  SemanticTypeGeneric genericsId
+    | genericsId == target -> Set.singleton polarity
+    | otherwise -> Set.empty
+  SemanticTypeArray element -> signsOfType estimates target polarity element
+  SemanticTypeTuple elements -> foldMap (signsOfType estimates target polarity) elements
+  SemanticTypeUnion branches -> foldMap (signsOfType estimates target polarity) branches
+  SemanticTypeObject fields -> foldMap (signsOfType estimates target polarity . (.parameterType)) (Map.elems fields)
+  SemanticTypeFunction parameterType returnType effect ->
+    signsOfType estimates target (flipPolarity polarity) parameterType
+      <> signsOfType estimates target polarity returnType
+      <> signsOfEffect target polarity effect
+  SemanticTypeData dataQName arguments ->
+    let variances = variancesOfList estimates dataQName
+     in mconcat (zipWith (argSigns estimates target polarity) variances arguments)
+  _ -> Set.empty
+
+-- | The polarities at which @target@ occurs in one @data@ argument, given the
+-- ambient polarity composed with the argument position's variance.
+argSigns :: Map QualifiedName [Variance] -> GenericsId -> Polarity -> Variance -> SemanticGenericArgument Resolved -> Set Polarity
+argSigns estimates target polarity variance argument =
+  let scan pol = case argument of
+        SemanticGenericArgumentType argumentType -> signsOfType estimates target pol argumentType
+        SemanticGenericArgumentEffect argumentEffect -> signsOfEffect target pol argumentEffect
+   in case variance of
+        Covariant -> scan polarity
+        Contravariant -> scan (flipPolarity polarity)
+        Invariant -> scan polarity <> scan (flipPolarity polarity)
+        Bivariant -> Set.empty
+
+-- | Polarities at which @target@ (an effect generic) occurs in an effect tree.
+signsOfEffect :: GenericsId -> Polarity -> SemanticEffect Resolved -> Set Polarity
+signsOfEffect target polarity = \case
+  SemanticEffectGeneric genericsId
+    | genericsId == target -> Set.singleton polarity
+    | otherwise -> Set.empty
+  SemanticEffectUnion branches -> foldMap (signsOfEffect target polarity) branches
+  _ -> Set.empty
+
+-- | Estimated variances for a data name (padding with 'Invariant' for safety).
+variancesOfList :: Map QualifiedName [Variance] -> QualifiedName -> [Variance]
+variancesOfList estimates dataQName = Map.findWithDefault [] dataQName estimates ++ repeat Invariant
 
 -- | Read-only env mapping each in-scope generic parameter to the (normalized)
 -- upper bound of its @extends@ clause. Consulted by 'subtypeNormalizedType' to
@@ -859,7 +1109,7 @@ subtypeNormalizedType env boundEnv = go
         -- the rest by their bounds) until none remain, then compare with the
         -- RHS's generics dropped (a RHS-only generic cannot help cover the LHS
         -- — sound, completeness-losing).
-        case expandLeftGenerics boundEnv rightLayered.genericsLayer leftLayered of
+        case expandLeftGenerics env boundEnv rightLayered.genericsLayer leftLayered of
           NormalizedTypeUnknown -> False
           NormalizedTypeLayered leftExpanded ->
             subtypeLayered leftExpanded rightLayered {genericsLayer = Set.empty}
@@ -890,17 +1140,45 @@ subtypeNormalizedType env boundEnv = go
       (Array _, Tuple _) -> False
       (Array leftElement, Array rightElement) -> go leftElement rightElement
 
-    -- | Map layer. Each left @data@ either appears on the right (rule i) or
-    -- its object view is a subtype of the right's structural part (rule ii,
+    -- | Map layer. Each left @data@ either appears on the right with args
+    -- related per the parameters' variance (rule i) or its (arg-substituted)
+    -- object view is a subtype of the right's structural part (rule ii,
     -- @data <: object@ — consulting 'env'). Object width subtyping plus
     -- @object <: record@; a record is never a subtype of a closed object.
     subtypeMap (MapSlot leftData leftBare) (MapSlot rightData rightBare) =
-      all dataMatches (Set.toList leftData) && subtypeBareObj leftBare rightBare
+      all dataMatches (Map.toList leftData) && subtypeBareObj leftBare rightBare
       where
-        dataMatches qualifiedName =
-          Set.member qualifiedName rightData
-            || subtypeBareObj (ClosedObj (Map.map requiredNormalizedField (dataObjectView qualifiedName))) rightBare
-        dataObjectView qualifiedName = Map.findWithDefault Map.empty qualifiedName env
+        dataMatches (qualifiedName, leftArgs) =
+          ( case Map.lookup qualifiedName rightData of
+              Just rightArgs -> subtypeArgs (variancesOfList' env qualifiedName) leftArgs rightArgs
+              Nothing -> False
+          )
+            || subtypeBareObj (ClosedObj (dataObjectView qualifiedName leftArgs)) rightBare
+
+    -- | Args of two applications of the same @data@, related by each parameter's
+    -- variance: covariant forwards, contravariant reversed, invariant both ways,
+    -- bivariant unconditionally.
+    subtypeArgs variances leftArgs rightArgs =
+      length leftArgs == length rightArgs && and (zipWith3 subtypeArg variances leftArgs rightArgs)
+    subtypeArg variance leftArg rightArg = case variance of
+      Covariant -> subtypeArgFwd leftArg rightArg
+      Bivariant -> True
+      Contravariant -> subtypeArgFwd rightArg leftArg
+      Invariant -> subtypeArgFwd leftArg rightArg && subtypeArgFwd rightArg leftArg
+    subtypeArgFwd leftArg rightArg = case (leftArg, rightArg) of
+      (NormalizedGenericArgType a, NormalizedGenericArgType b) -> go a b
+      (NormalizedGenericArgEffect a, NormalizedGenericArgEffect b) -> subtypeEffect a b
+      _ -> True
+
+    -- | A @data@'s object view at a use site: substitute the use site's args for
+    -- the data's generic parameters in its (un-normalized) field types, then
+    -- normalise — so @data \<: object@ sees the specialised field types.
+    dataObjectView qualifiedName leftArgs = case Map.lookup qualifiedName env of
+      Nothing -> Map.empty
+      Just info ->
+        let typeSubstitution = Map.fromList [(paramId, denormalise normalizedType) | (paramId, NormalizedGenericArgType normalizedType) <- zip info.dataParamIds leftArgs]
+            effectSubstitution = Map.fromList [(paramId, denormaliseEffect normalizedEffect) | (paramId, NormalizedGenericArgEffect normalizedEffect) <- zip info.dataParamIds leftArgs]
+         in Map.map (requiredNormalizedField . normaliseSemantic env . substituteGenerics typeSubstitution effectSubstitution) info.dataFields
 
     subtypeBareObj leftBare rightBare = case (leftBare, rightBare) of
       (NoObj, _) -> True
@@ -954,12 +1232,12 @@ subtypeNormalizedType env boundEnv = go
 -- becomes the tuple shape so a tuple pattern can read its components. The
 -- recursion that walks into nested patterns expands each level in turn, so a
 -- nested generic is handled when it becomes the next scrutinee.
-expandGenerics :: BoundEnv -> NormalizedType -> NormalizedType
-expandGenerics _ NormalizedTypeUnknown = NormalizedTypeUnknown
-expandGenerics boundEnv (NormalizedTypeLayered layered) = expandLeftGenerics boundEnv Set.empty layered
+expandGenerics :: DataFieldEnv -> BoundEnv -> NormalizedType -> NormalizedType
+expandGenerics _ _ NormalizedTypeUnknown = NormalizedTypeUnknown
+expandGenerics env boundEnv (NormalizedTypeLayered layered) = expandLeftGenerics env boundEnv Set.empty layered
 
-expandLeftGenerics :: BoundEnv -> Set GenericsId -> LayeredType -> NormalizedType
-expandLeftGenerics boundEnv rhsGenerics = loop
+expandLeftGenerics :: DataFieldEnv -> BoundEnv -> Set GenericsId -> LayeredType -> NormalizedType
+expandLeftGenerics env boundEnv rhsGenerics = loop
   where
     loop layered
       | Set.null layered.genericsLayer = NormalizedTypeLayered layered
@@ -968,7 +1246,7 @@ expandLeftGenerics boundEnv rhsGenerics = loop
               -- Drop all generics (shared ones cancel); re-add the LHS-only
               -- ones via their bounds.
               cleared = NormalizedTypeLayered layered {genericsLayer = Set.empty}
-              expanded = foldr (unionNT . boundOf) cleared (Set.toList lhsOnly)
+              expanded = foldr (unionNT env . boundOf) cleared (Set.toList lhsOnly)
            in case expanded of
                 NormalizedTypeUnknown -> NormalizedTypeUnknown
                 NormalizedTypeLayered layered' -> loop layered'

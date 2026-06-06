@@ -48,7 +48,7 @@ import Katari.SemanticType
   )
 import Katari.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Typechecker.Identifier (ConstructorData (..))
-import Katari.Typechecker.NormalizedType (BoundEnv, denormalise, expandGenerics, normaliseSemantic)
+import Katari.Typechecker.NormalizedType (BoundEnv, DataFieldEnv, buildDataFieldEnv, denormalise, expandGenerics, normaliseSemantic)
 
 -- | Cross-module context the checker needs while walking a single module:
 -- the constructors and top-level types reachable from the module (own +
@@ -154,6 +154,9 @@ newtype PatMatrix = PatMatrix [PatRow]
 data TypeCtx = TypeCtx
   { columnTypes :: [SemanticType Resolved],
     env :: ExhaustiveEnv,
+    -- | The data field env (for normalise / expand / subtype of @data@ types),
+    -- built once from the module's constructor signatures.
+    dataFieldEnv :: DataFieldEnv,
     -- | The module's generic bounds, normalized once (so each column read can
     -- expand a generic scrutinee to its bound).
     boundEnv :: BoundEnv
@@ -165,7 +168,7 @@ data TypeCtx = TypeCtx
 -- its bound's, so a pattern set covering the bound covers the generic.
 headColumnType :: TypeCtx -> SemanticType Resolved
 headColumnType context = case context.columnTypes of
-  (t : _) -> denormalise (expandGenerics context.boundEnv (normaliseSemantic t))
+  (t : _) -> denormalise (expandGenerics context.dataFieldEnv context.boundEnv (normaliseSemantic context.dataFieldEnv t))
   [] -> SemanticTypeUnknown
 
 -- ===========================================================================
@@ -355,7 +358,7 @@ tagCompatibleWithType tag ty env = case ty of
       SemanticTypeArray _ -> True
       _ -> False
     CtorTagData qualifiedName -> case ty of
-      SemanticTypeData tid ->
+      SemanticTypeData tid _arguments ->
         case Map.lookup qualifiedName env.constructors of
           Just cd -> cd.constructorTypeQName == tid
           Nothing -> False
@@ -391,7 +394,7 @@ isCompleteSig seen ty env = case ty of
     -- so a single such pattern already forms a complete signature. A longer
     -- pattern only covers the longer-than-named values and never completes.
     any (\case CtorTagTupleN n -> n <= length tupleTypes; _ -> False) seen
-  SemanticTypeData tid ->
+  SemanticTypeData tid _arguments ->
     let ctorQNames = [qualifiedName | (qualifiedName, _) <- ctorsOfType env tid]
         seenQNames = [qualifiedName | CtorTagData qualifiedName <- seen]
      in null ctorQNames
@@ -545,7 +548,8 @@ typePatternTagName = \case
 checkMatch :: ExhaustiveEnv -> AST.MatchExpression Zonked -> [ExhaustiveError]
 checkMatch env me =
   let subjectType = getExpressionType me.subject
-      context = TypeCtx {columnTypes = [subjectType], env = env, boundEnv = Map.map normaliseSemantic env.genericBounds}
+      dataFieldEnv = buildDataFieldEnv env.topLevelTypes
+      context = TypeCtx {columnTypes = [subjectType], env = env, dataFieldEnv = dataFieldEnv, boundEnv = Map.map (normaliseSemantic dataFieldEnv) env.genericBounds}
       arms = me.cases
       armHeads = map (\arm -> patternToHead env arm.pattern) arms
       armRows = [PatRow [h] arm.sourceSpan | (arm, h) <- zip arms armHeads]
@@ -572,7 +576,8 @@ checkIrrefutable ::
   [ExhaustiveError]
 checkIrrefutable env pattern subjectType =
   let headPat = patternToHead env pattern
-      context = TypeCtx {columnTypes = [subjectType], env = env, boundEnv = Map.map normaliseSemantic env.genericBounds}
+      dataFieldEnv = buildDataFieldEnv env.topLevelTypes
+      context = TypeCtx {columnTypes = [subjectType], env = env, dataFieldEnv = dataFieldEnv, boundEnv = Map.map (normaliseSemantic dataFieldEnv) env.genericBounds}
       sourceSpan = sourceSpanOf pattern
       row = PatRow [headPat] sourceSpan
    in if useful context (PatMatrix [row]) [PatHeadWildcard]

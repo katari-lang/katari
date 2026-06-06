@@ -280,7 +280,9 @@ fieldTypeOf ::
   Text ->
   Maybe SemTy
 fieldTypeOf snap ty field = case ty of
-  SemanticTypeData typeId -> do
+  -- TODO: substitute the application args into the field type (currently shows
+  -- the declared field type with generics unsubstituted — fine for completion).
+  SemanticTypeData typeId _arguments -> do
     parameters <- dataConstructorParameters snap typeId
     Map.lookup field parameters
   SemanticTypeObject fields -> (.parameterType) <$> Map.lookup field fields
@@ -350,7 +352,7 @@ completionsOfFields snap ty =
       fields = fieldsOf ty
       fieldsOf :: SemTy -> Map Text SemTy
       fieldsOf = \case
-        SemanticTypeData typeId ->
+        SemanticTypeData typeId _arguments ->
           fromMaybe Map.empty (dataConstructorParameters snap typeId)
         SemanticTypeObject m -> Map.map (.parameterType) m
         SemanticTypeUnion branches ->
