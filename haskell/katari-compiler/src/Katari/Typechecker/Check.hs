@@ -38,7 +38,7 @@ import Control.Monad.State.Strict
 import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -1267,6 +1267,16 @@ expandScrutinee subject = do
   dataFieldEnv <- asks (.checkDataFieldEnv)
   pure (denormalise (expandGenerics dataFieldEnv boundEnv (normaliseSemantic dataFieldEnv subject)))
 
+-- | The type / effect args carried by a match scrutinee for a given data
+-- constructor: the scrutinee is the applied data itself, or — for a
+-- tagged-union subject — the branch whose data name matches.
+argsForConstructor :: SemanticType Resolved -> QualifiedName -> Maybe [SemanticGenericArgument Resolved]
+argsForConstructor subject qualifiedName = case subject of
+  SemanticTypeData subjectQName arguments | subjectQName == qualifiedName -> Just arguments
+  SemanticTypeUnion branches ->
+    listToMaybe [arguments | SemanticTypeData branchQName arguments <- branches, branchQName == qualifiedName]
+  _ -> Nothing
+
 walkPattern :: SemanticType Resolved -> Pattern Identified -> Check (Pattern Zonked, [(VariableResolution, SemanticType Resolved)])
 walkPattern subject = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
@@ -1290,13 +1300,25 @@ walkPattern subject = \case
     let patternType = SemanticTypeTuple (map (patternTypeOf . fst) walked)
     pure (PatternTuple TuplePattern {elements = map fst walked, sourceSpan = sourceSpan, typeOf = patternType}, concatMap snd walked)
   PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan} -> do
-    fieldSubjects <- constructorFieldTypes constructorName.resolution
+    declaredFields <- constructorFieldTypes constructorName.resolution
+    dataFieldEnv <- asks (.checkDataFieldEnv)
+    -- Specialise the constructor's declared field types by the scrutinee's type
+    -- args, so a binding in @match (b: box[integer]) { case box(x = v) => v }@
+    -- gives @v : integer@ rather than the abstract parameter.
+    let matchedArgs = constructorName.resolution >>= argsForConstructor subject
+        fieldSubjects = case (constructorName.resolution, matchedArgs) of
+          (Just qualifiedName, Just arguments) ->
+            let paramIds = dataParamIdsOf dataFieldEnv qualifiedName
+                typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
+                effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
+             in Map.map (substituteGenerics typeSubstitution effectSubstitution) declaredFields
+          _ -> declaredFields
     walked <-
       forM parameters $ \(label, sub) -> do
         let fieldSubject = Map.findWithDefault SemanticTypeUnknown label.text fieldSubjects
         (sub', bindings) <- walkPattern fieldSubject sub
         pure ((retagNameRef label, sub'), bindings)
-    let patternType = maybe SemanticTypeUnknown (\qualifiedName -> SemanticTypeData qualifiedName []) constructorName.resolution
+    let patternType = maybe SemanticTypeUnknown (\qualifiedName -> SemanticTypeData qualifiedName (fromMaybe [] matchedArgs)) constructorName.resolution
     pure
       ( PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier = fmap retagNameRef moduleQualifier, constructorName = retagNameRef constructorName, parameters = map fst walked, sourceSpan = sourceSpan, typeOf = patternType},
         concatMap snd walked
