@@ -204,7 +204,9 @@ jsonStdlibSource =
       "@\"Look up @key@ in a JSON object, returning the child `json` (or `json_null` if @value@ is not an object or has no such key). Typed navigation that avoids unwrapping `json_object.entries` (a `record` of `unknown`) by hand.\"",
       "primitive get(value: json, key: string) -> json",
       "@\"Index into a JSON array, returning the element `json` (or `json_null` if @value@ is not an array or @index@ is out of range / negative).\"",
-      "primitive at(value: json, index: integer) -> json"
+      "primitive at(value: json, index: integer) -> json",
+      "@\"Unwrap a JSON object into a plain object value (recursively stripping the json_* tags, so nested strings / numbers become raw values). The inverse of `of` for objects — use it to turn a model's parsed tool-call arguments into the record `call_agent` dispatches with. Throws if @value@ is not a `json_object`.\"",
+      "primitive to_object(value: json) -> {}"
     ]
 
 -- | The @primitive.record@ sub-module source. Users call these as

@@ -702,8 +702,67 @@ export async function executePrim(
       }
       return { kind: "record", ctor: JSON_NULL_QNAME, entries: {} };
     }
+    case "primitive.json.to_object": {
+      const value = await materializeValueDeep(req(args, "value"), materialize);
+      if (value.kind !== "record" || value.ctor !== JSON_OBJECT_QNAME) {
+        throw new RecoverableEngineError(
+          `prim json.to_object: expected a json_object, got ${value.kind === "record" ? (value.ctor ?? "record") : value.kind}`,
+        );
+      }
+      return jsonTaggedToValue(value);
+    }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
+  }
+}
+
+// Tagged `json` value → plain Value (the inverse of `valueToJsonTagged`):
+// strip every json_* tag so nested strings / numbers / arrays / objects become
+// raw values. The result carries no `json` typing — it is the value a caller
+// (e.g. `call_agent`) consumes directly.
+function jsonTaggedToValue(value: Value): Value {
+  if (value.kind !== "record" || value.ctor === undefined) {
+    throw new RecoverableEngineError(
+      `prim json.to_object: expected a json value, got ${value.kind} (compiler invariant violated)`,
+    );
+  }
+  switch (value.ctor) {
+    case JSON_NULL_QNAME:
+      return { kind: "null" };
+    case JSON_BOOLEAN_QNAME:
+    case JSON_INTEGER_QNAME:
+    case JSON_NUMBER_QNAME:
+    case JSON_STRING_QNAME: {
+      const field = value.entries["value"];
+      if (field === undefined) {
+        throw new RecoverableEngineError(`prim json.to_object: ${value.ctor} missing .value`);
+      }
+      return field;
+    }
+    case JSON_ARRAY_QNAME: {
+      const items = value.entries["items"];
+      if (items?.kind !== "array") {
+        throw new RecoverableEngineError("prim json.to_object: json_array.items is not an array");
+      }
+      return { kind: "array", elements: items.elements.map(jsonTaggedToValue) };
+    }
+    case JSON_OBJECT_QNAME: {
+      const entries = value.entries["entries"];
+      if (entries?.kind !== "record") {
+        throw new RecoverableEngineError(
+          "prim json.to_object: json_object.entries is not a record",
+        );
+      }
+      const out: Record<string, Value> = {};
+      for (const [key, child] of Object.entries(entries.entries)) {
+        out[key] = jsonTaggedToValue(child);
+      }
+      return { kind: "record", entries: out };
+    }
+    default:
+      throw new RecoverableEngineError(
+        `prim json.to_object: unknown json constructor '${value.ctor}'`,
+      );
   }
 }
 
