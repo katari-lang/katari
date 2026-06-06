@@ -758,19 +758,31 @@ buildRequestsSchema dataDefs topLevelTypes effect =
       SemanticEffectPure -> ([], [])
       -- The effect top can't be enumerated; it contributes no concrete request.
       SemanticEffectAll -> ([], [])
-      SemanticEffectRequest qualifiedName _arguments -> ([qualifiedName], [])
+      SemanticEffectRequest qualifiedName arguments -> ([(qualifiedName, arguments)], [])
       SemanticEffectGeneric genericsId -> ([], [genericsId])
       SemanticEffectUnion branches -> mconcat (map collect branches)
     dedupe :: (Ord a) => [a] -> [a]
     dedupe = Set.toList . Set.fromList
     placeholder genericsId = object [Key.fromText genericPlaceholderKey .= genericsId]
-    requestJson qualifiedName = do
-      SemanticTypeFunction parameterType returnType _ <- Map.lookup qualifiedName topLevelTypes
+    argGenericId = \case
+      SemanticGenericArgumentType (SemanticTypeGeneric genericsId) -> Just genericsId
+      SemanticGenericArgumentEffect (SemanticEffectGeneric genericsId) -> Just genericsId
+      _ -> Nothing
+    requestJson (qualifiedName, arguments) = do
+      SemanticTypeFunction parameterType returnType selfEffect <- Map.lookup qualifiedName topLevelTypes
+      -- Specialise a generic request by the instantiation args: its own
+      -- (self-applied) effect carries the parameter ids to substitute.
+      let paramIds = case selfEffect of
+            SemanticEffectRequest selfName selfArgs | selfName == qualifiedName -> mapMaybe argGenericId selfArgs
+            _ -> []
+          typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
+          effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
+          specialise = substituteGenerics typeSubstitution effectSubstitution
       pure $
         object
           [ "name" .= renderQualifiedName qualifiedName,
-            "input" .= buildInputObject dataDefs parameterType [],
-            "output" .= toJsonSchema dataDefs Set.empty returnType
+            "input" .= buildInputObject dataDefs (specialise parameterType) [],
+            "output" .= toJsonSchema dataDefs Set.empty (specialise returnType)
           ]
 
 -- | Aeson-encode a 'JsonSchema' to a strict 'Text'. Used by Lowering to
@@ -793,18 +805,37 @@ buildRequestRefs ctx effect =
     effectRequests = \case
       SemanticEffectPure -> []
       SemanticEffectAll -> []
-      SemanticEffectRequest qualifiedName _arguments -> [qualifiedName]
+      SemanticEffectRequest qualifiedName arguments -> [(qualifiedName, arguments)]
       -- A not-yet-instantiated effect generic contributes no concrete request
       -- to the schema (an instantiation substitutes it before schema gen).
       SemanticEffectGeneric _ -> []
       SemanticEffectUnion branches -> concatMap effectRequests branches
 
-buildRequestRef :: SchemaContext -> QualifiedName -> Maybe RequestSchemaRef
-buildRequestRef ctx qualifiedName = do
+buildRequestRef :: SchemaContext -> (QualifiedName, [SemanticGenericArgument Resolved]) -> Maybe RequestSchemaRef
+buildRequestRef ctx (qualifiedName, arguments) = do
   rd <- Map.lookup qualifiedName ctx.requestData
-  SemanticTypeFunction parameterType returnType _ <-
+  SemanticTypeFunction parameterType returnType selfEffect <-
     Map.lookup qualifiedName ctx.topLevelTypes
-  pure
+  -- Specialise a generic request by the instantiation args (the request's own
+  -- self-applied effect carries the parameter ids).
+  let paramIds = case selfEffect of
+        SemanticEffectRequest selfName selfArgs | selfName == qualifiedName -> mapMaybe requestArgGenericId selfArgs
+        _ -> []
+      typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
+      effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
+      specialise = substituteGenerics typeSubstitution effectSubstitution
+  pure $ buildRequestRefBody ctx rd qualifiedName (specialise parameterType) (specialise returnType)
+
+-- | The 'GenericsId' a request's self-applied argument refers to (for recovering
+-- a request's parameter ids from its signature effect).
+requestArgGenericId :: SemanticGenericArgument Resolved -> Maybe GenericsId
+requestArgGenericId = \case
+  SemanticGenericArgumentType (SemanticTypeGeneric genericsId) -> Just genericsId
+  SemanticGenericArgumentEffect (SemanticEffectGeneric genericsId) -> Just genericsId
+  _ -> Nothing
+
+buildRequestRefBody :: SchemaContext -> RequestData -> QualifiedName -> SemanticType Resolved -> SemanticType Resolved -> RequestSchemaRef
+buildRequestRefBody ctx rd qualifiedName parameterType returnType =
     RequestSchemaRef
       { name = renderQualifiedName qualifiedName,
         input =

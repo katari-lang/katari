@@ -1,0 +1,27 @@
+@"A generic escalation: the handler supplies a value of the caller's chosen type (T return-only ⇒ contravariant)."
+request ask[T]() -> T
+
+@"A generic capability: collect a value of any type (T in the parameter ⇒ covariant)."
+request collect[T](value: T) -> null
+
+@"Handles ask, answering with a string; the caller instantiates ask[string], so the answer is checked against string."
+agent answered() -> string {
+  handle {
+    request ask() { next "answer" }
+  }
+  ask[string]()
+}
+
+@"Raises collect[integer] as a declared (forwarded) capability — no local handler."
+agent emit(n: integer) -> null with collect[integer] {
+  collect[integer](value = n)
+}
+
+@"Declares it may perform any effect (the effect top)."
+agent anything() -> integer with all {
+  0
+}
+
+agent main() -> string {
+  answered()
+}
