@@ -1,9 +1,9 @@
 // Sidecar bundler. Each input is a `{ packageName, sourceRoot }` pair —
-// one package's source tree. The bundler walks the source root for a
-// single `.ts` / `.js` file (anywhere under the root; nesting is not
-// inherently forbidden but having more than one sidecar in the same
-// package is a hard error) and packs every package's sidecar into a
-// single ESM bundle that imports `katari-port`.
+// one package's source tree. A package's sidecar may be a single file or
+// split across several: the entry is `<packageName>.ts` (the sole file
+// needs no special name), which imports the rest, and esbuild bundles them
+// together. Every package's sidecar is packed into a single ESM bundle that
+// imports `katari-port`.
 //
 // The generated entry wires each package through
 // `__withModule(packageName, body)` so `katari.agent(localName, ...)`
@@ -13,7 +13,7 @@
 // katari-port.
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import type { SidecarBundle } from "@katari-lang/runtime";
 import { init as initLexer, parse as parseLexer } from "es-module-lexer";
 import { build, type Plugin } from "esbuild";
@@ -35,8 +35,8 @@ export interface BundlePackage {
   packageName: string;
   /**
    * Absolute path of the package's source root (typically
-   * `<packageRoot>/src`). The bundler walks it for the single sidecar
-   * `.ts` / `.js` file.
+   * `<packageRoot>/src`). The bundler walks it for the sidecar entry
+   * (`<packageName>.ts`, or the sole `.ts` / `.js` file) + any files it imports.
    */
   sourceRoot: string;
 }
@@ -55,8 +55,8 @@ export interface BundleResult {
 /**
  * Bundle every package's sidecar into one ESM bundle. Returns `null`
  * when no package has a sidecar (= the snapshot doesn't need a sidecar
- * runtime). Each package is allowed at most one `.ts` / `.js` file under
- * its source root; more than one is a hard error.
+ * runtime). A package's sidecar may span several files bundled from the
+ * `<packageName>.ts` entry.
  */
 export async function bundleSidecar(opts: BundleOptions): Promise<BundleResult | null> {
   const entries = await collectSiblingEntries(opts.packages);
@@ -114,17 +114,23 @@ export async function bundleSidecar(opts: BundleOptions): Promise<BundleResult |
 // ─── Sidecar discovery ─────────────────────────────────────────────────────
 
 interface SiblingEntry {
-  /** Absolute path of the sidecar JS / TS source. */
-  siblingPath: string;
+  /** Absolute path of the sidecar entry source (the package-named file, or the
+   *  sole file). esbuild bundles from here, following its imports. */
+  entryPath: string;
+  /** Every sidecar source under the package root (the entry + any files it
+   *  imports). All are wrapped under the package qname so a `katari.agent` in
+   *  any of them registers as `<qname>.<name>`. */
+  allPaths: string[];
   /** Module qualified name (= package name, flat). */
   moduleQname: string;
 }
 
 /**
- * For each package, find the single sidecar file under its source root.
- * Returns one entry per package that has a sidecar (packages with none
- * are silently skipped — they're katari-only). Throws when a package
- * has more than one `.ts` / `.js` file under its source root.
+ * For each package, find its sidecar entry under the source root. A package's
+ * sidecar may be split across several files: the entry is the package-named
+ * file (`<pkg>.ts`), which imports the rest, and esbuild bundles them together
+ * into one flat sidecar. (A single-file package needs no `<pkg>.ts` name.)
+ * Returns one entry per package that has a sidecar (none → silently skipped).
  */
 async function collectSiblingEntries(packages: BundlePackage[]): Promise<SiblingEntry[]> {
   const out: SiblingEntry[] = [];
@@ -133,14 +139,16 @@ async function collectSiblingEntries(packages: BundlePackage[]): Promise<Sibling
     if (!exists) continue;
     const sidecars = await walkSidecars(pkg.sourceRoot);
     if (sidecars.length === 0) continue;
-    if (sidecars.length > 1) {
+    const named = sidecars.find((p) => baseNameNoExt(p) === pkg.packageName);
+    const entry = named ?? (sidecars.length === 1 ? sidecars[0]! : undefined);
+    if (entry === undefined) {
       throw new BundleError(
-        `package "${pkg.packageName}" has ${sidecars.length} sidecar files under ${pkg.sourceRoot}:\n  - ${sidecars.join(
+        `package "${pkg.packageName}" has ${sidecars.length} sidecar files but none named "${pkg.packageName}.ts" to serve as the entry:\n  - ${sidecars.join(
           "\n  - ",
-        )}\nEach katari package may register at most one sidecar file (Wave 6b-A3 flat-bundle rule). Combine them into one ts/js file.`,
+        )}\nName the entry "${pkg.packageName}.ts" and import the others from it (they bundle together).`,
       );
     }
-    out.push({ siblingPath: sidecars[0]!, moduleQname: pkg.packageName });
+    out.push({ entryPath: entry, allPaths: sidecars, moduleQname: pkg.packageName });
   }
   // Deterministic order for reproducible bundles.
   out.sort((a, b) => (a.moduleQname < b.moduleQname ? -1 : 1));
@@ -194,6 +202,10 @@ function noExtKey(path: string): string {
   return path.replace(/\.(ts|js)$/, "");
 }
 
+function baseNameNoExt(path: string): string {
+  return basename(path).replace(/\.(ts|js)$/, "");
+}
+
 async function pathExists(p: string): Promise<boolean> {
   try {
     await stat(p);
@@ -212,9 +224,7 @@ function renderSyntheticEntry(entries: SiblingEntry[]): string {
   // the file body so katari.agent(name, ...) registers under
   // `<qname>.<name>`.
   const importLines = entries
-    .map(
-      (e, idx) => `import "${escapeJsonPath(e.siblingPath)}";  // module ${idx}: ${e.moduleQname}`,
-    )
+    .map((e, idx) => `import "${escapeJsonPath(e.entryPath)}";  // module ${idx}: ${e.moduleQname}`)
     .join("\n");
 
   return [
@@ -239,7 +249,12 @@ function escapeJsonPath(s: string): string {
 // stay outside the wrapper (ESM rules them illegal inside a function).
 
 function makeModuleWrapPlugin(entries: SiblingEntry[]): Plugin {
-  const pathToQname = new Map(entries.map((e) => [e.siblingPath, e.moduleQname] as const));
+  // Every file under a package's root (the entry + any it imports) is wrapped
+  // under that package's qname, so a `katari.agent` in a split sub-file still
+  // registers as `<qname>.<name>`.
+  const pathToQname = new Map(
+    entries.flatMap((e) => e.allPaths.map((p) => [p, e.moduleQname] as const)),
+  );
   return {
     name: "katari-module-wrap",
     setup(build) {
