@@ -1028,7 +1028,8 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
           mapM
             ( \handler -> do
                 expected <- handlerExpectedNext bodyEffect handler
-                local (\e -> e {checkExpectedNext = expected}) (walkRequestHandler handler)
+                requestParamTypes <- handlerParamTypes bodyEffect handler
+                local (\e -> e {checkExpectedNext = expected}) (walkRequestHandler requestParamTypes handler)
             )
             handlers
         (thenClause', thenType) <- case thenClause of
@@ -1069,9 +1070,15 @@ assertMustExit sourceSpan bodyType mkError = do
     _ | isNever -> pure ()
     _ -> emitError (mkError sourceSpan)
 
-walkRequestHandler :: RequestHandler Identified -> Check (RequestHandler Zonked)
-walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
-  (parameters', _, paramLocals) <- elaborateParameters parameters
+-- | Check a request handler. Each parameter binds from the handled request's
+-- (instantiated) parameter type @requestParamTypes@: unannotated takes it
+-- directly, annotated checks that request-derived type against the annotation
+-- (like @let x: T = …@) and binds the annotation.
+walkRequestHandler :: Map Text (SemanticType Resolved) -> RequestHandler Identified -> Check (RequestHandler Zonked)
+walkRequestHandler requestParamTypes RequestHandler {moduleQualifier, name, parameters, returnType, body, sourceSpan} = do
+  walked <- mapM bindHandlerParam parameters
+  let parameters' = map fst walked
+      paramLocals = concatMap snd walked
   (body', bodyType) <- withLocals paramLocals (walkBlock body)
   -- A request handler body must transfer control with @break@ / @next@; falling
   -- through to a value (its type is not 'never') is a dedicated error.
@@ -1085,6 +1092,62 @@ walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType
         body = body',
         sourceSpan = sourceSpan
       }
+  where
+    bindHandlerParam ParameterBinding {annotation, name = paramName, typeAnnotation, defaultValue, spread, sourceSpan = paramSpan} = do
+      let requestType = Map.findWithDefault SemanticTypeUnknown paramName.text requestParamTypes
+      bindingType <- case typeAnnotation of
+        Just annotationType -> do
+          annotated <- elaborateType annotationType
+          subtypeAssert paramSpan requestType annotated
+          pure annotated
+        Nothing -> pure requestType
+      let rebuilt =
+            ParameterBinding
+              { annotation = annotation,
+                name = retagNameRef paramName,
+                typeAnnotation = fmap retagSyntacticType typeAnnotation,
+                defaultValue = defaultValue,
+                spread = spread,
+                sourceSpan = paramSpan
+              }
+          binding = maybe [] (\resolution -> [(resolution, bindingType)]) paramName.resolution
+      pure (rebuilt, binding)
+
+-- | The handled request's (instantiated) parameter types, by label — the
+-- counterpart of 'handlerExpectedNext' for the parameter (covariant) side: the
+-- top / an effect generic widens each generic parameter to its top (type →
+-- unknown, effect → all); a concrete instantiation substitutes the args.
+handlerParamTypes :: NormalizedEffect -> RequestHandler Identified -> Check (Map Text (SemanticType Resolved))
+handlerParamTypes bodyEffect RequestHandler {name} = case name.resolution of
+  Just (ResolvedConcreteRequest requestQName) -> do
+    dataFieldEnv <- asks (.checkDataFieldEnv)
+    scheme <- lookupLocal (ResolvedTopLevel requestQName)
+    case scheme >>= (paramFieldsOf . (.schemeBody)) of
+      Nothing -> pure Map.empty
+      Just paramFields -> do
+        let paramIds = dataParamIdsOf dataFieldEnv requestQName
+            widened =
+              Map.map
+                (substituteGenerics (Map.fromList [(p, SemanticTypeUnknown) | p <- paramIds]) (Map.fromList [(p, SemanticEffectAll) | p <- paramIds]))
+                paramFields
+            withArgs arguments =
+              Map.map
+                ( substituteGenerics
+                    (Map.fromList [(p, argumentType) | (p, SemanticGenericArgumentType argumentType) <- zip paramIds arguments])
+                    (Map.fromList [(p, argumentEffect) | (p, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments])
+                )
+                paramFields
+        pure $ case bodyEffect of
+          NormalizedEffectAny -> widened
+          NormalizedEffectRows concrete generics
+            | not (Set.null generics) -> widened
+            | Map.member requestQName concrete -> withArgs (requestArgsInEffect bodyEffect requestQName)
+            | otherwise -> widened
+  _ -> pure Map.empty
+  where
+    paramFieldsOf = \case
+      SemanticTypeFunction parameterObject _ _ -> Just (Map.map (.parameterType) (functionParameters parameterObject))
+      _ -> Nothing
 
 -- | The type a handler's @next@ answer must satisfy: the handled request's
 -- declared return type, with the body's instantiation args (read from the body

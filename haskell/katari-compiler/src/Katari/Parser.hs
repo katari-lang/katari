@@ -984,7 +984,7 @@ parseRequestHandler = parseWithSpan $ do
     optional (parsePunctuation PunctuationDot *> parseNameRef) >>= \case
       Just second -> pure (Just (retagParsedNameRef first), retagParsedNameRef second)
       Nothing -> pure (Nothing, retagParsedNameRef first)
-  parameters <- parseParameterList
+  parameters <- parseParenthesizedList parseHandlerParameter
   returnType <- optional (parsePunctuation PunctuationArrow *> parseType)
   body <- parseWithBreakContext BreakContextHandler parseBlock
   pure $ \sourceSpan ->
@@ -994,6 +994,25 @@ parseRequestHandler = parseWithSpan $ do
         parameters = parameters,
         returnType = returnType,
         body = body,
+        sourceSpan = sourceSpan
+      }
+
+-- | A request-handler parameter: a binding name with an OPTIONAL @: type@. When
+-- omitted, the checker binds it from the handled request's (instantiated)
+-- parameter type; when present, that request-derived type is checked against the
+-- annotation (like @let x: T = …@). No default / spread (a handler binds the
+-- request's argument record positionally by label).
+parseHandlerParameter :: Parser (ParameterBinding Parsed)
+parseHandlerParameter = parseWithSpan $ do
+  name <- parseNameRef
+  typeAnnotation <- optional (parsePunctuation PunctuationColon *> parseType)
+  pure $ \sourceSpan ->
+    ParameterBinding
+      { annotation = Nothing,
+        name = name,
+        typeAnnotation = typeAnnotation,
+        defaultValue = Nothing,
+        spread = False,
         sourceSpan = sourceSpan
       }
 

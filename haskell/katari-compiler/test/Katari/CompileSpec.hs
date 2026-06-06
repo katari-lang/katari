@@ -692,6 +692,35 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
       bad "request foo[T](value: T) -> null\nagent f(s: string) -> null with foo[integer] { foo[string](value = s) }\nagent main() -> integer { 0 }"
     it "with all is accepted" $
       ok "agent f() -> integer with all { 0 }\nagent main() -> integer { 0 }"
+    it "param-position generic: handler binds value from the request instantiation (store[integer] ⇒ integer)" $
+      ok
+        ( "request store[T](value: T) -> null\n"
+            <> "agent take_int(n: integer) -> null { null }\n"
+            <> "agent main() -> integer {\n"
+            <> "  handle { request store(value) { take_int(n = value); next null } }\n"
+            <> "  store[integer](value = 5)\n"
+            <> "  0\n"
+            <> "}"
+        )
+    it "param-position generic: misusing the bound value fails (integer ≠ string)" $
+      bad
+        ( "request store[T](value: T) -> null\n"
+            <> "agent take_str(s: string) -> null { null }\n"
+            <> "agent main() -> integer {\n"
+            <> "  handle { request store(value) { take_str(s = value); next null } }\n"
+            <> "  store[integer](value = 5)\n"
+            <> "  0\n"
+            <> "}"
+        )
+    it "an annotated handler param is checked against the request type (value: string vs store[integer])" $
+      bad
+        ( "request store[T](value: T) -> null\n"
+            <> "agent main() -> integer {\n"
+            <> "  handle { request store(value: string) { next null } }\n"
+            <> "  store[integer](value = 5)\n"
+            <> "  0\n"
+            <> "}"
+        )
     it "an unbounded effect generic forces a handler answer to never" $
       bad
         ( "request ask[T]() -> T\n"
