@@ -200,7 +200,11 @@ jsonStdlibSource =
       "@\"Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).\"",
       "primitive stringify(value: json) -> string",
       "@\"Reflect a runtime value into the `json` union: string / number / boolean / null pass through, arrays and (untagged) records / objects map recursively. Use it to embed dynamic data (e.g. a model's tool arguments) into a `json` request you build in Katari. Throws if the value is (or nests) a secret, a closure, or a tagged `data` value other than a `json_*` constructor.\"",
-      "primitive of(value: unknown) -> json"
+      "primitive of(value: unknown) -> json",
+      "@\"Look up @key@ in a JSON object, returning the child `json` (or `json_null` if @value@ is not an object or has no such key). Typed navigation that avoids unwrapping `json_object.entries` (a `record` of `unknown`) by hand.\"",
+      "primitive get(value: json, key: string) -> json",
+      "@\"Index into a JSON array, returning the element `json` (or `json_null` if @value@ is not an array or @index@ is out of range / negative).\"",
+      "primitive at(value: json, index: integer) -> json"
     ]
 
 -- | The @primitive.record@ sub-module source. Users call these as

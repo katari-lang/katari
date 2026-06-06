@@ -221,9 +221,9 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     expect(result).toBe(5000);
   });
 
-  itE2E("32-json-of: json.of reflects a dynamic record/array into the json union", async () => {
+  itE2E("32-json-of: json.of reflects a dynamic value; json.get/at navigate it", async () => {
     const result = await applyAndRun("json_of", "32-json-of");
-    expect(result).toBe('{"items":[1,2,3]}');
+    expect(result).toBe('{"items":[1,2,3]}|2');
   });
 
   itE2E("07-abs-and-mod: manhattan with negative literals + mod = 11", async () => {

@@ -679,6 +679,29 @@ export async function executePrim(
       const value = req(args, "value");
       return valueToJsonTagged(await materializeValueDeep(value, materialize));
     }
+    case "primitive.json.get": {
+      const value = req(args, "value");
+      const key = await materializeValueText(req(args, "key"), materialize);
+      if (value.kind === "record" && value.ctor === JSON_OBJECT_QNAME) {
+        const entries = value.entries["entries"];
+        if (entries?.kind === "record") {
+          const child = entries.entries[key];
+          if (child !== undefined) return child;
+        }
+      }
+      return { kind: "record", ctor: JSON_NULL_QNAME, entries: {} };
+    }
+    case "primitive.json.at": {
+      const value = req(args, "value");
+      const index = req(args, "index");
+      if (value.kind === "record" && value.ctor === JSON_ARRAY_QNAME && index.kind === "number") {
+        const items = value.entries["items"];
+        if (items?.kind === "array" && index.value >= 0 && index.value < items.elements.length) {
+          return items.elements[index.value] as Value;
+        }
+      }
+      return { kind: "record", ctor: JSON_NULL_QNAME, entries: {} };
+    }
     default:
       throw new RecoverableEngineError(`unknown prim: ${name}`);
   }

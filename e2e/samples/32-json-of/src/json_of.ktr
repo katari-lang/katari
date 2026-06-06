@@ -1,5 +1,11 @@
-@"json.of reflects a dynamic (untagged) record/array/scalar into the json union, so it can be stringified — the bridge for embedding runtime values into a json you build in Katari."
+@"json.of reflects a dynamic (untagged) record/array/scalar into the json union; json.get / json.at navigate it back out with the json type preserved — the bridge for building and reading json values in Katari."
 agent main() -> string {
   let dynamic = { items = [1, 2, 3] }
-  json.stringify(value = json.of(value = dynamic))
+  let encoded = json.of(value = dynamic)
+  let text = json.stringify(value = encoded)
+  let second = match (json.at(value = json.get(value = encoded, key = "items"), index = 1)) {
+    case json_integer(value = v) => { to_string(value = v) }
+    case _ => { "?" }
+  }
+  f"${text}|${second}"
 }
