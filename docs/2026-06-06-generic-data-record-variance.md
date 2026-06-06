@@ -25,6 +25,21 @@ Implementation notes (as shipped):
   (`box[integer].value : integer`). Schema substitutes args into field schemas.
   IR erases generics (data is a tagged object). Golden: `05-generic-data`.
 
+**Follow-on (2026-06-07): generic `request` + effect top `all`.** The same
+variance machinery was extended to effects (originally out of scope in §0):
+`request foo[A, R](x: A) -> R` (param covariant, return contravariant — the
+effect sits in a negative position); `SemanticEffectRequest` carries args; the
+normalized effect becomes `NormalizedEffectAny | NormalizedEffectRows` (the top
+is the surface `all`, dual of `pure`; variances baked at `normaliseEffect` — P2,
+to preserve the effect Monoid the inference walk relies on); `with foo[integer]`
+/ `with all` in the with-clause; and a handler's `next e` is now checked
+`U <: T` against the handled request's instantiated return (closing a
+pre-existing gap where `next` was unchecked for *any* request). Golden:
+`06-generic-request`. Known gaps: a request generic in *parameter* position
+can't yet have a handler (the handler can't annotate the abstract param); the
+handler check is lenient for a request raised only via a same-SCC sibling. See
+the `project_generic_data_variance` memory for the full map. Compiler 588/0.
+
 ## 0. Summary of decisions
 
 1. **`record` drops its parameter.** `record` (keyword, no `[V]`) is the
