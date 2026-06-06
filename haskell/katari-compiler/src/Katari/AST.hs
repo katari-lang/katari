@@ -1062,6 +1062,9 @@ instance HasSourceSpan (TypeUnionNode p) where
 -- request namespace.
 data SyntacticRequest (phase :: Phase) = SyntacticRequest
   { name :: NameRef phase RequestRef,
+    -- | Type / effect arguments for a generic request (@with foo[integer]@);
+    -- empty for a non-generic request.
+    arguments :: [SyntacticType phase],
     sourceSpan :: SourceSpan
   }
 
@@ -1572,15 +1575,19 @@ retagSyntacticType = \case
           sourceSpan = sourceSpan
         }
 
--- | Change the phase tag of a 'SyntacticRequest'.
+-- | Change the phase tag of a 'SyntacticRequest' (name + type arguments).
 retagSyntacticRequest ::
-  ( NameRefResolution phase1 RequestRef ~ NameRefResolution phase2 RequestRef
+  ( NameRefResolution phase1 TypeRef ~ NameRefResolution phase2 TypeRef,
+    NameRefResolution phase1 ModuleRef ~ NameRefResolution phase2 ModuleRef,
+    NameRefResolution phase1 LabelRef ~ NameRefResolution phase2 LabelRef,
+    NameRefResolution phase1 RequestRef ~ NameRefResolution phase2 RequestRef
   ) =>
   SyntacticRequest phase1 ->
   SyntacticRequest phase2
 retagSyntacticRequest req =
   SyntacticRequest
     { name = retagNameRef req.name,
+      arguments = map retagSyntacticType req.arguments,
       sourceSpan = req.sourceSpan
     }
 

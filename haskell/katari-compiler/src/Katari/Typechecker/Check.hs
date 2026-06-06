@@ -575,22 +575,21 @@ resolveTypeRef nameRef = case nameRef.resolution of
   Just (ResolvedRequestName qualifiedName) -> pure (AsEffect (SemanticEffectRequest qualifiedName []))
   Just (ResolvedEffectGenericName genericsId) -> pure (AsEffect (SemanticEffectGeneric genericsId))
   Just ResolvedPureEffect -> pure (AsEffect SemanticEffectPure)
+  Just ResolvedAllEffectName -> pure (AsEffect SemanticEffectAll)
   Nothing -> pure (AsType SemanticTypeUnknown)
 
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
 -- known requests contribute).
 elaborateRequestList :: [SyntacticRequest Identified] -> Check (SemanticEffect Resolved)
-elaborateRequestList syntacticRequests =
-  pure
-    ( unionEffects
-        [ effectLeaf resolution
-          | SyntacticRequest {name = NameRef {resolution = Just resolution}} <- syntacticRequests
-        ]
-    )
+elaborateRequestList syntacticRequests = unionEffects . catMaybes <$> mapM elaborateOne syntacticRequests
   where
-    effectLeaf = \case
-      ResolvedConcreteRequest qualifiedName -> SemanticEffectRequest qualifiedName []
-      ResolvedEffectGeneric genericsId -> SemanticEffectGeneric genericsId
+    elaborateOne SyntacticRequest {name, arguments} = case name.resolution of
+      Just (ResolvedConcreteRequest qualifiedName) -> do
+        arguments' <- mapM elaborateGenericArgument arguments
+        pure (Just (SemanticEffectRequest qualifiedName arguments'))
+      Just (ResolvedEffectGeneric genericsId) -> pure (Just (SemanticEffectGeneric genericsId))
+      Just ResolvedAllEffect -> pure (Just SemanticEffectAll)
+      Nothing -> pure Nothing
 
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase
 primitiveToSemantic = \case
@@ -1607,13 +1606,19 @@ inferEffects :: Bool -> Set QualifiedName -> [SCCResult] -> Check [SCCResult]
 inferEffects recursive sccQualifiedNames results = do
   locals <- asks (Map.map (.schemeBody) . (.checkLocals))
   dataFieldEnv <- asks (.checkDataFieldEnv)
+  -- The declared @with@ clause effect of each annotated agent, elaborated
+  -- (request args included, e.g. @with foo[integer]@) and normalised. 'Nothing'
+  -- for an unannotated agent (its effect is inferred below).
+  declaredEffectMap <-
+    fmap Map.fromList . sequence $
+      [ (qualifiedName,) <$> traverse (fmap (normaliseEffect dataFieldEnv) . elaborateRequestList . map retagSyntacticRequest) agentDecl.withRequests
+        | (qualifiedName, DeclarationAgent agentDecl, _) <- results
+      ]
   let externalLookup qualifiedName =
         effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) locals)
       agentInfos =
-        [ (qualifiedName, agentDecl, declaredEffect)
-        | (qualifiedName, DeclarationAgent agentDecl, _) <- results,
-          let declaredEffect =
-                fmap (effectFromResolutions . mapMaybe (\request -> request.name.resolution)) agentDecl.withRequests
+        [ (qualifiedName, agentDecl, Map.findWithDefault Nothing qualifiedName declaredEffectMap)
+        | (qualifiedName, DeclarationAgent agentDecl, _) <- results
         ]
       agentSpans =
         Map.fromList [(qualifiedName, agentDecl.sourceSpan) | (qualifiedName, agentDecl, _) <- agentInfos]

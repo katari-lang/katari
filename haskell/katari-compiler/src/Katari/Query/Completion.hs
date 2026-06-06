@@ -461,6 +461,8 @@ typeResolutionItem snap name = \case
   -- completion.
   ResolvedRequestName _ -> Nothing
   ResolvedEffectGenericName _ -> Nothing
+  ResolvedPureEffect -> Nothing
+  ResolvedAllEffectName -> Nothing
 
 mkModuleItemFor ::
   QuerySnapshot ->

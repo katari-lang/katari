@@ -73,6 +73,9 @@ data TypeResolution
     -- the empty effect. @pure@ names only an effect, so it resolves
     -- unambiguously here and is rejected in an ordinary type position.
     ResolvedPureEffect
+  | -- | The @all@ keyword in an effect-argument position (@foo[..., all]@): the
+    -- effect top. Like 'ResolvedPureEffect', names only an effect.
+    ResolvedAllEffectName
   deriving (Eq, Ord, Show)
 
 -- | How an /effect/ reference (a @with@-clause leaf — a
@@ -84,6 +87,9 @@ data TypeResolution
 data EffectResolution
   = ResolvedConcreteRequest QualifiedName
   | ResolvedEffectGeneric GenericsId
+  | -- | The @all@ keyword in a @with@ clause: the effect top (\"may perform any
+    -- effect\"). Contextual — only special when no @req@ named @all@ is in scope.
+    ResolvedAllEffect
   deriving (Eq, Ord, Show)
 
 -- | Module-local generic-parameter identifier. Issued by the Identifier phase

@@ -2163,7 +2163,13 @@ parseEffectTerm =
 parseRequest :: Parser (SyntacticRequest Parsed)
 parseRequest = parseWithSpan $ do
   name <- parseNameRef
-  pure $ \sourceSpan -> SyntacticRequest {name = name, sourceSpan = sourceSpan}
+  arguments <-
+    option [] $
+      between
+        (parsePunctuation PunctuationLeftBracket)
+        (parsePunctuation PunctuationRightBracket)
+        (parseType `sepEndBy1` parseComma)
+  pure $ \sourceSpan -> SyntacticRequest {name = name, arguments = arguments, sourceSpan = sourceSpan}
 
 -- | Optional generic parameter list @[T extends t, effect R, U]@ following a
 -- callable / data name. Absent (no @[@) yields the empty list, so monomorphic

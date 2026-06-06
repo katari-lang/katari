@@ -585,6 +585,8 @@ mergeSymbol newPos name existing incoming = do
         maybe (pure ()) (emitError . ErrorDuplicateName newPos name) maybeSpan
       -- Effect generics live only in local frames, never in the top-level merge.
       ResolvedEffectGeneric _ -> pure ()
+      -- @all@ is a contextual keyword, not a declared name — no duplicate.
+      ResolvedAllEffect -> pure ()
     reportFromConstructor :: QualifiedName -> Identifier ()
     reportFromConstructor qualifiedName = do
       maybeSpan <- gets (fmap (.constructorSourceSpan) . Map.lookup qualifiedName . (.constructors))
@@ -1277,6 +1279,9 @@ resolveBareRequest :: NameRef Parsed RequestRef -> Identifier (NameRefResolution
 resolveBareRequest nameRef =
   lookupRequest nameRef.text >>= \case
     Just resolution -> pure (Just resolution)
+    -- @all@ is the effect top (contextual: only when no @req@ named @all@ shadows
+    -- it), letting a @with@ clause declare "may perform any effect".
+    Nothing | nameRef.text == "all" -> pure (Just ResolvedAllEffect)
     Nothing -> do
       -- Distinguish "name does not exist" from "name exists but is not a
       -- request". The former is a generic K0102, the latter K0108.
@@ -1402,6 +1407,7 @@ resolveTypeName TypeNameNode {name, sourceSpan} = do
         lookupRequest name.text >>= \case
           Just (ResolvedConcreteRequest qualifiedName) -> pure (Just (ResolvedRequestName qualifiedName))
           Just (ResolvedEffectGeneric genericsId) -> pure (Just (ResolvedEffectGenericName genericsId))
+          Just ResolvedAllEffect -> pure (Just ResolvedAllEffectName)
           -- @pure@ is the empty effect; only meaningful as an effect argument.
           Nothing | name.text == "pure" -> pure (Just ResolvedPureEffect)
           Nothing -> do
@@ -1466,11 +1472,13 @@ resolveTupleType TupleTypeNode {elementTypes, sourceSpan} = do
   pure TupleTypeNode {elementTypes = elementTypes', sourceSpan = sourceSpan}
 
 resolveSyntacticRequest :: SyntacticRequest Parsed -> Identifier (SyntacticRequest Identified)
-resolveSyntacticRequest SyntacticRequest {name, sourceSpan} = do
+resolveSyntacticRequest SyntacticRequest {name, arguments, sourceSpan} = do
   metadata <- resolveBareRequest name
+  arguments' <- mapM resolveType arguments
   pure
     SyntacticRequest
       { name = identifiedNameRef metadata name,
+        arguments = arguments',
         sourceSpan = sourceSpan
       }
 
