@@ -1900,14 +1900,35 @@ parseUnionType = parseWithSpan $ do
     [] -> first
     _ -> TypeUnion TypeUnionNode {branches = first : rest, sourceSpan = sourceSpan}
 
--- | The branches of a union (i.e. everything that was previously @parseType@).
+-- | The branches of a union (i.e. everything that was previously @parseType@):
+-- a base type optionally followed by a @[arg, ...]@ type-application postfix
+-- (@array[T]@, @box[integer]@). The postfix binds tighter than @|@.
 parseAtomicType :: Parser (SyntacticType Parsed)
-parseAtomicType =
+parseAtomicType = parseWithSpan $ do
+  base <- parseBaseType
+  maybeArguments <-
+    optional $
+      between
+        (parsePunctuation PunctuationLeftBracket)
+        (parsePunctuation PunctuationRightBracket)
+        (parseType `sepEndBy1` parseComma)
+  pure $ \sourceSpan -> case maybeArguments of
+    Nothing -> base
+    Just arguments ->
+      TypeApplication
+        TypeApplicationTypeNode
+          { applicationHead = base,
+            applicationArguments = arguments,
+            sourceSpan = sourceSpan
+          }
+
+-- | A base type (no trailing @[...]@ application). @null@ stays a keyword (it
+-- doubles as the null value literal). Every other built-in type name (@integer@
+-- / @string@ / @never@ / @unknown@ / …) is a plain identifier resolved by
+-- 'parseNamedOrQualifiedType', exactly like @array@ / @record@ / a user type.
+parseBaseType :: Parser (SyntacticType Parsed)
+parseBaseType =
   choice
-    -- @null@ stays a keyword (it doubles as the null value literal). Every
-    -- other built-in type name (@integer@ / @string@ / @never@ / @unknown@ /
-    -- …) is a plain identifier resolved by 'parseNamedOrQualifiedType', exactly
-    -- like @array@ / @record@ / a user-defined type.
     [ parsePrimitiveType PrimitiveTypeKindNull KeywordNull,
       parseAgentType,
       parseLiteralType,
@@ -2035,22 +2056,15 @@ parseFunctionTypeParameter = do
   typeAnnotation <- parseType
   pure (name, typeAnnotation)
 
--- | @array[T]@. The Kataritoken @array@ is a regular identifier, not a keyword,
--- so we match it by string and rely on the surrounding @[...]@ to confirm.
+-- | The @array@ type constructor (nullary head). @array@ is a regular
+-- identifier, not a keyword; the element type is supplied by the enclosing
+-- 'TypeApplication' (@array[T]@), parsed by 'parseAtomicType'.
 parseArrayType :: Parser (SyntacticType Parsed)
 parseArrayType = parseWithSpan $ do
   void $ parseKatariTokenWith $ \case
     KatariTokenIdentifier "array" -> Just ()
     _ -> Nothing
-  parsePunctuation PunctuationLeftBracket
-  elementType <- parseType
-  parsePunctuation PunctuationRightBracket
-  pure $ \sourceSpan ->
-    TypeArray
-      ArrayTypeNode
-        { elementType = elementType,
-          sourceSpan = sourceSpan
-        }
+  pure $ \sourceSpan -> TypeArray ArrayTypeNode {sourceSpan = sourceSpan}
 
 -- | @record[V]@ — a homogeneous map from string keys to @V@ values.
 -- @record@ is matched as an identifier (same pattern as 'array') to

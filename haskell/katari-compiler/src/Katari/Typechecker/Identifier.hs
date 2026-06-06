@@ -1352,6 +1352,7 @@ resolveType = \case
   TypeName node -> TypeName <$> resolveTypeName node
   TypeFunction node -> TypeFunction <$> resolveFunctionType node
   TypeArray node -> TypeArray <$> resolveArrayType node
+  TypeApplication node -> TypeApplication <$> resolveTypeApplication node
   TypeTuple node -> TypeTuple <$> resolveTupleType node
   TypeQualified node -> TypeQualified <$> resolveQualifiedType node
   -- Literal types have nothing to resolve (the LiteralValue is phase-agnostic).
@@ -1446,9 +1447,13 @@ resolveFunctionType FunctionTypeNode {parameterTypes, spreadParameter, returnTyp
       }
 
 resolveArrayType :: ArrayTypeNode Parsed -> Identifier (ArrayTypeNode Identified)
-resolveArrayType ArrayTypeNode {elementType, sourceSpan} = do
-  elementType' <- resolveType elementType
-  pure ArrayTypeNode {elementType = elementType', sourceSpan = sourceSpan}
+resolveArrayType ArrayTypeNode {sourceSpan} = pure ArrayTypeNode {sourceSpan = sourceSpan}
+
+resolveTypeApplication :: TypeApplicationTypeNode Parsed -> Identifier (TypeApplicationTypeNode Identified)
+resolveTypeApplication TypeApplicationTypeNode {applicationHead, applicationArguments, sourceSpan} = do
+  applicationHead' <- resolveType applicationHead
+  applicationArguments' <- mapM resolveType applicationArguments
+  pure TypeApplicationTypeNode {applicationHead = applicationHead', applicationArguments = applicationArguments', sourceSpan = sourceSpan}
 
 resolveTupleType :: TupleTypeNode Parsed -> Identifier (TupleTypeNode Identified)
 resolveTupleType TupleTypeNode {elementTypes, sourceSpan} = do

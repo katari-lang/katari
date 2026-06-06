@@ -1010,10 +1010,10 @@ declarations = describe "declarations" $ do
     m <- shouldSucceed "type t = array[integer | string]"
     case head (decls m) of
       DeclarationTypeSynonym ts -> case ts.rhs of
-        TypeArray a -> case a.elementType of
-          TypeUnion _ -> pure ()
+        TypeApplication app -> case (app.applicationHead, app.applicationArguments) of
+          (TypeArray _, [TypeUnion _]) -> pure ()
           _ -> expectationFailure "expected union as array element"
-        _ -> expectationFailure "expected array type"
+        _ -> expectationFailure "expected array type application"
       _ -> expectationFailure "expected type synonym"
 
   it "parses import" $ do
@@ -1799,15 +1799,15 @@ arrayAndTupleTypes = describe "array and tuple types" $ do
     _ <- shouldSucceed "agent main(xs: array[integer]) { 1 }"
     pure ()
 
-  it "array[T] yields TypeArray node" $ do
+  it "array[T] yields a TypeApplication of TypeArray" $ do
     m <- shouldSucceed "agent main(xs: array[integer]) { 1 }"
     case head (decls m) of
       DeclarationAgent a -> case a.parameters of
         [p] -> case p.typeAnnotation of
-          Just (TypeArray n) -> case n.elementType of
-            TypePrimitive prim -> prim.kind `shouldBe` PrimitiveTypeKindInteger
-            _ -> expectationFailure "expected primitive element type"
-          _ -> expectationFailure "expected TypeArray"
+          Just (TypeApplication app) -> case (app.applicationHead, app.applicationArguments) of
+            (TypeArray _, [TypePrimitive prim]) -> prim.kind `shouldBe` PrimitiveTypeKindInteger
+            _ -> expectationFailure "expected array applied to a primitive element type"
+          _ -> expectationFailure "expected TypeApplication"
         _ -> expectationFailure "expected one parameter"
       _ -> expectationFailure "expected agent"
 

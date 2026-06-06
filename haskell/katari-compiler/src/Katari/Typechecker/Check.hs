@@ -449,6 +449,15 @@ elaborateType :: SyntacticType Identified -> Check (SemanticType Resolved)
 elaborateType syntacticType =
   elaborateTypeOrEffect syntacticType >>= expectType (sourceSpanOf syntacticType)
 
+-- | Elaborate one type-application argument: a type becomes a type argument; a
+-- name resolving to an effect (a @req@) becomes an effect argument. The kind is
+-- decided by the argument's own resolution (no need to consult the parameter).
+elaborateGenericArgument :: SyntacticType Identified -> Check (SemanticGenericArgument Resolved)
+elaborateGenericArgument argument =
+  elaborateTypeOrEffect argument >>= \case
+    AsType semanticType -> pure (SemanticGenericArgumentType semanticType)
+    AsEffect semanticEffect -> pure (SemanticGenericArgumentEffect semanticEffect)
+
 -- | Elaborate a syntactic type into a type /or/ an effect. A bare request name
 -- (only reachable via the Identifier's effect-namespace fallback) denotes an
 -- effect; a union is all-type or all-effect (mixing them is an error); every
@@ -470,8 +479,31 @@ elaborateTypeOrEffect = \case
         parameterEntries <- mapM (\(label, pt) -> (,) label <$> elaborateType pt) parameterTypes
         pure (SemanticTypeObject (requiredParameter <$> Map.fromList parameterEntries))
     pure (AsType (SemanticTypeFunction parameterSemantic returnSemantic requests))
-  TypeArray ArrayTypeNode {elementType} ->
-    AsType . SemanticTypeArray <$> elaborateType elementType
+  TypeArray ArrayTypeNode {sourceSpan} -> do
+    -- A bare @array@ (never applied) is incomplete: it must be @array[T]@.
+    emitError (CheckErrorMustInstantiate sourceSpan "array")
+    pure (AsType SemanticTypeUnknown)
+  TypeApplication TypeApplicationTypeNode {applicationHead, applicationArguments, sourceSpan} ->
+    case applicationHead of
+      -- @array[T]@ — the only built-in type constructor.
+      TypeArray _ -> case applicationArguments of
+        [elementType] -> AsType . SemanticTypeArray <$> elaborateType elementType
+        _ -> do
+          emitError (CheckErrorTypeArgArity sourceSpan 1 (length applicationArguments))
+          pure (AsType SemanticTypeUnknown)
+      -- @data foo[args]@ — a generic data applied to type / effect arguments.
+      _ ->
+        elaborateType applicationHead >>= \case
+          SemanticTypeData qualifiedName [] -> do
+            dataFieldEnv <- asks (.checkDataFieldEnv)
+            arguments <- mapM elaborateGenericArgument applicationArguments
+            let parameterCount = length (dataParamIdsOf dataFieldEnv qualifiedName)
+            when (parameterCount /= length arguments) $
+              emitError (CheckErrorTypeArgArity sourceSpan parameterCount (length arguments))
+            pure (AsType (SemanticTypeData qualifiedName arguments))
+          _ -> do
+            emitError (CheckErrorInternal sourceSpan "type application of a non-generic type")
+            pure (AsType SemanticTypeUnknown)
   TypeTuple TupleTypeNode {elementTypes} ->
     AsType . SemanticTypeTuple <$> mapM elaborateType elementTypes
   TypeUnion TypeUnionNode {branches, sourceSpan} -> do

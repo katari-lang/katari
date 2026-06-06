@@ -813,8 +813,15 @@ data SyntacticType (phase :: Phase) where
   TypeName :: TypeNameNode phase -> SyntacticType phase
   -- | @(p: T, ...) -> R [with E]@ — concrete function type.
   TypeFunction :: FunctionTypeNode phase -> SyntacticType phase
-  -- | @T[]@ — homogeneous array.
+  -- | The @array@ type constructor (nullary head). Always appears as the head
+  -- of a 'TypeApplication' (@array[T]@ = @TypeApplication TypeArray [T]@); a bare
+  -- @array@ is incomplete and rejected at elaboration.
   TypeArray :: ArrayTypeNode phase -> SyntacticType phase
+  -- | @head[arg, ...]@ — application of a type constructor to type / effect
+  -- arguments. The head is @array@ (homogeneous array) or a generic @data@ name;
+  -- arguments are types (an effect argument is a name resolving to a @req@,
+  -- disambiguated at elaboration by the parameter's kind).
+  TypeApplication :: TypeApplicationTypeNode phase -> SyntacticType phase
   -- | @(T1, T2, ...)@ — fixed-length, position-typed tuple.
   TypeTuple :: TupleTypeNode phase -> SyntacticType phase
   -- | @module.TypeName@ qualified reference.
@@ -856,6 +863,7 @@ instance HasSourceSpan (SyntacticType phase) where
     TypeName node -> node.sourceSpan
     TypeFunction node -> node.sourceSpan
     TypeArray node -> node.sourceSpan
+    TypeApplication node -> node.sourceSpan
     TypeTuple node -> node.sourceSpan
     TypeQualified node -> node.sourceSpan
     TypeLiteral node -> node.sourceSpan
@@ -975,13 +983,23 @@ data FunctionTypeNode (phase :: Phase) = FunctionTypeNode
 instance HasSourceSpan (FunctionTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
--- | AST node for a homogeneous array type @T[]@.
+-- | AST node for the nullary @array@ type constructor (the element type comes
+-- from the enclosing 'TypeApplication').
 data ArrayTypeNode (phase :: Phase) = ArrayTypeNode
-  { elementType :: SyntacticType phase,
-    sourceSpan :: SourceSpan
+  { sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (ArrayTypeNode p) where
+  sourceSpanOf node = node.sourceSpan
+
+-- | AST node for a type application @head[arg, ...]@.
+data TypeApplicationTypeNode (phase :: Phase) = TypeApplicationTypeNode
+  { applicationHead :: SyntacticType phase,
+    applicationArguments :: [SyntacticType phase],
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (TypeApplicationTypeNode p) where
   sourceSpanOf node = node.sourceSpan
 
 -- | AST node for a tuple type @(T1, T2, ...)@.
@@ -1493,10 +1511,13 @@ retagSyntacticType = \case
           withRequests = retagSyntacticRequest <$> withRequests,
           sourceSpan = sourceSpan
         }
-  TypeArray ArrayTypeNode {elementType, sourceSpan} ->
-    TypeArray
-      ArrayTypeNode
-        { elementType = retagSyntacticType elementType,
+  TypeArray ArrayTypeNode {sourceSpan} ->
+    TypeArray ArrayTypeNode {sourceSpan = sourceSpan}
+  TypeApplication TypeApplicationTypeNode {applicationHead, applicationArguments, sourceSpan} ->
+    TypeApplication
+      TypeApplicationTypeNode
+        { applicationHead = retagSyntacticType applicationHead,
+          applicationArguments = map retagSyntacticType applicationArguments,
           sourceSpan = sourceSpan
         }
   TypeTuple TupleTypeNode {elementTypes, sourceSpan} ->
@@ -1804,6 +1825,10 @@ deriving instance (ShowPhase phase) => Show (FunctionTypeNode phase)
 deriving instance (EqPhase phase) => Eq (ArrayTypeNode phase)
 
 deriving instance (ShowPhase phase) => Show (ArrayTypeNode phase)
+
+deriving instance (EqPhase phase) => Eq (TypeApplicationTypeNode phase)
+
+deriving instance (ShowPhase phase) => Show (TypeApplicationTypeNode phase)
 
 deriving instance (EqPhase phase) => Eq (RecordTypeNode phase)
 
