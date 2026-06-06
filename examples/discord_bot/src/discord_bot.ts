@@ -302,6 +302,21 @@ type KatariAgentMetadata = {
   input: KatariString;
 };
 
+/** Large opaque strings (e.g. Gemini thought signatures) re-ship in the
+ *  conversation history every step. Promote anything over the inline limit to a
+ *  content-addressed blob ref so the history payload stays small; the runtime /
+ *  sidecar resolves the ref back to text (`readString`) when it next consumes
+ *  the value. (CORE-side prim promotion already covers strings produced by
+ *  Katari prims like `to_string`; this covers FFI-direct values that bypass
+ *  prims — they're stored straight from the model's response.) */
+const HISTORY_BLOB_INLINE_LIMIT = 1024;
+async function blobIfLarge(
+  makeString: (text: string) => Promise<KatariString>,
+  text: string,
+): Promise<RawValue> {
+  return text.length > HISTORY_BLOB_INLINE_LIMIT ? makeString(text) : text;
+}
+
 // One model step: given the conversation + the tools' schemas, return the
 // model's decision (a step_final reply, or a step_call carrying a BATCH of tool
 // calls — each naming a tool by INDEX into the tools array + the args it chose).
@@ -362,12 +377,16 @@ katari.agent<{
   // dispatches them in parallel via call_agent.
   return {
     $constructor: "discord_bot.step_call",
-    calls: calls.map((call) => ({
-      $constructor: "discord_bot.tool_call",
-      tool_index: indexByName.get(call.name) ?? 0,
-      name: call.name,
-      thought_signature: call.thoughtSignature ?? "",
-      args: (call.args ?? {}) as RawValue,
-    })),
+    calls: await Promise.all(
+      calls.map(async (call) => ({
+        $constructor: "discord_bot.tool_call",
+        tool_index: indexByName.get(call.name) ?? 0,
+        name: call.name,
+        // Opaque + replayed verbatim every step → blob it when large so it
+        // doesn't bloat the history payload on each crossing.
+        thought_signature: await blobIfLarge((t) => ctx.makeString(t), call.thoughtSignature ?? ""),
+        args: (call.args ?? {}) as RawValue,
+      })),
+    ),
   } as RawValue;
 });
