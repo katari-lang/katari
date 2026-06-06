@@ -1061,7 +1061,10 @@ instance HasSourceSpan (TypeUnionNode p) where
 -- | An entry in a @with@-clause: one request name. Resolved against the
 -- request namespace.
 data SyntacticRequest (phase :: Phase) = SyntacticRequest
-  { name :: NameRef phase RequestRef,
+  { -- | An optional @module.@ qualifier for a cross-module request
+    -- (@with ai.get_ai_client@).
+    moduleQualifier :: Maybe (NameRef phase ModuleRef),
+    name :: NameRef phase RequestRef,
     -- | Type / effect arguments for a generic request (@with foo[integer]@);
     -- empty for a non-generic request.
     arguments :: [SyntacticType phase],
@@ -1586,7 +1589,8 @@ retagSyntacticRequest ::
   SyntacticRequest phase2
 retagSyntacticRequest req =
   SyntacticRequest
-    { name = retagNameRef req.name,
+    { moduleQualifier = fmap retagNameRef req.moduleQualifier,
+      name = retagNameRef req.name,
       arguments = map retagSyntacticType req.arguments,
       sourceSpan = req.sourceSpan
     }
