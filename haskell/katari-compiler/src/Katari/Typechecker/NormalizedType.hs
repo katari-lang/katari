@@ -61,6 +61,7 @@ module Katari.Typechecker.NormalizedType
 
     -- * Conversion from SemanticType
     normaliseSemantic,
+    requestArgsInEffect,
 
     -- * Lattice operations
     unionNT,
@@ -435,6 +436,16 @@ normaliseEffect env = \case
     NormalizedEffectRows (Map.singleton qualifiedName (variancesOf env qualifiedName, map (normaliseArg env) arguments)) Set.empty
   SemanticEffectGeneric genericsId -> NormalizedEffectRows Map.empty (Set.singleton genericsId)
   SemanticEffectUnion branches -> foldr (unionNormalizedEffect . normaliseEffect env) emptyNormalizedEffect branches
+
+-- | The (denormalised) arguments a request is applied to within an effect —
+-- used to instantiate a handler against the request's body usage. Empty if the
+-- request does not appear, or the effect is the top (@all@).
+requestArgsInEffect :: NormalizedEffect -> QualifiedName -> [SemanticGenericArgument Resolved]
+requestArgsInEffect effect qualifiedName = case effect of
+  NormalizedEffectAny -> []
+  NormalizedEffectRows concrete _ -> case Map.lookup qualifiedName concrete of
+    Just (_, arguments) -> map denormaliseArg arguments
+    Nothing -> []
 
 -- | Rebuild an effect tree from a normalised effect (concrete leaves then
 -- generic leaves, in id order, for determinism).

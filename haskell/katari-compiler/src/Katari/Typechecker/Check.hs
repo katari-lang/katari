@@ -68,6 +68,7 @@ import Katari.Typechecker.NormalizedType
     expandGenerics,
     normaliseEffect,
     normaliseSemantic,
+    requestArgsInEffect,
     nullNormalizedEffect,
     subtractConcrete,
     subtypeNormalizedType,
@@ -248,7 +249,11 @@ data CheckEnv = CheckEnv
     -- outside a generic body. Consulted by 'subtypeAssert' for bound expansion.
     checkBoundEnv :: BoundEnv,
     -- | The enclosing agent body's declared / expected return type, if any.
-    checkExpectedReturn :: Maybe (SemanticType Resolved)
+    checkExpectedReturn :: Maybe (SemanticType Resolved),
+    -- | Inside a request handler body: the type a @next e@ answer must satisfy
+    -- (@e : U@ requires @U \<: T@) — the handled request's return type with the
+    -- body's instantiation args substituted. 'Nothing' outside a handler.
+    checkExpectedNext :: Maybe (SemanticType Resolved)
   }
 
 -- | Where a non-local control transfer goes — used to collect the value types
@@ -1006,7 +1011,20 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
     collectExitsTagged [HandleBreakTag, HandleNextTag] $
       withLocals stateLocals $ do
         (body', bodyType) <- walkBlock body
-        handlers' <- mapM walkRequestHandler handlers
+        -- Re-derive the body's fired effect (from the zonked body's stamped
+        -- types) so each handler can be checked against the request's return
+        -- type at the instantiation the body actually raises.
+        dataFieldEnv <- asks (.checkDataFieldEnv)
+        localBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
+        let lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
+            bodyEffect = blockEffect dataFieldEnv lookupEff body'
+        handlers' <-
+          mapM
+            ( \handler -> do
+                expected <- handlerExpectedNext bodyEffect handler
+                local (\e -> e {checkExpectedNext = expected}) (walkRequestHandler handler)
+            )
+            handlers
         (thenClause', thenType) <- case thenClause of
           Nothing -> pure (Nothing, Nothing)
           Just (maybePattern, thenBody) -> do
@@ -1061,6 +1079,29 @@ walkRequestHandler RequestHandler {moduleQualifier, name, parameters, returnType
         body = body',
         sourceSpan = sourceSpan
       }
+
+-- | The type a handler's @next@ answer must satisfy: the handled request's
+-- declared return type, with the body's instantiation args (read from the body
+-- effect) substituted for the request's generic parameters. 'Nothing' when the
+-- handler does not resolve to a concrete request (then @next@ is unconstrained).
+handlerExpectedNext :: NormalizedEffect -> RequestHandler Identified -> Check (Maybe (SemanticType Resolved))
+handlerExpectedNext bodyEffect RequestHandler {name} = case name.resolution of
+  Just (ResolvedConcreteRequest requestQName) -> do
+    dataFieldEnv <- asks (.checkDataFieldEnv)
+    scheme <- lookupLocal (ResolvedTopLevel requestQName)
+    case scheme >>= (returnOfSignature . (.schemeBody)) of
+      Nothing -> pure Nothing
+      Just returnType -> do
+        let arguments = requestArgsInEffect bodyEffect requestQName
+            paramIds = dataParamIdsOf dataFieldEnv requestQName
+            typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
+            effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
+        pure (Just (substituteGenerics typeSubstitution effectSubstitution returnType))
+  _ -> pure Nothing
+  where
+    returnOfSignature = \case
+      SemanticTypeFunction _ returnType _ -> Just returnType
+      _ -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- Blocks and statements
@@ -1131,6 +1172,10 @@ walkStatement = \case
   StatementNext NextStatement {value, modifiers, sourceSpan} -> do
     (value', valueType) <- synthExpr value
     modifiers' <- mapM walkModifier modifiers
+    -- A @next e@ answer resumes the asker, so it must satisfy the handled
+    -- request's (instantiated) return type (set per handler in 'synthHandle').
+    expectedNext <- asks (.checkExpectedNext)
+    forM_ expectedNext $ \expected -> subtypeAssert (sourceSpanOf value) valueType expected
     recordExit HandleNextTag valueType
     pure (StatementNext NextStatement {value = value', modifiers = modifiers', sourceSpan = sourceSpan}, [], [])
   StatementForBreak ForBreakStatement {value, sourceSpan} -> do
@@ -1472,7 +1517,8 @@ checkSCC moduleName resolvedCallables moduleAST sccQualifiedNames typeData primR
             checkLocals = Map.mapKeys ResolvedTopLevel resolvedCallables,
             checkPrimRules = primRules,
             checkBoundEnv = Map.empty,
-            checkExpectedReturn = Nothing
+            checkExpectedReturn = Nothing,
+            checkExpectedNext = Nothing
           }
       sccDeclarations = filter (declarationInSCC sccQualifiedNames) moduleAST.declarations
       -- The whole module's per-callable quantifiers (gathered once), used to
