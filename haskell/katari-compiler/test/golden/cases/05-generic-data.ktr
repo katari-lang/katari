@@ -1,0 +1,24 @@
+@"A generic box holding one value of type T (T is covariant)."
+data box[out T](value: T)
+
+@"A heterogeneous pair."
+data pair[A, B](first: A, second: B)
+
+@"Builds a box[integer] and reads its (specialised) field back as integer."
+agent unwrap_box(n: integer) -> integer {
+  box[integer](value = n).value
+}
+
+@"Builds a pair and reads its second component (string) via match."
+agent second_of(a: integer, b: string) -> string {
+  match (pair[integer, string](first = a, second = b)) {
+    case pair(first = _, second = s) => { s }
+  }
+}
+
+@"Passes a box[integer] across an agent boundary (type-application annotation)."
+agent take_box(b: box[integer]) -> integer { b.value }
+
+agent main() -> integer {
+  take_box(b = box[integer](value = unwrap_box(n = 41)))
+}
