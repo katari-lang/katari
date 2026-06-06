@@ -37,6 +37,18 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       (K0021).** `request env_not_found(k) { break f"x: ${k}" }` reports
       `unexpected }`; the multi-line form parses. Suspect virtual-semicolon
       insertion at template-close immediately followed by `}`.
+- [ ] **[later] Record-literal keys can't be reserved words.** A record literal
+      `{ type = … }` fails to parse (`type` is a keyword) — bit when building
+      OpenAI's `"type": "function"` wire field in `ai.openai`. Workaround is
+      `record.set(rec, key = "type", value = …)` (string key). Allow quoted /
+      keyword keys in record literals, or accept string keys there.
+- [ ] **[later] `match` doesn't narrow the scrutinee.** Inside
+      `case foo(…) =>`, the scrutinee still has the union type, not `foo` — so
+      passing a matched union member to a function that wants the concrete member
+      means rebuilding it from the destructured fields (e.g. the per-provider
+      `infer_step` dispatch in `discord_bot.ai` rebuilds `gemini.gemini(model=…,
+      …)`). Want flow-narrowing of the scrutinee (or an as-pattern
+      `case c @ foo(…)`).
 - [ ] **[v0.1.0 · big, dedicated phase] Full generics + spreading.** The single
       mechanism behind several gaps. Spec is largely settled (user-side); this is
       an implementation effort spanning parser → identifier → CG → **solver** →
