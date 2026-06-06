@@ -62,6 +62,7 @@ module Katari.Typechecker.NormalizedType
     -- * Conversion from SemanticType
     normaliseSemantic,
     requestArgsInEffect,
+    dataArgsInType,
 
     -- * Lattice operations
     unionNT,
@@ -446,6 +447,17 @@ requestArgsInEffect effect qualifiedName = case effect of
   NormalizedEffectRows concrete _ -> case Map.lookup qualifiedName concrete of
     Just (_, arguments) -> map denormaliseArg arguments
     Nothing -> []
+
+-- | The (denormalised, variance-joined) arguments a @data@ is applied to within
+-- a /normalised/ type. 'Nothing' when the type is the top (@unknown@ — e.g. an
+-- unbounded generic was unioned in, so the data's args can't be pinned) or the
+-- data is absent. Callers should normalise + expand generics before calling, so
+-- the result reflects all branches (e.g. @foo[a] | foo[b]@ → the variance-joined
+-- args, not just one branch).
+dataArgsInType :: NormalizedType -> QualifiedName -> Maybe [SemanticGenericArgument Resolved]
+dataArgsInType normalizedType qualifiedName = case normalizedType of
+  NormalizedTypeUnknown -> Nothing
+  NormalizedTypeLayered layered -> map denormaliseArg <$> Map.lookup qualifiedName layered.mapLayer.dataApps
 
 -- | Rebuild an effect tree from a normalised effect (concrete leaves then
 -- generic leaves, in id order, for determinism).

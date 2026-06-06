@@ -69,6 +69,7 @@ import Katari.Typechecker.NormalizedType
     normaliseEffect,
     normaliseSemantic,
     requestArgsInEffect,
+    dataArgsInType,
     nullNormalizedEffect,
     subtractConcrete,
     subtypeNormalizedType,
@@ -1014,8 +1015,14 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
         -- types) so each handler can be checked against the request's return
         -- type at the instantiation the body actually raises.
         dataFieldEnv <- asks (.checkDataFieldEnv)
-        localBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
-        let lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
+        -- Local types (incl. this SCC's seeded recursive siblings) take
+        -- precedence over the reader env (imports + earlier SCCs), so a request
+        -- raised via a same-SCC sibling is still seen here (its effect is
+        -- declared — recursive agents must annotate `with`).
+        seededTypes <- gets (.stateLocalTypes)
+        readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
+        let localBodies = Map.union seededTypes readerBodies
+            lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
             bodyEffect = blockEffect dataFieldEnv lookupEff body'
         handlers' <-
           mapM
@@ -1090,12 +1097,23 @@ handlerExpectedNext bodyEffect RequestHandler {name} = case name.resolution of
     scheme <- lookupLocal (ResolvedTopLevel requestQName)
     case scheme >>= (returnOfSignature . (.schemeBody)) of
       Nothing -> pure Nothing
-      Just returnType -> do
-        let arguments = requestArgsInEffect bodyEffect requestQName
-            paramIds = dataParamIdsOf dataFieldEnv requestQName
-            typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
-            effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
-        pure (Just (substituteGenerics typeSubstitution effectSubstitution returnType))
+      Just returnType -> case bodyEffect of
+        -- The effect top: the request could be raised at any args, so a single
+        -- answer must be valid for all of them ⇒ 'never' (it can't be answered).
+        NormalizedEffectAny -> pure (Just SemanticTypeNever)
+        NormalizedEffectRows concrete generics
+          -- An in-scope effect generic is unbounded — it could itself be this
+          -- request at any args — so again the answer must satisfy 'never'.
+          | not (Set.null generics) -> pure (Just SemanticTypeNever)
+          -- Request not raised by the body: the handler is dead; leave 'next'
+          -- unconstrained rather than force 'never'.
+          | not (Map.member requestQName concrete) -> pure Nothing
+          | otherwise -> do
+              let arguments = requestArgsInEffect bodyEffect requestQName
+                  paramIds = dataParamIdsOf dataFieldEnv requestQName
+                  typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
+                  effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
+              pure (Just (substituteGenerics typeSubstitution effectSubstitution returnType))
   _ -> pure Nothing
   where
     returnOfSignature = \case
@@ -1322,16 +1340,6 @@ expandScrutinee subject = do
   dataFieldEnv <- asks (.checkDataFieldEnv)
   pure (denormalise (expandGenerics dataFieldEnv boundEnv (normaliseSemantic dataFieldEnv subject)))
 
--- | The type / effect args carried by a match scrutinee for a given data
--- constructor: the scrutinee is the applied data itself, or — for a
--- tagged-union subject — the branch whose data name matches.
-argsForConstructor :: SemanticType Resolved -> QualifiedName -> Maybe [SemanticGenericArgument Resolved]
-argsForConstructor subject qualifiedName = case subject of
-  SemanticTypeData subjectQName arguments | subjectQName == qualifiedName -> Just arguments
-  SemanticTypeUnion branches ->
-    listToMaybe [arguments | SemanticTypeData branchQName arguments <- branches, branchQName == qualifiedName]
-  _ -> Nothing
-
 walkPattern :: SemanticType Resolved -> Pattern Identified -> Check (Pattern Zonked, [(VariableResolution, SemanticType Resolved)])
 walkPattern subject = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
@@ -1357,17 +1365,22 @@ walkPattern subject = \case
   PatternQualifiedConstructor QualifiedConstructorPattern {moduleQualifier, constructorName, parameters, sourceSpan} -> do
     declaredFields <- constructorFieldTypes constructorName.resolution
     dataFieldEnv <- asks (.checkDataFieldEnv)
-    -- Specialise the constructor's declared field types by the scrutinee's type
-    -- args, so a binding in @match (b: box[integer]) { case box(x = v) => v }@
-    -- gives @v : integer@ rather than the abstract parameter.
-    let matchedArgs = constructorName.resolution >>= argsForConstructor subject
+    boundEnv <- asks (.checkBoundEnv)
+    -- Read the constructor's variance-joined args from the NORMALISED + generic-
+    -- expanded subject, so @box[a] | box[b]@ (and @box[a] | U@) bind soundly. A
+    -- top subject (an unbounded generic was unioned in, so the value could be
+    -- @box@ at any args) can't pin the args, so the field reads fall back to
+    -- @unknown@ — always a sound supertype for a read.
+    let normalizedSubject = expandGenerics dataFieldEnv boundEnv (normaliseSemantic dataFieldEnv subject)
+        matchedArgs = constructorName.resolution >>= dataArgsInType normalizedSubject
         fieldSubjects = case (constructorName.resolution, matchedArgs) of
           (Just qualifiedName, Just arguments) ->
             let paramIds = dataParamIdsOf dataFieldEnv qualifiedName
                 typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
                 effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
              in Map.map (substituteGenerics typeSubstitution effectSubstitution) declaredFields
-          _ -> declaredFields
+          (Just _, Nothing) -> Map.map (const SemanticTypeUnknown) declaredFields
+          (Nothing, _) -> declaredFields
     walked <-
       forM parameters $ \(label, sub) -> do
         let fieldSubject = Map.findWithDefault SemanticTypeUnknown label.text fieldSubjects
