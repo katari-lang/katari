@@ -244,6 +244,48 @@ seq/map layers already top-/bottom-out when shapes are incompatible.
   the scrutinee (hence its concrete data args) before walking arms — it does
   (subject synthesised first), so substitution has the args it needs.
 
+## 5b. Worked-out implementation blueprint (the lattice core)
+
+Concrete plan for the hardest layer (`NormalizedType` + the env), settled
+2026-06-06:
+
+- **`SemanticTypeData QualifiedName [SemanticGenericArgument]`**, where
+  `SemanticGenericArgument = SemanticGenericArgumentType SemanticType |
+  SemanticGenericArgumentEffect SemanticEffect` (a GADT alongside
+  `SemanticType` / `SemanticEffect`; derives Show/Eq/Ord). Non-generic data =
+  empty list.
+- **`MapSlot.dataApps :: Map QualifiedName [NormalizedGenericArg]`** (was `Set
+  QualifiedName`), `NormalizedGenericArg = NormalizedGenericArgType
+  NormalizedType | NormalizedGenericArgEffect NormalizedEffect` (derives
+  Eq/Show — `Map`, not `Set`, so no `Ord` cascade). One entry per data name;
+  same-name-different-args is resolved by variance at union/intersect.
+- **Env-threading is P1**, and the lattice ops are *interlocked*: `normalize`
+  calls `unionNT` (union-branch case), so `normalize`, `unionNT`, `intersectNT`,
+  and `subtypeNormalizedType` all carry the data env. `denormalise` stays
+  env-free (just rebuilds `SemanticTypeData qn (map denormArg args)`). External
+  `normaliseSemantic` callers (~6, all in Check/Exhaustive) thread the env they
+  already hold.
+- **`DataFieldEnv` → `Map QualifiedName DataInfo`** with
+  `DataInfo { dataParamIds :: [GenericsId], dataVariances :: [Variance],
+  dataFields :: Map Text (SemanticType Resolved) }`. **Fields are stored
+  un-normalized** (as `SemanticType`, generics intact) to break the
+  build-env-vs-normalize circularity (`buildDataFieldEnv` must not normalize, as
+  normalize now needs the env). Subtyping substitutes args into `dataFields`
+  (reusing `substituteGenerics`), then `normaliseSemantic env` the result.
+- **Variance combine** (`unionMapSlot` / `intersectMapSlot` over same-name data,
+  using `dataVariances`): per §4.4. Covariant union → `box[a∪b]`; invariant
+  mismatch → the whole union is `NormalizedTypeUnknown` (so the bare-obj/map
+  combine must be able to signal "unknown" up to `unionNT`). Subtype per §4.4.
+- **Variance inference**: a position-sign scan over `dataFields` per param
+  (§4.3), SCC fixpoint for recursive data, explicit `in`/`out` checked
+  `inferred <: declared` (§4.1). Computed once when building `DataInfo`.
+- **Cascade (SemanticTypeData pattern/constructor sites, ~21):** Render
+  (`name[args]`), Exhaustive (name-only, args ignored for ctor set), Completion
+  (substitute for field types), Check (construction attaches inferred/explicit
+  args; field-access + match substitute args into field types; `elaborateType`
+  of the new `TypeApplication` builds `SemanticTypeData`/`SemanticTypeArray`),
+  Schema (fill args into the data's field schemas).
+
 ## 6. Implementation phases
 
 1. **Type-application syntax** (parser + `SyntacticType` node + identifier
