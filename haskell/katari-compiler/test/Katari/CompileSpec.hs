@@ -26,6 +26,7 @@ spec = describe "Katari.Compile" $ do
   externalAgentSpec
   recursiveDataSpec
   defaultArgumentsSpec
+  genericsSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -628,3 +629,71 @@ recursiveDataSpec = describe "recursive data type" $ do
         case Aeson.fromJSON (Aeson.toJSON ir) of
           Aeson.Success decoded -> decoded `shouldBe` ir
           Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
+
+-- | Generic data + request + variance + effect top. Emphasises should-FAIL
+-- corners (the soundness edges that were thin before).
+genericsSpec :: Spec
+genericsSpec = describe "generics (data / request / variance / effect top)" $ do
+  let ok src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+      bad src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+
+  describe "generic data" $ do
+    it "box[integer] field access reads integer" $
+      ok "data box[T](value: T)\nagent main() -> integer { box[integer](value = 5).value }"
+    it "box[integer].value used as string fails" $
+      bad "data box[T](value: T)\nagent main() -> string { box[integer](value = 5).value }"
+    it "covariance: box[integer] <: box[integer | string]" $
+      ok
+        ( "data box[T](value: T)\n"
+            <> "agent want(b: box[integer | string]) -> integer { 0 }\n"
+            <> "agent main() -> integer { want(b = box[integer](value = 5)) }"
+        )
+    it "anti-covariance: box[integer | string] is NOT <: box[integer]" $
+      bad
+        ( "data box[T](value: T)\n"
+            <> "agent want(b: box[integer]) -> integer { 0 }\n"
+            <> "agent main() -> integer { want(b = box[integer | string](value = 5)) }"
+        )
+    it "match binding substitutes args: box[integer] => integer" $
+      ok "data box[T](value: T)\nagent f(b: box[integer]) -> integer { match (b) { case box(value = v) => { v } } }"
+    it "covariant union match binds the joined type (int|string ≮ integer)" $
+      bad
+        ( "data box[T](value: T)\n"
+            <> "agent pick(b: boolean) -> box[integer] | box[string] { match (b) { case true => { box[integer](value = 1) } case _ => { box[string](value = \"x\") } } }\n"
+            <> "agent g(b: boolean) -> integer { match (pick(b = b)) { case box(value = v) => { v } } }"
+        )
+    it "unbounded generic in the union makes the match binding unknown (≮ integer)" $
+      bad
+        ( "data box[T](value: T)\n"
+            <> "agent f[U](x: box[integer] | U) -> integer { match (x) { case box(value = v) => { v } case _ => { 0 } } }"
+        )
+
+  describe "explicit variance" $ do
+    it "out on a covariant parameter is accepted" $
+      ok "data box[out T](value: T)\nagent main() -> integer { 0 }"
+    it "in on a covariant parameter is rejected (K0228)" $
+      bad "data box[in T](value: T)\nagent main() -> integer { 0 }"
+
+  describe "generic request" $ do
+    it "ask[string]() returns string" $
+      ok "request ask[T]() -> T\nagent main() -> string {\n  handle { request ask() { next \"x\" } }\n  ask[string]()\n}"
+    it "ask[string]() used as integer fails" $
+      bad "request ask[T]() -> T\nagent main() -> integer {\n  handle { request ask() { next \"x\" } }\n  ask[string]()\n}"
+    it "handler answering the wrong type fails (next 42 vs ask[string])" $
+      bad "request ask[T]() -> T\nagent main() -> string {\n  handle { request ask() { next 42 } }\n  ask[string]()\n}"
+    it "with foo[integer] covers a body raising foo[integer]" $
+      ok "request foo[T](value: T) -> null\nagent f(n: integer) -> null with foo[integer] { foo[integer](value = n) }\nagent main() -> integer { 0 }"
+    it "with foo[integer] does NOT cover a body raising foo[string] (K0212)" $
+      bad "request foo[T](value: T) -> null\nagent f(s: string) -> null with foo[integer] { foo[string](value = s) }\nagent main() -> integer { 0 }"
+    it "with all is accepted" $
+      ok "agent f() -> integer with all { 0 }\nagent main() -> integer { 0 }"
+    it "an unbounded effect generic forces a handler answer to never" $
+      bad
+        ( "request ask[T]() -> T\n"
+            <> "agent f[effect E](g: agent() -> null with E) -> string with E {\n"
+            <> "  handle { request ask() { next \"x\" } }\n"
+            <> "  g()\n"
+            <> "  ask[string]()\n"
+            <> "}\n"
+            <> "agent main() -> integer { 0 }"
+        )
