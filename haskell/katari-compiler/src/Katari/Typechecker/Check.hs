@@ -38,7 +38,7 @@ import Control.Monad.State.Strict
 import Data.List (transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -1759,13 +1759,6 @@ inferEffects recursive sccQualifiedNames results = do
       case [param.name.text | param <- agentDecl.typeParameters, param.name.resolution == Just (ResolvedGenericParam genericsId)] of
         (name : _) -> name
         [] -> "<effect-generic>"
-
--- | The normalised effect a @with@ clause declares, from its resolved leaves.
-effectFromResolutions :: [EffectResolution] -> NormalizedEffect
-effectFromResolutions resolutions =
-  NormalizedEffectRows
-    (Map.fromList [(qualifiedName, ([], [])) | ResolvedConcreteRequest qualifiedName <- resolutions])
-    (Set.fromList [genericsId | ResolvedEffectGeneric genericsId <- resolutions])
 
 patchResultEffect :: Map QualifiedName NormalizedEffect -> SCCResult -> SCCResult
 patchResultEffect published (qualifiedName, declaration, sig) =
