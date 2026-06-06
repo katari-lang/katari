@@ -27,6 +27,7 @@ spec = describe "Katari.Compile" $ do
   recursiveDataSpec
   defaultArgumentsSpec
   genericsSpec
+  letAnnotationSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -629,6 +630,15 @@ recursiveDataSpec = describe "recursive data type" $ do
         case Aeson.fromJSON (Aeson.toJSON ir) of
           Aeson.Success decoded -> decoded `shouldBe` ir
           Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
+
+-- | A @let@ binder's type annotation must be checked against the bound value
+-- (it was silently ignored before — `let s: string = 5` was accepted).
+letAnnotationSpec :: Spec
+letAnnotationSpec = describe "let binder type annotation" $ do
+  it "a let annotation that the value satisfies is accepted" $
+    hasErrors (compileSync (singleSourceInput "agent main() -> integer { let x: integer = 5; x }")).diagnostics `shouldBe` False
+  it "a let annotation the value violates is rejected" $
+    hasErrors (compileSync (singleSourceInput "agent main() -> integer { let s: string = 5; 0 }")).diagnostics `shouldBe` True
 
 -- | Generic data + request + variance + effect top. Emphasises should-FAIL
 -- corners (the soundness edges that were thin before).

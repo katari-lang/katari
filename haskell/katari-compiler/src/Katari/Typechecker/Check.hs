@@ -1407,7 +1407,14 @@ walkPattern :: SemanticType Resolved -> Pattern Identified -> Check (Pattern Zon
 walkPattern subject = \case
   PatternVariable VariablePattern {name, typeAnnotation, sourceSpan} -> do
     bindingType <- case typeAnnotation of
-      Just t -> elaborateType t
+      -- An annotated binder (@let s: T = e@, @case s: T@) re-annotates the
+      -- matched value: the subject must be a subtype of the annotation (like the
+      -- @var@ initializer check). Narrowing to a /sub/type is a type guard
+      -- ('PatternType'), not a variable annotation.
+      Just t -> do
+        annotated <- elaborateType t
+        subtypeAssert sourceSpan subject annotated
+        pure annotated
       Nothing -> pure subject
     let bindings = maybe [] (\resolution -> [(resolution, bindingType)]) name.resolution
     pure (PatternVariable VariablePattern {name = retagNameRef name, typeAnnotation = fmap retagSyntacticType typeAnnotation, sourceSpan = sourceSpan, typeOf = bindingType}, bindings)
