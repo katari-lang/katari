@@ -370,7 +370,7 @@ substituteGenerics typeSubstitution effectSubstitution = go
       SemanticTypeArray element -> SemanticTypeArray (go element)
       SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
       SemanticTypeUnion branches -> unionSemantic (map go branches)
-      SemanticTypeRecord valueType -> SemanticTypeRecord (go valueType)
+      SemanticTypeRecord -> SemanticTypeRecord
       SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
       SemanticTypeFunction parameterType returnType effect ->
         SemanticTypeFunction
@@ -420,19 +420,12 @@ retagGenericCallee callee concreteType = case callee of
 recordExit :: ExitTag -> SemanticType Resolved -> Check ()
 recordExit tag semantic = modify' $ \s -> s {stateExits = ExitRecord tag semantic : s.stateExits}
 
--- | Run an action, then peel off the exits matching @tags@ that it recorded,
--- returning their value types. Non-matching exits are left in place so they
--- propagate to an outer scope (a @break@ inside a @for@ targets an enclosing
--- handle, etc.).
-collectExits :: [ExitTag] -> Check a -> Check (a, [SemanticType Resolved])
-collectExits tags action = do
-  (result, records) <- collectExitsTagged tags action
-  pure (result, [semantic | ExitRecord _ semantic <- records])
-
--- | Like 'collectExits' but returns the matched exit /records/ (tags kept), so
--- a scope that consumes several tags can treat them differently — e.g. a handle
--- scope consumes both its @break@ and @next@ exits (so neither leaks to an
--- outer scope) but only @break@ values determine the scope's result type.
+-- | Run an action, then peel off the matched exit /records/ (tags kept) that it
+-- recorded, so a scope consuming several tags can treat them differently — e.g.
+-- a @for@ scope consumes both its @break@ and @next@ exits (so neither leaks to
+-- an outer scope) but they feed its result type differently. Non-matching exits
+-- are left in place so they propagate to an outer scope (a @break@ inside a
+-- nested @for@ targets an enclosing handle, etc.).
 collectExitsTagged :: [ExitTag] -> Check a -> Check (a, [ExitRecord])
 collectExitsTagged tags action = do
   before <- gets (.stateExits)
@@ -525,8 +518,7 @@ elaborateTypeOrEffect = \case
   TypeNever _ -> pure (AsType SemanticTypeNever)
   TypeUnknown _ -> pure (AsType SemanticTypeUnknown)
   TypeFunctionAny _ -> pure (AsType SemanticTypeFunctionAny)
-  TypeRecord RecordTypeNode {valueType} ->
-    AsType . SemanticTypeRecord <$> elaborateType valueType
+  TypeRecord _ -> pure (AsType SemanticTypeRecord)
   TypeObject ObjectTypeNode {fields} ->
     -- An optional field @l?: T@ widens to @null | T@ (an absent / null value is
     -- admissible), mirroring the @x ?: T@ parameter desugaring.
@@ -607,10 +599,12 @@ literalValueToSemantic = \case
 -- and continue (the caller recovers by stamping the expected type).
 subtypeAssert :: SourceSpan -> SemanticType Resolved -> SemanticType Resolved -> Check ()
 subtypeAssert sourceSpan actual expected
-  -- 'unknown' on either side is the error-recovery / not-yet-known type: a
-  -- prior diagnostic (e.g. an unresolved name) already fired, so suppress the
-  -- cascade rather than pile on a second error for the same root cause.
-  | isUnknown actual || isUnknown expected = pure ()
+  -- 'unknown' as the EXPECTED type is the top: @actual <: unknown@ always holds,
+  -- so skip (also suppresses cascades when a prior error left @expected@
+  -- unknown). 'unknown' as the ACTUAL type is NOT skipped: @unknown <: T@ for a
+  -- narrower @T@ must fail (unknown is a real top, not an `any` escape hatch) —
+  -- a value of unknown type must be narrowed (e.g. via @match@) before use.
+  | isUnknown expected = pure ()
   | otherwise = do
       dataFieldEnv <- asks (.checkDataFieldEnv)
       boundEnv <- asks (.checkBoundEnv)
@@ -689,6 +683,9 @@ synthExpr = \case
 -- | Look up a variable / top-level callable reference's type. An unresolved
 -- reference (Identifier already reported it as an undefined name) yields
 -- @unknown@ silently — re-reporting it here would duplicate the diagnostic.
+-- Downstream uses of that @unknown@ recovery value may now cascade a subtype
+-- error (since @unknown@ is a sound top, not an @any@), which is acceptable:
+-- the root cause (the undefined name) is already reported.
 lookupVariableType :: SourceSpan -> Text -> Maybe VariableResolution -> Check (SemanticType Resolved)
 lookupVariableType _ _ = \case
   Just resolution -> maybe SemanticTypeUnknown id <$> lookupLocalType resolution
@@ -1375,7 +1372,7 @@ fieldType sourceSpan subject label = case subject of
     -- at elaboration), so the read type is just the field type.
     Just field -> pure field.parameterType
     Nothing -> missing
-  SemanticTypeRecord valueType -> pure valueType
+  SemanticTypeRecord -> pure SemanticTypeUnknown
   SemanticTypeData qualifiedName ->
     constructorFieldTypes (Just qualifiedName) >>= \fields ->
       case Map.lookup label fields of

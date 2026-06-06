@@ -109,12 +109,13 @@ data SemanticType phase where
   -- @T \<: SemanticTypeObject {label: t_field}@). Convertible to / from
   -- JSON schema style records.
   SemanticTypeObject :: Map Text (Parameter phase) -> SemanticType phase
-  -- | @record[V]@ — homogeneous map from string keys to values of
-  -- type @V@. Keys are implicitly @string@ because the wire form is
-  -- plain JSON object syntax and JSON object keys are always
-  -- strings. Distinct from 'SemanticTypeObject' (= statically-known
-  -- field labels) — a @record@ has a runtime-dynamic key set.
-  SemanticTypeRecord :: SemanticType phase -> SemanticType phase
+  -- | @record@ — the homogeneous-map top: any map value (object / data /
+  -- record), keys @string@, reads yield @unknown@. Nullary (no element type):
+  -- @object \<: record@ is always sound because @record@ is the top of the map
+  -- layer. Distinct from 'SemanticTypeObject' (= statically-known field labels)
+  -- — a @record@ has a runtime-dynamic key set. A typed dictionary is a generic
+  -- @data@ instead. See docs/2026-06-06-generic-data-record-variance.md.
+  SemanticTypeRecord :: SemanticType phase
 
 deriving instance Show (SemanticType phase)
 

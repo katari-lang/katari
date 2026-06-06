@@ -62,16 +62,27 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
   - Unlocks: handler-providing combinators (`with_session` / `retry` /
     `with_timeout`), the tool-calling cleanup below, and reusable libraries over
     arbitrary effects. (`map` / `filter` / `reduce` would also want this.)
-- [ ] **[later · needs generics] First-class handler provision.** A library
-      should be able to ship a reusable handler (a state cell, a retry/timeout
-      wrapper) so a user writes `with <handler>` instead of hand-rolling the
-      `handle (var s = …) { request … }` boilerplate per capability (the
-      discord_bot session was exactly this by hand before it moved to `array`).
-      Two directions to pick between: (a) make a **handler first-class** and add a
-      `with handler` form; or (b) treat a semantic handler as a **function taking
-      a callback** and add a Gleam-style `use` binding that desugars to the
-      handle/continuation. Either way needs generics (the handler is polymorphic
-      over the body's type/effects), so it lands after that phase.
+- [ ] **[v0.1.0 · needs generics inference] `use` binding + handler-as-function.**
+      Decided (was an a/b fork): **direction (b)**. A semantic handler is a
+      **higher-order function that takes the continuation** — `handler(args, k)`
+      runs the rest of the computation `k` under its capability and returns the
+      handled result. The sugar is a Gleam-style **`use` binding** that desugars
+      the trailing block into that continuation:
+
+      `{ let y = use f(x); rest }`  ⇒  `f(x, agent (y) { rest })`
+
+      So a library ships `ai_provider` / `with_session` / `retry` / `with_timeout`
+      as plain agents and the user writes
+      `let provider = use ai_provider(secret_env_key = "GEMINI_API_KEY"); …`
+      instead of hand-rolling `handle (var s = …) { request … }` per capability
+      (the discord_bot session/capabilities are exactly this boilerplate by hand).
+      **Needs generics _inference_, not just explicit type args:** a `use`-handler
+      is polymorphic over the continuation's result type + effect set, and the
+      ergonomic win is gone if every `use` site must spell `[R, E]`. So this wants
+      **local inference of the handler's generic params at the `use`/call site**
+      (synthesise the continuation's type/effects and feed them in), layered on
+      the bidirectional checker. This is the ergonomic key that makes the AI
+      library (below) actually writable.
 - [ ] **[later · solver completeness, not soundness] Aggregate-narrow for a
       variable's composite upper bounds.** With the unified type lattice, a free
       type variable that picks up *several* var-containing composite upper bounds
@@ -141,20 +152,44 @@ release · **[later]** post-v0.1.0 · **[deferred]** acknowledged, no owner yet.
       calling becomes first-class, decide where per-provider schema adaptation
       lives (a port helper? a stdlib agent? emitted alongside the schema bundle?)
       rather than every ext re-implementing it.
-- [ ] **[later · needs full generics] Tool-calling cleanup.** Today's discord
-      `infer_with_tools` ext owns the whole tool-call loop, which forces three
-      compromises: (1) the ktr passes **both** `tools` and `tool_metas` (the ext
-      can't call `get_metadata`); (2) the loop / multi-round logic is hidden in TS,
-      not Katari; (3) the ext **delegates the tools and so actually raises their
-      effects, but its type can't say so** — `get_e2b_key` is hardcoded into the
-      array element type and isn't generic. Target shape once generics land:
-      a **thin ext** = one stateless inference step (`ai_step(client, contents,
-      schemas) -> text | tool_call`), and the **loop + dispatch in Katari** —
-      `run_tools<E>(history, tools: array[agent(args) -> string with E]) -> … with E`
-      dispatches the chosen tool by value (`call_agent` taking an agent value, not
-      a name string), so the effect `E` is recovered from the tool's static type
-      and tracked honestly. Pass just the agents (schemas derived in Katari via
-      `get_metadata`), no parallel `tool_metas`.
+- [x] **Tool-calling cleanup (mostly done, 2026-06-06).** The target shape landed:
+      the ext is now a **thin stateless step** (`infer_step(client, history,
+      tool_metas) -> step_final | step_call`) and the **loop + parallel dispatch
+      live in Katari** — `infer_with_tools[effect E](history, tools: array[agent
+      (...never) -> unknown with E], …)` derives schemas via `get_metadata`,
+      dispatches each chosen tool **by value** with `call_agent[unknown, E]`, and
+      tracks the tools' effect `E` honestly through its signature. The model's
+      functionCall/functionResponse round-trip is replayed (turn / call_turn /
+      result_turn union + Gemini thoughtSignature). Remaining nit: the ext still
+      receives `tool_metas` alongside the agents because `get_metadata` runs in
+      Katari and the ext can't; once the schema adaptation moves (see
+      "Provider-ready tool schemas") the ext could take only `contents`.
+- [ ] **[v0.1.0+ · needs generics inference + `use`/handlers] AI provider / model
+      library.** Today's AI loop is Gemini-hardcoded in one sidecar. Target: a
+      reusable AI library whose `infer` / `infer_with_tools` run against any
+      **provider + model** the caller picks. Layering — modelled with first-class
+      **agent values** (no methods-on-`data`; a "model" is a record of closures =
+      a vtable), langchain-ish:
+  - **Provider** — auth/config capability (api key, base url). Installed via a
+    handler: `let p = use ai_provider(secret_env_key = "GEMINI_API_KEY")`. Mints
+    models. Per-vendor (gemini / openai / anthropic) provider agents.
+  - **Model** — a **vtable**: a record of agent closures implementing the
+    provider-specific protocol over an abstract session `S` — `new_session`,
+    `append_*`, `infer_step`. Built from a provider
+    (`gemini(p).model("gemini-3-flash")`). The session type `S` is **tied to the
+    model** (each vendor's history format differs), so a model is generic over `S`.
+  - **Session** — an opaque-to-the-caller value the model's closures interpret;
+    the handler appends to it. Format is model-specific (hence `S`). (langchain's
+    "memory" is the analogue.)
+  - **infer / infer_with_tools** — provider/model-agnostic, generic over `S` and
+    the tools' effect `E`; loop + dispatch in Katari (already true for the
+    Gemini-specific version above).
+      Blocked on: generics over `S` / `E` **with inference**, and `use`/handler
+      sugar for the provider capability (both above). Until then the discord
+      example stays Gemini-specific but is **split into ai / discord / e2b
+      modules** (one sidecar, package-scoped FFI) so the boundaries are already
+      library-ready — each module becomes its own package (+ its own sidecar) when
+      actually split out.
 
 ## Runtime / model
 

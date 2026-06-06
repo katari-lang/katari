@@ -121,7 +121,7 @@ agent array_of_points(points: array[point]) -> integer {
 // ─── Record ─────────────────────────────────────────────────────────
 
 @"Record (dynamic key-value map). Tests DynamicKeyValueEditor."
-agent record_echo(r: record[string]) -> record[string] { r }
+agent record_echo(r: record) -> record { r }
 
 // (Katari doesn't have anonymous object literals — named fields use data ctors)
 
@@ -133,7 +133,7 @@ agent nested_array_union(items: array[ok | err]) -> integer {
 }
 
 @"Record of arrays. Tests DynamicKeyValueEditor + ArrayField nesting."
-agent nested_record_array(groups: record[array[integer]]) -> record[array[integer]] { groups }
+agent nested_record_array(groups: record) -> record { groups }
 
 @"Echo of Array"
 agent echo_array(ints: array[integer]) -> array[integer] { ints }

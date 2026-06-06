@@ -1367,15 +1367,8 @@ resolveType = \case
     pure (TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan})
   TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
     pure (TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan})
-  TypeRecord RecordTypeNode {valueType, sourceSpan} -> do
-    valueType' <- resolveType valueType
-    pure
-      ( TypeRecord
-          RecordTypeNode
-            { valueType = valueType',
-              sourceSpan = sourceSpan
-            }
-      )
+  TypeRecord RecordTypeNode {sourceSpan} ->
+    pure (TypeRecord RecordTypeNode {sourceSpan = sourceSpan})
   TypeObject ObjectTypeNode {fields, sourceSpan} -> do
     fields' <- mapM (\(label, fieldType, isOptional) -> (\resolved -> (label, resolved, isOptional)) <$> resolveType fieldType) fields
     pure

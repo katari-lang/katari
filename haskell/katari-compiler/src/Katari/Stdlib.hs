@@ -178,8 +178,8 @@ primStdlibSource =
       "data json_string(value: string)",
       "@\"JSON array of further `json` values.\"",
       "data json_array(items: array[json])",
-      "@\"JSON object: a record (homogeneous string-keyed map) of further `json` values.\"",
-      "data json_object(entries: record[json])",
+      "@\"JSON object: a dynamic string-keyed map of further `json` values. `entries` is the `record` top; read with `record.get` (yields `unknown`) and match against the `json` variants.\"",
+      "data json_object(entries: record)",
       "// The standard JSON value union. Recursive via `json_array` /",
       "// `json_object`; pattern-match on the seven constructors to discriminate.",
       "type json = json_null | json_boolean | json_integer | json_number | json_string | json_array | json_object",
@@ -202,26 +202,25 @@ jsonStdlibSource =
     ]
 
 -- | The @primitive.record@ sub-module source. Users call these as
--- @record.empty()@, @record.get(...)@, etc. The flat @record[V]@ type
--- name is unaffected — it's a type-position keyword recognised by the
--- parser independent of the value-namespace module alias.
+-- @record.empty()@, @record.get(...)@, etc. @record@ is the homogeneous-map
+-- top (nullary) — reads yield @unknown@; a typed read narrows with @match@.
 recordStdlibSource :: Text
 recordStdlibSource =
   Text.unlines
     [ "@\"Construct an empty record.\"",
-      "primitive empty() -> record[unknown]",
+      "primitive empty() -> record",
       "@\"Retrieve a record entry by key. Returns null when the key is absent.\"",
-      "primitive get(record: record[unknown], key: string) -> unknown",
+      "primitive get(record: record, key: string) -> unknown",
       "@\"Insert or replace an entry, returning a fresh record (records are immutable).\"",
-      "primitive set(record: record[unknown], key: string, value: unknown) -> record[unknown]",
+      "primitive set(record: record, key: string, value: unknown) -> record",
       "@\"Remove an entry by key. Returns the record unchanged when the key is absent.\"",
-      "primitive remove(record: record[unknown], key: string) -> record[unknown]",
+      "primitive remove(record: record, key: string) -> record",
       "@\"List the keys present in the record (insertion order is not guaranteed).\"",
-      "primitive keys(record: record[unknown]) -> array[string]",
+      "primitive keys(record: record) -> array[string]",
       "@\"True if the record carries an entry under the given key.\"",
-      "primitive has(record: record[unknown], key: string) -> boolean",
+      "primitive has(record: record, key: string) -> boolean",
       "@\"Number of entries in the record.\"",
-      "primitive size(record: record[unknown]) -> integer"
+      "primitive size(record: record) -> integer"
     ]
 
 -- | The @primitive.array@ sub-module source. Users call these as

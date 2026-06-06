@@ -3,3 +3,8 @@ error[K0102]: undefined name 'unknown_function'
   |
 2 |   unknown_function()
   |   ^^^^^^^^^^^^^^^^
+error[K0210]: type mismatch: 'unknown' is not a subtype of 'integer'
+  --> test/golden/cases/03-undefined-name.ktr (1:25)
+  |
+1 | agent main() -> integer {
+  |                         ^

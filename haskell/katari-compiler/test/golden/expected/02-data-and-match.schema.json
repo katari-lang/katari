@@ -1131,7 +1131,7 @@
     "requests": []
   },
   {
-    "description": "JSON object: a record (homogeneous string-keyed map) of further `json` values.",
+    "description": "JSON object: a dynamic string-keyed map of further `json` values. `entries` is the `record` top; read with `record.get` (yields `unknown`) and match against the `json` variants.",
     "input": {
       "additionalProperties": true,
       "properties": {

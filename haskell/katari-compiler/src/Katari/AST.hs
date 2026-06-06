@@ -922,9 +922,11 @@ instance HasSourceSpan (FunctionAnyTypeNode p) where
 -- only the value type is carried syntactically. Generics (v0.2)
 -- could extend the surface to @record[K, V]@ by adding a key field
 -- whose absence defaults to @string@.
+-- | The @record@ type — the homogeneous-map top (any map value; reads yield
+-- @unknown@). Nullary: @record@ has no element type (a typed dictionary is a
+-- generic @data@ instead). See docs/2026-06-06-generic-data-record-variance.md.
 data RecordTypeNode (phase :: Phase) = RecordTypeNode
-  { valueType :: SyntacticType phase,
-    sourceSpan :: SourceSpan
+  { sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (RecordTypeNode p) where
@@ -1523,12 +1525,8 @@ retagSyntacticType = \case
     TypeUnknown UnknownTypeNode {sourceSpan = sourceSpan}
   TypeFunctionAny FunctionAnyTypeNode {sourceSpan} ->
     TypeFunctionAny FunctionAnyTypeNode {sourceSpan = sourceSpan}
-  TypeRecord RecordTypeNode {valueType, sourceSpan} ->
-    TypeRecord
-      RecordTypeNode
-        { valueType = retagSyntacticType valueType,
-          sourceSpan = sourceSpan
-        }
+  TypeRecord RecordTypeNode {sourceSpan} ->
+    TypeRecord RecordTypeNode {sourceSpan = sourceSpan}
   TypeObject ObjectTypeNode {fields, sourceSpan} ->
     TypeObject
       ObjectTypeNode

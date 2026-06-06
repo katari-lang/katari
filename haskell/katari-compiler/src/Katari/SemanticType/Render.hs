@@ -39,8 +39,7 @@ renderSemanticType = render False
       ST.SemanticTypeLiteralBoolean False -> "false"
       ST.SemanticTypeFunctionAny -> "agent"
       ST.SemanticTypeArray inner -> "[" <> render False inner <> "]"
-      ST.SemanticTypeRecord valueType ->
-        "record[" <> render False valueType <> "]"
+      ST.SemanticTypeRecord -> "record"
       ST.SemanticTypeTuple xs ->
         "(" <> Text.intercalate ", " (map (render False) xs) <> ")"
       ST.SemanticTypeUnion branches ->

@@ -1139,7 +1139,7 @@
     "65": {
       "body": {
         "defaults": {},
-        "description": "JSON object: a record (homogeneous string-keyed map) of further `json` values.",
+        "description": "JSON object: a dynamic string-keyed map of further `json` values. `entries` is the `record` top; read with `record.get` (yields `unknown`) and match against the `json` variants.",
         "entryBody": 78,
         "inputSchema": "{\"additionalProperties\":true,\"properties\":{\"entries\":{\"additionalProperties\":true,\"properties\":{},\"required\":[],\"type\":\"object\"}},\"required\":[\"entries\"],\"type\":\"object\"}",
         "name": "json_object",

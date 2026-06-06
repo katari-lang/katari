@@ -323,7 +323,7 @@ unifiedLatticePatterns = describe "unified lattice pattern coverage" $ do
       runExhaustive $
         mconcat
           [ "data foo(x: integer)\n",
-            "agent f(r: record[integer]) {\n",
+            "agent f(r: record) {\n",
             "  match (r) {\n",
             "    case foo(x = x) => { x }\n",
             "    case _          => { 0 }\n",

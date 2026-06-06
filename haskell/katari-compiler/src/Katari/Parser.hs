@@ -2057,20 +2057,14 @@ parseArrayType = parseWithSpan $ do
 -- avoid grabbing a new keyword; the surrounding @[...]@ disambiguates
 -- the syntactic context. Keys are implicit @string@ — the wire form
 -- is a plain JSON object whose keys are always strings.
+-- | The @record@ type — the homogeneous-map top. Nullary (no @[V]@): a typed
+-- dictionary is a generic @data@ instead.
 parseRecordType :: Parser (SyntacticType Parsed)
 parseRecordType = parseWithSpan $ do
   void $ parseKatariTokenWith $ \case
     KatariTokenIdentifier "record" -> Just ()
     _ -> Nothing
-  parsePunctuation PunctuationLeftBracket
-  valueType <- parseType
-  parsePunctuation PunctuationRightBracket
-  pure $ \sourceSpan ->
-    TypeRecord
-      RecordTypeNode
-        { valueType = valueType,
-          sourceSpan = sourceSpan
-        }
+  pure $ \sourceSpan -> TypeRecord RecordTypeNode {sourceSpan = sourceSpan}
 
 -- | @{label: T, label2: U, ...}@ — a structural object type. @{}@ is the
 -- empty object (any value of the map layer; no required fields). Multi-line
