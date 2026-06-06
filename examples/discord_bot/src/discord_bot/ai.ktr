@@ -1,0 +1,65 @@
+// The AI orchestration layer: the provider-agnostic public surface. It unions
+// the providers into one `ai_client`, dispatches a model step to the right one,
+// and runs the tool-using loop generically over the tools' shared effect. Apps
+// (and the providers) speak only the agnostic vocabulary in discord_bot.ai.types.
+
+import discord_bot.ai.types
+import discord_bot.ai.gemini
+import discord_bot.ai.openai
+
+// One configured provider connection. Add a provider by adding a data type in
+// its own module and a branch here + in infer_step — nothing else changes.
+type ai_client = gemini.gemini | openai.openai
+
+@"The shared AI client capability (provided once at the root)."
+request get_ai_client() -> ai_client
+
+@"One model step, dispatched to the configured provider. Provider-agnostic in / out (history + tool schemas -> a step decision)."
+agent infer_step(client: ai_client, history: array[types.message], tool_metas: array[agent_metadata]) -> types.step with json_parse_error {
+  match (client) {
+    case gemini.gemini(model = model, api_key = api_key, config = config) => {
+      gemini.gemini_infer_step(client = gemini.gemini(model = model, api_key = api_key, config = config), history = history, tool_metas = tool_metas)
+    }
+    case openai.openai(model = model, api_key = api_key, config = config) => {
+      openai.openai_infer_step(client = openai.openai(model = model, api_key = api_key, config = config), history = history, tool_metas = tool_metas)
+    }
+  }
+}
+
+@"Infer a single reply with no tools (the common chat case)."
+agent reply(history: array[types.message]) -> string with get_ai_client | json_parse_error {
+  match (infer_step(client = get_ai_client(), history = history, tool_metas = array.empty())) {
+    case types.step_final(text = text) => { text }
+    case types.step_call(calls = _) => { "(unexpected tool call without tools)" }
+  }
+}
+
+@"Run the tool-using model loop IN KATARI, generic over the tools' shared effect @E@: derive each tool's schema with get_metadata, then up to @max_steps@ times ask the configured provider for a step; on a batch of tool calls, dispatch them all CONCURRENTLY with `parallel for` (each resolves its tool by index and invokes it by value via call_agent, validating the model's args against the tool's schema), then feed every result back as a new turn; on a final answer, return it."
+agent infer_with_tools[effect E](
+  history: array[types.message],
+  tools: array[agent (...never) -> unknown with E],
+  max_steps: integer
+) -> string with E | get_ai_client | json_parse_error | error_invalid_argument {
+  let tool_metas = for (let tool in tools) { next get_metadata(value = tool) }
+  for (let _step in array.range(count = max_steps), var conversation: array[types.message] = history) {
+    match (infer_step(client = get_ai_client(), history = conversation, tool_metas = tool_metas)) {
+      case types.step_final(text = reply) => { break reply }
+      case types.step_call(calls = calls) => {
+        // Dispatch every requested tool in parallel; results come back in
+        // request order, each tagged with its tool name + call id so it
+        // round-trips as a function response on the next step.
+        let results = parallel for (let call in calls) {
+          next types.tool_result(
+            name = call.name,
+            call_id = call.opaque,
+            text = to_string(value = call_agent[unknown, E](target = array.get(array = tools, index = call.tool_index), args = json.to_object(value = call.args))),
+          )
+        }
+        // Record BOTH the model's call turn and the results turn so the next
+        // step replays the full call / response exchange.
+        let with_calls = array.append(array = conversation, value = types.call_turn(calls = calls))
+        next with { conversation = array.append(array = with_calls, value = types.result_turn(results = results)) }
+      }
+    }
+  } then { "(no final answer within the step budget)" }
+}

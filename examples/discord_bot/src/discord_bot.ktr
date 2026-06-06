@@ -1,26 +1,27 @@
-// The Discord bot APP: it wires the reusable `ai` and `discord` library modules
-// together, supplies its own tool (run Python in an e2b sandbox), and provides
-// the capabilities (`ai.get_ai_client`, `discord.get_discord_client`,
-// `get_e2b_key`) at the root. The two `import`ed modules could be split into
-// their own packages without touching this file's logic.
+// The Discord bot APP. It wires the reusable library modules — the provider-
+// agnostic `ai` orchestration (+ its `gemini` / `openai` providers), `discord`,
+// and the `e2b` tool — and provides the capabilities at the root. Swapping the
+// model or provider is a one-line change to the client built below; none of the
+// library modules know anything Discord- or e2b-specific.
 
 import discord_bot.ai
+import discord_bot.ai.types
+import discord_bot.ai.gemini
 import discord_bot.discord
+import discord_bot.e2b
 
-@"The e2b API key capability (provided once at the root)."
-request get_e2b_key() -> secret
-
-@"Run Python in an e2b sandbox; returns the stdout / value / error text."
-external e2b_exec(code: string, api_key: secret) -> string from "FFI:discord_bot.e2b_exec"
-
-@"Tool: execute Python code and return its output."
-agent run_python(code: string) -> string with get_e2b_key {
-  e2b_exec(code = code, api_key = get_e2b_key())
+@"Run the tool-using model loop over a history (its last turn is the user's task). The tools all share the @e2b.get_e2b_key@ effect, which `ai.infer_with_tools[e2b.get_e2b_key]` tracks through to here."
+agent ask(history: array[types.message], tools: array[agent (...never) -> unknown with e2b.get_e2b_key]) -> string with ai.get_ai_client | e2b.get_e2b_key | json_parse_error | error_invalid_argument {
+  ai.infer_with_tools[e2b.get_e2b_key](history = history, tools = tools, max_steps = 8)
 }
 
-@"Run the tool-using model loop over a history (its last turn is the user's task). The tools all share the @get_e2b_key@ effect, which `ai.infer_with_tools[get_e2b_key]` tracks through to here."
-agent ask(history: array[ai.message], tools: array[agent (...never) -> unknown with get_e2b_key]) -> string with ai.get_ai_client | get_e2b_key | error_invalid_argument {
-  ai.infer_with_tools[get_e2b_key](history = history, tools = tools, max_steps = 8)
+@"The provider connection this bot uses. Swap gemini -> openai (and the model id) to change provider; nothing else changes."
+agent build_client() -> ai.ai_client {
+  gemini.gemini(
+    model = "gemini-3.5-flash",
+    api_key = env.get_secret(key = "GEMINI_API_KEY"),
+    config = types.infer_config(system = "You are a helpful assistant in a Discord channel."),
+  )
 }
 
 @"Standalone entry to test the tool loop from the CLI (no Discord): katari run discord_bot.solve --args '{\"task\": \"...\"}'."
@@ -30,19 +31,19 @@ agent solve(task: string) -> string {
       break f"missing env: ${env_key}"
     }
   }
-  handle (var client = ai.ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = env.get_secret(key = "GEMINI_API_KEY"))) {
+  handle (var client = build_client()) {
     request ai.get_ai_client() {
       next client
     }
   }
   handle (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
-    request get_e2b_key() {
+    request e2b.get_e2b_key() {
       next e2b_key
     }
   }
   ask(
-    history = array.append(array = array.empty(), value = ai.turn(role = "user", text = task)),
-    tools = [run_python],
+    history = array.append(array = array.empty(), value = types.turn(role = "user", text = task)),
+    tools = [e2b.run_python],
   )
 }
 
@@ -53,7 +54,7 @@ agent main(channel_id: string) -> string {
       break f"missing env: ${env_key}"
     }
   }
-  handle (var client = ai.ai_client(provider = "gemini", model = "gemini-3.1-flash-lite", api_key = env.get_secret(key = "GEMINI_API_KEY"))) {
+  handle (var client = build_client()) {
     request ai.get_ai_client() {
       next client
     }
@@ -63,12 +64,12 @@ agent main(channel_id: string) -> string {
       next discord_client
     }
   }
-  handle (var history: array[ai.message] = array.empty()) {
+  handle (var history: array[types.message] = array.empty()) {
     request discord.on_message(text: string, channel_id: string) {
-      let asked = array.append(array = history, value = ai.turn(role = "user", text = text))
-      let reply = ai.ai_infer(client = ai.get_ai_client(), history = asked)
-      discord.send_message(channel_id = channel_id, text = reply)
-      next null with { history = array.append(array = asked, value = ai.turn(role = "model", text = reply)) }
+      let asked = array.append(array = history, value = types.turn(role = "user", text = text))
+      let answer = ai.reply(history = asked)
+      discord.send_message(channel_id = channel_id, text = answer)
+      next null with { history = array.append(array = asked, value = types.turn(role = "model", text = answer)) }
     }
   }
   discord.watch_messages(channel_id = channel_id)

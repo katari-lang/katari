@@ -1,0 +1,14 @@
+// A self-contained tool: run Python in an e2b sandbox. Its own capability
+// (`get_e2b_key`) + low-level ext + the `run_python` agent that an app hands to
+// the model as a tool. Splittable as its own package.
+
+@"The e2b API key capability (provided once at the root)."
+request get_e2b_key() -> secret
+
+@"Run Python in an e2b sandbox; returns the stdout / value / error text."
+external e2b_exec(code: string, api_key: secret) -> string from "FFI:discord_bot.e2b_exec"
+
+@"Tool: execute Python code and return its output."
+agent run_python(code: string) -> string with get_e2b_key {
+  e2b_exec(code = code, api_key = get_e2b_key())
+}

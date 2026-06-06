@@ -1,0 +1,14 @@
+// The ONLY network helper the sidecar provides for AI. Each provider module
+// builds its request body as JSON *in Katari* and parses the response as JSON
+// *in Katari*; this primitive just performs the POST, injecting the API key as
+// a single configurable auth header. Fully provider-agnostic — swapping or
+// adding a provider never touches the sidecar.
+
+@"POST @body@ to @url@ as application/json with one auth header @auth_header_name: <auth_prefix><api_key>@ (e.g. \"Authorization\" / \"Bearer \" for OpenAI, \"x-goog-api-key\" / \"\" for Gemini). Returns the response body text; throws on a non-2xx status."
+external http_post(
+  url: string,
+  body: string,
+  auth_header_name: string,
+  auth_prefix: string,
+  api_key: secret
+) -> string from "FFI:discord_bot.http_post"
