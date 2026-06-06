@@ -1431,9 +1431,18 @@ resolveQualifiedType QualifiedTypeNode {qualifier, target, sourceSpan} = do
     Just moduleName ->
       lookupModuleExportType moduleName target.text >>= \case
         Just resolution -> pure (Just resolution)
-        Nothing -> do
-          emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
-          pure Nothing
+        Nothing ->
+          -- Effect-namespace fallback (mirrors 'resolveTypeName'): a qualified
+          -- request name in a type position is meaningful as the effect
+          -- argument of a generic application (@foo[mod.req]@); the checker
+          -- reinterprets it there and rejects it in an ordinary type position.
+          lookupModuleExportRequest moduleName target.text >>= \case
+            Just (ResolvedConcreteRequest requestQualifiedName) -> pure (Just (ResolvedRequestName requestQualifiedName))
+            Just (ResolvedEffectGeneric genericsId) -> pure (Just (ResolvedEffectGenericName genericsId))
+            Just ResolvedAllEffect -> pure (Just ResolvedAllEffectName)
+            _ -> do
+              emitError (ErrorUndefinedQualified target.sourceSpan qualifier.text target.text)
+              pure Nothing
     Nothing -> pure Nothing
   pure
     QualifiedTypeNode
