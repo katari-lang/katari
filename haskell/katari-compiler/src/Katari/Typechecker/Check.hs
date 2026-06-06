@@ -1379,7 +1379,16 @@ walkPattern subject = \case
                 typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
                 effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
              in Map.map (substituteGenerics typeSubstitution effectSubstitution) declaredFields
-          (Just _, Nothing) -> Map.map (const SemanticTypeUnknown) declaredFields
+          (Just qualifiedName, Nothing) ->
+            -- Top / unpinnable (an unbounded generic was unioned in): the data
+            -- may be at any args. Substitute its generic parameters by their
+            -- per-kind top (type → unknown, effect → all) so generic-dependent
+            -- field reads widen, while a concrete field (e.g. `value: string` on
+            -- a non-generic constructor) stays precise.
+            let paramIds = dataParamIdsOf dataFieldEnv qualifiedName
+                typeSubstitution = Map.fromList [(paramId, SemanticTypeUnknown) | paramId <- paramIds]
+                effectSubstitution = Map.fromList [(paramId, SemanticEffectAll) | paramId <- paramIds]
+             in Map.map (substituteGenerics typeSubstitution effectSubstitution) declaredFields
           (Nothing, _) -> declaredFields
     walked <-
       forM parameters $ \(label, sub) -> do

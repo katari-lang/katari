@@ -667,6 +667,11 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
         ( "data box[T](value: T)\n"
             <> "agent f[U](x: box[integer] | U) -> integer { match (x) { case box(value = v) => { v } case _ => { 0 } } }"
         )
+    it "a NON-generic constructor matched on a top (unknown) subject keeps its concrete field type" $
+      ok
+        ( "data tag(value: string)\n"
+            <> "agent f(x: unknown) -> string { match (x) { case tag(value = s) => { s } case _ => { \"\" } } }"
+        )
 
   describe "explicit variance" $ do
     it "out on a covariant parameter is accepted" $
