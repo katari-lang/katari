@@ -60,6 +60,8 @@ import Katari.Typechecker.NormalizedType
     NormalizedEffect (..),
     buildDataFieldEnv,
     dataParamIdsOf,
+    Variance (..),
+    variancesOf,
     denormalise,
     denormaliseEffect,
     differenceNormalizedEffect,
@@ -129,6 +131,9 @@ data CheckError
     CheckErrorSpreadParameterMustBeSole SourceSpan
   | -- | A spread call argument (@foo(...e)@) is mixed with named arguments.
     CheckErrorSpreadArgumentMustBeSole SourceSpan
+  | -- | A @data@ parameter's declared variance (@in@ / @out@) is not satisfied
+    -- by its inferred variance (the parameter name and the declared marker).
+    CheckErrorVarianceMismatch SourceSpan Text Text
   | -- | A compiler-invariant violation (e.g. a node the Identifier pass should
     -- have eliminated). Should never fire on a well-formed AST.
     CheckErrorInternal SourceSpan Text
@@ -207,6 +212,11 @@ toDiagnostic = \case
     diagnosticError "K0223" "a spread parameter ('...obj: T') must be the only parameter" sourceSpan
   CheckErrorSpreadArgumentMustBeSole sourceSpan ->
     diagnosticError "K0224" "a spread argument ('...e') can't be mixed with named arguments" sourceSpan
+  CheckErrorVarianceMismatch sourceSpan name declared ->
+    diagnosticError
+      "K0225"
+      ("type parameter '" <> name <> "' is declared '" <> declared <> "' but is not used that way (its inferred variance is incompatible)")
+      sourceSpan
   CheckErrorInternal sourceSpan what ->
     diagnosticError "K9999" ("internal typechecker invariant violated: " <> what) sourceSpan
 
@@ -1507,8 +1517,31 @@ checkSCCDeclarations moduleName sccQualifiedNames declarations = do
       -- effect passes.
       recursive = Set.size sccQualifiedNames > 1 || any (isSelfRecursive moduleName) agents
   nonAgentResults <- catMaybes <$> mapM checkNonAgentDeclaration nonAgents
+  -- All @data@ live in one (the non-agent) SCC, so their constructor sigs are
+  -- now all known: build the complete data env and verify each declared
+  -- @in@ / @out@ variance against the inferred one.
+  checkDeclaredVariances (buildDataFieldEnv (Map.fromList [(qualifiedName, sig) | (qualifiedName, _, sig) <- nonAgentResults])) nonAgents
   agentResults <- checkAgentBatch recursive agents
   inferEffects recursive sccQualifiedNames (nonAgentResults ++ agentResults)
+
+-- | Verify each @data@ parameter's declared @in@ / @out@ marker against its
+-- inferred variance (the inferred variance must be bivariant or match the
+-- declared direction; the opposite direction or invariant is an error).
+checkDeclaredVariances :: DataFieldEnv -> [Declaration Identified] -> Check ()
+checkDeclaredVariances dataEnv declarations =
+  forM_ [dataDecl | DeclarationData dataDecl <- declarations] $ \dataDecl ->
+    case dataDecl.typeName.resolution of
+      Just (ResolvedNamedType dataQName) ->
+        forM_ (zip dataDecl.typeParameters (variancesOf dataEnv dataQName ++ repeat Bivariant)) $ \(parameter, inferred) ->
+          case parameter.declaredVariance of
+            Just DeclaredCovariant
+              | inferred /= Covariant && inferred /= Bivariant ->
+                  emitError (CheckErrorVarianceMismatch parameter.sourceSpan parameter.name.text "out")
+            Just DeclaredContravariant
+              | inferred /= Contravariant && inferred /= Bivariant ->
+                  emitError (CheckErrorVarianceMismatch parameter.sourceSpan parameter.name.text "in")
+            _ -> pure ()
+      _ -> pure ()
 
 -- | Compute each SCC agent's published effect and check it against any declared
 -- @with@ clause, then patch the agent signatures. No fixpoint is needed:

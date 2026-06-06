@@ -926,7 +926,7 @@ withGenericParameters span_ params action =
 -- which keeps the subtype bound-expansion loop terminating), then register
 -- the binder in the innermost frame as a type symbol pointing at the id.
 resolveGenericParameter :: GenericParameter Parsed -> Identifier (GenericParameter Identified)
-resolveGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} = do
+resolveGenericParameter GenericParameter {name, kind, declaredVariance, upperBound, sourceSpan} = do
   upperBound' <- traverse resolveType upperBound
   genericsId <- freshGenericsId
   -- A type parameter occupies the type namespace (referenced as @T@ in a type
@@ -942,6 +942,7 @@ resolveGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} = 
     GenericParameter
       { name = identifiedNameRef (Just (ResolvedGenericParam genericsId)) name,
         kind = kind,
+        declaredVariance = declaredVariance,
         upperBound = upperBound',
         sourceSpan = sourceSpan
       }

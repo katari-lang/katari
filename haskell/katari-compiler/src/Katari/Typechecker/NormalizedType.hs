@@ -46,6 +46,8 @@ module Katari.Typechecker.NormalizedType
     DataFieldEnv,
     buildDataFieldEnv,
     dataParamIdsOf,
+    Variance (..),
+    variancesOf,
     BoundEnv,
 
     -- * Helpers

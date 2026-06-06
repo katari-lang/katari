@@ -2170,28 +2170,36 @@ parseRequest = parseWithSpan $ do
 parseGenericParameters :: Parser [GenericParameter Parsed]
 parseGenericParameters = option [] (parseBracketedList parseGenericParameter)
 
+-- | A generic parameter, optionally prefixed by a variance marker:
+-- @out T@ / @in T@ (covariant / contravariant — @data@ only, verified against
+-- the inferred variance), then @effect R@ or @T@ / @T extends <type>@.
 parseGenericParameter :: Parser (GenericParameter Parsed)
-parseGenericParameter =
-  choice
-    [ try parseEffectGenericParameter,
-      parseTypeGenericParameter
-    ]
-
--- | @effect R@ — an effect parameter (no bound).
-parseEffectGenericParameter :: Parser (GenericParameter Parsed)
-parseEffectGenericParameter = parseWithSpan $ do
-  parseSpecificIdentifier "effect"
-  name <- parseNameRef
+parseGenericParameter = parseWithSpan $ do
+  declaredVariance <- parseDeclaredVariance
+  (name, kind, upperBound) <-
+    choice
+      [ try $ do
+          parseSpecificIdentifier "effect"
+          name <- parseNameRef
+          pure (name, GenericKindEffect, Nothing),
+        do
+          name <- parseNameRef
+          upperBound <- optional (parseSpecificIdentifier "extends" *> parseType)
+          pure (name, GenericKindType, upperBound)
+      ]
   pure $ \sourceSpan ->
-    GenericParameter {name = name, kind = GenericKindEffect, upperBound = Nothing, sourceSpan = sourceSpan}
+    GenericParameter {name = name, kind = kind, declaredVariance = declaredVariance, upperBound = upperBound, sourceSpan = sourceSpan}
 
--- | @T@ or @T extends <type>@ — a type parameter (@Nothing@ bound = @unknown@).
-parseTypeGenericParameter :: Parser (GenericParameter Parsed)
-parseTypeGenericParameter = parseWithSpan $ do
-  name <- parseNameRef
-  upperBound <- optional (parseSpecificIdentifier "extends" *> parseType)
-  pure $ \sourceSpan ->
-    GenericParameter {name = name, kind = GenericKindType, upperBound = upperBound, sourceSpan = sourceSpan}
+-- | An optional @in@ (contravariant) / @out@ (covariant) variance marker. @in@
+-- is the keyword; @out@ is matched contextually (it stays a valid identifier
+-- elsewhere).
+parseDeclaredVariance :: Parser (Maybe DeclaredVariance)
+parseDeclaredVariance =
+  optional $
+    choice
+      [ DeclaredContravariant <$ parseKeyword KeywordIn,
+        DeclaredCovariant <$ try (parseSpecificIdentifier "out")
+      ]
 
 parseParameterList :: Parser [ParameterBinding Parsed]
 parseParameterList =

@@ -197,15 +197,31 @@ deriving instance Eq GenericKind
 
 deriving instance Show GenericKind
 
+-- | A user-declared variance for a generic @data@ parameter (@data foo[out T]@
+-- / @data sink[in T]@). The checker verifies the /inferred/ variance is at
+-- least as permissive as the declared one ('Nothing' = take the inferred
+-- variance with no assertion). Only @data@ parameters may be annotated.
+data DeclaredVariance where
+  -- | @out T@ — covariant (T appears only positively).
+  DeclaredCovariant :: DeclaredVariance
+  -- | @in T@ — contravariant (T appears only negatively).
+  DeclaredContravariant :: DeclaredVariance
+
+deriving instance Eq DeclaredVariance
+
+deriving instance Show DeclaredVariance
+
 -- | A declared generic parameter of an @agent@ / @data@
 -- (@[T extends t, effect R]@). The binder @name@ is a 'TypeRef' that the
 -- Identifier resolves to a fresh 'Katari.Id.ResolvedGenericParam'; references
 -- to it (in parameter / return types, the @with@ clause, or nested bounds)
 -- resolve to the same id. 'upperBound' is the @extends@ clause (type kind
 -- only; 'Nothing' means @unknown@); effect parameters carry no bound.
+-- 'declaredVariance' is the optional @in@ / @out@ marker (@data@ only).
 data GenericParameter (phase :: Phase) = GenericParameter
   { name :: NameRef phase TypeRef,
     kind :: GenericKind,
+    declaredVariance :: Maybe DeclaredVariance,
     upperBound :: Maybe (SyntacticType phase),
     sourceSpan :: SourceSpan
   }
@@ -1578,10 +1594,11 @@ retagGenericParameter ::
   ) =>
   GenericParameter phase1 ->
   GenericParameter phase2
-retagGenericParameter GenericParameter {name, kind, upperBound, sourceSpan} =
+retagGenericParameter GenericParameter {name, kind, declaredVariance, upperBound, sourceSpan} =
   GenericParameter
     { name = retagNameRef name,
       kind = kind,
+      declaredVariance = declaredVariance,
       upperBound = retagSyntacticType <$> upperBound,
       sourceSpan = sourceSpan
     }
