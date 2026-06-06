@@ -200,8 +200,14 @@ data SemanticEffect phase where
   -- (so @with pure@ round-trips) but flattens to the empty 'Set' in the
   -- normalised form. 'unionEffects' drops it from non-empty unions.
   SemanticEffectPure :: SemanticEffect phase
-  -- | A single concrete @req@ effect, by its qualified name.
-  SemanticEffectRequest :: QualifiedName -> SemanticEffect phase
+  -- | The effect top — \"may perform any effect\" (surface @all@). The dual of
+  -- 'SemanticEffectPure'; arises from an invariant-arg union of generic requests
+  -- (no representable least upper bound) and lets a declaration opt into any
+  -- capability. No finite @with@ clause covers it.
+  SemanticEffectAll :: SemanticEffect phase
+  -- | A single concrete @req@ effect — a (possibly generic) request applied to
+  -- its type / effect arguments (empty for a non-generic request).
+  SemanticEffectRequest :: QualifiedName -> [SemanticGenericArgument phase] -> SemanticEffect phase
   -- | An in-scope @effect@ generic parameter, by its 'GenericsId'. Abstract
   -- while checking a generic declaration's body; replaced by a concrete effect
   -- at every instantiation site.
@@ -249,22 +255,36 @@ substituteGenerics typeSubstitution effectSubstitution = go
       SemanticTypeUnion branches -> unionSemantic (map go branches)
       SemanticTypeRecord -> SemanticTypeRecord
       SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
-      SemanticTypeData qualifiedName arguments -> SemanticTypeData qualifiedName (map goArg arguments)
+      SemanticTypeData qualifiedName arguments -> SemanticTypeData qualifiedName (map (substituteGenericArgument typeSubstitution effectSubstitution) arguments)
       SemanticTypeFunction parameterType returnType effect ->
         SemanticTypeFunction
           (go parameterType)
           (go returnType)
-          (substituteEffect effectSubstitution effect)
+          (substituteEffect typeSubstitution effectSubstitution effect)
       other -> other
-    goArg = \case
-      SemanticGenericArgumentType semanticType -> SemanticGenericArgumentType (go semanticType)
-      SemanticGenericArgumentEffect semanticEffect -> SemanticGenericArgumentEffect (substituteEffect effectSubstitution semanticEffect)
 
--- | Substitute concrete effects for effect generics throughout an effect tree.
-substituteEffect :: Map GenericsId (SemanticEffect Resolved) -> SemanticEffect Resolved -> SemanticEffect Resolved
-substituteEffect effectSubstitution = \case
+-- | Substitute through one generic argument (a type or an effect).
+substituteGenericArgument ::
+  Map GenericsId (SemanticType Resolved) ->
+  Map GenericsId (SemanticEffect Resolved) ->
+  SemanticGenericArgument Resolved ->
+  SemanticGenericArgument Resolved
+substituteGenericArgument typeSubstitution effectSubstitution = \case
+  SemanticGenericArgumentType semanticType -> SemanticGenericArgumentType (substituteGenerics typeSubstitution effectSubstitution semanticType)
+  SemanticGenericArgumentEffect semanticEffect -> SemanticGenericArgumentEffect (substituteEffect typeSubstitution effectSubstitution semanticEffect)
+
+-- | Substitute concrete types / effects for generics throughout an effect tree.
+-- Needs the /type/ substitution too, because a generic request's arguments
+-- (@with foo[T]@) may mention type generics.
+substituteEffect ::
+  Map GenericsId (SemanticType Resolved) ->
+  Map GenericsId (SemanticEffect Resolved) ->
+  SemanticEffect Resolved ->
+  SemanticEffect Resolved
+substituteEffect typeSubstitution effectSubstitution = \case
   SemanticEffectGeneric genericsId -> Map.findWithDefault (SemanticEffectGeneric genericsId) genericsId effectSubstitution
-  SemanticEffectUnion branches -> unionEffects (map (substituteEffect effectSubstitution) branches)
+  SemanticEffectRequest qualifiedName arguments -> SemanticEffectRequest qualifiedName (map (substituteGenericArgument typeSubstitution effectSubstitution) arguments)
+  SemanticEffectUnion branches -> unionEffects (map (substituteEffect typeSubstitution effectSubstitution) branches)
   leaf -> leaf
 
 -- | The empty (pure) effect — \"this expression performs no request\". The
@@ -272,9 +292,9 @@ substituteEffect effectSubstitution = \case
 emptyEffect :: SemanticEffect phase
 emptyEffect = SemanticEffectPure
 
--- | An effect containing exactly one concrete request.
+-- | An effect containing exactly one concrete (non-generic) request.
 singletonEffect :: QualifiedName -> SemanticEffect phase
-singletonEffect = SemanticEffectRequest
+singletonEffect qualifiedName = SemanticEffectRequest qualifiedName []
 
 -- | Smart union over effect trees: flattens nested unions and drops
 -- 'SemanticEffectPure' leaves, so the result is a single top-level union of
@@ -283,6 +303,7 @@ singletonEffect = SemanticEffectRequest
 -- stays faithful to what was written.)
 unionEffects :: [SemanticEffect phase] -> SemanticEffect phase
 unionEffects effects = case concatMap flatten effects of
+  flat | any isAll flat -> SemanticEffectAll -- the top absorbs every branch
   [] -> SemanticEffectPure
   [single] -> single
   flat -> SemanticEffectUnion flat
@@ -291,6 +312,7 @@ unionEffects effects = case concatMap flatten effects of
       SemanticEffectPure -> []
       SemanticEffectUnion branches -> concatMap flatten branches
       leaf -> [leaf]
+    isAll = \case SemanticEffectAll -> True; _ -> False
 
 -- | Binary union of two effect trees (@e1 | e2@). Combines the request sets of
 -- subexpressions (@e1 + e2@'s effects = @e1@'s ∪ @e2@'s).

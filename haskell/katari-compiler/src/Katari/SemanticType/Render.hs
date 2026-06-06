@@ -113,8 +113,15 @@ renderSemanticEffect = Text.intercalate " | " . leaves
       -- 'pure' elides to nothing here so a pure function renders as
       -- @() -> R@ (no @with@ clause), matching the prior empty-effect output.
       ST.SemanticEffectPure -> []
-      ST.SemanticEffectRequest qualifiedName -> [qualifiedName.name]
+      ST.SemanticEffectAll -> ["all"]
+      ST.SemanticEffectRequest qualifiedName arguments
+        | null arguments -> [qualifiedName.name]
+        | otherwise -> [qualifiedName.name <> "[" <> Text.intercalate ", " (map renderArgument arguments) <> "]"]
       -- An effect generic has no surface name in 'SemanticEffect' (it lives in
       -- the declaration); a placeholder suffices for hover.
       ST.SemanticEffectGeneric _ -> ["<effect>"]
       ST.SemanticEffectUnion branches -> concatMap leaves branches
+    renderArgument :: ST.SemanticGenericArgument ST.Resolved -> Text
+    renderArgument = \case
+      ST.SemanticGenericArgumentType argumentType -> renderSemanticType argumentType
+      ST.SemanticGenericArgumentEffect argumentEffect -> renderSemanticEffect argumentEffect

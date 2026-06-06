@@ -286,15 +286,25 @@ data FunctionShape = FunctionShape
 -- names plus the set of in-scope @effect@-generic parameters it includes. The
 -- @pure@ leaf contributes nothing. This is the canonical effect form used both
 -- in a function shape's @requests@ and by the checker's effect inference.
-data NormalizedEffect = NormalizedEffect
-  { effectConcrete :: Set QualifiedName,
-    effectGenerics :: Set GenericsId
-  }
+data NormalizedEffect
+  = -- | The effect top — \"any effect\" (surface @all@). Absorbs on union, is the
+    -- identity on intersect, covered only by itself. Arises from an
+    -- invariant-arg union of generic requests (no representable LUB).
+    NormalizedEffectAny
+  | -- | A finite union: concrete (possibly generic) @req@ names applied to their
+    -- args, plus in-scope @effect@ generics. The @pure@ leaf contributes the
+    -- empty rows. The @[Variance]@ baked onto each request (from the data env at
+    -- 'normaliseEffect') lets the env-free lattice ops combine two
+    -- instantiations of the same request by its parameters' variance.
+    NormalizedEffectRows
+      { effectConcrete :: Map QualifiedName ([Variance], [NormalizedGenericArg]),
+        effectGenerics :: Set GenericsId
+      }
   deriving (Eq, Show)
 
 -- | The empty (pure) normalised effect.
 emptyNormalizedEffect :: NormalizedEffect
-emptyNormalizedEffect = NormalizedEffect Set.empty Set.empty
+emptyNormalizedEffect = NormalizedEffectRows Map.empty Set.empty
 
 instance Semigroup NormalizedEffect where
   (<>) = unionNormalizedEffect
@@ -302,67 +312,140 @@ instance Semigroup NormalizedEffect where
 instance Monoid NormalizedEffect where
   mempty = emptyNormalizedEffect
 
--- | Union of two normalised effects (per-set union).
+-- | Union of two normalised effects. @all@ absorbs; two instantiations of the
+-- same request combine their args by variance (covariant → union, contravariant
+-- → intersect, invariant mismatch → @all@). Env-free: the arg /types/ are
+-- combined with an empty data env, so nested generic data with differing args
+-- conservatively widens (sound, rarely imprecise).
 unionNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffect
-unionNormalizedEffect leftEffect rightEffect =
-  NormalizedEffect
-    (Set.union leftEffect.effectConcrete rightEffect.effectConcrete)
-    (Set.union leftEffect.effectGenerics rightEffect.effectGenerics)
+unionNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
+  (NormalizedEffectAny, _) -> NormalizedEffectAny
+  (_, NormalizedEffectAny) -> NormalizedEffectAny
+  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+    case unionRequestApps leftConcrete rightConcrete of
+      Nothing -> NormalizedEffectAny
+      Just merged -> NormalizedEffectRows merged (Set.union leftGenerics rightGenerics)
 
--- | Intersection of two normalised effects (per-set intersection; covariant
--- meet of function shapes — loses completeness as elsewhere).
+type RequestApps = Map QualifiedName ([Variance], [NormalizedGenericArg])
+
+-- | Merge two request-app maps for a union; 'Nothing' on an invariant mismatch.
+unionRequestApps :: RequestApps -> RequestApps -> Maybe RequestApps
+unionRequestApps leftConcrete rightConcrete =
+  fmap Map.fromList . traverse combine . Set.toList $ Set.union (Map.keysSet leftConcrete) (Map.keysSet rightConcrete)
+  where
+    combine name = case (Map.lookup name leftConcrete, Map.lookup name rightConcrete) of
+      (Just (variances, leftArgs), Just (_, rightArgs)) ->
+        (\merged -> (name, (variances, merged))) <$> combineArgs (unionArg Map.empty) variances leftArgs rightArgs
+      (Just app, Nothing) -> Just (name, app)
+      (Nothing, Just app) -> Just (name, app)
+      (Nothing, Nothing) -> Nothing
+
+-- | Intersection of two normalised effects. @all@ is the identity; only shared
+-- requests survive, args combined dually (invariant mismatch drops the request).
 intersectNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffect
-intersectNormalizedEffect leftEffect rightEffect =
-  NormalizedEffect
-    (Set.intersection leftEffect.effectConcrete rightEffect.effectConcrete)
-    (Set.intersection leftEffect.effectGenerics rightEffect.effectGenerics)
+intersectNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
+  (NormalizedEffectAny, other) -> other
+  (other, NormalizedEffectAny) -> other
+  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+    NormalizedEffectRows
+      ( Map.fromList
+          [ (name, (variances, merged))
+            | (name, (variances, leftArgs)) <- Map.toList leftConcrete,
+              Just (_, rightArgs) <- [Map.lookup name rightConcrete],
+              Just merged <- [combineArgs (intersectArg Map.empty) variances leftArgs rightArgs]
+          ]
+      )
+      (Set.intersection leftGenerics rightGenerics)
 
 -- | Remove a set of concrete @req@ names from an effect (used when a @handle@
 -- discharges the requests it names). Effect generics are left untouched — a
 -- concrete handler cannot statically discharge an abstract generic effect, and
--- keeping it over-approximates the raised effect (sound).
+-- keeping it over-approximates the raised effect (sound). @all@ cannot be
+-- discharged by a finite handler set.
 subtractConcrete :: Set QualifiedName -> NormalizedEffect -> NormalizedEffect
-subtractConcrete handled effect =
-  effect {effectConcrete = Set.difference effect.effectConcrete handled}
+subtractConcrete handled = \case
+  NormalizedEffectAny -> NormalizedEffectAny
+  NormalizedEffectRows concrete generics -> NormalizedEffectRows (Map.withoutKeys concrete handled) generics
 
--- | Per-set difference of two effects (used to report the elements a body
--- raises beyond its declared @with@ clause).
+-- | The elements @left@ raises beyond @right@ (for the @with@-coverage report).
+-- A request is covered when @right@ names it with args that @left@'s
+-- instantiation is a subeffect of (per variance). @all@ minus a finite set is
+-- still uncoverable; anything minus @all@ is covered.
 differenceNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffect
-differenceNormalizedEffect leftEffect rightEffect =
-  NormalizedEffect
-    (Set.difference leftEffect.effectConcrete rightEffect.effectConcrete)
-    (Set.difference leftEffect.effectGenerics rightEffect.effectGenerics)
+differenceNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
+  (_, NormalizedEffectAny) -> emptyNormalizedEffect
+  (NormalizedEffectAny, _) -> NormalizedEffectAny
+  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+    NormalizedEffectRows
+      ( Map.fromList
+          [ (name, app)
+            | (name, app@(variances, leftArgs)) <- Map.toList leftConcrete,
+              case Map.lookup name rightConcrete of
+                Just (_, rightArgs) -> not (subtypeRequestArgs variances leftArgs rightArgs)
+                Nothing -> True
+          ]
+      )
+      (Set.difference leftGenerics rightGenerics)
 
--- | True when an effect has no concrete requests and no generics (pure).
+-- | True when an effect is exactly @pure@ (no requests, no generics; not @all@).
 nullNormalizedEffect :: NormalizedEffect -> Bool
-nullNormalizedEffect effect = Set.null effect.effectConcrete && Set.null effect.effectGenerics
+nullNormalizedEffect = \case
+  NormalizedEffectAny -> False
+  NormalizedEffectRows concrete generics -> Map.null concrete && Set.null generics
 
 -- | @subtypeEffect left right@ — every effect of @left@ is permitted by
--- @right@. Effect generics are unbounded, so (mirroring the type rule but
--- without bound expansion) a generic on the left cancels only against the same
--- generic on the right; any left-only generic fails. Concrete requests are
--- compared by subset. Right-only generics / requests are harmless slack.
+-- @right@. @all@ is the top. A left generic cancels only against the same right
+-- generic. A left request must appear on the right with args its instantiation
+-- is a subeffect of (per variance). Right-only slack is harmless.
 subtypeEffect :: NormalizedEffect -> NormalizedEffect -> Bool
-subtypeEffect leftEffect rightEffect =
-  Set.isSubsetOf leftEffect.effectGenerics rightEffect.effectGenerics
-    && Set.isSubsetOf leftEffect.effectConcrete rightEffect.effectConcrete
+subtypeEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
+  (_, NormalizedEffectAny) -> True
+  (NormalizedEffectAny, _) -> False
+  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+    Set.isSubsetOf leftGenerics rightGenerics
+      && all requestCovered (Map.toList leftConcrete)
+    where
+      requestCovered (name, (variances, leftArgs)) = case Map.lookup name rightConcrete of
+        Just (_, rightArgs) -> subtypeRequestArgs variances leftArgs rightArgs
+        Nothing -> False
 
--- | Flatten a (resolved) effect tree to its normalised form.
-normaliseEffect :: SemanticEffect Resolved -> NormalizedEffect
-normaliseEffect = \case
+-- | Relate two arg lists of the same request by its baked variances (covariant
+-- forward, contravariant reversed, invariant both, bivariant always). Env-free.
+subtypeRequestArgs :: [Variance] -> [NormalizedGenericArg] -> [NormalizedGenericArg] -> Bool
+subtypeRequestArgs variances leftArgs rightArgs =
+  length leftArgs == length rightArgs && and (zipWith3 oneArg variances leftArgs rightArgs)
+  where
+    oneArg variance leftArg rightArg = case variance of
+      Covariant -> sub leftArg rightArg
+      Contravariant -> sub rightArg leftArg
+      Invariant -> sub leftArg rightArg && sub rightArg leftArg
+      Bivariant -> True
+    sub leftArg rightArg = case (leftArg, rightArg) of
+      (NormalizedGenericArgType left, NormalizedGenericArgType right) -> subtypeNormalizedType Map.empty Map.empty left right
+      (NormalizedGenericArgEffect left, NormalizedGenericArgEffect right) -> subtypeEffect left right
+      _ -> True
+
+-- | Flatten a (resolved) effect tree to its normalised form. Needs the data env
+-- to bake each request's parameter variances onto its app entry.
+normaliseEffect :: DataFieldEnv -> SemanticEffect Resolved -> NormalizedEffect
+normaliseEffect env = \case
   SemanticEffectPure -> emptyNormalizedEffect
-  SemanticEffectRequest qualifiedName -> NormalizedEffect (Set.singleton qualifiedName) Set.empty
-  SemanticEffectGeneric genericsId -> NormalizedEffect Set.empty (Set.singleton genericsId)
-  SemanticEffectUnion branches -> foldr (unionNormalizedEffect . normaliseEffect) emptyNormalizedEffect branches
+  SemanticEffectAll -> NormalizedEffectAny
+  SemanticEffectRequest qualifiedName arguments ->
+    NormalizedEffectRows (Map.singleton qualifiedName (variancesOf env qualifiedName, map (normaliseArg env) arguments)) Set.empty
+  SemanticEffectGeneric genericsId -> NormalizedEffectRows Map.empty (Set.singleton genericsId)
+  SemanticEffectUnion branches -> foldr (unionNormalizedEffect . normaliseEffect env) emptyNormalizedEffect branches
 
 -- | Rebuild an effect tree from a normalised effect (concrete leaves then
 -- generic leaves, in id order, for determinism).
 denormaliseEffect :: NormalizedEffect -> SemanticEffect Resolved
-denormaliseEffect effect =
-  unionEffects
-    ( (SemanticEffectRequest <$> Set.toList effect.effectConcrete)
-        ++ (SemanticEffectGeneric <$> Set.toList effect.effectGenerics)
-    )
+denormaliseEffect = \case
+  NormalizedEffectAny -> SemanticEffectAll
+  NormalizedEffectRows concrete generics ->
+    unionEffects
+      ( [SemanticEffectRequest name (map denormaliseArg arguments) | (name, (_, arguments)) <- Map.toList concrete]
+          ++ (SemanticEffectGeneric <$> Set.toList generics)
+      )
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -399,7 +482,7 @@ denormaliseArg = \case
 normaliseArg :: DataFieldEnv -> SemanticGenericArgument Resolved -> NormalizedGenericArg
 normaliseArg env = \case
   SemanticGenericArgumentType semanticType -> NormalizedGenericArgType (normaliseSemantic env semanticType)
-  SemanticGenericArgumentEffect semanticEffect -> NormalizedGenericArgEffect (normaliseEffect semanticEffect)
+  SemanticGenericArgumentEffect semanticEffect -> NormalizedGenericArgEffect (normaliseEffect env semanticEffect)
 
 -- ---------------------------------------------------------------------------
 -- Denormalisation: NormalizedType -> SemanticType Resolved
@@ -608,7 +691,7 @@ normaliseSemantic env = go
               FunctionShape
                 { parameter = go parameterType,
                   returnType = go returnType,
-                  requests = normaliseEffect effect
+                  requests = normaliseEffect env effect
                 }
          in NormalizedTypeLayered emptyLayered {functionLayer = FunctionSlotOf shape}
       SemanticTypeUnion branches ->
@@ -714,7 +797,10 @@ combineArgs ::
   Maybe [NormalizedGenericArg]
 combineArgs per variances leftArgs rightArgs
   | length leftArgs /= length rightArgs = Nothing
-  | otherwise = sequence (zipWith3 per variances leftArgs rightArgs)
+  -- Pad variances with 'Invariant' (the conservative default) so a short / empty
+  -- variance list (e.g. a request whose variances aren't yet in the env) still
+  -- combines soundly rather than truncating the args.
+  | otherwise = sequence (zipWith3 per (variances ++ repeat Invariant) leftArgs rightArgs)
 
 -- | Union-combine one @data@ argument by its variance. Covariant / bivariant
 -- join; contravariant meet; invariant requires equality.

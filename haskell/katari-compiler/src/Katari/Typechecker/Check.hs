@@ -566,7 +566,7 @@ resolveTypeRef nameRef = case nameRef.resolution of
   -- Identifier's effect-namespace fallback (an effect argument of a generic
   -- application). Both denote effects; 'expectType' rejects them in an ordinary
   -- type position.
-  Just (ResolvedRequestName qualifiedName) -> pure (AsEffect (SemanticEffectRequest qualifiedName))
+  Just (ResolvedRequestName qualifiedName) -> pure (AsEffect (SemanticEffectRequest qualifiedName []))
   Just (ResolvedEffectGenericName genericsId) -> pure (AsEffect (SemanticEffectGeneric genericsId))
   Just ResolvedPureEffect -> pure (AsEffect SemanticEffectPure)
   Nothing -> pure (AsType SemanticTypeUnknown)
@@ -583,7 +583,7 @@ elaborateRequestList syntacticRequests =
     )
   where
     effectLeaf = \case
-      ResolvedConcreteRequest qualifiedName -> SemanticEffectRequest qualifiedName
+      ResolvedConcreteRequest qualifiedName -> SemanticEffectRequest qualifiedName []
       ResolvedEffectGeneric genericsId -> SemanticEffectGeneric genericsId
 
 primitiveToSemantic :: PrimitiveTypeKind -> SemanticType phase
@@ -1559,8 +1559,9 @@ checkDeclaredVariances dataEnv declarations =
 inferEffects :: Bool -> Set QualifiedName -> [SCCResult] -> Check [SCCResult]
 inferEffects recursive sccQualifiedNames results = do
   locals <- asks (Map.map (.schemeBody) . (.checkLocals))
+  dataFieldEnv <- asks (.checkDataFieldEnv)
   let externalLookup qualifiedName =
-        effectOfSignature (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) locals)
+        effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) locals)
       agentInfos =
         [ (qualifiedName, agentDecl, declaredEffect)
         | (qualifiedName, DeclarationAgent agentDecl, _) <- results,
@@ -1580,7 +1581,7 @@ inferEffects recursive sccQualifiedNames results = do
                 Just declared -> declared
                 Nothing
                   | recursive -> mempty
-                  | otherwise -> blockEffect (lookupWith Map.empty) agentDecl.body
+                  | otherwise -> blockEffect dataFieldEnv (lookupWith Map.empty) agentDecl.body
             )
           | (qualifiedName, agentDecl, declaredEffect) <- agentInfos
           ]
@@ -1591,7 +1592,7 @@ inferEffects recursive sccQualifiedNames results = do
       violations =
         [ (qualifiedName, effectNames agentDecl undeclared)
         | (qualifiedName, agentDecl, Just declared) <- agentInfos,
-          let bodyEffect = blockEffect (lookupWith published) (bodies Map.! qualifiedName),
+          let bodyEffect = blockEffect dataFieldEnv (lookupWith published) (bodies Map.! qualifiedName),
           let undeclared = differenceNormalizedEffect bodyEffect declared,
           not (nullNormalizedEffect undeclared)
         ]
@@ -1605,9 +1606,11 @@ inferEffects recursive sccQualifiedNames results = do
     -- Render an effect's undeclared elements: concrete requests by qualified
     -- name, effect generics by their declared parameter name (from the agent's
     -- generic list).
-    effectNames agentDecl effect =
-      map renderQName (Set.toList effect.effectConcrete)
-        ++ map (genericEffectName agentDecl) (Set.toList effect.effectGenerics)
+    effectNames agentDecl = \case
+      NormalizedEffectAny -> ["all"]
+      NormalizedEffectRows concrete generics ->
+        map renderQName (Map.keys concrete)
+          ++ map (genericEffectName agentDecl) (Set.toList generics)
     genericEffectName agentDecl genericsId =
       case [param.name.text | param <- agentDecl.typeParameters, param.name.resolution == Just (ResolvedGenericParam genericsId)] of
         (name : _) -> name
@@ -1616,8 +1619,8 @@ inferEffects recursive sccQualifiedNames results = do
 -- | The normalised effect a @with@ clause declares, from its resolved leaves.
 effectFromResolutions :: [EffectResolution] -> NormalizedEffect
 effectFromResolutions resolutions =
-  NormalizedEffect
-    (Set.fromList [qualifiedName | ResolvedConcreteRequest qualifiedName <- resolutions])
+  NormalizedEffectRows
+    (Map.fromList [(qualifiedName, ([], [])) | ResolvedConcreteRequest qualifiedName <- resolutions])
     (Set.fromList [genericsId | ResolvedEffectGeneric genericsId <- resolutions])
 
 patchResultEffect :: Map QualifiedName NormalizedEffect -> SCCResult -> SCCResult
@@ -1852,33 +1855,34 @@ renderQName qualifiedName = qualifiedName.module_ <> "." <> qualifiedName.name
 -- walking bodies.
 type EffectLookup = QualifiedName -> NormalizedEffect
 
--- | The effect a callable's function signature raises.
-effectOfSignature :: SemanticType Resolved -> NormalizedEffect
-effectOfSignature = \case
-  SemanticTypeFunction _ _ effect -> normaliseEffect effect
+-- | The effect a callable's function signature raises. Needs the data env to
+-- bake request variances (via 'normaliseEffect').
+effectOfSignature :: DataFieldEnv -> SemanticType Resolved -> NormalizedEffect
+effectOfSignature env = \case
+  SemanticTypeFunction _ _ effect -> normaliseEffect env effect
   _ -> mempty
 
-blockEffect :: EffectLookup -> Block Zonked -> NormalizedEffect
-blockEffect lookupEffect Block {statements, returnExpression} =
-  foldMap (statementEffect lookupEffect) statements
-    <> maybe mempty (exprEffect lookupEffect) returnExpression
+blockEffect :: DataFieldEnv -> EffectLookup -> Block Zonked -> NormalizedEffect
+blockEffect env lookupEffect Block {statements, returnExpression} =
+  foldMap (statementEffect env lookupEffect) statements
+    <> maybe mempty (exprEffect env lookupEffect) returnExpression
 
-statementEffect :: EffectLookup -> Statement Zonked -> NormalizedEffect
-statementEffect lookupEffect = \case
-  StatementLet s -> exprEffect lookupEffect s.value
-  StatementReturn s -> exprEffect lookupEffect s.value
-  StatementExpression e -> exprEffect lookupEffect e
-  StatementBreak s -> exprEffect lookupEffect s.value
-  StatementNext s -> exprEffect lookupEffect s.value <> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
-  StatementForNext s -> exprEffect lookupEffect s.value <> foldMap (exprEffect lookupEffect . (.value)) s.modifiers
-  StatementForBreak s -> exprEffect lookupEffect s.value
+statementEffect :: DataFieldEnv -> EffectLookup -> Statement Zonked -> NormalizedEffect
+statementEffect env lookupEffect = \case
+  StatementLet s -> exprEffect env lookupEffect s.value
+  StatementReturn s -> exprEffect env lookupEffect s.value
+  StatementExpression e -> exprEffect env lookupEffect e
+  StatementBreak s -> exprEffect env lookupEffect s.value
+  StatementNext s -> exprEffect env lookupEffect s.value <> foldMap (exprEffect env lookupEffect . (.value)) s.modifiers
+  StatementForNext s -> exprEffect env lookupEffect s.value <> foldMap (exprEffect env lookupEffect . (.value)) s.modifiers
+  StatementForBreak s -> exprEffect env lookupEffect s.value
   -- A nested @agent@ is its own callable; calling it contributes via its
   -- signature at the call site, so its body does not raise here.
   StatementAgent _ -> mempty
   StatementError _ -> mempty
 
-exprEffect :: EffectLookup -> Expression Zonked -> NormalizedEffect
-exprEffect lookupEffect = go
+exprEffect :: DataFieldEnv -> EffectLookup -> Expression Zonked -> NormalizedEffect
+exprEffect env lookupEffect = go
   where
     go = \case
       ExpressionLiteral _ -> mempty
@@ -1888,14 +1892,14 @@ exprEffect lookupEffect = go
       ExpressionParTuple e -> foldMap go e.elements
       ExpressionRecord e -> foldMap (go . snd) e.entries
       ExpressionCall e -> calleeEffect e.callee <> foldMap (go . (.value)) e.arguments
-      ExpressionIf e -> go e.condition <> blockEffect lookupEffect e.thenBlock <> maybe mempty (blockEffect lookupEffect) e.elseBlock
-      ExpressionMatch e -> go e.subject <> foldMap (blockEffect lookupEffect . (.body)) e.cases
+      ExpressionIf e -> go e.condition <> blockEffect env lookupEffect e.thenBlock <> maybe mempty (blockEffect env lookupEffect) e.elseBlock
+      ExpressionMatch e -> go e.subject <> foldMap (blockEffect env lookupEffect . (.body)) e.cases
       ExpressionFor e ->
         foldMap (go . (.source)) e.inBindings
           <> foldMap (go . (.initial)) e.varBindings
-          <> blockEffect lookupEffect e.body
-          <> maybe mempty (blockEffect lookupEffect . snd) e.thenBlock
-      ExpressionBlock e -> blockEffect lookupEffect e.block
+          <> blockEffect env lookupEffect e.body
+          <> maybe mempty (blockEffect env lookupEffect . snd) e.thenBlock
+      ExpressionBlock e -> blockEffect env lookupEffect e.block
       ExpressionHandle e -> handleEffect e
       ExpressionFieldAccess e -> go e.object
       ExpressionTypeApplication e -> go e.callee
@@ -1906,18 +1910,18 @@ exprEffect lookupEffect = go
     -- callee the lookup uses the current estimate; otherwise its signature
     -- effect (carried on the reference's type).
     calleeEffect = \case
-      ExpressionVariable v -> maybe (effectOfSignature v.typeOf) lookupEffect (topLevelQName v.name)
-      ExpressionQualifiedReference q -> maybe (effectOfSignature q.typeOf) lookupEffect (topLevelQName q.target)
-      complex -> effectOfSignature (exprTypeOf complex)
+      ExpressionVariable v -> maybe (effectOfSignature env v.typeOf) lookupEffect (topLevelQName v.name)
+      ExpressionQualifiedReference q -> maybe (effectOfSignature env q.typeOf) lookupEffect (topLevelQName q.target)
+      complex -> effectOfSignature env (exprTypeOf complex)
     -- A handle discharges the concrete requests it names: the body's effect
     -- with those requests subtracted (an abstract effect generic is NOT
     -- discharged by a concrete handler, so it passes through), plus the
     -- handlers' own bodies and the then-clause.
     handleEffect e =
       let handled = Set.fromList [qualifiedName | handler <- e.handlers, Just (ResolvedConcreteRequest qualifiedName) <- [handler.name.resolution]]
-          bodyEff = blockEffect lookupEffect e.body
-          handlerEff = foldMap (blockEffect lookupEffect . (.body)) e.handlers
-          thenEff = maybe mempty (blockEffect lookupEffect . snd) e.thenClause
+          bodyEff = blockEffect env lookupEffect e.body
+          handlerEff = foldMap (blockEffect env lookupEffect . (.body)) e.handlers
+          thenEff = maybe mempty (blockEffect env lookupEffect . snd) e.thenClause
        in subtractConcrete handled bodyEff <> handlerEff <> thenEff
     templateEffect = \case
       TemplateElementString _ -> mempty

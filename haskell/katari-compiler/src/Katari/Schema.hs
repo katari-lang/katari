@@ -756,7 +756,9 @@ buildRequestsSchema dataDefs topLevelTypes effect =
     (concreteNames, genericIds) = collect effect
     collect = \case
       SemanticEffectPure -> ([], [])
-      SemanticEffectRequest qualifiedName -> ([qualifiedName], [])
+      -- The effect top can't be enumerated; it contributes no concrete request.
+      SemanticEffectAll -> ([], [])
+      SemanticEffectRequest qualifiedName _arguments -> ([qualifiedName], [])
       SemanticEffectGeneric genericsId -> ([], [genericsId])
       SemanticEffectUnion branches -> mconcat (map collect branches)
     dedupe :: (Ord a) => [a] -> [a]
@@ -790,7 +792,8 @@ buildRequestRefs ctx effect =
   where
     effectRequests = \case
       SemanticEffectPure -> []
-      SemanticEffectRequest qualifiedName -> [qualifiedName]
+      SemanticEffectAll -> []
+      SemanticEffectRequest qualifiedName _arguments -> [qualifiedName]
       -- A not-yet-instantiated effect generic contributes no concrete request
       -- to the schema (an instantiation substitutes it before schema gen).
       SemanticEffectGeneric _ -> []
