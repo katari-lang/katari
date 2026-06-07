@@ -290,6 +290,50 @@ export function emitEscalateUpward(
   });
 }
 
+/**
+ * Forward a CONTROL-flow ask (return / break / next / break-for / next-for)
+ * from a descendant across the delegation boundary as an outbound `escalate`
+ * event, when the ask's lexical `target` lives in a lexical ancestor (a `use`
+ * continuation, or any closure, runs in its own delegation but its `return`
+ * etc. must unwind to the lexically-enclosing construct).
+ *
+ * Unlike `emitEscalateUpward` (the `request`-capability path), this:
+ *   - carries the whole `ControlAskKind` inline in `escalate.control` (value /
+ *     target / mods), with `argument` undefined and `agentDefId` a sentinel;
+ *   - sets up NO escalateAck round-trip (`outboundEscalations` /
+ *     `escalationOwners` are untouched) — a control unwind never resumes;
+ *   - does NOT cancel `t`. The escalating AgentThread enters a "stop phase":
+ *     it stays alive (its parked body too) until the ancestor's catch fires a
+ *     cancel cascade whose `terminate` reaches this delegation, at which point
+ *     the normal cancel machinery tears it down and emits `terminateAck`.
+ */
+export function emitControlEscalateUpward(
+  ctx: StepCtx,
+  t: import("./types.js").AgentThread,
+  peer: import("../endpoint.js").Endpoint,
+  control: import("../event.js").ControlAskKind,
+): void {
+  const escalationId = createEscalationId();
+  // `agentDefId` is ignored by the receiver when `control` is present; ship a
+  // harmless sentinel so the wire payload stays uniform with request escalates.
+  const sentinel: import("../../agent-def-id.js").AgentDefId = encodeCoreAgentDefId({
+    kind: "qname",
+    value: "<control>.<control>",
+  });
+  ctx.emit({
+    from: ctx.state.selfEndpoint,
+    to: peer,
+    payload: {
+      kind: "escalate",
+      delegationId: t.delegationId,
+      escalationId,
+      agentDefId: sentinel,
+      argument: undefined,
+      control,
+    },
+  });
+}
+
 // ─── askIdMap forwarding ───────────────────────────────────────────────────
 
 /**

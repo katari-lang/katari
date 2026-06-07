@@ -206,6 +206,17 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     expect(result).toBe(123);
   });
 
+  itE2E(
+    "100-use-return: `return` in a use-continuation unwinds the lexical agent (= 49)",
+    async () => {
+      // The continuation runs in its own delegation, but its `return` is lexically
+      // part of main: lexical control routing must unwind main (49), NOT let the
+      // dynamically-nearest provider catch it and add 1000 (1049).
+      const result = await applyAndRun("use_return", "100-use-return");
+      expect(result).toBe(49);
+    },
+  );
+
   itE2E("05-control-flow: main() returns 'positive'", async () => {
     const result = await applyAndRun("control-flow", "05-control-flow");
     expect(result).toBe("positive");

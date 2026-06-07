@@ -349,6 +349,25 @@ function translateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): v
       });
       return;
     }
+    if (p.control !== undefined) {
+      // A CONTROL-flow unwind (return / break / next / …) crossing INTO this
+      // delegation from a sub-delegation (e.g. a `use` continuation), bound for
+      // a lexical ancestor. Re-emit it as an upward `ask` through the sender's
+      // parent — `p.control` IS the AskKind (value / target / mods inline). No
+      // `inboundEscalations` / escalateAck bookkeeping: a control unwind never
+      // resumes the asker. The eventual catch above cancel-cascades a
+      // `terminate` back down, which tears the sub-delegation down normally.
+      const ownAskId = sender.nextAskId as number as AskId;
+      sender.nextAskId = ((sender.nextAskId as number) + 1) as AskId;
+      ctx.enqueue({
+        kind: "ask",
+        target: sender.parent,
+        askId: ownAskId,
+        askKind: p.control,
+        childCallId: sender.parentCallId,
+      });
+      return;
+    }
     // Allocate an own askId for the upward forward, and map
     // (askId → escalationId) so the eventual askAck from above can be
     // turned back into an outbound escalateAck. Resolve agentDefId →

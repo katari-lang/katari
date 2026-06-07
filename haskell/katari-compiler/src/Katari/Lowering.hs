@@ -1943,12 +1943,13 @@ offsetStatement offsetB offsetV = \case
   StatementLoadLiteral loadData ->
     StatementLoadLiteral loadData {output = offsetV loadData.output}
   StatementExit exitData ->
-    StatementExit exitData {value = offsetV exitData.value}
+    StatementExit exitData {value = offsetV exitData.value, target = offsetB exitData.target}
   StatementCont contData ->
     StatementCont
       contData
         { value = fmap offsetV contData.value,
-          modifiers = map (Data.Bifunctor.bimap offsetV offsetV) contData.modifiers
+          modifiers = map (Data.Bifunctor.bimap offsetV offsetV) contData.modifiers,
+          target = offsetB contData.target
         }
   StatementBindPattern bindData ->
     StatementBindPattern

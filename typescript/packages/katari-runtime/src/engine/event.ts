@@ -71,6 +71,20 @@ export type ExternalEventPayload =
       escalationId: EscalationId;
       agentDefId: AgentDefId;
       argument: Value | undefined;
+      /**
+       * Present when this escalate is a CONTROL-flow unwind (return / break /
+       * next / break-for / next-for) crossing the delegation boundary toward a
+       * lexical ancestor, rather than a capability request. The receiver
+       * reconstructs the upward `ask` directly from this (it IS the
+       * `ControlAskKind`, value + target + mods inline) and does NOT set up an
+       * escalateAck round-trip: a control unwind never resumes the asker — the
+       * ancestor's catch fires a cancel cascade that flows a `terminate` back
+       * down and tears the escalating delegation (in "stop phase") down.
+       *
+       * When `control` is set, `agentDefId` is an ignored sentinel and
+       * `argument` is undefined (the value rides inside `control`).
+       */
+      control?: ControlAskKind;
     }
   | {
       /** Reply to an `escalate`. Matched via `escalationId`. */
@@ -85,7 +99,7 @@ export type ExternalEventPayload =
 // kinds (e.g. future tracing taps) can be added without touching engine
 // dispatch — only the variant that catches them needs to know.
 
-import type { QualifiedName } from "../ir/types.js";
+import type { BlockId, QualifiedName } from "../ir/types.js";
 
 /**
  * Pre-evaluated state-var modifiers attached to `next` / `next-for` asks.
@@ -112,11 +126,21 @@ export type ModMap = Record<number, Value>;
  */
 export type AskKind =
   | { kind: "request"; reqId: QualifiedName; argument: Value | undefined }
-  | { kind: "next"; value: Value; mods: ModMap }
-  | { kind: "next-for"; value: Value; mods: ModMap }
-  | { kind: "return"; value: Value }
-  | { kind: "break"; value: Value }
-  | { kind: "break-for"; value: Value };
+  | { kind: "next"; value: Value; mods: ModMap; target: BlockId }
+  | { kind: "next-for"; value: Value; mods: ModMap; target: BlockId }
+  | { kind: "return"; value: Value; target: BlockId }
+  | { kind: "break"; value: Value; target: BlockId }
+  | { kind: "break-for"; value: Value; target: BlockId };
+
+/**
+ * The control-flow asks (everything except `request`). These carry a lexical
+ * `target` BlockId and are routed to the thread whose `blockId` matches it —
+ * escalating across delegation boundaries when the target lives in a lexical
+ * ancestor (see `ExitData.target`). A `request` is NOT control flow: it is
+ * dynamically routed to the nearest handle owning its reqId, so it has no
+ * `target`.
+ */
+export type ControlAskKind = Exclude<AskKind, { kind: "request" }>;
 
 export type InternalEventPayload =
   | {

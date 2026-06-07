@@ -114,11 +114,14 @@ export const forOps: ThreadOps<ForThread> = {
   },
 
   ask(ctx, t, askId, kind, childCallId) {
-    if (kind.kind === "break-for") {
+    // Catch break-for / next-for only when the exit's lexical target is THIS
+    // loop. An exit aimed at an outer loop bubbles up (and may cross a
+    // delegation boundary from a `use` continuation inside the body).
+    if (kind.kind === "break-for" && kind.target === t.blockId) {
       handleBreakFor(ctx, t as ForThread, kind.value);
       return;
     }
-    if (kind.kind === "next-for") {
+    if (kind.kind === "next-for" && kind.target === t.blockId) {
       handleNextFor(ctx, t as ForThread, kind.value, kind.mods, childCallId);
       return;
     }

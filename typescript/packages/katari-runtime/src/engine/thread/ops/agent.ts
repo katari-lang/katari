@@ -24,6 +24,7 @@ import {
   beginCancel,
   commonRemoveChild,
   emitAgentRootCompletion,
+  emitControlEscalateUpward,
   emitEscalateUpward,
   fillDefaults,
   hasChildren,
@@ -75,14 +76,18 @@ export const agentOps: ThreadOps<AgentThread> = {
   },
 
   ask(ctx, t, askId, kind, childCallId) {
-    if (kind.kind === "return") {
+    // An agent boundary catches `return` only when the exit's lexical target
+    // is THIS agent's block. A `return` whose target is a different block
+    // belongs to a lexical ancestor (e.g. the body of a `use` continuation,
+    // which runs in its own delegation but returns to the agent that wrote it).
+    if (kind.kind === "return" && kind.target === t.blockId) {
       catchReturn(ctx, t as AgentThread, kind.value);
       return;
     }
     if (t.parent === null) {
-      // Root AgentThread = receiver side of a delegation. A `request` ask
-      // that reaches us has no local handler — escalate it back to the
-      // delegation sender (symmetric with DelegateThread sender side).
+      // Root AgentThread = receiver side of a delegation. The ask is destined
+      // for something across the delegation boundary — escalate to the
+      // delegation sender (symmetric with the DelegateThread sender side).
       const peer = ctx.state.delegationSenders[t.delegationId];
       if (peer === undefined) {
         ctx.log("warn", "engine.agent: ask at root with no registered sender", {
@@ -92,7 +97,17 @@ export const agentOps: ThreadOps<AgentThread> = {
         });
         return;
       }
-      emitEscalateUpward(ctx, t as AgentThread, peer, kind, childCallId, askId);
+      if (kind.kind === "request") {
+        // A capability request with no local handler — ask the sender to serve
+        // it (escalateAck resumes the asker).
+        emitEscalateUpward(ctx, t as AgentThread, peer, kind, childCallId, askId);
+      } else {
+        // A control-flow unwind (return / break / next / …) targeting a lexical
+        // ancestor. Escalate it across the boundary and enter "stop phase": we
+        // do NOT cancel ourselves — the ancestor's catch will cancel-cascade a
+        // `terminate` back down to us.
+        emitControlEscalateUpward(ctx, t as AgentThread, peer, kind);
+      }
       return;
     }
     // Non-root AgentThread: currently unreachable in well-formed IR

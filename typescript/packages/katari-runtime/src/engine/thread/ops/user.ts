@@ -205,7 +205,7 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
     }
     case "statementExit": {
       const value = lookupValue(ctx, t.scopeId, stmt.body.value);
-      const askKind = exitKindToAsk(stmt.body.exitKind, value);
+      const askKind = exitKindToAsk(stmt.body.exitKind, value, stmt.body.target as BlockId);
       emitAskUpwards(ctx, t, askKind);
       return "wait";
     }
@@ -213,7 +213,7 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
       const value =
         stmt.body.value !== undefined ? lookupValue(ctx, t.scopeId, stmt.body.value) : NULL_VALUE;
       const mods = resolveModifiers(ctx, t.scopeId, stmt.body.modifiers);
-      const askKind = contKindToAsk(stmt.body.contKind, value, mods);
+      const askKind = contKindToAsk(stmt.body.contKind, value, mods, stmt.body.target as BlockId);
       emitAskUpwards(ctx, t, askKind);
       return "wait";
     }
@@ -272,14 +272,18 @@ function resolveModifiers(ctx: StepCtx, scopeId: ScopeId, mods: [VarId, VarId][]
   return out;
 }
 
-function exitKindToAsk(kind: import("../../../ir/types.js").ExitKind, value: Value): AskKind {
+function exitKindToAsk(
+  kind: import("../../../ir/types.js").ExitKind,
+  value: Value,
+  target: BlockId,
+): AskKind {
   switch (kind) {
     case "exitKindReturn":
-      return { kind: "return", value };
+      return { kind: "return", value, target };
     case "exitKindBreak":
-      return { kind: "break", value };
+      return { kind: "break", value, target };
     case "exitKindForBreak":
-      return { kind: "break-for", value };
+      return { kind: "break-for", value, target };
   }
 }
 
@@ -287,12 +291,13 @@ function contKindToAsk(
   kind: import("../../../ir/types.js").ContKind,
   value: Value,
   mods: ModMap,
+  target: BlockId,
 ): AskKind {
   switch (kind) {
     case "contKindNext":
-      return { kind: "next", value, mods };
+      return { kind: "next", value, mods, target };
     case "contKindForNext":
-      return { kind: "next-for", value, mods };
+      return { kind: "next-for", value, mods, target };
   }
 }
 

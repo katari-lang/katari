@@ -1,0 +1,11 @@
+@"Provider: call the continuation with 7, then add 1000. A `return` inside the continuation unwinds PAST this agent, so the `+ 1000` (and the rest of this body) never runs."
+agent provide(...k: agent (...integer) -> integer) -> integer {
+  let r = k(...7)
+  r + 1000
+}
+
+@"The `use` continuation `agent(...x){ return x * 7 }` has a `return` that is lexically part of main, so it unwinds main (= 7 * 7 = 49) rather than becoming the continuation's value (which would let provide add 1000, giving 1049)."
+agent main() -> integer {
+  let x = use provide
+  return x * 7
+}

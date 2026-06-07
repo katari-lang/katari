@@ -372,6 +372,15 @@ export type RecordBlock = {
 export type ExitData = {
   exitKind: ExitKind;
   value: VarId;
+  /**
+   * The BlockId of the LEXICALLY-nearest enclosing catching block (the agent
+   * for `return`, the handle scope for `break`, the for loop for `break-for`),
+   * stamped at lowering. The runtime catches this exit only at the thread whose
+   * `blockId` equals `target`, escalating across delegation boundaries (e.g. a
+   * `use` continuation runs in its own delegation but its `return` targets the
+   * lexically-enclosing agent, not the dynamically-nearest one).
+   */
+  target: BlockId;
 };
 
 export type ContData = {
@@ -379,6 +388,9 @@ export type ContData = {
   value?: VarId;
   /** [targetVar in loop/handle scope, new value var in this scope] */
   modifiers: [VarId, VarId][];
+  /** Lexical target block (the handle scope for `next`, the for loop for
+   * `next-for`); see {@link ExitData.target}. */
+  target: BlockId;
 };
 
 export type BindPatternData = {

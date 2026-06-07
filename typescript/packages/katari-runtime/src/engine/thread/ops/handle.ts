@@ -162,12 +162,12 @@ export const handleOps: ThreadOps<HandleThread> = {
       return;
     }
 
-    // next: catch if we own the corresponding reqId. Currently the
-    // compiler doesn't tag `statementCont` with which req it resumes —
-    // we rely on the topology (the `next` came from inside a handler
-    // body of *this* handle). Identify the originating handler body via
-    // childCallId, confirm it's a handlerBody role here, and proceed.
-    if (kind.kind === "next") {
+    // next: catch only when the cont's lexical target is THIS handle scope.
+    // Identify the originating handler body via childCallId (the child the ask
+    // bubbled up through), confirm it's a handlerBody role here, and proceed.
+    // A `next` whose target is elsewhere belongs to a lexical-ancestor handle —
+    // bubble it up (it may cross a delegation boundary from a `use` continuation).
+    if (kind.kind === "next" && kind.target === t.blockId) {
       const role = t.childRoles[childCallId];
       if (role !== undefined && role.kind === "handlerBody") {
         // Apply state-var modifiers to our scope, then targeted cancel.
@@ -194,13 +194,15 @@ export const handleOps: ThreadOps<HandleThread> = {
       return;
     }
 
-    // break: catch (done-terminating).
-    if (kind.kind === "break") {
+    // break: catch (done-terminating) only when its lexical target is THIS
+    // handle scope. A `break` aimed at an ancestor handle bubbles up (and may
+    // cross a delegation boundary from a `use` continuation).
+    if (kind.kind === "break" && kind.target === t.blockId) {
       handleBreak(ctx, t as HandleThread, kind.value);
       return;
     }
 
-    // Anything else: bubble up.
+    // Anything else (incl. break / next for an ancestor): bubble up.
     proxyAskToParent(ctx, t as HandleThread, childCallId, askId, kind);
   },
 
