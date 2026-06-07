@@ -1645,7 +1645,7 @@
     "requests": []
   },
   {
-    "description": "Retrieve the element at @index@ (0-based). Raises out-of-bounds as a `throw`.",
+    "description": "Retrieve the element at @index@ (0-based). Typed as `V | null` (the element type, or null when @index@ is out of range) — `match` the null arm to use the element.",
     "input": {
       "additionalProperties": true,
       "properties": {
@@ -2501,7 +2501,7 @@
     "requests": []
   },
   {
-    "description": "Retrieve a record entry by key, typed as the record's value type V. Returns null when the key is absent.",
+    "description": "Retrieve a record entry by key. Typed as `V | null` (the record's value type, or null when the key is absent) — `match` the null arm to use the value.",
     "input": {
       "additionalProperties": true,
       "properties": {

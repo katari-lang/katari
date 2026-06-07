@@ -1,12 +1,20 @@
-// Small JSON read helpers — plain Katari over the `json` data union. With
-// `record[json]` (json_object's entries) and `array[json]` (json_array's
-// items), `record.get` / `array.get` already return `json`, so these are just
-// thin match wrappers; no reify / stdlib json prims needed.
+// Small JSON read helpers — plain Katari over the `json` data union. `record.get`
+// / `array.get` are typed `V | null` (null on absent key / out-of-range index),
+// so `or_null` folds that null back into the `json` world as `json_null()`; the
+// readers below are then thin match wrappers. No reify / stdlib json prims needed.
+
+@"Fold a nullable json read (`record.get` / `array.get`, typed `json | null`) back into `json`: a missing value becomes `json_null()`."
+agent or_null(value: json | null) -> json {
+  match (value) {
+    case null => { json_null() }
+    case present => { present }
+  }
+}
 
 @"The child at object key @key@ (json_null if @node@ is not an object or has no such key)."
 agent field(node: json, key: string) -> json {
   match (node) {
-    case json_object(entries = entries) => { record.get(record = entries, key = key) }
+    case json_object(entries = entries) => { or_null(value = record.get(record = entries, key = key)) }
     case _ => { json_null() }
   }
 }
@@ -14,12 +22,7 @@ agent field(node: json, key: string) -> json {
 @"The element at array index @index@ (json_null if @node@ is not an array or @index@ is out of range)."
 agent elem(node: json, index: integer) -> json {
   match (node) {
-    case json_array(items = items) => {
-      match (index < array.length(array = items)) {
-        case true => { array.get(array = items, index = index) }
-        case _ => { json_null() }
-      }
-    }
+    case json_array(items = items) => { or_null(value = array.get(array = items, index = index)) }
     case _ => { json_null() }
   }
 }
@@ -45,7 +48,7 @@ agent to_value(node: json) -> unknown with pure {
     }
     case json_object(entries = entries) => {
       for (let key in record.keys(record = entries), var acc: record[unknown] = record.empty()) {
-        next with { acc = record.set(record = acc, key = key, value = to_value(node = record.get(record = entries, key = key))) }
+        next with { acc = record.set(record = acc, key = key, value = to_value(node = or_null(value = record.get(record = entries, key = key)))) }
       } then { acc }
     }
   }

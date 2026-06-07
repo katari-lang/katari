@@ -46,6 +46,7 @@ module Katari.Typechecker.NormalizedType
     DataFieldEnv,
     buildDataFieldEnv,
     dataParamIdsOf,
+    dataFieldsOf,
     Variance (..),
     variancesOf,
     BoundEnv,
@@ -1176,6 +1177,12 @@ variancesOf env qualifiedName = maybe [] (.dataVariances) (Map.lookup qualifiedN
 -- for an unknown / non-generic data.
 dataParamIdsOf :: DataFieldEnv -> QualifiedName -> [GenericsId]
 dataParamIdsOf env qualifiedName = maybe [] (.dataParamIds) (Map.lookup qualifiedName env)
+
+-- | A data's constructor field types (un-normalized, generics intact),
+-- positional substitution into them via 'dataParamIdsOf'. Empty for an
+-- unknown / non-generic-without-fields data.
+dataFieldsOf :: DataFieldEnv -> QualifiedName -> Map Text (SemanticType Resolved)
+dataFieldsOf env qualifiedName = maybe Map.empty (.dataFields) (Map.lookup qualifiedName env)
 
 -- | Build a 'DataFieldEnv' from a resolved type environment. A @data@
 -- constructor is the unique entry whose qualified name equals its returned

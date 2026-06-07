@@ -29,6 +29,7 @@ spec = describe "Katari.Compile" $ do
   genericsSpec
   letAnnotationSpec
   effectOverrideSpec
+  matchNarrowingSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -772,3 +773,43 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
             <> "}\n"
             <> "agent main() -> integer { 0 }"
         )
+
+-- | Match scrutinee narrowing: a catch-all / variable arm is typed by the
+-- residual after subtracting the union members earlier arms cover in full.
+-- Soundness over completeness — a member only leaves the residual when an arm
+-- provably matches ALL of its values (recursively through fields).
+matchNarrowingSpec :: Spec
+matchNarrowingSpec = describe "match scrutinee narrowing" $ do
+  let ok src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+      bad src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+      box = "data box(value: integer)\n"
+
+  it "narrows a `T | null` catch-all to `T` after a null arm" $
+    ok "agent f(x: integer | null) -> integer { match (x) { case null => { 0 } case b => { b } } }"
+
+  it "does NOT narrow a sole catch-all (it stays `T | null`)" $
+    bad "agent f(x: integer | null) -> integer { match (x) { case b => { b } } }"
+
+  it "a scalar type-guard subtracts the matched member" $
+    ok "agent f(x: integer | string) -> string { match (x) { case integer(n) => { \"n\" } case s => { s } } }"
+
+  it "subtracts a constructor whose field patterns are all irrefutable" $
+    ok (box <> "agent f(x: box | null) -> null { match (x) { case box(value = v) => { null } case other => { other } } }")
+
+  it "KEEPS a constructor when a field pattern is a refutable literal (soundness)" $
+    bad (box <> "agent f(x: box | null) -> null { match (x) { case box(value = 1) => { null } case rest => { rest } } }")
+
+  it "KEEPS a constructor when a nested type-guard's inner is refutable (soundness)" $
+    bad (box <> "agent f(x: box | null) -> null { match (x) { case box(value = integer(5)) => { null } case rest => { rest } } }")
+
+  it "record.get is `V | null` — consuming the value needs the null arm" $
+    bad
+      ( "agent f(r: record[integer]) -> integer { record.get(record = r, key = \"k\") }"
+      )
+
+  it "record.get's null is dischargeable by match-narrowing" $
+    ok
+      ( "agent f(r: record[integer]) -> integer {\n"
+          <> "  match (record.get(record = r, key = \"k\")) { case null => { 0 } case n => { n } }\n"
+          <> "}"
+      )

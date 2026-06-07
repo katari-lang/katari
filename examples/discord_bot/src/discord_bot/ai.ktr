@@ -53,7 +53,14 @@ agent infer_with_tools[effect E](
           next types.tool_result(
             name = call.name,
             call_id = call.opaque,
-            text = to_string(value = call_agent[unknown, E](target = array.get(array = tools, index = call.tool_index), args = jsonx.to_value(node = call.args))),
+            // `tool_index` is `array.index_of` of the model-supplied name, so a
+            // hallucinated / unknown tool name resolves out of range — `array.get`
+            // yields null there. Feed that back as an error result rather than
+            // crashing the run, so the model can correct on the next step.
+            text = match (array.get(array = tools, index = call.tool_index)) {
+              case null => { f"(error: unknown tool \"${call.name}\")" }
+              case tool => { to_string(value = call_agent[unknown, E](target = tool, args = jsonx.to_value(node = call.args))) }
+            },
           )
         }
         // Record BOTH the model's call turn and the results turn so the next

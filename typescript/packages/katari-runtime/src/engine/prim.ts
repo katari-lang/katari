@@ -337,16 +337,11 @@ export async function executePrim(
       const array = args["array"],
         index = args["index"];
       if (array?.kind === "array" && index?.kind === "number") {
-        if (!Number.isInteger(index.value) || index.value < 0) {
-          throw new RecoverableEngineError(
-            `prim array.get: index must be a non-negative integer, got ${index.value}`,
-          );
-        }
-        const elem = array.elements[index.value];
-        if (elem === undefined) {
-          throw new RecoverableEngineError("prim array.get: index out of bounds");
-        }
-        return elem;
+        // Out of range (negative, non-integer, or past the end) reads as `null`
+        // rather than raising — matching record.get and the `V | null` static
+        // type. A JS lookup at any such index already yields undefined.
+        const elem = Number.isInteger(index.value) ? array.elements[index.value] : undefined;
+        return elem === undefined ? { kind: "null" } : elem;
       }
       throw new RecoverableEngineError("prim array.get: invalid args");
     }

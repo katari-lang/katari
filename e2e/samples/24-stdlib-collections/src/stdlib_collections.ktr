@@ -9,8 +9,12 @@ agent main() -> string {
   let len = array.length(array = xs)
   let has1 = array.contains(array = xs, value = 1)
   let idx2 = array.index_of(array = xs, value = 2)
-  // array.get returns the element type (here: integer), via the array_get rule.
-  let first = array.get(array = array.reverse(array = xs), index = 0)
+  // array.get is typed `integer | null` (null when out of range); match-narrow
+  // the null arm so `first` is a plain `integer` for the math below.
+  let first = match (array.get(array = array.reverse(array = xs), index = 0)) {
+    case null => { 0 }
+    case n => { n }
+  }
 
   // string.* — split / join / upper / length.
   let words = string.split(value = "katari,is,fun", separator = ",")

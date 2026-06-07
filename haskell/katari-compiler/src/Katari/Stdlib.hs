@@ -209,7 +209,7 @@ recordStdlibSource =
   Text.unlines
     [ "@\"Construct an empty record (element type `never`, so it seeds a record of any value type).\"",
       "primitive empty() -> record[never]",
-      "@\"Retrieve a record entry by key, typed as the record's value type V. Returns null when the key is absent.\"",
+      "@\"Retrieve a record entry by key. Typed as `V | null` (the record's value type, or null when the key is absent) — `match` the null arm to use the value.\"",
       "primitive get(record: record[unknown], key: string) -> unknown using record_get",
       "@\"Insert or replace an entry, returning a fresh record (records are immutable). The result's value type widens to include the inserted value's type.\"",
       "primitive set(record: record[unknown], key: string, value: unknown) -> record[unknown] using record_set",
@@ -230,7 +230,7 @@ recordStdlibSource =
 arrayStdlibSource :: Text
 arrayStdlibSource =
   Text.unlines
-    [ "@\"Retrieve the element at @index@ (0-based). Raises out-of-bounds as a `throw`.\"",
+    [ "@\"Retrieve the element at @index@ (0-based). Typed as `V | null` (the element type, or null when @index@ is out of range) — `match` the null arm to use the element.\"",
       "primitive get(array: array[unknown], index: integer) -> unknown using array_get",
       "@\"Number of elements in the array.\"",
       "primitive length(array: array[unknown]) -> integer",

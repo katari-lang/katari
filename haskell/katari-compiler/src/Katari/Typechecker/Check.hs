@@ -60,6 +60,7 @@ import Katari.Typechecker.NormalizedType
     NormalizedEffect (..),
     buildDataFieldEnv,
     dataParamIdsOf,
+    dataFieldsOf,
     Variance (..),
     variancesOf,
     denormalise,
@@ -935,7 +936,10 @@ applyPrimRule rule argTypes sourceSpan =
           pure (unionSemantic (SemanticTypeString : Map.elems argTypes))
         PrimRuleArrayGet -> do
           subtypeAssert sourceSpan (arg "index") SemanticTypeInteger
-          pure (seqElementType (arg "array"))
+          -- An out-of-range / negative index yields @null@ at runtime (the prim no
+          -- longer raises), so the static result is @V | null@ — the caller must
+          -- handle the absence (e.g. @match@ the null arm). Mirrors record.get.
+          pure (unionSemantic [seqElementType (arg "array"), SemanticTypeNull])
         PrimRuleArrayShape ->
           let elements =
                 concat
@@ -943,7 +947,10 @@ applyPrimRule rule argTypes sourceSpan =
                     maybe [] pure (Map.lookup "value" argTypes)
                   ]
            in pure (SemanticTypeArray (unionSemantic elements))
-        PrimRuleRecordGet -> pure (recordValueType (arg "record"))
+        -- An absent key yields @null@ at runtime, so a record read is @V | null@.
+        -- The type now reflects that escape hatch (previously it lied as @V@); the
+        -- caller must handle the null (match-narrowing peels it in the catch-all).
+        PrimRuleRecordGet -> pure (unionSemantic [recordValueType (arg "record"), SemanticTypeNull])
         PrimRuleRecordSet ->
           let existing = recordValueType (arg "record")
               added = maybe [] pure (Map.lookup "value" argTypes)
@@ -970,15 +977,115 @@ synthIf IfExpression {condition, thenBlock, elseBlock, sourceSpan} = do
 synthMatch :: MatchExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
 synthMatch MatchExpression {subject, cases, sourceSpan} = do
   (subject', subjectType) <- synthExpr subject
-  walked <- mapM (walkCaseArm subjectType) cases
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  boundEnv <- asks (.checkBoundEnv)
+  walked <- walkArmsNarrowing dataFieldEnv boundEnv subjectType cases
   let semantic = unionSemantic (map snd walked)
   pure (ExpressionMatch MatchExpression {subject = subject', cases = map fst walked, sourceSpan = sourceSpan, typeOf = semantic}, semantic)
+
+-- | Walk match arms left-to-right, narrowing the scrutinee type for each arm by
+-- subtracting the union members that earlier arms already cover in full. So in
+-- @match (x: A | null) { case null => ..; case v => .. }@ the @v@ binder is
+-- typed @A@, not @A | null@ — which is what makes @record.get@ / @array.get@
+-- (now @V | null@) ergonomic to consume. Subtraction is conservative: an arm
+-- whose match is not exhaustive over a member leaves that member in, so a value
+-- that can still reach a later arm is never narrowed away (soundness over
+-- completeness — see 'patternCoversType').
+walkArmsNarrowing ::
+  DataFieldEnv ->
+  BoundEnv ->
+  SemanticType Resolved ->
+  [CaseArm Identified] ->
+  Check [(CaseArm Zonked, SemanticType Resolved)]
+walkArmsNarrowing dataFieldEnv boundEnv = go
+  where
+    go _ [] = pure []
+    go remaining (arm : rest) = do
+      walked@(zonked, _) <- walkCaseArm remaining arm
+      let remaining' = subtractPattern dataFieldEnv boundEnv remaining zonked.pattern
+      (walked :) <$> go remaining' rest
 
 walkCaseArm :: SemanticType Resolved -> CaseArm Identified -> Check (CaseArm Zonked, SemanticType Resolved)
 walkCaseArm subjectType CaseArm {pattern, body, sourceSpan} = do
   (pattern', bindings) <- walkPattern subjectType pattern
   (body', bodyType) <- withLocals bindings (walkBlock body)
   pure (CaseArm {pattern = pattern', body = body', sourceSpan = sourceSpan}, bodyType)
+
+-- | Residual scrutinee type after an arm: drop every union member the pattern
+-- matches in full. Sound by construction — a member is removed only when the
+-- pattern provably covers ALL of its values ('patternCoversType'); anything
+-- uncertain is kept.
+subtractPattern ::
+  DataFieldEnv -> BoundEnv -> SemanticType Resolved -> Pattern Zonked -> SemanticType Resolved
+subtractPattern dataFieldEnv boundEnv subject pattern =
+  unionSemantic
+    [member | member <- unionMembers subject, not (patternCoversType dataFieldEnv boundEnv pattern member)]
+
+-- | Flatten a (possibly nested) union into its member types. A non-union is a
+-- singleton list; @never@ contributes nothing.
+unionMembers :: SemanticType phase -> [SemanticType phase]
+unionMembers = \case
+  SemanticTypeUnion members -> concatMap unionMembers members
+  SemanticTypeNever -> []
+  other -> [other]
+
+-- | Does @pattern@ match EVERY value of @valueType@? Recurses through
+-- constructor / tuple / type-guard fields to any depth; a refutable leaf (a
+-- literal that is not the type's sole inhabitant, a constructor that is not the
+-- whole type, a field whose nested pattern is not exhaustive) makes the answer
+-- @False@. Only used to decide what a preceding arm consumed, so a conservative
+-- @False@ is always sound (it just narrows less).
+patternCoversType ::
+  DataFieldEnv -> BoundEnv -> Pattern Zonked -> SemanticType Resolved -> Bool
+patternCoversType dataFieldEnv boundEnv = go
+  where
+    semSubtype actual expected =
+      subtypeNormalizedType
+        dataFieldEnv
+        boundEnv
+        (normaliseSemantic dataFieldEnv actual)
+        (normaliseSemantic dataFieldEnv expected)
+    go pattern valueType = case pattern of
+      -- A binder / wildcard matches unconditionally (an annotation on it is an
+      -- upcast assertion, not a runtime filter), so it covers any value.
+      PatternVariable _ -> True
+      PatternWildcard _ -> True
+      -- A literal covers a member only when that member is the literal's own
+      -- singleton type (e.g. @null@ covers @null@; @1@ does not cover @integer@).
+      PatternLiteral LiteralPattern {value} -> valueType == literalValueToSemantic value
+      -- A type guard @t(inner)@ covers @valueType@ iff every value of it has tag
+      -- @t@ (valueType <: t) and @inner@ covers the narrowed type.
+      PatternType TypePattern {typeTag, inner} ->
+        let narrowed = typePatternTagToSemantic typeTag
+         in semSubtype valueType narrowed && go inner narrowed
+      -- A constructor pattern covers a member only when the member is exactly
+      -- that data constructor and every listed field pattern covers its field
+      -- (un-listed fields are implicit wildcards). A union-typed field a nested
+      -- pattern cannot fully cover therefore keeps the member.
+      PatternQualifiedConstructor QualifiedConstructorPattern {constructorName, parameters} ->
+        case (constructorName.resolution, valueType) of
+          (Just qualifiedName, SemanticTypeData memberName memberArgs)
+            | qualifiedName == memberName ->
+                let paramIds = dataParamIdsOf dataFieldEnv qualifiedName
+                    typeSubstitution = Map.fromList [(paramId, argType) | (paramId, SemanticGenericArgumentType argType) <- zip paramIds memberArgs]
+                    effectSubstitution = Map.fromList [(paramId, argEffect) | (paramId, SemanticGenericArgumentEffect argEffect) <- zip paramIds memberArgs]
+                    fieldTypes = Map.map (substituteGenerics typeSubstitution effectSubstitution) (dataFieldsOf dataFieldEnv qualifiedName)
+                    -- Only trust the field substitution when the args line up
+                    -- positionally; a top / arity-skewed data is left uncovered.
+                    pinned = length memberArgs == length paramIds
+                    fieldCovered (label, fieldPattern) =
+                      maybe False (go fieldPattern) (Map.lookup label.text fieldTypes)
+                 in pinned && all fieldCovered parameters
+          _ -> False
+      -- A tuple pattern covers a tuple member of equal arity when every
+      -- component pattern covers its component.
+      PatternTuple TuplePattern {elements} ->
+        case valueType of
+          SemanticTypeTuple componentTypes
+            | length componentTypes == length elements -> and (zipWith go elements componentTypes)
+          _ -> False
+      -- Record patterns: conservatively never claim full coverage.
+      PatternRecord _ -> False
 
 -- | A @for@ collects each iteration's @next v@ into an ordered array (its
 -- mapped output). The element type is the union of the body's @next@ values;
