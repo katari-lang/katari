@@ -635,7 +635,15 @@ instance FromJSON RecordBlock where
 -- | Payload for 'SExit'.
 data ExitData = ExitData
   { exitKind :: ExitKind,
-    value :: VarId
+    value :: VarId,
+    -- | The block this exit unwinds to — the LEXICALLY-nearest enclosing
+    -- catching block (the user agent for 'ExitKindReturn', the @handle@ scope
+    -- for 'ExitKindBreak', the @for@ loop for 'ExitKindForBreak'), stamped by
+    -- Lowering. The runtime routes the exit to the thread running this block,
+    -- crossing delegation boundaries if needed (so a @return@ in a @use@
+    -- continuation unwinds to the agent that lexically wrote it, not the
+    -- handler that dynamically invoked the continuation).
+    target :: BlockId
   }
   deriving (Eq, Show, Generic)
 
@@ -650,7 +658,11 @@ data ContData = ContData
   { contKind :: ContKind,
     value :: Maybe VarId,
     -- | (targetVar in loop/handle scope, new value var in this scope)
-    modifiers :: [(VarId, VarId)]
+    modifiers :: [(VarId, VarId)],
+    -- | The block this @next@ resumes — the LEXICALLY-nearest enclosing @for@
+    -- loop ('ContKindForNext') or @handle@ scope ('ContKindNext'), stamped by
+    -- Lowering (see 'ExitData.target').
+    target :: BlockId
   }
   deriving (Eq, Show, Generic)
 

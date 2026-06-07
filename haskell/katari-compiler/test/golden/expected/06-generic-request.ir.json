@@ -28,29 +28,12 @@
     },
     "10": {
       "body": {
-        "defaults": {},
-        "statements": [
-          {
-            "body": {
-              "output": 3,
-              "value": {
-                "kind": "literalValueString",
-                "string": "answer"
-              }
-            },
-            "kind": "statementLoadLiteral"
-          },
-          {
-            "body": {
-              "contKind": "contKindNext",
-              "modifiers": [],
-              "value": 3
-            },
-            "kind": "statementCont"
-          }
-        ]
+        "target": {
+          "body": 1,
+          "kind": "delegateTargetValue"
+        }
       },
-      "kind": "blockUser"
+      "kind": "blockDelegate"
     },
     "100": {
       "body": "primitive.array.get",
@@ -139,17 +122,30 @@
     },
     "11": {
       "body": {
-        "body": 8,
-        "handlers": [
+        "defaults": {},
+        "statements": [
           {
-            "handlerBody": 10,
-            "request": "main.ask"
+            "body": {
+              "output": 3,
+              "value": {
+                "kind": "literalValueString",
+                "string": "answer"
+              }
+            },
+            "kind": "statementLoadLiteral"
+          },
+          {
+            "body": {
+              "contKind": "contKindNext",
+              "modifiers": [],
+              "target": 9,
+              "value": 3
+            },
+            "kind": "statementCont"
           }
-        ],
-        "parallel": false,
-        "stateInits": []
+        ]
       },
-      "kind": "blockHandle"
+      "kind": "blockUser"
     },
     "110": {
       "body": "primitive.array.append",
@@ -242,7 +238,7 @@
         "statements": [
           {
             "body": {
-              "block": 11,
+              "block": 9,
               "output": 4
             },
             "kind": "statementCall"
@@ -1553,7 +1549,7 @@
           },
           {
             "body": {
-              "block": 9,
+              "block": 10,
               "output": 2
             },
             "kind": "statementCall"
@@ -1659,12 +1655,17 @@
     },
     "9": {
       "body": {
-        "target": {
-          "body": 1,
-          "kind": "delegateTargetValue"
-        }
+        "body": 8,
+        "handlers": [
+          {
+            "handlerBody": 11,
+            "request": "main.ask"
+          }
+        ],
+        "parallel": false,
+        "stateInits": []
       },
-      "kind": "blockDelegate"
+      "kind": "blockHandle"
     },
     "90": {
       "body": "primitive.env_not_found",
@@ -1811,7 +1812,6 @@
     "blockNames": {
       "0": "ask:agent",
       "1": "collect:agent",
-      "10": "ask",
       "100": "prim:primitive.array.get:leaf",
       "101": "prim:length:agent",
       "102": "prim:primitive.array.length:leaf",
@@ -1822,6 +1822,7 @@
       "107": "prim:of:agent",
       "108": "prim:primitive.array.of:leaf",
       "109": "prim:append:agent",
+      "11": "ask",
       "110": "prim:primitive.array.append:leaf",
       "111": "prim:concat:agent",
       "112": "prim:primitive.array.concat:leaf",

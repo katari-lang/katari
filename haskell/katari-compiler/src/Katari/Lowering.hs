@@ -124,7 +124,16 @@ data LowerEnv = LowerEnv
     topLevelTypes :: Map Id.QualifiedName (SemanticType Resolved),
     dataDefs :: Schema.DataDefs,
     requestNames :: Set Id.QualifiedName,
-    constructorNames :: Set Id.QualifiedName
+    constructorNames :: Set Id.QualifiedName,
+    -- | The lexically-nearest enclosing catching blocks, stamped onto exits /
+    -- conts so the runtime routes them to the block the SOURCE lexically meant
+    -- (not the dynamically-nearest one). A @use@ continuation is lowered with
+    -- these UNCHANGED (it is the enclosing agent's body), so a @return@ inside
+    -- it targets that agent; a user local @agent@ overrides 'currentReturnTarget'
+    -- with its own block, so a @return@ inside it stops there.
+    currentReturnTarget :: Maybe BlockId,
+    currentForTarget :: Maybe BlockId,
+    currentHandleTarget :: Maybe BlockId
   }
 
 initialLowerEnv :: LowerContext -> Text -> Map Id.VariableResolution (SemanticType Resolved) -> LowerEnv
@@ -136,7 +145,10 @@ initialLowerEnv ctx moduleName moduleLocalTypeEnv =
       topLevelTypes = ctx.topLevelTypes,
       dataDefs = ctx.dataDefs,
       requestNames = ctx.requestNames,
-      constructorNames = ctx.constructorNames
+      constructorNames = ctx.constructorNames,
+      currentReturnTarget = Nothing,
+      currentForTarget = Nothing,
+      currentHandleTarget = Nothing
     }
 
 data LowerState = LowerState
@@ -243,6 +255,31 @@ withLocals binds = local $ \env ->
 -- | Look up a local variable resolution in the current scope.
 lookupLocal :: Id.VariableResolution -> Lower (Maybe VarId)
 lookupLocal variableResolution = asks (Map.lookup variableResolution . (.localVars))
+
+-- | Run @action@ as a user agent body: @return@ targets @blockId@, and the
+-- break / next targets reset (you cannot break/next across an agent boundary).
+-- A @use@ continuation does NOT use this (it keeps the enclosing targets), so a
+-- @return@ inside it unwinds to the agent that lexically wrote the @use@.
+withReturnTarget :: BlockId -> Lower a -> Lower a
+withReturnTarget blockId = local (\env -> env {currentReturnTarget = Just blockId, currentForTarget = Nothing, currentHandleTarget = Nothing})
+
+withForTarget :: BlockId -> Lower a -> Lower a
+withForTarget blockId = local (\env -> env {currentForTarget = Just blockId})
+
+withHandleTarget :: BlockId -> Lower a -> Lower a
+withHandleTarget blockId = local (\env -> env {currentHandleTarget = Just blockId})
+
+-- | The block a @return@ / @break@ / @next@ exits to (its lexical catcher),
+-- stamped onto the IR. A missing target is an internal invariant violation
+-- (the typechecker rejects break/next/return outside their context).
+returnTargetBlock :: Lower BlockId
+returnTargetBlock = asks (.currentReturnTarget) >>= maybe (throwError (Internal.internalErrorNoSpan "lowering: return with no enclosing agent")) pure
+
+forTargetBlock :: Lower BlockId
+forTargetBlock = asks (.currentForTarget) >>= maybe (throwError (Internal.internalErrorNoSpan "lowering: for-break/next with no enclosing for")) pure
+
+handleTargetBlock :: Lower BlockId
+handleTargetBlock = asks (.currentHandleTarget) >>= maybe (throwError (Internal.internalErrorNoSpan "lowering: break/next with no enclosing handle")) pure
 
 -- ===========================================================================
 -- Variable resolution
@@ -859,6 +896,7 @@ lowerAgentLike name mVariableResolution description parameters body blockId = do
     Just variableResolution -> schemasForVariable variableResolution labelsAndAnnotations
     Nothing -> pure ("{}", "{}", "[]")
   lowerSimpleAgent
+    True
     blockId
     name
     bodyInput
@@ -923,6 +961,11 @@ bindParamLocal pb var = case pb.name.resolution of
 -- caller and embedded verbatim in 'AgentBlock', so @get_metadata@ at
 -- runtime can return them without re-deriving from the type.
 lowerSimpleAgent ::
+  -- | Does this agent catch @return@ (a real user agent), or is it a @use@
+  -- continuation that lets @return@ pass through to the lexically-enclosing
+  -- agent? Drives whether the body's @return@ targets @blockId@ or the inherited
+  -- 'currentReturnTarget'.
+  Bool ->
   BlockId ->
   Text ->
   Maybe VarId ->
@@ -934,10 +977,10 @@ lowerSimpleAgent ::
   Text ->
   Text ->
   Lower ()
-lowerSimpleAgent blockId name bodyInput agentDefaults prelude blk description inputSchema outputSchema requestsSchema = do
+lowerSimpleAgent catchesReturn blockId name bodyInput agentDefaults prelude blk description inputSchema outputSchema requestsSchema = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- prelude
-    withLocals locals (lowerBlockInto blk)
+    (if catchesReturn then withReturnTarget blockId else id) (withLocals locals (lowerBlockInto blk))
   -- Allocate the inner BlockUser body, then wrap it in a BlockAgent at
   -- @blockId@ (the externally-callable id). The agent fills defaults into the
   -- incoming value; the body binds it and reads its fields (already emitted by
@@ -992,13 +1035,15 @@ lowerHandler hr = do
   (trailing, statements) <- runWithFreshBuffer $ do
     locals <- paramPrelude
     withLocals locals (lowerBlockInto hr.body)
+  -- A handler body's trailing value is an implicit @break@ of the handle scope.
+  handleTarget <- handleTargetBlock
   let lastIsExit = case reverse statements of
         (StatementExit {} : _) -> True
         _ -> False
       finalStatements = case trailing of
         Just t
           | not lastIsExit ->
-              statements ++ [StatementExit ExitData {exitKind = ExitKindBreak, value = t}]
+              statements ++ [StatementExit ExitData {exitKind = ExitKindBreak, value = t, target = handleTarget}]
         _ -> statements
       userBlock =
         defaultUserBlock
@@ -1135,25 +1180,30 @@ lowerStmt = \case
     throwError (Internal.internalErrorNoSpan "lowerStmt: StatementLet must be peeled by lowerBlockInto")
   AST.StatementReturn stmt -> do
     var <- lowerExpr stmt.value
-    emit (StatementExit ExitData {exitKind = ExitKindReturn, value = var})
+    target <- returnTargetBlock
+    emit (StatementExit ExitData {exitKind = ExitKindReturn, value = var, target = target})
     pure True
   AST.StatementBreak stmt -> do
     var <- lowerExpr stmt.value
-    emit (StatementExit ExitData {exitKind = ExitKindBreak, value = var})
+    target <- handleTargetBlock
+    emit (StatementExit ExitData {exitKind = ExitKindBreak, value = var, target = target})
     pure True
   AST.StatementForBreak stmt -> do
     var <- lowerExpr stmt.value
-    emit (StatementExit ExitData {exitKind = ExitKindForBreak, value = var})
+    target <- forTargetBlock
+    emit (StatementExit ExitData {exitKind = ExitKindForBreak, value = var, target = target})
     pure True
   AST.StatementNext stmt -> do
     var <- lowerExpr stmt.value
     modPairs <- mapM lowerModifier stmt.modifiers
-    emit (StatementCont ContData {contKind = ContKindNext, value = Just var, modifiers = modPairs})
+    target <- handleTargetBlock
+    emit (StatementCont ContData {contKind = ContKindNext, value = Just var, modifiers = modPairs, target = target})
     pure True
   AST.StatementForNext stmt -> do
     var <- lowerExpr stmt.value
     modPairs <- mapM lowerModifier stmt.modifiers
-    emit (StatementCont ContData {contKind = ContKindForNext, value = Just var, modifiers = modPairs})
+    target <- forTargetBlock
+    emit (StatementCont ContData {contKind = ContKindForNext, value = Just var, modifiers = modPairs, target = target})
     pure True
   AST.StatementExpression expr -> do
     _ <- lowerExpr expr
@@ -1502,17 +1552,21 @@ lowerForExpr forExpression = do
   -- Each iter is (elementVar, sourceVar, pattern). The element pattern
   -- is destructured INSIDE the for body (so the bind statement reads
   -- the per-iteration element value), not in the enclosing scope.
+  -- Allocate the for block id up front so break / next inside the body (and
+  -- then-clause) can be stamped with it as their lexical target.
+  forBlockId <- freshBlockId
+  -- Sources / inits evaluate in the OUTER context (a break there targets the
+  -- enclosing construct), so they are NOT wrapped in 'withForTarget'.
   iters <- lowerForIters forExpression.inBindings
   (stateInits, stateLocals) <- lowerForStates forExpression.varBindings
-  bodyBlockId <- buildForBody iters stateLocals forExpression.body
+  bodyBlockId <- withForTarget forBlockId (buildForBody iters stateLocals forExpression.body)
   -- The @then@ clause sees state vars (their final value after the loop)
   -- but not iter vars (iteration is over). Its optional pattern binds the
   -- loop's mapped output array. Mirrors the surface semantics:
   -- `for (x in xs) { next x } then (xs2) { ... }` — `xs2` is the mapped
   -- array; `for (x in xs, var acc = 0) { ... } then { acc }` reads state.
-  thenBlockId <- traverse (buildForThenClause stateLocals) forExpression.thenBlock
+  thenBlockId <- traverse (withForTarget forBlockId . buildForThenClause stateLocals) forExpression.thenBlock
   let iterPairs = map (\(e, s, _) -> (e, s)) iters
-  forBlockId <- freshBlockId
   recordBlock
     forBlockId
     ( BlockFor
@@ -1706,11 +1760,14 @@ buildElementBlock expr = do
 lowerHandleExpr :: AST.HandleExpression Zonked -> Lower VarId
 lowerHandleExpr handleExpr = do
   bodyBlockId <- freshBlockId
-  -- Evaluate state var inits in outer scope.
+  -- Allocate the handle scope id up front so break / next inside the body and
+  -- handlers stamp it as their lexical target.
+  handleBlockId <- freshBlockId
+  -- Evaluate state var inits in outer scope (not under the handle target).
   stateBinds <- mapM mkHandleStateInit handleExpr.stateVariables
   let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
       stateLocals = [(variableResolution, bodyVar) | (Just variableResolution, bodyVar, _) <- stateBinds]
-  withLocals stateLocals $ do
+  withLocals stateLocals $ withHandleTarget handleBlockId $ do
     -- Body block (the continuation).
     (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto handleExpr.body)
     recordBlock
@@ -1722,7 +1779,6 @@ lowerHandleExpr handleExpr = do
     -- Then clause.
     thenBlockId <- lowerThenClause handleExpr.thenClause
     -- Record BlockHandle and call it.
-    handleBlockId <- freshBlockId
     recordBlock
       handleBlockId
       ( BlockHandle
@@ -1773,7 +1829,10 @@ lowerUseExpr useExpr = do
       binderVar <- freshVarId (Just binderRef.text)
       pure (Just binderVar, pure [(variableResolution, binderVar)])
     _ -> pure (Nothing, pure [])
-  lowerSimpleAgent continuationBlockId "use continuation" bodyInput Map.empty prelude useExpr.body Nothing "{}" "{}" "[]"
+  -- catchesReturn = False: the continuation is the enclosing agent's body, so
+  -- `return` inside it must target THAT agent (it keeps the inherited
+  -- currentReturnTarget), not the continuation block.
+  lowerSimpleAgent False continuationBlockId "use continuation" bodyInput Map.empty prelude useExpr.body Nothing "{}" "{}" "[]"
   closureVar <- freshVarId Nothing
   emit (StatementMakeClosure MakeClosureData {output = closureVar, block = continuationBlockId})
   -- Apply the handler-provider value to the continuation (single-value call).

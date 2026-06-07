@@ -178,13 +178,14 @@ statementSpec = describe "Statement (sum)" $ do
         ]
 
   it "StatementExit nests ExitData under 'body' (with exitKind enum)" $ do
-    StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 4}
+    StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 4, target = BlockId 9}
       `shouldEncodeAs` object
         [ "kind" .= ("statementExit" :: String),
           "body"
             .= object
               [ "exitKind" .= ("exitKindReturn" :: String),
-                "value" .= (4 :: Int)
+                "value" .= (4 :: Int),
+                "target" .= (9 :: Int)
               ]
         ]
 
@@ -193,14 +194,16 @@ statementSpec = describe "Statement (sum)" $ do
       ContData
         { contKind = ContKindForNext,
           value = Nothing,
-          modifiers = [(VarId 5, VarId 6)]
+          modifiers = [(VarId 5, VarId 6)],
+          target = BlockId 9
         }
       `shouldEncodeAs` object
         [ "kind" .= ("statementCont" :: String),
           "body"
             .= object
               [ "contKind" .= ("contKindForNext" :: String),
-                "modifiers" .= [[Aeson.Number 5, Aeson.Number 6]]
+                "modifiers" .= [[Aeson.Number 5, Aeson.Number 6]],
+                "target" .= (9 :: Int)
               ]
         ]
 
@@ -226,8 +229,8 @@ statementSpec = describe "Statement (sum)" $ do
     roundTrip $ StatementMakeClosure MakeClosureData {output = VarId 0, block = BlockId 0}
     roundTrip $
       StatementLoadLiteral LoadLiteralData {output = VarId 0, value = LiteralValueInteger 0}
-    roundTrip $ StatementExit ExitData {exitKind = ExitKindBreak, value = VarId 0}
-    roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), modifiers = []}
+    roundTrip $ StatementExit ExitData {exitKind = ExitKindBreak, value = VarId 0, target = BlockId 0}
+    roundTrip $ StatementCont ContData {contKind = ContKindNext, value = Just (VarId 0), modifiers = [], target = BlockId 0}
     roundTrip $ StatementBindPattern BindPatternData {source = VarId 0, pattern = MatchPatternAny}
 
   it "round-trips all LiteralValue variants" $ do
@@ -302,7 +305,7 @@ moduleSpec = describe "IRModule" $ do
             UserBlock
               { input = Nothing,
                 defaults = Map.empty,
-                statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0}],
+                statements = [StatementExit ExitData {exitKind = ExitKindReturn, value = VarId 0, target = BlockId 0}],
                 trailing = Nothing
               }
     roundTrip
