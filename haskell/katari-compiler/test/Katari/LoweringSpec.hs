@@ -826,9 +826,10 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
     any (\e -> e.exitKind == ExitKindReturn) allExits `shouldBe` True
 
   it "break inside handler body emits StatementExit ExitKindBreak" $ do
-    -- 'break' is only allowed inside for or request handler bodies; the implicit
-    -- handler-body-tail also lowers as ExitKindBreak, so any handler block
-    -- exhibits the property.
+    -- 'break' is only allowed inside for or request handler bodies. `use handler`
+    -- now lowers to a provider agent (the BlockHandle lives inside it), so we find
+    -- the handler body via the (anywhere) BlockHandle scan rather than walking
+    -- main's body graph.
     (irMod, errs) <-
       lowerSource $
         Text.unlines
@@ -843,9 +844,14 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
             "}"
           ]
     errs `shouldBe` []
-    let Just ub = agentBody "main" irMod
-        allExits = collectAllExits ub irMod
-    any (\e -> e.exitKind == ExitKindBreak) allExits `shouldBe` True
+    let allHandlerExits =
+          [ d
+            | hb <- findAllHandleBlocks irMod,
+              h <- hb.handlers,
+              Just hBody <- [userBlockOf h.handlerBody irMod],
+              StatementExit d <- hBody.statements
+          ]
+    any (\e -> e.exitKind == ExitKindBreak) allHandlerExits `shouldBe` True
 
   it "block with then attaches thenBlock" $ do
     (irMod, errs) <-

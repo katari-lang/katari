@@ -1855,13 +1855,6 @@ lowerHandlerExpr handlerExpr = do
 -- single-value spread call. No dedicated IR block — below Lowering this is
 -- indistinguishable from a hand-written @agent k(...x){ body }; expr(...k)@.
 lowerUseExpr :: AST.UseExpression Zonked -> Lower VarId
-lowerUseExpr useExpr
-  -- @use handler {...}@ written INLINE lowers exactly like the old @handle@: the
-  -- continuation IS the handle body (no provider closure / extra delegation), so
-  -- requests it raises are caught in the same delegation. (A standalone handler
-  -- value reached via @use <expr>@ falls through to the general path below.)
-  | AST.ExpressionHandler handlerExpr <- useExpr.expr =
-      lowerInlineHandle handlerExpr useExpr.body
 lowerUseExpr useExpr = do
   continuationBlockId <- freshBlockId
   (bodyInput, prelude) <- case useExpr.binder of
@@ -1882,57 +1875,6 @@ lowerUseExpr useExpr = do
   out <- freshVarId Nothing
   emit (StatementCall CallData {block = delegateBlk, argument = Just closureVar, output = Just out})
   pure out
-
--- | Lower an inline @use handler {...} continuation@ as the old @handle@ does:
--- the continuation is the handle body, run in the SAME delegation under a
--- 'BlockHandle' constructed in place (state vars evaluated in the current scope;
--- @break@ / @next@ stamp the handle scope as their lexical target). No provider
--- agent / closure — this is the efficient, well-trodden handle IR.
-lowerInlineHandle :: AST.HandlerExpression Zonked -> AST.Block Zonked -> Lower VarId
-lowerInlineHandle handlerExpr continuationBody = do
-  bodyBlockId <- freshBlockId
-  handleBlockId <- freshBlockId
-  stateBinds <- mapM mkHandleStateInit handlerExpr.stateVariables
-  let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
-      stateLocals = [(variableResolution, bodyVar) | (Just variableResolution, bodyVar, _) <- stateBinds]
-  withLocals stateLocals $ withHandleTarget handleBlockId $ do
-    (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto continuationBody)
-    recordBlock
-      bodyBlockId
-      (BlockUser (defaultUserBlock {statements = bodyStatements, trailing = bodyTrailing}))
-      Nothing
-    handlerList <- mapM lowerHandler handlerExpr.handlers
-    thenBlockId <- lowerThenClause handlerExpr.thenClause
-    recordBlock
-      handleBlockId
-      ( BlockHandle
-          ( HandleBlock
-              { parallel = handlerExpr.parallel,
-                stateInits = stateInits_,
-                body = bodyBlockId,
-                handlers = handlerList,
-                thenBlock = thenBlockId
-              }
-          )
-      )
-      Nothing
-    out <- freshVarId Nothing
-    emit (StatementCall CallData {block = handleBlockId, argument = Nothing, output = Just out})
-    pure out
-  where
-    mkHandleStateInit ::
-      AST.StateVariableBinding Zonked ->
-      Lower (Maybe Id.VariableResolution, VarId, VarId)
-    mkHandleStateInit svb = do
-      initVar <- lowerExpr svb.initial
-      case svb.name.resolution of
-        Just variableResolution -> do
-          bodyVar <- freshVarId (Just svb.name.text)
-          pure (Just variableResolution, bodyVar, initVar)
-        Nothing -> do
-          recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
-          bodyVar <- freshVarId Nothing
-          pure (Nothing, bodyVar, initVar)
 
 -- | Emit a fresh load-literal statement and return the resulting var.
 emitLoadLiteral :: LiteralValue -> Lower VarId
