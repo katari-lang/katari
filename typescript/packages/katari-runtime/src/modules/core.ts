@@ -303,7 +303,7 @@ export class CoreModule implements Module {
     const loaded = await tx.shards.get(this.projectId, shardId);
     if (loaded !== null) {
       const ir = await this.resolveIR(loaded.currentSnapshot);
-      const state = deserialize(ir, decryptCheckpoint(loaded.checkpoint));
+      const state = deserialize(ir, await decryptCheckpoint(loaded.checkpoint));
       // The snapshot is not in the checkpoint (CORE-private) — re-supply it.
       state.snapshot = loaded.currentSnapshot;
       const entry: ShardEntry = { state, currentSnapshot: loaded.currentSnapshot };
@@ -398,7 +398,7 @@ export class CoreModule implements Module {
       shardId,
       currentSnapshot,
       status: "active",
-      checkpoint: encryptCheckpoint(promoted),
+      checkpoint: await encryptCheckpoint(promoted),
     });
   }
 

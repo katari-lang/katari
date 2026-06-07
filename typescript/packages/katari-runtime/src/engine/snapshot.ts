@@ -20,11 +20,21 @@
 // decrypts after load; storage just sees an opaque JSON blob.
 
 import type { IRModule } from "../ir/types.js";
-import { decryptValueTree, encryptValueTree } from "../value-secret-codec.js";
+import { decryptValueTree, type EncryptedValue, encryptValueTree } from "../value-secret-codec.js";
+import type { ScopeId, ThreadId } from "./id.js";
+import type { Scope } from "./scope.js";
 import type { State } from "./state.js";
-import type { RefRep } from "./value.js";
+import type { ChildRole, PendingAction, PostCancelAction, Thread } from "./thread/types.js";
+import type { RefRep, Value } from "./value.js";
 
-export type EngineCheckpoint = {
+// `V` is the embedded value type. The in-memory / plaintext checkpoint is
+// `EngineCheckpoint<Value>` (the default — `serialize` produces it); the
+// encrypted-at-rest form is `EngineCheckpoint<EncryptedValue>` (=
+// `EncryptedEngineCheckpoint`). Making the two genuinely distinct types is the
+// point: storage only ever accepts `EncryptedEngineCheckpoint`, so "persisted a
+// plaintext secret" is now a type error rather than a runtime hope. Only
+// `threads` / `scopes` carry Values — every other field is value-free.
+export type EngineCheckpoint<V = Value> = {
   /**
    * Engine checkpoint layout version. v0.1.0 ships as v1 — the
    * pre-release version numbers (3, 4) used during development were
@@ -35,8 +45,8 @@ export type EngineCheckpoint = {
   selfEndpoint: string;
   ffiTargetEndpoint: string;
   envTargetEndpoint: string;
-  threads: State["threads"];
-  scopes: State["scopes"];
+  threads: Record<ThreadId, Thread<V>>;
+  scopes: Record<ScopeId, Scope<V>>;
   closures: State["closures"];
   nextClosureId: number;
   delegations: State["delegations"];
@@ -92,97 +102,173 @@ export function deserialize(irModule: IRModule, snap: EngineCheckpoint): State {
   };
 }
 
-// ─── Secret encryption at the storage boundary ─────────────────────────────
+// ─── Value mapping across the checkpoint (storage boundary) ─────────────────
+//
+// `mapCheckpointValues` walks the *structure* of a checkpoint — the only
+// Value-bearing fields are `threads` and `scopes` — and applies `transform` to
+// every embedded `Value`. The transform recurses WITHIN a Value tree (records /
+// arrays / secret leaves); this walker only locates the Value SLOTS.
+//
+// It is TYPED end to end: `mapThreadValues<V, W>` returns `Thread<W>`, so if a
+// thread variant grows a new Value-typed field that the walker fails to map,
+// the result is no longer assignable to `Thread<W>` and the build breaks. The
+// `encrypt` / `decrypt` instantiations pick V≠W (`Value` ↔ `EncryptedValue`),
+// where any missed slot is a hard error; `promote` (V=W=Value) rides the same,
+// already-verified walker. This replaces an earlier untyped walk that
+// identified Values by a `kind`-tag set and so mistook a `RecordThread`
+// (`kind: "record"`) for a Value record.
+//
+// The walker is async only because `promote` is async; `encrypt` / `decrypt`
+// pass synchronous transforms (an `await` on a plain value is a noop). Both
+// callers (CORE persist / load) are already async.
 
-/**
- * Nominal marker for checkpoints whose secret values have been encrypted.
- * Currently structurally identical to EngineCheckpoint — the encryption
- * guarantee is enforced at runtime by walkValuesInTree, not by the type
- * system. A branded type should replace this in v0.2.0.
- */
-export type EncryptedEngineCheckpoint = Omit<EngineCheckpoint, never>;
+/** A checkpoint whose every embedded secret has been replaced by its AES-GCM
+ *  envelope. A genuinely distinct type from the plaintext `EngineCheckpoint`:
+ *  storage accepts only this, so a plaintext checkpoint cannot reach the DB. */
+export type EncryptedEngineCheckpoint = EngineCheckpoint<EncryptedValue>;
 
-/** Runtime tag set used by 'walkValuesInTree' to identify a
- * 'Value'-shaped object inside the otherwise unstructured JSON
- * tree of a checkpoint. Kept in sync with the 'Value' tagged union
- * in 'value.ts'. */
-const VALUE_KIND_TAGS: ReadonlySet<string> = new Set([
-  "number",
-  "string",
-  "file",
-  "boolean",
-  "null",
-  "array",
-  "record",
-  "closure",
-  "agentLiteral",
-  "secret",
-]);
+type Transform<A, B> = (value: A) => B | Promise<B>;
 
-/**
- * Encrypt every 'secret' Value embedded in a checkpoint. Returns a
- * structurally-equivalent JSON tree where each former 'secret' Value
- * has been replaced by the storage-only 'EncryptedSecret' envelope.
- * Idempotent on checkpoints that have no secrets.
- */
-export function encryptCheckpoint(checkpoint: EngineCheckpoint): EncryptedEngineCheckpoint {
-  return walkValuesInTree(checkpoint, encryptValueTree) as EncryptedEngineCheckpoint;
-}
-
-/**
- * Inverse of 'encryptCheckpoint'. Throws via 'secret-crypto' if any
- * envelope fails AES-GCM authentication (= tampering or wrong key).
- */
-export function decryptCheckpoint(encrypted: EncryptedEngineCheckpoint): EngineCheckpoint {
-  return walkValuesInTree(encrypted, decryptValueTree) as EngineCheckpoint;
-}
-
-/**
- * Walk a JSON tree, calling `transform` on every node whose shape
- * matches a 'Value' variant (= `kind` field in 'VALUE_KIND_TAGS').
- * Other objects are recursed structurally. Pure: returns a fresh
- * tree without mutating the input.
- *
- * Untyped on purpose: the checkpoint structure threads `Value` through
- * deeply nested Thread variants whose full type-level enumeration
- * would be both verbose and brittle to internal refactors. The
- * 'VALUE_KIND_TAGS' set is the single source of truth — extending the
- * 'Value' union elsewhere requires only updating that set.
- *
- * The transform's input/output relationship (Value→EncryptedValue or
- * EncryptedValue→Value) is enforced by the typed wrappers
- * 'encryptCheckpoint' / 'decryptCheckpoint', not by this internal
- * helper.
- */
-function walkValuesInTree(
-  node: unknown,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transform: (v: any) => unknown,
-): unknown {
-  if (node === null || typeof node !== "object") return node;
-  if (Array.isArray(node)) {
-    return node.map((n) => walkValuesInTree(n, transform));
-  }
-  const obj = node as Record<string, unknown>;
-  // Match BOTH the plaintext Value shape (= kind ∈ VALUE_KIND_TAGS) and
-  // the encrypted-storage envelope (= '$envelope' marker). 'encryptValueTree'
-  // is fed only plaintext Values during encrypt (no envelopes exist at
-  // that point); 'decryptValueTree' is fed both shapes during decrypt
-  // (plaintext Values pass through unchanged, envelopes decrypt back).
-  // Keeping the match here — not in two separate walkers — means a
-  // checkpoint that mixes plaintext and encrypted nodes (e.g. an
-  // already-encrypted checkpoint re-encrypted) still round-trips.
-  if (
-    (typeof obj.kind === "string" && VALUE_KIND_TAGS.has(obj.kind)) ||
-    typeof obj.$envelope === "string"
-  ) {
-    return transform(obj);
-  }
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[k] = walkValuesInTree(v, transform);
+async function mapRecord<K extends PropertyKey, A, B>(
+  record: Record<K, A>,
+  f: Transform<A, B>,
+): Promise<Record<K, B>> {
+  const out = {} as Record<K, B>;
+  for (const [key, value] of Object.entries(record) as [K, A][]) {
+    out[key] = await f(value);
   }
   return out;
+}
+
+async function mapArray<A, B>(array: A[], f: Transform<A, B>): Promise<B[]> {
+  const out: B[] = [];
+  for (const element of array) out.push(await f(element));
+  return out;
+}
+
+async function mapOptional<A, B>(value: A | undefined, f: Transform<A, B>): Promise<B | undefined> {
+  return value === undefined ? undefined : await f(value);
+}
+
+async function mapChildRole<V, W>(role: ChildRole<V>, f: Transform<V, W>): Promise<ChildRole<W>> {
+  return role.kind === "thenClause"
+    ? { ...role, mainResultValue: await f(role.mainResultValue) }
+    : role;
+}
+
+async function mapPendingAction<V, W>(
+  action: PendingAction<V>,
+  f: Transform<V, W>,
+): Promise<PendingAction<W>> {
+  switch (action.kind) {
+    case "ask":
+      return { ...action, argument: await mapOptional(action.argument, f) };
+    case "thenClause":
+      return { ...action, mainResultValue: await f(action.mainResultValue) };
+  }
+}
+
+async function mapPostCancelAction<V, W>(
+  action: PostCancelAction<V>,
+  f: Transform<V, W>,
+): Promise<PostCancelAction<W>> {
+  switch (action.kind) {
+    case "finish":
+      return { ...action, value: await mapOptional(action.value, f) };
+    case "askComplete":
+      return { ...action, value: await f(action.value) };
+  }
+}
+
+/** Map every embedded Value of one thread. Exhaustive over the thread union;
+ *  the `Thread<V> → Thread<W>` signature is what makes a missed Value field a
+ *  compile error (the unmapped field keeps type `V`, which is not `W`). */
+async function mapThreadValues<V, W>(thread: Thread<V>, f: Transform<V, W>): Promise<Thread<W>> {
+  switch (thread.kind) {
+    case "agent":
+      return {
+        ...thread,
+        argument: await mapOptional(thread.argument, f),
+        pendingReturn: await mapOptional(thread.pendingReturn, f),
+      };
+    case "handle":
+      return {
+        ...thread,
+        childRoles: await mapRecord(thread.childRoles, (role) => mapChildRole(role, f)),
+        pendingActions: await mapArray(thread.pendingActions, (action) =>
+          mapPendingAction(action, f),
+        ),
+        postCancelActions: await mapRecord(thread.postCancelActions, (action) =>
+          mapPostCancelAction(action, f),
+        ),
+        pendingReturn: await mapOptional(thread.pendingReturn, f),
+      };
+    case "for":
+      return {
+        ...thread,
+        iterableSnapshot: await mapArray(thread.iterableSnapshot, f),
+        collected: await mapRecord(thread.collected, f),
+        postCancelActions: await mapRecord(thread.postCancelActions, (action) =>
+          mapPostCancelAction(action, f),
+        ),
+        pendingReturn: await mapOptional(thread.pendingReturn, f),
+      };
+    case "request":
+    case "delegate":
+    case "prim":
+    case "ctor":
+      return { ...thread, argument: await mapOptional(thread.argument, f) };
+    case "callAgent":
+      return {
+        ...thread,
+        target: await f(thread.target),
+        argsRecord: await mapRecord(thread.argsRecord, f),
+      };
+    case "tuple":
+    case "record":
+      return { ...thread, collected: await mapRecord(thread.collected, f) };
+    case "user":
+    case "match":
+    case "getField":
+    case "makeClosure":
+      // Value-free variants — assignable to Thread<W> unchanged.
+      return thread;
+  }
+}
+
+async function mapScopeValues<V, W>(scope: Scope<V>, f: Transform<V, W>): Promise<Scope<W>> {
+  return { ...scope, values: await mapRecord(scope.values, f) };
+}
+
+async function mapCheckpointValues<V, W>(
+  checkpoint: EngineCheckpoint<V>,
+  f: Transform<V, W>,
+): Promise<EngineCheckpoint<W>> {
+  return {
+    ...checkpoint,
+    threads: await mapRecord(checkpoint.threads, (thread) => mapThreadValues(thread, f)),
+    scopes: await mapRecord(checkpoint.scopes, (scope) => mapScopeValues(scope, f)),
+  };
+}
+
+/**
+ * Encrypt every `secret` embedded in a checkpoint into its storage envelope.
+ * The result type (`EncryptedEngineCheckpoint`) is distinct from the input, so
+ * the boundary is enforced statically: only an encrypted checkpoint can be
+ * handed to storage.
+ */
+export function encryptCheckpoint(
+  checkpoint: EngineCheckpoint,
+): Promise<EncryptedEngineCheckpoint> {
+  return mapCheckpointValues(checkpoint, encryptValueTree);
+}
+
+/**
+ * Inverse of `encryptCheckpoint`. Throws via `secret-crypto` if any envelope
+ * fails AES-GCM authentication (= tampering or wrong key).
+ */
+export function decryptCheckpoint(encrypted: EncryptedEngineCheckpoint): Promise<EngineCheckpoint> {
+  return mapCheckpointValues(encrypted, decryptValueTree);
 }
 
 // ─── Persist-time promotion (inline string → content-addressed ref) ─────────
@@ -207,40 +293,35 @@ export type PromoteFn = (text: string) => Promise<RefRep>;
 /** Default 4 KiB: below this an inline string is cheap to keep in the checkpoint. */
 export const DEFAULT_PROMOTE_THRESHOLD_BYTES = 4096;
 
-function inlineTextOverThreshold(
-  rep: unknown,
-  threshold: number,
-): rep is { kind: "inline"; text: string } {
-  return (
-    typeof rep === "object" &&
-    rep !== null &&
-    (rep as { kind?: unknown }).kind === "inline" &&
-    typeof (rep as { text?: unknown }).text === "string" &&
-    Buffer.byteLength((rep as { text: string }).text, "utf8") > threshold
-  );
-}
-
-async function promoteInTree(
-  node: unknown,
+/** Recurse a Value tree, promoting every inline `string` over the threshold to
+ *  a content-addressed ref. Other kinds pass through (secret stays inline; file
+ *  / ref strings are already refs). */
+async function promoteValueTree(
+  value: Value,
   promote: PromoteFn,
   threshold: number,
-): Promise<unknown> {
-  if (node === null || typeof node !== "object") return node;
-  if (Array.isArray(node)) {
-    return Promise.all(node.map((n) => promoteInTree(n, promote, threshold)));
+): Promise<Value> {
+  switch (value.kind) {
+    case "string":
+      return value.rep.kind === "inline" && Buffer.byteLength(value.rep.text, "utf8") > threshold
+        ? { kind: "string", rep: await promote(value.rep.text) }
+        : value;
+    case "array":
+      return {
+        kind: "array",
+        elements: await mapArray(value.elements, (e) => promoteValueTree(e, promote, threshold)),
+      };
+    case "record": {
+      const entries = await mapRecord(value.entries, (e) =>
+        promoteValueTree(e, promote, threshold),
+      );
+      return value.ctor !== undefined
+        ? { kind: "record", entries, ctor: value.ctor }
+        : { kind: "record", entries };
+    }
+    default:
+      return value;
   }
-  const obj = node as Record<string, unknown>;
-  // A `string` Value whose inline text exceeds the threshold → promote.
-  if (obj.kind === "string" && inlineTextOverThreshold(obj.rep, threshold)) {
-    return { kind: "string", rep: await promote((obj.rep as { text: string }).text) };
-  }
-  // Everything else (non-Value structure, composite Values, secret/file/ref
-  // strings, small strings) recurses structurally so nested strings promote.
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[k] = await promoteInTree(v, promote, threshold);
-  }
-  return out;
 }
 
 /**
@@ -249,10 +330,10 @@ async function promoteInTree(
  * `encryptCheckpoint` at persist time (promotion handles strings, encryption
  * handles the remaining secrets — disjoint concerns).
  */
-export async function promoteCheckpoint(
+export function promoteCheckpoint(
   checkpoint: EngineCheckpoint,
   promote: PromoteFn,
   threshold: number = DEFAULT_PROMOTE_THRESHOLD_BYTES,
 ): Promise<EngineCheckpoint> {
-  return (await promoteInTree(checkpoint, promote, threshold)) as EngineCheckpoint;
+  return mapCheckpointValues(checkpoint, (value) => promoteValueTree(value, promote, threshold));
 }

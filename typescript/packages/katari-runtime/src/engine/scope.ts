@@ -8,7 +8,11 @@ import type { Json } from "../json.js";
 import type { ScopeId } from "./id.js";
 import type { Value } from "./value.js";
 
-export type Scope = {
+// `V` parameterises the embedded `Value` so the storage boundary can
+// instantiate `Scope<EncryptedValue>` for the encrypted checkpoint form. The
+// live engine uses the default `Scope = Scope<Value>`; only `engine/snapshot.ts`
+// picks a different `V`. See `mapScopeValues` there.
+export type Scope<V = Value> = {
   id: ScopeId;
   parentId: ScopeId | null;
   /**
@@ -16,7 +20,7 @@ export type Scope = {
    * structural data. `Map` would also work but adds friction with Immer's
    * draft producers.
    */
-  values: Record<number, Value>;
+  values: Record<number, V>;
   /**
    * The ambient generic substitution of the enclosing agent activation, set on
    * an agent's root scope from the inbound `delegate` event's `generics`. Inner

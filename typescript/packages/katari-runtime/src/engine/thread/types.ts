@@ -65,12 +65,12 @@ type Common = {
  * eventual `escalateAck` arrives inbound and is converted into an
  * `askAck` to the child via `outboundEscalations`.
  */
-export type AgentThread = Common & {
+export type AgentThread<V = Value> = Common & {
   kind: "agent";
   /** BlockId of the BlockAgent we represent. */
   blockId: BlockId;
   /** Args this agent was called with (passed into the body's scope at create). */
-  argument: Value | undefined;
+  argument: V | undefined;
   /**
    * Delegation id that landed us here. Used to look up the sender in
    * `state.delegationSenders` when emitting delegateAck/terminateAck/escalate.
@@ -80,7 +80,7 @@ export type AgentThread = Common & {
    * Set when a `return` ask (or natural body done) was caught. Drives the
    * eventual outbound `delegateAck` after children finish cancelling.
    */
-  pendingReturn?: Value;
+  pendingReturn?: V;
   /**
    * Outstanding outbound escalations: escalationId → askId. Populated when
    * a non-return `ask` from a descendant reaches this root and is converted
@@ -101,7 +101,7 @@ export type UserThread = Common & {
   pc: number;
 };
 
-export type HandleThread = Common & {
+export type HandleThread<V = Value> = Common & {
   kind: "handle";
   blockId: BlockId;
   /**
@@ -112,22 +112,22 @@ export type HandleThread = Common & {
    *   - "handlerBody" — a handler invocation (carries the asker chain)
    *   - "thenClause"  — the optional `then` clause spawned after main done
    */
-  childRoles: Record<CallId, ChildRole>;
+  childRoles: Record<CallId, ChildRole<V>>;
   /**
    * Sequential-mode pending action queue. Empty when block.parallel === true.
    */
-  pendingActions: PendingAction[];
+  pendingActions: PendingAction<V>[];
   /** Action to fire once a specific child finishes cancelling. */
-  postCancelActions: Record<CallId, PostCancelAction>;
+  postCancelActions: Record<CallId, PostCancelAction<V>>;
   /**
    * Set when a `break` ask was caught (handle scope's done-terminating
    * exit). Drives the eventual `done` to parent after children finish
    * cancelling.
    */
-  pendingReturn?: Value;
+  pendingReturn?: V;
 };
 
-export type ChildRole =
+export type ChildRole<V = Value> =
   | { kind: "main" }
   | {
       kind: "handlerBody";
@@ -143,30 +143,30 @@ export type ChildRole =
        */
       askerCallId: CallId;
     }
-  | { kind: "thenClause"; mainResultValue: Value };
+  | { kind: "thenClause"; mainResultValue: V };
 
-export type PendingAction =
+export type PendingAction<V = Value> =
   | {
       kind: "ask";
       reqId: QualifiedName;
-      argument: Value | undefined;
+      argument: V | undefined;
       askId: AskId;
       askerCallId: CallId;
     }
-  | { kind: "thenClause"; mainResultValue: Value };
+  | { kind: "thenClause"; mainResultValue: V };
 
-export type PostCancelAction =
+export type PostCancelAction<V = Value> =
   /** Pattern (i): general post-cancel cleanup, used by ForThread. */
-  | { kind: "finish"; value?: Value }
+  | { kind: "finish"; value?: V }
   /** Pattern (ii): targeted `next` resume — fire askAck after the cancel completes. */
   | {
       kind: "askComplete";
       askId: AskId;
       askerCallId: CallId;
-      value: Value;
+      value: V;
     };
 
-export type ForThread = Common & {
+export type ForThread<V = Value> = Common & {
   kind: "for";
   blockId: BlockId;
   /** Sequential cursor: the index of the iteration currently running. */
@@ -174,19 +174,19 @@ export type ForThread = Common & {
   /** Total iteration count (Cartesian product of the iter sources). */
   total: number;
   /** Iter source array values resolved at construction. */
-  iterableSnapshot: Value[];
+  iterableSnapshot: V[];
   /**
    * Mapped output accumulator: each iteration's `next v` value, keyed by its
    * iteration index so parallel completions stay in source order. Assembled
    * into an array (the loop's value, or the then-clause's input) on
    * completion.
    */
-  collected: Record<number, Value>;
+  collected: Record<number, V>;
   /** CallId → iteration index, so an inbound `next-for` knows which slot to fill. */
   iterIndexByCallId: Record<CallId, number>;
-  postCancelActions: Record<CallId, PostCancelAction>;
+  postCancelActions: Record<CallId, PostCancelAction<V>>;
   /** Set when a `break-for` ask was caught (short-circuits to this value). */
-  pendingReturn?: Value;
+  pendingReturn?: V;
   /**
    * CallId of the spawned then-block child, when one exists. Set in
    * `emitForResult` at the moment the then-block is spawned; consulted in
@@ -214,10 +214,10 @@ export type GetFieldThread = Common & {
   blockId: BlockId;
 };
 
-export type RequestThread = Common & {
+export type RequestThread<V = Value> = Common & {
   kind: "request";
   reqId: QualifiedName;
-  argument: Value | undefined;
+  argument: V | undefined;
   /** Set after the initial ask has been emitted. */
   pendingAskId?: AskId;
 };
@@ -242,12 +242,12 @@ export type RequestThread = Common & {
  * from above is converted into an outbound `escalateAck` to the peer via
  * `inboundEscalations`.
  */
-export type DelegateThread = Common & {
+export type DelegateThread<V = Value> = Common & {
   kind: "delegate";
   /** BlockId of the BlockDelegate that spawned us (target lives in the block). */
   blockId: BlockId;
   /** Args passed in the delegate event. */
-  argument: Value | undefined;
+  argument: V | undefined;
   /** Delegation id issued by us at create time. */
   delegationId: DelegationId;
   /**
@@ -260,10 +260,10 @@ export type DelegateThread = Common & {
   inboundEscalations: Record<AskId, EscalationId>;
 };
 
-export type PrimThread = Common & {
+export type PrimThread<V = Value> = Common & {
   kind: "prim";
   primName: string;
-  argument: Value | undefined;
+  argument: V | undefined;
   /**
    * Set after the prim raised a custom request (e.g. `json_parse_error`)
    * and the corresponding `ask` was emitted upward. The thread stays
@@ -275,10 +275,10 @@ export type PrimThread = Common & {
   pendingAskId?: AskId;
 };
 
-export type CtorThread = Common & {
+export type CtorThread<V = Value> = Common & {
   kind: "ctor";
   ctorId: QualifiedName;
-  argument: Value | undefined;
+  argument: V | undefined;
 };
 
 /**
@@ -334,19 +334,19 @@ export type MakeClosureThread = Common & {
  *      parent (same as DelegateThread); its eventual `askAck` becomes
  *      an outbound `escalateAck`.
  */
-export type CallAgentThread = Common & {
+export type CallAgentThread<V = Value> = Common & {
   kind: "callAgent";
   /**
    * The callable VALUE to invoke (an `agentLiteral` or `closure`; it carries
    * the dispatch identity + any generic substitution). Resolved at @create@.
    */
-  target: Value;
+  target: V;
   /**
    * The user-supplied @args@ record (dynamically built, e.g. from an AI). Kept
    * verbatim until @create@, where it is validated against the target's input
    * schema (specialised to the target's generics) before the delegate fires.
    */
-  argsRecord: Record<string, Value>;
+  argsRecord: Record<string, V>;
   /**
    * `delegationId` issued at create time when the delegate path is
    * taken (= name resolved successfully). Unset otherwise (= the thread
@@ -365,22 +365,22 @@ export type CallAgentThread = Common & {
  * helpers in `thread/ops/collecting.ts` operate generically on this base; the
  * final value is always an ordered `array` Value (tuples and arrays share it).
  */
-type CollectingBase = {
+type CollectingBase<V = Value> = {
   blockId: BlockId;
   /** CallId → element value, collected as children complete. */
-  collected: Record<CallId, Value>;
+  collected: Record<CallId, V>;
   nextIndex: number;
 };
 
 // The unified seq thread — both `[...]` and `par [...]` fan out here and collect
 // into one ordered `array` Value (tuple / array share the runtime form).
-export type TupleThread = Common &
-  CollectingBase & {
+export type TupleThread<V = Value> = Common &
+  CollectingBase<V> & {
     kind: "tuple";
   };
 
-export type RecordThread = Common &
-  CollectingBase & {
+export type RecordThread<V = Value> = Common &
+  CollectingBase<V> & {
     kind: "record";
   };
 
@@ -389,22 +389,28 @@ export type RecordThread = Common &
  * RecordThread uses `CollectingBase` for its shape but has its own ops
  * (`record.ts`) — it is intentionally excluded here.
  */
-export type CollectingThread = TupleThread;
+export type CollectingThread<V = Value> = TupleThread<V>;
 
-export type Thread =
-  | AgentThread
+// `V` parameterises the embedded `Value` type so the storage boundary can
+// instantiate `Thread<EncryptedValue>` for the encrypted-at-rest checkpoint
+// form. The live engine always uses the default `Thread = Thread<Value>`; only
+// `engine/snapshot.ts` (encrypt / decrypt) ever picks a different `V`. See the
+// `mapThreadValues` walker there — its `Thread<V> → Thread<W>` signature is
+// what makes "every embedded Value is transformed" a compile-time guarantee.
+export type Thread<V = Value> =
+  | AgentThread<V>
   | UserThread
-  | HandleThread
-  | ForThread
+  | HandleThread<V>
+  | ForThread<V>
   | MatchThread
-  | RequestThread
-  | DelegateThread
-  | PrimThread
-  | CallAgentThread
-  | CtorThread
+  | RequestThread<V>
+  | DelegateThread<V>
+  | PrimThread<V>
+  | CallAgentThread<V>
+  | CtorThread<V>
   | MakeClosureThread
-  | TupleThread
-  | RecordThread
+  | TupleThread<V>
+  | RecordThread<V>
   | GetFieldThread;
 
 export type ThreadKind = Thread["kind"];
