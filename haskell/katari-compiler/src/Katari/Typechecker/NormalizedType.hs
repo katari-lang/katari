@@ -38,6 +38,7 @@ module Katari.Typechecker.NormalizedType
     emptyNormalizedEffect,
     unionNormalizedEffect,
     subtractConcrete,
+    shadowNormalizedEffect,
     differenceNormalizedEffect,
     nullNormalizedEffect,
     normaliseEffect,
@@ -398,6 +399,18 @@ subtractConcrete handled = \case
   NormalizedEffectAny -> NormalizedEffectAny
   NormalizedEffectRows concrete generics shadowed -> NormalizedEffectRows (Map.withoutKeys concrete handled) generics shadowed
 
+-- | Exclude a set of request names from an effect entirely — the override-row
+-- @⊖@: remove them from the concrete requests AND add them to @effectShadowed@
+-- so they are also removed from the effect generics once instantiated. (Used to
+-- form the residual @E = actual ⊖ {handled}@ when inferring a handler's E.)
+shadowNormalizedEffect :: Set QualifiedName -> NormalizedEffect -> NormalizedEffect
+shadowNormalizedEffect names = \case
+  NormalizedEffectAny -> NormalizedEffectAny
+  NormalizedEffectRows concrete generics shadowed ->
+    -- Exclude from the concrete requests; record in shadowed only if there are
+    -- generics for it to act on (otherwise the shadow is vacuous).
+    NormalizedEffectRows (Map.withoutKeys concrete names) generics (if Set.null generics then shadowed else Set.union shadowed names)
+
 -- | The elements @left@ raises beyond @right@ (for the @with@-coverage report).
 -- A request is covered when @right@ names it with args that @left@'s
 -- instantiation is a subeffect of (per variance). @all@ minus a finite set is
@@ -487,7 +500,9 @@ normaliseEffect env = \case
        in NormalizedEffectRows
             (Map.union overrideEntries (Map.withoutKeys baseConcrete overrideNames))
             baseGenerics
-            (Set.union baseShadowed overrideNames)
+            -- Shadowing only matters for the generics' contribution; with no
+            -- generics the override is just a union, so keep shadowed empty.
+            (if Set.null baseGenerics then baseShadowed else Set.union baseShadowed overrideNames)
 
 -- | The (denormalised) arguments a request is applied to within an effect —
 -- used to instantiate a handler against the request's body usage. Empty if the
@@ -516,8 +531,9 @@ denormaliseEffect :: NormalizedEffect -> SemanticEffect Resolved
 denormaliseEffect = \case
   NormalizedEffectAny -> SemanticEffectAll
   NormalizedEffectRows concrete generics shadowed
-    -- No shadows ⇒ a plain union of the concrete requests + generic leaves.
-    | Set.null shadowed ->
+    -- No shadows (or no generics for them to act on — then the shadow is
+    -- vacuous) ⇒ a plain union of the concrete requests + generic leaves.
+    | Set.null shadowed || Set.null generics ->
         unionEffects (concreteLeaves (Map.toList concrete) ++ genericLeaves)
     -- Shadows present ⇒ an override row: the base is the generics + any concrete
     -- not shadowed; the shadowed names with a concrete value become the overrides.

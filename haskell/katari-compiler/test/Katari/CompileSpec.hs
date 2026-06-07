@@ -30,6 +30,7 @@ spec = describe "Katari.Compile" $ do
   letAnnotationSpec
   effectOverrideSpec
   matchNarrowingSpec
+  genericsInferenceSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -632,6 +633,41 @@ recursiveDataSpec = describe "recursive data type" $ do
         case Aeson.fromJSON (Aeson.toJSON ir) of
           Aeson.Success decoded -> decoded `shouldBe` ir
           Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
+
+-- | Args-only generics inference: a generic callable applied without explicit
+-- @[..]@ infers its instantiation from the argument types. The headline case is
+-- the handler provider — its R and E are recovered from the continuation arg.
+genericsInferenceSpec :: Spec
+genericsInferenceSpec = describe "generics inference (args-only)" $ do
+  let ok src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+      bad src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+      provider =
+        "request some_req[T]() -> T\n"
+          <> "request foo() -> null\n"
+          <> "agent provide[R, effect E](cont: agent () -> R with {...E, some_req[string]}, fallback: R) -> R with E { fallback }\n"
+
+  it "infers a plain type parameter from an argument (identity(x = 5))" $
+    ok "agent identity[T](x: T) -> T { x }\nagent main() -> integer { identity(x = 5) }"
+  it "infers R and E for the handler provider from the continuation (E = the residual effect)" $
+    ok
+      ( provider
+          <> "agent cont() -> integer with some_req[string] | foo { let s = some_req[string](); let n = foo(); 0 }\n"
+          <> "agent caller() -> integer with foo { provide(cont = cont, fallback = 0) }\n"
+          <> "agent main() -> integer { 0 }"
+      )
+  it "rejects a continuation whose discharged request has the wrong instantiation" $
+    bad
+      ( provider
+          <> "agent cont() -> integer with some_req[integer] { let n = some_req[integer](); 0 }\n"
+          <> "agent caller() -> integer { provide(cont = cont, fallback = 0) }\n"
+          <> "agent main() -> integer { 0 }"
+      )
+  it "rejects a continuation whose residual generic might itself raise the discharged request" $
+    bad
+      ( provider
+          <> "agent caller[effect G](inner: agent () -> integer with some_req[string] | G) -> integer { provide(cont = inner, fallback = 0) }\n"
+          <> "agent main() -> integer { 0 }"
+      )
 
 -- | Override-row effects @{...E, req[args]}@ (the basis for first-class
 -- handlers / `use`): the row shadows the named requests in the base @E@, so it

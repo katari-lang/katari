@@ -73,6 +73,7 @@ import Katari.Typechecker.NormalizedType
     dataArgsInType,
     nullNormalizedEffect,
     subtractConcrete,
+    shadowNormalizedEffect,
     subtypeNormalizedType,
   )
 
@@ -120,6 +121,10 @@ data CheckError
   | -- | A generic application supplied the wrong number of type arguments
     -- (expected, actual).
     CheckErrorTypeArgArity SourceSpan Int Int
+  | -- | A generic callable was applied to arguments without explicit type
+    -- arguments, and at least one generic parameter could not be inferred from
+    -- the argument types (args-only inference). Instantiate it explicitly.
+    CheckErrorCannotInferGeneric SourceSpan
   | -- | An effect expression appears where a type is required (e.g. a request
     -- name in a @let@ / parameter annotation, or at a type-parameter position).
     CheckErrorEffectInTypePosition SourceSpan
@@ -204,6 +209,11 @@ toDiagnostic = \case
     diagnosticError
       "K0218"
       ("wrong number of type arguments: expected " <> Text.pack (show expected) <> ", got " <> Text.pack (show actual))
+      sourceSpan
+  CheckErrorCannotInferGeneric sourceSpan ->
+    diagnosticError
+      "K0229"
+      "cannot infer the generic type arguments from the call arguments; instantiate explicitly with [..]"
       sourceSpan
   CheckErrorEffectInTypePosition sourceSpan ->
     diagnosticError "K0220" "an effect can't be used as a type here" sourceSpan
@@ -767,7 +777,18 @@ walkTemplateElement = \case
 -- ---------------------------------------------------------------------------
 
 synthCall :: CallExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
-synthCall CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
+synthCall callExpr@CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
+  -- A bare reference to a generic callable applied to (named) arguments, with no
+  -- explicit @[..]@: infer its instantiation from the argument types. (An
+  -- explicit @f[..](args)@ has a 'ExpressionTypeApplication' callee, whose
+  -- resolution is Nothing here, so it falls through to the normal path.)
+  calleeParams <- genericParamsOf (calleeResolution callee)
+  case (spreadArgument, calleeParams) of
+    (Nothing, _ : _) -> synthInferredCall callee calleeParams arguments sourceSpan
+    _ -> synthMonomorphicCall callExpr
+
+synthMonomorphicCall :: CallExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthMonomorphicCall CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
   (callee', calleeType) <- synthExpr callee
   case spreadArgument of
     -- Spread call @foo(...e)@: the single argument value is @e@; require its
@@ -842,6 +863,133 @@ synthGenericApplication TypeApplicationExpression {callee, typeArguments, source
             sourceSpan = sourceSpan,
             typeOf = resultType
           }
+
+-- ---------------------------------------------------------------------------
+-- Generics inference (args-only, best-effort; soundness rechecked)
+-- ---------------------------------------------------------------------------
+
+-- | A partial generic substitution accumulated by matching; on a collision (a
+-- generic matched in several positions) the candidates are joined.
+type InferSubst = (Map GenericsId (SemanticType Resolved), Map GenericsId (SemanticEffect Resolved))
+
+emptyInfer :: InferSubst
+emptyInfer = (Map.empty, Map.empty)
+
+combineInfer :: InferSubst -> InferSubst -> InferSubst
+combineInfer (leftTypes, leftEffects) (rightTypes, rightEffects) =
+  ( Map.unionWith (\a b -> unionSemantic [a, b]) leftTypes rightTypes,
+    Map.unionWith (\a b -> unionEffects [a, b]) leftEffects rightEffects
+  )
+
+-- | Match an expected type (carrying generics) against a concrete actual type,
+-- collecting each generic's witness. Structural; a generic leaf binds to the
+-- whole actual sub-part. Best effort — variance is ignored here, so an
+-- over-broad witness only turns into a recheck error the user can fix by
+-- annotating.
+matchType :: DataFieldEnv -> SemanticType Resolved -> SemanticType Resolved -> InferSubst
+matchType env expected actual = case expected of
+  SemanticTypeGeneric genericsId -> (Map.singleton genericsId actual, Map.empty)
+  SemanticTypeArray element -> case actual of
+    SemanticTypeArray actualElement -> matchType env element actualElement
+    _ -> emptyInfer
+  SemanticTypeRecord valueType -> case actual of
+    SemanticTypeRecord actualValue -> matchType env valueType actualValue
+    _ -> emptyInfer
+  SemanticTypeTuple elements -> case actual of
+    SemanticTypeTuple actualElements | length elements == length actualElements ->
+      foldr (combineInfer . uncurry (matchType env)) emptyInfer (zip elements actualElements)
+    _ -> emptyInfer
+  SemanticTypeObject fields -> case actual of
+    SemanticTypeObject actualFields ->
+      foldr combineInfer emptyInfer
+        [matchType env field.parameterType actualField.parameterType | (label, field) <- Map.toList fields, Just actualField <- [Map.lookup label actualFields]]
+    _ -> emptyInfer
+  SemanticTypeData qualifiedName arguments -> case actual of
+    SemanticTypeData actualName actualArguments | qualifiedName == actualName ->
+      foldr (combineInfer . uncurry (matchGenericArgument env)) emptyInfer (zip arguments actualArguments)
+    _ -> emptyInfer
+  SemanticTypeFunction parameterType returnType effect -> case actual of
+    SemanticTypeFunction actualParameter actualReturn actualEffect ->
+      matchType env parameterType actualParameter
+        `combineInfer` matchType env returnType actualReturn
+        `combineInfer` matchEffect env effect actualEffect
+    _ -> emptyInfer
+  -- A generic in a union with concrete siblings: bind it to the whole actual
+  -- (a precise type difference is deferred; the recheck guards soundness).
+  SemanticTypeUnion branches ->
+    foldr combineInfer emptyInfer [(Map.singleton genericsId actual, Map.empty) | SemanticTypeGeneric genericsId <- branches]
+  _ -> emptyInfer
+
+matchGenericArgument :: DataFieldEnv -> SemanticGenericArgument Resolved -> SemanticGenericArgument Resolved -> InferSubst
+matchGenericArgument env expected actual = case (expected, actual) of
+  (SemanticGenericArgumentType expectedType, SemanticGenericArgumentType actualType) -> matchType env expectedType actualType
+  (SemanticGenericArgumentEffect expectedEffect, SemanticGenericArgumentEffect actualEffect) -> matchEffect env expectedEffect actualEffect
+  _ -> emptyInfer
+
+-- | Match an expected effect (carrying generics) against the actual effect. The
+-- generic base @E@ of @{...E, req[args]}@ / @E | req@ is bound to the RESIDUAL
+-- @actual ⊖ {explicit concrete request names}@ — the effect that remains once
+-- those requests are discharged. The recheck then validates the discharge is
+-- sound (e.g. rejecting an actual whose @E@ might itself raise the request).
+matchEffect :: DataFieldEnv -> SemanticEffect Resolved -> SemanticEffect Resolved -> InferSubst
+matchEffect env expected actual = case normaliseEffect env expected of
+  NormalizedEffectAny -> emptyInfer
+  NormalizedEffectRows concreteExpected genericsExpected _ ->
+    let residual = denormaliseEffect (shadowNormalizedEffect (Map.keysSet concreteExpected) (normaliseEffect env actual))
+     in (Map.empty, Map.fromList [(genericsId, residual) | genericsId <- Set.toList genericsExpected])
+
+-- | Infer a generic callee's instantiation from its argument types: match each
+-- parameter's (generic) type against the supplied argument type.
+inferSubstitution :: DataFieldEnv -> SemanticType Resolved -> Map Text (SemanticType Resolved) -> InferSubst
+inferSubstitution env calleeSig actualArguments = case calleeSig of
+  SemanticTypeFunction (SemanticTypeObject parameters) _ _ ->
+    foldr combineInfer emptyInfer
+      [matchType env parameter.parameterType actualType | (label, parameter) <- Map.toList parameters, Just actualType <- [Map.lookup label actualArguments]]
+  _ -> emptyInfer
+
+-- | A generic callee applied to arguments WITHOUT explicit type arguments:
+-- infer the instantiation from the argument types (args-only, best effort),
+-- then check the call against the instantiated signature (which restores
+-- soundness — an unsound witness fails here and the user annotates).
+synthInferredCall ::
+  Expression Identified ->
+  [(GenericsId, GenericKind, SemanticType Resolved)] ->
+  [CallArgument Identified] ->
+  SourceSpan ->
+  Check (Expression Zonked, SemanticType Resolved)
+synthInferredCall callee params arguments sourceSpan = do
+  let resolution = calleeResolution callee
+  calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (fromMaybe SemanticTypeUnknown) . lookupLocalType) resolution
+  walkedArgs <- mapM (walkCallArgument Nothing) arguments
+  let actualArgTypes = Map.fromList [(label, argType) | (_, (label, argType)) <- walkedArgs]
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  let (typeSubstitution, effectSubstitution) = inferSubstitution dataFieldEnv calleeSig actualArgTypes
+  forM_ params $ \(genericsId, kind, _) -> case kind of
+    GenericKindType | not (Map.member genericsId typeSubstitution) -> emitError (CheckErrorCannotInferGeneric sourceSpan)
+    GenericKindEffect | not (Map.member genericsId effectSubstitution) -> emitError (CheckErrorCannotInferGeneric sourceSpan)
+    _ -> pure ()
+  let concreteType = substituteGenerics typeSubstitution effectSubstitution calleeSig
+  calleeZonked <- retagGenericCallee callee concreteType
+  result <- applyNormalCall sourceSpan concreteType actualArgTypes
+  pure
+    ( ExpressionCall
+        CallExpression
+          { callee =
+              ExpressionTypeApplication
+                TypeApplicationExpression
+                  { callee = calleeZonked,
+                    typeArguments = [],
+                    instantiation = (Map.toList typeSubstitution, Map.toList effectSubstitution),
+                    sourceSpan = sourceSpan,
+                    typeOf = concreteType
+                  },
+            arguments = map fst walkedArgs,
+            spreadArgument = Nothing,
+            sourceSpan = sourceSpan,
+            typeOf = result
+          },
+      result
+    )
 
 -- | Elaborate one generic argument according to its parameter's kind: a type
 -- parameter ('Left') checks the argument against its bound; an effect parameter
