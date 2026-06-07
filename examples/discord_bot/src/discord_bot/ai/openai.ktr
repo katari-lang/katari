@@ -5,6 +5,7 @@
 // the arguments as a JSON *string*. Same agnostic types, different shaping.
 
 import discord_bot.ai.types
+import discord_bot.ai.jsonx
 import discord_bot.http
 
 @"An OpenAI provider connection (the Chat Completions API)."
@@ -24,9 +25,18 @@ agent openai_tool_call_json(call: types.tool_call) -> json {
     name = json_string(value = call.name),
     arguments = json_string(value = json.stringify(value = call.args)),
   })
-  // `type` is a keyword, so it can't be a record-literal key — set it by string.
-  let base = { id = json_string(value = call.opaque), function = function_json }
-  json_object(entries = record.set(record = base, key = "type", value = json_string(value = "function")))
+  // `type` is a keyword, so it can't be a record-literal key; build via
+  // record.set from an empty record[json] so the value type stays `json`.
+  let entries = record.set(
+    record = record.set(
+      record = record.set(record = record.empty(), key = "id", value = json_string(value = call.opaque)),
+      key = "type",
+      value = json_string(value = "function"),
+    ),
+    key = "function",
+    value = function_json,
+  )
+  json_object(entries = entries)
 }
 
 agent openai_messages_of(msg: types.message) -> array[json] {
@@ -69,7 +79,12 @@ agent openai_function_tool(meta: agent_metadata) -> json with json_parse_error {
     description = json_string(value = meta.description),
     parameters = json.parse(text = meta.input),
   })
-  json_object(entries = record.set(record = { function = function_json }, key = "type", value = json_string(value = "function")))
+  let entries = record.set(
+    record = record.set(record = record.empty(), key = "type", value = json_string(value = "function")),
+    key = "function",
+    value = function_json,
+  )
+  json_object(entries = entries)
 }
 
 agent openai_request_body(client: openai, history: array[types.message], tool_metas: array[agent_metadata]) -> string with json_parse_error {
@@ -95,32 +110,32 @@ agent openai_string(node: json) -> string {
 }
 
 agent openai_message(parsed: json) -> json {
-  json.get(value = json.at(value = json.get(value = parsed, key = "choices"), index = 0), key = "message")
+  jsonx.field(node = jsonx.elem(node = jsonx.field(node = parsed, key = "choices"), index = 0), key = "message")
 }
 
 agent openai_tool_call_of(tc: json, tool_names: array[string]) -> types.tool_call with json_parse_error {
-  let function = json.get(value = tc, key = "function")
-  let name = openai_string(node = json.get(value = function, key = "name"))
+  let function = jsonx.field(node =tc, key = "function")
+  let name = openai_string(node = jsonx.field(node =function, key = "name"))
   types.tool_call(
     tool_index = array.index_of(array = tool_names, value = name),
     name = name,
-    opaque = openai_string(node = json.get(value = tc, key = "id")),
-    args = json.parse(text = openai_string(node = json.get(value = function, key = "arguments"))),
+    opaque = openai_string(node = jsonx.field(node =tc, key = "id")),
+    args = json.parse(text = openai_string(node = jsonx.field(node =function, key = "arguments"))),
   )
 }
 
 agent openai_parse_step(response: string, tool_metas: array[agent_metadata]) -> types.step with json_parse_error {
   let message = openai_message(parsed = json.parse(text = response))
   let tool_names = for (let meta in tool_metas) { next meta.name }
-  match (json.get(value = message, key = "tool_calls")) {
+  match (jsonx.field(node =message, key = "tool_calls")) {
     case json_array(items = tcs) => {
       let calls = for (let tc in tcs) { next openai_tool_call_of(tc = tc, tool_names = tool_names) }
       match (array.length(array = calls)) {
-        case 0 => { types.step_final(text = openai_string(node = json.get(value = message, key = "content"))) }
+        case 0 => { types.step_final(text = openai_string(node = jsonx.field(node =message, key = "content"))) }
         case _ => { types.step_call(calls = calls) }
       }
     }
-    case _ => { types.step_final(text = openai_string(node = json.get(value = message, key = "content"))) }
+    case _ => { types.step_final(text = openai_string(node = jsonx.field(node =message, key = "content"))) }
   }
 }
 

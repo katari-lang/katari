@@ -7,7 +7,7 @@
 @"One turn in a conversation: who spoke (\"user\" / \"model\") and what they said."
 data turn(role: string, text: string)
 
-@"One tool the model wants to invoke this step — @tool_index@ selects it from the tools array (for dispatch), @name@ is its function name (for the model-facing call/response record), @opaque@ is any provider token that must be replayed verbatim on the call turn (Gemini's thought signature; empty for providers that don't use one), @args@ is the model's argument object as parsed `json` (replayed verbatim on the call turn; `json.to_object` turns it into the record `call_agent` dispatches with)."
+@"One tool the model wants to invoke this step — @tool_index@ selects it from the tools array (for dispatch), @name@ is its function name (for the model-facing call/response record), @opaque@ is any provider token that must be replayed verbatim on the call turn (Gemini's thought signature; empty for providers that don't use one), @args@ is the model's argument object as parsed `json` (replayed verbatim on the call turn; `jsonx.to_value` turns it into the value `call_agent` dispatches with)."
 data tool_call(tool_index: integer, name: string, opaque: string, args: json)
 
 @"A tool's output for the model, keyed by the tool @name@ / @call_id@ so it round-trips as a function response."

@@ -4,6 +4,7 @@
 // (and the providers) speak only the agnostic vocabulary in discord_bot.ai.types.
 
 import discord_bot.ai.types
+import discord_bot.ai.jsonx
 import discord_bot.ai.gemini
 import discord_bot.ai.openai
 
@@ -52,7 +53,7 @@ agent infer_with_tools[effect E](
           next types.tool_result(
             name = call.name,
             call_id = call.opaque,
-            text = to_string(value = call_agent[unknown, E](target = array.get(array = tools, index = call.tool_index), args = json.to_object(value = call.args))),
+            text = to_string(value = call_agent[unknown, E](target = array.get(array = tools, index = call.tool_index), args = jsonx.to_value(node = call.args))),
           )
         }
         // Record BOTH the model's call turn and the results turn so the next
