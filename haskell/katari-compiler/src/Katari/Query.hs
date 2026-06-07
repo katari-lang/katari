@@ -52,7 +52,7 @@ import Katari.AST
     ForInBinding (..),
     ForNextStatement (..),
     ForVarBinding (..),
-    HandleExpression (..),
+    HandlerExpression (..),
     UseExpression (..),
     IfExpression (..),
     LetStatement (..),
@@ -468,11 +468,10 @@ hoverFromExpression snap moduleName position expression
         hoverFromExpression snap moduleName position tae.callee
       ExpressionTemplate te ->
         listToMaybe (mapMaybe (hoverFromTemplateElement snap moduleName position) te.elements)
-      ExpressionHandle he ->
+      ExpressionHandler he ->
         listToMaybe (mapMaybe (hoverFromStateVariable snap moduleName position) he.stateVariables)
           `orElse` listToMaybe (mapMaybe (hoverFromRequestHandler snap moduleName position) he.handlers)
           `orElse` (he.thenClause >>= hoverFromBlock snap moduleName position . snd)
-          `orElse` hoverFromBlock snap moduleName position he.body
       ExpressionUse ue ->
         hoverFromExpression snap moduleName position ue.expr
           `orElse` hoverFromBlock snap moduleName position ue.body
@@ -513,7 +512,7 @@ zonkedExpressionType = \case
   ExpressionFieldAccess e -> e.typeOf
   ExpressionTypeApplication e -> e.typeOf
   ExpressionTemplate e -> e.typeOf
-  ExpressionHandle e -> e.typeOf
+  ExpressionHandler e -> e.typeOf
   ExpressionUse e -> e.typeOf
   ExpressionParTuple e -> e.typeOf
   ExpressionQualifiedReference e -> e.typeOf
@@ -695,11 +694,10 @@ refFromExpression position expression
         refFromExpression position tae.callee
       ExpressionTemplate te ->
         listToMaybe (mapMaybe (refFromTemplateElement position) te.elements)
-      ExpressionHandle he ->
+      ExpressionHandler he ->
         listToMaybe (mapMaybe (refFromStateVariable position) he.stateVariables)
           `orElse` listToMaybe (mapMaybe (refFromRequestHandler position) he.handlers)
           `orElse` (he.thenClause >>= refFromBlock position . snd)
-          `orElse` refFromBlock position he.body
       ExpressionUse ue ->
         refFromExpression position ue.expr
           `orElse` refFromBlock position ue.body
@@ -824,11 +822,10 @@ collectExpressionOccurrences expression index = case expression of
     collectExpressionOccurrences tae.callee index
   ExpressionTemplate te ->
     foldr collectTemplateElementOccurrences index te.elements
-  ExpressionHandle he ->
+  ExpressionHandler he ->
     let withState = foldr collectStateVariableOccurrences index he.stateVariables
         withHandlers = foldr (\handler -> collectBlockOccurrences handler.body) withState he.handlers
-        withThen = maybe withHandlers (\(_, thenBlock) -> collectBlockOccurrences thenBlock withHandlers) he.thenClause
-     in collectBlockOccurrences he.body withThen
+     in maybe withHandlers (\(_, thenBlock) -> collectBlockOccurrences thenBlock withHandlers) he.thenClause
   ExpressionUse ue ->
     collectExpressionOccurrences ue.expr (collectBlockOccurrences ue.body index)
   ExpressionQualifiedReference qre ->

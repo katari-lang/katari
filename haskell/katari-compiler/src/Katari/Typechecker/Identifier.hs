@@ -1516,15 +1516,21 @@ resolveBlock Block {statements, returnExpression, sourceSpan} = do
 -- current scope. State variables, handlers, and the then clause are resolved
 -- in their own sub-frame (state vars visible to handlers and then, but not
 -- to the body).
-resolveHandleExpr :: HandleExpression Parsed -> Identifier (HandleExpression Identified)
-resolveHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan} = do
-  -- Body resolves in the OUTER scope (before handle's internal frame).
-  body' <- resolveBlock body
-  -- Handle internals in their own frame (state vars visible to handlers/then, not body).
+-- | Resolve a first-class handler-provider expression. It captures no
+-- continuation body (the old @handle@ body is gone); instead it mints the two
+-- implicit generic ids — @R@ (continuation return) and @E@ (residual effect) —
+-- that the checker quantifies the provider over. They carry no surface name
+-- (the explicit @handler[T, F]@ form is type application over this node), so we
+-- allocate their 'GenericsId's directly without registering scope symbols.
+resolveHandlerExpr :: HandlerExpression Parsed -> Identifier (HandlerExpression Identified)
+resolveHandlerExpr HandlerExpression {parallel, stateVariables, handlers, thenClause, sourceSpan} = do
+  returnGeneric <- freshGenericsId
+  effectGeneric <- freshGenericsId
+  -- Handler internals in their own frame (state vars visible to handlers/then).
   (stateVariables', handlers', thenClause') <- withScopeFrameAt sourceSpan $ do
     stateVariables' <- mapM resolveStateVariable stateVariables
     handlers' <- mapM resolveRequestHandler handlers
-    -- The @then@ clause shares the handle's frame, so it sees state vars.
+    -- The @then@ clause shares the handler's frame, so it sees state vars.
     -- Its own pattern + block introduce a nested frame for the destructured
     -- pattern bindings.
     thenClause' <-
@@ -1537,12 +1543,12 @@ resolveHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClau
         thenClause
     pure (stateVariables', handlers', thenClause')
   pure
-    HandleExpression
+    HandlerExpression
       { parallel = parallel,
         stateVariables = stateVariables',
         handlers = handlers',
         thenClause = thenClause',
-        body = body',
+        generics = (returnGeneric, effectGeneric),
         sourceSpan = sourceSpan,
         typeOf = ()
       }
@@ -1704,7 +1710,7 @@ resolveExpression = \case
   ExpressionFieldAccess expression -> resolveFieldAccess expression
   ExpressionTypeApplication expression -> ExpressionTypeApplication <$> resolveTypeApplicationExpr expression
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
-  ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
+  ExpressionHandler expression -> ExpressionHandler <$> resolveHandlerExpr expression
   ExpressionUse expression -> ExpressionUse <$> resolveUseExpr expression
   ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
   ExpressionQualifiedReference qref -> do

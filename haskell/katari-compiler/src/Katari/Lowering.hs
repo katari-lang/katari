@@ -1016,7 +1016,7 @@ lowerSimpleAgent catchesReturn blockId name bodyInput agentDefaults prelude blk 
 
 -- | Lower a 'RequestHandler' to a 'BlockUser'. The handler body inherits
 -- the handle scope (state vars are directly accessible via 'withLocals'
--- in the enclosing 'lowerHandleExpr'). Only req args are passed via
+-- in the enclosing 'lowerHandlerExpr'). Only req args are passed via
 -- 'parameters'. The body's trailing value is treated as an implicit
 -- @break@; an explicit 'StatementExit ExitKindBreak' is appended if
 -- the body completes normally.
@@ -1300,7 +1300,7 @@ lowerExpr = \case
   AST.ExpressionIf ifExpr -> lowerIfExpr ifExpr
   AST.ExpressionMatch matchExpr -> lowerMatchExpr matchExpr
   AST.ExpressionFor forExpr -> lowerForExpr forExpr
-  AST.ExpressionHandle handleExpr -> lowerHandleExpr handleExpr
+  AST.ExpressionHandler handlerExpr -> lowerHandlerExpr handlerExpr
   AST.ExpressionUse useExpr -> lowerUseExpr useExpr
   AST.ExpressionParTuple parTupleExpr -> lowerTupleExpr True parTupleExpr.elements
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
@@ -1754,53 +1754,86 @@ buildElementBlock expr = do
   recordBlock blockId (BlockUser userBlock) Nothing
   pure blockId
 
--- | Lower a handle expression (Koka-style). State vars are evaluated in
--- the current scope; the body (continuation) and handlers are built as
--- child blocks, then a 'BlockHandle' is constructed and called.
-lowerHandleExpr :: AST.HandleExpression Zonked -> Lower VarId
-lowerHandleExpr handleExpr = do
-  bodyBlockId <- freshBlockId
-  -- Allocate the handle scope id up front so break / next inside the body and
-  -- handlers stamp it as their lexical target.
+-- | Lower a @handler {...}@ expression into a /provider agent/ closure value:
+-- an agent that takes the continuation @k@ as its single (spread) input and runs
+-- it under the installed handlers via a 'BlockHandle' whose body is just @k()@.
+-- Below Lowering this is indistinguishable from a hand-written
+-- @agent provider(...k) { handle { k() } with {handlers} then {...} }@ closed over
+-- the definition scope; the type-level @R@/@E@ generics are erased (dispatch is
+-- by request id + value, so the runtime needs no substitution). The continuation
+-- comes from applying the closure (a direct spread call, or @use@).
+--
+-- The provider does NOT catch @return@ (it pushes no return target): a @return@
+-- in the @then@ clause is lexically the enclosing agent's, so it escalates out
+-- across the delegation boundary (lexical control routing), exactly like a @use@
+-- continuation.
+lowerHandlerExpr :: AST.HandlerExpression Zonked -> Lower VarId
+lowerHandlerExpr handlerExpr = do
+  providerBlockId <- freshBlockId
+  -- The continuation parameter: the provider's single spread input.
+  contVar <- freshVarId (Just "$cont")
   handleBlockId <- freshBlockId
-  -- Evaluate state var inits in outer scope (not under the handle target).
-  stateBinds <- mapM mkHandleStateInit handleExpr.stateVariables
-  let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
-      stateLocals = [(variableResolution, bodyVar) | (Just variableResolution, bodyVar, _) <- stateBinds]
-  withLocals stateLocals $ withHandleTarget handleBlockId $ do
-    -- Body block (the continuation).
-    (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto handleExpr.body)
-    recordBlock
-      bodyBlockId
-      (BlockUser (defaultUserBlock {statements = bodyStatements, trailing = bodyTrailing}))
-      Nothing
-    -- Handlers.
-    handlerList <- mapM lowerHandler handleExpr.handlers
-    -- Then clause.
-    thenBlockId <- lowerThenClause handleExpr.thenClause
-    -- Record BlockHandle and call it.
-    recordBlock
-      handleBlockId
-      ( BlockHandle
-          ( HandleBlock
-              { parallel = handleExpr.parallel,
-                stateInits = stateInits_,
-                body = bodyBlockId,
-                handlers = handlerList,
-                thenBlock = thenBlockId
-              }
-          )
-      )
-      Nothing
-    out <- freshVarId Nothing
-    emit $
-      StatementCall
-        CallData
-          { block = handleBlockId,
-            argument = Nothing,
-            output = Just out
+  providerBodyBlockId <- freshBlockId
+  -- Build the provider agent's body buffer: state inits + a call to the
+  -- BlockHandle, whose own body is `{ k() }`. State inits evaluate INSIDE the
+  -- provider (per invocation), reading any captured definition-scope vars.
+  (providerTrailing, providerStatements) <- runWithFreshBuffer $ do
+    stateBinds <- mapM mkHandleStateInit handlerExpr.stateVariables
+    let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
+        stateLocals = [(variableResolution, bodyVar) | (Just variableResolution, bodyVar, _) <- stateBinds]
+    withLocals stateLocals $ withHandleTarget handleBlockId $ do
+      -- The handle body: call the continuation `k()` (no args) and trail it.
+      handleBodyBlockId <- freshBlockId
+      (handleBodyTrailing, handleBodyStatements) <- runWithFreshBuffer $ do
+        kCallBlockId <- freshBlockId
+        recordBlock kCallBlockId (BlockDelegate DelegateBlock {target = DelegateTargetValue contVar}) Nothing
+        resultVar <- freshVarId Nothing
+        emit (StatementCall CallData {block = kCallBlockId, argument = Nothing, output = Just resultVar})
+        pure (Just resultVar)
+      recordBlock
+        handleBodyBlockId
+        (BlockUser (defaultUserBlock {statements = handleBodyStatements, trailing = handleBodyTrailing}))
+        Nothing
+      handlerList <- mapM lowerHandler handlerExpr.handlers
+      thenBlockId <- lowerThenClause handlerExpr.thenClause
+      recordBlock
+        handleBlockId
+        ( BlockHandle
+            ( HandleBlock
+                { parallel = handlerExpr.parallel,
+                  stateInits = stateInits_,
+                  body = handleBodyBlockId,
+                  handlers = handlerList,
+                  thenBlock = thenBlockId
+                }
+            )
+        )
+        Nothing
+      out <- freshVarId Nothing
+      emit (StatementCall CallData {block = handleBlockId, argument = Nothing, output = Just out})
+      pure (Just out)
+  recordBlock
+    providerBodyBlockId
+    (BlockUser (defaultUserBlock {input = Just contVar, statements = providerStatements, trailing = providerTrailing}))
+    (Just "handler.body")
+  recordBlock
+    providerBlockId
+    ( BlockAgent
+        AgentBlock
+          { qualifiedName = QualifiedName "<local>" "handler",
+            defaults = Map.empty,
+            entryBody = providerBodyBlockId,
+            name = "handler",
+            description = Nothing,
+            inputSchema = "{}",
+            outputSchema = "{}",
+            requestsSchema = "[]"
           }
-    pure out
+    )
+    (Just "handler")
+  closureVar <- freshVarId Nothing
+  emit (StatementMakeClosure MakeClosureData {output = closureVar, block = providerBlockId})
+  pure closureVar
   where
     mkHandleStateInit ::
       AST.StateVariableBinding Zonked ->
@@ -1822,6 +1855,13 @@ lowerHandleExpr handleExpr = do
 -- single-value spread call. No dedicated IR block — below Lowering this is
 -- indistinguishable from a hand-written @agent k(...x){ body }; expr(...k)@.
 lowerUseExpr :: AST.UseExpression Zonked -> Lower VarId
+lowerUseExpr useExpr
+  -- @use handler {...}@ written INLINE lowers exactly like the old @handle@: the
+  -- continuation IS the handle body (no provider closure / extra delegation), so
+  -- requests it raises are caught in the same delegation. (A standalone handler
+  -- value reached via @use <expr>@ falls through to the general path below.)
+  | AST.ExpressionHandler handlerExpr <- useExpr.expr =
+      lowerInlineHandle handlerExpr useExpr.body
 lowerUseExpr useExpr = do
   continuationBlockId <- freshBlockId
   (bodyInput, prelude) <- case useExpr.binder of
@@ -1842,6 +1882,57 @@ lowerUseExpr useExpr = do
   out <- freshVarId Nothing
   emit (StatementCall CallData {block = delegateBlk, argument = Just closureVar, output = Just out})
   pure out
+
+-- | Lower an inline @use handler {...} continuation@ as the old @handle@ does:
+-- the continuation is the handle body, run in the SAME delegation under a
+-- 'BlockHandle' constructed in place (state vars evaluated in the current scope;
+-- @break@ / @next@ stamp the handle scope as their lexical target). No provider
+-- agent / closure — this is the efficient, well-trodden handle IR.
+lowerInlineHandle :: AST.HandlerExpression Zonked -> AST.Block Zonked -> Lower VarId
+lowerInlineHandle handlerExpr continuationBody = do
+  bodyBlockId <- freshBlockId
+  handleBlockId <- freshBlockId
+  stateBinds <- mapM mkHandleStateInit handlerExpr.stateVariables
+  let stateInits_ = [(bodyVar, initVar) | (_, bodyVar, initVar) <- stateBinds]
+      stateLocals = [(variableResolution, bodyVar) | (Just variableResolution, bodyVar, _) <- stateBinds]
+  withLocals stateLocals $ withHandleTarget handleBlockId $ do
+    (bodyTrailing, bodyStatements) <- runWithFreshBuffer (lowerBlockInto continuationBody)
+    recordBlock
+      bodyBlockId
+      (BlockUser (defaultUserBlock {statements = bodyStatements, trailing = bodyTrailing}))
+      Nothing
+    handlerList <- mapM lowerHandler handlerExpr.handlers
+    thenBlockId <- lowerThenClause handlerExpr.thenClause
+    recordBlock
+      handleBlockId
+      ( BlockHandle
+          ( HandleBlock
+              { parallel = handlerExpr.parallel,
+                stateInits = stateInits_,
+                body = bodyBlockId,
+                handlers = handlerList,
+                thenBlock = thenBlockId
+              }
+          )
+      )
+      Nothing
+    out <- freshVarId Nothing
+    emit (StatementCall CallData {block = handleBlockId, argument = Nothing, output = Just out})
+    pure out
+  where
+    mkHandleStateInit ::
+      AST.StateVariableBinding Zonked ->
+      Lower (Maybe Id.VariableResolution, VarId, VarId)
+    mkHandleStateInit svb = do
+      initVar <- lowerExpr svb.initial
+      case svb.name.resolution of
+        Just variableResolution -> do
+          bodyVar <- freshVarId (Just svb.name.text)
+          pure (Just variableResolution, bodyVar, initVar)
+        Nothing -> do
+          recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
+          bodyVar <- freshVarId Nothing
+          pure (Nothing, bodyVar, initVar)
 
 -- | Emit a fresh load-literal statement and return the resulting var.
 emitLoadLiteral :: LiteralValue -> Lower VarId

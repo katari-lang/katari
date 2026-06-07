@@ -26,17 +26,17 @@ agent build_client() -> ai.ai_client {
 
 @"Standalone entry to test the tool loop from the CLI (no Discord): katari run discord_bot.solve --args '{\"task\": \"...\"}'."
 agent solve(task: string) -> string {
-  handle {
+  use handler {
     request env_not_found(env_key: string) {
       break f"missing env: ${env_key}"
     }
   }
-  handle (var client = build_client()) {
+  use handler (var client = build_client()) {
     request ai.get_ai_client() {
       next client
     }
   }
-  handle (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
+  use handler (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
     request e2b.get_e2b_key() {
       next e2b_key
     }
@@ -49,22 +49,22 @@ agent solve(task: string) -> string {
 
 @"Entry: set up the AI client + Discord connection, then serve one channel forever, keeping the conversation history as a Katari value."
 agent main(channel_id: string) -> string {
-  handle {
+  use handler {
     request env_not_found(env_key: string) {
       break f"missing env: ${env_key}"
     }
   }
-  handle (var client = build_client()) {
+  use handler (var client = build_client()) {
     request ai.get_ai_client() {
       next client
     }
   }
-  handle (var discord_client = discord.create_discord_client(token = env.get_secret(key = "DISCORD_TOKEN"))) {
+  use handler (var discord_client = discord.create_discord_client(token = env.get_secret(key = "DISCORD_TOKEN"))) {
     request discord.get_discord_client() {
       next discord_client
     }
   }
-  handle (var history: array[types.message] = array.empty()) {
+  use handler (var history: array[types.message] = array.empty()) {
     request discord.on_message(text: string, channel_id: string) {
       let asked = array.append(array = history, value = types.turn(role = "user", text = text))
       let answer = ai.reply(history = asked)

@@ -635,7 +635,7 @@ qualifiedRequestHandler = describe "request handlers" $ do
         mconcat
           [ "request get() -> integer\n",
             "agent main() {\n",
-            "  handle {\n",
+            "  use handler {\n",
             "    request get() { break 0; }\n",
             "  }\n",
             "  0\n",
@@ -651,7 +651,7 @@ qualifiedRequestHandler = describe "request handlers" $ do
             mconcat
               [ "import io\n",
                 "agent main() {\n",
-                "  handle {\n",
+                "  use handler {\n",
                 "    request io.read() { break 0; }\n",
                 "  }\n",
                 "  0\n",
@@ -669,7 +669,7 @@ qualifiedRequestHandler = describe "request handlers" $ do
             mconcat
               [ "import io\n",
                 "agent main() {\n",
-                "  handle {\n",
+                "  use handler {\n",
                 "    request io.absent() { break 0; }\n",
                 "  }\n",
                 "  0\n",
@@ -683,7 +683,7 @@ qualifiedRequestHandler = describe "request handlers" $ do
     shouldFailIdentifyWith isUndefName $
       mconcat
         [ "agent main() {\n",
-          "  handle {\n",
+          "  use handler {\n",
           "    request nonexistent() { break 0; }\n",
           "  }\n",
           "  0\n",
@@ -695,7 +695,7 @@ qualifiedRequestHandler = describe "request handlers" $ do
       mconcat
         [ "agent helper() -> integer { 0 }\n",
           "agent main() {\n",
-          "  handle {\n",
+          "  use handler {\n",
           "    request helper() { break 0; }\n",
           "  }\n",
           "  0\n",
@@ -735,7 +735,7 @@ scopeIsolation = describe "scope isolation" $ do
       mconcat
         [ "request get() -> integer\n",
           "agent main() {\n",
-          "  handle (var count = 0) {\n",
+          "  use handler (var count = 0) {\n",
           "    request get() { break 0; }\n",
           "  }\n",
           "  count\n",
@@ -747,7 +747,7 @@ scopeIsolation = describe "scope isolation" $ do
       mconcat
         [ "request get() -> integer\n",
           "agent main() {\n",
-          "  handle (var y = x) {\n",
+          "  use handler (var y = x) {\n",
           "    request get() { break 0; }\n",
           "  }\n",
           "  let x = 0;\n",
@@ -761,7 +761,7 @@ scopeIsolation = describe "scope isolation" $ do
         mconcat
           [ "request inc() -> integer\n",
             "agent main() {\n",
-            "  handle (var a = 1, var b = a) {\n",
+            "  use handler (var a = 1, var b = a) {\n",
             "    request inc() { break 0; }\n",
             "  }\n",
             "  0\n",
@@ -774,7 +774,7 @@ scopeIsolation = describe "scope isolation" $ do
       mconcat
         [ "request inc() -> integer\n",
           "agent main() {\n",
-          "  handle (var a = b, var b = 1) {\n",
+          "  use handler (var a = b, var b = 1) {\n",
           "    request inc() { break 0; }\n",
           "  }\n",
           "  0\n",

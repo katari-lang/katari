@@ -23,7 +23,7 @@ request bump(n: integer) -> integer
 
 @"Parallel for whose bodies each RAISE a request — exercises concurrent escalations bubbling through the for thread to a sequential handle, with each askAck routed back to the right iteration."
 agent par_with_effect(xs: array[integer]) -> array[integer] {
-  handle (var base = 100) {
+  use handler (var base = 100) {
     request bump(n: integer) {
       next base + n
     }

@@ -3,7 +3,7 @@ external boomExt() -> null from "FFI:ext_throw_catch.boomExt"
 
 @"Catches the throw bubbled from the failing external."
 agent main() -> string {
-  handle {
+  use handler {
     request throw(msg: string) {
       break f"ext threw: ${msg}"
     }

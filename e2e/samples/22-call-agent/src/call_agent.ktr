@@ -5,7 +5,7 @@ agent greeter(name: string) -> string {
 
 @"Invoke the greeter dynamically with a runtime-built args record. call_agent takes the callable VALUE (greeter) + a dynamic args record, validating the args against greeter's input schema; bad args raise error_invalid_argument, which the handle scope catches and turns into a diagnostic string."
 agent try_call(args: {}) -> string {
-  handle {
+  use handler {
     request error_invalid_argument(message: string) {
       break f"err: ${message}"
     }

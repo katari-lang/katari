@@ -113,6 +113,16 @@ type family GenericInstantiation (phase :: Phase) :: Type where
   GenericInstantiation Identified = ()
   GenericInstantiation Zonked = ([(GenericsId, SemanticType Resolved)], [(GenericsId, SemanticEffect Resolved)])
 
+-- | A 'HandlerExpression' is an anonymous generic agent (a handler provider)
+-- implicitly quantified over two parameters: @R@ (the continuation's return
+-- type) and @E@ (the residual effect). Their 'GenericsId's are minted by the
+-- Identifier pass (no surface names — the explicit @handler[T, F]@ form is type
+-- /application/, not declaration). Absent before 'Identified'.
+type family HandlerGenerics (phase :: Phase) :: Type where
+  HandlerGenerics Parsed = ()
+  HandlerGenerics Identified = (GenericsId, GenericsId)
+  HandlerGenerics Zonked = (GenericsId, GenericsId)
+
 -- ---------------------------------------------------------------------------
 -- NameRef: a name with phase-dependent resolution metadata attached.
 -- ---------------------------------------------------------------------------
@@ -433,31 +443,38 @@ data Block (phase :: Phase) = Block
 instance HasSourceSpan (Block phase) where
   sourceSpanOf block = block.sourceSpan
 
--- | Koka-style handle expression. Installs request handlers for its
--- continuation body. The body (continuation after @handle@) runs under
--- the installed handlers.
+-- | A first-class handler expression — an anonymous generic agent (a /handler
+-- provider/) that installs the given request handlers for a continuation passed
+-- to it. Implicitly generic over @R@ (the continuation's return type) and @E@
+-- (the residual effect); its type is
+-- @[R, E] agent(...k: agent() -> R with {...E, req...}) -> Rret with E@.
 --
 -- @
--- handle (var s = init) {
+-- handler (var s = init) {
 --   req foo() -> T { next v; s = new }
 -- } then (pat) { finalizer }
--- continuation_body
 -- @
+--
+-- Unlike the old @handle@ statement it does NOT capture a body — the
+-- continuation comes from applying it (directly @(handler {...})(cont)@ or via
+-- @use handler {...}@), with @R@ / @E@ inferred from that continuation exactly
+-- as for a generic agent call. @handler[T, F] {...}@ explicitly instantiates
+-- @R := T@, @E := F@ (parses as a 'TypeApplicationExpression' over this node).
 --
 -- When @parallel = True@, handlers run concurrently and @stateVariables@
 -- must be empty (enforced by the typechecker).
-data HandleExpression (phase :: Phase) = HandleExpression
+data HandlerExpression (phase :: Phase) = HandlerExpression
   { parallel :: !Bool,
     stateVariables :: [StateVariableBinding phase],
     handlers :: [RequestHandler phase],
     thenClause :: Maybe (Maybe (Pattern phase), Block phase),
-    -- | Continuation body that runs under the installed handlers.
-    body :: Block phase,
+    -- | The implicit @(R, E)@ generic parameter ids, minted by the Identifier.
+    generics :: HandlerGenerics phase,
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }
 
-instance HasSourceSpan (HandleExpression phase) where
+instance HasSourceSpan (HandlerExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | @(let x =)? use expr@ — applies the handler-provider @expr@ to the
@@ -483,7 +500,7 @@ data UseExpression (phase :: Phase) = UseExpression
 instance HasSourceSpan (UseExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | One @var name [: T] = init@ binding inside a 'HandleExpression''s
+-- | One @var name [: T] = init@ binding inside a 'HandlerExpression''s
 -- @(...)@ list. Visible to all handlers in the same @handle@ scope; only
 -- @next@ inside a handler may mutate it.
 data StateVariableBinding (phase :: Phase) = StateVariableBinding
@@ -1106,7 +1123,7 @@ instance HasSourceSpan (SyntacticRequest phase) where
 
 -- | All expression shapes. Every variant carries a 'typeOf' field (in its
 -- specific node type) holding phase-dependent type information.
--- 'ExpressionHandle', 'ExpressionParTuple', 'ExpressionParArray', and
+-- 'ExpressionHandler', 'ExpressionParTuple', 'ExpressionParArray', and
 -- 'ExpressionQualifiedReference' are documented with their constructors;
 -- the rest correspond directly to their named node.
 data Expression (phase :: Phase) where
@@ -1145,8 +1162,8 @@ data Expression (phase :: Phase) where
   ExpressionTypeApplication :: TypeApplicationExpression phase -> Expression phase
   -- | @f\"...\"@ template literal with interpolation.
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
-  -- | Koka-style handle expression. Captures the continuation as its body.
-  ExpressionHandle :: HandleExpression phase -> Expression phase
+  -- | A first-class handler-provider expression (an anonymous generic agent).
+  ExpressionHandler :: HandlerExpression phase -> Expression phase
   -- | @(let x =)? use expr@. Captures the continuation as its body and passes
   -- it to @expr@ (a handler-provider agent) as a continuation closure.
   ExpressionUse :: UseExpression phase -> Expression phase
@@ -1174,7 +1191,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionFieldAccess expression -> expression.sourceSpan
     ExpressionTypeApplication expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
-    ExpressionHandle expression -> expression.sourceSpan
+    ExpressionHandler expression -> expression.sourceSpan
     ExpressionUse expression -> expression.sourceSpan
     ExpressionParTuple expression -> expression.sourceSpan
     ExpressionQualifiedReference expression -> expression.sourceSpan
@@ -1671,7 +1688,8 @@ class
     Eq (NameRefResolution phase ConstructorRef),
     Eq (ExpressionType phase),
     Eq (PatternType phase),
-    Eq (GenericInstantiation phase)
+    Eq (GenericInstantiation phase),
+    Eq (HandlerGenerics phase)
   ) =>
   EqPhase phase
 
@@ -1684,7 +1702,8 @@ instance
     Eq (NameRefResolution phase ConstructorRef),
     Eq (ExpressionType phase),
     Eq (PatternType phase),
-    Eq (GenericInstantiation phase)
+    Eq (GenericInstantiation phase),
+    Eq (HandlerGenerics phase)
   ) =>
   EqPhase phase
 
@@ -1701,7 +1720,8 @@ class
     Show (NameRefResolution phase ConstructorRef),
     Show (ExpressionType phase),
     Show (PatternType phase),
-    Show (GenericInstantiation phase)
+    Show (GenericInstantiation phase),
+    Show (HandlerGenerics phase)
   ) =>
   ShowPhase phase
 
@@ -1714,7 +1734,8 @@ instance
     Show (NameRefResolution phase ConstructorRef),
     Show (ExpressionType phase),
     Show (PatternType phase),
-    Show (GenericInstantiation phase)
+    Show (GenericInstantiation phase),
+    Show (HandlerGenerics phase)
   ) =>
   ShowPhase phase
 
@@ -1770,9 +1791,9 @@ deriving instance (EqPhase phase) => Eq (Block phase)
 
 deriving instance (ShowPhase phase) => Show (Block phase)
 
-deriving instance (EqPhase phase) => Eq (HandleExpression phase)
+deriving instance (EqPhase phase) => Eq (HandlerExpression phase)
 
-deriving instance (ShowPhase phase) => Show (HandleExpression phase)
+deriving instance (ShowPhase phase) => Show (HandlerExpression phase)
 
 deriving instance (EqPhase phase) => Eq (UseExpression phase)
 

@@ -217,6 +217,15 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     },
   );
 
+  itE2E("101-handler-value: a `handler` returned as a value, then `use`d (= 14)", async () => {
+    // Exercises the standalone handler-provider path: make_handler returns the
+    // handler as a first-class generic agent value; `use make_handler[integer]()`
+    // applies it to the continuation, whose ask() requests escalate across the
+    // delegation boundary to the provider's handler (next 7) and resume.
+    const result = await applyAndRun("handler_value", "101-handler-value");
+    expect(result).toBe(14);
+  });
+
   itE2E("05-control-flow: main() returns 'positive'", async () => {
     const result = await applyAndRun("control-flow", "05-control-flow");
     expect(result).toBe("positive");

@@ -152,7 +152,7 @@ data Keyword where
   KeywordFor :: Keyword
   KeywordThen :: Keyword
   KeywordVar :: Keyword
-  KeywordHandle :: Keyword
+  KeywordHandler :: Keyword
   KeywordUse :: Keyword
   KeywordParallel :: Keyword
   KeywordExternal :: Keyword
@@ -588,7 +588,7 @@ lexKeywordText = \case
   KeywordFor -> "for"
   KeywordThen -> "then"
   KeywordVar -> "var"
-  KeywordHandle -> "handle"
+  KeywordHandler -> "handler"
   KeywordUse -> "use"
   KeywordParallel -> "parallel"
   KeywordExternal -> "external"

@@ -95,7 +95,7 @@ spec = do
     returnStatement
     nextAndBreak
     declarations
-    handleExpression
+    handlerExpression
     patterns
     types
     arrayAndTupleTypes
@@ -654,10 +654,9 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next 42; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -667,10 +666,9 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next 42 with { count = count + 1 }; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -680,10 +678,9 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break 0; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -720,10 +717,9 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -733,10 +729,9 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -779,23 +774,22 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next 42; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
         case a.body.returnExpression of
-          Just (ExpressionHandle he) ->
+          Just (ExpressionHandler he) ->
             case he.handlers of
               [rh] ->
                 case rh.body.statements of
                   [StatementNext _] -> pure ()
                   _ -> expectationFailure "expected StatementNext"
               _ -> expectationFailure "expected one handler"
-          _ -> expectationFailure "expected handle expression"
+          _ -> expectationFailure "expected handler expression"
       _ -> expectationFailure "expected agent"
 
   it "break in request handler is StatementBreak" $ do
@@ -803,23 +797,22 @@ nextAndBreak = describe "next and break" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break 0; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
         case a.body.returnExpression of
-          Just (ExpressionHandle he) ->
+          Just (ExpressionHandler he) ->
             case he.handlers of
               [rh] ->
                 case rh.body.statements of
                   [StatementBreak _] -> pure ()
                   _ -> expectationFailure "expected StatementBreak"
               _ -> expectationFailure "expected one handler"
-          _ -> expectationFailure "expected handle expression"
+          _ -> expectationFailure "expected handler expression"
       _ -> expectationFailure "expected agent"
 
 -- ---------------------------------------------------------------------------
@@ -1111,17 +1104,16 @@ declarations = describe "declarations" $ do
 -- Handle expression
 -- ---------------------------------------------------------------------------
 
-handleExpression :: Spec
-handleExpression = describe "handle expression" $ do
+handlerExpression :: Spec
+handlerExpression = describe "handler expression" $ do
   it "parses basic handle with handler" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break 1; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -1131,20 +1123,19 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request io.read() { break 42; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a -> case a.body.returnExpression of
-        Just (ExpressionHandle he) -> case he.handlers of
+        Just (ExpressionHandler he) -> case he.handlers of
           [h] -> do
             fmap nameText h.moduleQualifier `shouldBe` Just "io"
             nameText h.name `shouldBe` "read"
           _ -> expectationFailure "expected one handler"
-        _ -> expectationFailure "expected handle expression"
+        _ -> expectationFailure "expected handler expression"
       _ -> expectationFailure "expected agent"
 
   it "parses handle with bare handler keeps moduleQualifier as Nothing" $ do
@@ -1152,20 +1143,19 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break 42; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a -> case a.body.returnExpression of
-        Just (ExpressionHandle he) -> case he.handlers of
+        Just (ExpressionHandler he) -> case he.handlers of
           [h] -> do
             isNothing h.moduleQualifier `shouldBe` True
             nameText h.name `shouldBe` "get"
           _ -> expectationFailure "expected one handler"
-        _ -> expectationFailure "expected handle expression"
+        _ -> expectationFailure "expected handler expression"
       _ -> expectationFailure "expected agent"
 
   it "parses handle with state variables" $ do
@@ -1173,10 +1163,9 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle (var count: integer = 0) {\n",
+            "  handler (var count: integer = 0) {\n",
             "    request inc() { next null with { count = count + 1 }; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -1186,11 +1175,10 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle (var x = 0, var y = 0) {\n",
+            "  handler (var x = 0, var y = 0) {\n",
             "    request addX() { next null with { x = x + 1 }; }\n",
             "    request addY() { next null with { y = y + 1 }; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -1200,21 +1188,20 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break 1; }\n",
             "  } then { 0 }\n",
-            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
         case a.body.returnExpression of
-          Just (ExpressionHandle he) ->
+          Just (ExpressionHandler he) ->
             case he.thenClause of
               Just (Nothing, _) -> pure ()
               Just (Just _, _) -> expectationFailure "expected pattern absent"
               Nothing -> expectationFailure "expected then clause"
-          _ -> expectationFailure "expected handle expression"
+          _ -> expectationFailure "expected handler expression"
       _ -> expectationFailure "expected agent"
 
   it "parses handle with then clause (with pattern)" $ do
@@ -1222,32 +1209,30 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { break 1; }\n",
             "  } then(p) { p }\n",
-            "  result\n",
             "}"
           ]
     case head (decls m) of
       DeclarationAgent a ->
         case a.body.returnExpression of
-          Just (ExpressionHandle he) ->
+          Just (ExpressionHandler he) ->
             case he.thenClause of
               Just (Just _, _) -> pure ()
               Just (Nothing, _) -> expectationFailure "expected pattern present"
               Nothing -> expectationFailure "expected then clause"
-          _ -> expectationFailure "expected handle expression"
+          _ -> expectationFailure "expected handler expression"
       _ -> expectationFailure "expected agent"
 
   it "rejects then on different line from preceding `}`" $ do
     shouldFail $
       mconcat
         [ "agent main() {\n",
-          "  handle {\n",
+          "  handler {\n",
           "    request get() { break 1; }\n",
           "  }\n",
           "  then(p) { p }\n",
-          "  result\n",
           "}"
         ]
 
@@ -1256,23 +1241,21 @@ handleExpression = describe "handle expression" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() -> string { break \"hello\"; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
 
-  it "parses parallel handle" $ do
+  it "parses parallel handler" $ do
     _ <-
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  parallel handle {\n",
+            "  parallel handler {\n",
             "    request get() { break 1; }\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -1585,12 +1568,11 @@ autoSemicolon = describe "auto-inserted semicolons" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next 1; }\n",
             "  } then (x) {\n",
             "    x\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()
@@ -1754,13 +1736,12 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
     shouldFailWith
       ( mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next 1; }\n",
             "  }\n",
             "  then (x) {\n",
             "    x\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
       )
@@ -1779,12 +1760,11 @@ sameLineBlockKeyword = describe "same-line block keyword rule" $ do
       shouldSucceed $
         mconcat
           [ "agent main() {\n",
-            "  handle {\n",
+            "  handler {\n",
             "    request get() { next 1; }\n",
             "  } then (x) {\n",
             "    x\n",
             "  }\n",
-            "  result\n",
             "}"
           ]
     pure ()

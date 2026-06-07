@@ -6,7 +6,7 @@ request collect[T](value: T) -> null
 
 @"Handles ask, answering with a string; the caller instantiates ask[string], so the answer is checked against string."
 agent answered() -> string {
-  handle {
+  use handler {
     request ask() { next "answer" }
   }
   ask[string]()

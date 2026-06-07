@@ -3,7 +3,7 @@ agent main() -> string {
   @"A local closure, invoked dynamically via call_agent."
   agent local_greet(name: string) -> string { f"hi ${name}" }
 
-  handle {
+  use handler {
     request error_invalid_argument(message: string) { break f"err: ${message}" }
   }
   call_agent[string, pure](target = local_greet, args = { name = "bob" })

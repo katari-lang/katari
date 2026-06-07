@@ -720,7 +720,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
         Text.unlines
           [ "request fetch() -> integer",
             "agent main() -> integer {",
-            "  handle {",
+            "  use handler {",
             "    request fetch() { break 42 }",
             "  }",
             "  fetch()",
@@ -738,7 +738,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
         Text.unlines
           [ "request fetch() -> integer",
             "agent main() -> integer {",
-            "  handle {",
+            "  use handler {",
             "    request fetch() { break 42 }",
             "  }",
             "  fetch()",
@@ -762,7 +762,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
         Text.unlines
           [ "request inc() -> integer",
             "agent counter() -> integer {",
-            "  handle (var n: integer = 0) {",
+            "  use handler (var n: integer = 0) {",
             "    request inc() {",
             "      next n with { n = n + 1 }",
             "    }",
@@ -784,7 +784,7 @@ stage6Spec = describe "Stage 6 \8212 handle scope / where / state vars" $ do
         Text.unlines
           [ "request inc() -> integer",
             "agent counter() -> integer {",
-            "  handle (var n: integer = 0) {",
+            "  use handler (var n: integer = 0) {",
             "    request inc() {",
             "      next n with { n = n + 1 }",
             "    }",
@@ -834,7 +834,7 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
         Text.unlines
           [ "request fetch() -> integer",
             "agent main() -> integer {",
-            "  handle {",
+            "  use handler {",
             "    request fetch() {",
             "      break 0",
             "    }",
@@ -853,7 +853,7 @@ stage7Spec = describe "Stage 7 \8212 non-local exit semantics" $ do
         Text.unlines
           [ "request fetch() -> integer",
             "agent main() -> integer {",
-            "  handle { request fetch() { break 1 } } then(v) { v }",
+            "  use handler { request fetch() { break 1 } } then(v) { v }",
             "  fetch()",
             "}"
           ]

@@ -9,9 +9,9 @@ agent run() -> integer with tick {
   a + b + c
 }
 
-@"Installs a stateful tick handler: each tick() call returns the current counter, then bumps it by one via 'next ... with { counter = ... }'."
+@"Installs a stateful tick handler: each tick() call returns the current counter, then bumps it by one via 'next ... with { counter = ... }'. `use handler {...}` runs the rest of the block (run()) under the handler."
 agent main() -> integer {
-  handle (var counter: integer = 1) {
+  use handler (var counter: integer = 1) {
     request tick() {
       next counter with { counter = counter + 1 }
     }

@@ -147,7 +147,7 @@ spec = describe "Katari.Query.lookupAtPosition (hover)" $ do
     let src =
           Text.unlines
             [ "agent main() -> string {",
-              "  handle {",
+              "  use handler {",
               "    request throw(msg: string) {",
               "      break \"caught\"",
               "    }",

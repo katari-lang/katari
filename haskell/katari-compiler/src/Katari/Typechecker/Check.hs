@@ -713,7 +713,7 @@ synthExpr = \case
   ExpressionIf ifExpr -> synthIf ifExpr
   ExpressionMatch matchExpr -> synthMatch matchExpr
   ExpressionFor forExpr -> synthFor forExpr
-  ExpressionHandle handleExpr -> synthHandle handleExpr
+  ExpressionHandler handlerExpr -> synthBareHandler handlerExpr
   ExpressionUse useExpr -> synthUse useExpr
   ExpressionBlock BlockExpression {block, sourceSpan} -> do
     (block', semantic) <- walkBlock block
@@ -778,15 +778,26 @@ walkTemplateElement = \case
 -- ---------------------------------------------------------------------------
 
 synthCall :: CallExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
-synthCall callExpr@CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
-  -- A bare reference to a generic callable applied to (named) arguments, with no
-  -- explicit @[..]@: infer its instantiation from the argument types. (An
-  -- explicit @f[..](args)@ has a 'ExpressionTypeApplication' callee, whose
-  -- resolution is Nothing here, so it falls through to the normal path.)
-  calleeParams <- genericParamsOf (calleeResolution callee)
-  case (spreadArgument, calleeParams) of
-    (Nothing, _ : _) -> synthInferredCall callee calleeParams arguments sourceSpan
-    _ -> synthMonomorphicCall callExpr
+synthCall callExpr@CallExpression {callee, arguments, spreadArgument, sourceSpan} = case (callee, spreadArgument) of
+  -- A direct spread call on a bare handler @(handler {...})(...cont)@: infer the
+  -- provider's R / E from the continuation argument (same inference as @use@).
+  (ExpressionHandler he, Just spreadExpr) -> do
+    (spreadExpr', spreadType) <- synthExpr spreadExpr
+    (calleeZonked, concreteProvider) <- inferHandlerProvider he spreadType sourceSpan
+    result <- applySpreadCall sourceSpan concreteProvider spreadType
+    pure
+      ( ExpressionCall CallExpression {callee = calleeZonked, arguments = [], spreadArgument = Just spreadExpr', sourceSpan = sourceSpan, typeOf = result},
+        result
+      )
+  _ -> do
+    -- A bare reference to a generic callable applied to (named) arguments, with no
+    -- explicit @[..]@: infer its instantiation from the argument types. (An
+    -- explicit @f[..](args)@ has a 'ExpressionTypeApplication' callee, whose
+    -- resolution is Nothing here, so it falls through to the normal path.)
+    calleeParams <- genericParamsOf (calleeResolution callee)
+    case (spreadArgument, calleeParams) of
+      (Nothing, _ : _) -> synthInferredCall callee calleeParams arguments sourceSpan
+      _ -> synthMonomorphicCall callExpr
 
 synthMonomorphicCall :: CallExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
 synthMonomorphicCall CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
@@ -830,31 +841,46 @@ applySpreadCall sourceSpan calleeType spreadType = case calleeType of
 -- bound, and substitute them into the callee's signature to get a concrete
 -- type. A non-generic callee with type arguments is an arity error.
 synthGenericApplication :: TypeApplicationExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
-synthGenericApplication TypeApplicationExpression {callee, typeArguments, sourceSpan} = do
-  let resolution = calleeResolution callee
-  params <- genericParamsOf resolution
-  if null params
-    then do
-      (callee', calleeType) <- synthExpr callee
-      if null typeArguments
-        then pure ()
-        else emitError (CheckErrorTypeArgArity sourceSpan 0 (length typeArguments))
-      pure (rebuilt callee' calleeType ([], []), calleeType)
-    else do
-      if length typeArguments == length params
-        then pure ()
-        else emitError (CheckErrorTypeArgArity sourceSpan (length params) (length typeArguments))
-      -- Process each (parameter, argument) pair by the parameter's kind: a type
-      -- parameter elaborates its argument as a type (checked against its bound),
-      -- an effect parameter elaborates it as an effect.
-      substitutions <- zipWithM (applyTypeArgument sourceSpan) params typeArguments
-      let typeSubstitution = Map.fromList [(genericsId, argType) | Left (genericsId, argType) <- substitutions]
-          effectSubstitution = Map.fromList [(genericsId, argEffect) | Right (genericsId, argEffect) <- substitutions]
-      calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocalType) resolution
-      let concreteType = substituteGenerics typeSubstitution effectSubstitution calleeSig
-      calleeZonked <- retagGenericCallee callee concreteType
-      pure (rebuilt calleeZonked concreteType (Map.toList typeSubstitution, Map.toList effectSubstitution), concreteType)
+synthGenericApplication TypeApplicationExpression {callee, typeArguments, sourceSpan} = case callee of
+  -- @handler[T, F] {...}@: the handler is an anonymous generic agent, so its two
+  -- quantifiers come from the node (not a resolution). Instantiate exactly like
+  -- a named generic callee, but stamp the (once-walked) handler node directly.
+  ExpressionHandler he -> do
+    (params, providerType, mkZonked) <- synthHandlerScheme he
+    if length typeArguments == length params
+      then pure ()
+      else emitError (CheckErrorTypeArgArity sourceSpan (length params) (length typeArguments))
+    substitutions <- zipWithM (applyTypeArgument sourceSpan) params typeArguments
+    let typeSubstitution = Map.fromList [(genericsId, argType) | Left (genericsId, argType) <- substitutions]
+        effectSubstitution = Map.fromList [(genericsId, argEffect) | Right (genericsId, argEffect) <- substitutions]
+        concreteType = substituteGenerics typeSubstitution effectSubstitution providerType
+    pure (rebuilt (mkZonked concreteType) concreteType (Map.toList typeSubstitution, Map.toList effectSubstitution), concreteType)
+  _ -> goNamed
   where
+    goNamed = do
+      let resolution = calleeResolution callee
+      params <- genericParamsOf resolution
+      if null params
+        then do
+          (callee', calleeType) <- synthExpr callee
+          if null typeArguments
+            then pure ()
+            else emitError (CheckErrorTypeArgArity sourceSpan 0 (length typeArguments))
+          pure (rebuilt callee' calleeType ([], []), calleeType)
+        else do
+          if length typeArguments == length params
+            then pure ()
+            else emitError (CheckErrorTypeArgArity sourceSpan (length params) (length typeArguments))
+          -- Process each (parameter, argument) pair by the parameter's kind: a type
+          -- parameter elaborates its argument as a type (checked against its bound),
+          -- an effect parameter elaborates it as an effect.
+          substitutions <- zipWithM (applyTypeArgument sourceSpan) params typeArguments
+          let typeSubstitution = Map.fromList [(genericsId, argType) | Left (genericsId, argType) <- substitutions]
+              effectSubstitution = Map.fromList [(genericsId, argEffect) | Right (genericsId, argEffect) <- substitutions]
+          calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (maybe SemanticTypeUnknown id) . lookupLocalType) resolution
+          let concreteType = substituteGenerics typeSubstitution effectSubstitution calleeSig
+          calleeZonked <- retagGenericCallee callee concreteType
+          pure (rebuilt calleeZonked concreteType (Map.toList typeSubstitution, Map.toList effectSubstitution), concreteType)
     rebuilt calleeZonked resultType instantiation =
       ExpressionTypeApplication
         TypeApplicationExpression
@@ -1296,30 +1322,35 @@ walkForVarBinding ForVarBinding {name, typeAnnotation, initial, sourceSpan} = do
       binding
     )
 
-synthHandle :: HandleExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
-synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, body, sourceSpan} = do
+-- | Build the generic /handler-provider/ scheme of a @handler {...}@ expression:
+-- its two quantifiers @R@ (continuation return) / @E@ (residual effect), the
+-- provider function type
+-- @agent(...k: agent() -> R with {...E, req...}) -> Rret with (E ∪ handlerEff ∪ thenEff)@,
+-- and a builder that re-stamps the (once-)walked node with a concrete type at a
+-- use site. The handlers are checked against the override-row effect (each
+-- handled request shadowed out of @E@), so @next@ / parameters resolve exactly
+-- as in the old inline @handle@. @Rret@ = the @then@ clause's type (or @R@) ∪
+-- the handler bodies' @break@ types.
+synthHandlerScheme ::
+  HandlerExpression Identified ->
+  Check ([(GenericsId, GenericKind, SemanticType Resolved)], SemanticType Resolved, SemanticType Resolved -> Expression Zonked)
+synthHandlerScheme HandlerExpression {parallel, stateVariables, handlers, thenClause, generics = (returnGeneric, effectGeneric), sourceSpan} = do
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  let returnType = SemanticTypeGeneric returnGeneric
+      residualEffect = SemanticEffectGeneric effectGeneric
+      -- Every handled request is overridden onto @E@ at its base (no args): a
+      -- provider can only soundly handle NON-generic requests (a generic one
+      -- would force @next : never@), and for those @[]@ is the exact form.
+      handledReqs = [qualifiedName | handler <- handlers, Just (ResolvedConcreteRequest qualifiedName) <- [handler.name.resolution]]
+      overrideEffect = case handledReqs of
+        [] -> residualEffect
+        _ -> SemanticEffectOverride residualEffect [SemanticEffectRequest qualifiedName [] | qualifiedName <- handledReqs]
+      -- The override-row effect the handlers are checked against: @{...E, req...}@.
+      bodyEffect = normaliseEffect dataFieldEnv overrideEffect
   (stateVariables', stateLocals) <- unzipBindings <$> mapM walkStateVariable stateVariables
-  -- Consume both the handle scope's @break@ and @next@ exits (so neither leaks
-  -- to an outer scope), but only @break@ values feed the scope's result type:
-  -- @next v@ resumes the asker with @v@, it does not make the scope evaluate to
-  -- @v@ (mirrors how a @for@ scope's value is its breaks ∪ then, not its nexts).
-  ((body', bodyType, handlers', thenClause', thenType), exitRecords) <-
+  ((handlers', thenClause', thenType), exitRecords) <-
     collectExitsTagged [HandleBreakTag, HandleNextTag] $
       withLocals stateLocals $ do
-        (body', bodyType) <- walkBlock body
-        -- Re-derive the body's fired effect (from the zonked body's stamped
-        -- types) so each handler can be checked against the request's return
-        -- type at the instantiation the body actually raises.
-        dataFieldEnv <- asks (.checkDataFieldEnv)
-        -- Local types (incl. this SCC's seeded recursive siblings) take
-        -- precedence over the reader env (imports + earlier SCCs), so a request
-        -- raised via a same-SCC sibling is still seen here (its effect is
-        -- declared — recursive agents must annotate `with`).
-        seededTypes <- gets (.stateLocalTypes)
-        readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
-        let localBodies = Map.union seededTypes readerBodies
-            lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
-            bodyEffect = blockEffect dataFieldEnv lookupEff body'
         handlers' <-
           mapM
             ( \handler -> do
@@ -1332,17 +1363,64 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
           Nothing -> pure (Nothing, Nothing)
           Just (maybePattern, thenBody) -> do
             (pattern', bindings) <- case maybePattern of
-              Just p -> do (p', bs) <- walkPattern bodyType p; pure (Just p', bs)
+              Just p -> do (p', bs) <- walkPattern returnType p; pure (Just p', bs)
               Nothing -> pure (Nothing, [])
             (thenBody', thenBodyType) <- withLocals bindings (walkBlock thenBody)
             pure (Just (pattern', thenBody'), Just thenBodyType)
-        pure (body', bodyType, handlers', thenClause', thenType)
-  let breakTypes = [semantic | ExitRecord HandleBreakTag semantic <- exitRecords]
-      semantic = unionSemantic (maybe bodyType id thenType : breakTypes)
-  pure
-    ( ExpressionHandle HandleExpression {parallel = parallel, stateVariables = stateVariables', handlers = handlers', thenClause = thenClause', body = body', sourceSpan = sourceSpan, typeOf = semantic},
-      semantic
-    )
+        pure (handlers', thenClause', thenType)
+  -- The provider raises its own handler / then bodies on TOP of the residual E
+  -- (the continuation's handled requests are discharged here; only E passes
+  -- through). Use the same SCC-aware effect lookup as agent bodies.
+  seededTypes <- gets (.stateLocalTypes)
+  readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
+  let localBodies = Map.union seededTypes readerBodies
+      lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
+      breakTypes = [semantic | ExitRecord HandleBreakTag semantic <- exitRecords]
+      resultType = unionSemantic (maybe returnType id thenType : breakTypes)
+      providerOwnEffect =
+        foldMap (blockEffect dataFieldEnv lookupEff . (.body)) handlers'
+          <> maybe mempty (blockEffect dataFieldEnv lookupEff . snd) thenClause'
+      providerEffect = denormaliseEffect (normaliseEffect dataFieldEnv residualEffect <> providerOwnEffect)
+      -- The continuation is a no-arg agent @agent() -> R@ (empty-object param).
+      continuationType = SemanticTypeFunction (SemanticTypeObject Map.empty) returnType overrideEffect
+      providerType = SemanticTypeFunction continuationType resultType providerEffect
+      quantifiers = [(returnGeneric, GenericKindType, SemanticTypeUnknown), (effectGeneric, GenericKindEffect, SemanticTypeUnknown)]
+      mkZonked typeOf =
+        ExpressionHandler
+          HandlerExpression {parallel = parallel, stateVariables = stateVariables', handlers = handlers', thenClause = thenClause', generics = (returnGeneric, effectGeneric), sourceSpan = sourceSpan, typeOf = typeOf}
+  pure (quantifiers, providerType, mkZonked)
+
+-- | Instantiate a handler provider by inferring its @R@ / @E@ from the actual
+-- continuation / argument type it is applied to (the @use@ continuation, or a
+-- direct spread call's argument). Mirrors the generic-callee inference path:
+-- match the provider's parameter against the actual, substitute, then the caller
+-- rechecks soundness via 'applySpreadCall'. Returns the re-stamped zonked
+-- handler node + its concrete provider type.
+inferHandlerProvider ::
+  HandlerExpression Identified -> SemanticType Resolved -> SourceSpan -> Check (Expression Zonked, SemanticType Resolved)
+inferHandlerProvider he actualArgType sourceSpan = do
+  (params, providerType, mkZonked) <- synthHandlerScheme he
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  let providerParam = case providerType of
+        SemanticTypeFunction parameterType _ _ -> parameterType
+        _ -> SemanticTypeNever
+      (typeSubstitution, effectSubstitution) = matchType dataFieldEnv providerParam actualArgType
+  forM_ params $ \(genericsId, kind, _) -> case kind of
+    GenericKindType | not (Map.member genericsId typeSubstitution) -> emitError (CheckErrorCannotInferGeneric sourceSpan)
+    GenericKindEffect | not (Map.member genericsId effectSubstitution) -> emitError (CheckErrorCannotInferGeneric sourceSpan)
+    _ -> pure ()
+  let concreteProvider = substituteGenerics typeSubstitution effectSubstitution providerType
+  pure (mkZonked concreteProvider, concreteProvider)
+
+synthBareHandler :: HandlerExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthBareHandler he = do
+  -- A bare @handler {...}@ (no explicit @[R, E]@, not applied) is like a bare
+  -- generic reference: it must be instantiated (apply it / @use@ it / write
+  -- @handler[R, E]{...}@). Walk it so its internals are still checked, then
+  -- report the must-instantiate error.
+  (_, _, mkZonked) <- synthHandlerScheme he
+  emitError (CheckErrorMustInstantiate he.sourceSpan "handler")
+  pure (mkZonked SemanticTypeUnknown, SemanticTypeUnknown)
 
 -- | @(let x =)? use expr@. Types directly (no surface desugar). @expr@ must be
 -- a handler-provider: @agent(cont: agent(...ARG) -> R1 with E_cont) -> R2 with
@@ -1353,6 +1431,10 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
 -- effect @expr@ can't discharge fails here). The @use@'s type is @expr@'s return
 -- @R2@; its effect (collected separately) is @expr@'s effect @E_expr@.
 synthUse :: UseExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthUse UseExpression {binder, expr, body, sourceSpan}
+  -- @use handler {...}@ is just @use@ applied to an (inline) handler provider:
+  -- its R / E are inferred from the continuation exactly as for a named provider.
+  | ExpressionHandler he <- expr = synthUseHandler he binder body sourceSpan
 synthUse UseExpression {binder, expr, body, sourceSpan} = do
   let exprResolution = calleeResolution expr
   exprParams <- genericParamsOf exprResolution
@@ -1373,7 +1455,7 @@ synthUse UseExpression {binder, expr, body, sourceSpan} = do
             Just b | Just res <- b.resolution -> [(res, argType)]
             _ -> []
       (body', bodyType) <- withLocals binderLocals (walkBlock body)
-      -- The body's fired effect (re-derived from the zonked body, as in synthHandle).
+      -- The body's fired effect (re-derived from the zonked body, as in the handler check).
       dataFieldEnv <- asks (.checkDataFieldEnv)
       seededTypes <- gets (.stateLocalTypes)
       readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
@@ -1410,6 +1492,56 @@ synthUse UseExpression {binder, expr, body, sourceSpan} = do
         ( ExpressionUse UseExpression {binder = fmap retagNameRef binder, expr = expr', body = body', sourceSpan = sourceSpan, typeOf = SemanticTypeUnknown},
           SemanticTypeUnknown
         )
+
+synthUseHandler ::
+  HandlerExpression Identified ->
+  Maybe (NameRef Identified VariableRef) ->
+  Block Identified ->
+  SourceSpan ->
+  Check (Expression Zonked, SemanticType Resolved)
+synthUseHandler HandlerExpression {parallel, stateVariables, handlers, thenClause, generics, sourceSpan = handlerSpan} binder body sourceSpan = do
+  (stateVariables', stateLocals) <- unzipBindings <$> mapM walkStateVariable stateVariables
+  -- A bare `let x = use handler` binder has no meaningful value (the handle body
+  -- receives nothing); bind it to null so it still scopes cleanly.
+  let binderLocals = case binder of
+        Just b | Just resolution <- b.resolution -> [(resolution, SemanticTypeNull)]
+        _ -> []
+  ((body', bodyType, handlers', thenClause', thenType), exitRecords) <-
+    collectExitsTagged [HandleBreakTag, HandleNextTag] $
+      withLocals (stateLocals ++ binderLocals) $ do
+        (body', bodyType) <- walkBlock body
+        dataFieldEnv <- asks (.checkDataFieldEnv)
+        seededTypes <- gets (.stateLocalTypes)
+        readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
+        let localBodies = Map.union seededTypes readerBodies
+            lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
+            bodyEffect = blockEffect dataFieldEnv lookupEff body'
+        handlers' <-
+          mapM
+            ( \handler -> do
+                expected <- handlerExpectedNext bodyEffect handler
+                requestParamTypes <- handlerParamTypes bodyEffect handler
+                local (\e -> e {checkExpectedNext = expected}) (walkRequestHandler requestParamTypes handler)
+            )
+            handlers
+        (thenClause', thenType) <- case thenClause of
+          Nothing -> pure (Nothing, Nothing)
+          Just (maybePattern, thenBody) -> do
+            (pattern', bindings) <- case maybePattern of
+              Just p -> do (p', bs) <- walkPattern bodyType p; pure (Just p', bs)
+              Nothing -> pure (Nothing, [])
+            (thenBody', thenBodyType) <- withLocals bindings (walkBlock thenBody)
+            pure (Just (pattern', thenBody'), Just thenBodyType)
+        pure (body', bodyType, handlers', thenClause', thenType)
+  let breakTypes = [semantic | ExitRecord HandleBreakTag semantic <- exitRecords]
+      resultType = unionSemantic (maybe bodyType id thenType : breakTypes)
+      handlerZonked =
+        ExpressionHandler
+          HandlerExpression {parallel = parallel, stateVariables = stateVariables', handlers = handlers', thenClause = thenClause', generics = generics, sourceSpan = handlerSpan, typeOf = resultType}
+  pure
+    ( ExpressionUse UseExpression {binder = fmap retagNameRef binder, expr = handlerZonked, body = body', sourceSpan = sourceSpan, typeOf = resultType},
+      resultType
+    )
 
 walkStateVariable :: StateVariableBinding Identified -> Check (StateVariableBinding Zonked, [(VariableResolution, SemanticType Resolved)])
 walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpan} = do
@@ -1502,9 +1634,15 @@ handlerParamTypes bodyEffect RequestHandler {name} = case name.resolution of
                 paramFields
         pure $ case bodyEffect of
           NormalizedEffectAny -> widened
-          NormalizedEffectRows concrete generics _shadowed
+          NormalizedEffectRows concrete generics shadowed
+            -- Present at concrete args AND either no generic is in play, or the
+            -- request is shadowed out of the generic (an override row
+            -- @{...E, foo[args]}@ — @E@ provably excludes @foo@): answerable at
+            -- exactly those args.
+            | Map.member requestQName concrete && (Set.null generics || Set.member requestQName shadowed) ->
+                withArgs (requestArgsInEffect bodyEffect requestQName)
+            -- A non-shadowed generic could itself be this request at any args.
             | not (Set.null generics) -> widened
-            | Map.member requestQName concrete -> withArgs (requestArgsInEffect bodyEffect requestQName)
             | otherwise -> widened
   _ -> pure Map.empty
   where
@@ -1527,19 +1665,24 @@ handlerExpectedNext bodyEffect RequestHandler {name} = case name.resolution of
         -- The effect top: the request could be raised at any args, so a single
         -- answer must be valid for all of them ⇒ 'never' (it can't be answered).
         NormalizedEffectAny -> pure (Just SemanticTypeNever)
-        NormalizedEffectRows concrete generics _shadowed
-          -- An in-scope effect generic is unbounded — it could itself be this
-          -- request at any args — so again the answer must satisfy 'never'.
-          | not (Set.null generics) -> pure (Just SemanticTypeNever)
-          -- Request not raised by the body: the handler is dead; leave 'next'
-          -- unconstrained rather than force 'never'.
-          | not (Map.member requestQName concrete) -> pure Nothing
-          | otherwise -> do
+        NormalizedEffectRows concrete generics shadowed
+          -- Present at concrete args AND either no generic is in play, or the
+          -- request is shadowed out of the generic (an override row
+          -- @{...E, foo[args]}@): answer at exactly those args. This is the
+          -- handler-provider case — the continuation raises @foo@ only at the
+          -- override args, with @E@ provably excluding it.
+          | Map.member requestQName concrete && (Set.null generics || Set.member requestQName shadowed) -> do
               let arguments = requestArgsInEffect bodyEffect requestQName
                   paramIds = dataParamIdsOf dataFieldEnv requestQName
                   typeSubstitution = Map.fromList [(paramId, argumentType) | (paramId, SemanticGenericArgumentType argumentType) <- zip paramIds arguments]
                   effectSubstitution = Map.fromList [(paramId, argumentEffect) | (paramId, SemanticGenericArgumentEffect argumentEffect) <- zip paramIds arguments]
               pure (Just (substituteGenerics typeSubstitution effectSubstitution returnType))
+          -- A non-shadowed in-scope effect generic is unbounded — it could
+          -- itself be this request at any args — so the answer must satisfy
+          -- 'never'.
+          | not (Set.null generics) -> pure (Just SemanticTypeNever)
+          -- Request not raised: the handler is dead; leave 'next' unconstrained.
+          | otherwise -> pure Nothing
   _ -> pure Nothing
   where
     returnOfSignature = \case
@@ -1616,7 +1759,7 @@ walkStatement = \case
     (value', valueType) <- synthExpr value
     modifiers' <- mapM walkModifier modifiers
     -- A @next e@ answer resumes the asker, so it must satisfy the handled
-    -- request's (instantiated) return type (set per handler in 'synthHandle').
+    -- request's (instantiated) return type (set per handler in 'synthHandlerScheme').
     expectedNext <- asks (.checkExpectedNext)
     forM_ expectedNext $ \expected -> subtypeAssert (sourceSpanOf value) valueType expected
     recordExit HandleNextTag valueType
@@ -2421,7 +2564,15 @@ exprEffect env lookupEffect = go
           <> blockEffect env lookupEffect e.body
           <> maybe mempty (blockEffect env lookupEffect . snd) e.thenBlock
       ExpressionBlock e -> blockEffect env lookupEffect e.block
-      ExpressionHandle e -> handleEffect e
+      -- Constructing a @handler {...}@ value is pure (like a closure literal):
+      -- its handler / then effects are baked into the provider type's @with@
+      -- clause and surface only when the provider is applied / @use@d.
+      ExpressionHandler _ -> mempty
+      -- @use handler {...}@ (inline handler) ≡ the old @handle { continuation }@:
+      -- the continuation's effect with the handled requests subtracted, plus the
+      -- handlers' / then bodies. (A concrete handler does NOT discharge an
+      -- abstract effect generic — it passes through.)
+      ExpressionUse e | ExpressionHandler he <- e.expr -> useHandlerEffect he e.body
       -- @use expr@ ≡ @expr(continuation)@: evaluating @expr@ plus calling it.
       -- The continuation body's effect is consumed BY @expr@ (routed through its
       -- signature), so it is not raised here — only @expr@'s own effect is.
@@ -2438,16 +2589,15 @@ exprEffect env lookupEffect = go
       ExpressionVariable v -> maybe (effectOfSignature env v.typeOf) lookupEffect (topLevelQName v.name)
       ExpressionQualifiedReference q -> maybe (effectOfSignature env q.typeOf) lookupEffect (topLevelQName q.target)
       complex -> effectOfSignature env (exprTypeOf complex)
-    -- A handle discharges the concrete requests it names: the body's effect
-    -- with those requests subtracted (an abstract effect generic is NOT
-    -- discharged by a concrete handler, so it passes through), plus the
-    -- handlers' own bodies and the then-clause.
-    handleEffect e =
-      let handled = Set.fromList [qualifiedName | handler <- e.handlers, Just (ResolvedConcreteRequest qualifiedName) <- [handler.name.resolution]]
-          bodyEff = blockEffect env lookupEffect e.body
-          handlerEff = foldMap (blockEffect env lookupEffect . (.body)) e.handlers
-          thenEff = maybe mempty (blockEffect env lookupEffect . snd) e.thenClause
-       in subtractConcrete handled bodyEff <> handlerEff <> thenEff
+    -- An inline @use handler { handlers } then {} continuation@: the handle
+    -- discharges the concrete requests it names from the continuation's effect,
+    -- then adds the handler / then bodies' own effects.
+    useHandlerEffect he continuationBody =
+      let handled = Set.fromList [qualifiedName | handler <- he.handlers, Just (ResolvedConcreteRequest qualifiedName) <- [handler.name.resolution]]
+          continuationEff = blockEffect env lookupEffect continuationBody
+          handlerEff = foldMap (blockEffect env lookupEffect . (.body)) he.handlers
+          thenEff = maybe mempty (blockEffect env lookupEffect . snd) he.thenClause
+       in subtractConcrete handled continuationEff <> handlerEff <> thenEff
     templateEffect = \case
       TemplateElementString _ -> mempty
       TemplateElementExpression el -> go el.value
@@ -2465,7 +2615,7 @@ exprTypeOf = \case
   ExpressionMatch e -> e.typeOf
   ExpressionFor e -> e.typeOf
   ExpressionBlock e -> e.typeOf
-  ExpressionHandle e -> e.typeOf
+  ExpressionHandler e -> e.typeOf
   ExpressionUse e -> e.typeOf
   ExpressionFieldAccess e -> e.typeOf
   ExpressionTypeApplication e -> e.typeOf

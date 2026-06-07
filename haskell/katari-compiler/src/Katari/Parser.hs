@@ -838,12 +838,6 @@ parseBlockBodyWithRecovery = loop []
           -- alternative so `let x = use ...` is not parsed as an ordinary let.
           parseUseStep,
           BlockStepStatement <$> parseNonExpressionStatement,
-          -- Koka-style handle: captures the rest of this block as its body.
-          parseHandleStep False,
-          -- par handle: also captures the rest.
-          try $ do
-            _ <- MP.lookAhead (parseKeyword KeywordParallel *> parseKeyword KeywordHandle)
-            parseHandleStep True,
           do
             expression <- parseExpression
             -- Distinguish: an explicit ';' makes the expression a statement.
@@ -868,10 +862,6 @@ parseBlockBodyWithRecovery = loop []
                 pure (BlockStepReturn (Just expression))
               ]
         ]
-    -- Parse a handle expression that captures the rest of this block as body.
-    parseHandleStep parallel = do
-      handleExpr <- parseHandleExpression parallel
-      pure (BlockStepReturn (Just handleExpr))
     -- Parse `(let x =)? use expr`, capturing the rest of this block as the
     -- continuation `body`. The binder's `let x =` is only consumed when `use`
     -- follows (otherwise an ordinary let backtracks cleanly).
@@ -933,23 +923,28 @@ parseStatementEnd =
   void (some parseSemicolon)
     <|> MP.lookAhead (parsePunctuation PunctuationRightBrace <|> eof)
 
--- | Koka-style handle expression. Parses the handle clause and then
--- captures the remaining block contents as the body (continuation).
+-- | First-class handler-provider expression. Parses the handler clause; unlike
+-- the old @handle@ it does NOT capture a continuation body — the continuation
+-- comes from applying the resulting provider (directly or via @use@).
 --
 -- @
--- (par) handle (var s = init, ...) {
+-- (par) handler[T, F]? (var s = init, ...)? {
 --   req name(parameters) -> T { body }
 --   ...
--- } then (pat) { ... }
--- continuation_statements; trailing_expr
+-- } then (pat)? { ... }
 -- @
 --
--- Called from 'parseBlockBodyWithRecovery' when @handle@ or @par handle@
--- is encountered at statement position.
-parseHandleExpression :: Bool -> Parser (Expression Parsed)
-parseHandleExpression parallel = parseWithSpan $ do
+-- The optional @[T, F]@ explicitly instantiates the provider's two implicit
+-- generics @R := T@, @E := F@; it is parsed here (between @handler@ and the
+-- clause) and wraps the node in a 'TypeApplicationExpression', mirroring the
+-- @callee[args]@ postfix the checker already understands.
+parseHandlerExpression :: Bool -> Parser (Expression Parsed)
+parseHandlerExpression parallel = parseWithSpan $ do
   when parallel (void $ parseKeyword KeywordParallel)
-  parseKeyword KeywordHandle
+  parseKeyword KeywordHandler
+  -- Explicit instantiation @handler[T, F]@: type args sit BEFORE the clause
+  -- (a normal postfix @[..]@ can't, since @{@ follows). Empty when omitted.
+  typeArguments <- option [] (parseBracketedList parseType)
   stateVariables <- option [] . try $ parseParenthesizedList parseStateVariable
   parsePunctuation PunctuationLeftBrace
   skipMany parseSemicolon
@@ -957,30 +952,29 @@ parseHandleExpression parallel = parseWithSpan $ do
   parsePunctuation PunctuationRightBrace
   parseDetectSameLineKeywordViolation
   thenClause <- optional parseThenClause
-  -- Consume optional semicolons between handle clause and continuation.
-  skipMany parseSemicolon
-  -- Continuation: the rest of the enclosing block becomes the handle body.
-  bodyStart <- parseCurrentPosition
-  (bodyStatements, bodyReturn) <- parseBlockBodyWithRecovery
-  bodyEnd <- parsePreviousEndPosition
-  bodySpan <- parseMakeSpan bodyStart bodyEnd
-  let body =
-        Block
-          { statements = bodyStatements,
-            returnExpression = bodyReturn,
-            sourceSpan = bodySpan
-          }
   pure $ \sourceSpan ->
-    ExpressionHandle
-      HandleExpression
-        { parallel = parallel,
-          stateVariables = stateVariables,
-          handlers = handlers,
-          thenClause = thenClause,
-          body = body,
-          sourceSpan = sourceSpan,
-          typeOf = ()
-        }
+    let handlerExpr =
+          ExpressionHandler
+            HandlerExpression
+              { parallel = parallel,
+                stateVariables = stateVariables,
+                handlers = handlers,
+                thenClause = thenClause,
+                generics = (),
+                sourceSpan = sourceSpan,
+                typeOf = ()
+              }
+     in if null typeArguments
+          then handlerExpr
+          else
+            ExpressionTypeApplication
+              TypeApplicationExpression
+                { callee = handlerExpr,
+                  typeArguments = typeArguments,
+                  instantiation = (),
+                  sourceSpan = sourceSpan,
+                  typeOf = ()
+                }
 
 -- | Parse a @then@ clause: @then@ keyword, optional pattern in parens, then a
 -- block. Used as the optional finalizer of a handle or for clause.
@@ -1429,6 +1423,7 @@ parsePrimaryExpression =
       [ parseIfExpression,
         parseMatchExpression,
         parseForExpression False,
+        parseHandlerExpression False,
         parseParExpression,
         parseTemplateLiteral,
         parseLiteralExpression,
@@ -1449,6 +1444,8 @@ parseParExpression = do
   choice
     [ -- par for (...) { ... }
       try (parseForExpression True),
+      -- par handler { ... } — parallel handler provider
+      try (parseHandlerExpression True),
       -- par [e1, e2, ...] — parallel tuple
       parseParTupleExpression
     ]

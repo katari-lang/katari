@@ -1,0 +1,15 @@
+@"A request the provider's handler answers."
+request ask() -> integer
+
+@"Returns a `handler` as a FIRST-CLASS VALUE — a provider agent generic over the continuation's return type R. `handler[R, pure]` instantiates the provider's two implicit generics with make_handler's own R and a pure residual. This exercises the standalone-handler path (provider agent + closure), distinct from inline `use handler`."
+agent make_handler[R]() -> (agent(...(agent() -> R with ask)) -> R) {
+  return handler[R, pure] {
+    request ask() { next 7 }
+  }
+}
+
+@"Builds the provider value, then `use`s it: the rest of the block runs as the continuation under the provider's ask handler. ask() answers 7 each time, so 7 + 7 = 14."
+agent main() -> integer {
+  use make_handler[integer]()
+  ask() + ask()
+}

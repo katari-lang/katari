@@ -32,6 +32,7 @@ spec = describe "Katari.Compile" $ do
   matchNarrowingSpec
   genericsInferenceSpec
   useSpec
+  handlerSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -118,7 +119,7 @@ defaultArgumentsSpec = describe "default arguments" $ do
             [ "request tick() -> integer\n",
               "agent run() -> integer with tick { tick() }\n",
               "agent main() -> integer {\n",
-              "  handle (var counter: integer = 1) {\n",
+              "  use handler (var counter: integer = 1) {\n",
               "    request tick() { next counter with { counter = counter + 1 } }\n",
               "  }\n",
               "  run()\n",
@@ -399,7 +400,7 @@ happyPathSpec = describe "well-formed single-module input" $ do
             [ "agent main() -> integer {\n",
               "  for(let x in [1, 2, 3]) {\n",
               "    break {\n",
-              "      handle {} then(_) { 0 }\n",
+              "      use handler {} then(_) { 0 }\n",
               "      7\n",
               "    };\n",
               "  } then { 0 }\n",
@@ -655,6 +656,31 @@ useSpec = describe "use" $ do
   it "rejects a use whose provider does not take a continuation agent" $
     bad "agent foo(...n: integer) -> integer { n }\nagent main() -> integer { use foo\n 42 }"
 
+-- | First-class @handler {...}@ expression: an anonymous generic provider agent.
+-- Inline @use handler@ is checked like the old @handle@ (precise against the
+-- continuation's effect); a standalone @handler[R, E]{...}@ is a generic value.
+handlerSpec :: Spec
+handlerSpec = describe "handler expression" $ do
+  let ok src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+      bad src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+
+  it "inline `use handler` handles a request raised by the continuation" $
+    ok "request ask() -> integer\nagent main() -> integer { use handler { request ask() { next 5 } }\n ask() + 1 }"
+  it "inline `use handler` then-clause result becomes the value" $
+    ok "request ask() -> integer\nagent main() -> string { use handler { request ask() { next 5 } } then(n) { \"done\" }\n ask() }"
+  it "a handler `break` exits the scope with the broken value" $
+    ok "request ask() -> integer\nagent main() -> integer { use handler { request ask() { break 9 } }\n ask() }"
+  it "returns a handler as a first-class value (standalone provider, explicit [R, E])" $
+    ok
+      ( "request ask() -> integer\n"
+          <> "agent mk[R]() -> (agent(...(agent() -> R with ask)) -> R) { return handler[R, pure] { request ask() { next 7 } } }\n"
+          <> "agent main() -> integer { use mk[integer]()\n ask() + ask() }"
+      )
+  it "a bare handler (no application / no [R, E]) must be instantiated" $
+    bad "request ask() -> integer\nagent main() -> integer { let h = handler { request ask() { next 1 } }\n 0 }"
+  it "a handler body that falls through without break/next is rejected" $
+    bad "request ask() -> integer\nagent main() -> integer { use handler { request ask() { 5 } }\n ask() }"
+
 -- | Args-only generics inference: a generic callable applied without explicit
 -- @[..]@ infers its instantiation from the argument types. The headline case is
 -- the handler provider — its R and E are recovered from the continuation arg.
@@ -780,11 +806,11 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
 
   describe "generic request" $ do
     it "ask[string]() returns string" $
-      ok "request ask[T]() -> T\nagent main() -> string {\n  handle { request ask() { next \"x\" } }\n  ask[string]()\n}"
+      ok "request ask[T]() -> T\nagent main() -> string {\n  use handler { request ask() { next \"x\" } }\n  ask[string]()\n}"
     it "ask[string]() used as integer fails" $
-      bad "request ask[T]() -> T\nagent main() -> integer {\n  handle { request ask() { next \"x\" } }\n  ask[string]()\n}"
+      bad "request ask[T]() -> T\nagent main() -> integer {\n  use handler { request ask() { next \"x\" } }\n  ask[string]()\n}"
     it "handler answering the wrong type fails (next 42 vs ask[string])" $
-      bad "request ask[T]() -> T\nagent main() -> string {\n  handle { request ask() { next 42 } }\n  ask[string]()\n}"
+      bad "request ask[T]() -> T\nagent main() -> string {\n  use handler { request ask() { next 42 } }\n  ask[string]()\n}"
     it "with foo[integer] covers a body raising foo[integer]" $
       ok "request foo[T](value: T) -> null\nagent f(n: integer) -> null with foo[integer] { foo[integer](value = n) }\nagent main() -> integer { 0 }"
     it "with foo[integer] does NOT cover a body raising foo[string] (K0212)" $
@@ -796,7 +822,7 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
         ( "request store[T](value: T) -> null\n"
             <> "agent take_int(n: integer) -> null { null }\n"
             <> "agent main() -> integer {\n"
-            <> "  handle { request store(value) { take_int(n = value); next null } }\n"
+            <> "  use handler { request store(value) { take_int(n = value); next null } }\n"
             <> "  store[integer](value = 5)\n"
             <> "  0\n"
             <> "}"
@@ -806,7 +832,7 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
         ( "request store[T](value: T) -> null\n"
             <> "agent take_str(s: string) -> null { null }\n"
             <> "agent main() -> integer {\n"
-            <> "  handle { request store(value) { take_str(s = value); next null } }\n"
+            <> "  use handler { request store(value) { take_str(s = value); next null } }\n"
             <> "  store[integer](value = 5)\n"
             <> "  0\n"
             <> "}"
@@ -815,7 +841,7 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
       bad
         ( "request store[T](value: T) -> null\n"
             <> "agent main() -> integer {\n"
-            <> "  handle { request store(value: string) { next null } }\n"
+            <> "  use handler { request store(value: string) { next null } }\n"
             <> "  store[integer](value = 5)\n"
             <> "  0\n"
             <> "}"
@@ -824,7 +850,7 @@ genericsSpec = describe "generics (data / request / variance / effect top)" $ do
       bad
         ( "request ask[T]() -> T\n"
             <> "agent f[effect E](g: agent() -> null with E) -> string with E {\n"
-            <> "  handle { request ask() { next \"x\" } }\n"
+            <> "  use handler { request ask() { next \"x\" } }\n"
             <> "  g()\n"
             <> "  ask[string]()\n"
             <> "}\n"

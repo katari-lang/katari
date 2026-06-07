@@ -17,7 +17,7 @@ agent run() -> integer with scheduled {
 
 @"Returns the number of scheduled() ticks observed before the handler breaks (= 1 for this sample)."
 agent main() -> integer {
-  handle (var counter = 0) {
+  use handler (var counter = 0) {
     request scheduled() {
       break counter + 1
     }
