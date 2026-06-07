@@ -35,7 +35,7 @@ where
 import Control.Monad (forM, forM_, when, zipWithM)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
-import Data.List (transpose)
+import Data.List (partition, transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
@@ -588,7 +588,15 @@ resolveTypeRef nameRef = case nameRef.resolution of
 -- | Elaborate a @with@ clause into a concrete request set (only names that are
 -- known requests contribute).
 elaborateRequestList :: [SyntacticRequest Identified] -> Check (SemanticEffect Resolved)
-elaborateRequestList syntacticRequests = unionEffects . catMaybes <$> mapM elaborateOne syntacticRequests
+elaborateRequestList syntacticRequests = case partition (.spread) syntacticRequests of
+  -- No spread: an ordinary union of the request leaves.
+  ([], _) -> unionEffects . catMaybes <$> mapM elaborateOne syntacticRequests
+  -- Override row @{...base, req, …}@: the spreads form the base, the rest are the
+  -- concrete overrides that shadow their names in the base.
+  (spreads, overrides) -> do
+    base <- unionEffects . catMaybes <$> mapM elaborateOne spreads
+    overrideEffects <- catMaybes <$> mapM elaborateOne overrides
+    pure (SemanticEffectOverride base overrideEffects)
   where
     elaborateOne SyntacticRequest {name, arguments} = case name.resolution of
       Just (ResolvedConcreteRequest qualifiedName) -> do
@@ -1171,7 +1179,7 @@ handlerParamTypes bodyEffect RequestHandler {name} = case name.resolution of
                 paramFields
         pure $ case bodyEffect of
           NormalizedEffectAny -> widened
-          NormalizedEffectRows concrete generics
+          NormalizedEffectRows concrete generics _shadowed
             | not (Set.null generics) -> widened
             | Map.member requestQName concrete -> withArgs (requestArgsInEffect bodyEffect requestQName)
             | otherwise -> widened
@@ -1196,7 +1204,7 @@ handlerExpectedNext bodyEffect RequestHandler {name} = case name.resolution of
         -- The effect top: the request could be raised at any args, so a single
         -- answer must be valid for all of them ⇒ 'never' (it can't be answered).
         NormalizedEffectAny -> pure (Just SemanticTypeNever)
-        NormalizedEffectRows concrete generics
+        NormalizedEffectRows concrete generics _shadowed
           -- An in-scope effect generic is unbounded — it could itself be this
           -- request at any args — so again the answer must satisfy 'never'.
           | not (Set.null generics) -> pure (Just SemanticTypeNever)
@@ -1794,7 +1802,7 @@ inferEffects recursive sccQualifiedNames results = do
     -- generic list).
     effectNames agentDecl = \case
       NormalizedEffectAny -> ["all"]
-      NormalizedEffectRows concrete generics ->
+      NormalizedEffectRows concrete generics _shadowed ->
         map renderQName (Map.keys concrete)
           ++ map (genericEffectName agentDecl) (Set.toList generics)
     genericEffectName agentDecl genericsId =

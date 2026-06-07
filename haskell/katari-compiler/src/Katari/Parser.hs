@@ -2158,11 +2158,27 @@ parseGroupedType = do
 -- list; the un-normalised tree lives only in 'SemanticEffect'). A single
 -- trailing pipe is tolerated for multi-line declarations.
 parseRequests :: Parser [SyntacticRequest Parsed]
-parseRequests = do
-  first <- parseEffectTerm
-  rest <- many (try (parsePunctuation PunctuationPipe *> parseEffectTerm))
-  _ <- optional (try (parsePunctuation PunctuationPipe))
-  pure (concat (first : rest))
+parseRequests = parseOverrideRow <|> parseUnionRequests
+  where
+    parseUnionRequests = do
+      first <- parseEffectTerm
+      rest <- many (try (parsePunctuation PunctuationPipe *> parseEffectTerm))
+      _ <- optional (try (parsePunctuation PunctuationPipe))
+      pure (concat (first : rest))
+
+-- | An override-row effect @{ ...base, req[args], … }@: the spread @...base@
+-- (the effect being overridden, restricted to a single request / generic for
+-- now) followed by concrete request overrides. Returned as the base (flagged
+-- @spread = True@) ahead of the override leaves.
+parseOverrideRow :: Parser [SyntacticRequest Parsed]
+parseOverrideRow = do
+  parsePunctuation PunctuationLeftBrace
+  parsePunctuation PunctuationEllipsis
+  base <- parseRequest
+  overrides <- many (try (parseComma *> parseRequest))
+  _ <- optional parseComma
+  parsePunctuation PunctuationRightBrace
+  pure (base {spread = True} : overrides)
 
 -- | One term of an effect expression: the @pure@ literal (the empty effect, a
 -- contextual keyword), a parenthesised sub-expression, or a single request
@@ -2193,7 +2209,7 @@ parseRequest = parseWithSpan $ do
         (parsePunctuation PunctuationLeftBracket)
         (parsePunctuation PunctuationRightBracket)
         (parseType `sepEndBy1` parseComma)
-  pure $ \sourceSpan -> SyntacticRequest {moduleQualifier = moduleQualifier, name = name, arguments = arguments, sourceSpan = sourceSpan}
+  pure $ \sourceSpan -> SyntacticRequest {moduleQualifier = moduleQualifier, name = name, arguments = arguments, spread = False, sourceSpan = sourceSpan}
 
 -- | Optional generic parameter list @[T extends t, effect R, U]@ following a
 -- callable / data name. Absent (no @[@) yields the empty list, so monomorphic

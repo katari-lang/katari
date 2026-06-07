@@ -316,13 +316,19 @@ data NormalizedEffect
     -- instantiations of the same request by its parameters' variance.
     NormalizedEffectRows
       { effectConcrete :: Map QualifiedName ([Variance], [NormalizedGenericArg]),
-        effectGenerics :: Set GenericsId
+        effectGenerics :: Set GenericsId,
+        -- | Request names EXCLUDED from the contribution of the @effectGenerics@
+        -- (the override-row @{...E, req[args]}@ shadows @req@ in @E@: when @E@ is
+        -- instantiated, @req@ is removed from it). Empty for a plain union. The
+        -- only difference between @ask[int] | E@ (ask may also come from E) and
+        -- @{...E, ask[int]}@ (E's ask excluded) is @ask ∈ effectShadowed@.
+        effectShadowed :: Set QualifiedName
       }
   deriving (Eq, Show)
 
 -- | The empty (pure) normalised effect.
 emptyNormalizedEffect :: NormalizedEffect
-emptyNormalizedEffect = NormalizedEffectRows Map.empty Set.empty
+emptyNormalizedEffect = NormalizedEffectRows Map.empty Set.empty Set.empty
 
 instance Semigroup NormalizedEffect where
   (<>) = unionNormalizedEffect
@@ -339,10 +345,13 @@ unionNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedEffec
 unionNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
   (NormalizedEffectAny, _) -> NormalizedEffectAny
   (_, NormalizedEffectAny) -> NormalizedEffectAny
-  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+  (NormalizedEffectRows leftConcrete leftGenerics leftShadowed, NormalizedEffectRows rightConcrete rightGenerics rightShadowed) ->
     case unionRequestApps leftConcrete rightConcrete of
       Nothing -> NormalizedEffectAny
-      Just merged -> NormalizedEffectRows merged (Set.union leftGenerics rightGenerics)
+      -- A name stays shadowed only if shadowed on BOTH sides: if only one side
+      -- excludes it from its generics, the other side's generics may contribute
+      -- it, so the union can't guarantee the exclusion.
+      Just merged -> NormalizedEffectRows merged (Set.union leftGenerics rightGenerics) (Set.intersection leftShadowed rightShadowed)
 
 type RequestApps = Map QualifiedName ([Variance], [NormalizedGenericArg])
 
@@ -364,7 +373,7 @@ intersectNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> NormalizedE
 intersectNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
   (NormalizedEffectAny, other) -> other
   (other, NormalizedEffectAny) -> other
-  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+  (NormalizedEffectRows leftConcrete leftGenerics leftShadowed, NormalizedEffectRows rightConcrete rightGenerics rightShadowed) ->
     NormalizedEffectRows
       ( Map.fromList
           [ (name, (variances, merged))
@@ -374,6 +383,9 @@ intersectNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect
           ]
       )
       (Set.intersection leftGenerics rightGenerics)
+      -- Dual of union: a name is excluded from the meet's generics if excluded
+      -- on EITHER side.
+      (Set.union leftShadowed rightShadowed)
 
 -- | Remove a set of concrete @req@ names from an effect (used when a @handle@
 -- discharges the requests it names). Effect generics are left untouched — a
@@ -383,7 +395,7 @@ intersectNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect
 subtractConcrete :: Set QualifiedName -> NormalizedEffect -> NormalizedEffect
 subtractConcrete handled = \case
   NormalizedEffectAny -> NormalizedEffectAny
-  NormalizedEffectRows concrete generics -> NormalizedEffectRows (Map.withoutKeys concrete handled) generics
+  NormalizedEffectRows concrete generics shadowed -> NormalizedEffectRows (Map.withoutKeys concrete handled) generics shadowed
 
 -- | The elements @left@ raises beyond @right@ (for the @with@-coverage report).
 -- A request is covered when @right@ names it with args that @left@'s
@@ -393,7 +405,7 @@ differenceNormalizedEffect :: NormalizedEffect -> NormalizedEffect -> Normalized
 differenceNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
   (_, NormalizedEffectAny) -> emptyNormalizedEffect
   (NormalizedEffectAny, _) -> NormalizedEffectAny
-  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+  (NormalizedEffectRows leftConcrete leftGenerics leftShadowed, NormalizedEffectRows rightConcrete rightGenerics _rightShadowed) ->
     NormalizedEffectRows
       ( Map.fromList
           [ (name, app)
@@ -404,12 +416,13 @@ differenceNormalizedEffect leftEffect rightEffect = case (leftEffect, rightEffec
           ]
       )
       (Set.difference leftGenerics rightGenerics)
+      leftShadowed
 
 -- | True when an effect is exactly @pure@ (no requests, no generics; not @all@).
 nullNormalizedEffect :: NormalizedEffect -> Bool
 nullNormalizedEffect = \case
   NormalizedEffectAny -> False
-  NormalizedEffectRows concrete generics -> Map.null concrete && Set.null generics
+  NormalizedEffectRows concrete generics _shadowed -> Map.null concrete && Set.null generics
 
 -- | @subtypeEffect left right@ — every effect of @left@ is permitted by
 -- @right@. @all@ is the top. A left generic cancels only against the same right
@@ -419,8 +432,12 @@ subtypeEffect :: NormalizedEffect -> NormalizedEffect -> Bool
 subtypeEffect leftEffect rightEffect = case (leftEffect, rightEffect) of
   (_, NormalizedEffectAny) -> True
   (NormalizedEffectAny, _) -> False
-  (NormalizedEffectRows leftConcrete leftGenerics, NormalizedEffectRows rightConcrete rightGenerics) ->
+  (NormalizedEffectRows leftConcrete leftGenerics leftShadowed, NormalizedEffectRows rightConcrete rightGenerics rightShadowed) ->
     Set.isSubsetOf leftGenerics rightGenerics
+      -- The right may exclude (shadow) a request from its generics only if the
+      -- left also excludes it — otherwise left's generics could contribute it
+      -- where right's can't. (More shadows = smaller effect, so left ⊇ right's.)
+      && Set.isSubsetOf rightShadowed leftShadowed
       && all requestCovered (Map.toList leftConcrete)
     where
       requestCovered (name, (variances, leftArgs)) = case Map.lookup name rightConcrete of
@@ -450,9 +467,26 @@ normaliseEffect env = \case
   SemanticEffectPure -> emptyNormalizedEffect
   SemanticEffectAll -> NormalizedEffectAny
   SemanticEffectRequest qualifiedName arguments ->
-    NormalizedEffectRows (Map.singleton qualifiedName (variancesOf env qualifiedName, map (normaliseArg env) arguments)) Set.empty
-  SemanticEffectGeneric genericsId -> NormalizedEffectRows Map.empty (Set.singleton genericsId)
+    NormalizedEffectRows (Map.singleton qualifiedName (variancesOf env qualifiedName, map (normaliseArg env) arguments)) Set.empty Set.empty
+  SemanticEffectGeneric genericsId -> NormalizedEffectRows Map.empty (Set.singleton genericsId) Set.empty
   SemanticEffectUnion branches -> foldr (unionNormalizedEffect . normaliseEffect env) emptyNormalizedEffect branches
+  -- Override row @{...base, req[args], …}@: each concrete override SHADOWS its
+  -- name in @base@ (excluded from base's generics + replacing base's concrete)
+  -- and is then added. Done atomically (not via union, which would intersect the
+  -- shadowed set away). @base@ should be a generic / pure / request union.
+  SemanticEffectOverride base overrides -> case normaliseEffect env base of
+    NormalizedEffectAny -> NormalizedEffectAny
+    NormalizedEffectRows baseConcrete baseGenerics baseShadowed ->
+      let overrideEntries =
+            Map.fromList
+              [ (qualifiedName, (variancesOf env qualifiedName, map (normaliseArg env) arguments))
+                | SemanticEffectRequest qualifiedName arguments <- overrides
+              ]
+          overrideNames = Map.keysSet overrideEntries
+       in NormalizedEffectRows
+            (Map.union overrideEntries (Map.withoutKeys baseConcrete overrideNames))
+            baseGenerics
+            (Set.union baseShadowed overrideNames)
 
 -- | The (denormalised) arguments a request is applied to within an effect —
 -- used to instantiate a handler against the request's body usage. Empty if the
@@ -460,7 +494,7 @@ normaliseEffect env = \case
 requestArgsInEffect :: NormalizedEffect -> QualifiedName -> [SemanticGenericArgument Resolved]
 requestArgsInEffect effect qualifiedName = case effect of
   NormalizedEffectAny -> []
-  NormalizedEffectRows concrete _ -> case Map.lookup qualifiedName concrete of
+  NormalizedEffectRows concrete _ _ -> case Map.lookup qualifiedName concrete of
     Just (_, arguments) -> map denormaliseArg arguments
     Nothing -> []
 
@@ -480,11 +514,20 @@ dataArgsInType normalizedType qualifiedName = case normalizedType of
 denormaliseEffect :: NormalizedEffect -> SemanticEffect Resolved
 denormaliseEffect = \case
   NormalizedEffectAny -> SemanticEffectAll
-  NormalizedEffectRows concrete generics ->
-    unionEffects
-      ( [SemanticEffectRequest name (map denormaliseArg arguments) | (name, (_, arguments)) <- Map.toList concrete]
-          ++ (SemanticEffectGeneric <$> Set.toList generics)
-      )
+  NormalizedEffectRows concrete generics shadowed
+    -- No shadows ⇒ a plain union of the concrete requests + generic leaves.
+    | Set.null shadowed ->
+        unionEffects (concreteLeaves (Map.toList concrete) ++ genericLeaves)
+    -- Shadows present ⇒ an override row: the base is the generics + any concrete
+    -- not shadowed; the shadowed names with a concrete value become the overrides.
+    | otherwise ->
+        let (overridden, base) = Map.partitionWithKey (\name _ -> Set.member name shadowed) concrete
+         in SemanticEffectOverride
+              (unionEffects (concreteLeaves (Map.toList base) ++ genericLeaves))
+              (concreteLeaves (Map.toList overridden))
+    where
+      genericLeaves = SemanticEffectGeneric <$> Set.toList generics
+      concreteLeaves entries = [SemanticEffectRequest name (map denormaliseArg arguments) | (name, (_, arguments)) <- entries]
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -1259,6 +1302,7 @@ signsOfEffect target polarity = \case
     | genericsId == target -> Set.singleton polarity
     | otherwise -> Set.empty
   SemanticEffectUnion branches -> foldMap (signsOfEffect target polarity) branches
+  SemanticEffectOverride base overrides -> foldMap (signsOfEffect target polarity) (base : overrides)
   _ -> Set.empty
 
 -- | Estimated variances for a data name (padding with 'Invariant' for safety).

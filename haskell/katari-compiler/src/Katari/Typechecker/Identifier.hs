@@ -1481,7 +1481,7 @@ resolveTupleType TupleTypeNode {elementTypes, sourceSpan} = do
   pure TupleTypeNode {elementTypes = elementTypes', sourceSpan = sourceSpan}
 
 resolveSyntacticRequest :: SyntacticRequest Parsed -> Identifier (SyntacticRequest Identified)
-resolveSyntacticRequest SyntacticRequest {moduleQualifier, name, arguments, sourceSpan} = do
+resolveSyntacticRequest SyntacticRequest {moduleQualifier, name, arguments, spread, sourceSpan} = do
   (moduleQualifier', name') <- resolveQualifiedRequestRef moduleQualifier name
   arguments' <- mapM resolveType arguments
   pure
@@ -1489,6 +1489,7 @@ resolveSyntacticRequest SyntacticRequest {moduleQualifier, name, arguments, sour
       { moduleQualifier = moduleQualifier',
         name = name',
         arguments = arguments',
+        spread = spread,
         sourceSpan = sourceSpan
       }
 

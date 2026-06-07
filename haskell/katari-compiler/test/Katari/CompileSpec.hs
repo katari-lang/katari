@@ -28,6 +28,7 @@ spec = describe "Katari.Compile" $ do
   defaultArgumentsSpec
   genericsSpec
   letAnnotationSpec
+  effectOverrideSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -630,6 +631,36 @@ recursiveDataSpec = describe "recursive data type" $ do
         case Aeson.fromJSON (Aeson.toJSON ir) of
           Aeson.Success decoded -> decoded `shouldBe` ir
           Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
+
+-- | Override-row effects @{...E, req[args]}@ (the basis for first-class
+-- handlers / `use`): the row shadows the named requests in the base @E@, so it
+-- is incomparable with the plain union @E | req@.
+effectOverrideSpec :: Spec
+effectOverrideSpec = describe "override-row effects" $ do
+  let ok src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+      bad src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+      askDecl = "request ask[T]() -> T\n"
+
+  it "a handler-provider param type with an override row elaborates" $
+    ok
+      ( "request some_req[T]() -> T\n"
+          <> "agent provide[R, effect E](cont: agent () -> R with {...E, some_req[string]}, fallback: R) -> R with E { fallback }\n"
+          <> "agent main() -> integer { 0 }"
+      )
+  it "an override row {...E, ask[int]} is NOT satisfied by the union E | ask[int]" $
+    bad
+      ( askDecl
+          <> "agent target[effect E](cont: agent () -> integer with {...E, ask[integer]}) -> integer { 0 }\n"
+          <> "agent caller[effect E](cont: agent () -> integer with E | ask[integer]) -> integer { target[E](cont = cont) }\n"
+          <> "agent main() -> integer { 0 }"
+      )
+  it "the same override row satisfies itself" $
+    ok
+      ( askDecl
+          <> "agent target[effect E](cont: agent () -> integer with {...E, ask[integer]}) -> integer { 0 }\n"
+          <> "agent caller[effect E](cont: agent () -> integer with {...E, ask[integer]}) -> integer { target[E](cont = cont) }\n"
+          <> "agent main() -> integer { 0 }"
+      )
 
 -- | A @let@ binder's type annotation must be checked against the bound value
 -- (it was silently ignored before — `let s: string = 5` was accepted).

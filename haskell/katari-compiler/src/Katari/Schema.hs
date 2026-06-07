@@ -761,6 +761,9 @@ buildRequestsSchema dataDefs topLevelTypes effect =
       SemanticEffectRequest qualifiedName arguments -> ([(qualifiedName, arguments)], [])
       SemanticEffectGeneric genericsId -> ([], [genericsId])
       SemanticEffectUnion branches -> mconcat (map collect branches)
+      -- The schema enumerates the requests a body may raise; the override row's
+      -- base + overrides are all reachable, so collect from both.
+      SemanticEffectOverride base overrides -> mconcat (map collect (base : overrides))
     dedupe :: (Ord a) => [a] -> [a]
     dedupe = Set.toList . Set.fromList
     placeholder genericsId = object [Key.fromText genericPlaceholderKey .= genericsId]
@@ -810,6 +813,7 @@ buildRequestRefs ctx effect =
       -- to the schema (an instantiation substitutes it before schema gen).
       SemanticEffectGeneric _ -> []
       SemanticEffectUnion branches -> concatMap effectRequests branches
+      SemanticEffectOverride base overrides -> concatMap effectRequests (base : overrides)
 
 buildRequestRef :: SchemaContext -> (QualifiedName, [SemanticGenericArgument Resolved]) -> Maybe RequestSchemaRef
 buildRequestRef ctx (qualifiedName, arguments) = do

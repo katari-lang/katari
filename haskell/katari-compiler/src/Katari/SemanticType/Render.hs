@@ -122,6 +122,9 @@ renderSemanticEffect = Text.intercalate " | " . leaves
       -- the declaration); a placeholder suffices for hover.
       ST.SemanticEffectGeneric _ -> ["<effect>"]
       ST.SemanticEffectUnion branches -> concatMap leaves branches
+      -- An override row renders as @{...base, override, …}@.
+      ST.SemanticEffectOverride base overrides ->
+        ["{...(" <> renderSemanticEffect base <> ")" <> Text.concat (map (\o -> ", " <> renderSemanticEffect o) overrides) <> "}"]
     renderArgument :: ST.SemanticGenericArgument ST.Resolved -> Text
     renderArgument = \case
       ST.SemanticGenericArgumentType argumentType -> renderSemanticType argumentType

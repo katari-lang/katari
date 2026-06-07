@@ -1068,6 +1068,9 @@ data SyntacticRequest (phase :: Phase) = SyntacticRequest
     -- | Type / effect arguments for a generic request (@with foo[integer]@);
     -- empty for a non-generic request.
     arguments :: [SyntacticType phase],
+    -- | A spread @...E@ in an override row @{...E, req[args], …}@: this entry is
+    -- the row's base (the effect being overridden), not an override leaf.
+    spread :: Bool,
     sourceSpan :: SourceSpan
   }
 
@@ -1592,6 +1595,7 @@ retagSyntacticRequest req =
     { moduleQualifier = fmap retagNameRef req.moduleQualifier,
       name = retagNameRef req.name,
       arguments = map retagSyntacticType req.arguments,
+      spread = req.spread,
       sourceSpan = req.sourceSpan
     }
 

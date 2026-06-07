@@ -220,6 +220,15 @@ data SemanticEffect phase where
   -- singleton flattens to its branch, an empty union collapses to
   -- 'SemanticEffectPure'). Always build via 'unionEffects' to maintain this.
   SemanticEffectUnion :: [SemanticEffect phase] -> SemanticEffect phase
+  -- | An override row @{...base, req1[args], req2[args], …}@: @base@ (the spread,
+  -- usually a generic) with each override request SHADOWING its name in @base@
+  -- and replacing it. Differs from a union: @{...E, ask[int]}@ excludes @ask@
+  -- from @E@ (so @E@ instantiated to something raising @ask[string]@ cannot match
+  -- it), whereas @E | ask[int]@ does not. The mechanism @handle@-as-value
+  -- (@use@) needs to discharge a request from an abstract residual effect. The
+  -- overrides must be concrete requests (a generic in override position is
+  -- rejected — its shadowed name set would be unknown).
+  SemanticEffectOverride :: SemanticEffect phase -> [SemanticEffect phase] -> SemanticEffect phase
 
 deriving instance Show (SemanticEffect phase)
 
@@ -289,6 +298,10 @@ substituteEffect typeSubstitution effectSubstitution = \case
   SemanticEffectGeneric genericsId -> Map.findWithDefault (SemanticEffectGeneric genericsId) genericsId effectSubstitution
   SemanticEffectRequest qualifiedName arguments -> SemanticEffectRequest qualifiedName (map (substituteGenericArgument typeSubstitution effectSubstitution) arguments)
   SemanticEffectUnion branches -> unionEffects (map (substituteEffect typeSubstitution effectSubstitution) branches)
+  SemanticEffectOverride base overrides ->
+    SemanticEffectOverride
+      (substituteEffect typeSubstitution effectSubstitution base)
+      (map (substituteEffect typeSubstitution effectSubstitution) overrides)
   leaf -> leaf
 
 -- | The empty (pure) effect — \"this expression performs no request\". The
