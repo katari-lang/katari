@@ -1,0 +1,8 @@
+@"A trivial continuation provider: run the continuation and return its result."
+agent run_it[R](...k: agent () -> R) -> R { k() }
+
+@"`use run_it` makes the rest of the block the continuation run_it invokes. (= 123)"
+agent main() -> integer {
+  use run_it
+  100 + 23
+}

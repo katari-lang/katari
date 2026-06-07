@@ -833,6 +833,10 @@ parseBlockBodyWithRecovery = loop []
             <$ MP.lookAhead (parsePunctuation PunctuationRightBrace),
           BlockStepReturn Nothing
             <$ MP.lookAhead eof,
+          -- `(let x =)? use expr`: captures the rest of this block as the
+          -- continuation passed to `expr`. Tried before the let/statement
+          -- alternative so `let x = use ...` is not parsed as an ordinary let.
+          parseUseStep,
           BlockStepStatement <$> parseNonExpressionStatement,
           -- Koka-style handle: captures the rest of this block as its body.
           parseHandleStep False,
@@ -868,6 +872,46 @@ parseBlockBodyWithRecovery = loop []
     parseHandleStep parallel = do
       handleExpr <- parseHandleExpression parallel
       pure (BlockStepReturn (Just handleExpr))
+    -- Parse `(let x =)? use expr`, capturing the rest of this block as the
+    -- continuation `body`. The binder's `let x =` is only consumed when `use`
+    -- follows (otherwise an ordinary let backtracks cleanly).
+    parseUseStep = do
+      startPosition <- parseCurrentPosition
+      binder <-
+        optional
+          ( try
+              ( parseKeyword KeywordLet
+                  *> parseNameRef
+                  <* parsePunctuation PunctuationEquals
+                  <* MP.lookAhead (parseKeyword KeywordUse)
+              )
+          )
+      parseKeyword KeywordUse
+      useExpr <- parseExpression
+      skipMany parseSemicolon
+      bodyStart <- parseCurrentPosition
+      (bodyStatements, bodyReturn) <- parseBlockBodyWithRecovery
+      bodyEnd <- parsePreviousEndPosition
+      bodySpan <- parseMakeSpan bodyStart bodyEnd
+      useEnd <- parsePreviousEndPosition
+      useSpan <- parseMakeSpan startPosition useEnd
+      let body =
+            Block
+              { statements = bodyStatements,
+                returnExpression = bodyReturn,
+                sourceSpan = bodySpan
+              }
+      pure $
+        BlockStepReturn $
+          Just $
+            ExpressionUse
+              UseExpression
+                { binder = binder,
+                  expr = useExpr,
+                  body = body,
+                  sourceSpan = useSpan,
+                  typeOf = ()
+                }
 
 parseNonExpressionStatement :: Parser (Statement Parsed)
 parseNonExpressionStatement =

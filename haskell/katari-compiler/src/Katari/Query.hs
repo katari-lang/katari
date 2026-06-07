@@ -53,6 +53,7 @@ import Katari.AST
     ForNextStatement (..),
     ForVarBinding (..),
     HandleExpression (..),
+    UseExpression (..),
     IfExpression (..),
     LetStatement (..),
     LiteralExpression (..),
@@ -472,6 +473,9 @@ hoverFromExpression snap moduleName position expression
           `orElse` listToMaybe (mapMaybe (hoverFromRequestHandler snap moduleName position) he.handlers)
           `orElse` (he.thenClause >>= hoverFromBlock snap moduleName position . snd)
           `orElse` hoverFromBlock snap moduleName position he.body
+      ExpressionUse ue ->
+        hoverFromExpression snap moduleName position ue.expr
+          `orElse` hoverFromBlock snap moduleName position ue.body
       ExpressionQualifiedReference qre ->
         hoverFromVariableRef snap moduleName qre.target
       ExpressionRecord re ->
@@ -510,6 +514,7 @@ zonkedExpressionType = \case
   ExpressionTypeApplication e -> e.typeOf
   ExpressionTemplate e -> e.typeOf
   ExpressionHandle e -> e.typeOf
+  ExpressionUse e -> e.typeOf
   ExpressionParTuple e -> e.typeOf
   ExpressionQualifiedReference e -> e.typeOf
 
@@ -695,6 +700,9 @@ refFromExpression position expression
           `orElse` listToMaybe (mapMaybe (refFromRequestHandler position) he.handlers)
           `orElse` (he.thenClause >>= refFromBlock position . snd)
           `orElse` refFromBlock position he.body
+      ExpressionUse ue ->
+        refFromExpression position ue.expr
+          `orElse` refFromBlock position ue.body
       ExpressionQualifiedReference qre
         | spanContains qre.target.sourceSpan position ->
             fmap ResolvedReferenceVariable qre.target.resolution
@@ -821,6 +829,8 @@ collectExpressionOccurrences expression index = case expression of
         withHandlers = foldr (\handler -> collectBlockOccurrences handler.body) withState he.handlers
         withThen = maybe withHandlers (\(_, thenBlock) -> collectBlockOccurrences thenBlock withHandlers) he.thenClause
      in collectBlockOccurrences he.body withThen
+  ExpressionUse ue ->
+    collectExpressionOccurrences ue.expr (collectBlockOccurrences ue.body index)
   ExpressionQualifiedReference qre ->
     addModuleOccurrence qre.moduleQualifier (addVariableOccurrence qre.target index)
   _ -> index

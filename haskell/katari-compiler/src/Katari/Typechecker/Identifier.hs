@@ -1547,6 +1547,25 @@ resolveHandleExpr HandleExpression {parallel, stateVariables, handlers, thenClau
         typeOf = ()
       }
 
+-- | Resolve a @use@: @expr@ resolves in the outer scope; the continuation
+-- @body@ resolves in a fresh frame with the optional @binder@ (the
+-- continuation's parameter) bound.
+resolveUseExpr :: UseExpression Parsed -> Identifier (UseExpression Identified)
+resolveUseExpr UseExpression {binder, expr, body, sourceSpan} = do
+  expr' <- resolveExpression expr
+  (binder', body') <- withScopeFrameAt sourceSpan $ do
+    binder' <- traverse bindLocalVariable binder
+    body' <- resolveBlock body
+    pure (binder', body')
+  pure
+    UseExpression
+      { binder = binder',
+        expr = expr',
+        body = body',
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+
 -- | A state variable's initializer is resolved in the scope as it stands
 -- BEFORE the binding (so only earlier state vars are visible). The binding is
 -- introduced only after the initializer has been resolved.
@@ -1686,6 +1705,7 @@ resolveExpression = \case
   ExpressionTypeApplication expression -> ExpressionTypeApplication <$> resolveTypeApplicationExpr expression
   ExpressionTemplate expression -> ExpressionTemplate <$> resolveTemplateExpr expression
   ExpressionHandle expression -> ExpressionHandle <$> resolveHandleExpr expression
+  ExpressionUse expression -> ExpressionUse <$> resolveUseExpr expression
   ExpressionParTuple expression -> ExpressionParTuple <$> resolveParTupleExpr expression
   ExpressionQualifiedReference qref -> do
     -- The parser never produces this constructor on a Parsed AST.

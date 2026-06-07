@@ -489,6 +489,7 @@ getExpressionType = \case
   AST.ExpressionTypeApplication e -> e.typeOf
   AST.ExpressionTemplate e -> e.typeOf
   AST.ExpressionHandle e -> e.typeOf
+  AST.ExpressionUse e -> e.typeOf
   AST.ExpressionParTuple e -> e.typeOf
   AST.ExpressionQualifiedReference e -> e.typeOf
 
@@ -687,6 +688,8 @@ walkExpression env = \case
         )
         he.thenClause
       ++ walkBlock env he.body
+  AST.ExpressionUse ue ->
+    walkExpression env ue.expr ++ walkBlock env ue.body
   AST.ExpressionParTuple pte ->
     concatMap (walkExpression env) pte.elements
   AST.ExpressionLiteral _ -> []

@@ -201,6 +201,11 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     expect(result).toBe(42);
   });
 
+  itE2E("99-use-cont: main() returns 123 (use passes the continuation to a provider)", async () => {
+    const result = await applyAndRun("use_cont", "99-use-cont");
+    expect(result).toBe(123);
+  });
+
   itE2E("05-control-flow: main() returns 'positive'", async () => {
     const result = await applyAndRun("control-flow", "05-control-flow");
     expect(result).toBe("positive");

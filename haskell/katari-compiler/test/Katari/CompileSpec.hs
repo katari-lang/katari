@@ -31,6 +31,7 @@ spec = describe "Katari.Compile" $ do
   effectOverrideSpec
   matchNarrowingSpec
   genericsInferenceSpec
+  useSpec
 
 defaultArgumentsSpec :: Spec
 defaultArgumentsSpec = describe "default arguments" $ do
@@ -633,6 +634,26 @@ recursiveDataSpec = describe "recursive data type" $ do
         case Aeson.fromJSON (Aeson.toJSON ir) of
           Aeson.Success decoded -> decoded `shouldBe` ir
           Aeson.Error msg -> expectationFailure ("decode failed: " <> msg)
+
+-- | @(let x =)? use expr@ — applies a handler-provider @expr@ to the captured
+-- continuation. Type-checked directly; @expr@ must take the continuation as its
+-- single (spread) agent parameter. Generics are inferred from the continuation.
+useSpec :: Spec
+useSpec = describe "use" $ do
+  let ok src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` False
+      bad src = hasErrors (compileSync (singleSourceInput src)).diagnostics `shouldBe` True
+
+  it "applies a continuation provider (bare use, block value becomes the provider's result)" $
+    ok "agent run_it(...k: agent () -> integer) -> integer { k() }\nagent main() -> integer { use run_it\n 100 }"
+  it "infers a generic provider's return from the continuation" $
+    ok "agent run_g[R](...k: agent () -> R) -> R { k() }\nagent main() -> integer { use run_g\n 42 }"
+  it "binds the continuation parameter with `let x = use`" $
+    ok
+      ( "agent feed(...k: agent (...integer) -> integer) -> integer { call_agent[integer, pure](target = k, args = 5) }\n"
+          <> "agent main() -> integer { let x = use feed\n x + 1 }"
+      )
+  it "rejects a use whose provider does not take a continuation agent" $
+    bad "agent foo(...n: integer) -> integer { n }\nagent main() -> integer { use foo\n 42 }"
 
 -- | Args-only generics inference: a generic callable applied without explicit
 -- @[..]@ infers its instantiation from the argument types. The headline case is

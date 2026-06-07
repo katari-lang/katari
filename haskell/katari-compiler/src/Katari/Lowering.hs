@@ -1251,6 +1251,7 @@ lowerExpr = \case
   AST.ExpressionMatch matchExpr -> lowerMatchExpr matchExpr
   AST.ExpressionFor forExpr -> lowerForExpr forExpr
   AST.ExpressionHandle handleExpr -> lowerHandleExpr handleExpr
+  AST.ExpressionUse useExpr -> lowerUseExpr useExpr
   AST.ExpressionParTuple parTupleExpr -> lowerTupleExpr True parTupleExpr.elements
   AST.ExpressionQualifiedReference qualifiedRefExpr ->
     -- Qualified references never bind locally.
@@ -1758,6 +1759,30 @@ lowerHandleExpr handleExpr = do
           recordError (LoweringErrorUnresolvedVariable svb.sourceSpan svb.name.text)
           bodyVar <- freshVarId Nothing
           pure (Nothing, bodyVar, initVar)
+
+-- | Lower @(let x =)? use expr@ by desugaring into existing IR: the captured
+-- continuation @body@ becomes a closure (a local-agent-like block whose single
+-- input is the optional binder @x@), and @expr@ is applied to it as a
+-- single-value spread call. No dedicated IR block — below Lowering this is
+-- indistinguishable from a hand-written @agent k(...x){ body }; expr(...k)@.
+lowerUseExpr :: AST.UseExpression Zonked -> Lower VarId
+lowerUseExpr useExpr = do
+  continuationBlockId <- freshBlockId
+  (bodyInput, prelude) <- case useExpr.binder of
+    Just binderRef | Just variableResolution <- binderRef.resolution -> do
+      binderVar <- freshVarId (Just binderRef.text)
+      pure (Just binderVar, pure [(variableResolution, binderVar)])
+    _ -> pure (Nothing, pure [])
+  lowerSimpleAgent continuationBlockId "use continuation" bodyInput Map.empty prelude useExpr.body Nothing "{}" "{}" "[]"
+  closureVar <- freshVarId Nothing
+  emit (StatementMakeClosure MakeClosureData {output = closureVar, block = continuationBlockId})
+  -- Apply the handler-provider value to the continuation (single-value call).
+  exprVar <- lowerExpr useExpr.expr
+  delegateBlk <- freshBlockId
+  recordBlock delegateBlk (BlockDelegate DelegateBlock {target = DelegateTargetValue exprVar}) Nothing
+  out <- freshVarId Nothing
+  emit (StatementCall CallData {block = delegateBlk, argument = Just closureVar, output = Just out})
+  pure out
 
 -- | Emit a fresh load-literal statement and return the resulting var.
 emitLoadLiteral :: LiteralValue -> Lower VarId

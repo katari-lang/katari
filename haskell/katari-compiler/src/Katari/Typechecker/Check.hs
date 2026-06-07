@@ -714,6 +714,7 @@ synthExpr = \case
   ExpressionMatch matchExpr -> synthMatch matchExpr
   ExpressionFor forExpr -> synthFor forExpr
   ExpressionHandle handleExpr -> synthHandle handleExpr
+  ExpressionUse useExpr -> synthUse useExpr
   ExpressionBlock BlockExpression {block, sourceSpan} -> do
     (block', semantic) <- walkBlock block
     pure (ExpressionBlock BlockExpression {block = block', sourceSpan = sourceSpan, typeOf = semantic}, semantic)
@@ -1342,6 +1343,73 @@ synthHandle HandleExpression {parallel, stateVariables, handlers, thenClause, bo
     ( ExpressionHandle HandleExpression {parallel = parallel, stateVariables = stateVariables', handlers = handlers', thenClause = thenClause', body = body', sourceSpan = sourceSpan, typeOf = semantic},
       semantic
     )
+
+-- | @(let x =)? use expr@. Types directly (no surface desugar). @expr@ must be
+-- a handler-provider: @agent(cont: agent(...ARG) -> R1 with E_cont) -> R2 with
+-- E_expr@. The continuation's actual type is @agent(ARG) -> bodyType with
+-- bodyEffect@; we infer @expr@'s generics from it (so @use h@ needs no explicit
+-- @[..]@), instantiate, then check the continuation against @expr@'s
+-- (instantiated) continuation parameter — which restores soundness (a body whose
+-- effect @expr@ can't discharge fails here). The @use@'s type is @expr@'s return
+-- @R2@; its effect (collected separately) is @expr@'s effect @E_expr@.
+synthUse :: UseExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthUse UseExpression {binder, expr, body, sourceSpan} = do
+  let exprResolution = calleeResolution expr
+  exprParams <- genericParamsOf exprResolution
+  -- expr's (possibly generic) signature: synth directly when monomorphic,
+  -- else take the generic scheme body and instantiate below.
+  (exprZonkedDirect, exprSig) <-
+    if null exprParams
+      then do (zonked, signature) <- synthExpr expr; pure (Just zonked, signature)
+      else do
+        signature <- maybe (pure SemanticTypeUnknown) (fmap (fromMaybe SemanticTypeUnknown) . lookupLocalType) exprResolution
+        pure (Nothing, signature)
+  case exprSig of
+    SemanticTypeFunction continuationParam _ _ -> do
+      let argType = case continuationParam of
+            SemanticTypeFunction parameter _ _ -> parameter
+            _ -> SemanticTypeNever
+          binderLocals = case binder of
+            Just b | Just res <- b.resolution -> [(res, argType)]
+            _ -> []
+      (body', bodyType) <- withLocals binderLocals (walkBlock body)
+      -- The body's fired effect (re-derived from the zonked body, as in synthHandle).
+      dataFieldEnv <- asks (.checkDataFieldEnv)
+      seededTypes <- gets (.stateLocalTypes)
+      readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
+      let localBodies = Map.union seededTypes readerBodies
+          lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
+          bodyEffect = blockEffect dataFieldEnv lookupEff body'
+          continuationActual = SemanticTypeFunction argType bodyType (denormaliseEffect bodyEffect)
+          (typeSubstitution, effectSubstitution) = matchType dataFieldEnv continuationParam continuationActual
+          concreteExprSig = substituteGenerics typeSubstitution effectSubstitution exprSig
+      exprZonked <- case exprZonkedDirect of
+        Just zonked -> pure zonked
+        Nothing -> do
+          calleeZonked <- retagGenericCallee expr concreteExprSig
+          pure
+            ( ExpressionTypeApplication
+                TypeApplicationExpression
+                  { callee = calleeZonked,
+                    typeArguments = [],
+                    instantiation = (Map.toList typeSubstitution, Map.toList effectSubstitution),
+                    sourceSpan = sourceSpan,
+                    typeOf = concreteExprSig
+                  }
+            )
+      resultType <- applySpreadCall sourceSpan concreteExprSig continuationActual
+      pure
+        ( ExpressionUse UseExpression {binder = fmap retagNameRef binder, expr = exprZonked, body = body', sourceSpan = sourceSpan, typeOf = resultType},
+          resultType
+        )
+    _ -> do
+      (expr', _) <- maybe (synthExpr expr) (\zonked -> pure (zonked, exprSig)) exprZonkedDirect
+      (body', _) <- walkBlock body
+      emitError (CheckErrorTypeMismatch sourceSpan exprSig SemanticTypeFunctionAny)
+      pure
+        ( ExpressionUse UseExpression {binder = fmap retagNameRef binder, expr = expr', body = body', sourceSpan = sourceSpan, typeOf = SemanticTypeUnknown},
+          SemanticTypeUnknown
+        )
 
 walkStateVariable :: StateVariableBinding Identified -> Check (StateVariableBinding Zonked, [(VariableResolution, SemanticType Resolved)])
 walkStateVariable StateVariableBinding {name, typeAnnotation, initial, sourceSpan} = do
@@ -2354,6 +2422,10 @@ exprEffect env lookupEffect = go
           <> maybe mempty (blockEffect env lookupEffect . snd) e.thenBlock
       ExpressionBlock e -> blockEffect env lookupEffect e.block
       ExpressionHandle e -> handleEffect e
+      -- @use expr@ ≡ @expr(continuation)@: evaluating @expr@ plus calling it.
+      -- The continuation body's effect is consumed BY @expr@ (routed through its
+      -- signature), so it is not raised here — only @expr@'s own effect is.
+      ExpressionUse e -> go e.expr <> effectOfSignature env (exprTypeOf e.expr)
       ExpressionFieldAccess e -> go e.object
       ExpressionTypeApplication e -> go e.callee
       ExpressionTemplate e -> foldMap templateEffect e.elements
@@ -2394,6 +2466,7 @@ exprTypeOf = \case
   ExpressionFor e -> e.typeOf
   ExpressionBlock e -> e.typeOf
   ExpressionHandle e -> e.typeOf
+  ExpressionUse e -> e.typeOf
   ExpressionFieldAccess e -> e.typeOf
   ExpressionTypeApplication e -> e.typeOf
   ExpressionTemplate e -> e.typeOf

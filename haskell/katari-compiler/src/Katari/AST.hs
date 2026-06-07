@@ -460,6 +460,29 @@ data HandleExpression (phase :: Phase) = HandleExpression
 instance HasSourceSpan (HandleExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
+-- | @(let x =)? use expr@ — applies the handler-provider @expr@ to the
+-- continuation (the rest of the enclosing block, captured as @body@). @binder@
+-- is the continuation's parameter (the value @expr@ resumes it with); absent for
+-- a bare @use expr@ whose continuation takes no value.
+--
+-- @
+-- let x = use some_provider   -- x bound in the continuation below
+-- continuation_using_x
+-- @
+--
+-- Type-checked directly (Check); Lowering desugars it into a continuation
+-- closure + a call @expr(...continuation)@ using existing IR ops.
+data UseExpression (phase :: Phase) = UseExpression
+  { binder :: Maybe (NameRef phase VariableRef),
+    expr :: Expression phase,
+    body :: Block phase,
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (UseExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
 -- | One @var name [: T] = init@ binding inside a 'HandleExpression''s
 -- @(...)@ list. Visible to all handlers in the same @handle@ scope; only
 -- @next@ inside a handler may mutate it.
@@ -1124,6 +1147,9 @@ data Expression (phase :: Phase) where
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
   -- | Koka-style handle expression. Captures the continuation as its body.
   ExpressionHandle :: HandleExpression phase -> Expression phase
+  -- | @(let x =)? use expr@. Captures the continuation as its body and passes
+  -- it to @expr@ (a handler-provider agent) as a continuation closure.
+  ExpressionUse :: UseExpression phase -> Expression phase
   -- | Parallel seq construction: @par [e1, e2, ...]@.
   ExpressionParTuple :: ParTupleExpression phase -> Expression phase
   -- | Synthesised by the Identifier pass from a @FieldAccess@ chain whose
@@ -1149,6 +1175,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionTypeApplication expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
     ExpressionHandle expression -> expression.sourceSpan
+    ExpressionUse expression -> expression.sourceSpan
     ExpressionParTuple expression -> expression.sourceSpan
     ExpressionQualifiedReference expression -> expression.sourceSpan
 
@@ -1746,6 +1773,10 @@ deriving instance (ShowPhase phase) => Show (Block phase)
 deriving instance (EqPhase phase) => Eq (HandleExpression phase)
 
 deriving instance (ShowPhase phase) => Show (HandleExpression phase)
+
+deriving instance (EqPhase phase) => Eq (UseExpression phase)
+
+deriving instance (ShowPhase phase) => Show (UseExpression phase)
 
 deriving instance (EqPhase phase) => Eq (StateVariableBinding phase)
 
