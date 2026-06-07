@@ -496,7 +496,7 @@ toCore dataDefs visited = \case
   -- don't emit a @propertyNames@ refinement.
   -- TODO(Phase 2): emit @additionalProperties@ as a typed schema once
   -- the schema model supports it.
-  SemanticTypeRecord ->
+  SemanticTypeRecord _valueType ->
     SchemaCoreObject
       { properties = Map.empty,
         required = Set.empty,
@@ -669,7 +669,7 @@ mentionsSecret dataDefs visited = \case
   SemanticTypeTuple elements -> any recurse elements
   SemanticTypeUnion branches -> any recurse branches
   SemanticTypeObject fields -> any (recurse . (.parameterType)) (Map.elems fields)
-  SemanticTypeRecord -> False
+  SemanticTypeRecord valueType -> recurse valueType
   SemanticTypeFunction parameterType returnType _ ->
     recurse parameterType || recurse returnType
   -- A generic arg can carry @secret@ (e.g. @box[secret]@), so check the args

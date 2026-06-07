@@ -113,13 +113,17 @@ data SemanticType phase where
   -- @T \<: SemanticTypeObject {label: t_field}@). Convertible to / from
   -- JSON schema style records.
   SemanticTypeObject :: Map Text (Parameter phase) -> SemanticType phase
-  -- | @record@ — the homogeneous-map top: any map value (object / data /
-  -- record), keys @string@, reads yield @unknown@. Nullary (no element type):
-  -- @object \<: record@ is always sound because @record@ is the top of the map
-  -- layer. Distinct from 'SemanticTypeObject' (= statically-known field labels)
-  -- — a @record@ has a runtime-dynamic key set. A typed dictionary is a generic
-  -- @data@ instead. See docs/2026-06-06-generic-data-record-variance.md.
-  SemanticTypeRecord :: SemanticType phase
+  -- | @record[V]@ — a homogeneous map: dynamic @string@ keys, every read yields
+  -- the value type @V@ (covariant in @V@). @record[unknown]@ is the map top and
+  -- is interchangeable with the empty object @{}@. Distinct from
+  -- 'SemanticTypeObject' (statically-known field labels): an object guarantees
+  -- its named fields are present; a @record@ guarantees no specific key. The two
+  -- are therefore INCOMPARABLE except @{} ≈ record[unknown]@ — an object allows
+  -- (width) extra fields of any type, so @{a:A} \<: record[V]@ only when
+  -- @V = unknown@, and a record never guarantees a named field. The element type
+  -- @V@ makes a typed dictionary expressible directly (no wrapper @data@).
+  -- See docs/2026-06-06-generic-data-record-variance.md.
+  SemanticTypeRecord :: SemanticType phase -> SemanticType phase
 
 deriving instance Show (SemanticType phase)
 
@@ -253,7 +257,7 @@ substituteGenerics typeSubstitution effectSubstitution = go
       SemanticTypeArray element -> SemanticTypeArray (go element)
       SemanticTypeTuple elements -> SemanticTypeTuple (map go elements)
       SemanticTypeUnion branches -> unionSemantic (map go branches)
-      SemanticTypeRecord -> SemanticTypeRecord
+      SemanticTypeRecord valueType -> SemanticTypeRecord (go valueType)
       SemanticTypeObject fields -> SemanticTypeObject (Map.map (\field -> Parameter (go field.parameterType) field.optional) fields)
       SemanticTypeData qualifiedName arguments -> SemanticTypeData qualifiedName (map (substituteGenericArgument typeSubstitution effectSubstitution) arguments)
       SemanticTypeFunction parameterType returnType effect ->

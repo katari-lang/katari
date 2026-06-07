@@ -65,6 +65,14 @@ data PrimRule
     -- growing / slicing array prims (@of@ / @append@ / @concat@ / @slice@ /
     -- @reverse@) so the element type flows through to the result.
     PrimRuleArrayShape
+  | -- | @record : record[V], key : string@ — result is @V@. Extracts the value
+    -- type from the record argument (the @record.get@ analogue of
+    -- 'PrimRuleArrayGet'), so reading a @record[json]@ yields @json@.
+    PrimRuleRecordGet
+  | -- | Result is @record[V ∪ W]@: the record argument's value type @V@ joined
+    -- with the @value@ argument's type @W@ (or just @V@ when there is no
+    -- @value@). Used by @record.set@ (widen) / @record.remove@ (preserve V).
+    PrimRuleRecordSet
   deriving (Eq, Show)
 
 -- | Decode a surface @using <name>@ identifier into a 'PrimRule', or
@@ -77,6 +85,8 @@ parsePrimRule = \case
   "fstring_join" -> Just PrimRuleFstringJoin
   "array_get" -> Just PrimRuleArrayGet
   "array_shape" -> Just PrimRuleArrayShape
+  "record_get" -> Just PrimRuleRecordGet
+  "record_set" -> Just PrimRuleRecordSet
   _ -> Nothing
 
 -- | Sentinel source span for synthetic prim nodes (used by operator

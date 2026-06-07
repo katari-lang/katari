@@ -131,7 +131,7 @@ primStdlibSource =
       "primitive get_metadata(value: agent) -> agent_metadata",
       "",
       "// Dynamic dispatch. `call_agent` invokes a callable VALUE with a",
-      "// dynamically-built args record (e.g. produced by an AI), validating",
+      "// dynamically-built args value (e.g. produced by an AI), validating",
       "// the args against the target's declared input schema at runtime. The",
       "// target is taken by value — `agent(...never) -> R with E` accepts any",
       "// agent returning `R` with effect `E` (the `...never` arg makes it the",
@@ -140,8 +140,8 @@ primStdlibSource =
       "// plus `error_invalid_argument` when the args fail the schema.",
       "@\"Raised by @call_agent@ when the supplied args fail the target's input schema. Handle via @request error_invalid_argument(message) { ... }@.\"",
       "request error_invalid_argument(message: string) -> never",
-      "@\"Invoke a callable value with a runtime-built args record, validating the args against the target's input schema (specialised to the target's generics). Raises @error_invalid_argument@ on schema-invalid args. @R@ / @E@ are the target's return type / effect.\"",
-      "primitive call_agent[R, effect E](target: agent(...never) -> R with E, args: {}) -> R with E | error_invalid_argument",
+      "@\"Invoke a callable value with a runtime-built args value, validating it against the target's input schema (specialised to the target's generics) at runtime. @args@ is typed @unknown@ — the static shape is unknown (it may be AI-produced, and a spread target's parameter need not even be an object), so the only check is the runtime schema validation, which raises @error_invalid_argument@ on a mismatch. @R@ / @E@ are the target's return type / effect.\"",
+      "primitive call_agent[R, effect E](target: agent(...never) -> R with E, args: unknown) -> R with E | error_invalid_argument",
       "",
       "// Errors. `throw` is the universal recoverable-error capability:",
       "// engine prim errors, FFI-handler throws, refutable pattern misses",
@@ -179,7 +179,7 @@ primStdlibSource =
       "@\"JSON array of further `json` values.\"",
       "data json_array(items: array[json])",
       "@\"JSON object: a dynamic string-keyed map of further `json` values. `entries` is the `record` top; read with `record.get` (yields `unknown`) and match against the `json` variants.\"",
-      "data json_object(entries: record)",
+      "data json_object(entries: record[json])",
       "// The standard JSON value union. Recursive via `json_array` /",
       "// `json_object`; pattern-match on the seven constructors to discriminate.",
       "type json = json_null | json_boolean | json_integer | json_number | json_string | json_array | json_object",
@@ -198,15 +198,7 @@ jsonStdlibSource =
     [ "@\"Parse a JSON-encoded string into a `json` value. Raises `json_parse_error` on malformed input.\"",
       "primitive parse(text: string) -> json with json_parse_error",
       "@\"Serialize a `json` value to canonical JSON text. The static type rules out closures / secrets / arbitrary tagged values, so this primitive is total (no runtime error path).\"",
-      "primitive stringify(value: json) -> string",
-      "@\"Reflect a runtime value into the `json` union: string / number / boolean / null pass through, arrays and (untagged) records / objects map recursively. Use it to embed dynamic data (e.g. a model's tool arguments) into a `json` request you build in Katari. Throws if the value is (or nests) a secret, a closure, or a tagged `data` value other than a `json_*` constructor.\"",
-      "primitive of(value: unknown) -> json",
-      "@\"Look up @key@ in a JSON object, returning the child `json` (or `json_null` if @value@ is not an object or has no such key). Typed navigation that avoids unwrapping `json_object.entries` (a `record` of `unknown`) by hand.\"",
-      "primitive get(value: json, key: string) -> json",
-      "@\"Index into a JSON array, returning the element `json` (or `json_null` if @value@ is not an array or @index@ is out of range / negative).\"",
-      "primitive at(value: json, index: integer) -> json",
-      "@\"Unwrap a JSON object into a plain object value (recursively stripping the json_* tags, so nested strings / numbers become raw values). The inverse of `of` for objects — use it to turn a model's parsed tool-call arguments into the record `call_agent` dispatches with. Throws if @value@ is not a `json_object`.\"",
-      "primitive to_object(value: json) -> {}"
+      "primitive stringify(value: json) -> string"
     ]
 
 -- | The @primitive.record@ sub-module source. Users call these as
@@ -215,20 +207,20 @@ jsonStdlibSource =
 recordStdlibSource :: Text
 recordStdlibSource =
   Text.unlines
-    [ "@\"Construct an empty record.\"",
-      "primitive empty() -> record",
-      "@\"Retrieve a record entry by key. Returns null when the key is absent.\"",
-      "primitive get(record: record, key: string) -> unknown",
-      "@\"Insert or replace an entry, returning a fresh record (records are immutable).\"",
-      "primitive set(record: record, key: string, value: unknown) -> record",
-      "@\"Remove an entry by key. Returns the record unchanged when the key is absent.\"",
-      "primitive remove(record: record, key: string) -> record",
+    [ "@\"Construct an empty record (element type `never`, so it seeds a record of any value type).\"",
+      "primitive empty() -> record[never]",
+      "@\"Retrieve a record entry by key, typed as the record's value type V. Returns null when the key is absent.\"",
+      "primitive get(record: record[unknown], key: string) -> unknown using record_get",
+      "@\"Insert or replace an entry, returning a fresh record (records are immutable). The result's value type widens to include the inserted value's type.\"",
+      "primitive set(record: record[unknown], key: string, value: unknown) -> record[unknown] using record_set",
+      "@\"Remove an entry by key (value type preserved). Returns the record unchanged when the key is absent.\"",
+      "primitive remove(record: record[unknown], key: string) -> record[unknown] using record_set",
       "@\"List the keys present in the record (insertion order is not guaranteed).\"",
-      "primitive keys(record: record) -> array[string]",
+      "primitive keys(record: record[unknown]) -> array[string]",
       "@\"True if the record carries an entry under the given key.\"",
-      "primitive has(record: record, key: string) -> boolean",
+      "primitive has(record: record[unknown], key: string) -> boolean",
       "@\"Number of entries in the record.\"",
-      "primitive size(record: record) -> integer"
+      "primitive size(record: record[unknown]) -> integer"
     ]
 
 -- | The @primitive.array@ sub-module source. Users call these as

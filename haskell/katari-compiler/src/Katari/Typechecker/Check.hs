@@ -502,9 +502,15 @@ elaborateTypeOrEffect = \case
     pure (AsType SemanticTypeUnknown)
   TypeApplication TypeApplicationTypeNode {applicationHead, applicationArguments, sourceSpan} ->
     case applicationHead of
-      -- @array[T]@ — the only built-in type constructor.
+      -- @array[T]@ — a built-in type constructor.
       TypeArray _ -> case applicationArguments of
         [elementType] -> AsType . SemanticTypeArray <$> elaborateType elementType
+        _ -> do
+          emitError (CheckErrorTypeArgArity sourceSpan 1 (length applicationArguments))
+          pure (AsType SemanticTypeUnknown)
+      -- @record[V]@ — the homogeneous map applied to its value type.
+      TypeRecord _ -> case applicationArguments of
+        [valueType] -> AsType . SemanticTypeRecord <$> elaborateType valueType
         _ -> do
           emitError (CheckErrorTypeArgArity sourceSpan 1 (length applicationArguments))
           pure (AsType SemanticTypeUnknown)
@@ -537,7 +543,7 @@ elaborateTypeOrEffect = \case
   TypeNever _ -> pure (AsType SemanticTypeNever)
   TypeUnknown _ -> pure (AsType SemanticTypeUnknown)
   TypeFunctionAny _ -> pure (AsType SemanticTypeFunctionAny)
-  TypeRecord _ -> pure (AsType SemanticTypeRecord)
+  TypeRecord _ -> pure (AsType (SemanticTypeRecord SemanticTypeUnknown))
   TypeObject ObjectTypeNode {fields} ->
     -- An optional field @l?: T@ widens to @null | T@ (an absent / null value is
     -- admissible), mirroring the @x ?: T@ parameter desugaring.
@@ -640,10 +646,18 @@ subtypeAssert sourceSpan actual expected
 -- | Check an expression against an expected type: synthesise it, then assert
 -- the synthesised type is a subtype of the expectation.
 checkExpr :: Expression Identified -> SemanticType Resolved -> Check (Expression Zonked)
-checkExpr expression expected = do
-  (zonked, actual) <- synthExpr expression
-  subtypeAssert (sourceSpanOf expression) actual expected
-  pure zonked
+checkExpr expression expected = case (expression, expected) of
+  -- A `{ k = v }` literal denotes an object by default, but an object and a
+  -- `record[V]` are incomparable; when the expected type IS a `record[V]`, the
+  -- literal elaborates AS that record (each value checked against V). So the
+  -- same syntax builds an object or a record, decided by the expected type.
+  (ExpressionRecord RecordExpression {entries, sourceSpan}, SemanticTypeRecord valueType) -> do
+    walked <- mapM (\(label, valueExpression) -> (,) label <$> checkExpr valueExpression valueType) entries
+    pure (ExpressionRecord RecordExpression {entries = walked, sourceSpan = sourceSpan, typeOf = SemanticTypeRecord valueType})
+  _ -> do
+    (zonked, actual) <- synthExpr expression
+    subtypeAssert (sourceSpanOf expression) actual expected
+    pure zonked
 
 -- | Synthesise an expression's type bottom-up, producing the zonked node.
 synthExpr :: Expression Identified -> Check (Expression Zonked, SemanticType Resolved)
@@ -758,7 +772,7 @@ synthCall CallExpression {callee, arguments, spreadArgument, sourceSpan} = do
           result
         )
     Nothing -> do
-      walkedArgs <- mapM walkCallArgument arguments
+      walkedArgs <- mapM (\callArgument -> walkCallArgument (calleeParamType calleeType callArgument.label.text) callArgument) arguments
       let arguments' = map fst walkedArgs
           argTypes = Map.fromList [(label, argType) | (_, (label, argType)) <- walkedArgs]
       primRule <- calleePrimRule callee
@@ -837,9 +851,22 @@ applyTypeArgument sourceSpan (genericsId, kind, bound) argument = case kind of
     argEffect <- elaborateTypeOrEffect argument >>= expectEffect (sourceSpanOf argument)
     pure (Right (genericsId, argEffect))
 
-walkCallArgument :: CallArgument Identified -> Check (CallArgument Zonked, (Text, SemanticType Resolved))
-walkCallArgument CallArgument {label, value, sourceSpan} = do
-  (value', valueType) <- synthExpr value
+-- | The callee's declared type for parameter @label@ (used to flow an expected
+-- type into the argument, e.g. so a @{ k = v }@ literal checks as a @record[V]@).
+calleeParamType :: SemanticType Resolved -> Text -> Maybe (SemanticType Resolved)
+calleeParamType calleeType label = case calleeType of
+  SemanticTypeFunction (SemanticTypeObject fields) _ _ -> (.parameterType) <$> Map.lookup label fields
+  _ -> Nothing
+
+walkCallArgument :: Maybe (SemanticType Resolved) -> CallArgument Identified -> Check (CallArgument Zonked, (Text, SemanticType Resolved))
+walkCallArgument expectedParam CallArgument {label, value, sourceSpan} = do
+  -- A record literal flows its expected @record[V]@ in (bidirectional), so it
+  -- elaborates AS a record; everything else is synthesised bottom-up.
+  (value', valueType) <- case (value, expectedParam) of
+    (ExpressionRecord _, Just expected@(SemanticTypeRecord _)) -> do
+      zonked <- checkExpr value expected
+      pure (zonked, expected)
+    _ -> synthExpr value
   pure (CallArgument {label = retagNameRef label, value = value', sourceSpan = sourceSpan}, (label.text, valueType))
 
 -- | Does the callee resolve to a prim with a special result rule?
@@ -908,6 +935,11 @@ applyPrimRule rule argTypes sourceSpan =
                     maybe [] pure (Map.lookup "value" argTypes)
                   ]
            in pure (SemanticTypeArray (unionSemantic elements))
+        PrimRuleRecordGet -> pure (recordValueType (arg "record"))
+        PrimRuleRecordSet ->
+          let existing = recordValueType (arg "record")
+              added = maybe [] pure (Map.lookup "value" argTypes)
+           in pure (SemanticTypeRecord (unionSemantic (existing : added)))
         PrimRuleSimple -> pure SemanticTypeUnknown
 
 -- ---------------------------------------------------------------------------
@@ -1537,6 +1569,15 @@ seqElementType = \case
   SemanticTypeUnion branches -> unionSemantic (map seqElementType branches)
   _ -> SemanticTypeUnknown
 
+-- | The value type @V@ of a @record[V]@ argument (the @record.get@ / @record.set@
+-- element). An object coerces to @record[unknown]@, so a non-record argument
+-- reads as @unknown@.
+recordValueType :: SemanticType Resolved -> SemanticType Resolved
+recordValueType = \case
+  SemanticTypeRecord valueType -> valueType
+  SemanticTypeUnion branches -> unionSemantic (map recordValueType branches)
+  _ -> SemanticTypeUnknown
+
 -- | The type of field @label@ read from a map-layer (object / data / record)
 -- subject. A missing field on an object / data is a hard error.
 fieldType :: SourceSpan -> SemanticType Resolved -> Text -> Check (SemanticType Resolved)
@@ -1546,7 +1587,8 @@ fieldType sourceSpan subject label = case subject of
     -- at elaboration), so the read type is just the field type.
     Just field -> pure field.parameterType
     Nothing -> missing
-  SemanticTypeRecord -> pure SemanticTypeUnknown
+  -- A read off @record[V]@ yields its value type @V@ (any key).
+  SemanticTypeRecord valueType -> pure valueType
   SemanticTypeData qualifiedName arguments ->
     constructorFieldTypes (Just qualifiedName) >>= \fields ->
       case Map.lookup label fields of

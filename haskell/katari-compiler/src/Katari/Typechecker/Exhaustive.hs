@@ -286,7 +286,7 @@ getSubFieldTypes tag columnType env = case tag of
     _ -> replicate n SemanticTypeUnknown
   CtorTagType narrowTag -> [typePatternTagToResolved narrowTag]
   CtorTagRecordKeys keys -> case columnType of
-    SemanticTypeRecord -> replicate (length keys) SemanticTypeUnknown
+    SemanticTypeRecord valueType -> replicate (length keys) valueType
     -- An object pattern over an object subject can read each key's declared
     -- field type; missing keys (width subtyping) fall back to 'unknown'.
     SemanticTypeObject fields ->
@@ -368,7 +368,7 @@ tagCompatibleWithType tag ty env = case ty of
       -- particular data is a subtype of the object; an over-broad
       -- reachability only ever misses a warning, never raises a false error.
       SemanticTypeObject _ -> True
-      SemanticTypeRecord -> True
+      SemanticTypeRecord _ -> True
       _ -> False
     -- Runtime type-guard patterns are always compatible: the guard runs
     -- at runtime against any value, narrowing from whatever the static
