@@ -1,9 +1,0 @@
-@"Adds two integers."
-agent sum_two(a: integer, b: integer) -> integer {
-  a + b
-}
-
-@"Returns the sum of 2 and 3 (= 5)."
-agent main() -> integer {
-  sum_two(a = 2, b = 3)
-}

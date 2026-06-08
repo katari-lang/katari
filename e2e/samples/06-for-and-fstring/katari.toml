@@ -1,7 +1,0 @@
-[package]
-name = "for_and_fstring"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

@@ -1,7 +1,0 @@
-[package]
-name = "blob_echo"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

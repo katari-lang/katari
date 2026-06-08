@@ -1,7 +1,0 @@
-[package]
-name = "runtime_error"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

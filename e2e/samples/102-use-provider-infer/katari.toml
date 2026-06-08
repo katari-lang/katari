@@ -1,7 +1,0 @@
-[package]
-name = "use_provider_infer"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

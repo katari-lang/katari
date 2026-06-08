@@ -1,6 +1,0 @@
-@"Demonstrates object literals widening to the record top + the record.* primitives. Builds a small record, inserts a new entry, and returns its size."
-agent main() -> integer {
-  let user = { name = "alice", age = 30 }
-  let with_city = record.set(record = user, key = "city", value = "tokyo")
-  record.size(record = with_city)
-}

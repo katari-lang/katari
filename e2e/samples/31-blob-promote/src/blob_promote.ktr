@@ -1,6 +1,0 @@
-@"Force a >4KB string so the runtime promotes it to a blob ref at the producing prim (string.join), then read it back — string.length materializes the ref. Result 5000 proves promote -> store -> materialize round-trips through the real value store."
-agent main() -> integer {
-  let chunks = for (let _i in array.range(count = 500)) { next "xxxxxxxxxx" }
-  let big = string.join(parts = chunks, separator = "")
-  string.length(value = big)
-}
