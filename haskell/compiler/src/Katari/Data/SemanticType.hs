@@ -8,56 +8,57 @@ import Katari.Data.QualifiedName (QualifiedName)
 
 data FieldInfomation where
   FieldInfomation ::
-    { name :: Text,
+    { semanticType :: SemanticType,
       optional :: Bool
     } ->
     FieldInfomation
   deriving (Eq, Ord, Show)
 
-data SemanticTypeBase where
-  SemanticTypeBaseNever :: SemanticTypeBase
-  SemanticTypeBaseUnknown :: SemanticTypeBase
-  SemanticTypeBaseNull :: SemanticTypeBase
-  SemanticTypeBaseInteger :: SemanticTypeBase
-  SemanticTypeBaseNumber :: SemanticTypeBase
-  SemanticTypeBaseString :: SemanticTypeBase
-  SemanticTypeBaseBoolean :: SemanticTypeBase
-  SemanticTypeBaseFile :: SemanticTypeBase
-  SemanticTypeBaseAgent :: SemanticTypeBase
-  SemanticTypeBaseArray :: SemanticType -> SemanticTypeBase
-  SemanticTypeBaseTuple :: List SemanticType -> SemanticTypeBase
-  SemanticTypeBaseData :: QualifiedName -> Map GenericId SemanticGenericArgument -> SemanticTypeBase
-  SemanticTypeBaseObject :: Map Text FieldInfomation -> SemanticTypeBase
-  SemanticTypeBaseRecord :: SemanticType -> SemanticTypeBase
-  SemanticTypeBaseGeneric :: GenericId -> SemanticTypeBase
+data SemanticType where
+  SemanticTypeNever :: SemanticType
+  SemanticTypeUnknown :: SemanticType
+  SemanticTypeNull :: SemanticType
+  SemanticTypeInteger :: SemanticType
+  SemanticTypeNumber :: SemanticType
+  SemanticTypeString :: SemanticType
+  SemanticTypeBoolean :: SemanticType
+  SemanticTypeFile :: SemanticType
+  SemanticTypeAgent :: SemanticType -> SemanticType -> SemanticEffect -> SemanticType
+  SemanticTypeArray :: SemanticType -> SemanticType
+  SemanticTypeTuple :: List SemanticType -> SemanticType
+  SemanticTypeData :: QualifiedName -> Map Text SemanticGenericArgument -> SemanticType
+  SemanticTypeObject :: Map Text FieldInfomation -> SemanticType
+  SemanticTypeRecord :: SemanticType -> SemanticType
+  SemanticTypeUnion :: List SemanticType -> SemanticType
+  SemanticTypeGeneric :: GenericId -> SemanticType
+  SemanticTypeAttribute :: SemanticType -> SemanticAttribute -> SemanticType
   deriving (Eq, Ord, Show)
 
--- | Coeffect: Public (default) <: Private
---   Public values cannot assign to agent parameters with private coeffects.
+-- | Attribute: Public (default) <: Private
+--   Public values cannot assign to agent parameters with private attributes.
 --   let x : number of public = secret -- Error
 --   let y : number of private = non_secret -- OK
-data SemanticCoeffect where
-  SemanticCoeffectPublic :: SemanticCoeffect -- Public Value (default)
-  SemanticCoeffectPrivate :: SemanticCoeffect -- Private Value
-  SemanticCoeffectUnion :: SemanticCoeffect -> SemanticCoeffect -> SemanticCoeffect -- Union of coeffects
-  SemanticCoeffectGeneric :: GenericId -> SemanticCoeffect -- Generic coeffect
+data SemanticAttribute where
+  SemanticAttributePublic :: SemanticAttribute -- Public Value (default)
+  SemanticAttributePrivate :: SemanticAttribute -- Private Value
+  SemanticAttributeUnion :: List SemanticAttribute -> SemanticAttribute -- Union of attributes
+  SemanticAttributeGeneric :: GenericId -> SemanticAttribute -- Generic attribute
   deriving (Eq, Ord, Show)
 
 data SemanticEffect where
   SemanticEffectPure :: SemanticEffect
   SemanticEffectAny :: SemanticEffect
-  SemanticEffectRequest :: QualifiedName -> Map GenericId SemanticGenericArgument -> SemanticEffect
-  SemanticEffectUnion :: SemanticEffect -> SemanticEffect -> SemanticEffect
+  SemanticEffectRequest :: QualifiedName -> Map Text SemanticGenericArgument -> SemanticEffect
+  SemanticEffectUnion :: List SemanticEffect -> SemanticEffect
+  -- | {...(eff expr), req1[generics], req2[generics]}
+  -- Union:  req1[int] | req1[string] ~> req1[int | string]  (if covariant)
+  -- Overwrite: {...req1[int], req1[string]} ~> req1[string]
+  SemanticEffectOverwrite :: SemanticEffect -> List (QualifiedName, Map Text SemanticGenericArgument) -> SemanticEffect
   SemanticEffectGeneric :: GenericId -> SemanticEffect
-  deriving (Eq, Ord, Show)
-
--- | Expected syntax : type of coeffect
-data SemanticType where
-  SemanticType :: SemanticTypeBase -> SemanticCoeffect -> SemanticType
   deriving (Eq, Ord, Show)
 
 data SemanticGenericArgument where
   SemanticGenericArgumentType :: SemanticType -> SemanticGenericArgument
   SemanticGenericArgumentEffect :: SemanticEffect -> SemanticGenericArgument
-  SemanticGenericArgumentCoeffect :: SemanticCoeffect -> SemanticGenericArgument
+  SemanticGenericArgumentAttribute :: SemanticAttribute -> SemanticGenericArgument
   deriving (Eq, Ord, Show)

@@ -1,6 +1,7 @@
 module Katari.Data.Environment where
 
 import Data.Map (Map)
+import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.Id (GenericId)
 import Katari.Data.QualifiedName (QualifiedName)
@@ -10,10 +11,13 @@ type DataEnvironment typeShape = Map QualifiedName (DataInfo typeShape)
 
 type RequestEnvironment typeShape = Map QualifiedName (RequestInfo typeShape)
 
+type GenericBoundEnvironment typeShape = Map GenericId typeShape
+
 data DataInfo typeShape = DataInfo
   { name :: QualifiedName,
-    genericParameter :: List GenericId,
-    variance :: Map GenericId Variance,
+    genericParameter :: List Text,
+    genericAssignment :: Map Text GenericId,
+    variance :: Map Text Variance,
     -- | The shape of constructor
     -- Ex)
     -- data foo(x: number) ~> {x: number}
@@ -24,8 +28,9 @@ data DataInfo typeShape = DataInfo
 
 data RequestInfo typeShape = RequestInfo
   { name :: QualifiedName,
-    genericParameter :: List GenericId,
-    variance :: Map GenericId Variance,
+    genericParameter :: List Text,
+    genericAssignment :: Map Text GenericId,
+    variance :: Map Text Variance,
     request :: (typeShape, typeShape) -- (request parameter, request return type)
   }
   deriving (Eq, Show)

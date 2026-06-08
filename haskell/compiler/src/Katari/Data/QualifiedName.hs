@@ -2,6 +2,7 @@ module Katari.Data.QualifiedName where
 
 import Data.Aeson (ToJSON (..), Value (String))
 import Data.Text (Text)
+import Data.Text.Prettyprint.Doc.Render.Tutorials.StackMachineTutorial (render)
 import GHC.Generics (Generic)
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
 
@@ -13,4 +14,7 @@ data QualifiedName = QualifiedName
   deriving (Eq, Ord, Show, Generic)
 
 instance ToJSON QualifiedName where
-  toJSON qualifiedName = String $ renderModuleName qualifiedName.module_ <> "." <> qualifiedName.name
+  toJSON qualifiedName = String $ renderQualifiedName qualifiedName
+
+renderQualifiedName :: QualifiedName -> Text
+renderQualifiedName qualifiedName = renderModuleName qualifiedName.module_ <> "." <> qualifiedName.name

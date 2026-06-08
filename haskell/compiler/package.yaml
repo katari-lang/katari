@@ -43,6 +43,7 @@ library:
     - Katari.Data.QualifiedName
     - Katari.Data.Environment
     - Katari.Data.NormalizedType
+    - Katari.Data.Environment
 
 tests:
   compiler-test:
