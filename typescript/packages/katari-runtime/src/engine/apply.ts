@@ -16,10 +16,12 @@ import type { IRModule } from "../ir/types.js";
 import { CORE_ENDPOINT, type Endpoint, endpoint } from "./endpoint.js";
 import type { Event } from "./event.js";
 import { collectGarbage, shouldGc } from "./gc.js";
+import { createEntityId, type EntityId } from "./id.js";
 import type { Result } from "./result.js";
 import { drive } from "./runner.js";
 import type { State } from "./state.js";
 import type { RefFetcher, RefPutter } from "./step-ctx.js";
+import type { CoreStore } from "./store.js";
 
 const DEFAULT_FFI_ENDPOINT = endpoint("ext://ffi");
 const DEFAULT_ENV_ENDPOINT = endpoint("ext://env");
@@ -35,16 +37,16 @@ export function createState(
     envEndpoint?: Endpoint;
     /** Snapshot this shard runs. Stamped into closures created here. */
     snapshot?: string;
+    /** The entity this shard runs as (`shardId = E`). A fresh id when omitted. */
+    selfEntity?: EntityId;
   } = {},
 ): State {
   return {
     selfEndpoint: options.selfEndpoint ?? CORE_ENDPOINT,
+    selfEntity: options.selfEntity ?? createEntityId(),
     irModule,
     snapshot: options.snapshot ?? "",
     threads: {},
-    scopes: {},
-    closures: {},
-    nextClosureId: 0,
     delegations: {},
     pendingDelegateOut: {},
     delegationSenders: {},
@@ -52,7 +54,6 @@ export function createState(
     ffiTargetEndpoint: options.ffiEndpoint ?? DEFAULT_FFI_ENDPOINT,
     envTargetEndpoint: options.envEndpoint ?? DEFAULT_ENV_ENDPOINT,
     lastGcScopeCount: 0,
-    scopeCount: 0,
     threadCount: 0,
   };
 }
@@ -73,14 +74,15 @@ export function createState(
  */
 export async function applyEvent(
   state: State,
+  store: CoreStore,
   event: Event,
   fetchRef?: RefFetcher,
   putRef?: RefPutter,
 ): Promise<Result> {
-  const driven = await drive(state, event, fetchRef, putRef);
-  // drive() mutates `state` in place and returns the same reference.
-  if (shouldGc(driven.state)) {
-    collectGarbage(driven.state);
+  const driven = await drive(state, store, event, fetchRef, putRef);
+  // drive() mutates `state` + `store` in place and returns the same references.
+  if (shouldGc(driven.state, store)) {
+    collectGarbage(driven.state, store);
   }
   return {
     state: driven.state,

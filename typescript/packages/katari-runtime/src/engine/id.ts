@@ -20,13 +20,16 @@ export type EscalationId = string & { readonly __brand: "EscalationId" };
 export type EntityId = string & { readonly __brand: "EntityId" };
 
 /**
- * ClosureId: machine-local identifier for a closure record stored in
- * `state.closures`. Allocated by `statementMakeClosure` execution. Closures
- * are first-class runtime objects (rather than inlined into `Value`) so
- * agent calls via closure can reference them by id, and so the GC can
- * collect them when no live `Value` holds a closure reference.
+ * ClosureId: machine-local identifier for a closure record held in the
+ * CORE-global closure store (one store per project actor, owned by an entity —
+ * see docs/2026-06-08-scope-closure-entity.md). Minted by `statementMakeClosure`
+ * execution. A closure VALUE is `{ kind: "closure", closureId }`: a machine-local
+ * handle (a UUID, so it is globally unique across the project's shards and stays
+ * stable across persistence + the wire `closure:<id>` form). The content-
+ * addressed `{ ref }` blob form is gone from live values; it survives only as the
+ * at-rest serialised form.
  */
-export type ClosureId = number & { readonly __brand: "ClosureId" };
+export type ClosureId = string & { readonly __brand: "ClosureId" };
 
 /**
  * AskId: per-asker counter that pairs an `ask` with its eventual `askAck`.
@@ -65,4 +68,8 @@ export function createEscalationId(): EscalationId {
 
 export function createEntityId(): EntityId {
   return crypto.randomUUID() as EntityId;
+}
+
+export function createClosureId(): ClosureId {
+  return crypto.randomUUID() as ClosureId;
 }

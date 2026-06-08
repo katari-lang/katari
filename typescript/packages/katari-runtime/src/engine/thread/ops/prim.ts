@@ -15,7 +15,6 @@
 
 import { encodeCoreAgentDefId } from "../../../agent-def-id.js";
 import type { AgentBlock, BlockId, QualifiedName } from "../../../ir/types.js";
-import { decodeClosureBlob } from "../../closure-codec.js";
 import { RecoverableEngineError } from "../../errors.js";
 import { fillGenericSchema, fillRequestsSchema } from "../../generics.js";
 import type { AskId, CallId } from "../../id.js";
@@ -232,21 +231,25 @@ async function resolveCallableMetadata(ctx: StepCtx, value: Value): Promise<Call
       };
     }
     case "closure": {
-      // The closure is self-describing: its blob carries the body block's
-      // compiled schema, so we fetch + read it without resolving the block
-      // against an IR. The `id` is informational (re-dispatch is by the value).
-      const content = decodeClosureBlob(await ctx.materialize(value.ref));
-      const m = content.metadata;
+      // Resolve the closure record from the CORE-global store and read its body
+      // block's compiled schema from the IR (a run tree is single-snapshot, so
+      // the body block lives in this shard's IR). `id` is the closure value's
+      // wire form (`closure:<closureId>`).
+      const record = ctx.store.closures[value.closureId];
+      if (record === undefined) {
+        throw new RecoverableEngineError(
+          `prim get_metadata: closure ${value.closureId} not found (its owner entity may have been released)`,
+        );
+      }
+      const block = requireAgentBlock(ctx, record.blockId, `closure:${value.closureId}`);
       return {
-        name: m.name,
-        description: m.description,
-        inputSchema: m.inputSchema,
-        outputSchema: m.outputSchema,
-        requestsSchema: m.requestsSchema,
-        // The dispatch handle, identical to the closure value's wire form +
-        // delegate target — `closureref:<ref id>` (cf. a top-level agent's
-        // `id` = its qname). The ref id, not the content hash.
-        id: encodeCoreAgentDefId({ kind: "closureRef", id: value.ref.id }),
+        name: block.name,
+        description: block.description,
+        inputSchema: block.inputSchema,
+        outputSchema: block.outputSchema,
+        requestsSchema: block.requestsSchema,
+        // The dispatch handle, identical to the closure value's wire form.
+        id: encodeCoreAgentDefId({ kind: "closure", value: value.closureId }),
       };
     }
     default:

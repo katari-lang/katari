@@ -5,21 +5,22 @@
 // flows on the bus and inside an agent VALUE) and an INTERNAL form (the bare
 // user-defined name, which lives per-snapshot inside the IR and the sidecar).
 //
-// **Wire format**: a flat string, one of three CORE flavours:
+// **Wire format**: a flat string, one of two CORE flavours:
 //   - `"main.foo@<snapshot>"` — a top-level callable in its EXTERNAL form. The
 //     `@snapshot` says which IR version to run (a bare `"main.foo"` is the
 //     internal id and is ambiguous on the wire — delegating one fails). It is
 //     stamped in exactly two places: DelegateThread (a CORE/FFI delegate target)
 //     and the front-end / API entry (building the id from a name + snapshot).
-//   - `"closureref:<ref id>"` — a closure crossing a shard boundary, dispatched
-//     by its content-ref id (CORE fetches the blob + materializes it; the
-//     snapshot rides inside the blob, so no `@` stamp).
-//   - `"closure:N"` — the engine-allocated in-shard dispatch id. CORE-INTERNAL
-//     only: CORE rewrites an inbound `closureref:` to this for the new shard's
-//     own dispatch; it never crosses the bus, the schema, or `get_metadata`.
-// The wire callable forms a value / `get_metadata.id` / the JSON-Schema `$agent`
-// string carry are the first two (`qname@snapshot` | `closureref:<id>`) — the
-// same string flows end-to-end through CORE / FFI / API / sidecar / AI tool calls.
+//   - `"closure:<closureId>"` — a closure, dispatched by its machine-local id
+//     (a UUID) into the CORE-global closure store. A CORE-internal closure call
+//     never emits a delegate (the call site spawns the body in-shard over the
+//     captured scope); this wire form appears in a closure VALUE / `get_metadata.id`
+//     / the JSON-Schema `$agent` carry, and on a cross-entity callback delegate
+//     (e.g. FFI invoking a closure it received). The snapshot rides on the
+//     closure record (not an `@` stamp). The id is process-local: a closure is
+//     re-invocable only while its owner entity is alive in this project actor.
+// Both callable wire forms (`qname@snapshot` | `closure:<id>`) flow end-to-end
+// through CORE / FFI / API / sidecar / AI tool calls.
 //
 // **Branding**: each module owns its own opaque type wrapper around the
 // raw string. `encodeCoreAgentDefId` / `encodeFfiAgentDefId` are the
@@ -36,11 +37,9 @@
 import type { ClosureId } from "./engine/id.js";
 import type { QualifiedName } from "./ir/types.js";
 
+// `:` is not a valid character in a Katari identifier (qname segments are
+// `[A-Za-z_][A-Za-z0-9_]*`), so this prefix can never collide with a real qname.
 const CLOSURE_PREFIX = "closure:";
-// A closure that has escaped its home shard is dispatched by its content ref
-// (the captured env lives in a value-store blob — see closure-codec). `:` after
-// `closureref` keeps it from ever matching the bare `closure:` prefix.
-const CLOSURE_REF_PREFIX = "closureref:";
 
 /**
  * Qualified name of the language built-in `throw` request. This is Katari
@@ -65,15 +64,12 @@ export type AgentDefId = string & { readonly __brand: "AgentDefId" };
 
 // ─── CORE encoding / decoding ──────────────────────────────────────────────
 
-/** CORE module knows three flavours: a top-level callable's qname, an
- * engine-allocated (in-shard) closure id, or a content-addressed closure ref —
- * a closure crossing a shard boundary, identified by just its ref id (`module`
- * is invariably `core`; `hash`/`size` live in the ref store keyed by that id,
- * and the snapshot rides inside the blob, not as a separate `@` stamp). */
+/** CORE module knows two flavours: a top-level callable's qname (snapshot-
+ * stamped on the wire), or a closure's machine-local id (a UUID) into the
+ * CORE-global closure store (the snapshot rides on the closure record). */
 export type CoreAgentDefId =
   | { kind: "qname"; value: QualifiedName; snapshot?: string }
-  | { kind: "closure"; value: ClosureId }
-  | { kind: "closureRef"; id: string };
+  | { kind: "closure"; value: ClosureId };
 
 // `@` separates a qname from the snapshot it runs on. Safe: `@` appears in
 // neither qname segments (`[A-Za-z_][A-Za-z0-9_]*`), snapshot UUIDs, nor the
@@ -88,9 +84,6 @@ export function encodeCoreAgentDefId(value: CoreAgentDefId): AgentDefId {
   if (value.kind === "closure") {
     return (CLOSURE_PREFIX + String(value.value)) as AgentDefId;
   }
-  if (value.kind === "closureRef") {
-    return (CLOSURE_REF_PREFIX + value.id) as AgentDefId;
-  }
   return (
     value.snapshot !== undefined ? `${value.value}${SNAPSHOT_SEP}${value.snapshot}` : value.value
   ) as AgentDefId;
@@ -101,15 +94,12 @@ export function decodeCoreAgentDefId(id: AgentDefId): CoreAgentDefId {
   if (typeof s !== "string") {
     throw new Error(`agent-def-id: invalid CORE encoding: ${JSON.stringify(id)}`);
   }
-  if (s.startsWith(CLOSURE_REF_PREFIX)) {
-    return { kind: "closureRef", id: s.slice(CLOSURE_REF_PREFIX.length) };
-  }
   if (s.startsWith(CLOSURE_PREFIX)) {
-    const n = Number(s.slice(CLOSURE_PREFIX.length));
-    if (!Number.isInteger(n) || n < 0) {
+    const closureId = s.slice(CLOSURE_PREFIX.length);
+    if (closureId === "") {
       throw new Error(`agent-def-id: malformed closure id: ${JSON.stringify(s)}`);
     }
-    return { kind: "closure", value: n as ClosureId };
+    return { kind: "closure", value: closureId as ClosureId };
   }
   const at = s.indexOf(SNAPSHOT_SEP);
   if (at >= 0) {
@@ -138,7 +128,7 @@ export function decodeFfiAgentDefId(id: AgentDefId): FfiAgentDefId {
   if (typeof s !== "string") {
     throw new Error(`agent-def-id: invalid FFI encoding: ${JSON.stringify(id)}`);
   }
-  if (s.startsWith(CLOSURE_PREFIX) || s.startsWith(CLOSURE_REF_PREFIX)) {
+  if (s.startsWith(CLOSURE_PREFIX)) {
     throw new Error(
       `agent-def-id: FFI received a closure-form AgentDefId (${JSON.stringify(s)}); FFI agents are dispatched by qname only`,
     );
@@ -160,8 +150,8 @@ export function decodeFfiAgentDefId(id: AgentDefId): FfiAgentDefId {
 //   - FFI strips it before talking to the sidecar (whose handler registry is
 //     keyed by the bare qname — the sidecar already IS the right snapshot's
 //     code) and stamps its own snapshot on a CORE child the ext spawns.
-// Closures never carry a snapshot (they run in the enclosing scope), so all
-// three pass a closure id through unchanged.
+// Closures carry no `@` stamp (the snapshot rides on the closure record), so
+// these helpers pass a closure id through unchanged.
 
 /** The snapshot a snapshot-dependent delegate target runs on, or `undefined`
  *  for a bare qname / closure. */
@@ -177,10 +167,8 @@ export function stripAgentDefIdSnapshot(id: AgentDefId): AgentDefId {
   return encodeCoreAgentDefId({ kind: "qname", value: decoded.value });
 }
 
-/** The ref id of a closure-ref agent def id, or `undefined` for any other form.
- *  CORE uses this on an inbound delegate to decide the materialize path (fetch
- *  the closure blob by `(core, id)`). */
-export function agentDefIdClosureRef(id: AgentDefId): string | undefined {
+/** The closure id of a closure-form agent def id, or `undefined` otherwise. */
+export function agentDefIdClosure(id: AgentDefId): ClosureId | undefined {
   const decoded = decodeCoreAgentDefId(id);
-  return decoded.kind === "closureRef" ? decoded.id : undefined;
+  return decoded.kind === "closure" ? decoded.value : undefined;
 }

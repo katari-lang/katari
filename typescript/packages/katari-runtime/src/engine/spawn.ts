@@ -10,13 +10,13 @@ import type { Block, BlockId } from "../ir/types.js";
 import {
   type CallId,
   createDelegationId,
-  createScopeId,
   createThreadId,
   type DelegationId,
   type ScopeId,
   type ThreadId,
 } from "./id.js";
 import type { StepCtx } from "./step-ctx.js";
+import { allocScope } from "./store.js";
 import { newCommonFields, setChild } from "./thread/common.js";
 import type { Thread } from "./thread/types.js";
 import { NULL_VALUE, type Value } from "./value.js";
@@ -59,20 +59,15 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
     throw new Error(`engine.spawnChild: parent ${args.parentId} not found`);
   }
 
-  // Allocate the child scope. `isolated` → null parent, `inline` →
-  // caller's scope, `captured` → captured scope.
-  const newScopeId = createScopeId();
+  // Allocate the child scope in the CORE-global store, owned by this shard's
+  // entity. `isolated` → null parent, `inline` → caller's scope, `captured` →
+  // captured scope.
   const parentScopeId = match(args.scopeMode)
     .with({ mode: "isolated" }, () => null as ScopeId | null)
     .with({ mode: "inline" }, (m) => m.parentScopeId)
     .with({ mode: "captured" }, (m) => m.capturedScopeId)
     .exhaustive();
-  ctx.state.scopes[newScopeId] = {
-    id: newScopeId,
-    parentId: parentScopeId,
-    values: {},
-  };
-  ctx.state.scopeCount++;
+  const newScopeId = allocScope(ctx.store, parentScopeId, ctx.state.selfEntity);
 
   const newThreadId = createThreadId();
   const common = newCommonFields({
@@ -197,78 +192,44 @@ export function spawnChild(ctx: StepCtx, args: SpawnArgs): ThreadId {
   return newThreadId;
 }
 
-// ─── MakeClosureThread (closure literal) ──────────────────────────────────
-
-export type SpawnMakeClosureArgs = {
-  parentId: ThreadId;
-  parentCallId: CallId;
-  /** Body block (BlockAgent) the closure runs. */
-  blockId: BlockId;
-  /** Scope chain to capture (= the spawning thread's scope). */
-  capturedScopeId: ScopeId;
-  /** Var the closure binds itself to (self-reference). */
-  selfVar: number;
-};
-
-/**
- * Spawn a MakeClosureThread for a `StatementMakeClosure`. Unlike spawnChild
- * this is not block-kind-driven (the body block is a BlockAgent, which
- * spawnChild rejects — agents are reached only via delegation). The thread
- * does not run statements, so it reuses the captured scope as its own scopeId
- * (no fresh scope allocated) and just serializes it in `create`.
- */
-export function spawnMakeClosure(ctx: StepCtx, args: SpawnMakeClosureArgs): ThreadId {
-  const parent = ctx.state.threads[args.parentId] as Thread | undefined;
-  if (parent === undefined) {
-    throw new Error(`engine.spawnMakeClosure: parent ${args.parentId} not found`);
-  }
-  const newThreadId = createThreadId();
-  const common = newCommonFields({
-    id: newThreadId,
-    parent: args.parentId,
-    parentCallId: args.parentCallId,
-    scopeId: args.capturedScopeId,
-  });
-  const thread: Thread = {
-    ...common,
-    kind: "makeClosure",
-    blockId: args.blockId,
-    capturedScopeId: args.capturedScopeId,
-    selfVar: args.selfVar,
-  };
-  ctx.state.threads[newThreadId] = thread;
-  ctx.state.threadCount++;
-  setChild(parent, args.parentCallId, newThreadId);
-  ctx.enqueue({ kind: "create", threadId: newThreadId });
-  return newThreadId;
-}
-
-// ─── AgentThread + DelegateThread (delegation boundary) ───────────────────
+// ─── AgentThread (delegation boundary / in-shard closure body) ─────────────
 
 export type SpawnAgentRootArgs = {
   blockId: BlockId;
   argument: Value | undefined;
   delegationId: DelegationId;
   /**
-   * Optional parent scope. When set, the new agent's scope inherits from
-   * it — used for closure-based dispatch so the body can see captured
-   * locals. Top-level qualifiedName dispatch leaves it null and the agent
-   * runs in a fresh isolated scope.
+   * Optional parent scope. When set, the new agent's scope inherits from it —
+   * used for closure dispatch so the body sees captured locals. Top-level
+   * qualifiedName dispatch leaves it null and the agent runs isolated.
    */
-  capturedScopeId?: import("./id.js").ScopeId | null;
+  capturedScopeId?: ScopeId | null;
   /**
    * The activation's ambient generic substitution (from the inbound delegate's
    * `generics`), recorded on the agent's root scope for `statementApplyGenerics`
    * inside the body to resolve `foo[T]` placeholders against.
    */
   ambientGenerics?: Record<string, import("../json.js").Json>;
+  /**
+   * For an IN-SHARD closure call (the hot path): the call-site thread + callId
+   * that this agent body answers to, so it is a NON-root agent (its `return`
+   * proxies up the local tree to the lexical target, and its requests bubble to
+   * an enclosing handle — no delegation boundary). Omitted for a true inbound
+   * delegate, where the agent is a delegation root (parent === null).
+   */
+  parent?: { threadId: ThreadId; callId: CallId };
 };
 
 /**
- * Spawn a fresh root AgentThread for an inbound `delegate` event. Args are
- * bound into the agent's body scope by the AgentThread's own `create` op
- * (which spawns the body UserThread). Returns the new ThreadId so the
- * caller can register it under `state.delegations`.
+ * Spawn an AgentThread for a `blockAgent`. Two callers:
+ *
+ *   - an inbound `delegate` (translateExternal) → a delegation ROOT (parent
+ *     omitted); its completion drives the outbound delegateAck.
+ *   - an in-shard closure call (delegate.ts / callAgent.ts) → a NON-root agent
+ *     (parent supplied); it `done`s its caller and proxies control upward.
+ *
+ * Args are bound into the body scope by the AgentThread's own `create` op.
+ * Returns the new ThreadId.
  */
 export function spawnAgentRoot(ctx: StepCtx, args: SpawnAgentRootArgs): ThreadId {
   const block = ctx.state.irModule.blocks[String(args.blockId)] as Block | undefined;
@@ -278,20 +239,16 @@ export function spawnAgentRoot(ctx: StepCtx, args: SpawnAgentRootArgs): ThreadId
     );
   }
 
-  const newScopeId = createScopeId();
-  ctx.state.scopes[newScopeId] = {
-    id: newScopeId,
-    parentId: args.capturedScopeId ?? null,
-    values: {},
-    ...(args.ambientGenerics !== undefined ? { ambientGenerics: args.ambientGenerics } : {}),
-  };
-  ctx.state.scopeCount++;
+  const newScopeId = allocScope(ctx.store, args.capturedScopeId ?? null, ctx.state.selfEntity);
+  if (args.ambientGenerics !== undefined) {
+    ctx.store.scopes[newScopeId]!.ambientGenerics = args.ambientGenerics;
+  }
 
   const newThreadId = createThreadId();
   const common = newCommonFields({
     id: newThreadId,
-    parent: null,
-    parentCallId: null,
+    parent: args.parent?.threadId ?? null,
+    parentCallId: args.parent?.callId ?? null,
     scopeId: newScopeId,
   });
   const agent: Thread = {
@@ -304,6 +261,13 @@ export function spawnAgentRoot(ctx: StepCtx, args: SpawnAgentRootArgs): ThreadId
   };
   ctx.state.threads[newThreadId] = agent as Thread;
   ctx.state.threadCount++;
+  if (args.parent !== undefined) {
+    const parent = ctx.state.threads[args.parent.threadId] as Thread | undefined;
+    if (parent === undefined) {
+      throw new Error(`engine.spawnAgentRoot: parent ${args.parent.threadId} not found`);
+    }
+    setChild(parent, args.parent.callId, newThreadId);
+  }
   ctx.enqueue({ kind: "create", threadId: newThreadId });
   return newThreadId;
 }

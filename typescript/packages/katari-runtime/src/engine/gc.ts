@@ -1,102 +1,34 @@
-// Mark-and-sweep GC for scopes + closures.
+// Intra-entity mark-and-sweep GC over the CORE-global scope + closure store.
 //
-// Scopes form a tree (`parentId`); closures live in `state.closures` and
-// hold a ScopeId. Tuples / arrays / tagged values can hold further refs
-// transitively. The GC root set is every live thread's scopeId. From
-// there we trace parent chains + every Value graph in scope.values, with
-// closure-id derefs adding the captured scope (and its parent chain).
+// Cross-entity / persistence GC is gone (docs/2026-06-08-scope-closure-entity.md
+// §5): entity release cascade-drops the scopes / closures it still owns, and
+// ascent moves escaping ones to the parent. What remains is an intra-entity
+// transient reclamation: a long-running entity (a big `for`, a long
+// orchestrator) accumulates transient scopes mid-life, so a mark-sweep still
+// runs — but ONLY over the scopes the CURRENT entity owns. Parent-owned
+// (inherited / captured-from-ancestor) scopes are roots from this entity's view
+// and must never be touched.
 //
-// Closures are reachable iff some live Value has `closure { closureId }`.
-// Unreachable closures are dropped from `state.closures`.
-//
-// Invocation: the runner calls `collectGarbage` at the end of an
-// `applyEvent` drain when scope count growth crosses a heuristic
-// threshold.
+// Roots = this entity's live threads' scope chains + closures it owns reachable
+// from a live value (computed inside `collectEntityGarbage`).
 
-import type { ClosureId, ScopeId } from "./id.js";
-import type { Scope } from "./scope.js";
+import type { ScopeId } from "./id.js";
 import type { State } from "./state.js";
-import type { Value } from "./value.js";
+import { type CoreStore, collectEntityGarbage, shouldGc as shouldGcStore } from "./store.js";
 
-const GC_GROWTH_FACTOR = 1.5;
-const GC_MIN_DELTA = 32;
-
-/**
- * Decide whether GC should run after this applyEvent.
- *
- * Heuristics:
- *   - if no live threads remain, sweep immediately (nothing is reachable)
- *   - else, only sweep when scope count has grown past
- *     `lastGcScopeCount * GROWTH_FACTOR + MIN_DELTA`
- */
-export function shouldGc(state: State): boolean {
-  if (state.threadCount === 0) return state.scopeCount > 0;
-  return state.scopeCount > state.lastGcScopeCount * GC_GROWTH_FACTOR + GC_MIN_DELTA;
+/** Decide whether GC should run after this applyEvent (this entity's owned
+ *  count grew past the heuristic, or no live threads remain). */
+export function shouldGc(state: State, store: CoreStore): boolean {
+  if (state.threadCount === 0) return false; // terminal: the entity cascade drops everything
+  return shouldGcStore(store, state.selfEntity, state.lastGcScopeCount);
 }
 
-/** Mutate the Immer draft to remove unreachable scopes + closures. */
-export function collectGarbage(state: State): void {
-  const reachableScopes = new Set<ScopeId>();
-  const reachableClosures = new Set<number>();
-  const worklist: ScopeId[] = [];
-
-  const visitScope = (scopeId: ScopeId | null): void => {
-    if (scopeId === null) return;
-    if (reachableScopes.has(scopeId)) return;
-    reachableScopes.add(scopeId);
-    worklist.push(scopeId);
-  };
-
-  // Roots: every live thread's scopeId.
+/** Sweep the scopes + closures owned by this shard's entity, rooted at its live
+ *  threads' scope chains. Updates the GC heuristic baseline. */
+export function collectGarbage(state: State, store: CoreStore): void {
+  const roots: ScopeId[] = [];
   for (const t of Object.values(state.threads)) {
-    if (t === undefined) continue;
-    visitScope(t.scopeId);
+    if (t !== undefined) roots.push(t.scopeId);
   }
-
-  while (worklist.length > 0) {
-    const scopeId = worklist.pop()!;
-    const sc = state.scopes[scopeId] as Scope | undefined;
-    if (sc === undefined) continue;
-
-    visitScope(sc.parentId);
-
-    for (const v of Object.values(sc.values)) {
-      if (v !== undefined) traceValue(v, visitScope);
-    }
-  }
-
-  for (const scopeId of Object.keys(state.scopes) as ScopeId[]) {
-    if (!reachableScopes.has(scopeId)) {
-      delete state.scopes[scopeId];
-    }
-  }
-  for (const closureKey of Object.keys(state.closures)) {
-    const closureId = Number(closureKey) as ClosureId;
-    if (!reachableClosures.has(closureId)) {
-      delete state.closures[closureId];
-    }
-  }
-
-  state.scopeCount = reachableScopes.size;
-  state.lastGcScopeCount = reachableScopes.size;
-}
-
-function traceValue(v: Value, visitScope: (s: ScopeId | null) => void): void {
-  switch (v.kind) {
-    case "closure":
-      // A closure value is a content ref — no `state.closures` entry to keep
-      // alive. Its blob's reachability is the value store's concern (Phase G
-      // GC opens it to trace nested refs). The shard-local dispatch records in
-      // `state.closures` are one-shot (consumed at spawn) and never value-
-      // referenced, so the sweep below collects them.
-      return;
-    case "array":
-      for (const e of v.elements) traceValue(e, visitScope);
-      return;
-    case "record":
-      for (const e of Object.values(v.entries)) traceValue(e, visitScope);
-      return;
-    default:
-      return;
-  }
+  state.lastGcScopeCount = collectEntityGarbage(store, state.selfEntity, roots);
 }

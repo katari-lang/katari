@@ -12,7 +12,8 @@
 //     is NOT on the ref (ambient context). v0.1.0 refs are always
 //     `complete` (building/streaming is v0.2).
 //
-// closure values are machine-local id references into `state.closures`;
+// closure values are machine-local id references into the CORE-global closure
+// store (one per project actor — see store.ts);
 // agentLiteral carries the qualified name PLUS the snapshot it resolves
 // against (the external form). The snapshot is supplied where the value is
 // created — `literalToValue` reads it from the shard's `state.snapshot`.
@@ -20,6 +21,7 @@
 import type { LiteralValue, QualifiedName } from "../ir/types.js";
 import type { Json } from "../json.js";
 import { hashText } from "../storage/hash.js";
+import type { ClosureId } from "./id.js";
 
 /** Owner module of a value reference. `project` is ambient (not carried). */
 export type RefModule = "core" | "ffi" | "api";
@@ -65,20 +67,19 @@ export type Value =
   // type system enforces which keys / ctor are required (`data <: object <:
   // record`). A JSON object decodes here ( `$constructor` ⇒ `ctor`).
   | { kind: "record"; entries: Record<string, Value>; ctor?: QualifiedName }
-  // A closure is ALWAYS a content-addressed ref (Phase E / #5 — content-
-  // addressed closures). Its body block + snapshot + captured environment are
-  // serialized to a value-store blob at the closure literal (make-closure); the
-  // ref is the handle that flows everywhere. Invoking it materializes the blob
-  // into the receiving shard (grafting the captured env). Content-addressing
-  // keeps the graph acyclic, so the eventual GC is reference-counting (no
-  // cross-shard mark-sweep). There is no machine-local closure VALUE form — the
-  // shard-local dispatch record (`state.closures`) is keyed by the engine's
-  // `closure:N` agent def id, never by a Value.
+  // A closure is a machine-local id reference into the CORE-global closure store
+  // (docs/2026-06-08-scope-closure-entity.md). `closureId` is a UUID minted at
+  // the closure literal (make-closure, inline — no serialize); invoking the
+  // value spawns the closure's body as a thread in the CURRENT shard over the
+  // captured scope (resolved through the global store). The content-addressed
+  // `{ ref }` blob form is GONE from the live value; it survives only as the
+  // at-rest serialised form (checkpoint / cross-server). The wire form is
+  // `$agent: closure:<closureId>` (uniform with an agent literal — both callables).
   // `generics` (when present) is the resolved generic substitution attached by
   // a `foo[args]` instantiation (statementApplyGenerics): a map from the
   // callee's GenericsId (as a string key) to the proper JSON Schema of its type
   // argument. `get_metadata` fills the callee's GenericSchema with it.
-  | { kind: "closure"; ref: RefRep; generics?: Record<string, Json> }
+  | { kind: "closure"; closureId: ClosureId; generics?: Record<string, Json> }
   // Top-level callable reference (agent / prim / ctor / external). An agent
   // value is the EXTERNAL form: it carries the snapshot it resolves against
   // (`qualifiedName@snapshot` on the wire), set when the value is born — from
@@ -96,7 +97,7 @@ export type Value =
       generics?: Record<string, Json>;
     };
 
-/** A closure carried by content-addressed ref (its serialized body+env blob). */
+/** A closure carried by its machine-local id into the CORE-global store. */
 export type ClosureValue = Extract<Value, { kind: "closure" }>;
 
 /** A value-reference handle (owner module + id) — the unit the GC ownership
@@ -105,11 +106,12 @@ export type RefHandle = { module: RefModule; id: string };
 
 /**
  * Collect every content-ref handle reachable in `value` (a `string`/`file`
- * carried as a ref, or a `closure`), recursing through array / tagged / record.
- * Inline byte sequences and scalars carry no ref. Used by the GC ownership
- * layer to find the refs a crossing value (delegateAck / escalate) carries, and
- * the refs a closure blob captures. Duplicates are not de-duped (callers use a
- * Set if needed).
+ * carried as a ref), recursing through array / record. Inline byte sequences and
+ * scalars carry no ref. A `closure` is NOT a ref (it is a machine-local id into
+ * the global store — see {@link collectClosures}); its captured refs are dragged
+ * up via the store's scope chains, not via this walk. Used by the ownership layer
+ * to find the refs a crossing value (delegateAck / escalate) carries. Duplicates
+ * are not de-duped (callers use a Set if needed).
  */
 export function collectRefs(value: Value): RefHandle[] {
   const out: RefHandle[] = [];
@@ -122,8 +124,32 @@ export function collectRefs(value: Value): RefHandle[] {
       case "file":
         out.push({ module: v.rep.module, id: v.rep.id });
         return;
+      case "array":
+        for (const e of v.elements) walk(e);
+        return;
+      case "record":
+        for (const e of Object.values(v.entries)) walk(e);
+        return;
+      default:
+        return;
+    }
+  };
+  walk(value);
+  return out;
+}
+
+/**
+ * Collect every closure id reachable in `value`, recursing through array /
+ * record. Used by the ownership layer to find the closures a crossing value
+ * (delegateAck / escalate) carries up; the store then expands each id to its
+ * captured scope chain + nested closures (see `reachableFromClosures`).
+ */
+export function collectClosures(value: Value): ClosureId[] {
+  const out: ClosureId[] = [];
+  const walk = (v: Value): void => {
+    switch (v.kind) {
       case "closure":
-        out.push({ module: v.ref.module, id: v.ref.id });
+        out.push(v.closureId);
         return;
       case "array":
         for (const e of v.elements) walk(e);

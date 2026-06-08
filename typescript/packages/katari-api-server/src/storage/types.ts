@@ -27,6 +27,7 @@ import type {
   EntityId,
   EscalationId,
   ProjectIndexStore,
+  ScopeStore,
   ShardStore,
   ValueStore,
 } from "@katari-lang/runtime";
@@ -37,6 +38,7 @@ export type {
   EntityId,
   EscalationId,
   ProjectIndexStore,
+  ScopeStore,
   ShardStore,
   SidecarBundle,
   ValueStore,
@@ -484,6 +486,8 @@ export interface Storage {
   shards: ShardStore;
   /** Project-local routing index for shards (bus id → shard E). */
   projectIndex: ProjectIndexStore;
+  /** Per-owner-entity at-rest mirror of the CORE-global scope + closure store. */
+  scopes: ScopeStore;
 
   /**
    * Run `fn` inside a backend-native transaction. The `tx` argument exposes

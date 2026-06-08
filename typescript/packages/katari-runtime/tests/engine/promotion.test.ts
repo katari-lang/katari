@@ -5,42 +5,21 @@
 
 import { describe, expect, it } from "vitest";
 import { executePrim } from "../../src/engine/prim.js";
-import { type EngineCheckpoint, promoteCheckpoint } from "../../src/engine/snapshot.js";
+import { promoteValueTree } from "../../src/engine/snapshot.js";
 import type { BytesRep, RefRep, Value } from "../../src/engine/value.js";
 import { mkRecord, mkSecret, mkString } from "../../src/engine/value.js";
 import { hashText } from "../../src/storage/hash.js";
 
-// promoteCheckpoint walks the typed checkpoint structure (threads + scopes are
-// the only Value-bearing fields), so a test value is placed in a scope slot and
-// recovered from there. The promotion itself still recurses INTO the Value tree
-// (arrays / records / nested strings), which is what these tests exercise.
-function checkpointWith(value: Value): EngineCheckpoint {
-  return {
-    schemaVersion: 1,
-    selfEndpoint: "core://main" as EngineCheckpoint["selfEndpoint"],
-    ffiTargetEndpoint: "ext://ffi" as EngineCheckpoint["ffiTargetEndpoint"],
-    envTargetEndpoint: "ext://env" as EngineCheckpoint["envTargetEndpoint"],
-    threads: {},
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    scopes: { 1: { id: 1, parentId: null, values: { 0: value } } as any },
-    closures: {},
-    nextClosureId: 0,
-    delegations: {},
-    pendingDelegateOut: {},
-    delegationSenders: {},
-    escalationOwners: {},
-    lastGcScopeCount: 0,
-  };
-}
-
+// `promoteValueTree` recurses INTO a Value tree (arrays / records / nested
+// strings), promoting every large inline string to a content-addressed ref —
+// the same walk both the checkpoint (thread values) and the ScopeStore (captured
+// scope values) use at persist. These tests exercise that walk directly.
 async function promoteValue(
   value: Value,
   promote: (text: string) => Promise<RefRep>,
   threshold: number,
 ): Promise<Value> {
-  const promoted = await promoteCheckpoint(checkpointWith(value), promote, threshold);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (promoted.scopes as any)[1].values[0] as Value;
+  return promoteValueTree(value, promote, threshold);
 }
 
 const recordEntries = (v: Value): Record<string, Value> => {

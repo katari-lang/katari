@@ -12,6 +12,7 @@ import {
   CORE_ENDPOINT,
   createDelegationId,
   createState,
+  emptyStore,
   endpoint,
   type Event,
 } from "../../src/engine/index.js";
@@ -138,7 +139,7 @@ describe("engine integration: end-to-end via external delegate", () => {
       },
     };
 
-    const result = await applyEvent(state, event);
+    const result = await applyEvent(state, emptyStore(), event);
     const ack = result.outbound.find(
       (e) => e.payload.kind === "delegateAck" && e.payload.delegationId === delegationId,
     );
@@ -168,7 +169,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     );
 
     const run = async (args: Record<string, { kind: "number"; value: number }>) => {
-      const result = await applyEvent(createState(module), {
+      const result = await applyEvent(createState(module), emptyStore(), {
         from: API_ENDPOINT,
         to: CORE_ENDPOINT,
         payload: {
@@ -191,7 +192,7 @@ describe("engine integration: end-to-end via external delegate", () => {
   it("missing entry emits a prim.throw escalate back to the sender", async () => {
     const state = createState(ir({}, {}));
     const delegationId = createDelegationId();
-    const result = await applyEvent(state, {
+    const result = await applyEvent(state, emptyStore(), {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
@@ -390,13 +391,12 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(Object.keys(index.escalationOwners).length).toBe(0);
   });
 
-  it("closure crossing: main makes a local agent + invokes it across shards", async () => {
+  it("closure call: main makes a local agent + invokes it in-shard over the global scope", async () => {
     // main(): base = 10; inc = (local agent capturing base); out = inc(); ret out
-    // Invoking `inc` is a delegate to a runtime closure value → a NEW shard. The
-    // closure cannot carry main's local closure-id space across the bus, so CORE
-    // serializes its captured env to a value-store blob on the way out and
-    // materializes it back on the way in. The closure body returns the captured
-    // `base`, proving the env survived the round-trip.
+    // Invoking `inc` is an IN-SHARD closure call (no delegate, no serialize): the
+    // body runs as a thread in main's shard over the captured scope (the
+    // CORE-global store). The body returns the captured `base`, proving it reads
+    // the captured env directly. No closure blob is ever written.
     const base = 0 as VarId;
     const clos = 1 as VarId;
     const out = 2 as VarId;
@@ -546,9 +546,9 @@ describe("engine integration: end-to-end via external delegate", () => {
     if (apiAck && apiAck.payload.kind === "delegateAck") {
       expect(apiAck.payload.value).toEqual({ kind: "number", value: 10 });
     }
-    // A closure blob was actually written (the env crossed as a content ref).
-    expect(blobs.size).toBeGreaterThan(0);
-    // Both shards completed → routing index fully purged.
+    // No closure blob is written — the body runs in-shard over the global scope.
+    expect(blobs.size).toBe(0);
+    // The single shard completed → routing index fully purged.
     const index = core.currentProjectIndex;
     expect(Object.keys(index.delegations).length).toBe(0);
     expect(Object.keys(index.pendingDelegateOut).length).toBe(0);
@@ -590,10 +590,11 @@ describe("engine integration: end-to-end via external delegate", () => {
     }, { main: 1 });
 
     const state = createState(module);
+    const store = emptyStore();
     const delegationId = createDelegationId();
 
     // Start the agent — it pauses on the external delegate.
-    const startResult = await applyEvent(state, {
+    const startResult = await applyEvent(state, store, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: {
@@ -611,7 +612,7 @@ describe("engine integration: end-to-end via external delegate", () => {
     expect(ffiDelegate).toBeDefined();
 
     // Now terminate.
-    const cancelResult = await applyEvent(startResult.state, {
+    const cancelResult = await applyEvent(startResult.state, store, {
       from: API_ENDPOINT,
       to: CORE_ENDPOINT,
       payload: { kind: "terminate", delegationId },

@@ -25,7 +25,7 @@ export type KatariFile = KatariRef<"file">;
 export type KatariString = string | KatariRef<"string">;
 
 /** A Katari callable value: an agent (`{$agent:"qname@snapshot"}`) or a closure
- *  (`{$agent:"closureref:<id>"}`). Closures arrive from CORE; user code can only
+ *  (`{$agent:"closure:<id>"}`). Closures arrive from CORE; user code can only
  *  construct agents (see `katari.makeAgent`). */
 export type KatariAgent = { $agent: string };
 

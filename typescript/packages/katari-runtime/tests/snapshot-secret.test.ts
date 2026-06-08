@@ -1,8 +1,8 @@
 // encryptCheckpoint / decryptCheckpoint round-trip tests. The checkpoint
-// is the deeply-nested storage form of the engine 'State'; secrets can
-// live in scopes, threads, delegations, etc. The walker must find them
-// all and replace each with the storage envelope, then put them back
-// on decrypt.
+// is the storage form of the engine 'State'; the only Value-bearing field is
+// `threads` (scopes / closures live in the CORE-global store and persist via the
+// ScopeStore). The walker must find every secret in a thread's value slots and
+// replace each with the storage envelope, then put them back on decrypt.
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
@@ -31,9 +31,6 @@ function emptyCheckpoint(): EngineCheckpoint {
     ffiTargetEndpoint: "ext://ffi" as EngineCheckpoint["ffiTargetEndpoint"],
     envTargetEndpoint: "ext://env" as EngineCheckpoint["envTargetEndpoint"],
     threads: {},
-    scopes: {},
-    closures: {},
-    nextClosureId: 0,
     delegations: {},
     pendingDelegateOut: {},
     delegationSenders: {},
@@ -45,24 +42,24 @@ function emptyCheckpoint(): EngineCheckpoint {
 describe("snapshot encryption", () => {
   it("a checkpoint without secrets is unchanged structurally", async () => {
     const base = emptyCheckpoint();
-    base.scopes = {
+    base.threads = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      1: { parentId: null, values: { 7: mkString("x") } } as any,
+      1: { kind: "agent", argument: mkString("x") } as any,
     };
     const enc = await encryptCheckpoint(base);
     expect(enc).toEqual(base);
     expect(await decryptCheckpoint(enc)).toEqual(base);
   });
 
-  it("a secret in a scope value is replaced by $envelope on encrypt", async () => {
+  it("a secret in a thread value is replaced by $envelope on encrypt", async () => {
     const base = emptyCheckpoint();
-    base.scopes = {
+    base.threads = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      1: { parentId: null, values: { 7: mkSecret("abc") } } as any,
+      1: { kind: "agent", argument: mkSecret("abc") } as any,
     };
     const enc = await encryptCheckpoint(base);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const encryptedSlot = (enc.scopes as any)[1].values[7];
+    const encryptedSlot = (enc.threads as any)[1].argument;
     expect("$envelope" in encryptedSlot).toBe(true);
     // No plaintext "abc" anywhere in the encrypted JSON.
     expect(JSON.stringify(enc)).not.toContain("abc");
@@ -116,15 +113,15 @@ describe("snapshot encryption", () => {
 
   it("rejects tampered ciphertext on decrypt", async () => {
     const base = emptyCheckpoint();
-    base.scopes = {
+    base.threads = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      1: { parentId: null, values: { 7: mkSecret("tamper") } } as any,
+      1: { kind: "agent", argument: mkSecret("tamper") } as any,
     };
     const enc = await encryptCheckpoint(base);
     // Tamper with the envelope ciphertext (= flip a character in the
     // body half, after the IV separator).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const env = (enc.scopes as any)[1].values[7] as { $envelope: string };
+    const env = (enc.threads as any)[1].argument as { $envelope: string };
     const colon = env.$envelope.indexOf(":");
     const original = env.$envelope.slice(colon + 1);
     env.$envelope =

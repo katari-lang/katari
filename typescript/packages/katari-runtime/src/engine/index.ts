@@ -3,6 +3,7 @@
 // scaffolding; runtime functions land as the implementation progresses.
 
 export { applyEvent, createState } from "./apply.js";
+export type { ClosureRecord } from "./closure.js";
 export type { Endpoint } from "./endpoint.js";
 export { CORE_ENDPOINT, endpoint } from "./endpoint.js";
 export type { EngineError } from "./errors.js";
@@ -24,6 +25,7 @@ export { collectGarbage, shouldGc } from "./gc.js";
 export type {
   AskId,
   CallId,
+  ClosureId,
   DelegationId,
   EntityId,
   EscalationId,
@@ -31,6 +33,7 @@ export type {
   ThreadId,
 } from "./id.js";
 export {
+  createClosureId,
   createDelegationId,
   createEntityId,
   createEscalationId,
@@ -55,6 +58,8 @@ export { emptyProjectIndex } from "./shard.js";
 export type { EncryptedEngineCheckpoint, EngineCheckpoint } from "./snapshot.js";
 export { deserialize, serialize } from "./snapshot.js";
 export type { State } from "./state.js";
+export type { CoreStore } from "./store.js";
+export { emptyStore } from "./store.js";
 export type {
   AgentThread,
   AskIdMap,
@@ -79,6 +84,7 @@ export {
   bytesContentEqual,
   bytesEqualsText,
   bytesHash,
+  collectClosures,
   collectRefs,
   inlineText,
   isBytesValue,

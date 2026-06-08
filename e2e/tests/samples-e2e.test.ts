@@ -257,14 +257,15 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
       const result = await applyAndRun("metadata", "08-metadata");
       // `name` is the bare user-defined name (internal namespace). `id` is the
       // external dispatch handle: a top-level agent's is `qname@snapshot`, a
-      // closure's is `closureref:<ref id>` (identical to the value's wire form +
-      // delegate target). snapshot / ref id are per-run uuids → assert the shape.
+      // closure's is `closure:<closureId>` (its machine-local id into the
+      // CORE-global store, identical to the value's wire form). snapshot /
+      // closure id are per-run uuids → assert the shape.
       expect(typeof result).toBe("string");
       const parts = (result as string).split("|");
       expect(parts[0]).toBe("add_them");
       expect(parts[1]).toMatch(/^metadata\.add_them@[0-9a-f-]{36}$/);
       expect(parts[2]).toBe("local_bar");
-      expect(parts[3]).toMatch(/^closureref:[0-9a-f-]{36}$/);
+      expect(parts[3]).toMatch(/^closure:[0-9a-f-]{36}$/);
     },
   );
 
@@ -379,10 +380,11 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
   );
 
   itE2E(
-    "23-call-closure: dispatch a local closure via its get_metadata id (closureref round-trip)",
+    "23-call-closure: dispatch a local closure via call_agent (in-shard round-trip)",
     async () => {
-      // call_agent takes the closure VALUE, resolves its blob,
-      // validates args, and runs it: the dynamic-dispatch round-trip.
+      // call_agent takes the closure VALUE, validates args against its body
+      // block's input schema, and spawns it in-shard: the dynamic-dispatch
+      // round-trip over the CORE-global scope.
       const result = await applyAndRun("call_closure", "23-call-closure");
       expect(result).toBe("hi bob");
     },

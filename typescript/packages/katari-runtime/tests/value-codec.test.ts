@@ -25,21 +25,15 @@ describe("value-codec", () => {
     expect(rt({ kind: "null" })).toEqual({ kind: "null" });
   });
 
-  it("round-trips a content-ref closure (#5) as a `$agent` callable handle", () => {
+  it("round-trips a closure as a `$agent` callable handle (machine-local id)", () => {
     // A closure is a callable, so it serialises under `$agent` (uniform with a
-    // top-level agent) — NOT as a `$ref` envelope. The dispatch handle is just
-    // the ref id (`closureref:<id>`); `module` is invariably `core` and
-    // `hash`/`size` are vestigial (the content hash lives in the ref store keyed
-    // by the id), so the round-trip preserves the id, not hash/size.
-    const ref = { kind: "ref", module: "core", id: "abc", hash: "h123", size: 42 } as const;
-    const closure: Value = { kind: "closure", ref };
+    // top-level agent) — NOT as a `$ref` envelope. The dispatch handle is the
+    // closure's machine-local id (`closure:<closureId>`), preserved on round-trip.
+    const closure: Value = { kind: "closure", closureId: "abc" as never };
     const raw = valueToRaw(closure) as Record<string, unknown>;
-    expect(raw[CALLABLE_DISCRIMINATOR]).toBe("closureref:abc"); // the id, not JSON
+    expect(raw[CALLABLE_DISCRIMINATOR]).toBe("closure:abc"); // the id, not JSON
     expect(raw.$ref).toBeUndefined(); // not a $ref
-    expect(rt(closure)).toEqual({
-      kind: "closure",
-      ref: { kind: "ref", module: "core", id: "abc", hash: "", size: 0 },
-    });
+    expect(rt(closure)).toEqual({ kind: "closure", closureId: "abc" });
   });
 
   it("encodes data values with $constructor + fields", () => {
@@ -87,12 +81,13 @@ describe("value-codec", () => {
     expect(rt(v)).toEqual(v);
   });
 
-  it("rejects a $agent: closure:N on inbound (closures are $ref-encoded now)", () => {
-    // The local closure value form was retired (#5); a closure never encodes as
-    // `$agent: closure:N`. If one appears on the wire it is a version skew.
-    expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: "closure:7" })).toThrow(
-      RawValueDecodeError,
-    );
+  it("decodes a $agent: closure:<id> as a machine-local closure value", () => {
+    // The closure wire form is `$agent: closure:<closureId>` — a machine-local
+    // id into the CORE-global store (the content-ref form was retired).
+    expect(valueFromRaw({ [CALLABLE_DISCRIMINATOR]: "closure:c7" })).toEqual({
+      kind: "closure",
+      closureId: "c7",
+    });
   });
 
   it("encodes arrays element-wise", () => {
@@ -137,7 +132,8 @@ describe("value-codec", () => {
     expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: 5 })).toThrow(
       RawValueDecodeError,
     );
-    expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: "closure:abc" })).toThrow(
+    // An empty closure id is malformed.
+    expect(() => valueFromRaw({ [CALLABLE_DISCRIMINATOR]: "closure:" })).toThrow(
       RawValueDecodeError,
     );
   });

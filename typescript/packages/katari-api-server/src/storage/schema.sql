@@ -364,3 +364,42 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS refs_after_delete ON refs;
 CREATE TRIGGER refs_after_delete AFTER DELETE ON refs
   FOR EACH ROW EXECUTE FUNCTION refs_decrement_blob();
+
+-- ─── Scope / closure store: the CORE-global store's per-owner at-rest mirror ──
+--
+-- Scopes + closures live warm in memory on the CoreModule (one store per project
+-- actor) and are invoked in-shard with no serialize. These tables are their
+-- write-through durable mirror (crash recovery / cold load), modelled exactly
+-- like `refs`: each row is owned by one entity (`owner_entity_id`, FK CASCADE),
+-- or transiently by NULL mid-ascent. A closure escape re-owns the escaping
+-- scopes / closures to the parent on the ack; an entity release cascade-drops the
+-- rest. See docs/2026-06-08-scope-closure-entity.md.
+--
+-- `values` (scope-only) holds the captured bindings as encrypted Values (a
+-- captured `secret` → `$envelope`); `ambient_generics` carries the activation's
+-- generic substitution. A closure carries no values — just its body block,
+-- captured scope, and the snapshot its code lives in.
+
+CREATE TABLE IF NOT EXISTS scopes (
+  project_id       UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  id               UUID NOT NULL,
+  owner_entity_id  UUID REFERENCES entities(id) ON DELETE CASCADE,  -- NULL = in-transit (mid-ascent)
+  parent_id        UUID,                          -- -> scopes.id (chain; not FK — may be ancestor-owned)
+  values           JSONB NOT NULL DEFAULT '{}',   -- { varId: EncryptedValue }
+  ambient_generics JSONB,                         -- { genericsId: JSON } (null when none)
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, id)
+);
+CREATE INDEX IF NOT EXISTS scopes_owner_entity_idx ON scopes (project_id, owner_entity_id);
+
+CREATE TABLE IF NOT EXISTS closures (
+  project_id        UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  id                UUID NOT NULL,
+  owner_entity_id   UUID REFERENCES entities(id) ON DELETE CASCADE,  -- NULL = in-transit (mid-ascent)
+  block_id          BIGINT NOT NULL,              -- IR BlockId of the body (a blockAgent)
+  captured_scope_id UUID NOT NULL,                -- -> scopes.id (the captured scope)
+  snapshot          TEXT NOT NULL,                -- code version the body block lives in
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, id)
+);
+CREATE INDEX IF NOT EXISTS closures_owner_entity_idx ON closures (project_id, owner_entity_id);

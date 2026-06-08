@@ -18,10 +18,11 @@ import type { Block, BlockId, CallData, Statement, UserBlock, VarId } from "../.
 import type { Json } from "../../../json.js";
 import type { AskKind, ModMap } from "../../event.js";
 import { fillGenericSchema } from "../../generics.js";
-import type { CallId, ScopeId } from "../../id.js";
+import { type CallId, createClosureId, type ScopeId } from "../../id.js";
 import { tryMatch } from "../../pattern.js";
-import { spawnChild, spawnMakeClosure } from "../../spawn.js";
+import { spawnChild } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
+import { putClosure } from "../../store.js";
 import { literalToValue, NULL_VALUE, type Value } from "../../value.js";
 import {
   allocAskId,
@@ -72,15 +73,9 @@ export const userOps: ThreadOps<UserThread> = {
 };
 
 function outputVarOf(stmt: Statement): VarId | undefined {
-  switch (stmt.kind) {
-    case "statementCall":
-      return stmt.body.output;
-    case "statementMakeClosure":
-      // The MakeClosureThread `done`s the closure ref into this var.
-      return stmt.body.output;
-    default:
-      return undefined;
-  }
+  // Only a `statementCall` waits on a child whose value lands here on `done`.
+  // `statementMakeClosure` binds its output inline (no child), so it is absent.
+  return stmt.kind === "statementCall" ? stmt.body.output : undefined;
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -157,20 +152,23 @@ function handleStatement(ctx: StepCtx, t: UserThread, stmt: Statement): Statemen
       return "advance";
     }
     case "statementMakeClosure": {
-      // A closure literal. Spawn a MakeClosureThread (like a call): its async
-      // `create` freezes the captured scope into a content blob via ctx.putBlob
-      // and `done`s us with the resulting `{ kind: "closure", ref }`. The output
-      // var is the closure's self-reference var (recursive local agent). We wait.
-      const callId = t.pc as CallId;
-      t.pc += 1;
-      spawnMakeClosure(ctx, {
-        parentId: t.id,
-        parentCallId: callId,
+      // A closure literal. Inline (no thread, no serialize): mint a ClosureId,
+      // register a record in the CORE-global store owned by this shard's entity,
+      // capturing the current scope. Bind the closure value into the output var
+      // of THIS scope — which is also the closure's captured scope, so a
+      // recursive local agent self-references through it for free (the body's
+      // scope inherits the captured scope on a call). Invoking the value spawns
+      // the body in-shard over the captured scope (delegate.ts / callAgent.ts).
+      const closureId = createClosureId();
+      putClosure(ctx.store, {
+        id: closureId,
         blockId: stmt.body.block as BlockId,
-        capturedScopeId: t.scopeId,
-        selfVar: stmt.body.output,
+        scopeId: t.scopeId,
+        snapshot: ctx.state.snapshot,
+        owner: ctx.state.selfEntity,
       });
-      return "wait";
+      setValueInScope(ctx, t.scopeId, stmt.body.output, { kind: "closure", closureId });
+      return "advance";
     }
     case "statementBindPattern": {
       const incoming = lookupValue(ctx, t.scopeId, stmt.body.source);

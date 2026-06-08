@@ -32,10 +32,10 @@ describe("CoreAgentDefId snapshot", () => {
     expect(decodeCoreAgentDefId(wire)).toEqual({ kind: "qname", value: "main.foo" });
   });
 
-  it("closures never carry a snapshot (snapshot-independent, run in scope)", () => {
-    const wire = encodeCoreAgentDefId({ kind: "closure", value: 7 as ClosureId });
-    expect(wire).toBe("closure:7");
-    expect(decodeCoreAgentDefId(wire)).toEqual({ kind: "closure", value: 7 });
+  it("a closure is its machine-local id (no snapshot stamp)", () => {
+    const wire = encodeCoreAgentDefId({ kind: "closure", value: "c7" as ClosureId });
+    expect(wire).toBe("closure:c7");
+    expect(decodeCoreAgentDefId(wire)).toEqual({ kind: "closure", value: "c7" });
   });
 
   it("a primitive used as an escalate request stays bare", () => {

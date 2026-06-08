@@ -45,7 +45,7 @@ export function isKatariString(value: RawValue): value is KatariString {
   return typeof value === "string" || asRef(value)?.as === "string";
 }
 
-/** A callable value (agent `qname@snapshot` or `closureref:<id>`). */
+/** A callable value (agent `qname@snapshot` or `closure:<id>`). */
 export function isKatariAgent(value: RawValue): value is KatariAgent {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   return typeof (value as Record<string, RawValue>)[CALLABLE_DISCRIMINATOR] === "string";

@@ -21,7 +21,7 @@
 
 import type { IRModule } from "../ir/types.js";
 import { decryptValueTree, type EncryptedValue, encryptValueTree } from "../value-secret-codec.js";
-import type { ScopeId, ThreadId } from "./id.js";
+import { createEntityId, type ThreadId } from "./id.js";
 import type { Scope } from "./scope.js";
 import type { State } from "./state.js";
 import type { ChildRole, PendingAction, PostCancelAction, Thread } from "./thread/types.js";
@@ -32,8 +32,13 @@ import type { RefRep, Value } from "./value.js";
 // encrypted-at-rest form is `EngineCheckpoint<EncryptedValue>` (=
 // `EncryptedEngineCheckpoint`). Making the two genuinely distinct types is the
 // point: storage only ever accepts `EncryptedEngineCheckpoint`, so "persisted a
-// plaintext secret" is now a type error rather than a runtime hope. Only
-// `threads` / `scopes` carry Values — every other field is value-free.
+// plaintext secret" is now a type error rather than a runtime hope.
+//
+// Scopes + closures are NOT in the checkpoint — they live in the CORE-global
+// store and persist per owner entity (see docs/2026-06-08-scope-closure-entity.md
+// + ScopeStore). Only `threads` carries Values here; every other field is
+// value-free. `selfEntity` / `snapshot` are CORE-private (the host re-supplies
+// them from the shard id + `engine_shards.current_snapshot` on load).
 export type EngineCheckpoint<V = Value> = {
   /**
    * Engine checkpoint layout version. v0.1.0 ships as v1 — the
@@ -46,9 +51,6 @@ export type EngineCheckpoint<V = Value> = {
   ffiTargetEndpoint: string;
   envTargetEndpoint: string;
   threads: Record<ThreadId, Thread<V>>;
-  scopes: Record<ScopeId, Scope<V>>;
-  closures: State["closures"];
-  nextClosureId: number;
   delegations: State["delegations"];
   pendingDelegateOut: State["pendingDelegateOut"];
   delegationSenders: State["delegationSenders"];
@@ -63,9 +65,6 @@ export function serialize(state: State): EngineCheckpoint {
     ffiTargetEndpoint: state.ffiTargetEndpoint,
     envTargetEndpoint: state.envTargetEndpoint,
     threads: structuredClone(state.threads),
-    scopes: structuredClone(state.scopes),
-    closures: structuredClone(state.closures),
-    nextClosureId: state.nextClosureId,
     delegations: structuredClone(state.delegations),
     pendingDelegateOut: structuredClone(state.pendingDelegateOut),
     delegationSenders: structuredClone(state.delegationSenders),
@@ -79,17 +78,14 @@ export function deserialize(irModule: IRModule, snap: EngineCheckpoint): State {
     throw new Error(`engine.checkpoint: unsupported schemaVersion ${snap.schemaVersion}`);
   }
   const threads = structuredClone(snap.threads);
-  const scopes = structuredClone(snap.scopes);
   return {
     selfEndpoint: snap.selfEndpoint as State["selfEndpoint"],
+    // CORE-private (not in the checkpoint) — the host re-supplies them right
+    // after load (`selfEntity` = shardId; `snapshot` = engine_shards.current).
+    selfEntity: createEntityId(),
     irModule,
-    // CORE-private (not in the checkpoint) — the host re-supplies it from
-    // engine_shards.current_snapshot right after load.
     snapshot: "",
     threads,
-    scopes,
-    closures: structuredClone(snap.closures),
-    nextClosureId: snap.nextClosureId,
     delegations: structuredClone(snap.delegations),
     pendingDelegateOut: structuredClone(snap.pendingDelegateOut),
     delegationSenders: structuredClone(snap.delegationSenders),
@@ -97,7 +93,6 @@ export function deserialize(irModule: IRModule, snap: EngineCheckpoint): State {
     ffiTargetEndpoint: snap.ffiTargetEndpoint as State["ffiTargetEndpoint"],
     envTargetEndpoint: snap.envTargetEndpoint as State["envTargetEndpoint"],
     lastGcScopeCount: snap.lastGcScopeCount,
-    scopeCount: Object.keys(scopes).length,
     threadCount: Object.keys(threads).length,
   };
 }
@@ -230,14 +225,9 @@ async function mapThreadValues<V, W>(thread: Thread<V>, f: Transform<V, W>): Pro
     case "user":
     case "match":
     case "getField":
-    case "makeClosure":
       // Value-free variants — assignable to Thread<W> unchanged.
       return thread;
   }
-}
-
-async function mapScopeValues<V, W>(scope: Scope<V>, f: Transform<V, W>): Promise<Scope<W>> {
-  return { ...scope, values: await mapRecord(scope.values, f) };
 }
 
 async function mapCheckpointValues<V, W>(
@@ -247,8 +237,14 @@ async function mapCheckpointValues<V, W>(
   return {
     ...checkpoint,
     threads: await mapRecord(checkpoint.threads, (thread) => mapThreadValues(thread, f)),
-    scopes: await mapRecord(checkpoint.scopes, (scope) => mapScopeValues(scope, f)),
   };
+}
+
+/** Map every embedded Value of a scope (used by the ScopeStore persistence to
+ *  encrypt / decrypt / promote captured scope values, symmetric to the
+ *  checkpoint thread mapping). Exported so the scope persistence reuses it. */
+export async function mapScopeValues<V, W>(scope: Scope<V>, f: Transform<V, W>): Promise<Scope<W>> {
+  return { ...scope, values: await mapRecord(scope.values, f) };
 }
 
 /**
@@ -295,8 +291,9 @@ export const DEFAULT_PROMOTE_THRESHOLD_BYTES = 4096;
 
 /** Recurse a Value tree, promoting every inline `string` over the threshold to
  *  a content-addressed ref. Other kinds pass through (secret stays inline; file
- *  / ref strings are already refs). */
-async function promoteValueTree(
+ *  / ref strings are already refs). Exported so the ScopeStore persistence
+ *  promotes captured scope values the same way the checkpoint promotes threads. */
+export async function promoteValueTree(
   value: Value,
   promote: PromoteFn,
   threshold: number,

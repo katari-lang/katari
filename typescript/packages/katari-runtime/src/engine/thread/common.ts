@@ -14,6 +14,7 @@ import type { Json } from "../../json.js";
 import { type AskId, type CallId, createEscalationId, type ScopeId, type ThreadId } from "../id.js";
 import type { Scope } from "../scope.js";
 import type { StepCtx } from "../step-ctx.js";
+import { lookupAmbient, lookupVar } from "../store.js";
 import { literalToValue, mkRecord, mkString, type Value } from "../value.js";
 
 export { recordEntries } from "../value.js";
@@ -468,18 +469,11 @@ export function emitThrowEscalate(ctx: StepCtx, t: Thread, message: string): voi
 // ─── Scope helpers ─────────────────────────────────────────────────────────
 
 export function getScope(ctx: StepCtx, id: ScopeId): Scope {
-  const sc = ctx.state.scopes[id];
+  const sc = ctx.store.scopes[id];
   if (sc === undefined) {
     throw new Error(`engine: scope ${id} not found`);
   }
   return sc as Scope;
-}
-
-export function createScope(ctx: StepCtx, id: ScopeId, parentId: ScopeId | null): Scope {
-  const sc: Scope = { id, parentId, values: {} };
-  ctx.state.scopes[id] = sc as Scope;
-  ctx.state.scopeCount++;
-  return ctx.state.scopes[id] as Scope;
 }
 
 export function setValueInScope(ctx: StepCtx, scopeId: ScopeId, varId: number, value: Value): void {
@@ -544,50 +538,19 @@ export function bindBlockInput(
   }
 }
 
-// Hard upper bound on scope-chain depth to catch corrupt checkpoints
-// that contain a cycle (parentId pointing back into the chain). Real
-// programs nest 10-20 frames at the deepest; 1000 is comfortably above
-// anything reachable through legal lowering. Above that we'd rather
-// fail loudly than spin in an infinite walk.
-const MAX_SCOPE_DEPTH = 1000;
-
+/** Resolve `varId` from `scopeId` up its parents (CORE-global store). */
 export function lookupValue(ctx: StepCtx, scopeId: ScopeId, varId: number): Value {
-  let cur: ScopeId | null = scopeId;
-  let depth = 0;
-  while (cur !== null) {
-    if (depth++ > MAX_SCOPE_DEPTH) {
-      throw new Error(
-        `engine: scope chain from ${scopeId} exceeded ${MAX_SCOPE_DEPTH} frames while looking up var ${varId} (possible cycle in scope.parentId)`,
-      );
-    }
-    const sc: Scope | undefined = ctx.state.scopes[cur] as Scope | undefined;
-    if (sc === undefined) {
-      throw new Error(`engine: scope ${cur} not found while looking up var ${varId}`);
-    }
-    const v = sc.values[varId];
-    if (v !== undefined) return v as Value;
-    cur = sc.parentId;
-  }
-  throw new Error(`engine: var ${varId} not found in scope ${scopeId} or ancestors`);
+  return lookupVar(ctx.store, scopeId, varId);
 }
 
 /**
  * Find the ambient generic substitution in scope — the nearest `ambientGenerics`
  * walking the scope chain from `scopeId` (the enclosing agent activation set it
- * on its root scope). Returns an empty map when none is in scope (a non-generic
- * activation), in which case a `statementApplyGenerics` fill is a no-op.
+ * on its root scope). Empty when none is in scope (a non-generic activation), in
+ * which case a `statementApplyGenerics` fill is a no-op.
  */
 export function lookupAmbientGenerics(ctx: StepCtx, scopeId: ScopeId): Record<string, Json> {
-  let cur: ScopeId | null = scopeId;
-  let depth = 0;
-  while (cur !== null) {
-    if (depth++ > MAX_SCOPE_DEPTH) break;
-    const sc = ctx.state.scopes[cur] as Scope | undefined;
-    if (sc === undefined) break;
-    if (sc.ambientGenerics !== undefined) return sc.ambientGenerics;
-    cur = sc.parentId;
-  }
-  return {};
+  return lookupAmbient(ctx.store, scopeId);
 }
 
 // ─── Common Thread defaults (for spawn) ────────────────────────────────────

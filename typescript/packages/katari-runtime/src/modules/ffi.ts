@@ -595,7 +595,7 @@ export class FfiModule implements Module {
       case "ipcChildDelegate": {
         // Ext is starting a CORE-side child. The callable it passed is an agent
         // value it received from Katari — already in external form
-        // (`qname@snapshot` / `closureref:<id>`), so we hand it through
+        // (`qname@snapshot` / `closure:<id>`), so we hand it through
         // verbatim (no re-stamp). A bare qname (e.g. a hand-written
         // `katari.delegate("some.agent", ...)`) carries no snapshot and CORE
         // rejects it as an un-stamped target — the expected "not found" outcome.

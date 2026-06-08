@@ -100,6 +100,7 @@ export class ApiServerActorHost {
             shards: tx.shards,
             projectIndex: tx.projectIndex,
             values: tx.values,
+            scopes: tx.scopes,
             entities: new StorageEntityStore(tx, projectId),
           }),
         ),

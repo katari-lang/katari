@@ -29,13 +29,13 @@
 //   terminate     → index.delegations[delegationId]          (the shard running D)
 //   escalateAck   → index.escalationOwners[escalationId]      (the raiser shard)
 
-import { agentDefIdClosureRef, agentDefIdSnapshot, encodeCoreAgentDefId } from "../agent-def-id.js";
+import { agentDefIdClosure, agentDefIdSnapshot } from "../agent-def-id.js";
 import { applyEvent, createState } from "../engine/apply.js";
-import { decodeClosureBlob, materializeClosure } from "../engine/closure-codec.js";
 import { CORE_ENDPOINT, type Endpoint } from "../engine/endpoint.js";
 import type { ExternalEvent } from "../engine/event.js";
 import { createEntityId, type EntityId } from "../engine/id.js";
 import type { Logger } from "../engine/logger.js";
+import type { Scope } from "../engine/scope.js";
 import { emptyProjectIndex, type ProjectIndex, type ShardId } from "../engine/shard.js";
 import {
   DEFAULT_PROMOTE_THRESHOLD_BYTES,
@@ -47,11 +47,32 @@ import {
 } from "../engine/snapshot.js";
 import type { State } from "../engine/state.js";
 import type { RefFetcher, RefPutter } from "../engine/step-ctx.js";
-import { collectRefs, type RefRep, recordEntries } from "../engine/value.js";
+import {
+  type CoreStore,
+  dropOwned,
+  emptyStore,
+  reachableFromClosures,
+  reownEscaping,
+  restoreOwned,
+  snapshotOwned,
+} from "../engine/store.js";
+import {
+  collectClosures,
+  collectRefs,
+  type RefRep,
+  recordEntries,
+  type Value,
+} from "../engine/value.js";
 import type { IRModule } from "../ir/types.js";
 import type { Module } from "../module.js";
+import type { PersistedClosure, PersistedScope } from "../storage/scope-store.js";
 import type { ValueStore } from "../storage/value-store.js";
-import { encryptValueRecord } from "../value-secret-codec.js";
+import {
+  decryptValueTree,
+  type EncryptedValue,
+  encryptValueRecord,
+  encryptValueTree,
+} from "../value-secret-codec.js";
 import { type EntityModule, type EntityStore, NULL_ENTITY_STORE } from "./entity-store.js";
 import type { CoreStorage, CoreTxStores } from "./storage.js";
 
@@ -86,6 +107,15 @@ export class CoreModule implements Module {
 
   /** Shards resident in memory (warm across quanta; DB is a write-through mirror). */
   private readonly shardCache = new Map<ShardId, ShardEntry>();
+  /**
+   * The CORE-global scope + closure store: one per project actor, shared across
+   * all the project's shards (docs/2026-06-08-scope-closure-entity.md). Warm in
+   * memory; a closure call resolves its captured scope here without any
+   * serialize. Scopes / closures are entity-owned; ascent re-owns escaping ones
+   * to the parent on an ack, and the entity-release cascade drops the rest. The
+   * ScopeStore (when wired) is its write-through mirror for crash recovery.
+   */
+  private readonly globalStore: CoreStore = emptyStore();
   /** Project routing index (warm; lazily loaded, written through every quantum). */
   private projectIndex: ProjectIndex = emptyProjectIndex();
   private indexLoaded = false;
@@ -108,16 +138,27 @@ export class CoreModule implements Module {
 
       // ── Issuer side: a child we delegated has reported its result ─────────
       if (payload.kind === "delegateAck" || payload.kind === "terminateAck") {
-        if (payload.kind === "delegateAck" && tx.values !== null) {
-          // Value-driven ascent: the result value carries the escaping ref ids
-          // (the child detached them to owner=NULL); claim them to the issuing
-          // shard's entity. No child lookup, no parent id on the bus.
+        if (payload.kind === "delegateAck") {
+          // Value-driven ascent: the result value carries the escaping closures
+          // (and their captured scope chains) + ref ids; the child detached them
+          // to owner=NULL on its terminal. Claim them to the issuing shard's
+          // entity — closures / scopes in the warm global store, refs in the
+          // value store. No child lookup, no parent id on the bus.
           const issuerEntity = this.projectIndex.pendingDelegateOut[payload.delegationId];
           if (issuerEntity !== undefined) {
-            const seed = collectRefs(payload.value);
-            if (seed.length > 0) {
-              await tx.values.reownRefs(this.projectId, null, issuerEntity, seed);
+            const capturedRefs = reownEscaping(
+              this.globalStore,
+              payload.value,
+              null,
+              issuerEntity as unknown as EntityId,
+            );
+            if (tx.values !== null) {
+              const seed = [...collectRefs(payload.value), ...capturedRefs];
+              if (seed.length > 0) {
+                await tx.values.reownRefs(this.projectId, null, issuerEntity, seed);
+              }
             }
+            await this.persistOwnedScopes(tx, issuerEntity as unknown as EntityId);
           }
         }
         // Drop the request edge now the result is in. BEFORE applyEvent so a
@@ -183,10 +224,16 @@ export class CoreModule implements Module {
         await tx.entities.deleteEscalation(payload.escalationId);
       }
 
+      // Snapshot this entity's owned scope/closure slice so a poisoned quantum
+      // (an irrecoverable throw mid-apply) can be rolled back: the global store
+      // is mutated in place and is NOT per-shard, so eviction alone would leave
+      // its half-mutations visible to sibling shards.
+      const ownedSlice = snapshotOwned(this.globalStore, shardId as unknown as EntityId);
       let result: Awaited<ReturnType<typeof applyEvent>>;
       try {
         result = await applyEvent(
           shard.state,
+          this.globalStore,
           event,
           this.makeFetchRef(tx.values),
           // Refs produced inside this shard's quantum are owned by the shard's
@@ -194,9 +241,11 @@ export class CoreModule implements Module {
           this.makePutRef(tx.values, shardId),
         );
       } catch (err) {
-        // applyEvent mutates state in place; an irrecoverable throw leaves this
-        // warm shard half-mutated. Evict it (the per-feed tx rolls back) so the
-        // next feed reloads a clean copy.
+        // applyEvent mutates state + the global store in place; an irrecoverable
+        // throw leaves both half-mutated. Restore this entity's owned slice +
+        // evict the shard (the per-feed tx rolls back the DB) so the next feed
+        // reloads a clean copy.
+        restoreOwned(this.globalStore, shardId as unknown as EntityId, ownedSlice);
         this.shardCache.delete(shardId);
         throw err;
       }
@@ -209,12 +258,15 @@ export class CoreModule implements Module {
 
       this.reconcileIndex(shardId, shard.state);
       if (shard.state.threadCount === 0) {
-        // Terminal: detach the escaping refs (the outbound delegateAck value's,
-        // owner→NULL) so they survive the entity delete + can be claimed by the
-        // parent; then self-delete the entity (its remaining refs + raised
-        // escalations cascade away). The delegation is deleted by OUR parent on
-        // its ack — not here.
-        await this.detachEscapingRefs(tx, shardId, outbound);
+        // Terminal: detach the escaping closures + their captured scope chains
+        // (owner→NULL in the global store) and the escaping refs (owner→NULL in
+        // the value store) so they survive the entity delete + can be claimed by
+        // the parent; then cascade-drop everything the entity still owns and
+        // self-delete the entity (its remaining refs + raised escalations cascade
+        // away). The delegation is deleted by OUR parent on its ack — not here.
+        await this.detachEscaping(tx, shardId, outbound);
+        dropOwned(this.globalStore, shardId as unknown as EntityId);
+        await this.dropOwnedScopes(tx, shardId as unknown as EntityId);
         await tx.entities.deleteEntity(shardId as unknown as EntityId);
         if (tx.values !== null) await tx.values.reapFreedBlobs(this.projectId);
         this.shardCache.delete(shardId);
@@ -222,6 +274,7 @@ export class CoreModule implements Module {
         await tx.shards.delete(this.projectId, shardId);
       } else {
         await this.persistShard(tx, shardId, shard.state, shard.currentSnapshot);
+        await this.persistOwnedScopes(tx, shardId as unknown as EntityId);
       }
       await tx.projectIndex.upsert(this.projectId, this.projectIndex);
 
@@ -304,51 +357,52 @@ export class CoreModule implements Module {
     if (loaded !== null) {
       const ir = await this.resolveIR(loaded.currentSnapshot);
       const state = deserialize(ir, await decryptCheckpoint(loaded.checkpoint));
-      // The snapshot is not in the checkpoint (CORE-private) — re-supply it.
+      // CORE-private fields (not in the checkpoint) — re-supply them. `selfEntity`
+      // = the shard id (= E); `snapshot` = the recorded code version.
       state.snapshot = loaded.currentSnapshot;
+      state.selfEntity = shardId as unknown as EntityId;
+      // Cold load: pull this entity's owned scopes / closures (+ the closures its
+      // values reference, transitively) into the warm global store.
+      await this.loadEntityScopes(tx, shardId as unknown as EntityId);
       const entry: ShardEntry = { state, currentSnapshot: loaded.currentSnapshot };
       this.shardCache.set(shardId, entry);
       return entry;
     }
     if (delegatePayload === undefined) return null;
 
-    // A closure that escaped its home shard: fetch its frozen blob by `(core,
-    // id)`, materialize the captured env into a fresh shard, then rewrite the
-    // target to the new (local) closure id so the standard closure:N dispatch
-    // runs the body. The snapshot rides in the blob.
-    const closureRefId = agentDefIdClosureRef(delegatePayload.agentDefId);
-    if (closureRefId !== undefined) {
-      if (tx.values === null) {
-        throw new Error("core: closure-ref delegate but no value store wired to materialize it");
+    // The snapshot the fresh shard runs:
+    //   - closure delegate (a cross-entity callback, e.g. FFI invoking a closure
+    //     it received): the snapshot rides on the closure record in the global
+    //     store. Cold start may need to load the record first.
+    //   - qname delegate: stamped on the target (API root / CORE / FFI child).
+    const closureId = agentDefIdClosure(delegatePayload.agentDefId);
+    let snapshot: string;
+    if (closureId !== undefined) {
+      if (this.globalStore.closures[closureId] === undefined) {
+        await this.loadClosureChain(tx, closureId);
       }
-      const bytes = await tx.values.fetch(this.projectId, "core", closureRefId);
-      if (bytes === null) {
-        throw new Error(`core: closure blob core/${closureRefId} not found in value store`);
+      const record = this.globalStore.closures[closureId];
+      if (record === undefined) {
+        throw new Error(`core: closure ${closureId} not found for delegate ${shardId}`);
       }
-      const content = decodeClosureBlob(bytes);
-      const ir = await this.resolveIR(content.snapshot);
-      const state = createState(ir, { selfEndpoint: this.endpoint, snapshot: content.snapshot });
-      // The self-ref a recursive body re-dispatches by: only `(module, id)` is
-      // used downstream (dispatch / get_metadata / GC), so hash/size are left
-      // vestigial — the content hash lives in the ref store keyed by the id.
-      const selfRef: RefRep = { kind: "ref", module: "core", id: closureRefId, hash: "", size: 0 };
-      const newClosureId = materializeClosure(content, state, selfRef);
-      delegatePayload.agentDefId = encodeCoreAgentDefId({ kind: "closure", value: newClosureId });
-      const entry: ShardEntry = { state, currentSnapshot: content.snapshot };
-      this.shardCache.set(shardId, entry);
-      return entry;
+      snapshot = record.snapshot;
+    } else {
+      const stamped = agentDefIdSnapshot(delegatePayload.agentDefId);
+      if (stamped === undefined) {
+        throw new Error(
+          `core: un-stamped delegate ${shardId} — cannot resolve the snapshot to run`,
+        );
+      }
+      snapshot = stamped;
     }
-
-    // A qname target: every one is stamped (API root / CORE child / FFI child).
-    // An un-stamped one is an invariant violation — fail loudly, don't guess.
-    const delegateSnapshot = agentDefIdSnapshot(delegatePayload.agentDefId);
-    if (delegateSnapshot === undefined) {
-      throw new Error(`core: un-stamped delegate ${shardId} — cannot resolve the snapshot to run`);
-    }
-    const ir = await this.resolveIR(delegateSnapshot);
+    const ir = await this.resolveIR(snapshot);
     const entry: ShardEntry = {
-      state: createState(ir, { selfEndpoint: this.endpoint, snapshot: delegateSnapshot }),
-      currentSnapshot: delegateSnapshot,
+      state: createState(ir, {
+        selfEndpoint: this.endpoint,
+        snapshot,
+        selfEntity: shardId as unknown as EntityId,
+      }),
+      currentSnapshot: snapshot,
     };
     this.shardCache.set(shardId, entry);
     return entry;
@@ -403,24 +457,158 @@ export class CoreModule implements Module {
   }
 
   /**
-   * Detach a completed shard's ESCAPING refs (value-driven ascent). The refs in
-   * the outbound `delegateAck` value (transitively via `refs_to`) are re-owned
-   * from this shard's entity to NULL (in-transit); the parent claims them by id
-   * from the value it receives. Every other ref the shard owns is dropped by the
-   * entity-delete cascade. A shard ending without a `delegateAck` (terminate /
-   * unhandled throw) detaches nothing → everything it owns cascades away.
+   * Detach a completed shard's ESCAPING resources (value-driven ascent). From
+   * the outbound `delegateAck` value: the closures it carries + their captured
+   * scope chains are re-owned from this shard's entity to NULL in the global
+   * store (and persisted as in-transit rows), and the refs (the value's own +
+   * those captured inside the escaping scopes) are re-owned to NULL in the value
+   * store. The parent claims them all by the value it receives. Everything else
+   * the shard owns is dropped by the entity-release cascade. A shard ending
+   * without a `delegateAck` (terminate / unhandled throw) detaches nothing.
    */
-  private async detachEscapingRefs(
+  private async detachEscaping(
     tx: CoreTxStores,
     shardId: ShardId,
     outbound: ExternalEvent[],
   ): Promise<void> {
-    if (tx.values === null) return;
     const ack = outbound.find((ev) => ev.payload.kind === "delegateAck");
     if (ack === undefined || ack.payload.kind !== "delegateAck") return;
-    const escapeSeed = collectRefs(ack.payload.value);
-    if (escapeSeed.length === 0) return;
-    await tx.values.reownRefs(this.projectId, shardId, null, escapeSeed);
+    const value = ack.payload.value;
+    // Warm: re-own escaping closures + captured scope chains E → NULL; returns
+    // the content refs captured inside those scopes.
+    const capturedRefs = reownEscaping(
+      this.globalStore,
+      value,
+      shardId as unknown as EntityId,
+      null,
+    );
+    if (tx.values !== null) {
+      const seed = [...collectRefs(value), ...capturedRefs];
+      if (seed.length > 0) await tx.values.reownRefs(this.projectId, shardId, null, seed);
+    }
+    // Persist the now-NULL-owned (in-transit) escaping scopes / closures so the
+    // parent's claim survives a crash in the (sub-second) ascent window.
+    await this.persistDetached(tx, value);
+  }
+
+  // ─── Scope / closure persistence (write-through mirror of the global store) ──
+
+  /** Persist the scopes + closures `entity` owns in the global store (the
+   *  per-quantum write-through + a claim). No-op when no ScopeStore is wired. */
+  private async persistOwnedScopes(tx: CoreTxStores, entity: EntityId): Promise<void> {
+    if (tx.scopes == null) return;
+    const scopes: PersistedScope[] = [];
+    const closures: PersistedClosure[] = [];
+    for (const sc of Object.values(this.globalStore.scopes)) {
+      if (sc.owner === entity) scopes.push(serializePersistedScope(sc));
+    }
+    for (const c of Object.values(this.globalStore.closures)) {
+      if (c.owner === entity) closures.push({ ...c });
+    }
+    if (scopes.length > 0 || closures.length > 0) {
+      await tx.scopes.upsert(this.projectId, scopes, closures);
+    }
+  }
+
+  /** Persist the escaping (now NULL-owned) scopes / closures `value` carries. */
+  private async persistDetached(tx: CoreTxStores, value: Value): Promise<void> {
+    if (tx.scopes == null) return;
+    const { scopes: scopeIds, closures: closureIds } = reachableFromClosures(
+      this.globalStore,
+      collectClosures(value),
+    );
+    const scopes: PersistedScope[] = [];
+    const closures: PersistedClosure[] = [];
+    for (const id of scopeIds) {
+      const sc = this.globalStore.scopes[id];
+      if (sc !== undefined && sc.owner === null) scopes.push(serializePersistedScope(sc));
+    }
+    for (const id of closureIds) {
+      const c = this.globalStore.closures[id];
+      if (c !== undefined && c.owner === null) closures.push({ ...c });
+    }
+    if (scopes.length > 0 || closures.length > 0) {
+      await tx.scopes.upsert(this.projectId, scopes, closures);
+    }
+  }
+
+  /** Drop the scopes / closures `entity` owns from persistence (entity cascade). */
+  private async dropOwnedScopes(tx: CoreTxStores, entity: EntityId): Promise<void> {
+    if (tx.scopes == null) return;
+    await tx.scopes.deleteOwned(this.projectId, entity);
+  }
+
+  /** Cold load: pull `entity`'s owned scopes / closures (+ the closures their
+   *  values reference + the parent / captured scopes they chain to, transitively
+   *  across owners) into the warm global store. */
+  private async loadEntityScopes(tx: CoreTxStores, entity: EntityId): Promise<void> {
+    if (tx.scopes == null) return;
+    this.graftPersisted(await tx.scopes.loadOwned(this.projectId, entity));
+    await this.loadTransitive(tx);
+  }
+
+  /** Cold load: pull a single closure + its captured scope chain (and nested
+   *  closures) into the warm store (a closure callback after a restart). */
+  private async loadClosureChain(
+    tx: CoreTxStores,
+    closureId: import("../engine/id.js").ClosureId,
+  ): Promise<void> {
+    if (tx.scopes == null) return;
+    this.graftPersisted(await tx.scopes.loadByIds(this.projectId, [], [closureId]));
+    await this.loadTransitive(tx);
+  }
+
+  /** Pull every still-missing scope (a loaded scope's `parentId`, a loaded
+   *  closure's captured scope) + closure (referenced by a loaded scope value)
+   *  into the warm store, until the reachable set is closed. */
+  private async loadTransitive(tx: CoreTxStores): Promise<void> {
+    if (tx.scopes == null) return;
+    // Bounded: each round either loads new rows or stops. The cap guards against
+    // a corrupt store that keeps reporting a missing id it can't supply.
+    for (let round = 0; round < 10_000; round++) {
+      const missingScopes = new Set<import("../engine/id.js").ScopeId>();
+      const missingClosures = new Set<import("../engine/id.js").ClosureId>();
+      for (const sc of Object.values(this.globalStore.scopes)) {
+        if (sc.parentId !== null && this.globalStore.scopes[sc.parentId] === undefined) {
+          missingScopes.add(sc.parentId);
+        }
+        for (const v of Object.values(sc.values)) {
+          if (v !== undefined) {
+            for (const cid of collectClosures(v)) {
+              if (this.globalStore.closures[cid] === undefined) missingClosures.add(cid);
+            }
+          }
+        }
+      }
+      for (const c of Object.values(this.globalStore.closures)) {
+        if (this.globalStore.scopes[c.scopeId] === undefined) missingScopes.add(c.scopeId);
+      }
+      if (missingScopes.size === 0 && missingClosures.size === 0) return;
+      const loaded = await tx.scopes.loadByIds(
+        this.projectId,
+        [...missingScopes],
+        [...missingClosures],
+      );
+      if (loaded.scopes.length === 0 && loaded.closures.length === 0) return; // nothing more to resolve
+      this.graftPersisted(loaded);
+    }
+  }
+
+  /** Graft a loaded scope / closure set into the warm global store (decrypting
+   *  captured secret values back to plaintext). Refs stay refs. */
+  private graftPersisted(loaded: { scopes: PersistedScope[]; closures: PersistedClosure[] }): void {
+    for (const sc of loaded.scopes) {
+      this.globalStore.scopes[sc.id] = {
+        id: sc.id,
+        parentId: sc.parentId,
+        owner: sc.owner,
+        values: deserializeScopeValues(sc.values),
+        ...(sc.ambientGenerics !== undefined ? { ambientGenerics: sc.ambientGenerics } : {}),
+      };
+    }
+    for (const c of loaded.closures) {
+      this.globalStore.closures[c.id] = { ...c };
+    }
   }
 
   /** Promote one inline string to an owner=this-shard ref. */
@@ -522,6 +710,29 @@ export class CoreModule implements Module {
       createdAt: new Date().toISOString(),
     });
   }
+}
+
+/** Encrypt a live scope into its at-rest row form (captured secrets → envelopes;
+ *  refs / inline strings pass through — large strings were promoted at birth). */
+function serializePersistedScope(scope: Scope): PersistedScope {
+  const values: Record<number, EncryptedValue> = {};
+  for (const [k, v] of Object.entries(scope.values)) {
+    if (v !== undefined) values[Number(k)] = encryptValueTree(v);
+  }
+  return {
+    id: scope.id,
+    parentId: scope.parentId,
+    owner: scope.owner,
+    values,
+    ...(scope.ambientGenerics !== undefined ? { ambientGenerics: scope.ambientGenerics } : {}),
+  };
+}
+
+/** Inverse of {@link serializePersistedScope}'s value map (envelopes → secrets). */
+function deserializeScopeValues(values: Record<number, EncryptedValue>): Record<number, Value> {
+  const out: Record<number, Value> = {};
+  for (const [k, v] of Object.entries(values)) out[Number(k)] = decryptValueTree(v);
+  return out;
 }
 
 /** Sync `indexMap` so every key in `stateMap` points at `shardId`, and any

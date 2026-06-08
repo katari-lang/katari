@@ -18,6 +18,7 @@ import type {
   Json,
   ProjectIndexStore,
   SchemaBundle,
+  ScopeStore,
   ShardStore,
   ValueStore,
 } from "@katari-lang/runtime";
@@ -25,6 +26,7 @@ import postgres from "postgres";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
 import type { BlobStore } from "./blob-store.js";
+import { PgScopeStore } from "./scope-store-pg.js";
 import { PgProjectIndexStore, PgShardStore } from "./shard-store-pg.js";
 import type {
   CancelReason,
@@ -1233,6 +1235,7 @@ export class PostgresStorage implements Storage {
   readonly values: ValueStore;
   readonly shards: ShardStore;
   readonly projectIndex: ProjectIndexStore;
+  readonly scopes: ScopeStore;
 
   private constructor(
     private readonly sql: Sql,
@@ -1252,6 +1255,7 @@ export class PostgresStorage implements Storage {
     this.values = new PgValueStore(sql, blobStore);
     this.shards = new PgShardStore(sql);
     this.projectIndex = new PgProjectIndexStore(sql);
+    this.scopes = new PgScopeStore(sql);
   }
 
   static create(databaseUrl: string, blobStore: BlobStore): PostgresStorage {
@@ -1312,6 +1316,7 @@ function runInTx<T>(
       values: new PgValueStore(innerSql, blobStore),
       shards: new PgShardStore(innerSql),
       projectIndex: new PgProjectIndexStore(innerSql),
+      scopes: new PgScopeStore(innerSql),
       withTransaction: (innerFn) => runInTx(innerSql, blobStore, innerFn),
       withSnapshotLock: async (_innerTx, snapshotId, body) => {
         await acquireSnapshotAdvisoryLock(innerSql, snapshotId);

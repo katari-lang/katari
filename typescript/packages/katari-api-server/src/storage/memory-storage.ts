@@ -17,6 +17,7 @@ import type {
 import { Mutex } from "async-mutex";
 import { v7 as uuidv7 } from "uuid";
 import { decodeCursor, encodeCursor } from "../cursor.js";
+import { InMemoryScopeStore } from "./scope-store-memory.js";
 import { InMemoryProjectIndexStore, InMemoryShardStore } from "./shard-store-memory.js";
 import type {
   DelegationRepo,
@@ -278,11 +279,12 @@ class InMemoryEngineCheckpointRepo implements EngineCheckpointRepo {
 class InMemoryEntityRepo implements EntityRepo {
   rows = new Map<EntityId, EntityRow>();
 
-  // Holds the value store + escalation repo so `delete` can simulate the FK
-  // CASCADE (drop the entity's still-owned refs + raised escalations) that the
-  // Postgres impl gets for free.
+  // Holds the value + scope stores + escalation repo so `delete` can simulate
+  // the FK CASCADE (drop the entity's still-owned refs / scopes / closures +
+  // raised escalations) that the Postgres impl gets for free.
   constructor(
     private readonly values: InMemoryValueStore,
+    private readonly scopes: InMemoryScopeStore,
     private readonly escalations: InMemoryEscalationRepo,
   ) {}
 
@@ -321,8 +323,10 @@ class InMemoryEntityRepo implements EntityRepo {
     const row = this.rows.get(id);
     if (row === undefined) return false;
     this.rows.delete(id);
-    // FK CASCADE (simulated): drop the entity's still-owned refs + escalations.
+    // FK CASCADE (simulated): drop the entity's still-owned refs / scopes /
+    // closures + raised escalations.
     this.values.deleteRefsOwnedBy(row.projectId, id);
+    this.scopes.deleteOwnedSync(row.projectId, id);
     for (const esc of [...this.escalations.rows.values()]) {
       if (esc.entityId === id) this.escalations.rows.delete(esc.id);
     }
@@ -659,10 +663,12 @@ export class InMemoryStorage implements Storage {
   readonly snapshots = new InMemorySnapshotRepo();
   readonly checkpoints = new InMemoryEngineCheckpointRepo();
   readonly values = new InMemoryValueStore();
+  readonly scopes = new InMemoryScopeStore();
   readonly escalations = new InMemoryEscalationRepo();
-  // entities holds value-store + escalation refs so `delete` simulates the FK
-  // CASCADE (refs + raised escalations) the Postgres impl gets for free.
-  readonly entities = new InMemoryEntityRepo(this.values, this.escalations);
+  // entities holds value + scope stores + escalation refs so `delete` simulates
+  // the FK CASCADE (refs / scopes / closures + raised escalations) the Postgres
+  // impl gets for free.
+  readonly entities = new InMemoryEntityRepo(this.values, this.scopes, this.escalations);
   readonly delegations = new InMemoryDelegationRepo();
   readonly runs = new InMemoryRunRepo();
   readonly runEscalationsAudit = new InMemoryRunEscalationsAuditRepo();
@@ -727,6 +733,8 @@ export class InMemoryStorage implements Storage {
       // valid rollback target (inserts/deletes revert; bytes never mutate).
       valueRefsRows: new Map(this.values.refs),
       valueBlobsRows: new Map(this.values.blobs),
+      scopeRows: new Map(this.scopes.scopes),
+      closureRows: new Map(this.scopes.closures),
       shardRows: new Map(this.shards.rows),
       projectIndexRows: new Map(this.projectIndex.rows),
     };
@@ -747,6 +755,8 @@ export class InMemoryStorage implements Storage {
     this.envEntries.rows = snap.envEntriesRows;
     this.values.refs = snap.valueRefsRows;
     this.values.blobs = snap.valueBlobsRows;
+    this.scopes.scopes = snap.scopeRows;
+    this.scopes.closures = snap.closureRows;
     this.shards.rows = snap.shardRows;
     this.projectIndex.rows = snap.projectIndexRows;
   }
@@ -767,6 +777,8 @@ type TxSnapshot = {
   envEntriesRows: Map<string, EnvEntryRow>;
   valueRefsRows: InMemoryValueStore["refs"];
   valueBlobsRows: InMemoryValueStore["blobs"];
+  scopeRows: InMemoryScopeStore["scopes"];
+  closureRows: InMemoryScopeStore["closures"];
   shardRows: InMemoryShardStore["rows"];
   projectIndexRows: InMemoryProjectIndexStore["rows"];
 };

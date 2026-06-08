@@ -3,7 +3,7 @@
 // discriminator priority:
 //
 //   1. `{$constructor: "...", ...fieldsRaw}`  → tagged value
-//   2. `{$agent: "module.name" | "closureref:<ref>"}` → callable (agent / closure)
+//   2. `{$agent: "module.name@snap" | "closure:<id>"}` → callable (agent / closure)
 //   3. `{$ref: {module, id}, as, hash, size}`  → value reference (string/file)
 //   4. `{$secret: "..."}` (inbound)            → refused (one-way out)
 //   5. plain object (none of the above)        → record
@@ -87,13 +87,15 @@ export function valueToRaw(value: Value): RawValue {
     }
     case "closure":
       // A closure is a callable, so it serialises like one — as `$agent`,
-      // uniform with a top-level agent (#5). Its dispatch handle is just the
-      // content ref id (`closureref:<id>`), exactly what a delegate target
-      // carries, so the value form and the dispatch id converge (and match
-      // `get_metadata`'s `id` field). `hash`/`size` are not on the wire — they
-      // live in the ref store keyed by the id (recovered there when needed).
+      // uniform with a top-level agent. Its dispatch handle is its machine-local
+      // id (`closure:<closureId>`), the same string a delegate target / a
+      // `get_metadata.id` carries. The id is process-local: the closure resolves
+      // only while its owner entity is alive in this project actor.
       return {
-        [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({ kind: "closureRef", id: value.ref.id }),
+        [CALLABLE_DISCRIMINATOR]: encodeCoreAgentDefId({
+          kind: "closure",
+          value: value.closureId,
+        }),
       };
     case "agentLiteral":
       // External form: the snapshot rides in the `@snapshot` stamp (encode
@@ -174,8 +176,8 @@ function decodeCallable(rawId: unknown): Value {
     throw new RawValueDecodeError(`valueFromRaw: $agent must be a string, got ${typeof rawId}`);
   }
   // Both callable forms ride under `$agent` as their agent def id: a top-level
-  // agent is a bare qname; a closure is `closureref:<...>` carrying its content
-  // ref. Decode through the agent-def-id codec so the two stay in one place.
+  // agent is a bare qname (`qname@snapshot`); a closure is `closure:<closureId>`.
+  // Decode through the agent-def-id codec so the two stay in one place.
   let decoded: ReturnType<typeof decodeCoreAgentDefId>;
   try {
     decoded = decodeCoreAgentDefId(rawId as AgentDefId);
@@ -185,21 +187,9 @@ function decodeCallable(rawId: unknown): Value {
     );
   }
   switch (decoded.kind) {
-    case "closureRef":
-      // The wire carries only the ref id; `module` is invariably `core` and
-      // `hash`/`size` are vestigial for a closure value (dispatch + get_metadata
-      // + GC all key off `(module, id)`, and the content hash lives in the ref
-      // store keyed by the id). Reconstruct a minimal ref.
-      return {
-        kind: "closure",
-        ref: { kind: "ref", module: "core", id: decoded.id, hash: "", size: 0 },
-      };
     case "closure":
-      // The in-shard `closure:N` dispatch id is engine-internal, never a wire
-      // value. Seeing it here is a version skew / encoder bug.
-      throw new RawValueDecodeError(
-        `valueFromRaw: '$agent: ${rawId}' — a local closure id is not a wire value`,
-      );
+      // The machine-local closure id (a UUID into the CORE-global closure store).
+      return { kind: "closure", closureId: decoded.value };
     case "qname":
       // Preserve the `@snapshot` stamp (the external form). A bare wire value
       // decodes to a snapshot-less agent literal that fails at delegate.

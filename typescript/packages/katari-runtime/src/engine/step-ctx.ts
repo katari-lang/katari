@@ -17,6 +17,7 @@
 import type { Event, InternalEventPayload } from "./event.js";
 import type { LogEntry, LogLevel } from "./logger.js";
 import type { State } from "./state.js";
+import type { CoreStore } from "./store.js";
 import type { BytesRep, RefHandle, RefRep } from "./value.js";
 
 /**
@@ -70,6 +71,13 @@ export interface StepCtx {
   /** Live engine state for this step (mutated in place). */
   readonly state: State;
   /**
+   * The CORE-global scope + closure store (shared across the project's shards;
+   * see docs/2026-06-08-scope-closure-entity.md). Mutated in place during a
+   * quantum. Scopes / closures this shard creates are tagged `owner =
+   * state.selfEntity`.
+   */
+  readonly store: CoreStore;
+  /**
    * Whether a real value store is wired (`putBlob` can persist). False when
    * the host injected the default `noRefPutter` (tests / store-less harnesses).
    * Transparent producers (e.g. large-string promotion) consult this to fall
@@ -121,15 +129,17 @@ export function emptyBuffers(): StepBuffers {
   return { queue: [], outbound: [], logs: [] };
 }
 
-/** Build a StepCtx that backs onto the given state + buffers. */
+/** Build a StepCtx that backs onto the given state + store + buffers. */
 export function makeStepCtx(
   state: State,
+  store: CoreStore,
   buffers: StepBuffers,
   fetchRef: RefFetcher = noRefFetcher,
   putRef: RefPutter = noRefPutter,
 ): StepCtx {
   return {
     state,
+    store,
     valueStoreWired: putRef !== noRefPutter,
     enqueue(event) {
       buffers.queue.push(event);

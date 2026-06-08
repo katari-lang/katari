@@ -13,9 +13,11 @@ export {
   bytesContentEqual,
   bytesEqualsText,
   bytesHash,
+  collectClosures,
   collectGarbage,
   collectRefs,
   consoleLogger,
+  createClosureId,
   createDelegationId,
   createEntityId,
   createEscalationId,
@@ -26,6 +28,7 @@ export {
   EntryNotFoundError,
   emptyProjectIndex,
   emptyResult,
+  emptyStore,
   endpoint,
   IrrecoverableEngineError,
   inlineText,
@@ -55,6 +58,9 @@ export type {
   BytesRep,
   CallId,
   ChildRole,
+  ClosureId,
+  ClosureRecord,
+  CoreStore,
   CtorThread,
   DelegateThread,
   DelegationId,
@@ -108,6 +114,7 @@ export type {
 // ─── Storage: value store (3-layer byte-sequence storage) ──────────────────
 
 export { hashBytes, hashText } from "./storage/hash.js";
+export type { PersistedClosure, PersistedScope, ScopeStore } from "./storage/scope-store.js";
 export type {
   CreateFileInput,
   FileRecord,

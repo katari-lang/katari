@@ -5,21 +5,18 @@
 //   1. Resolve the @target@ VALUE into a callable identity (mirrors
 //      DelegateThread's value dispatch): an `agentLiteral` dispatches
 //      CORE-internal when its qname is in the IR entries (else FFI); a
-//      `closure` always dispatches on CORE (fetch its blob for the input
-//      schema). The value also carries any generic substitution.
+//      `closure` resolves through the CORE-global closure store and is invoked
+//      IN-SHARD (no delegate). The value also carries any generic substitution.
 //   2. Read the target's input schema, specialise it to the value's generics,
 //      and validate @argsRecord@ against it; collect mismatches into one
 //      diagnostic string.
-//   3. On success: emit an outbound `delegate` event — @argsRecord@ becomes the
-//      target's single argument value, the generics ride along — and wait for
-//      the matching `delegateAck` (translated by the runner into a `done`).
+//   3. On success: for an agent target, emit an outbound `delegate` event and
+//      wait for the `delegateAck` (translated by the runner into a `done`); for
+//      a closure target, spawn the body as a thread in the current shard over
+//      the captured scope (the body `done`s us directly).
 //   4. On (a) an un-callable target, or (b) validation errors: raise the
 //      `primitive.error_invalid_argument` request upward and enter the
-//      "waiting for cancel" state, just like `PrimRaiseRequest` for ordinary
-//      prims.
-//
-// Inbound asks (escalates from the peer) are forwarded upward as
-// `ask` events to our parent, mirroring DelegateThread.
+//      "waiting for cancel" state, like `PrimRaiseRequest` for ordinary prims.
 
 import {
   type AgentDefId,
@@ -29,21 +26,29 @@ import {
 import type { AgentBlock, BlockId } from "../../../ir/types.js";
 import type { Json } from "../../../json.js";
 import { valueToRaw } from "../../../value-codec.js";
-import { decodeClosureBlob } from "../../closure-codec.js";
 import type { Endpoint } from "../../endpoint.js";
 import { fillGenericSchema } from "../../generics.js";
-import { type AskId, createDelegationId } from "../../id.js";
+import { type AskId, type ClosureId, createDelegationId } from "../../id.js";
 import { relaxedSchemaFromString, validateAgainstSchema } from "../../schema-validate.js";
+import { spawnAgentRoot } from "../../spawn.js";
 import type { StepCtx } from "../../step-ctx.js";
 import { mkRecord, mkString, type Value } from "../../value.js";
-import { allocAskId, deleteThread } from "../common.js";
+import {
+  allocAskId,
+  allocCallId,
+  beginCancel,
+  commonRemoveChild,
+  deleteThread,
+  hasChildren,
+  proxyAskToParent,
+} from "../common.js";
 import type { CallAgentThread, Thread } from "../types.js";
-import { defaultAskAckProxy, defaultCancelAckUnexpected } from "./defaults.js";
+import { defaultAskAckProxy } from "./defaults.js";
 import type { ThreadOps } from "./types.js";
 
 export const callAgentOps: ThreadOps<CallAgentThread> = {
-  async create(ctx, t) {
-    const resolved = await resolveTarget(ctx, t);
+  create(ctx, t) {
+    const resolved = resolveTarget(ctx, t);
     if (resolved.kind === "error") {
       raiseCallAgentError(ctx, t, resolved.message);
       return;
@@ -59,9 +64,33 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
       return;
     }
 
-    // Schema validated → emit the delegate event. The args record becomes the
-    // target's single argument value; the target's generic substitution rides
-    // along so it runs specialised.
+    if (resolved.kind === "closure") {
+      // In-shard closure call: spawn the body as our child over the captured
+      // scope (the global store). The args record is the body's single argument;
+      // the target's generics become the body's ambient substitution.
+      const record = ctx.store.closures[resolved.closureId];
+      if (record === undefined) {
+        raiseCallAgentError(
+          ctx,
+          t,
+          `call_agent: closure '${resolved.closureId}' not found (its owner entity may have been released)`,
+        );
+        return;
+      }
+      const callId = allocCallId(t as Thread);
+      spawnAgentRoot(ctx, {
+        blockId: record.blockId,
+        argument: mkRecord({ ...t.argsRecord }),
+        delegationId: createDelegationId(), // synthetic — non-root agent
+        capturedScopeId: record.scopeId,
+        parent: { threadId: t.id, callId },
+        ...(resolved.generics !== undefined ? { ambientGenerics: resolved.generics } : {}),
+      });
+      return;
+    }
+
+    // Agent target → emit the delegate event. The args record becomes the
+    // target's single argument value; its generic substitution rides along.
     const delegationId = createDelegationId();
     t.delegationId = delegationId;
     ctx.state.pendingDelegateOut[delegationId] = t.id;
@@ -79,30 +108,29 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
   },
 
   /**
-   * `done` arrives via the runner translating an inbound `delegateAck`.
-   * Forward the value upstream as our own done.
+   * For an in-shard closure call, our body AgentThread child finished — remove
+   * it and forward its value to our parent, whose `commonRemoveChild` deletes US
+   * (mirrors the cross-shard ack, which the runner routes straight to the parent).
    */
-  done(ctx, t, _callId, value) {
+  done(ctx, t, callId, value) {
+    if (!commonRemoveChild(ctx, t as CallAgentThread, callId)) return;
     if (t.parent !== null && t.parentCallId !== null) {
-      ctx.enqueue({
-        kind: "done",
-        target: t.parent,
-        callId: t.parentCallId,
-        value,
-      });
+      ctx.enqueue({ kind: "done", target: t.parent, callId: t.parentCallId, value });
     }
-    deleteThread(ctx, t.id);
   },
 
   /**
-   * Two cancel cases:
-   *   - We have an outstanding delegation (= the happy-path child).
-   *     Mirror DelegateThread: emit `terminate` and wait for ack.
-   *   - We're in the error-raise state (= no child, only the upward
-   *     ask). No child to terminate; immediately ack and exit.
+   * Three cancel cases:
+   *   - In-shard closure call (we own the body child): cascade cancel to it.
+   *   - Outstanding delegation (agent target): emit `terminate` and wait.
+   *   - Error-raise state (no child, only the upward ask): ack and exit.
    */
   cancel(ctx, t) {
     if (t.status === "cancelling") return;
+    if (hasChildren(t)) {
+      beginCancel(ctx, t as Thread);
+      return;
+    }
     t.status = "cancelling";
     if (t.delegationId !== undefined) {
       ctx.emit({
@@ -111,9 +139,7 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
         payload: { kind: "terminate", delegationId: t.delegationId },
       });
       // The terminateAck path goes through the runner and translates
-      // into either a `done` (= still produced a value first) or a
-      // `cancelAck`. Either way we finish via the normal `done`/cancel
-      // path; nothing more to do here.
+      // into either a `done` or a `cancelAck`; nothing more to do here.
       return;
     }
     // Error-raise state: no child to wait on, ack the parent.
@@ -127,17 +153,20 @@ export const callAgentOps: ThreadOps<CallAgentThread> = {
     deleteThread(ctx, t.id);
   },
 
-  cancelAck: defaultCancelAckUnexpected,
+  /** In-shard closure call: the body child finished cancelling — common
+   *  bookkeeping fires `finishCancelling` (→ cancelAck to our parent). */
+  cancelAck(ctx, t, callId) {
+    commonRemoveChild(ctx, t as CallAgentThread, callId);
+  },
 
   /**
-   * No children of our own; inbound `escalate` is translated by the
-   * runner into a direct upward ask to our parent, bypassing us. Any
-   * ask reaching us is an invariant violation.
+   * In-shard closure call: a control / request ask from the body child bubbles
+   * here — proxy it up to our parent. (Cross-shard delegates have no children;
+   * an inbound `escalate` is converted by the runner into an upward ask directly,
+   * so reaching here always means the in-shard case.)
    */
-  ask(_ctx, _t, askId) {
-    throw new Error(
-      `callAgent thread received ask (askId=${askId}) — CallAgentThread has no children`,
-    );
+  ask(ctx, t, askId, kind, childCallId) {
+    proxyAskToParent(ctx, t as Thread, childCallId, askId, kind);
   },
 
   /**
@@ -180,8 +209,13 @@ type Resolved =
        *  delegate (and used to specialise `inputSchema` before validation). */
       generics?: Record<string, Json>;
       /** The target's input schema (compiled JSON Schema string, possibly
-       *  carrying `$generic` placeholders) — from the IR for an agent value,
-       *  from the blob for a closure. */
+       *  carrying `$generic` placeholders) — from the IR for an agent value. */
+      inputSchema: string;
+    }
+  | {
+      kind: "closure";
+      closureId: ClosureId;
+      generics?: Record<string, Json>;
       inputSchema: string;
     }
   | { kind: "error"; message: string };
@@ -189,8 +223,9 @@ type Resolved =
 // Resolve the call target from the supplied VALUE (mirrors DelegateThread's
 // value dispatch), additionally surfacing the input schema so create() can
 // validate the dynamic args. An agent value dispatches CORE-internal when its
-// qname is in the IR entries, else FFI; a closure always dispatches on CORE.
-async function resolveTarget(ctx: StepCtx, t: CallAgentThread): Promise<Resolved> {
+// qname is in the IR entries, else FFI; a closure resolves through the CORE-global
+// store and is invoked in-shard.
+function resolveTarget(ctx: StepCtx, t: CallAgentThread): Resolved {
   const target = t.target;
   if (target.kind === "agentLiteral") {
     const qname = target.qualifiedName;
@@ -220,21 +255,25 @@ async function resolveTarget(ctx: StepCtx, t: CallAgentThread): Promise<Resolved
     };
   }
   if (target.kind === "closure") {
-    let inputSchema: string;
-    try {
-      inputSchema = decodeClosureBlob(await ctx.materialize(target.ref)).metadata.inputSchema;
-    } catch (e) {
+    const record = ctx.store.closures[target.closureId];
+    if (record === undefined) {
       return {
         kind: "error",
-        message: `call_agent: closure '${target.ref.id}' not resolvable: ${e instanceof Error ? e.message : String(e)}`,
+        message: `call_agent: closure '${target.closureId}' not found (its owner entity may have been released)`,
+      };
+    }
+    const block = requireAgentBlock(ctx, record.blockId, `closure:${target.closureId}`);
+    if (block === null) {
+      return {
+        kind: "error",
+        message: `call_agent: closure '${target.closureId}' body is not an agent block`,
       };
     }
     return {
-      kind: "ok",
-      peer: ctx.state.selfEndpoint,
-      agentDefId: encodeCoreAgentDefId({ kind: "closureRef", id: target.ref.id }),
+      kind: "closure",
+      closureId: target.closureId,
       generics: target.generics,
-      inputSchema,
+      inputSchema: block.inputSchema,
     };
   }
   return {

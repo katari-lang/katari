@@ -58,7 +58,9 @@ export function literalReturnIR(literal: string, irName = "test"): IRModule {
           },
           {
             kind: "statementExit",
-            body: { exitKind: "exitKindReturn", value: 0 as VarId },
+            // The lexical target of a top-level agent's `return` is its own
+            // BlockAgent (block 0), so the root AgentThread catches it.
+            body: { exitKind: "exitKindReturn", value: 0 as VarId, target: 0 as BlockId },
           },
         ],
       },
@@ -121,7 +123,8 @@ export function produceFileIR(returnFile: boolean): IRModule {
           },
           {
             kind: "statementExit",
-            body: { exitKind: "exitKindReturn", value: (returnFile ? 1 : 0) as VarId },
+            // Lexical return target = main's own BlockAgent (block 0).
+            body: { exitKind: "exitKindReturn", value: (returnFile ? 1 : 0) as VarId, target: 0 as BlockId },
           },
         ],
       },

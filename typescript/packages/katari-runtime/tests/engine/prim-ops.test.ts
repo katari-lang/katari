@@ -16,6 +16,7 @@ import {
   createScopeId,
   createState,
   createThreadId,
+  emptyStore,
   type Event,
   type PrimThread,
 } from "../../src/engine/index.js";
@@ -157,9 +158,10 @@ describe("engine: runner dispatches prim create without crashing", () => {
       entries: {},
       nameTable: { varNames: {}, blockNames: {} },
     });
+    const store = emptyStore();
     const threadId = createThreadId();
     const scopeId = createScopeId();
-    state.scopes[scopeId] = { id: scopeId, parentId: null, values: {} };
+    store.scopes[scopeId] = { id: scopeId, parentId: null, values: {}, owner: state.selfEntity };
 
     const prim: PrimThread = {
       kind: "prim",
@@ -183,7 +185,7 @@ describe("engine: runner dispatches prim create without crashing", () => {
       payload: { kind: "create", threadId },
     };
 
-    const result = await applyEvent(state, event);
+    const result = await applyEvent(state, store, event);
     // No outbound. The prim ran but, having no parent, just sat there.
     expect(result.outbound).toEqual([]);
   });

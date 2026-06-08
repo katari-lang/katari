@@ -31,6 +31,7 @@ import {
   type RefPutter,
   type StepBuffers,
 } from "./step-ctx.js";
+import type { CoreStore } from "./store.js";
 import {
   dispatchAsk,
   dispatchAskAck,
@@ -57,6 +58,7 @@ import { mkRecord, mkString } from "./value.js";
  */
 export async function drive(
   state: State,
+  store: CoreStore,
   initial: Event,
   fetchRef?: RefFetcher,
   putRef?: RefPutter,
@@ -65,7 +67,7 @@ export async function drive(
   buffers: StepBuffers;
 }> {
   const buffers = emptyBuffers();
-  const ctx = makeStepCtx(state, buffers, fetchRef, putRef);
+  const ctx = makeStepCtx(state, store, buffers, fetchRef, putRef);
 
   if (!isInternal(initial.payload)) {
     applyTranslateExternal(ctx, initial);
@@ -442,10 +444,14 @@ function translateExternal(ctx: ReturnType<typeof makeStepCtx>, event: Event): v
  * Resolve a CORE-encoded `agentDefId` to a target BlockAgent.
  *
  *   - `{ kind: "qname",   value }` → `IRModule.entries` lookup (top-level)
- *   - `{ kind: "closure", value }` → `state.closures` lookup (closure dispatch)
+ *   - `{ kind: "closure", value }` → CORE-global closure-store lookup
  *
- * The `capturedScopeId` is non-null only for closure dispatch; the new
- * AgentThread's body scope inherits from it so captured locals are visible.
+ * The closure case is reached only by an inbound `delegate` that crosses a true
+ * entity boundary (a closure value that escaped to another module — e.g. FFI —
+ * and is invoked back). A CORE-internal closure call never emits a delegate: the
+ * call site spawns the body in-shard (delegate.ts / callAgent.ts). Either way the
+ * captured scope lives in the global store, so the new AgentThread's body scope
+ * inherits it directly. `capturedScopeId` is non-null only for the closure case.
  */
 function resolveDelegateTarget(
   ctx: ReturnType<typeof makeStepCtx>,
@@ -464,24 +470,15 @@ function resolveDelegateTarget(
     }
     return { blockId, capturedScopeId: null };
   }
-  if (decoded.kind === "closureRef") {
-    // CORE materializes a closure-ref delegate into a local closure (rewriting
-    // the target to closure:N) BEFORE applyEvent — so the engine must never see
-    // one. Reaching here is a host-side invariant violation.
-    throw new Error(
-      `engine.runner: closure-ref delegate ${delegationId} reached the engine unmaterialized (CORE must materialize it first)`,
-    );
-  }
   // kind === "closure"
-  const record = ctx.state.closures[decoded.value];
+  const record = ctx.store.closures[decoded.value];
   if (record === undefined) {
-    // A stale `delegate` referencing a GC'd closure is a per-agent
-    // recoverable error (= the original closure is no longer alive),
-    // not an engine invariant violation. Throw the recoverable variant
-    // so the runner converts it into a `prim.throw` escalate; the
-    // previous raw `Error` poisoned the whole snapshot.
+    // A stale `delegate` referencing a dropped closure is a per-agent
+    // recoverable error (the owner entity may have terminated → cascade-dropped
+    // the closure), not an engine invariant violation. Throw the recoverable
+    // variant so the runner converts it into a `prim.throw` escalate.
     throw new RecoverableEngineError(
-      `engine.runner: closure ${decoded.value} not found for delegate ${delegationId} (closure may have been GC'd)`,
+      `engine.runner: closure ${decoded.value} not found for delegate ${delegationId} (its owner entity may have been released)`,
     );
   }
   return {

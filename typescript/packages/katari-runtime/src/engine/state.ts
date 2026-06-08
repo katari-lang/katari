@@ -15,15 +15,20 @@
 // applyEvent calls (otherwise GC would fire every event for small machines).
 
 import type { IRModule } from "../ir/types.js";
-import type { ClosureRecord } from "./closure.js";
 import type { Endpoint } from "./endpoint.js";
-import type { ClosureId, DelegationId, EscalationId, ScopeId, ThreadId } from "./id.js";
-import type { Scope } from "./scope.js";
+import type { DelegationId, EntityId, EscalationId, ThreadId } from "./id.js";
 import type { Thread } from "./thread/types.js";
 
 export type State = {
   /** Identity of this engine instance. Events with `to !== selfEndpoint` are outbound. */
   selfEndpoint: Endpoint;
+  /**
+   * The entity this shard runs as (`shardId = E`). Stamped onto every scope /
+   * closure this shard creates so the CORE-global store tracks ownership (the
+   * ascent / cascade / intra-entity GC all key off it). See
+   * docs/2026-06-08-scope-closure-entity.md.
+   */
+  selfEntity: EntityId;
   irModule: IRModule;
   /**
    * The snapshot (code version) this shard runs. Set by the host when the
@@ -35,16 +40,6 @@ export type State = {
   snapshot: string;
   /** ThreadId → Thread. */
   threads: Record<ThreadId, Thread>;
-  /** ScopeId → Scope. */
-  scopes: Record<ScopeId, Scope>;
-  /**
-   * ClosureId → ClosureRecord. Allocated by `statementMakeClosure`.
-   * Reachability traced through `Value { kind: "closure", closureId }` in
-   * scope values; collected by GC when no live Value references the id.
-   */
-  closures: Record<ClosureId, ClosureRecord>;
-  /** Per-machine ClosureId allocator. Increments every makeClosure. */
-  nextClosureId: number;
   /**
    * Receiver-side: delegationId → AgentThread root id.
    *
@@ -92,10 +87,11 @@ export type State = {
   ffiTargetEndpoint: Endpoint;
   /** Endpoint to send CORE→ENV delegate to (= EnvModule, host-provided). */
   envTargetEndpoint: Endpoint;
-  /** Scope count at the most recent GC pass. Used by the GC trigger heuristic. */
+  /**
+   * This entity's owned-scope/closure count at the most recent intra-entity GC
+   * pass. The GC trigger heuristic compares the live owned count against it.
+   */
   lastGcScopeCount: number;
-  /** Tracked counter for `Object.keys(scopes).length`. Maintained by spawn / GC. */
-  scopeCount: number;
   /** Tracked counter for `Object.keys(threads).length`. Maintained by spawn / deleteThread. */
   threadCount: number;
 };
