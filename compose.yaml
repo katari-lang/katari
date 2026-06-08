@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: katari-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: katari
+      POSTGRES_PASSWORD: katari
+      POSTGRES_DB: katari
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - katari-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U katari -d katari"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: typescript/runtime/Dockerfile
+    image: katari-runtime:local
+    container_name: katari-runtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      # `postgres` is the service hostname on the compose network.
+      DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  katari-pgdata:

@@ -1,0 +1,23 @@
+# VCS / editor
+.git
+.vscode
+
+# Node
+**/node_modules
+**/dist
+
+# Haskell — not needed for the TypeScript image
+haskell
+.stack-work
+**/.stack-work
+dist-newstyle
+
+# Local env / logs
+**/.env
+**/.env.local
+**/*.log
+
+# Docker
+Dockerfile
+**/Dockerfile
+.dockerignore

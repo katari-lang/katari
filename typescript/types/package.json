@@ -1,0 +1,35 @@
+{
+  "name": "@katari-lang/types",
+  "version": "0.1.0-rc6",
+  "description": "Shared type definitions for Katari Language",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "yukikurage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/types"
+  },
+  "homepage": "https://katari-lang.dev",
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "devDependencies": {
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,7 @@
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      run: pnpm run format
+    lint:
+      run: pnpm run lint
