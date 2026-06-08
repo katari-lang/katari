@@ -226,6 +226,20 @@ describe("samples/ end-to-end (apply → run → verify)", () => {
     expect(result).toBe(14);
   });
 
+  itE2E(
+    "102-use-provider-infer: `use config_provider(base = ...)` infers R / E from the continuation (= 16)",
+    async () => {
+      // A generic handler-provider applied with NO explicit `[..]`: the
+      // compiler infers its return type R (integer) and residual effect E
+      // (`{ other }`) from the `use` continuation. The provider captures a local
+      // (base + 1 = 11) and answers get_config from it; `other` is the inferred
+      // residual handled by an outer handler (5). 11 + 5 = 16. This is the
+      // discord `session_provider(model = ...)` shape, distilled.
+      const result = await applyAndRun("use_provider_infer", "102-use-provider-infer");
+      expect(result).toBe(16);
+    },
+  );
+
   itE2E("05-control-flow: main() returns 'positive'", async () => {
     const result = await applyAndRun("control-flow", "05-control-flow");
     expect(result).toBe("positive");

@@ -1,0 +1,22 @@
+@"A capability the provider answers from a captured local."
+request get_config() -> integer
+
+@"A capability handled OUTSIDE the provider (the inferred residual effect)."
+request other() -> integer
+
+@"A reusable provider: builds + captures a local (`captured`) ONCE, then returns a `handler` that answers `get_config` from it. Generic over the continuation's return type `R` and residual effect `E`. Exercises `use config_provider(base = ...)` with NO explicit `[..]` — the compiler infers `R` / `E` from the continuation, exactly as the discord `session_provider` does."
+agent config_provider[R, effect E](base: integer) -> (agent (...(agent () -> R with { ...E, get_config })) -> R with E) {
+  let captured = base + 1
+  return handler[R, E] {
+    request get_config() { next captured }
+  }
+}
+
+@"Provide `other` inline, then provide `get_config` via the provider (its `R = integer` and residual `E = { other }` are INFERRED), then read both. = (10+1) + 5 = 16."
+agent main() -> integer {
+  use handler (var n = 5) {
+    request other() { next n }
+  }
+  use config_provider(base = 10)
+  get_config() + other()
+}

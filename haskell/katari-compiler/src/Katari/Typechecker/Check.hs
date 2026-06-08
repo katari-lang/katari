@@ -1431,11 +1431,102 @@ synthBareHandler he = do
 -- effect @expr@ can't discharge fails here). The @use@'s type is @expr@'s return
 -- @R2@; its effect (collected separately) is @expr@'s effect @E_expr@.
 synthUse :: UseExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
-synthUse UseExpression {binder, expr, body, sourceSpan}
+synthUse use@UseExpression {binder, expr, body, sourceSpan}
   -- @use handler {...}@ is just @use@ applied to an (inline) handler provider:
   -- its R / E are inferred from the continuation exactly as for a named provider.
   | ExpressionHandler he <- expr = synthUseHandler he binder body sourceSpan
-synthUse UseExpression {binder, expr, body, sourceSpan} = do
+  -- @use provider(args)@ where @provider@ is a GENERIC handler-provider agent:
+  -- the call's R / E aren't fixed by its arguments (e.g. @session_provider(model
+  -- = ...)@), so infer them from the continuation (the @use@ body) — the same
+  -- inference the direct @use <provider>@ path below does — plus the arguments.
+  -- This lets a reusable provider be applied with no explicit @[..]@.
+  | ExpressionCall callExpr <- expr, Nothing <- callExpr.spreadArgument = do
+      calleeParams <- genericParamsOf (calleeResolution callExpr.callee)
+      if null calleeParams
+        then synthUseGeneral use
+        else synthUseGenericCall binder callExpr calleeParams body sourceSpan
+  | otherwise = synthUseGeneral use
+
+-- | @use@ over a generic-provider CALL (@use session_provider(model = ...)@). The
+-- call produces the provider, whose two implicit generics (continuation return
+-- @R@, residual effect @E@) the arguments don't determine; infer them from the
+-- continuation (matching the provider's expected continuation against the actual
+-- one) together with the arguments, then instantiate + apply. Mirrors the
+-- direct-provider inference in 'synthUseGeneral', threaded through the call.
+synthUseGenericCall ::
+  Maybe (NameRef Identified VariableRef) ->
+  CallExpression Identified ->
+  [(GenericsId, GenericKind, SemanticType Resolved)] ->
+  Block Identified ->
+  SourceSpan ->
+  Check (Expression Zonked, SemanticType Resolved)
+synthUseGenericCall binder CallExpression {callee, arguments} params body sourceSpan = do
+  let resolution = calleeResolution callee
+  calleeSig <- maybe (pure SemanticTypeUnknown) (fmap (fromMaybe SemanticTypeUnknown) . lookupLocalType) resolution
+  -- The provider the call PRODUCES (calleeSig's return) and the continuation it
+  -- expects (the provider's parameter) — both still carrying the call's generics.
+  let providerType = case calleeSig of
+        SemanticTypeFunction _ returnType _ -> returnType
+        _ -> SemanticTypeUnknown
+      continuationParam = case providerType of
+        SemanticTypeFunction parameter _ _ -> parameter
+        _ -> SemanticTypeUnknown
+      argType = case continuationParam of
+        SemanticTypeFunction parameter _ _ -> parameter
+        _ -> SemanticTypeNever
+      binderLocals = case binder of
+        Just b | Just res <- b.resolution -> [(res, argType)]
+        _ -> []
+  -- The ACTUAL continuation (the use body), re-derived as in the direct path.
+  (body', bodyType) <- withLocals binderLocals (walkBlock body)
+  dataFieldEnv <- asks (.checkDataFieldEnv)
+  seededTypes <- gets (.stateLocalTypes)
+  readerBodies <- asks (Map.map (.schemeBody) . (.checkLocals))
+  let localBodies = Map.union seededTypes readerBodies
+      lookupEff qualifiedName = effectOfSignature dataFieldEnv (Map.findWithDefault SemanticTypeUnknown (ResolvedTopLevel qualifiedName) localBodies)
+      bodyEffect = blockEffect dataFieldEnv lookupEff body'
+      continuationActual = SemanticTypeFunction argType bodyType (denormaliseEffect bodyEffect)
+  -- Infer the generics from BOTH the arguments and the continuation.
+  walkedArgs <- mapM (walkCallArgument Nothing) arguments
+  let actualArgTypes = Map.fromList [(label, walkedType) | (_, (label, walkedType)) <- walkedArgs]
+      (typeSubstitution, effectSubstitution) =
+        combineInfer
+          (inferSubstitution dataFieldEnv calleeSig actualArgTypes)
+          (matchType dataFieldEnv continuationParam continuationActual)
+  forM_ params $ \(genericsId, kind, _) -> case kind of
+    GenericKindType | not (Map.member genericsId typeSubstitution) -> emitError (CheckErrorCannotInferGeneric sourceSpan)
+    GenericKindEffect | not (Map.member genericsId effectSubstitution) -> emitError (CheckErrorCannotInferGeneric sourceSpan)
+    _ -> pure ()
+  let concreteCalleeSig = substituteGenerics typeSubstitution effectSubstitution calleeSig
+  calleeZonked <- retagGenericCallee callee concreteCalleeSig
+  -- Validate the arguments + recover the concrete provider (the call's result),
+  -- then apply it to the continuation (which rechecks the inferred R / E).
+  concreteProvider <- applyNormalCall sourceSpan concreteCalleeSig actualArgTypes
+  resultType <- applySpreadCall sourceSpan concreteProvider continuationActual
+  let callZonked =
+        ExpressionCall
+          CallExpression
+            { callee =
+                ExpressionTypeApplication
+                  TypeApplicationExpression
+                    { callee = calleeZonked,
+                      typeArguments = [],
+                      instantiation = (Map.toList typeSubstitution, Map.toList effectSubstitution),
+                      sourceSpan = sourceSpan,
+                      typeOf = concreteCalleeSig
+                    },
+              arguments = map fst walkedArgs,
+              spreadArgument = Nothing,
+              sourceSpan = sourceSpan,
+              typeOf = concreteProvider
+            }
+  pure
+    ( ExpressionUse UseExpression {binder = fmap retagNameRef binder, expr = callZonked, body = body', sourceSpan = sourceSpan, typeOf = resultType},
+      resultType
+    )
+
+synthUseGeneral :: UseExpression Identified -> Check (Expression Zonked, SemanticType Resolved)
+synthUseGeneral UseExpression {binder, expr, body, sourceSpan} = do
   let exprResolution = calleeResolution expr
   exprParams <- genericParamsOf exprResolution
   -- expr's (possibly generic) signature: synth directly when monomorphic,

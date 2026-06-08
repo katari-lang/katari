@@ -1,8 +1,11 @@
 // The Discord bot APP. It wires the reusable library modules — the provider-
 // agnostic `ai` orchestration (+ its `gemini` / `openai` providers), `discord`,
-// and the `e2b` tool — and provides the capabilities at the root. Swapping the
-// model or provider is a one-line change to the client built below; none of the
-// library modules know anything Discord- or e2b-specific.
+// and the `e2b` tool — and provides the capabilities at the root. The AI session
+// is installed with `use session_provider(model = ...)`: a reusable provider
+// agent that returns a first-class `handler` value, so the rest of the block runs
+// with the `ai.get_ai_client` capability bound. Swapping the model or provider is
+// a one-line change inside `session_provider`; none of the library modules know
+// anything Discord- or e2b-specific.
 
 import discord_bot.ai
 import discord_bot.ai.types
@@ -15,13 +18,16 @@ agent ask(history: array[types.message], tools: array[agent (...never) -> unknow
   ai.infer_with_tools[e2b.get_e2b_key](history = history, tools = tools, max_steps = 8)
 }
 
-@"The provider connection this bot uses. Swap gemini -> openai (and the model id) to change provider; nothing else changes."
-agent build_client() -> ai.ai_client {
-  gemini.gemini(
-    model = "gemini-3.5-flash",
+@"A reusable AI-session provider. Builds the provider connection for `model` ONCE (reading its key — so a missing key raises `env_not_found` here) and hands it to the continuation as the ambient `ai.get_ai_client` capability: `use session_provider(model = ...)` makes the rest of the block run with that client. Generic over the continuation's return type `R` and residual effect `E`, so the same provider serves both `solve` and `main`. Swap gemini -> openai (and the model id) to change provider; nothing else changes."
+agent session_provider[R, effect E](model: string) -> (agent (...(agent () -> R with { ...E, ai.get_ai_client })) -> R with E) with env_not_found {
+  let client = gemini.gemini(
+    model = model,
     api_key = env.get_secret(key = "GEMINI_API_KEY"),
     config = types.infer_config(system = "You are a helpful assistant in a Discord channel."),
   )
+  return handler[R, E] {
+    request ai.get_ai_client() { next client }
+  }
 }
 
 @"Standalone entry to test the tool loop from the CLI (no Discord): katari run discord_bot.solve --args '{\"task\": \"...\"}'."
@@ -31,16 +37,12 @@ agent solve(task: string) -> string {
       break f"missing env: ${env_key}"
     }
   }
-  use handler (var client = build_client()) {
-    request ai.get_ai_client() {
-      next client
-    }
-  }
   use handler (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
     request e2b.get_e2b_key() {
       next e2b_key
     }
   }
+  use session_provider(model = "gemini-3.5-flash")
   ask(
     history = array.append(array = array.empty(), value = types.turn(role = "user", text = task)),
     tools = [e2b.run_python],
@@ -54,11 +56,7 @@ agent main(channel_id: string) -> string {
       break f"missing env: ${env_key}"
     }
   }
-  use handler (var client = build_client()) {
-    request ai.get_ai_client() {
-      next client
-    }
-  }
+  use session_provider(model = "gemini-3.5-flash")
   use handler (var discord_client = discord.create_discord_client(token = env.get_secret(key = "DISCORD_TOKEN"))) {
     request discord.get_discord_client() {
       next discord_client
