@@ -1,0 +1,28 @@
+# Shared HLint config for every package under haskell/.
+#
+# Standalone hlint/refactor (unlike HLS, which gets flags from cabal) does not
+# read .cabal/package.yaml, and its permissive default enables PatternSynonyms
+# — which turns the `pattern` record field into a keyword
+# ("parse error on input `pattern`"). So we mirror the packages' shared cabal
+# language config here. Auto-discovered from the repo root, same as biome.json.
+#
+# When a package adds a new default-extension to its cabal, add it here too.
+- arguments:
+  - -XGHC2021
+  - -XDataKinds
+  - -XLambdaCase
+  - -XOverloadedStrings
+  - -XDuplicateRecordFields
+  - -XNoFieldSelectors
+  - -XRecordWildCards
+  - -XOverloadedRecordDot
+  - -XTypeFamilies
+  - -XGADTs
+  - -XQuantifiedConstraints
+  - -XUndecidableInstances
+  - -XDerivingStrategies
+  - -XTypeData
+  - -XStrictData
+  - -XLiberalTypeSynonyms
+  - -XImpredicativeTypes
+  - -XNoPatternSynonyms

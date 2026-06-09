@@ -1,17 +1,17 @@
 module Katari.Data.NormalizedType where
 
-import Control.Monad (foldM, when, (<=<))
+import Control.Monad (foldM, when)
 import Control.Monad.RWS (RWS)
-import Control.Monad.RWS.Class (MonadReader (..), MonadState (..), MonadWriter (..), asks)
+import Control.Monad.RWS.Class (MonadWriter (..), asks)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text, pack)
 import GHC.List (List)
 import Katari.Common (intersectWithKeyM, mapMaybeM, unionWithKeyM)
-import Katari.Data.Environment (DataEnvironment, GenericBoundEnvironment, RequestEnvironment (..), variance)
+import Katari.Data.Environment (DataEnvironment, GenericBoundEnvironment, RequestEnvironment, variance)
 import Katari.Data.Id (GenericId)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Data.SemanticType (FieldInfomation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), semanticType)
@@ -180,8 +180,8 @@ data UnknownGenericErrorInfo where
 
 data CannotBeUnionedErrorInfo where
   CannotBeUnionedErrorInfo ::
-    { left :: NormalizedType,
-      right :: NormalizedType,
+    { left :: NormalizedGenericArgument,
+      right :: NormalizedGenericArgument,
       message :: Text
     } ->
     CannotBeUnionedErrorInfo
@@ -189,8 +189,8 @@ data CannotBeUnionedErrorInfo where
 
 data CannotBeIntersectedErrorInfo where
   CannotBeIntersectedErrorInfo ::
-    { left :: NormalizedType,
-      right :: NormalizedType,
+    { left :: NormalizedGenericArgument,
+      right :: NormalizedGenericArgument,
       message :: Text
     } ->
     CannotBeIntersectedErrorInfo
@@ -206,13 +206,19 @@ data KindErrorInfo where
   deriving (Eq, Ord, Show)
 
 data NormalizerEnvironment = NormalizeEnvironment
-  { dataEnvironment :: DataEnvironment NormalizedBaseType,
-    requestEnvironment :: RequestEnvironment NormalizedBaseType,
+  { dataEnvironment :: DataEnvironment NormalizedType,
+    requestEnvironment :: RequestEnvironment NormalizedType,
     genericBoundEnvironment :: GenericBoundEnvironment NormalizedGenericArgument
   }
   deriving (Eq, Show)
 
 type Normalizer a = RWS NormalizerEnvironment (List SubtypeError) () a
+
+kindOf :: NormalizedGenericArgument -> Text
+kindOf genericArgument = case genericArgument of
+  NormalizedGenericArgumentType _ -> "type"
+  NormalizedGenericArgumentEffect _ -> "effect"
+  NormalizedGenericArgumentAttribute _ -> "attribute"
 
 neverLayer :: LayeredType
 neverLayer =
@@ -429,7 +435,7 @@ unionBaseType left right = case (left, right) of
         Nothing -> do
           tell [UnknownDataError $ UnknownDataErrorInfo {expected = qualifiedName, message = "Unknown data: " <> pack (show qualifiedName)}]
           pure $ Map.union leftGenerics rightGenerics
-        Just dataInfo -> unionWithKeyM (unionGenericArgument dataInfo.variance) leftGenerics rightGenerics
+        Just dataInfo -> unionWithKeyM (unionGenericArgumentWithVariance dataInfo.variance) leftGenerics rightGenerics
 
     unionSequenceLayer :: SequenceSlot -> SequenceSlot -> Normalizer SequenceSlot
     unionSequenceLayer leftSequence rightSequence = case (leftSequence, rightSequence) of
@@ -492,11 +498,27 @@ unionEffect left right = case (left, right) of
         Nothing -> do
           tell [UnknownRequestError $ UnknownRequestErrorInfo {expected = requestQualifiedName, message = "Unknown request: " <> pack (show requestQualifiedName)}]
           pure $ Map.union leftGenerics rightGenerics
-        Just requestInfo -> unionWithKeyM (unionGenericArgument requestInfo.variance) leftGenerics rightGenerics
+        Just requestInfo -> unionWithKeyM (unionGenericArgumentWithVariance requestInfo.variance) leftGenerics rightGenerics
 
-unionGenericArgument :: Map Text Variance -> Text -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
-unionGenericArgument varianceMap genericArgumentName leftArgument rightArgument =
-  case Map.lookup genericArgumentName varianceMap of
+unionGenericArgument :: NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
+unionGenericArgument leftArgument rightArgument = case (leftArgument, rightArgument) of
+  (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
+    unionedType <- unionType leftType rightType
+    pure $ NormalizedGenericArgumentType unionedType
+  (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
+    unionedEffect <- unionEffect leftEffect rightEffect
+    pure $ NormalizedGenericArgumentEffect unionedEffect
+  (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
+    unionedAttribute <- unionAttribute leftAttribute rightAttribute
+    pure $ NormalizedGenericArgumentAttribute unionedAttribute
+  _ -> do
+    tell [KindError $ KindErrorInfo {expected = kindOf leftArgument, actual = kindOf rightArgument, message = "Generic arguments with different kinds cannot be unioned"}]
+    pure leftArgument -- NOTE: we can return either left or right argument because they are not unionable
+
+unionGenericArgumentWithVariance :: Map Text Variance -> Text -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
+unionGenericArgumentWithVariance variances genericArgumentName leftArgument rightArgument = do
+  let maybeVariance = Map.lookup genericArgumentName variances
+  case maybeVariance of
     Nothing -> do
       tell [UnknownGenericError $ UnknownGenericErrorInfo {expected = genericArgumentName, message = "Unknown generic argument: " <> genericArgumentName}]
       pure leftArgument -- NOTE: if the generic is not found in the variance map, we cannot determine how to union the generic arguments
@@ -505,47 +527,11 @@ unionGenericArgument varianceMap genericArgumentName leftArgument rightArgument 
         if leftArgument == rightArgument
           then pure leftArgument
           else do
-            tell [CannotBeUnionedError $ CannotBeUnionedErrorInfo {left = bottomType, right = topType, message = "Invariant generic argument cannot be unioned: " <> genericArgumentName}]
+            tell [CannotBeUnionedError $ CannotBeUnionedErrorInfo {left = leftArgument, right = rightArgument, message = "Invariant generic arguments must be identical to be unioned"}]
             pure leftArgument -- NOTE: we can return either left or right argument because they are not unionable
-      Covariant -> case (leftArgument, rightArgument) of
-        (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
-          unionedType <- unionType leftType rightType
-          pure $ NormalizedGenericArgumentType unionedType
-        (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
-          unionedEffect <- unionEffect leftEffect rightEffect
-          pure $ NormalizedGenericArgumentEffect unionedEffect
-        (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
-          unionedAttribute <- unionAttribute leftAttribute rightAttribute
-          pure $ NormalizedGenericArgumentAttribute unionedAttribute
-        _ -> do
-          tell [CannotBeUnionedError $ CannotBeUnionedErrorInfo {left = bottomType, right = topType, message = "Covariant generic argument with different kinds cannot be unioned: " <> genericArgumentName}]
-          pure leftArgument -- NOTE: we can return either left or right argument because they are not unionable
-      Contravariant -> case (leftArgument, rightArgument) of
-        (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
-          intersectedType <- intersectType leftType rightType
-          pure $ NormalizedGenericArgumentType intersectedType
-        (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
-          intersectedEffect <- intersectEffect leftEffect rightEffect
-          pure $ NormalizedGenericArgumentEffect intersectedEffect
-        (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
-          intersectedAttribute <- intersectAttribute leftAttribute rightAttribute
-          pure $ NormalizedGenericArgumentAttribute intersectedAttribute
-        _ -> do
-          tell [CannotBeUnionedError $ CannotBeUnionedErrorInfo {left = bottomType, right = topType, message = "Contravariant generic argument with different kinds cannot be unioned: " <> genericArgumentName}]
-          pure leftArgument -- NOTE: we can return either left or right argument because they are not unionable
-      Bivariant -> case (leftArgument, rightArgument) of
-        (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
-          unionedType <- unionType leftType rightType
-          pure $ NormalizedGenericArgumentType unionedType
-        (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
-          unionedEffect <- unionEffect leftEffect rightEffect
-          pure $ NormalizedGenericArgumentEffect unionedEffect
-        (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
-          unionedAttribute <- unionAttribute leftAttribute rightAttribute
-          pure $ NormalizedGenericArgumentAttribute unionedAttribute
-        _ -> do
-          tell [CannotBeUnionedError $ CannotBeUnionedErrorInfo {left = bottomType, right = topType, message = "Bivariant generic argument with different kinds cannot be unioned: " <> genericArgumentName}]
-          pure leftArgument -- NOTE: we can return either left or right argument because they are not unionable
+      Covariant -> unionGenericArgument leftArgument rightArgument
+      Contravariant -> intersectGenericArgument leftArgument rightArgument
+      Bivariant -> unionGenericArgument leftArgument rightArgument
 
 intersectType :: NormalizedType -> NormalizedType -> Normalizer NormalizedType
 intersectType left right = do
@@ -611,7 +597,7 @@ intersectBaseType left right = case (left, right) of
         Nothing -> do
           tell [UnknownDataError $ UnknownDataErrorInfo {expected = qualifiedName, message = "Unknown data: " <> pack (show qualifiedName)}]
           pure $ Map.union leftGenerics rightGenerics
-        Just dataInfo -> unionWithKeyM (intersectGenericArgument dataInfo.variance) leftGenerics rightGenerics
+        Just dataInfo -> unionWithKeyM (intersectGenericArgumentWithVariance dataInfo.variance) leftGenerics rightGenerics
 
     intersectSequenceLayer :: SequenceSlot -> SequenceSlot -> Normalizer SequenceSlot
     intersectSequenceLayer leftSequence rightSequence = case (leftSequence, rightSequence) of
@@ -667,7 +653,7 @@ intersectEffect left right = case (left, right) of
         Nothing -> do
           tell [UnknownRequestError $ UnknownRequestErrorInfo {expected = requestQualifiedName, message = "Unknown request: " <> pack (show requestQualifiedName)}]
           pure $ Map.union leftGenerics rightGenerics
-        Just requestInfo -> unionWithKeyM (intersectGenericArgument requestInfo.variance) leftGenerics rightGenerics
+        Just requestInfo -> unionWithKeyM (intersectGenericArgumentWithVariance requestInfo.variance) leftGenerics rightGenerics
 
 -- | Intersection of attributes:
 --   private, private -> private
@@ -681,58 +667,38 @@ intersectAttribute left right =
         generic = Set.intersection left.generic right.generic
       }
 
-intersectGenericArgument :: Map Text Variance -> Text -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
-intersectGenericArgument varianceMap genericArgumentName leftArgument rightArgument =
-  case Map.lookup genericArgumentName varianceMap of
+intersectGenericArgument :: NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
+intersectGenericArgument leftArgument rightArgument = case (leftArgument, rightArgument) of
+  (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
+    intersectedType <- intersectType leftType rightType
+    pure $ NormalizedGenericArgumentType intersectedType
+  (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
+    intersectedEffect <- intersectEffect leftEffect rightEffect
+    pure $ NormalizedGenericArgumentEffect intersectedEffect
+  (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
+    intersectedAttribute <- intersectAttribute leftAttribute rightAttribute
+    pure $ NormalizedGenericArgumentAttribute intersectedAttribute
+  _ -> do
+    tell [KindError $ KindErrorInfo {expected = kindOf leftArgument, actual = kindOf rightArgument, message = "Generic arguments with different kinds cannot be intersected"}]
+    pure leftArgument -- NOTE: we can return either left or right argument because they are not intersectable
+
+intersectGenericArgumentWithVariance :: Map Text Variance -> Text -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
+intersectGenericArgumentWithVariance variances genericArgumentName leftArgument rightArgument = do
+  let maybeVariance = Map.lookup genericArgumentName variances
+  case maybeVariance of
     Nothing -> do
       tell [UnknownGenericError $ UnknownGenericErrorInfo {expected = genericArgumentName, message = "Unknown generic argument: " <> genericArgumentName}]
-      pure leftArgument -- NOTE: if the generic is not found in the variance map, we cannot determine how to intersect the generic arguments
+      pure leftArgument
     Just variance -> case variance of
-      Invariant ->
+      Invariant -> do
         if leftArgument == rightArgument
           then pure leftArgument
           else do
-            tell [CannotBeIntersectedError $ CannotBeIntersectedErrorInfo {left = bottomType, right = topType, message = "Invariant generic argument cannot be intersected: " <> genericArgumentName}]
+            tell [CannotBeIntersectedError $ CannotBeIntersectedErrorInfo {left = leftArgument, right = rightArgument, message = "Invariant generic arguments must be identical to be intersected"}]
             pure leftArgument -- NOTE: we can return either left or right argument because they are not intersectable
-      Covariant -> case (leftArgument, rightArgument) of
-        (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
-          intersectedType <- intersectType leftType rightType
-          pure $ NormalizedGenericArgumentType intersectedType
-        (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
-          intersectedEffect <- intersectEffect leftEffect rightEffect
-          pure $ NormalizedGenericArgumentEffect intersectedEffect
-        (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
-          intersectedAttribute <- intersectAttribute leftAttribute rightAttribute
-          pure $ NormalizedGenericArgumentAttribute intersectedAttribute
-        _ -> do
-          tell [CannotBeIntersectedError $ CannotBeIntersectedErrorInfo {left = bottomType, right = topType, message = "Covariant generic argument with different kinds cannot be intersected: " <> genericArgumentName}]
-          pure leftArgument -- NOTE: we can return either left or right argument because they are not intersectable
-      Contravariant -> case (leftArgument, rightArgument) of
-        (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
-          unionedType <- unionType leftType rightType
-          pure $ NormalizedGenericArgumentType unionedType
-        (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
-          unionedEffect <- unionEffect leftEffect rightEffect
-          pure $ NormalizedGenericArgumentEffect unionedEffect
-        (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
-          unionedAttribute <- unionAttribute leftAttribute rightAttribute
-          pure $ NormalizedGenericArgumentAttribute unionedAttribute
-        _ -> do
-          tell [CannotBeIntersectedError $ CannotBeIntersectedErrorInfo {left = bottomType, right = topType, message = "Contravariant generic argument with different kinds cannot be intersected: " <> genericArgumentName}]
-          pure leftArgument -- NOTE: we can return either left or right argument because they are not intersectable
-      Bivariant -> case (leftArgument, rightArgument) of
-        (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> do
-          intersectedType <- intersectType leftType rightType
-          pure $ NormalizedGenericArgumentType intersectedType
-        (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> do
-          intersectedEffect <- intersectEffect leftEffect rightEffect
-          pure $ NormalizedGenericArgumentEffect intersectedEffect
-        (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> do
-          intersectedAttribute <- intersectAttribute leftAttribute rightAttribute
-          pure $ NormalizedGenericArgumentAttribute intersectedAttribute
-        _ -> do
-          tell [CannotBeIntersectedError $ CannotBeIntersectedErrorInfo {left = bottomType, right = topType, message = "Bivariant generic argument with different kinds cannot be intersected: " <> genericArgumentName}]
-          pure leftArgument -- NOTE: we can return either left or right argument because they are not intersectable
+      Covariant -> intersectGenericArgument leftArgument rightArgument
+      Contravariant -> unionGenericArgument leftArgument rightArgument
+      Bivariant -> intersectGenericArgument leftArgument rightArgument
 
 -- |
 --   union        (combineType = unionType,     combineOptional = ||): leftover = field | other.rest, optional = True
@@ -791,7 +757,7 @@ mergeSequence combineType leftSequence rightSequence = do
 
 -- | Check if the first type is a subtype of the second type. (first <: second)
 -- NOTE: Attribute
--- private <: public, public /<: private
+-- public <: private, private /<: public
 -- Attribute distribution rule:
 --   private {x : number of public} <: public {x : number of private} -- OK
 subtypeType ::
@@ -847,4 +813,237 @@ subtypeBaseType left right = case (left, right) of
   (NormalizedBaseTypeLayerd leftLayer, NormalizedBaseTypeLayerd rightLayer) -> subtypeLayeredType leftLayer rightLayer
 
 subtypeLayeredType :: LayeredType -> LayeredType -> Normalizer ()
-subtypeLayeredType leftLayered rightLayered = undefined
+subtypeLayeredType leftLayered rightLayered = do
+  let tellLayeredTypeError message =
+        tell
+          [ SubtypeError $
+              SubtypeErrorInfo
+                { expected = NormalizedGenericArgumentType $ NormalizedType {baseType = NormalizedBaseTypeLayerd rightLayered, attribute = bottomAttribute},
+                  actual = NormalizedGenericArgumentType $ NormalizedType {baseType = NormalizedBaseTypeLayerd leftLayered, attribute = bottomAttribute},
+                  message = message
+                }
+          ]
+  -- Resolve the generic layer the same way as 'subtypeAttribute': take the upper bound of every
+  -- generic that occurs only on the left (common generics cancel; nested generics introduced by the
+  -- bounds are not resolved further), union those bounds into the left type, and then compare only
+  -- the non-generic layers.
+  genericBoundEnvironmentValue <- asks (\environment -> environment.genericBoundEnvironment)
+  let leftOnlyGenerics = Set.difference leftLayered.genericLayer rightLayered.genericLayer
+  leftOnlyGenericBoundTypes <-
+    mapMaybeM
+      ( \case
+          NormalizedGenericArgumentType boundType -> pure (Just boundType)
+          NormalizedGenericArgumentEffect boundEffect -> do
+            tell [KindError $ KindErrorInfo {expected = "type", actual = "effect", message = "Expected a type bound, but got an effect: " <> pack (show boundEffect)}]
+            pure Nothing
+          NormalizedGenericArgumentAttribute boundAttribute -> do
+            tell [KindError $ KindErrorInfo {expected = "type", actual = "attribute", message = "Expected a type bound, but got an attribute: " <> pack (show boundAttribute)}]
+            pure Nothing
+      )
+      (Map.restrictKeys genericBoundEnvironmentValue leftOnlyGenerics)
+  effectiveLeftBaseType <- foldM unionBaseType (NormalizedBaseTypeLayerd leftLayered) (map (\boundType -> boundType.baseType) (Map.elems leftOnlyGenericBoundTypes))
+  case effectiveLeftBaseType of
+    -- A left-only generic has no usable upper bound, so the effective left type is unknown (top)
+    -- and cannot be a subtype of a known layered type.
+    NormalizedBaseTypeUnknown -> tellLayeredTypeError "A left-only generic is unbounded, so the left type is effectively unknown"
+    NormalizedBaseTypeLayerd effectiveLeftLayered -> do
+      case (effectiveLeftLayered.numberLayer, rightLayered.numberLayer) of
+        (NumberSlotInteger, NumberSlotInteger) -> pure ()
+        (NumberSlotNumber, NumberSlotNumber) -> pure ()
+        (NumberSlotAbsent, NumberSlotAbsent) -> pure ()
+        (NumberSlotInteger, NumberSlotNumber) -> pure () -- integer <: number
+        (NumberSlotAbsent, NumberSlotInteger) -> pure () -- absent <: integer
+        (NumberSlotAbsent, NumberSlotNumber) -> pure () -- absent <: number
+        _ -> tellLayeredTypeError "Number layers are incompatible"
+      case (effectiveLeftLayered.stringLayer, rightLayered.stringLayer) of
+        (False, False) -> pure ()
+        (True, True) -> pure ()
+        (False, True) -> pure () -- absent <: string
+        _ -> tellLayeredTypeError "String layers are incompatible"
+      case (effectiveLeftLayered.booleanLayer, rightLayered.booleanLayer) of
+        (False, False) -> pure ()
+        (True, True) -> pure ()
+        (False, True) -> pure () -- absent <: boolean
+        _ -> tellLayeredTypeError "Boolean layers are incompatible"
+      case (effectiveLeftLayered.fileLayer, rightLayered.fileLayer) of
+        (False, False) -> pure ()
+        (True, True) -> pure ()
+        (False, True) -> pure () -- absent <: file
+        _ -> tellLayeredTypeError "File layers are incompatible"
+      case (effectiveLeftLayered.functionLayer, rightLayered.functionLayer) of
+        (FunctionSlotAbsent, FunctionSlotAbsent) -> pure ()
+        (FunctionSlotOf leftArgument leftReturnType leftEffect, FunctionSlotOf rightArgument rightReturnType rightEffect) -> do
+          subtypeType rightArgument leftArgument -- NOTE: function argument is contravariant
+          subtypeType leftReturnType rightReturnType
+          subtypeEffect leftEffect rightEffect
+        (FunctionSlotAbsent, FunctionSlotOf {}) -> pure () -- absent <: function
+        _ -> tellLayeredTypeError "Function layers are incompatible"
+      case (effectiveLeftLayered.sequenceLayer, rightLayered.sequenceLayer) of
+        (SequenceSlotAbsent, SequenceSlotAbsent) -> pure ()
+        (SequenceSlotAbsent, SequenceSlotOf _) -> pure () -- absent <: sequence
+        (SequenceSlotOf leftSequence, SequenceSlotOf rightSequence) -> subtypeSequence leftSequence rightSequence
+        _ -> tellLayeredTypeError "Sequence layers are incompatible"
+      case (effectiveLeftLayered.objectLayer, rightLayered.objectLayer) of
+        (ObjectSlotAbsent, ObjectSlotAbsent) -> pure ()
+        (ObjectSlotAbsent, ObjectSlotOf _) -> pure () -- absent <: object
+        (ObjectSlotOf leftObject, ObjectSlotOf rightObject) -> subtypeObject leftObject rightObject
+        _ -> tellLayeredTypeError "Object layers are incompatible"
+      -- NOTE: the data layer is a union of nominal types; every nominal type on the left must also
+      -- appear on the right, and its generic arguments are compared by the declared variance.
+      dataEnvironmentValue <- asks (\environment -> environment.dataEnvironment)
+      mapM_
+        ( \(qualifiedName, leftArguments) ->
+            case Map.lookup qualifiedName rightLayered.dataLayer of
+              Nothing -> tellLayeredTypeError $ "Data type is not present in the supertype: " <> renderQualifiedName qualifiedName
+              Just rightArguments ->
+                case Map.lookup qualifiedName dataEnvironmentValue of
+                  Nothing -> tell [UnknownDataError $ UnknownDataErrorInfo {expected = qualifiedName, message = "Unknown data: " <> pack (show qualifiedName)}]
+                  Just dataInfo -> subtypeGenericArguments dataInfo.variance leftArguments rightArguments
+        )
+        (Map.toList effectiveLeftLayered.dataLayer)
+
+subtypeEffect :: NormalizedEffect -> NormalizedEffect -> Normalizer ()
+subtypeEffect left right = case (left, right) of
+  (NormalizedEffectAny, NormalizedEffectAny) -> pure ()
+  (NormalizedEffectAny, NormalizedEffectRow rightRow) ->
+    tell
+      [ SubtypeError $
+          SubtypeErrorInfo
+            { expected = NormalizedGenericArgumentEffect $ NormalizedEffectRow rightRow,
+              actual = NormalizedGenericArgumentEffect NormalizedEffectAny,
+              message = "Any effect cannot be a subtype of a known effect"
+            }
+      ]
+  (NormalizedEffectRow _, NormalizedEffectAny) -> pure ()
+  (NormalizedEffectRow leftRow, NormalizedEffectRow rightRow) -> do
+    -- NOTE: requests are covariant; every request the left effect performs must also be present in the right effect
+    let tellEffectRowError message =
+          tell
+            [ SubtypeError $
+                SubtypeErrorInfo
+                  { expected = NormalizedGenericArgumentEffect $ NormalizedEffectRow rightRow,
+                    actual = NormalizedGenericArgumentEffect $ NormalizedEffectRow leftRow,
+                    message = message
+                  }
+            ]
+    requestEnvironmentValue <- asks (\environment -> environment.requestEnvironment)
+    mapM_
+      ( \(requestQualifiedName, leftArguments) ->
+          case Map.lookup requestQualifiedName rightRow.request of
+            Nothing -> tellEffectRowError $ "Left effect performs a request not present in the right effect: " <> renderQualifiedName requestQualifiedName
+            Just rightArguments ->
+              case Map.lookup requestQualifiedName requestEnvironmentValue of
+                Nothing -> tell [UnknownRequestError $ UnknownRequestErrorInfo {expected = requestQualifiedName, message = "Unknown request: " <> pack (show requestQualifiedName)}]
+                Just requestInfo -> subtypeGenericArguments requestInfo.variance leftArguments rightArguments
+      )
+      (Map.toList leftRow.request)
+    -- NOTE: generics are covariant
+    if leftRow.generic `Set.isSubsetOf` rightRow.generic
+      then pure ()
+      else tellEffectRowError "Effect generics are incompatible"
+    -- NOTE: shadowing is contravariant, so the left's shadowed set must be a superset of the right's shadowed set
+    if rightRow.shadowed `Set.isSubsetOf` leftRow.shadowed
+      then pure ()
+      else tellEffectRowError "Effect shadowed requests are incompatible"
+
+-- | Sequences are covariant: every position's element type must be a subtype, including the tail
+-- (rest). A position present on only one side is compared against the other side's rest.
+subtypeSequence :: NormalizedSequence -> NormalizedSequence -> Normalizer ()
+subtypeSequence leftSequence rightSequence = do
+  let maximumLength = max (length leftSequence.items) (length rightSequence.items)
+  mapM_
+    ( \index ->
+        subtypeType
+          (effectiveItem leftSequence.rest (leftSequence.items `atMay` index))
+          (effectiveItem rightSequence.rest (rightSequence.items `atMay` index))
+    )
+    [0 .. maximumLength - 1]
+  subtypeType leftSequence.rest rightSequence.rest
+  where
+    effectiveItem :: NormalizedType -> Maybe NormalizedType -> NormalizedType
+    effectiveItem = Data.Maybe.fromMaybe
+
+-- | Object field types are covariant. A field present on only one side is compared against the
+-- other side's rest (treated as optional). A required field on the right must be required on the
+-- left, otherwise the left value may omit a field the right guarantees.
+subtypeObject :: NormalizedObject -> NormalizedObject -> Normalizer ()
+subtypeObject leftObject rightObject = do
+  let fieldNames = Set.union (Map.keysSet leftObject.fields) (Map.keysSet rightObject.fields)
+  mapM_
+    ( \fieldName -> do
+        let leftField = effectiveField leftObject.rest (Map.lookup fieldName leftObject.fields)
+            rightField = effectiveField rightObject.rest (Map.lookup fieldName rightObject.fields)
+        subtypeType leftField.normalizedType rightField.normalizedType
+        case (leftField.optional, rightField.optional) of
+          (True, False) ->
+            tell
+              [ SubtypeError $
+                  SubtypeErrorInfo
+                    { expected = NormalizedGenericArgumentType rightField.normalizedType,
+                      actual = NormalizedGenericArgumentType leftField.normalizedType,
+                      message = "Optional field cannot be a subtype of a required field: " <> fieldName
+                    }
+              ]
+          _ -> pure ()
+    )
+    (Set.toList fieldNames)
+  subtypeType leftObject.rest rightObject.rest
+  where
+    effectiveField :: NormalizedType -> Maybe NormalizedFieldInformation -> NormalizedFieldInformation
+    effectiveField objectRest =
+      fromMaybe
+        NormalizedFieldInformation
+          { normalizedType = objectRest,
+            optional = True
+          }
+
+-- | Compare two generic-argument maps (of a data type or request) pointwise, using the declared
+-- variance of each parameter.
+subtypeGenericArguments :: Map Text Variance -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer ()
+subtypeGenericArguments varianceMap leftArguments rightArguments =
+  mapM_
+    ( \genericArgumentName ->
+        case (Map.lookup genericArgumentName leftArguments, Map.lookup genericArgumentName rightArguments) of
+          (Just leftArgument, Just rightArgument) -> subtypeGenericArgument varianceMap genericArgumentName leftArgument rightArgument
+          _ -> pure ()
+    )
+    (Set.toList $ Set.union (Map.keysSet leftArguments) (Map.keysSet rightArguments))
+
+-- | Compare a single generic argument by its variance, mirroring the dispatch used by
+-- 'unionGenericArgument' / 'intersectGenericArgument':
+--   covariant     -> left <: right
+--   contravariant -> right <: left
+--   invariant     -> both directions
+--   bivariant     -> no constraint
+subtypeGenericArgument :: Map Text Variance -> Text -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer ()
+subtypeGenericArgument varianceMap genericArgumentName leftArgument rightArgument =
+  case Map.lookup genericArgumentName varianceMap of
+    Nothing ->
+      tell [UnknownGenericError $ UnknownGenericErrorInfo {expected = genericArgumentName, message = "Unknown generic argument: " <> genericArgumentName}]
+    Just variance -> case variance of
+      Covariant -> subtypeCovariantArgument leftArgument rightArgument
+      Contravariant -> subtypeCovariantArgument rightArgument leftArgument
+      Invariant -> do
+        subtypeCovariantArgument leftArgument rightArgument
+        subtypeCovariantArgument rightArgument leftArgument
+      Bivariant -> pure ()
+  where
+    subtypeCovariantArgument :: NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer ()
+    subtypeCovariantArgument lowerArgument upperArgument = case (lowerArgument, upperArgument) of
+      (NormalizedGenericArgumentType lowerType, NormalizedGenericArgumentType upperType) -> subtypeType lowerType upperType
+      (NormalizedGenericArgumentEffect lowerEffect, NormalizedGenericArgumentEffect upperEffect) -> subtypeEffect lowerEffect upperEffect
+      (NormalizedGenericArgumentAttribute lowerAttribute, NormalizedGenericArgumentAttribute upperAttribute) -> subtypeAttribute lowerAttribute upperAttribute
+      _ ->
+        tell
+          [ KindError $
+              KindErrorInfo
+                { expected = genericArgumentKindName upperArgument,
+                  actual = genericArgumentKindName lowerArgument,
+                  message = "Generic argument kinds are incompatible: " <> genericArgumentName
+                }
+          ]
+    genericArgumentKindName :: NormalizedGenericArgument -> Text
+    genericArgumentKindName argument = case argument of
+      NormalizedGenericArgumentType _ -> "type"
+      NormalizedGenericArgumentEffect _ -> "effect"
+      NormalizedGenericArgumentAttribute _ -> "attribute"
