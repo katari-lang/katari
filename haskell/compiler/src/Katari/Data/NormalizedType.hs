@@ -1,6 +1,6 @@
 module Katari.Data.NormalizedType where
 
-import Control.Monad (foldM, (<=<))
+import Control.Monad (foldM, when, (<=<))
 import Control.Monad.RWS (RWS)
 import Control.Monad.RWS.Class (MonadReader (..), MonadState (..), MonadWriter (..), asks)
 import Data.Map (Map)
@@ -10,6 +10,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text, pack)
 import GHC.List (List)
+import Katari.Common (intersectWithKeyM, mapMaybeM, unionWithKeyM)
 import Katari.Data.Environment (DataEnvironment, GenericBoundEnvironment, RequestEnvironment (..), variance)
 import Katari.Data.Id (GenericId)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
@@ -139,12 +140,15 @@ data SubtypeError where
   CannotBeIntersectedError ::
     CannotBeIntersectedErrorInfo ->
     SubtypeError
+  KindError ::
+    KindErrorInfo ->
+    SubtypeError
   deriving (Eq, Ord, Show)
 
 data SubtypeErrorInfo where
   SubtypeErrorInfo ::
-    { expected :: NormalizedType,
-      actual :: NormalizedType,
+    { expected :: NormalizedGenericArgument,
+      actual :: NormalizedGenericArgument,
       message :: Text
     } ->
     SubtypeErrorInfo
@@ -168,7 +172,7 @@ data UnknownDataErrorInfo where
 
 data UnknownGenericErrorInfo where
   UnknownGenericErrorInfo ::
-    { expected :: GenericId,
+    { expected :: Text,
       message :: Text
     } ->
     UnknownGenericErrorInfo
@@ -190,6 +194,15 @@ data CannotBeIntersectedErrorInfo where
       message :: Text
     } ->
     CannotBeIntersectedErrorInfo
+  deriving (Eq, Ord, Show)
+
+data KindErrorInfo where
+  KindErrorInfo ::
+    { expected :: Text,
+      actual :: Text,
+      message :: Text
+    } ->
+    KindErrorInfo
   deriving (Eq, Ord, Show)
 
 data NormalizerEnvironment = NormalizeEnvironment
@@ -485,7 +498,7 @@ unionGenericArgument :: Map Text Variance -> Text -> NormalizedGenericArgument -
 unionGenericArgument varianceMap genericArgumentName leftArgument rightArgument =
   case Map.lookup genericArgumentName varianceMap of
     Nothing -> do
-      tell [SubtypeError $ SubtypeErrorInfo {expected = bottomType, actual = topType, message = "Unknown generic: " <> genericArgumentName}]
+      tell [UnknownGenericError $ UnknownGenericErrorInfo {expected = genericArgumentName, message = "Unknown generic argument: " <> genericArgumentName}]
       pure leftArgument -- NOTE: if the generic is not found in the variance map, we cannot determine how to union the generic arguments
     Just variance -> case variance of
       Invariant -> do
@@ -672,7 +685,7 @@ intersectGenericArgument :: Map Text Variance -> Text -> NormalizedGenericArgume
 intersectGenericArgument varianceMap genericArgumentName leftArgument rightArgument =
   case Map.lookup genericArgumentName varianceMap of
     Nothing -> do
-      tell [SubtypeError $ SubtypeErrorInfo {expected = bottomType, actual = topType, message = "Unknown generic: " <> genericArgumentName}]
+      tell [UnknownGenericError $ UnknownGenericErrorInfo {expected = genericArgumentName, message = "Unknown generic argument: " <> genericArgumentName}]
       pure leftArgument -- NOTE: if the generic is not found in the variance map, we cannot determine how to intersect the generic arguments
     Just variance -> case variance of
       Invariant ->
@@ -776,36 +789,6 @@ mergeSequence combineType leftSequence rightSequence = do
       Just itemType -> itemType
       Nothing -> sequenceRest
 
--- \| right only or left only  ~>  keep
--- \| left and right  ~>  apply f
-unionWithKeyM :: (Ord k, Monad m) => (k -> a -> a -> m a) -> Map k a -> Map k a -> m (Map k a)
-unionWithKeyM f leftMap rightMap = do
-  let keys = Set.union (Map.keysSet leftMap) (Map.keysSet rightMap)
-  Map.fromList . catMaybes
-    <$> mapM
-      ( \key -> case (Map.lookup key leftMap, Map.lookup key rightMap) of
-          (Just leftValue, Just rightValue) -> do
-            unionedValue <- f key leftValue rightValue
-            pure $ Just (key, unionedValue)
-          (Just leftValue, Nothing) -> pure $ Just (key, leftValue)
-          (Nothing, Just rightValue) -> pure $ Just (key, rightValue)
-          (Nothing, Nothing) -> pure Nothing
-      )
-      (Set.toList keys)
-
-intersectWithKeyM :: (Ord k, Monad m) => (k -> a -> a -> m a) -> Map k a -> Map k a -> m (Map k a)
-intersectWithKeyM f leftMap rightMap = do
-  let keys = Set.intersection (Map.keysSet leftMap) (Map.keysSet rightMap)
-  Map.fromList . catMaybes
-    <$> mapM
-      ( \key -> case (Map.lookup key leftMap, Map.lookup key rightMap) of
-          (Just leftValue, Just rightValue) -> do
-            intersectedValue <- f key leftValue rightValue
-            pure $ Just (key, intersectedValue)
-          _ -> pure Nothing
-      )
-      (Set.toList keys)
-
 -- | Check if the first type is a subtype of the second type. (first <: second)
 -- NOTE: Attribute
 -- private <: public, public /<: private
@@ -814,34 +797,54 @@ intersectWithKeyM f leftMap rightMap = do
 subtypeType ::
   NormalizedType ->
   NormalizedType ->
-  Normalizer Bool
+  Normalizer ()
 subtypeType left right = do
-  isBaseSubtype <- subtypeBaseType left.baseType right.baseType
-  isAttributeSubtype <- subtypeAttribute left.attribute right.attribute
-  pure $ isBaseSubtype && isAttributeSubtype
+  subtypeBaseType left.baseType right.baseType
+  subtypeAttribute left.attribute right.attribute
 
-subtypeAttribute :: NormalizedAttribute -> NormalizedAttribute -> Normalizer Bool
+subtypeAttribute :: NormalizedAttribute -> NormalizedAttribute -> Normalizer ()
 subtypeAttribute left right = do
   -- 1. Collect generic bounds of left only generics, and union them to rest of left attribute
   -- 2. Compare non-generic parts
   genricBoundsEnvironment <- asks $ \environment -> environment.genericBoundEnvironment
   let leftOnlyGenerics = Set.difference left.generic right.generic
-      leftOnlyGenericBounds =
-        Map.mapMaybe
-          ( \case
-              NormalizedGenericArgumentAttribute attribute -> Just attribute
-              _ -> Nothing
-          )
-          $ Map.restrictKeys genricBoundsEnvironment leftOnlyGenerics
+  leftOnlyGenericBounds <-
+    mapMaybeM
+      ( \case
+          NormalizedGenericArgumentAttribute attribute -> pure $ Just attribute
+          NormalizedGenericArgumentType argumentType -> do
+            tell [KindError $ KindErrorInfo {expected = "attribute", actual = "type", message = "Expected an attribute, but got a type: " <> pack (show argumentType)}]
+            pure Nothing
+          NormalizedGenericArgumentEffect argumentEffect -> do
+            tell [KindError $ KindErrorInfo {expected = "attribute", actual = "effect", message = "Expected an attribute, but got an effect: " <> pack (show argumentEffect)}]
+            pure Nothing
+      )
+      $ Map.restrictKeys genricBoundsEnvironment leftOnlyGenerics
   effectiveLeftAttribute <- foldM unionAttribute left $ Map.elems leftOnlyGenericBounds
-  pure $ not effectiveLeftAttribute.private || right.private -- NOTE: public <: private, private /<: public
+  when (effectiveLeftAttribute.private && not right.private) $
+    tell
+      [ SubtypeError $
+          SubtypeErrorInfo
+            { expected = NormalizedGenericArgumentAttribute $ NormalizedAttribute {private = False, generic = Set.empty},
+              actual = NormalizedGenericArgumentAttribute $ NormalizedAttribute {private = True, generic = Set.empty},
+              message = "Private attribute cannot be a subtype of public attribute"
+            }
+      ]
 
-subtypeBaseType :: NormalizedBaseType -> NormalizedBaseType -> Normalizer Bool
+subtypeBaseType :: NormalizedBaseType -> NormalizedBaseType -> Normalizer ()
 subtypeBaseType left right = case (left, right) of
-  (NormalizedBaseTypeUnknown, NormalizedBaseTypeUnknown) -> pure True
-  (NormalizedBaseTypeUnknown, _) -> pure False
-  (_, NormalizedBaseTypeUnknown) -> pure True
+  (NormalizedBaseTypeUnknown, NormalizedBaseTypeUnknown) -> pure ()
+  (NormalizedBaseTypeUnknown, expected) ->
+    tell
+      [ SubtypeError $
+          SubtypeErrorInfo
+            { expected = NormalizedGenericArgumentType $ NormalizedType {baseType = expected, attribute = bottomAttribute},
+              actual = NormalizedGenericArgumentType $ NormalizedType {baseType = left, attribute = bottomAttribute},
+              message = "Unknown type cannot be a subtype of a known type"
+            }
+      ]
+  (_, NormalizedBaseTypeUnknown) -> pure ()
   (NormalizedBaseTypeLayerd leftLayer, NormalizedBaseTypeLayerd rightLayer) -> subtypeLayeredType leftLayer rightLayer
 
-subtypeLayeredType :: LayeredType -> LayeredType -> Normalizer Bool
+subtypeLayeredType :: LayeredType -> LayeredType -> Normalizer ()
 subtypeLayeredType leftLayered rightLayered = undefined
