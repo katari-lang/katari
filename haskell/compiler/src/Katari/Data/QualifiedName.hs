@@ -14,6 +14,7 @@ data QualifiedName = QualifiedName
   deriving (Eq, Ord, Show, Generic)
 
 instance ToJSON QualifiedName where
+  toJSON :: QualifiedName -> Value
   toJSON qualifiedName = String $ renderQualifiedName qualifiedName
 
 renderQualifiedName :: QualifiedName -> Text
