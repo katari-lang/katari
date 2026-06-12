@@ -7,7 +7,7 @@ import GHC.List (List)
 import Katari.Data.GenericKind (GenericKind)
 import Katari.Data.Id (GenericId)
 import Katari.Data.QualifiedName (QualifiedName)
-import Katari.Data.Variant (Variance)
+import Katari.Data.Variance (Variance)
 
 type DataEnvironment typeShape = Map QualifiedName (DataInfo typeShape)
 

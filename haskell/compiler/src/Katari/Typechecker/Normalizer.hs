@@ -31,11 +31,12 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Common (intersectWithKeyM, unionWithKeyM)
 import Katari.Data.Environment (DataEnvironment, DataInfo (..), GenericBoundEnvironment, GenericParameterInfo, RequestEnvironment, RequestInfo (..), genericIdsByName, genericParameterNames, variancesByName)
+import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
-import Katari.Data.Variant (Variance (..))
+import Katari.Data.Variance (Variance (..))
 import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..), UnknownDataErrorInfo (..), UnknownGenericErrorInfo (..), UnknownRequestErrorInfo (..))
 
 ------------------------------------------------------------------------------------------------
@@ -167,9 +168,9 @@ tellAttributeMismatch reason actual expected =
           }
     ]
 
-tellKindMismatch :: Text -> Text -> Text -> Normalizer ()
+tellKindMismatch :: GenericKind -> GenericKind -> Text -> Normalizer ()
 tellKindMismatch expectedKind actualKind reason =
-  tell [TypeErrorKind $ KindErrorInfo {expected = expectedKind, actual = actualKind, reason = reason}]
+  tell [TypeErrorKind $ KindErrorInfo {expected = renderGenericKind expectedKind, actual = renderGenericKind actualKind, reason = reason}]
 
 tellUnknownGeneric :: Text -> Normalizer ()
 tellUnknownGeneric genericArgumentName =
@@ -807,7 +808,7 @@ boundedType = resolveUpperBounds (NormalizedGenericArgumentType topType) (\norma
     absorbBound accumulated = \case
       NormalizedGenericArgumentType bound -> union accumulated bound
       other -> do
-        tellKindMismatch "type" (kindOf other) "Expected a type bound for a type generic"
+        tellKindMismatch GenericKindType (kindOf other) "Expected a type bound for a type generic"
         pure accumulated
 
 boundedEffect :: Set GenericId -> NormalizedEffect -> Normalizer NormalizedEffect
@@ -819,7 +820,7 @@ boundedEffect = resolveUpperBounds (NormalizedGenericArgumentEffect topEffect) e
     absorbBound accumulated = \case
       NormalizedGenericArgumentEffect bound -> absorbEffectBound accumulated bound
       other -> do
-        tellKindMismatch "effect" (kindOf other) "Expected an effect bound for an effect generic"
+        tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect bound for an effect generic"
         pure accumulated
 
 -- | Absorb an effect generic's upper bound into the row that carried the generic. Not a lattice
@@ -847,7 +848,7 @@ boundedAttribute = resolveUpperBounds (NormalizedGenericArgumentAttribute topAtt
     absorbBound accumulated = \case
       NormalizedGenericArgumentAttribute bound -> union accumulated bound
       other -> do
-        tellKindMismatch "attribute" (kindOf other) "Expected an attribute bound for an attribute generic"
+        tellKindMismatch GenericKindAttribute (kindOf other) "Expected an attribute bound for an attribute generic"
         pure accumulated
 
 ------------------------------------------------------------------------------------------------
@@ -955,7 +956,7 @@ substituteType substitution normalizedType = do
     NormalizedBaseTypeLayered layered -> NormalizedBaseTypeLayered <$> traverseArguments substituteVisitor layered
   substitutedAttribute <- substituteAttribute substitution normalizedType.attribute
   substituteGenerics
-    "type"
+    GenericKindType
     (\accumulated -> \case NormalizedGenericArgumentType replacement -> Just (union accumulated replacement); _ -> Nothing)
     substitution
     (\generics -> normalizedType {baseType = substitutedBaseType, attribute = substitutedAttribute, generics = generics})
@@ -975,7 +976,7 @@ substituteEffect substitution effect = case effect of
   NormalizedEffectRow effectRow -> do
     substitutedRequests <- mapM (mapM (substituteGenericArgument substitution)) effectRow.request
     substituteGenerics
-      "effect"
+      GenericKindEffect
       (\accumulated -> \case NormalizedGenericArgumentEffect replacement -> Just (union accumulated replacement); _ -> Nothing)
       substitution
       (\generics -> NormalizedEffectRow $ effectRow {request = substitutedRequests, generic = generics})
@@ -985,7 +986,7 @@ substituteEffect substitution effect = case effect of
 substituteAttribute :: Map GenericId NormalizedGenericArgument -> NormalizedAttribute -> Normalizer NormalizedAttribute
 substituteAttribute substitution attribute =
   substituteGenerics
-    "attribute"
+    GenericKindAttribute
     (\accumulated -> \case NormalizedGenericArgumentAttribute replacement -> Just (union accumulated replacement); _ -> Nothing)
     substitution
     (\generics -> NormalizedAttribute {private = attribute.private, generic = generics})
@@ -1001,7 +1002,7 @@ substituteGenericArgument substitution genericArgument = case genericArgument of
 -- rebuild the node with the kept ones, then absorb each replacement of the expected kind
 -- (reporting a kind mismatch otherwise).
 substituteGenerics ::
-  Text ->
+  GenericKind ->
   (a -> NormalizedGenericArgument -> Maybe (Normalizer a)) ->
   Map GenericId NormalizedGenericArgument ->
   (Set GenericId -> a) ->
@@ -1019,7 +1020,11 @@ substituteGenerics expectedKind absorbReplacement substitution rebuild generics 
       Nothing -> do
         tellKindMismatch expectedKind (kindOf replacement) ("Expected " <> article expectedKind <> " argument for " <> article expectedKind <> " generic")
         pure accumulated
-    article kind = (if kind == "attribute" || kind == "effect" then "an " else "a ") <> kind
+    -- NOTE: the indefinite article agrees with the kind's spoken name (a type / an effect / an attribute).
+    article = \case
+      GenericKindType -> "a type"
+      GenericKindEffect -> "an effect"
+      GenericKindAttribute -> "an attribute"
 
 ------------------------------------------------------------------------------------------------
 -- Denormalization (normalized -> display-oriented semantic)

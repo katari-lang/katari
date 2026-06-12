@@ -19,7 +19,7 @@ type data ReferenceKind where
 type data Phase where
   Parsed :: Phase
   Identified :: Phase
-  Zonked :: Phase
+  Typed :: Phase
 
 -- | Identifier resolves references
 type family ReferenceResolution (phase :: Phase) (nameReferenceKind :: ReferenceKind) :: Type where
@@ -33,25 +33,25 @@ type family ReferenceResolution (phase :: Phase) (nameReferenceKind :: Reference
 type family ExpressionType (phase :: Phase) :: Type where
   ExpressionType Parsed = ()
   ExpressionType Identified = ()
-  ExpressionType Zonked = SemanticType
+  ExpressionType Typed = SemanticType
 
 -- | Type container for pattern
 type family PatternType (phase :: Phase) :: Type where
   PatternType Parsed = ()
   PatternType Identified = ()
-  PatternType Zonked = SemanticType
+  PatternType Typed = SemanticType
 
--- | callee[T, E](...), etc...  Zonked AST will contains infered generic instantiations
+-- | callee[T, E](...), etc...  Typed AST will contains infered generic instantiations
 type family GenericInstantiation (phase :: Phase) :: Type where
   GenericInstantiation Parsed = ()
   GenericInstantiation Identified = ()
-  GenericInstantiation Zonked = Map Text SemanticGenericArgument
+  GenericInstantiation Typed = Map Text SemanticGenericArgument
 
--- | handler[R, E] {...}  Zonked AST will contains infered generic instantiations for R and E
+-- | handler[R, E] {...}  Typed AST will contains infered generic instantiations for R and E
 type family HandlerGenerics (phase :: Phase) :: Type where
   HandlerGenerics Parsed = ()
   HandlerGenerics Identified = ()
-  HandlerGenerics Zonked = (SemanticGenericArgument, SemanticGenericArgument) -- (return type, effect)
+  HandlerGenerics Typed = (SemanticGenericArgument, SemanticGenericArgument) -- (return type, effect)
 
 data Module (phase :: Phase) = Module
   { declarations :: List (Declaration phase),
@@ -454,7 +454,7 @@ data RequestHandler (phase :: Phase) = RequestHandler
     typeReference :: Reference phase TypeReference,
     genericArguments :: List (SyntacticType phase),
     -- | The resolved substitution (declared generic -> argument), filled by the checker at
-    -- 'Zonked' so lowering need not re-derive it
+    -- 'Typed' so lowering need not re-derive it
     instantiation :: GenericInstantiation phase,
     parameters :: List (ParameterBinding phase),
     returnType :: Maybe (SyntacticType phase),
@@ -527,7 +527,7 @@ data ConstructorPattern (phase :: Phase) = ConstructorPattern
     constructorReference :: Reference phase VariableReference,
     genericArguments :: List (SyntacticType phase),
     -- | The resolved substitution (declared generic -> argument), filled by the checker at
-    -- 'Zonked' so narrowing / lowering need not re-derive it
+    -- 'Typed' so narrowing / lowering need not re-derive it
     instantiation :: GenericInstantiation phase,
     fields :: List (FieldPattern phase),
     sourceSpan :: SourceSpan,
@@ -1135,7 +1135,7 @@ instance HasSourceSpan (QualifiedReferenceExpression phase) where
 -- Phase retagging helpers
 --
 -- Identity transports between phases whose 'ReferenceResolution' agree
--- (Identified / Zonked). Nodes carrying a phase-specific @typeOf@ are rebuilt
+-- (Identified / Typed). Nodes carrying a phase-specific @typeOf@ are rebuilt
 -- by each walker instead.
 ---------------------------------------------------------------------------------------------------------------
 

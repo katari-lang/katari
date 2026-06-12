@@ -48,7 +48,7 @@ library:
     - Katari.Data.Environment
     - Katari.Data.NormalizedType
     - Katari.Data.ModuleName
-    - Katari.Data.Variant
+    - Katari.Data.Variance
     - Katari.Error
     - Katari.Panic
     - Katari.Diagnostics

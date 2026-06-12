@@ -12,7 +12,10 @@
     "test": "pnpm -r run test",
     "lint": "pnpm run lint:haskell && pnpm run lint:typescript",
     "lint:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package hlint -- hlint {} +",
-    "lint:typescript": "biome check"
+    "lint:typescript": "biome check",
+    "lint-fix": "pnpm run lint-fix:haskell && pnpm run lint-fix:typescript",
+    "lint-fix:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package hlint -- hlint --refactor --refactor-options=\"--inplace\" {} \\;",
+    "lint-fix:typescript": "biome check --fix"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",

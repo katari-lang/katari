@@ -8,12 +8,10 @@ import GHC.List (List)
 import Katari.Data.Id (GenericId (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 
-data FieldInformation where
-  FieldInformation ::
-    { semanticType :: SemanticType,
-      optional :: Bool
-    } ->
-    FieldInformation
+data FieldInformation = FieldInformation
+  { semanticType :: SemanticType,
+    optional :: Bool
+  }
   deriving (Eq, Ord, Show)
 
 data SemanticType where

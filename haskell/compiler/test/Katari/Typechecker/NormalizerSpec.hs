@@ -13,7 +13,7 @@ import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), renderSemanticType)
-import Katari.Data.Variant (Variance (..))
+import Katari.Data.Variance (Variance (..))
 import Katari.Error (typeErrorCode)
 import Katari.Typechecker.Normalizer
 import Test.Hspec

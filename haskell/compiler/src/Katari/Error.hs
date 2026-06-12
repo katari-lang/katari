@@ -114,68 +114,52 @@ typeErrorSeverity = \case
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
-data SubtypeErrorInfo where
-  SubtypeErrorInfo ::
-    { expected :: SemanticGenericArgument,
-      actual :: SemanticGenericArgument,
-      reason :: Text
-    } ->
-    SubtypeErrorInfo
+data SubtypeErrorInfo = SubtypeErrorInfo
+  { expected :: SemanticGenericArgument,
+    actual :: SemanticGenericArgument,
+    reason :: Text
+  }
   deriving (Eq, Ord, Show)
 
-data UnknownRequestErrorInfo where
-  UnknownRequestErrorInfo ::
-    { expected :: QualifiedName
-    } ->
-    UnknownRequestErrorInfo
+newtype UnknownRequestErrorInfo = UnknownRequestErrorInfo
+  { expected :: QualifiedName
+  }
   deriving (Eq, Ord, Show)
 
-data UnknownDataErrorInfo where
-  UnknownDataErrorInfo ::
-    { expected :: QualifiedName
-    } ->
-    UnknownDataErrorInfo
+newtype UnknownDataErrorInfo = UnknownDataErrorInfo
+  { expected :: QualifiedName
+  }
   deriving (Eq, Ord, Show)
 
-data UnknownGenericErrorInfo where
-  UnknownGenericErrorInfo ::
-    { expected :: Text
-    } ->
-    UnknownGenericErrorInfo
+newtype UnknownGenericErrorInfo = UnknownGenericErrorInfo
+  { expected :: Text
+  }
   deriving (Eq, Ord, Show)
 
-data CannotBeUnionedErrorInfo where
-  CannotBeUnionedErrorInfo ::
-    { left :: SemanticGenericArgument,
-      right :: SemanticGenericArgument
-    } ->
-    CannotBeUnionedErrorInfo
+data CannotBeUnionedErrorInfo = CannotBeUnionedErrorInfo
+  { left :: SemanticGenericArgument,
+    right :: SemanticGenericArgument
+  }
   deriving (Eq, Ord, Show)
 
-data CannotBeIntersectedErrorInfo where
-  CannotBeIntersectedErrorInfo ::
-    { left :: SemanticGenericArgument,
-      right :: SemanticGenericArgument
-    } ->
-    CannotBeIntersectedErrorInfo
+data CannotBeIntersectedErrorInfo = CannotBeIntersectedErrorInfo
+  { left :: SemanticGenericArgument,
+    right :: SemanticGenericArgument
+  }
   deriving (Eq, Ord, Show)
 
-data KindErrorInfo where
-  KindErrorInfo ::
-    { expected :: Text,
-      actual :: Text,
-      reason :: Text
-    } ->
-    KindErrorInfo
+data KindErrorInfo = KindErrorInfo
+  { expected :: Text,
+    actual :: Text,
+    reason :: Text
+  }
   deriving (Eq, Ord, Show)
 
-data GenericArityErrorInfo where
-  GenericArityErrorInfo ::
-    { name :: QualifiedName,
-      -- | The declared generic parameter names, in declaration order
-      expected :: List Text,
-      -- | The argument names actually supplied
-      actual :: List Text
-    } ->
-    GenericArityErrorInfo
+data GenericArityErrorInfo = GenericArityErrorInfo
+  { name :: QualifiedName,
+    -- | The declared generic parameter names, in declaration order
+    expected :: List Text,
+    -- | The argument names actually supplied
+    actual :: List Text
+  }
   deriving (Eq, Ord, Show)
