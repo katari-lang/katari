@@ -11,8 +11,8 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "lint": "pnpm run lint:haskell && pnpm run lint:typescript",
-    "lint:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package hlint -- hlint --refactor --refactor-options=\"--inplace\" {} \\;",
-    "lint:typescript": "biome check --write"
+    "lint:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package hlint -- hlint {} +",
+    "lint:typescript": "biome check"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",

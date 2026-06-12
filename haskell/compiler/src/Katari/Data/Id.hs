@@ -1,32 +1,24 @@
 module Katari.Data.Id where
 
-import Data.Aeson (FromJSON (..), ToJSON (..))
+import Data.Aeson (FromJSON, ToJSON)
 import Katari.Data.QualifiedName (QualifiedName)
 
-newtype GenericId where
-  GenericsId :: Int -> GenericId
-  deriving (Eq, Ord, Show)
+newtype GenericId = GenericId Int
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
 
-instance ToJSON GenericId where
-  toJSON (GenericsId n) = toJSON n
-
-instance FromJSON GenericId where
-  parseJSON = fmap GenericsId . parseJSON
-
-newtype LocalVarId where
-  LocalVarId :: Int -> LocalVarId
-  deriving (Eq, Ord, Show)
+newtype LocalVariableId = LocalVariableId Int
+  deriving stock (Eq, Ord, Show)
 
 data VariableResolution where
-  VariableResolutionLocalVar :: LocalVarId -> VariableResolution
+  VariableResolutionLocalVariable :: LocalVariableId -> VariableResolution
   VariableResolutionQualifiedName :: QualifiedName -> VariableResolution
-  deriving (Eq, Ord, Show)
+  deriving stock (Eq, Ord, Show)
 
 -- | Shared type for type, effect, and attribute resolution
 data TypeResolution where
-  TypeResolutionData :: QualifiedName -> TypeResolution
-  TypeResolutionRequest :: QualifiedName -> TypeResolution
+  TypeResolutionQualifiedName :: QualifiedName -> TypeResolution
   TypeResolutionGenericType :: GenericId -> TypeResolution -- [T]
   TypeResolutionGenericEffect :: GenericId -> TypeResolution -- [effect T]
   TypeResolutionGenericAttribute :: GenericId -> TypeResolution -- [attribute T]
-  deriving (Eq, Ord, Show)
+  deriving stock (Eq, Ord, Show)

@@ -1,19 +1,12 @@
 module Katari.Data.ModuleName where
 
-import Data.Aeson (FromJSON, ToJSON (..))
-import Data.Aeson.Types (FromJSON (..))
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
-import GHC.Generics (Generic)
 
 -- | Dot separated module name, e.g. "path.to.module"
 newtype ModuleName = ModuleName Text
-  deriving (Eq, Ord, Show, Generic)
-
-instance ToJSON ModuleName where
-  toJSON (ModuleName module_) = toJSON module_
-
-instance FromJSON ModuleName where
-  parseJSON = fmap ModuleName . parseJSON
+  deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON, FromJSON)
 
 renderModuleName :: ModuleName -> Text
-renderModuleName (ModuleName module_) = module_
+renderModuleName (ModuleName moduleName) = moduleName
