@@ -50,6 +50,9 @@ library:
     - Katari.Data.ModuleName
     - Katari.Data.Variant
     - Katari.Error
+    - Katari.Panic
+    - Katari.Diagnostics
+    - Katari.Identifier
     - Katari.Typechecker.Normalizer
 
 tests:

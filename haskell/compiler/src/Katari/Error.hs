@@ -1,10 +1,6 @@
 -- | Centralized catalogue of every error the compiler can emit.
 module Katari.Error where
 
-import Data.Foldable (toList)
-import Data.List (sortOn)
-import Data.Sequence (Seq)
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
@@ -16,11 +12,6 @@ import Katari.Data.SourceSpan (Located (..), renderSourceSpan)
 data CompilerError where
   CompilerErrorType :: TypeError -> CompilerError
   deriving (Eq, Ord, Show)
-
--- | A compiler error with the source span it was reported at. Errors are constructed without a
--- span (the type-system layer works on span-less semantic types); the phase that holds the
--- originating AST node attaches one. See 'Katari.Data.SourceSpan.Located'.
-type LocatedCompilerError = Located CompilerError
 
 -- | Stable, searchable error code of an error.
 -- Code ranges (provisional): K1xxx = parser, K2xxx = identifier / name resolution, K3xxx = type system.
@@ -46,24 +37,8 @@ renderCompilerError = \case
   CompilerErrorType typeError -> renderTypeError typeError
 
 -- | As 'renderCompilerError', prefixed with the source location.
-renderLocatedCompilerError :: LocatedCompilerError -> Text
+renderLocatedCompilerError :: Located CompilerError -> Text
 renderLocatedCompilerError located = renderSourceSpan located.sourceSpan <> " " <> renderCompilerError located.value
-
--- | The errors a phase has accumulated, in emission order. Phases use this as their writer monoid
--- (mtl's @tell@); the Normalizer stays on its own span-free @[TypeError]@ and is bridged into this
--- by the checker. 'finalizeDiagnostics' orders and deduplicates them for presentation.
-type Diagnostics = Seq LocatedCompilerError
-
--- | Order a phase's accumulated diagnostics by source position and drop exact duplicates (the same
--- node may be reported more than once before spans distinguish the occurrences).
-finalizeDiagnostics :: Diagnostics -> List LocatedCompilerError
-finalizeDiagnostics = sortOn bySourcePosition . Set.toList . Set.fromList . toList
-  where
-    bySourcePosition located = (located.sourceSpan, located.value)
-
--- | Render every diagnostic, one per line, ordered by source position.
-renderDiagnostics :: Diagnostics -> Text
-renderDiagnostics = Text.intercalate "\n" . map renderLocatedCompilerError . finalizeDiagnostics
 
 renderTypeError :: TypeError -> Text
 renderTypeError typeError =
