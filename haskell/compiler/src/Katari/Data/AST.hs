@@ -41,17 +41,12 @@ type family PatternType (phase :: Phase) :: Type where
   PatternType Identified = ()
   PatternType Typed = SemanticType
 
--- | callee[T, E](...), etc...  Typed AST will contains infered generic instantiations
+-- | callee[T, E](...), etc...  Typed AST will contains infered generic instantiations.
+-- Also carries the explicit @handler[R, E]@ instantiation (keyed by the generic name).
 type family GenericInstantiation (phase :: Phase) :: Type where
   GenericInstantiation Parsed = ()
   GenericInstantiation Identified = ()
   GenericInstantiation Typed = Map Text SemanticGenericArgument
-
--- | handler[R, E] {...}  Typed AST will contains infered generic instantiations for R and E
-type family HandlerGenerics (phase :: Phase) :: Type where
-  HandlerGenerics Parsed = ()
-  HandlerGenerics Identified = ()
-  HandlerGenerics Typed = (SemanticGenericArgument, SemanticGenericArgument) -- (return type, effect)
 
 data Module (phase :: Phase) = Module
   { declarations :: List (Declaration phase),
@@ -101,7 +96,8 @@ data ModuleQualifier (phase :: Phase) = ModuleQualifier
 instance HasSourceSpan (ModuleQualifier phase) where
   sourceSpanOf qualifier = qualifier.sourceSpan
 
--- | A formal generic parameter of an agent / request / external / prim declaration.
+-- | A formal generic parameter of an agent / request / external / prim / data /
+-- type-synonym declaration.
 data GenericParameter (phase :: Phase) = GenericParameter
   { name :: Text,
     labelReference :: Reference phase LabelReference,
@@ -109,7 +105,7 @@ data GenericParameter (phase :: Phase) = GenericParameter
     typeReference :: Reference phase TypeReference,
     kind :: GenericKind,
     -- | No upper bound  ~> unknown of private (top type)
-    upperBound :: Maybe (SyntacticType phase),
+    upperBound :: Maybe (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan
   }
 
@@ -135,7 +131,7 @@ data ParameterSignature (phase :: Phase) = ParameterSignature
   { annotation :: Maybe Text,
     name :: Text,
     labelReference :: Reference phase LabelReference,
-    parameterType :: SyntacticType phase,
+    parameterType :: SyntacticTypeExpr phase,
     defaultValue :: Maybe ParameterDefault,
     sourceSpan :: SourceSpan
   }
@@ -168,8 +164,8 @@ data AgentDeclaration (phase :: Phase) = AgentDeclaration
     variableReference :: Reference phase VariableReference,
     genericParameters :: List (GenericParameter phase),
     parameters :: List (ParameterBinding phase),
-    returnType :: SyntacticType phase,
-    effects :: Maybe (SyntacticEffect phase),
+    returnType :: Maybe (SyntacticTypeExpr phase), -- Nothing ~> infer
+    effects :: Maybe (SyntacticTypeExpr phase), -- Nothing ~> infer
     body :: Block phase,
     sourceSpan :: SourceSpan
   }
@@ -187,7 +183,7 @@ data RequestDeclaration (phase :: Phase) = RequestDeclaration
     typeReference :: Reference phase TypeReference,
     genericParameters :: List (GenericParameter phase),
     parameters :: List (ParameterSignature phase),
-    returnType :: SyntacticType phase,
+    returnType :: SyntacticTypeExpr phase,
     sourceSpan :: SourceSpan
   }
 
@@ -220,7 +216,7 @@ data NamesImport = NamesImport
 
 data ModuleImport = ModuleImport
   { moduleName :: ModuleName,
-    alias :: Maybe Text
+    alias :: Maybe Text -- Notying ~> prefix import  ex) import "foo.bar"  ~> bar.agent_name
   }
   deriving stock (Eq, Show)
 
@@ -236,34 +232,33 @@ data ImportItemKind where
   ImportItemType :: ImportItemKind
   deriving stock (Eq, Show)
 
--- | @external agent name[generics](label : type ?= default, ...) -> T with E from "ENDPOINT:dispatch_name"@
+-- | @external agent name[generics](label : type ?= default, ...) -> T with E@.
+-- The declaration name is the sole handle; there is no separate endpoint / dispatch name.
 data ExternalAgentDeclaration (phase :: Phase) = ExternalAgentDeclaration
   { annotation :: Maybe Text,
     name :: Text,
     variableReference :: Reference phase VariableReference,
     genericParameters :: List (GenericParameter phase),
     parameters :: List (ParameterSignature phase),
-    returnType :: SyntacticType phase,
-    effects :: Maybe (SyntacticEffect phase),
-    endpoint :: Text,
-    dispatchName :: Text,
+    returnType :: SyntacticTypeExpr phase,
+    effects :: Maybe (SyntacticTypeExpr phase), -- Nothing ~> capture
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (ExternalAgentDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
--- | @primitive agent name[generics](label : type ?= default, ...) -> T with E using rule@
+-- | @primitive agent name[generics](label : type ?= default, ...) -> T with E@.
+-- Prim-specific typing (numeric join, element-type propagation, taint) is expressed
+-- through generics / attributes, so there is no @using@ rule escape hatch.
 data PrimitiveAgentDeclaration (phase :: Phase) = PrimitiveAgentDeclaration
   { annotation :: Maybe Text,
     name :: Text,
     variableReference :: Reference phase VariableReference,
     genericParameters :: List (GenericParameter phase),
     parameters :: List (ParameterSignature phase),
-    returnType :: SyntacticType phase,
-    effects :: Maybe (SyntacticEffect phase),
-    -- | Special typing rule consulted by the typechecker
-    using :: Maybe Text,
+    returnType :: SyntacticTypeExpr phase,
+    effects :: Maybe (SyntacticTypeExpr phase), -- Nothing ~> pure
     sourceSpan :: SourceSpan
   }
 
@@ -286,11 +281,13 @@ data DataDeclaration (phase :: Phase) = DataDeclaration
 instance HasSourceSpan (DataDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
--- | @type name = T@
+-- | @type name[generics] = T@. Generic synonyms expand structurally; the checker
+-- rejects (mutually) recursive synonym references, so expansion always terminates.
 data TypeSynonymDeclaration (phase :: Phase) = TypeSynonymDeclaration
   { name :: Text,
     typeReference :: Reference phase TypeReference,
-    definition :: SyntacticType phase,
+    genericParameters :: List (GenericParameter phase),
+    definition :: SyntacticTypeExpr phase,
     sourceSpan :: SourceSpan
   }
 
@@ -304,7 +301,7 @@ instance HasSourceSpan (TypeSynonymDeclaration phase) where
 -- | A list of statements plus an optional trailing expression (the block's value).
 data Block (phase :: Phase) = Block
   { statements :: List (Statement phase),
-    returnExpression :: Maybe (Expression phase),
+    returnExpression :: Maybe (Expression phase), -- Nothing ~> null
     sourceSpan :: SourceSpan
   }
 
@@ -314,6 +311,8 @@ instance HasSourceSpan (Block phase) where
 data Statement (phase :: Phase) where
   -- | @let pattern = expression@
   StatementLet :: LetStatement phase -> Statement phase
+  -- | @[let pattern =] use provider@ — a @let@-like statement (see 'UseStatement')
+  StatementUse :: UseStatement phase -> Statement phase
   -- | Locally-bound agent (closure over the enclosing scope)
   StatementAgent :: AgentDeclaration phase -> Statement phase
   -- | @return expression@
@@ -334,6 +333,7 @@ data Statement (phase :: Phase) where
 instance HasSourceSpan (Statement phase) where
   sourceSpanOf = \case
     StatementLet statement -> statement.sourceSpan
+    StatementUse statement -> statement.sourceSpan
     StatementAgent statement -> statement.sourceSpan
     StatementReturn statement -> statement.sourceSpan
     StatementExpression expression -> sourceSpanOf expression
@@ -352,6 +352,19 @@ data LetStatement (phase :: Phase) = LetStatement
 instance HasSourceSpan (LetStatement phase) where
   sourceSpanOf statement = statement.sourceSpan
 
+-- | @[let pattern =] use provider@ — a @let@-like statement that applies @provider@
+-- (a handler provider) to the rest of the enclosing block, captured as @body@ (the
+-- continuation). @{ use e }@ desugars to @{ let _ = use e; null }@.
+data UseStatement (phase :: Phase) = UseStatement
+  { binder :: Maybe (Pattern phase),
+    provider :: Expression phase,
+    body :: Block phase,
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (UseStatement phase) where
+  sourceSpanOf statement = statement.sourceSpan
+
 data ReturnStatement (phase :: Phase) = ReturnStatement
   { value :: Expression phase,
     sourceSpan :: SourceSpan
@@ -362,7 +375,7 @@ instance HasSourceSpan (ReturnStatement phase) where
 
 data NextStatement (phase :: Phase) = NextStatement
   { value :: Expression phase,
-    modifiers :: List (Modifier phase),
+    modifiers :: List (Modifier phase), -- No modidiers ~> []
     sourceSpan :: SourceSpan
   }
 
@@ -379,7 +392,7 @@ instance HasSourceSpan (BreakStatement phase) where
 
 data ForNextStatement (phase :: Phase) = ForNextStatement
   { value :: Expression phase,
-    modifiers :: List (Modifier phase),
+    modifiers :: List (Modifier phase), -- No modidiers ~> []
     sourceSpan :: SourceSpan
   }
 
@@ -409,7 +422,7 @@ instance HasSourceSpan (Modifier phase) where
 data VariableBinding (phase :: Phase) = VariableBinding
   { name :: Text,
     variableReference :: Reference phase VariableReference,
-    typeAnnotation :: Maybe (SyntacticType phase),
+    typeAnnotation :: Maybe (SyntacticTypeExpr phase),
     initial :: Expression phase,
     sourceSpan :: SourceSpan
   }
@@ -431,15 +444,18 @@ instance HasSourceSpan (ThenClause phase) where
 -- Handlers
 ---------------------------------------------------------------------------------------------------------------
 
--- | @[par] handler (var s = init, ...) { request foo(...) { ... } ... } then (pattern) { body }@.
--- An anonymous handler-provider agent, implicitly generic over the continuation's
--- return type and residual effect ('HandlerGenerics').
+-- | @[par] handler[R, E](var s = init, ...) { request foo(...) { ... } ... } then (pattern) { body }@.
+-- An anonymous handler-provider agent, generic over the continuation's return type
+-- and residual effect. @genericArguments@ holds the explicit @[R, E]@ written by the
+-- user (empty when omitted); @instantiation@ is the substitution the checker resolves
+-- (keyed by the generic name, e.g. @\"R\"@ / @\"E\"@).
 data HandlerExpression (phase :: Phase) = HandlerExpression
   { parallel :: Bool,
+    genericArguments :: List (SyntacticTypeExpr phase),
+    instantiation :: GenericInstantiation phase,
     stateVariables :: List (VariableBinding phase),
     handlers :: List (RequestHandler phase),
     thenClause :: Maybe (ThenClause phase),
-    generics :: HandlerGenerics phase,
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }
@@ -452,31 +468,18 @@ data RequestHandler (phase :: Phase) = RequestHandler
   { moduleQualifier :: Maybe (ModuleQualifier phase),
     name :: Text,
     typeReference :: Reference phase TypeReference,
-    genericArguments :: List (SyntacticType phase),
+    genericArguments :: List (SyntacticTypeExpr phase),
     -- | The resolved substitution (declared generic -> argument), filled by the checker at
     -- 'Typed' so lowering need not re-derive it
     instantiation :: GenericInstantiation phase,
     parameters :: List (ParameterBinding phase),
-    returnType :: Maybe (SyntacticType phase),
+    returnType :: Maybe (SyntacticTypeExpr phase),
     body :: Block phase,
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (RequestHandler phase) where
   sourceSpanOf handler = handler.sourceSpan
-
--- | @[let pattern =] use provider@ — applies @provider@ (a handler provider) to
--- the rest of the enclosing block, captured as @body@ (the continuation).
-data UseExpression (phase :: Phase) = UseExpression
-  { binder :: Maybe (Pattern phase),
-    provider :: Expression phase,
-    body :: Block phase,
-    sourceSpan :: SourceSpan,
-    typeOf :: ExpressionType phase
-  }
-
-instance HasSourceSpan (UseExpression phase) where
-  sourceSpanOf expression = expression.sourceSpan
 
 ---------------------------------------------------------------------------------------------------------------
 -- Patterns
@@ -494,7 +497,7 @@ data Pattern (phase :: Phase) where
   -- | @42@ / @"foo"@ / @true@ / @null@ — refutable
   PatternLiteral :: LiteralPattern phase -> Pattern phase
   -- | @T(pattern)@ — runtime type filter, narrows the subject to @T@
-  PatternType :: TypePattern phase -> Pattern phase
+  PatternTypeFilter :: TypeFilterPattern phase -> Pattern phase
   -- | @{ label => pattern, ... }@ — subset match against a record value
   PatternRecord :: RecordPattern phase -> Pattern phase
 
@@ -505,13 +508,13 @@ instance HasSourceSpan (Pattern phase) where
     PatternTuple pattern' -> pattern'.sourceSpan
     PatternWildcard pattern' -> pattern'.sourceSpan
     PatternLiteral pattern' -> pattern'.sourceSpan
-    PatternType pattern' -> pattern'.sourceSpan
+    PatternTypeFilter pattern' -> pattern'.sourceSpan
     PatternRecord pattern' -> pattern'.sourceSpan
 
 data VariablePattern (phase :: Phase) = VariablePattern
   { name :: Text,
     variableReference :: Reference phase VariableReference,
-    typeAnnotation :: Maybe (SyntacticType phase),
+    typeAnnotation :: Maybe (SyntacticTypeExpr phase),
     -- | Only meaningful in parameter position
     defaultValue :: Maybe ParameterDefault,
     sourceSpan :: SourceSpan,
@@ -525,7 +528,7 @@ data ConstructorPattern (phase :: Phase) = ConstructorPattern
   { moduleQualifier :: Maybe (ModuleQualifier phase),
     name :: Text,
     constructorReference :: Reference phase VariableReference,
-    genericArguments :: List (SyntacticType phase),
+    genericArguments :: List (SyntacticTypeExpr phase),
     -- | The resolved substitution (declared generic -> argument), filled by the checker at
     -- 'Typed' so narrowing / lowering need not re-derive it
     instantiation :: GenericInstantiation phase,
@@ -558,7 +561,7 @@ instance HasSourceSpan (TuplePattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
 data WildcardPattern (phase :: Phase) = WildcardPattern
-  { typeAnnotation :: Maybe (SyntacticType phase),
+  { typeAnnotation :: Maybe (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan,
     typeOf :: PatternType phase
   }
@@ -575,14 +578,15 @@ data LiteralPattern (phase :: Phase) = LiteralPattern
 instance HasSourceSpan (LiteralPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
-data TypePattern (phase :: Phase) = TypePattern
-  { matchedType :: SyntacticType phase,
+-- | @T(pattern)@ — a runtime type filter that narrows the subject to @T@
+data TypeFilterPattern (phase :: Phase) = TypeFilterPattern
+  { matchedType :: SyntacticTypeExpr phase,
     inner :: Pattern phase,
     sourceSpan :: SourceSpan,
     typeOf :: PatternType phase
   }
 
-instance HasSourceSpan (TypePattern phase) where
+instance HasSourceSpan (TypeFilterPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
 data RecordPattern (phase :: Phase) = RecordPattern
@@ -595,47 +599,58 @@ instance HasSourceSpan (RecordPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
 ---------------------------------------------------------------------------------------------------------------
--- Types
+-- Type-level syntax (types, effects, attributes)
+--
+-- One kind-agnostic syntax tree for everything that appears in a type position:
+-- ordinary types, @with@-clause effects, and @of@ attributes. The parser cannot
+-- tell which kind a bare name or a @|@ union denotes — only the checker, after
+-- name resolution, can — so all three kinds share 'SyntacticTypeExpr' and the
+-- checker splits them by kind. The @Type@ prefix is kept for brevity but spans
+-- every kind, not just types.
 ---------------------------------------------------------------------------------------------------------------
 
-data SyntacticType (phase :: Phase) where
+data SyntacticTypeExpr (phase :: Phase) where
   -- | @null@ / @integer@ / @number@ / @string@ / @boolean@ / @file@
-  TypePrimitive :: PrimitiveTypeNode -> SyntacticType phase
-  -- | @never@ — bottom
-  TypeNever :: SourceSpan -> SyntacticType phase
-  -- | @unknown@ — top
-  TypeUnknown :: SourceSpan -> SyntacticType phase
-  -- | Bare type name. Resolution also covers generic effect / attribute names.
-  TypeName :: TypeNameNode phase -> SyntacticType phase
-  -- | @module.name@
-  TypeQualified :: QualifiedTypeNode phase -> SyntacticType phase
+  TypePrimitive :: PrimitiveTypeNode -> SyntacticTypeExpr phase
+  -- | @never@ — the type bottom
+  TypeNever :: SourceSpan -> SyntacticTypeExpr phase
+  -- | @unknown@ — the type top
+  TypeUnknown :: SourceSpan -> SyntacticTypeExpr phase
+  -- | @all@ — the effect top
+  TypeAll :: SourceSpan -> SyntacticTypeExpr phase
+  -- | @[module.]name@ — a type / generic / effect / attribute name (kind resolved by
+  -- the checker). With arguments it heads a 'TypeApplication'.
+  TypeName :: TypeNameNode phase -> SyntacticTypeExpr phase
   -- | @agent T -> R [with E]@. The parenthesised parameter list
   -- @agent (label : T, ...) -> R@ is parser sugar for an object parameter type.
-  TypeAgent :: AgentTypeNode phase -> SyntacticType phase
+  TypeAgent :: AgentTypeNode phase -> SyntacticTypeExpr phase
   -- | The @array@ type constructor; always the head of a 'TypeApplication'
-  TypeArray :: SourceSpan -> SyntacticType phase
+  TypeArray :: SourceSpan -> SyntacticTypeExpr phase
   -- | The @record@ type; bare = homogeneous-map top, @record[V]@ via 'TypeApplication'
-  TypeRecord :: SourceSpan -> SyntacticType phase
+  TypeRecord :: SourceSpan -> SyntacticTypeExpr phase
   -- | @head[argument, ...]@
-  TypeApplication :: TypeApplicationTypeNode phase -> SyntacticType phase
+  TypeApplication :: TypeApplicationTypeNode phase -> SyntacticTypeExpr phase
   -- | @(T1, T2, ...)@
-  TypeTuple :: TupleTypeNode phase -> SyntacticType phase
-  -- | @T1 | T2 | ...@ — 2 or more branches, order preserving
-  TypeUnion :: TypeUnionNode phase -> SyntacticType phase
+  TypeTuple :: TupleTypeNode phase -> SyntacticTypeExpr phase
+  -- | @T1 | T2 | ...@ — 2 or more branches, order preserving. Kind-agnostic: a union
+  -- of types, of effects, or of attributes; the checker decides which.
+  TypeUnion :: TypeUnionNode phase -> SyntacticTypeExpr phase
   -- | @{label : T, label ?: T, ...}@
-  TypeObject :: ObjectTypeNode phase -> SyntacticType phase
+  TypeObject :: ObjectTypeNode phase -> SyntacticTypeExpr phase
   -- | @T of A@
-  TypeAttributed :: AttributedTypeNode phase -> SyntacticType phase
-  -- | @public@ / @private@ — only meaningful in attribute positions (kind-checked)
-  TypeAttributeLiteral :: AttributeLiteralNode -> SyntacticType phase
+  TypeAttributed :: AttributedTypeNode phase -> SyntacticTypeExpr phase
+  -- | @public@ / @private@ — an attribute literal (kind-checked)
+  TypeAttributeLiteral :: AttributeLiteralNode -> SyntacticTypeExpr phase
+  -- | @{...E, request[arguments], ...}@ — an effect that shadows requests of its base
+  TypeOverride :: OverrideTypeNode phase -> SyntacticTypeExpr phase
 
-instance HasSourceSpan (SyntacticType phase) where
+instance HasSourceSpan (SyntacticTypeExpr phase) where
   sourceSpanOf = \case
     TypePrimitive node -> node.sourceSpan
     TypeNever sourceSpan -> sourceSpan
     TypeUnknown sourceSpan -> sourceSpan
+    TypeAll sourceSpan -> sourceSpan
     TypeName node -> node.sourceSpan
-    TypeQualified node -> node.sourceSpan
     TypeAgent node -> node.sourceSpan
     TypeArray sourceSpan -> sourceSpan
     TypeRecord sourceSpan -> sourceSpan
@@ -645,6 +660,7 @@ instance HasSourceSpan (SyntacticType phase) where
     TypeObject node -> node.sourceSpan
     TypeAttributed node -> node.sourceSpan
     TypeAttributeLiteral node -> node.sourceSpan
+    TypeOverride node -> node.sourceSpan
 
 data PrimitiveTypeKind where
   PrimitiveTypeKindNull :: PrimitiveTypeKind
@@ -664,8 +680,11 @@ data PrimitiveTypeNode = PrimitiveTypeNode
 instance HasSourceSpan PrimitiveTypeNode where
   sourceSpanOf node = node.sourceSpan
 
+-- | @[module.]name@ — a kind-agnostic name reference. @moduleQualifier@ is the
+-- optional @module.@ prefix (cross-module reference).
 data TypeNameNode (phase :: Phase) = TypeNameNode
-  { name :: Text,
+  { moduleQualifier :: Maybe (ModuleQualifier phase),
+    name :: Text,
     typeReference :: Reference phase TypeReference,
     sourceSpan :: SourceSpan
   }
@@ -673,32 +692,25 @@ data TypeNameNode (phase :: Phase) = TypeNameNode
 instance HasSourceSpan (TypeNameNode phase) where
   sourceSpanOf node = node.sourceSpan
 
-data QualifiedTypeNode (phase :: Phase) = QualifiedTypeNode
-  { moduleQualifier :: ModuleQualifier phase,
-    name :: Text,
-    typeReference :: Reference phase TypeReference,
-    sourceSpan :: SourceSpan
-  }
-
-instance HasSourceSpan (QualifiedTypeNode phase) where
-  sourceSpanOf node = node.sourceSpan
-
 -- | @agent T -> R [with E]@. No @with@ clause ~> pure.
 data AgentTypeNode (phase :: Phase) = AgentTypeNode
-  { parameterType :: SyntacticType phase,
-    returnType :: SyntacticType phase,
-    effects :: Maybe (SyntacticEffect phase),
+  { parameterType :: SyntacticTypeExpr phase,
+    returnType :: SyntacticTypeExpr phase,
+    effects :: Maybe (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (AgentTypeNode phase) where
   sourceSpanOf node = node.sourceSpan
 
--- | Arguments are parsed uniformly as types; the typechecker splits them into
--- type / effect / attribute arguments by the head's generic-parameter kinds.
+-- | @head[argument, ...]@. Arguments are parsed uniformly as type-level syntax; the
+-- checker splits them into type / effect / attribute arguments by the head's
+-- generic-parameter kinds. The resolved substitution is not stored here — the
+-- annotation's meaning lives in the computed 'SemanticType' — so this node stays
+-- phase-transportable by 'retagSyntacticTypeExpr'.
 data TypeApplicationTypeNode (phase :: Phase) = TypeApplicationTypeNode
-  { applicationHead :: SyntacticType phase,
-    applicationArguments :: List (SyntacticType phase),
+  { applicationHead :: SyntacticTypeExpr phase,
+    applicationArguments :: List (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan
   }
 
@@ -706,7 +718,7 @@ instance HasSourceSpan (TypeApplicationTypeNode phase) where
   sourceSpanOf node = node.sourceSpan
 
 data TupleTypeNode (phase :: Phase) = TupleTypeNode
-  { elementTypes :: List (SyntacticType phase),
+  { elementTypes :: List (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan
   }
 
@@ -714,7 +726,7 @@ instance HasSourceSpan (TupleTypeNode phase) where
   sourceSpanOf node = node.sourceSpan
 
 data TypeUnionNode (phase :: Phase) = TypeUnionNode
-  { branches :: List (SyntacticType phase),
+  { branches :: List (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan
   }
 
@@ -732,7 +744,7 @@ instance HasSourceSpan (ObjectTypeNode phase) where
 -- | @label : T@ / @label ?: T@ (optional ~> the field may be absent)
 data ObjectTypeField (phase :: Phase) = ObjectTypeField
   { name :: Text,
-    fieldType :: SyntacticType phase,
+    fieldType :: SyntacticTypeExpr phase,
     optional :: Bool,
     sourceSpan :: SourceSpan
   }
@@ -742,8 +754,8 @@ instance HasSourceSpan (ObjectTypeField phase) where
 
 -- | @T of A@ — the attribute side is kind-checked to be an attribute
 data AttributedTypeNode (phase :: Phase) = AttributedTypeNode
-  { baseType :: SyntacticType phase,
-    attribute :: SyntacticType phase,
+  { baseType :: SyntacticTypeExpr phase,
+    attribute :: SyntacticTypeExpr phase,
     sourceSpan :: SourceSpan
   }
 
@@ -764,55 +776,15 @@ data AttributeLiteralNode = AttributeLiteralNode
 instance HasSourceSpan AttributeLiteralNode where
   sourceSpanOf node = node.sourceSpan
 
----------------------------------------------------------------------------------------------------------------
--- Effects
----------------------------------------------------------------------------------------------------------------
-
--- | A @with@-clause effect expression. An omitted clause means pure.
-data SyntacticEffect (phase :: Phase) where
-  -- | @all@ — the effect top
-  EffectAll :: SourceSpan -> SyntacticEffect phase
-  -- | A request / generic-effect name with optional arguments
-  EffectNamed :: NamedEffectNode phase -> SyntacticEffect phase
-  -- | @E1 | E2 | ...@
-  EffectUnion :: EffectUnionNode phase -> SyntacticEffect phase
-  -- | @{...E, request[arguments], ...}@ — shadows requests of the base effect
-  EffectOverride :: OverrideEffectNode phase -> SyntacticEffect phase
-
-instance HasSourceSpan (SyntacticEffect phase) where
-  sourceSpanOf = \case
-    EffectAll sourceSpan -> sourceSpan
-    EffectNamed node -> node.sourceSpan
-    EffectUnion node -> node.sourceSpan
-    EffectOverride node -> node.sourceSpan
-
--- | @[module.]name[argument, ...]@
-data NamedEffectNode (phase :: Phase) = NamedEffectNode
-  { moduleQualifier :: Maybe (ModuleQualifier phase),
-    name :: Text,
-    typeReference :: Reference phase TypeReference,
-    arguments :: List (SyntacticType phase),
+-- | @{...E, request[arguments], ...}@ — each override is named-effect syntax (a
+-- 'TypeName' or 'TypeApplication') that shadows the matching request of @base@.
+data OverrideTypeNode (phase :: Phase) = OverrideTypeNode
+  { base :: SyntacticTypeExpr phase,
+    overrides :: List (SyntacticTypeExpr phase),
     sourceSpan :: SourceSpan
   }
 
-instance HasSourceSpan (NamedEffectNode phase) where
-  sourceSpanOf node = node.sourceSpan
-
-data EffectUnionNode (phase :: Phase) = EffectUnionNode
-  { branches :: List (SyntacticEffect phase),
-    sourceSpan :: SourceSpan
-  }
-
-instance HasSourceSpan (EffectUnionNode phase) where
-  sourceSpanOf node = node.sourceSpan
-
-data OverrideEffectNode (phase :: Phase) = OverrideEffectNode
-  { base :: SyntacticEffect phase,
-    overrides :: List (NamedEffectNode phase),
-    sourceSpan :: SourceSpan
-  }
-
-instance HasSourceSpan (OverrideEffectNode phase) where
+instance HasSourceSpan (OverrideTypeNode phase) where
   sourceSpanOf node = node.sourceSpan
 
 ---------------------------------------------------------------------------------------------------------------
@@ -824,10 +796,8 @@ data Expression (phase :: Phase) where
   ExpressionLiteral :: LiteralExpression phase -> Expression phase
   -- | Bare identifier
   ExpressionVariable :: VariableExpression phase -> Expression phase
-  -- | @[e1, e2, ...]@ — sequential evaluation
+  -- | @[e1, e2, ...]@ (sequential) / @parallel [e1, e2, ...]@ (concurrent, results in order)
   ExpressionTuple :: TupleExpression phase -> Expression phase
-  -- | @par [e1, e2, ...]@ — concurrent evaluation, results in order
-  ExpressionParallelTuple :: ParallelTupleExpression phase -> Expression phase
   -- | @{ label = e, ... }@
   ExpressionRecord :: RecordExpression phase -> Expression phase
   -- | @callee(label = e, ...)@
@@ -852,8 +822,6 @@ data Expression (phase :: Phase) where
   ExpressionTemplate :: TemplateExpression phase -> Expression phase
   -- | First-class handler provider
   ExpressionHandler :: HandlerExpression phase -> Expression phase
-  -- | @[let pattern =] use provider@
-  ExpressionUse :: UseExpression phase -> Expression phase
   -- | @module.target@ — synthesised by the Identifier from a field-access chain
   -- whose left-most segment resolves to a module; never produced by the parser
   ExpressionQualifiedReference :: QualifiedReferenceExpression phase -> Expression phase
@@ -863,7 +831,6 @@ instance HasSourceSpan (Expression phase) where
     ExpressionLiteral expression -> expression.sourceSpan
     ExpressionVariable expression -> expression.sourceSpan
     ExpressionTuple expression -> expression.sourceSpan
-    ExpressionParallelTuple expression -> expression.sourceSpan
     ExpressionRecord expression -> expression.sourceSpan
     ExpressionCall expression -> expression.sourceSpan
     ExpressionBinaryOperator expression -> expression.sourceSpan
@@ -876,7 +843,6 @@ instance HasSourceSpan (Expression phase) where
     ExpressionTypeApplication expression -> expression.sourceSpan
     ExpressionTemplate expression -> expression.sourceSpan
     ExpressionHandler expression -> expression.sourceSpan
-    ExpressionUse expression -> expression.sourceSpan
     ExpressionQualifiedReference expression -> expression.sourceSpan
 
 data LiteralExpression (phase :: Phase) = LiteralExpression
@@ -898,22 +864,16 @@ data VariableExpression (phase :: Phase) = VariableExpression
 instance HasSourceSpan (VariableExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
+-- | @[e1, e2, ...]@ (sequential) / @parallel [e1, e2, ...]@ (concurrent). @parallel@
+-- evaluates the elements concurrently; results are collected in source order either way.
 data TupleExpression (phase :: Phase) = TupleExpression
-  { elements :: List (Expression phase),
+  { parallel :: Bool,
+    elements :: List (Expression phase),
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }
 
 instance HasSourceSpan (TupleExpression phase) where
-  sourceSpanOf expression = expression.sourceSpan
-
-data ParallelTupleExpression (phase :: Phase) = ParallelTupleExpression
-  { elements :: List (Expression phase),
-    sourceSpan :: SourceSpan,
-    typeOf :: ExpressionType phase
-  }
-
-instance HasSourceSpan (ParallelTupleExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | Keys are values on the wire, not references
@@ -1024,11 +984,11 @@ instance HasSourceSpan (CaseArm phase) where
   sourceSpanOf arm = arm.sourceSpan
 
 -- | @[par] for (pattern in source; var x = init; ...) { body } [then (pattern) { ... }]@.
--- Each @next@ value becomes an element of the loop's mapped output array; the
--- optional @then@ clause receives that array.
+-- A single @pattern in source@ binding drives the loop. Each @next@ value becomes an
+-- element of the loop's mapped output array; the optional @then@ clause receives it.
 data ForExpression (phase :: Phase) = ForExpression
   { parallel :: Bool,
-    inBindings :: List (ForInBinding phase),
+    inBinding :: ForInBinding phase,
     varBindings :: List (VariableBinding phase),
     body :: Block phase,
     thenClause :: Maybe (ThenClause phase),
@@ -1070,11 +1030,11 @@ data FieldAccessExpression (phase :: Phase) = FieldAccessExpression
 instance HasSourceSpan (FieldAccessExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | Bracket arguments parse uniformly as types; the typechecker splits them by
--- the callee's generic-parameter kinds and records the result in 'instantiation'.
+-- | Bracket arguments parse uniformly as type-level syntax; the typechecker splits
+-- them by the callee's generic-parameter kinds and records the result in 'instantiation'.
 data TypeApplicationExpression (phase :: Phase) = TypeApplicationExpression
   { callee :: Expression phase,
-    typeArguments :: List (SyntacticType phase),
+    typeArguments :: List (SyntacticTypeExpr phase),
     instantiation :: GenericInstantiation phase,
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
@@ -1135,8 +1095,8 @@ instance HasSourceSpan (QualifiedReferenceExpression phase) where
 -- Phase retagging helpers
 --
 -- Identity transports between phases whose 'ReferenceResolution' agree
--- (Identified / Typed). Nodes carrying a phase-specific @typeOf@ are rebuilt
--- by each walker instead.
+-- (Identified / Typed). Nodes carrying a phase-specific @typeOf@ or @instantiation@
+-- are rebuilt by each walker instead.
 ---------------------------------------------------------------------------------------------------------------
 
 retagReference ::
@@ -1160,27 +1120,21 @@ retagModuleQualifier qualifier =
       sourceSpan = qualifier.sourceSpan
     }
 
-retagSyntacticType ::
+retagSyntacticTypeExpr ::
   ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
     ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
   ) =>
-  SyntacticType phase1 ->
-  SyntacticType phase2
-retagSyntacticType = \case
+  SyntacticTypeExpr phase1 ->
+  SyntacticTypeExpr phase2
+retagSyntacticTypeExpr = \case
   TypePrimitive node -> TypePrimitive node
   TypeNever sourceSpan -> TypeNever sourceSpan
   TypeUnknown sourceSpan -> TypeUnknown sourceSpan
+  TypeAll sourceSpan -> TypeAll sourceSpan
   TypeName node ->
     TypeName
       TypeNameNode
-        { name = node.name,
-          typeReference = retagReference node.typeReference,
-          sourceSpan = node.sourceSpan
-        }
-  TypeQualified node ->
-    TypeQualified
-      QualifiedTypeNode
-        { moduleQualifier = retagModuleQualifier node.moduleQualifier,
+        { moduleQualifier = retagModuleQualifier <$> node.moduleQualifier,
           name = node.name,
           typeReference = retagReference node.typeReference,
           sourceSpan = node.sourceSpan
@@ -1188,9 +1142,9 @@ retagSyntacticType = \case
   TypeAgent node ->
     TypeAgent
       AgentTypeNode
-        { parameterType = retagSyntacticType node.parameterType,
-          returnType = retagSyntacticType node.returnType,
-          effects = retagSyntacticEffect <$> node.effects,
+        { parameterType = retagSyntacticTypeExpr node.parameterType,
+          returnType = retagSyntacticTypeExpr node.returnType,
+          effects = retagSyntacticTypeExpr <$> node.effects,
           sourceSpan = node.sourceSpan
         }
   TypeArray sourceSpan -> TypeArray sourceSpan
@@ -1198,20 +1152,20 @@ retagSyntacticType = \case
   TypeApplication node ->
     TypeApplication
       TypeApplicationTypeNode
-        { applicationHead = retagSyntacticType node.applicationHead,
-          applicationArguments = retagSyntacticType <$> node.applicationArguments,
+        { applicationHead = retagSyntacticTypeExpr node.applicationHead,
+          applicationArguments = retagSyntacticTypeExpr <$> node.applicationArguments,
           sourceSpan = node.sourceSpan
         }
   TypeTuple node ->
     TypeTuple
       TupleTypeNode
-        { elementTypes = retagSyntacticType <$> node.elementTypes,
+        { elementTypes = retagSyntacticTypeExpr <$> node.elementTypes,
           sourceSpan = node.sourceSpan
         }
   TypeUnion node ->
     TypeUnion
       TypeUnionNode
-        { branches = retagSyntacticType <$> node.branches,
+        { branches = retagSyntacticTypeExpr <$> node.branches,
           sourceSpan = node.sourceSpan
         }
   TypeObject node ->
@@ -1223,11 +1177,18 @@ retagSyntacticType = \case
   TypeAttributed node ->
     TypeAttributed
       AttributedTypeNode
-        { baseType = retagSyntacticType node.baseType,
-          attribute = retagSyntacticType node.attribute,
+        { baseType = retagSyntacticTypeExpr node.baseType,
+          attribute = retagSyntacticTypeExpr node.attribute,
           sourceSpan = node.sourceSpan
         }
   TypeAttributeLiteral node -> TypeAttributeLiteral node
+  TypeOverride node ->
+    TypeOverride
+      OverrideTypeNode
+        { base = retagSyntacticTypeExpr node.base,
+          overrides = retagSyntacticTypeExpr <$> node.overrides,
+          sourceSpan = node.sourceSpan
+        }
 
 retagObjectTypeField ::
   ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
@@ -1238,47 +1199,9 @@ retagObjectTypeField ::
 retagObjectTypeField field =
   ObjectTypeField
     { name = field.name,
-      fieldType = retagSyntacticType field.fieldType,
+      fieldType = retagSyntacticTypeExpr field.fieldType,
       optional = field.optional,
       sourceSpan = field.sourceSpan
-    }
-
-retagSyntacticEffect ::
-  ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
-    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
-  ) =>
-  SyntacticEffect phase1 ->
-  SyntacticEffect phase2
-retagSyntacticEffect = \case
-  EffectAll sourceSpan -> EffectAll sourceSpan
-  EffectNamed node -> EffectNamed (retagNamedEffectNode node)
-  EffectUnion node ->
-    EffectUnion
-      EffectUnionNode
-        { branches = retagSyntacticEffect <$> node.branches,
-          sourceSpan = node.sourceSpan
-        }
-  EffectOverride node ->
-    EffectOverride
-      OverrideEffectNode
-        { base = retagSyntacticEffect node.base,
-          overrides = retagNamedEffectNode <$> node.overrides,
-          sourceSpan = node.sourceSpan
-        }
-
-retagNamedEffectNode ::
-  ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
-    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
-  ) =>
-  NamedEffectNode phase1 ->
-  NamedEffectNode phase2
-retagNamedEffectNode node =
-  NamedEffectNode
-    { moduleQualifier = retagModuleQualifier <$> node.moduleQualifier,
-      name = node.name,
-      typeReference = retagReference node.typeReference,
-      arguments = retagSyntacticType <$> node.arguments,
-      sourceSpan = node.sourceSpan
     }
 
 retagGenericParameter ::
@@ -1293,7 +1216,7 @@ retagGenericParameter parameter =
       labelReference = retagReference parameter.labelReference,
       typeReference = retagReference parameter.typeReference,
       kind = parameter.kind,
-      upperBound = retagSyntacticType <$> parameter.upperBound,
+      upperBound = retagSyntacticTypeExpr <$> parameter.upperBound,
       sourceSpan = parameter.sourceSpan
     }
 
@@ -1310,8 +1233,7 @@ class
     Eq (ReferenceResolution phase LabelReference),
     Eq (ExpressionType phase),
     Eq (PatternType phase),
-    Eq (GenericInstantiation phase),
-    Eq (HandlerGenerics phase)
+    Eq (GenericInstantiation phase)
   ) =>
   EqPhase phase
 
@@ -1322,8 +1244,7 @@ instance
     Eq (ReferenceResolution phase LabelReference),
     Eq (ExpressionType phase),
     Eq (PatternType phase),
-    Eq (GenericInstantiation phase),
-    Eq (HandlerGenerics phase)
+    Eq (GenericInstantiation phase)
   ) =>
   EqPhase phase
 
@@ -1335,8 +1256,7 @@ class
     Show (ReferenceResolution phase LabelReference),
     Show (ExpressionType phase),
     Show (PatternType phase),
-    Show (GenericInstantiation phase),
-    Show (HandlerGenerics phase)
+    Show (GenericInstantiation phase)
   ) =>
   ShowPhase phase
 
@@ -1347,8 +1267,7 @@ instance
     Show (ReferenceResolution phase LabelReference),
     Show (ExpressionType phase),
     Show (PatternType phase),
-    Show (GenericInstantiation phase),
-    Show (HandlerGenerics phase)
+    Show (GenericInstantiation phase)
   ) =>
   ShowPhase phase
 
@@ -1416,6 +1335,10 @@ deriving stock instance (EqPhase phase) => Eq (LetStatement phase)
 
 deriving stock instance (ShowPhase phase) => Show (LetStatement phase)
 
+deriving stock instance (EqPhase phase) => Eq (UseStatement phase)
+
+deriving stock instance (ShowPhase phase) => Show (UseStatement phase)
+
 deriving stock instance (EqPhase phase) => Eq (ReturnStatement phase)
 
 deriving stock instance (ShowPhase phase) => Show (ReturnStatement phase)
@@ -1456,10 +1379,6 @@ deriving stock instance (EqPhase phase) => Eq (RequestHandler phase)
 
 deriving stock instance (ShowPhase phase) => Show (RequestHandler phase)
 
-deriving stock instance (EqPhase phase) => Eq (UseExpression phase)
-
-deriving stock instance (ShowPhase phase) => Show (UseExpression phase)
-
 deriving stock instance (EqPhase phase) => Eq (Pattern phase)
 
 deriving stock instance (ShowPhase phase) => Show (Pattern phase)
@@ -1488,25 +1407,21 @@ deriving stock instance (EqPhase phase) => Eq (LiteralPattern phase)
 
 deriving stock instance (ShowPhase phase) => Show (LiteralPattern phase)
 
-deriving stock instance (EqPhase phase) => Eq (TypePattern phase)
+deriving stock instance (EqPhase phase) => Eq (TypeFilterPattern phase)
 
-deriving stock instance (ShowPhase phase) => Show (TypePattern phase)
+deriving stock instance (ShowPhase phase) => Show (TypeFilterPattern phase)
 
 deriving stock instance (EqPhase phase) => Eq (RecordPattern phase)
 
 deriving stock instance (ShowPhase phase) => Show (RecordPattern phase)
 
-deriving stock instance (EqPhase phase) => Eq (SyntacticType phase)
+deriving stock instance (EqPhase phase) => Eq (SyntacticTypeExpr phase)
 
-deriving stock instance (ShowPhase phase) => Show (SyntacticType phase)
+deriving stock instance (ShowPhase phase) => Show (SyntacticTypeExpr phase)
 
 deriving stock instance (EqPhase phase) => Eq (TypeNameNode phase)
 
 deriving stock instance (ShowPhase phase) => Show (TypeNameNode phase)
-
-deriving stock instance (EqPhase phase) => Eq (QualifiedTypeNode phase)
-
-deriving stock instance (ShowPhase phase) => Show (QualifiedTypeNode phase)
 
 deriving stock instance (EqPhase phase) => Eq (AgentTypeNode phase)
 
@@ -1536,21 +1451,9 @@ deriving stock instance (EqPhase phase) => Eq (AttributedTypeNode phase)
 
 deriving stock instance (ShowPhase phase) => Show (AttributedTypeNode phase)
 
-deriving stock instance (EqPhase phase) => Eq (SyntacticEffect phase)
+deriving stock instance (EqPhase phase) => Eq (OverrideTypeNode phase)
 
-deriving stock instance (ShowPhase phase) => Show (SyntacticEffect phase)
-
-deriving stock instance (EqPhase phase) => Eq (NamedEffectNode phase)
-
-deriving stock instance (ShowPhase phase) => Show (NamedEffectNode phase)
-
-deriving stock instance (EqPhase phase) => Eq (EffectUnionNode phase)
-
-deriving stock instance (ShowPhase phase) => Show (EffectUnionNode phase)
-
-deriving stock instance (EqPhase phase) => Eq (OverrideEffectNode phase)
-
-deriving stock instance (ShowPhase phase) => Show (OverrideEffectNode phase)
+deriving stock instance (ShowPhase phase) => Show (OverrideTypeNode phase)
 
 deriving stock instance (EqPhase phase) => Eq (Expression phase)
 
@@ -1567,10 +1470,6 @@ deriving stock instance (ShowPhase phase) => Show (VariableExpression phase)
 deriving stock instance (EqPhase phase) => Eq (TupleExpression phase)
 
 deriving stock instance (ShowPhase phase) => Show (TupleExpression phase)
-
-deriving stock instance (EqPhase phase) => Eq (ParallelTupleExpression phase)
-
-deriving stock instance (ShowPhase phase) => Show (ParallelTupleExpression phase)
 
 deriving stock instance (EqPhase phase) => Eq (RecordExpression phase)
 
