@@ -6,7 +6,7 @@
 module Katari.Identifier where
 
 import Control.Monad.RWS.CPS (RWS, evalRWS)
-import Control.Monad.RWS.Class (MonadReader, MonadState, asks, get, local, put)
+import Control.Monad.RWS.Class (MonadReader, MonadState, asks, local, state)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Text (Text)
@@ -53,16 +53,10 @@ runIdentifier environment action = evalRWS action environment initialIdentifierS
 -- Fresh-id supply ---------------------------------------------------------------------------------
 
 freshGenericId :: (MonadState IdentifierState m) => m GenericId
-freshGenericId = do
-  state <- get
-  put state {nextGenericId = state.nextGenericId + 1}
-  pure (GenericId state.nextGenericId)
+freshGenericId = state (\current -> (GenericId current.nextGenericId, current {nextGenericId = current.nextGenericId + 1}))
 
 freshLocalVariableId :: (MonadState IdentifierState m) => m LocalVariableId
-freshLocalVariableId = do
-  state <- get
-  put state {nextLocalVariableId = state.nextLocalVariableId + 1}
-  pure (LocalVariableId state.nextLocalVariableId)
+freshLocalVariableId = state (\current -> (LocalVariableId current.nextLocalVariableId, current {nextLocalVariableId = current.nextLocalVariableId + 1}))
 
 -- Scope -------------------------------------------------------------------------------------------
 

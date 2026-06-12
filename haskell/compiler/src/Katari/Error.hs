@@ -1,4 +1,6 @@
--- | Centralized catalogue of every error the compiler can emit.
+-- | The user-facing error catalogue: every error the compiler can emit, with its code, severity,
+-- and rendering. The accumulation machinery (the writer monoid, emission helpers) lives in
+-- "Katari.Diagnostics"; internal-compiler-error aborts in "Katari.Panic".
 module Katari.Error where
 
 import Data.Text (Text)

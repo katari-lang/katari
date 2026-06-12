@@ -36,6 +36,7 @@ capture action = pass $ do
 finalizeDiagnostics :: Diagnostics -> List (Located CompilerError)
 finalizeDiagnostics = sortOn bySourcePosition . Set.toList . Set.fromList . toList
   where
+    -- value breaks span ties so the order is total; keep the key injective over Located.
     bySourcePosition located = (located.sourceSpan, located.value)
 
 -- | Render every diagnostic, one per line, ordered by source position.
