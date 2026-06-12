@@ -1,10 +1,12 @@
 module Katari.Data.SemanticTypeSpec (spec) where
 
 import Data.Map qualified as Map
+import Data.Sequence qualified as Seq
 import Katari.Data.Id (GenericId (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SemanticType
+import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Error
 import Test.Hspec
 
@@ -58,6 +60,19 @@ spec = do
     it "renders a generic-arity error from its structured fields" $
       renderTypeError (TypeErrorGenericArity $ GenericArityErrorInfo {name = fooName, expected = ["T"], actual = []})
         `shouldBe` "K3008: Generic arguments do not match the declaration of test.foo\n  expected: [T]\n  actual:   []"
+
+  describe "severityOf" $
+    it "classifies a type error as an error" $
+      severityOf (CompilerErrorType (TypeErrorUnknownData UnknownDataErrorInfo {expected = fooName})) `shouldBe` SeverityError
+
+  describe "finalizeDiagnostics" $
+    it "drops exact duplicates and orders by source position" $ do
+      let unknownData = CompilerErrorType (TypeErrorUnknownData UnknownDataErrorInfo {expected = fooName})
+          spanAt line column = SourceSpan {filePath = "m.ktr", start = Position {line, column}, end = Position {line, column}}
+          earlier = Located {value = unknownData, sourceSpan = spanAt 1 1}
+          later = Located {value = unknownData, sourceSpan = spanAt 2 1}
+      (\located -> located.sourceSpan) <$> finalizeDiagnostics (Seq.fromList [later, earlier, later])
+        `shouldBe` [spanAt 1 1, spanAt 2 1]
 
 fooName :: QualifiedName
 fooName = QualifiedName {moduleName = ModuleName "test", name = "foo"}

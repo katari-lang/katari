@@ -1,6 +1,10 @@
 -- | Centralized catalogue of every error the compiler can emit.
 module Katari.Error where
 
+import Data.Foldable (toList)
+import Data.List (sortOn)
+import Data.Sequence (Seq)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
@@ -24,6 +28,17 @@ compilerErrorCode :: CompilerError -> Text
 compilerErrorCode = \case
   CompilerErrorType typeError -> typeErrorCode typeError
 
+-- | The severity of a diagnostic. Decided here per error kind (the single source of truth) rather
+-- than at each emission site; a policy layer (e.g. @-Werror@) can override later.
+data Severity where
+  SeverityError :: Severity
+  SeverityWarning :: Severity
+  deriving (Eq, Ord, Show)
+
+severityOf :: CompilerError -> Severity
+severityOf = \case
+  CompilerErrorType typeError -> typeErrorSeverity typeError
+
 -- | Human-readable rendering of one error: code, reason, and the types involved (in surface
 -- syntax, via the renderers of "Katari.Data.SemanticType").
 renderCompilerError :: CompilerError -> Text
@@ -33,6 +48,22 @@ renderCompilerError = \case
 -- | As 'renderCompilerError', prefixed with the source location.
 renderLocatedCompilerError :: LocatedCompilerError -> Text
 renderLocatedCompilerError located = renderSourceSpan located.sourceSpan <> " " <> renderCompilerError located.value
+
+-- | The errors a phase has accumulated, in emission order. Phases use this as their writer monoid
+-- (mtl's @tell@); the Normalizer stays on its own span-free @[TypeError]@ and is bridged into this
+-- by the checker. 'finalizeDiagnostics' orders and deduplicates them for presentation.
+type Diagnostics = Seq LocatedCompilerError
+
+-- | Order a phase's accumulated diagnostics by source position and drop exact duplicates (the same
+-- node may be reported more than once before spans distinguish the occurrences).
+finalizeDiagnostics :: Diagnostics -> List LocatedCompilerError
+finalizeDiagnostics = sortOn bySourcePosition . Set.toList . Set.fromList . toList
+  where
+    bySourcePosition located = (located.sourceSpan, located.value)
+
+-- | Render every diagnostic, one per line, ordered by source position.
+renderDiagnostics :: Diagnostics -> Text
+renderDiagnostics = Text.intercalate "\n" . map renderLocatedCompilerError . finalizeDiagnostics
 
 renderTypeError :: TypeError -> Text
 renderTypeError typeError =
@@ -90,6 +121,19 @@ typeErrorCode = \case
   TypeErrorCannotBeIntersected _ -> "K3006"
   TypeErrorKind _ -> "K3007"
   TypeErrorGenericArity _ -> "K3008"
+
+-- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
+-- decision. Every current type error fails compilation.
+typeErrorSeverity :: TypeError -> Severity
+typeErrorSeverity = \case
+  TypeErrorSubtype _ -> SeverityError
+  TypeErrorUnknownRequest _ -> SeverityError
+  TypeErrorUnknownData _ -> SeverityError
+  TypeErrorUnknownGeneric _ -> SeverityError
+  TypeErrorCannotBeUnioned _ -> SeverityError
+  TypeErrorCannotBeIntersected _ -> SeverityError
+  TypeErrorKind _ -> SeverityError
+  TypeErrorGenericArity _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
