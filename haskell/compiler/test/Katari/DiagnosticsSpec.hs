@@ -5,17 +5,17 @@ import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Diagnostics (finalizeDiagnostics)
-import Katari.Error (CompilerError (..), TypeError (..), UnknownDataErrorInfo (..))
+import Katari.Error (CompilerError (..), GenericArityErrorInfo (..), TypeError (..))
 import Test.Hspec
 
 spec :: Spec
 spec =
   describe "finalizeDiagnostics" $
     it "drops exact duplicates and orders by source position" $ do
-      let unknownData = CompilerErrorType (TypeErrorUnknownData UnknownDataErrorInfo {expected = fooName})
+      let sampleError = CompilerErrorType (TypeErrorGenericArity GenericArityErrorInfo {name = fooName, expected = [], actual = []})
           spanAt line column = SourceSpan {filePath = "m.ktr", start = Position {line, column}, end = Position {line, column}}
-          earlier = Located {value = unknownData, sourceSpan = spanAt 1 1}
-          later = Located {value = unknownData, sourceSpan = spanAt 2 1}
+          earlier = Located {value = sampleError, sourceSpan = spanAt 1 1}
+          later = Located {value = sampleError, sourceSpan = spanAt 2 1}
       (\located -> located.sourceSpan) <$> finalizeDiagnostics (Seq.fromList [later, earlier, later])
         `shouldBe` [spanAt 1 1, spanAt 2 1]
 

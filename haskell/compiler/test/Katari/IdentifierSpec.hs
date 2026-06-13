@@ -3,10 +3,9 @@ module Katari.IdentifierSpec (spec) where
 import Data.Sequence qualified as Seq
 import Katari.Data.Id (GenericId (..), LocalVariableId (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName (..))
-import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Diagnostics (reportAt)
-import Katari.Error (CompilerError (..), TypeError (..), UnknownDataErrorInfo (..))
+import Katari.Error (CompilerError (..), IdentifierError (..), UndefinedNameErrorInfo (..))
 import Katari.Identifier
 import Test.Hspec
 
@@ -42,4 +41,4 @@ someSpan = SourceSpan {filePath = "m.ktr", start = position, end = position}
     position = Position {line = 1, column = 1}
 
 someError :: CompilerError
-someError = CompilerErrorType (TypeErrorUnknownData UnknownDataErrorInfo {expected = QualifiedName {moduleName = ModuleName "test", name = "foo"}})
+someError = CompilerErrorIdentifier (IdentifierErrorUndefinedName UndefinedNameErrorInfo {name = "foo"})

@@ -52,16 +52,13 @@ spec = do
               }
         )
         `shouldBe` "K3001: Number layers are incompatible\n  expected: string\n  actual:   integer"
-    it "renders an unknown-data error from its structured name" $
-      renderTypeError (TypeErrorUnknownData $ UnknownDataErrorInfo {expected = fooName})
-        `shouldBe` "K3003: Unknown data: test.foo"
     it "renders a generic-arity error from its structured fields" $
       renderTypeError (TypeErrorGenericArity $ GenericArityErrorInfo {name = fooName, expected = ["T"], actual = []})
         `shouldBe` "K3008: Generic arguments do not match the declaration of test.foo\n  expected: [T]\n  actual:   []"
 
   describe "severityOf" $
     it "classifies a type error as an error" $
-      severityOf (CompilerErrorType (TypeErrorUnknownData UnknownDataErrorInfo {expected = fooName})) `shouldBe` SeverityError
+      severityOf (CompilerErrorType (TypeErrorGenericArity GenericArityErrorInfo {name = fooName, expected = ["T"], actual = []})) `shouldBe` SeverityError
 
 fooName :: QualifiedName
 fooName = QualifiedName {moduleName = ModuleName "test", name = "foo"}

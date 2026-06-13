@@ -41,7 +41,8 @@ import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
 import Katari.Data.Variance (Variance (..))
-import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..), UnknownDataErrorInfo (..), UnknownGenericErrorInfo (..), UnknownRequestErrorInfo (..))
+import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..))
+import Katari.Panic (panic)
 
 ------------------------------------------------------------------------------------------------
 -- The normalizer monad
@@ -84,27 +85,24 @@ withWorld :: NormalizedAttribute -> Normalizer a -> Normalizer a
 withWorld attribute = local (\environment -> environment {world = joinAttribute environment.world attribute})
 
 ------------------------------------------------------------------------------------------------
--- Environment lookups. Unknown names are reported at each lookup site (callers never re-report);
--- the same name may surface more than once until errors carry source spans and the checker dedups.
+-- Environment lookups. A name absent here is a compiler-invariant violation, not a user error: the
+-- identifier resolved it and the environment is built complete, so the lookup 'panic's. The
+-- user-facing "undefined name" belongs to the identifier phase (K2xxx).
 ------------------------------------------------------------------------------------------------
 
-dataInfoFor :: QualifiedName -> Normalizer (Maybe (DataInfo NormalizedType))
+dataInfoFor :: QualifiedName -> Normalizer (DataInfo NormalizedType)
 dataInfoFor qualifiedName = do
   maybeDataInfo <- asks (\environment -> Map.lookup qualifiedName environment.dataEnvironment)
   case maybeDataInfo of
-    Nothing -> do
-      tell [TypeErrorUnknownData $ UnknownDataErrorInfo {expected = qualifiedName}]
-      pure Nothing
-    Just dataInfo -> pure (Just dataInfo)
+    Just dataInfo -> pure dataInfo
+    Nothing -> panic ("data type absent from the environment after name resolution: " <> renderQualifiedName qualifiedName)
 
-requestInfoFor :: QualifiedName -> Normalizer (Maybe (RequestInfo NormalizedType))
+requestInfoFor :: QualifiedName -> Normalizer (RequestInfo NormalizedType)
 requestInfoFor qualifiedName = do
   maybeRequestInfo <- asks (\environment -> Map.lookup qualifiedName environment.requestEnvironment)
   case maybeRequestInfo of
-    Nothing -> do
-      tell [TypeErrorUnknownRequest $ UnknownRequestErrorInfo {expected = qualifiedName}]
-      pure Nothing
-    Just requestInfo -> pure (Just requestInfo)
+    Just requestInfo -> pure requestInfo
+    Nothing -> panic ("request absent from the environment after name resolution: " <> renderQualifiedName qualifiedName)
 
 -- | Report when a data / request application does not supply exactly the declared generic
 -- arguments. Runs once, at the semantic -> normalized boundary ('normalizeType' /
@@ -125,17 +123,13 @@ checkGenericArity qualifiedName declaredParameters arguments =
 
 checkDataArity :: QualifiedName -> Map Text a -> Normalizer ()
 checkDataArity qualifiedName arguments = do
-  maybeDataInfo <- dataInfoFor qualifiedName
-  mapM_
-    (\dataInfo -> checkGenericArity qualifiedName dataInfo.genericParameters arguments)
-    maybeDataInfo
+  dataInfo <- dataInfoFor qualifiedName
+  checkGenericArity qualifiedName dataInfo.genericParameters arguments
 
 checkRequestArity :: QualifiedName -> Map Text a -> Normalizer ()
 checkRequestArity qualifiedName arguments = do
-  maybeRequestInfo <- requestInfoFor qualifiedName
-  mapM_
-    (\requestInfo -> checkGenericArity qualifiedName requestInfo.genericParameters arguments)
-    maybeRequestInfo
+  requestInfo <- requestInfoFor qualifiedName
+  checkGenericArity qualifiedName requestInfo.genericParameters arguments
 
 ------------------------------------------------------------------------------------------------
 -- Error reporting
@@ -184,9 +178,12 @@ tellKindMismatch :: GenericKind -> GenericKind -> Text -> Normalizer ()
 tellKindMismatch expectedKind actualKind reason =
   tell [TypeErrorKind $ KindErrorInfo {expected = renderGenericKind expectedKind, actual = renderGenericKind actualKind, reason = reason}]
 
-tellUnknownGeneric :: Text -> Normalizer ()
-tellUnknownGeneric genericArgumentName =
-  tell [TypeErrorUnknownGeneric $ UnknownGenericErrorInfo {expected = genericArgumentName}]
+-- | A generic argument name absent from the declaration's parameters. 'checkGenericArity' runs at
+-- normalization, so by the time the lattice / subtype code sees the arguments the name set matches
+-- the declaration; an unknown name here is a compiler-invariant violation, not a user error.
+panicUnknownGeneric :: Text -> a
+panicUnknownGeneric genericArgumentName =
+  panic ("generic argument absent from the declaration after the arity check: " <> genericArgumentName)
 
 -- | An invariant generic argument received two different instantiations; report it for the
 -- direction ('Join' = union, 'Meet' = intersection) being computed.
@@ -438,8 +435,8 @@ instance TypeLattice NormalizedEffect where
                 case Map.lookup qualifiedName rightRow.request of
                   Nothing -> tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName) effectiveLeft right
                   Just rightArguments -> do
-                    maybeRequestInfo <- requestInfoFor qualifiedName
-                    mapM_ (\requestInfo -> subtypeArgumentsWith (variancesByName requestInfo.genericParameters) leftArguments rightArguments) maybeRequestInfo
+                    requestInfo <- requestInfoFor qualifiedName
+                    subtypeArgumentsWith (variancesByName requestInfo.genericParameters) leftArguments rightArguments
             )
             (Map.toList effectiveLeftRow.request)
           -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
@@ -457,8 +454,8 @@ instance TypeLattice NormalizedEffect where
 -- | Combine the argument maps of one request name according to the request's declared variances.
 combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer (Map Text NormalizedGenericArgument)
 combineRequestArguments direction qualifiedName leftArguments rightArguments = do
-  maybeRequestInfo <- requestInfoFor qualifiedName
-  combineArgumentMap direction ((\requestInfo -> variancesByName requestInfo.genericParameters) <$> maybeRequestInfo) leftArguments rightArguments
+  requestInfo <- requestInfoFor qualifiedName
+  combineArgumentMap direction (variancesByName requestInfo.genericParameters) leftArguments rightArguments
 
 -- | Combine the tails of two effect rows. A tail variable behaves covariantly (the join keeps tails
 -- of either side, the meet only shared ones), but its lacks set is contravariant: @E \\ left@ joined
@@ -556,8 +553,8 @@ combineLayers direction left right = do
         <*> combine direction leftFunction.returnType rightFunction.returnType
         <*> combine direction leftFunction.effect rightFunction.effect
     combineDataArguments qualifiedName leftArguments rightArguments = do
-      maybeDataInfo <- dataInfoFor qualifiedName
-      combineArgumentMap direction ((\dataInfo -> variancesByName dataInfo.genericParameters) <$> maybeDataInfo) leftArguments rightArguments
+      dataInfo <- dataInfoFor qualifiedName
+      combineArgumentMap direction (variancesByName dataInfo.genericParameters) leftArguments rightArguments
 
 -- | Combine the named generic arguments of one data type or request, each according to its
 -- declared variance:
@@ -567,25 +564,19 @@ combineLayers direction left right = do
 --   bivariant     -> unconstrained; combine in the same direction
 -- Ex) req1[T, U] covariant in T, contravariant in U:
 --     req1[int, string] | req1[string, number] ~> req1[int | string, string & number]
--- When the owner is unknown (variances 'Nothing', already reported), the arguments are merged
--- positionally without further checks.
-combineArgumentMap :: LatticeDirection -> Maybe (Map Text Variance) -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer (Map Text NormalizedGenericArgument)
-combineArgumentMap direction maybeVariances leftArguments rightArguments = case maybeVariances of
-  Nothing -> pure $ Map.union leftArguments rightArguments
-  Just variances -> unionWithKeyM combineNamedArgument leftArguments rightArguments
-    where
-      combineNamedArgument genericArgumentName leftArgument rightArgument = case Map.lookup genericArgumentName variances of
-        Nothing -> do
-          tellUnknownGeneric genericArgumentName
-          pure leftArgument
-        Just Covariant -> combine direction leftArgument rightArgument
-        Just Contravariant -> combine (dualDirection direction) leftArgument rightArgument
-        Just Bivariant -> combine direction leftArgument rightArgument
-        Just Invariant
-          | leftArgument == rightArgument -> pure leftArgument
-          | otherwise -> do
-              tellInvariantMismatch direction leftArgument rightArgument
-              pure leftArgument -- NOTE: either side works; the pair is not combinable anyway
+combineArgumentMap :: LatticeDirection -> Map Text Variance -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer (Map Text NormalizedGenericArgument)
+combineArgumentMap direction variances = unionWithKeyM combineNamedArgument
+  where
+    combineNamedArgument genericArgumentName leftArgument rightArgument = case Map.lookup genericArgumentName variances of
+      Nothing -> panicUnknownGeneric genericArgumentName
+      Just Covariant -> combine direction leftArgument rightArgument
+      Just Contravariant -> combine (dualDirection direction) leftArgument rightArgument
+      Just Bivariant -> combine direction leftArgument rightArgument
+      Just Invariant
+        | leftArgument == rightArgument -> pure leftArgument
+        | otherwise -> do
+            tellInvariantMismatch direction leftArgument rightArgument
+            pure leftArgument -- NOTE: either side works; the pair is not combinable anyway
 
 -- | The field a name missing from one side stands for: that side's `rest`, optional.
 restField :: NormalizedObject -> NormalizedFieldInformation
@@ -716,24 +707,22 @@ subtypeData :: NormalizedAttribute -> Map QualifiedName (Map Text NormalizedGene
 subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.toList leftDataLayer)
   where
     checkData (qualifiedName, leftArguments) = do
-      maybeDataInfo <- dataInfoFor qualifiedName
-      case maybeDataInfo of
-        Nothing -> pure () -- already reported by the lookup
-        Just dataInfo -> case Map.lookup qualifiedName rightLayer.dataLayer of
-          Just rightArguments -> do
-            ((), nominalErrors) <- captureErrors $ subtypeArgumentsWith (variancesByName dataInfo.genericParameters) leftArguments rightArguments
-            unless (null nominalErrors) $ do
-              ((), constructorErrors) <- constructorCheck dataInfo leftArguments
-              -- NOTE: when both fail, report the nominal errors; they refer to the type as written
-              unless (null constructorErrors) $ tell nominalErrors
-          Nothing -> do
+      dataInfo <- dataInfoFor qualifiedName
+      case Map.lookup qualifiedName rightLayer.dataLayer of
+        Just rightArguments -> do
+          ((), nominalErrors) <- captureErrors $ subtypeArgumentsWith (variancesByName dataInfo.genericParameters) leftArguments rightArguments
+          unless (null nominalErrors) $ do
             ((), constructorErrors) <- constructorCheck dataInfo leftArguments
-            unless (null constructorErrors) $ do
-              tellSubtypeMismatch
-                ("Data type is not present in the supertype, and its constructor is not a subtype either: " <> renderQualifiedName qualifiedName)
-                (layeredAsType neverLayer {dataLayer = Map.singleton qualifiedName leftArguments})
-                right
-              tell constructorErrors
+            -- NOTE: when both fail, report the nominal errors; they refer to the type as written
+            unless (null constructorErrors) $ tell nominalErrors
+        Nothing -> do
+          ((), constructorErrors) <- constructorCheck dataInfo leftArguments
+          unless (null constructorErrors) $ do
+            tellSubtypeMismatch
+              ("Data type is not present in the supertype, and its constructor is not a subtype either: " <> renderQualifiedName qualifiedName)
+              (layeredAsType neverLayer {dataLayer = Map.singleton qualifiedName leftArguments})
+              right
+            tell constructorErrors
     constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do
       constructorInstance <- substituteType (constructorSubstitution dataInfo leftArguments) dataInfo.constructor
       subtype constructorInstance right
@@ -761,7 +750,7 @@ subtypeArgumentsWith variances leftArguments rightArguments =
   where
     checkNamedArgument (genericArgumentName, (leftArgument, rightArgument)) =
       case Map.lookup genericArgumentName variances of
-        Nothing -> tellUnknownGeneric genericArgumentName
+        Nothing -> panicUnknownGeneric genericArgumentName
         Just Covariant -> subtype leftArgument rightArgument
         Just Contravariant -> subtype rightArgument leftArgument
         Just Invariant -> do
