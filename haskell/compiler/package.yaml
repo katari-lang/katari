@@ -49,11 +49,18 @@ library:
     - Katari.Data.NormalizedType
     - Katari.Data.ModuleName
     - Katari.Data.Variance
+    - Katari.Data.IR
     - Katari.Error
     - Katari.Panic
     - Katari.Diagnostics
     - Katari.Identifier
     - Katari.Typechecker.Normalizer
+    - Katari.Typechecker.Environment
+    - Katari.Typechecker.Check
+    - Katari.Parser
+    - Katari.Lowering
+    - Katari.Schema
+    - Katari.Compile
 
 tests:
   compiler-test:
