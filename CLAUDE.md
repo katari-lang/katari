@@ -75,3 +75,30 @@ This project is under development phase, so you can change anything; architectur
 - `pnpm run lint:typescript`: Lint typescript code using biome check
 
 Github CI will run `pnpm run typecheck` and `pnpm run lint` on every push and pull request to ensure code quality and catch errors early.
+
+### Coding Rules
+
+- Do not use abbreviations in variable and function names. Exception: `id` only
+
+- Haskell
+  - Do not use partial functions (e.g. head, tail, fromJust, etc.)
+  - Use `Record` syntax for data types with multiple fields
+    - name duplication is allowed in difference data types (Language Extension: DuplicateRecordFields, NoFieldSelectors, OverloadedRecordDot,...) so you can simply name the fields as `input` and `output`, without prefixing them with the data type name.
+  - Use `List` for list data types, not `[T]`
+  - Use `Text` for string data types, not `String`
+  - Use `case` for pattern matching, not function definitions with multiple equations
+    - ex)
+
+      ```haskell
+      -- bad
+      myFunction (MyTypeA n) = ...
+      myFunction (MyTypeB s) = ...
+
+      myFunction x = case x of
+        MyTypeA n -> ...
+        MyTypeB s -> ...
+      ```
+
+- TypeScript
+  - Do not use `any`
+  - Do not use `as` (as possible)
