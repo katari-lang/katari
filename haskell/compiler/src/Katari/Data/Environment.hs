@@ -45,7 +45,7 @@ data RequestInfo typeShape = RequestInfo
 
 -- | The declared parameter names, in declaration order (the positional form for diagnostics).
 genericParameterNames :: List GenericParameterInfo -> List Text
-genericParameterNames parameters = (\parameter -> parameter.name) <$> parameters
+genericParameterNames = map (.name)
 
 -- | The parameter-name to generic-id map (used to build a constructor substitution).
 genericIdsByName :: List GenericParameterInfo -> Map Text GenericId
@@ -54,12 +54,3 @@ genericIdsByName parameters = Map.fromList [(parameter.name, parameter.genericId
 -- | The parameter-name to variance map (used by the lattice and subtyping of generic arguments).
 variancesByName :: List GenericParameterInfo -> Map Text Variance
 variancesByName parameters = Map.fromList [(parameter.name, parameter.variance) | parameter <- parameters]
-
-modifyDataInfoTypeShape :: (a -> b) -> DataInfo a -> DataInfo b
-modifyDataInfoTypeShape f dataInfo =
-  dataInfo {constructor = f dataInfo.constructor}
-
-modifyRequestInfoTypeShape :: (a -> b) -> RequestInfo a -> RequestInfo b
-modifyRequestInfoTypeShape f requestInfo =
-  let (requestParameter, requestReturnType) = requestInfo.request
-   in requestInfo {request = (f requestParameter, f requestReturnType)}

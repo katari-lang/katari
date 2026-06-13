@@ -1,9 +1,8 @@
 -- | Logic over the normalized type representation: normalization from semantic types, the
--- union / intersection lattice, subtyping, generic substitution, attribute push-down, and
--- denormalization back to display-oriented semantic types. The passive data definitions live in
--- "Katari.Data.NormalizedType".
+-- union / intersection lattice, subtyping, generic substitution, and denormalization back to
+-- display-oriented semantic types. The passive data definitions live in "Katari.Data.NormalizedType".
 --
--- Two structural ideas organise this module:
+-- Three structural ideas organise this module:
 --
 --   * 'TypeLattice' — types, effects, attributes and generic arguments all support the same three
 --     relations: join (union), meet (intersection) and ordering (subtype). Join and meet are
@@ -11,9 +10,14 @@
 --     (absent slots, contravariant positions, shadowed sets) flips the direction instead of
 --     duplicating the traversal.
 --
---   * 'traverseArguments' — attribute push-down ('pushAttribute') and generic substitution
---     ('substituteType') are both "rebuild every nested argument position" walks; they share one
---     traversal that knows the variance of each position.
+--   * The subtyping /world/ — an attribute is not distributed into a type's interior; instead
+--     'subtype' carries the attribute of the context it is comparing inside (the 'world'), and
+--     compares every attribute joined with it. Descending through a private expectation raises the
+--     world ('withWorld'), so "a value observed through a private container is itself private" holds
+--     without any eager push-down. Attributes therefore stay exactly where they were written.
+--
+--   * 'traverseArguments' — generic substitution ('substituteType') rebuilds every nested argument
+--     position; this is its shared traversal.
 --
 -- Errors carry 'SemanticGenericArgument' payloads (user-facing types), so normalized nodes are
 -- denormalized at the report site; see the @tell*@ helpers.
@@ -21,7 +25,7 @@ module Katari.Typechecker.Normalizer where
 
 import Control.Monad (foldM, unless, when)
 import Control.Monad.RWS.CPS (RWS)
-import Control.Monad.RWS.Class (MonadWriter (..), asks)
+import Control.Monad.RWS.Class (MonadWriter (..), asks, local)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Map.Merge.Strict qualified as Merge
@@ -46,7 +50,11 @@ import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo
 data NormalizerEnvironment = NormalizerEnvironment
   { dataEnvironment :: DataEnvironment NormalizedType,
     requestEnvironment :: RequestEnvironment NormalizedType,
-    genericBoundEnvironment :: GenericBoundEnvironment NormalizedGenericArgument
+    genericBoundEnvironment :: GenericBoundEnvironment NormalizedGenericArgument,
+    -- | The attribute of the context the current 'subtype' comparison is nested inside: bottom
+    -- (public) at the top level, raised by 'withWorld' as the comparison descends through private
+    -- expectations. Every attribute is compared joined with it.
+    world :: NormalizedAttribute
   }
   deriving (Eq, Show)
 
@@ -59,6 +67,21 @@ captureErrors :: Normalizer a -> Normalizer (a, List NormalizeError)
 captureErrors action = pass $ do
   (result, errors) <- listen action
   pure ((result, errors), const [])
+
+-- | Pure join of two attributes (private wins, attribute-generics union). 'combine' computes the
+-- same in the 'Normalizer'; this pure form threads the subtyping 'world'.
+joinAttribute :: NormalizedAttribute -> NormalizedAttribute -> NormalizedAttribute
+joinAttribute left right =
+  NormalizedAttribute {private = left.private || right.private, generic = Set.union left.generic right.generic}
+
+-- | The attribute of the context the current comparison is nested inside (see 'world').
+currentWorld :: Normalizer NormalizedAttribute
+currentWorld = asks (\environment -> environment.world)
+
+-- | Compare the interior of a node whose (supertype) attribute is @attribute@ in a world raised by
+-- it: the interior is observed through that attribute, so it joins the world for nested comparisons.
+withWorld :: NormalizedAttribute -> Normalizer a -> Normalizer a
+withWorld attribute = local (\environment -> environment {world = joinAttribute environment.world attribute})
 
 ------------------------------------------------------------------------------------------------
 -- Environment lookups. Unknown names are reported at each lookup site (callers never re-report);
@@ -180,8 +203,8 @@ tellUnknownGeneric genericArgumentName =
 -- direction ('Join' = union, 'Meet' = intersection) being computed.
 tellInvariantMismatch :: LatticeDirection -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer ()
 tellInvariantMismatch direction leftArgument rightArgument = do
-  leftSemantic <- denormalizeGenericArgument bottomAttribute leftArgument
-  rightSemantic <- denormalizeGenericArgument bottomAttribute rightArgument
+  leftSemantic <- denormalizeGenericArgument leftArgument
+  rightSemantic <- denormalizeGenericArgument rightArgument
   tell $ case direction of
     Join -> [TypeErrorCannotBeUnioned $ CannotBeUnionedErrorInfo {left = leftSemantic, right = rightSemantic}]
     Meet -> [TypeErrorCannotBeIntersected $ CannotBeIntersectedErrorInfo {left = leftSemantic, right = rightSemantic}]
@@ -196,73 +219,53 @@ layeredAsType layer = NormalizedType {baseType = NormalizedBaseTypeLayered layer
 
 normalizeType :: SemanticType -> Normalizer NormalizedType
 normalizeType semanticBaseType = case semanticBaseType of
-  SemanticTypeNever -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer
-  SemanticTypeUnknown -> pure $ makeNormalizedTypeWithPublic NormalizedBaseTypeUnknown
+  SemanticTypeNever -> pure bottomType
+  SemanticTypeUnknown -> pure $ public NormalizedBaseTypeUnknown
+  SemanticTypeNull -> pure $ layered neverLayer {nullLayer = True}
+  SemanticTypeBoolean -> pure $ layered neverLayer {booleanLayer = True}
+  SemanticTypeFile -> pure $ layered neverLayer {fileLayer = True}
+  SemanticTypeInteger -> pure $ layered neverLayer {numberLayer = NumberSlotInteger}
+  SemanticTypeNumber -> pure $ layered neverLayer {numberLayer = NumberSlotNumber}
+  SemanticTypeString -> pure $ layered neverLayer {stringLayer = True}
+  SemanticTypeGeneric genericArgumentName -> pure bottomType {generics = Set.singleton genericArgumentName}
   SemanticTypeAgent parameterType returnType effect -> do
     normalizedArgument <- normalizeType parameterType
     normalizedReturnType <- normalizeType returnType
     normalizedEffect <- normalizeEffect effect
-    pure $
-      makeNormalizedTypeWithPublic $
-        NormalizedBaseTypeLayered $
-          neverLayer
-            { functionLayer = Just NormalizedFunction {argumentType = normalizedArgument, returnType = normalizedReturnType, effect = normalizedEffect}
-            }
-  SemanticTypeNull -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {nullLayer = True}
-  SemanticTypeBoolean -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {booleanLayer = True}
-  SemanticTypeFile -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {fileLayer = True}
-  SemanticTypeInteger -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {numberLayer = NumberSlotInteger}
-  SemanticTypeNumber -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {numberLayer = NumberSlotNumber}
-  SemanticTypeString -> pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {stringLayer = True}
+    pure $ layered neverLayer {functionLayer = Just NormalizedFunction {argumentType = normalizedArgument, returnType = normalizedReturnType, effect = normalizedEffect}}
   SemanticTypeArray itemType -> do
     normalizedItemType <- normalizeType itemType
     -- NOTE: an array is a sequence with no fixed prefix; every element falls under `rest`
-    pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {sequenceLayer = Just $ NormalizedSequence {items = [], rest = normalizedItemType}}
+    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = [], rest = normalizedItemType}}
   SemanticTypeTuple itemTypes -> do
     normalizedItemTypes <- mapM normalizeType itemTypes
     -- NOTE: a tuple's tail is open (rest = unknown of public), mirroring how an object's other fields default to unknown of public
-    pure $ makeNormalizedTypeWithPublic $ NormalizedBaseTypeLayered neverLayer {sequenceLayer = Just $ NormalizedSequence {items = normalizedItemTypes, rest = publicUnknown}}
+    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = normalizedItemTypes, rest = publicUnknown}}
   SemanticTypeData qualifiedName genericArguments -> do
     checkDataArity qualifiedName genericArguments
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
-    pure $
-      makeNormalizedTypeWithPublic $
-        NormalizedBaseTypeLayered neverLayer {dataLayer = Map.singleton qualifiedName normalizedGenericArguments}
+    pure $ layered neverLayer {dataLayer = Map.singleton qualifiedName normalizedGenericArguments}
   SemanticTypeObject fields -> do
     normalizedFields <- mapM normalizeFieldInformation fields
-    pure $
-      makeNormalizedTypeWithPublic $
-        NormalizedBaseTypeLayered
-          neverLayer
-            { objectLayer =
-                Just $
-                  NormalizedObject
-                    { fields = normalizedFields,
-                      -- NOTE: Other fields must be "public"
-                      -- then; {x: number, y: number of private} /<: {x: number}  <-- Error because field y is private in the left type but public in the right type.
-                      --       {x: number, y: number of private} <: {x: number} of private   <-- OK.
-                      rest = publicUnknown
-                    }
-            }
+    -- NOTE: Other fields must be "public"
+    -- then; {x: number, y: number of private} /<: {x: number}  <-- Error because field y is private in the left type but public in the right type.
+    --       {x: number, y: number of private} <: {x: number} of private   <-- OK.
+    pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = normalizedFields, rest = publicUnknown}}
   SemanticTypeRecord recordType -> do
     normalizedRecordType <- normalizeType recordType
-    pure $
-      makeNormalizedTypeWithPublic $
-        NormalizedBaseTypeLayered neverLayer {objectLayer = Just $ NormalizedObject {fields = mempty, rest = normalizedRecordType}}
-  SemanticTypeGeneric genericArgumentName -> pure $ (makeNormalizedTypeWithPublic (NormalizedBaseTypeLayered neverLayer)) {generics = Set.singleton genericArgumentName}
-  SemanticTypeUnion semanticTypes -> do
-    normalizedTypes <- mapM normalizeType semanticTypes
-    foldM union bottomType normalizedTypes
+    pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = mempty, rest = normalizedRecordType}}
+  SemanticTypeUnion semanticTypes -> foldM union bottomType =<< mapM normalizeType semanticTypes
   SemanticTypeAttribute baseType attribute -> do
     normalized <- normalizeType baseType
     normalizedAttribute <- normalizeAttribute attribute
-    -- NOTE: number of public of private ~> number of private. The attribute is pushed into all
-    -- covariant positions so that the result stays in normal form (see 'pushAttribute').
-    pushAttribute normalizedAttribute normalized
+    -- NOTE: number of public of private ~> number of private. The attribute sits on the node; it is
+    -- not distributed into the interior — 'subtype' applies it contextually through the 'world'.
+    pure normalized {attribute = joinAttribute normalized.attribute normalizedAttribute}
   where
-    makeNormalizedTypeWithPublic normalizedBaseType =
-      NormalizedType {baseType = normalizedBaseType, generics = Set.empty, attribute = bottomAttribute} -- default attribute is public
-    publicUnknown = NormalizedType {baseType = NormalizedBaseTypeUnknown, generics = Set.empty, attribute = bottomAttribute}
+    -- A type carrying the default (public) attribute and no generics.
+    public base = NormalizedType {baseType = base, generics = Set.empty, attribute = bottomAttribute}
+    layered = public . NormalizedBaseTypeLayered
+    publicUnknown = public NormalizedBaseTypeUnknown
 
 normalizeAttribute :: SemanticAttribute -> Normalizer NormalizedAttribute
 normalizeAttribute attribute = case attribute of
@@ -365,6 +368,9 @@ instance TypeLattice NormalizedType where
   combine direction left right = do
     combinedBaseType <- combineBaseType direction left.baseType right.baseType
     combinedAttribute <- combine direction left.attribute right.attribute
+    -- NOTE: attributes are not redistributed. A one-sided layer may carry an attribute below the
+    -- combined node's, but 'subtype' compares every attribute joined with the world (which picks up
+    -- the node attribute on the way down), so the node's attribute is never lost.
     pure $
       NormalizedType
         { baseType = combinedBaseType,
@@ -374,23 +380,21 @@ instance TypeLattice NormalizedType where
 
   -- Check if the first type is a subtype of the second type (first <: second).
   --
-  -- NOTE: Attribute — public <: private, private /<: public. Both sides are assumed to be in
-  -- normal form (see 'pushAttribute'): every node's attribute has already been pushed into its
-  -- covariant positions, so the check compares attributes pointwise at each node and never
-  -- redistributes. The data layer is the one position normalization could not reach, so it is
-  -- checked separately by 'subtypeData' with the attributes of the enclosing nodes.
+  -- NOTE: Attribute — public <: private, private /<: public, both compared joined with the current
+  -- 'world'. A node's own attribute describes the handle, not its interior, so it is compared once
+  -- here; the interior is then compared under @world ∪ right.attribute@ ('withWorld'), which is how
+  -- "observed through a private container" propagates without an eager push-down. @{x: number of
+  -- private}@ stays a public object with a private field (fits under @unknown of public@); a value
+  -- private at the handle does not (@unknown of private@ is the top, @unknown of public@ is not).
   subtype left right = do
     -- Resolve the left's generics to their upper bounds (transitively), treating the supertype's
     -- own generics as already covered (they cancel). The resulting generics field is then ignored:
     -- every remaining generic is either covered by the right or already expanded into the
     -- base/attribute.
     effectiveLeft <- boundedType right.generics left
-    -- NOTE: only the outermost attribute is compared against unknown's. A value's own attribute
-    -- describes the handle, not its interior: @{x: number of private}@ is a public object with a
-    -- private field, so it fits under @unknown of public@. (A top-level private value does not —
-    -- @unknown of public@ is not the top; @unknown of private@ is.)
     subtype effectiveLeft.attribute right.attribute
-    case (effectiveLeft.baseType, right.baseType) of
+    -- The interior is observed through the supertype's attribute, so it joins the world below.
+    withWorld right.attribute $ case (effectiveLeft.baseType, right.baseType) of
       (NormalizedBaseTypeUnknown, NormalizedBaseTypeUnknown) -> pure ()
       (NormalizedBaseTypeUnknown, NormalizedBaseTypeLayered _) ->
         tellSubtypeMismatch "Unknown type cannot be a subtype of a known type" effectiveLeft right
@@ -411,11 +415,17 @@ instance TypeLattice NormalizedAttribute where
         }
 
   subtype left right = do
+    -- Compare both sides joined with the world: inside a private context every attribute is at least
+    -- private, so the public/private distinction collapses there (sound — a private context observes
+    -- everything privately).
+    world <- currentWorld
+    let worldedLeft = joinAttribute left world
+        worldedRight = joinAttribute right world
     -- Resolve the left's attribute-generics to their upper bounds (transitively), treating the
     -- supertype's own attribute-generics as already covered, then compare the private part.
-    effectiveLeft <- boundedAttribute right.generic left
-    when (effectiveLeft.private && not right.private) $
-      tellAttributeMismatch "Private attribute cannot be a subtype of public attribute" effectiveLeft right
+    effectiveLeft <- boundedAttribute worldedRight.generic worldedLeft
+    when (effectiveLeft.private && not worldedRight.private) $
+      tellAttributeMismatch "Private attribute cannot be a subtype of public attribute" effectiveLeft worldedRight
 
 instance TypeLattice NormalizedEffect where
   combine direction left right = case (left, right, direction) of
@@ -709,13 +719,13 @@ subtypeObject leftObject rightObject = do
 --
 --   (i)  the same nominal type appears on the right, with generic arguments compatible per the
 --        declared variance, or
---   (ii) its constructor type (with the generic arguments substituted in, and the left node's
---        attribute pushed into it) is a subtype of the whole right side; data foo[T](x: T) gives
---        foo[U] <: {x: U}, so fields of a data value can be read through the object layer.
+--   (ii) its constructor type (with the generic arguments substituted in) is a subtype of the whole
+--        right side; data foo[T](x: T) gives foo[U] <: {x: U}, so fields of a data value can be read
+--        through the object layer.
 --
--- The constructor instance is the one position 'pushAttribute' could not reach during
--- normalization (the data layer is not expanded there), hence the explicit push with the left
--- node's attribute — this is the only place subtyping still distributes an attribute.
+-- The constructor instance is the data value's interior, so it is compared with the left node's
+-- attribute joined into the world ('withWorld') — observed through the data's handle, by the same
+-- contextual rule the rest of subtyping uses.
 subtypeData :: NormalizedAttribute -> Map QualifiedName (Map Text NormalizedGenericArgument) -> NormalizedType -> LayeredType -> Normalizer ()
 subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.toList leftDataLayer)
   where
@@ -738,10 +748,9 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
                 (layeredAsType neverLayer {dataLayer = Map.singleton qualifiedName leftArguments})
                 right
               tell constructorErrors
-    constructorCheck dataInfo leftArguments = captureErrors $ do
+    constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do
       constructorInstance <- substituteType (constructorSubstitution dataInfo leftArguments) dataInfo.constructor
-      instanceWithAttribute <- pushAttribute leftAttribute constructorInstance
-      subtype instanceWithAttribute right
+      subtype constructorInstance right
 
 -- | The generic-id substitution that instantiates a data declaration's constructor with the
 -- arguments of one application of it.
@@ -855,25 +864,22 @@ boundedAttribute = resolveUpperBounds (NormalizedGenericArgumentAttribute topAtt
 -- Argument traversal: attribute push-down and generic substitution
 ------------------------------------------------------------------------------------------------
 
--- | Callbacks of 'traverseArguments', one per argument kind. Each receives the variance of the
--- position it is rebuilding.
+-- | Callbacks of 'traverseArguments', one per argument kind.
 data ArgumentVisitor = ArgumentVisitor
-  { visitType :: Variance -> NormalizedType -> Normalizer NormalizedType,
-    visitEffect :: Variance -> NormalizedEffect -> Normalizer NormalizedEffect,
-    visitAttribute :: Variance -> NormalizedAttribute -> Normalizer NormalizedAttribute
+  { visitType :: NormalizedType -> Normalizer NormalizedType,
+    visitEffect :: NormalizedEffect -> Normalizer NormalizedEffect,
+    visitAttribute :: NormalizedAttribute -> Normalizer NormalizedAttribute
   }
 
 -- | Rebuild every nested argument position of a layered type: object fields and rest, sequence
--- items and rest, the function argument / return / effect, and data arguments. Object fields,
--- sequence items and the function return are covariant positions; the function argument is
--- contravariant; data arguments carry their declared variance (defaulting to invariant when the
--- declaration does not know the name, so that nothing covariant-only happens to them).
+-- items and rest, the function argument / return / effect, and data arguments. Variance-agnostic —
+-- its one user, 'substituteType', rebuilds every position alike.
 traverseArguments :: ArgumentVisitor -> LayeredType -> Normalizer LayeredType
 traverseArguments visitor layered = do
   visitedFunctionLayer <- traverse visitFunction layered.functionLayer
   visitedSequenceLayer <- traverse visitSequence layered.sequenceLayer
   visitedObjectLayer <- traverse visitObject layered.objectLayer
-  visitedDataLayer <- Map.traverseWithKey visitDataArguments layered.dataLayer
+  visitedDataLayer <- traverse (traverse visitArgument) layered.dataLayer
   pure $
     layered
       { functionLayer = visitedFunctionLayer,
@@ -884,65 +890,27 @@ traverseArguments visitor layered = do
   where
     visitFunction function =
       NormalizedFunction
-        <$> visitor.visitType Contravariant function.argumentType
-        <*> visitor.visitType Covariant function.returnType
-        <*> visitor.visitEffect Covariant function.effect
+        <$> visitor.visitType function.argumentType
+        <*> visitor.visitType function.returnType
+        <*> visitor.visitEffect function.effect
     visitSequence normalizedSequence = do
-      visitedItems <- mapM (visitor.visitType Covariant) normalizedSequence.items
-      visitedRest <- visitor.visitType Covariant normalizedSequence.rest
+      visitedItems <- mapM visitor.visitType normalizedSequence.items
+      visitedRest <- visitor.visitType normalizedSequence.rest
       pure $ NormalizedSequence {items = visitedItems, rest = visitedRest}
     visitObject normalizedObject = do
       visitedFields <-
         mapM
           ( \fieldInformation -> do
-              visitedFieldType <- visitor.visitType Covariant fieldInformation.normalizedType
+              visitedFieldType <- visitor.visitType fieldInformation.normalizedType
               pure fieldInformation {normalizedType = visitedFieldType}
           )
           normalizedObject.fields
-      visitedRest <- visitor.visitType Covariant normalizedObject.rest
+      visitedRest <- visitor.visitType normalizedObject.rest
       pure $ NormalizedObject {fields = visitedFields, rest = visitedRest}
-    visitDataArguments qualifiedName arguments = do
-      maybeDataInfo <- dataInfoFor qualifiedName
-      let variances = maybe Map.empty (\dataInfo -> variancesByName dataInfo.genericParameters) maybeDataInfo
-      Map.traverseWithKey
-        (\genericArgumentName -> visitArgument (Map.findWithDefault Invariant genericArgumentName variances))
-        arguments
-    visitArgument variance = \case
-      NormalizedGenericArgumentType normalizedType -> NormalizedGenericArgumentType <$> visitor.visitType variance normalizedType
-      NormalizedGenericArgumentEffect effect -> NormalizedGenericArgumentEffect <$> visitor.visitEffect variance effect
-      NormalizedGenericArgumentAttribute attribute -> NormalizedGenericArgumentAttribute <$> visitor.visitAttribute variance attribute
-
--- | Push an attribute into every covariant position of a type: union it into the type's own
--- attribute and recurse into object fields, sequence elements, the function return, and covariant
--- data arguments. The function argument (contravariant), invariant data arguments and effects are
--- left untouched.
---
--- This establishes the normal form maintained by 'normalizeType': the effective attribute of every
--- covariant position is at least the attribute of every node enclosing it ("a value observed
--- through a private container is itself private"). Union and intersection preserve the invariant,
--- so it holds for every normalized type, and 'subtype' can compare attributes pointwise without
--- redistributing. 'pushAttribute' runs at every @of@ node during normalization, and once more on
--- the data constructor instance during 'subtypeData' (the position normalization cannot reach).
-pushAttribute :: NormalizedAttribute -> NormalizedType -> Normalizer NormalizedType
-pushAttribute ambient normalizedType
-  -- NOTE: inputs are already in normal form, so pushing the bottom attribute is the identity
-  | ambient == bottomAttribute = pure normalizedType
-pushAttribute ambient normalizedType = do
-  pushedAttribute <- union normalizedType.attribute ambient
-  pushedBaseType <- case normalizedType.baseType of
-    NormalizedBaseTypeUnknown -> pure NormalizedBaseTypeUnknown
-    NormalizedBaseTypeLayered layered -> NormalizedBaseTypeLayered <$> traverseArguments (pushVisitor pushedAttribute) layered
-  pure normalizedType {attribute = pushedAttribute, baseType = pushedBaseType}
-  where
-    pushVisitor pushedAttribute =
-      ArgumentVisitor
-        { visitType = \variance argumentType ->
-            if variance == Covariant then pushAttribute pushedAttribute argumentType else pure argumentType,
-          -- NOTE: effects carry no attribute
-          visitEffect = \_ effect -> pure effect,
-          visitAttribute = \variance argumentAttribute ->
-            if variance == Covariant then union argumentAttribute pushedAttribute else pure argumentAttribute
-        }
+    visitArgument = \case
+      NormalizedGenericArgumentType normalizedType -> NormalizedGenericArgumentType <$> visitor.visitType normalizedType
+      NormalizedGenericArgumentEffect effect -> NormalizedGenericArgumentEffect <$> visitor.visitEffect effect
+      NormalizedGenericArgumentAttribute attribute -> NormalizedGenericArgumentAttribute <$> visitor.visitAttribute attribute
 
 -- | Literal substitution of generic ids. A generic id occurring in a node's generics set is
 -- removed and its replacement unioned into that node (the set representation means "this node is
@@ -964,9 +932,9 @@ substituteType substitution normalizedType = do
   where
     substituteVisitor =
       ArgumentVisitor
-        { visitType = \_ -> substituteType substitution,
-          visitEffect = \_ -> substituteEffect substitution,
-          visitAttribute = \_ -> substituteAttribute substitution
+        { visitType = substituteType substitution,
+          visitEffect = substituteEffect substitution,
+          visitAttribute = substituteAttribute substitution
         }
 
 -- | As 'substituteType', for effects (effect-kind generic ids and the request arguments).
@@ -1038,36 +1006,21 @@ substituteGenerics expectedKind absorbReplacement substitution rebuild generics 
 -- shadowing (overwrite) is likewise not reconstructed. Denormalization never emits errors: it is
 -- used while constructing errors.
 --
--- The attribute is rendered in "reverse-push" (concise) form: an @ambient@ attribute is threaded
--- through the covariant positions, and a node emits @of …@ only when its attribute is NOT already
--- subsumed by the ambient. This undoes the distribution 'pushAttribute' performed, so a type
--- written as @{x: number} of private@ renders back as @{x: number} of private@ instead of repeating
--- @of private@ on every nested position. Dropping an attribute already implied by the ambient is
--- sound (the position's meaning is @attribute ∪ ambient@, unchanged when @attribute <: ambient@).
+-- Attributes are read straight off each node (subtyping never distributed them), so a type written
+-- as @{x: number} of private@ renders back the same, with @of private@ exactly where it sits.
 denormalize :: NormalizedType -> Normalizer SemanticType
-denormalize = denormalizeWithAmbient bottomAttribute
-
-denormalizeWithAmbient :: NormalizedAttribute -> NormalizedType -> Normalizer SemanticType
-denormalizeWithAmbient ambient normalizedType = do
-  childAmbient <- union ambient normalizedType.attribute
-  baseSemanticType <- denormalizeBaseType childAmbient normalizedType.baseType normalizedType.generics
+denormalize normalizedType = do
+  baseSemanticType <- denormalizeBaseType normalizedType.baseType normalizedType.generics
   pure $
-    if attributeSubsumedBy normalizedType.attribute ambient
+    if normalizedType.attribute == bottomAttribute
       then baseSemanticType
       else SemanticTypeAttribute baseSemanticType (denormalizeAttribute normalizedType.attribute)
 
--- | Whether @attribute@ adds nothing on top of @ambient@: it is no more private, and introduces no
--- attribute-generic the ambient does not already carry. Purely syntactic (no generic bound
--- resolution), which is sufficient for display.
-attributeSubsumedBy :: NormalizedAttribute -> NormalizedAttribute -> Bool
-attributeSubsumedBy attribute ambient =
-  (not attribute.private || ambient.private) && attribute.generic `Set.isSubsetOf` ambient.generic
-
-denormalizeBaseType :: NormalizedAttribute -> NormalizedBaseType -> Set GenericId -> Normalizer SemanticType
-denormalizeBaseType childAmbient baseType generics = case baseType of
+denormalizeBaseType :: NormalizedBaseType -> Set GenericId -> Normalizer SemanticType
+denormalizeBaseType baseType generics = case baseType of
   NormalizedBaseTypeUnknown -> pure SemanticTypeUnknown
   NormalizedBaseTypeLayered layeredType -> do
-    layerTypes <- denormalizeLayers childAmbient layeredType
+    layerTypes <- denormalizeLayers layeredType
     let genericTypes = SemanticTypeGeneric <$> Set.toList generics
     pure $ case layerTypes <> genericTypes of
       [] -> SemanticTypeNever
@@ -1075,8 +1028,8 @@ denormalizeBaseType childAmbient baseType generics = case baseType of
       many -> SemanticTypeUnion many
 
 -- | One semantic type per active layer (in a fixed order); the caller unions them.
-denormalizeLayers :: NormalizedAttribute -> LayeredType -> Normalizer (List SemanticType)
-denormalizeLayers childAmbient layeredType = do
+denormalizeLayers :: LayeredType -> Normalizer (List SemanticType)
+denormalizeLayers layeredType = do
   let nullPart = [SemanticTypeNull | layeredType.nullLayer]
       numberPart = case layeredType.numberLayer of
         NumberSlotAbsent -> []
@@ -1088,9 +1041,8 @@ denormalizeLayers childAmbient layeredType = do
   functionPart <- case layeredType.functionLayer of
     Nothing -> pure []
     Just function -> do
-      -- NOTE: the argument is contravariant, so it is rendered with a fresh ambient
       semanticArgument <- denormalize function.argumentType
-      semanticReturn <- denormalizeWithAmbient childAmbient function.returnType
+      semanticReturn <- denormalize function.returnType
       semanticEffect <- denormalizeEffect function.effect
       pure [SemanticTypeAgent semanticArgument semanticReturn semanticEffect]
   sequencePart <- case layeredType.sequenceLayer of
@@ -1098,50 +1050,37 @@ denormalizeLayers childAmbient layeredType = do
     Just normalizedSequence ->
       if null normalizedSequence.items
         then do
-          semanticItem <- denormalizeWithAmbient childAmbient normalizedSequence.rest
+          semanticItem <- denormalize normalizedSequence.rest
           pure [SemanticTypeArray semanticItem]
         else do
-          semanticItems <- mapM (denormalizeWithAmbient childAmbient) normalizedSequence.items
+          semanticItems <- mapM denormalize normalizedSequence.items
           pure [SemanticTypeTuple semanticItems]
   objectPart <- case layeredType.objectLayer of
     Nothing -> pure []
     Just normalizedObject ->
       if Map.null normalizedObject.fields
         then do
-          semanticRecord <- denormalizeWithAmbient childAmbient normalizedObject.rest
+          semanticRecord <- denormalize normalizedObject.rest
           pure [SemanticTypeRecord semanticRecord]
         else do
-          semanticFields <- mapM (denormalizeFieldInformation childAmbient) normalizedObject.fields
+          semanticFields <- mapM denormalizeFieldInformation normalizedObject.fields
           pure [SemanticTypeObject semanticFields]
-  dataPart <- mapM (uncurry (denormalizeData childAmbient)) (Map.toList layeredType.dataLayer)
+  dataPart <- mapM (uncurry denormalizeData) (Map.toList layeredType.dataLayer)
   pure $ nullPart <> numberPart <> stringPart <> booleanPart <> filePart <> functionPart <> sequencePart <> objectPart <> dataPart
 
-denormalizeFieldInformation :: NormalizedAttribute -> NormalizedFieldInformation -> Normalizer FieldInformation
-denormalizeFieldInformation childAmbient fieldInformation = do
-  semanticFieldType <- denormalizeWithAmbient childAmbient fieldInformation.normalizedType
+denormalizeFieldInformation :: NormalizedFieldInformation -> Normalizer FieldInformation
+denormalizeFieldInformation fieldInformation = do
+  semanticFieldType <- denormalize fieldInformation.normalizedType
   pure FieldInformation {semanticType = semanticFieldType, optional = fieldInformation.optional}
 
-denormalizeData :: NormalizedAttribute -> QualifiedName -> Map Text NormalizedGenericArgument -> Normalizer SemanticType
-denormalizeData childAmbient qualifiedName arguments = do
-  -- NOTE: a silent lookup — denormalization runs while errors are being constructed, so it must
-  -- not report errors itself (an unknown name is reported by whichever operation hit it first)
-  maybeDataInfo <- asks (\environment -> Map.lookup qualifiedName environment.dataEnvironment)
-  let variances = maybe Map.empty (\dataInfo -> variancesByName dataInfo.genericParameters) maybeDataInfo
-  semanticArguments <-
-    Map.traverseWithKey
-      ( \genericArgumentName argument ->
-          -- NOTE: only covariant arguments carry the ambient (as in 'pushAttribute' / subtyping)
-          let argumentAmbient = case Map.lookup genericArgumentName variances of
-                Just Covariant -> childAmbient
-                _ -> bottomAttribute
-           in denormalizeGenericArgument argumentAmbient argument
-      )
-      arguments
+denormalizeData :: QualifiedName -> Map Text NormalizedGenericArgument -> Normalizer SemanticType
+denormalizeData qualifiedName arguments = do
+  semanticArguments <- mapM denormalizeGenericArgument arguments
   pure $ SemanticTypeData qualifiedName semanticArguments
 
-denormalizeGenericArgument :: NormalizedAttribute -> NormalizedGenericArgument -> Normalizer SemanticGenericArgument
-denormalizeGenericArgument ambient genericArgument = case genericArgument of
-  NormalizedGenericArgumentType normalizedType -> SemanticGenericArgumentType <$> denormalizeWithAmbient ambient normalizedType
+denormalizeGenericArgument :: NormalizedGenericArgument -> Normalizer SemanticGenericArgument
+denormalizeGenericArgument genericArgument = case genericArgument of
+  NormalizedGenericArgumentType normalizedType -> SemanticGenericArgumentType <$> denormalize normalizedType
   NormalizedGenericArgumentEffect effect -> SemanticGenericArgumentEffect <$> denormalizeEffect effect
   NormalizedGenericArgumentAttribute attribute -> pure $ SemanticGenericArgumentAttribute (denormalizeAttribute attribute)
 
@@ -1165,6 +1104,5 @@ denormalizeEffect effect = case effect of
 
 denormalizeRequest :: QualifiedName -> Map Text NormalizedGenericArgument -> Normalizer SemanticEffect
 denormalizeRequest qualifiedName arguments = do
-  -- NOTE: effects carry no attribute, so request arguments are denormalized with a fresh ambient
-  semanticArguments <- mapM (denormalizeGenericArgument bottomAttribute) arguments
+  semanticArguments <- mapM denormalizeGenericArgument arguments
   pure $ SemanticEffectRequest qualifiedName semanticArguments

@@ -41,7 +41,7 @@ type family PatternType (phase :: Phase) :: Type where
   PatternType Identified = ()
   PatternType Typed = SemanticType
 
--- | callee[T, E](...), etc...  Typed AST will contains infered generic instantiations.
+-- | callee[T, E](...), etc...  The Typed AST carries the inferred generic instantiations.
 -- Also carries the explicit @handler[R, E]@ instantiation (keyed by the generic name).
 type family GenericInstantiation (phase :: Phase) :: Type where
   GenericInstantiation Parsed = ()
@@ -157,9 +157,15 @@ data ParameterDefault = ParameterDefault
 instance HasSourceSpan ParameterDefault where
   sourceSpanOf parameterDefault = parameterDefault.sourceSpan
 
--- | @agent name[generics](label => pattern, ...) -> T with E { body }@
+-- | @[private] agent name[generics](label => pattern, ...) -> T with E { body }@.
+-- @private@ marks the agent's handle private: it may be called only from a private world (the body
+-- of another @private@ agent). Orthogonal to a private return type (@-> T of private@) — a private
+-- handle restricts who may call it, a private return restricts what the result may flow into. See
+-- the attribute world model in "Katari.Typechecker.Normalizer".
 data AgentDeclaration (phase :: Phase) = AgentDeclaration
   { annotation :: Maybe Text,
+    -- | @private agent@ — handle private (callable only from a private world)
+    private :: Bool,
     name :: Text,
     variableReference :: Reference phase VariableReference,
     genericParameters :: List (GenericParameter phase),
@@ -216,7 +222,7 @@ data NamesImport = NamesImport
 
 data ModuleImport = ModuleImport
   { moduleName :: ModuleName,
-    alias :: Maybe Text -- Notying ~> prefix import  ex) import "foo.bar"  ~> bar.agent_name
+    alias :: Maybe Text -- Nothing ~> prefix import  ex) import "foo.bar"  ~> bar.agent_name
   }
   deriving stock (Eq, Show)
 
@@ -375,7 +381,7 @@ instance HasSourceSpan (ReturnStatement phase) where
 
 data NextStatement (phase :: Phase) = NextStatement
   { value :: Expression phase,
-    modifiers :: List (Modifier phase), -- No modidiers ~> []
+    modifiers :: List (Modifier phase), -- No modifiers ~> []
     sourceSpan :: SourceSpan
   }
 
@@ -392,7 +398,7 @@ instance HasSourceSpan (BreakStatement phase) where
 
 data ForNextStatement (phase :: Phase) = ForNextStatement
   { value :: Expression phase,
-    modifiers :: List (Modifier phase), -- No modidiers ~> []
+    modifiers :: List (Modifier phase), -- No modifiers ~> []
     sourceSpan :: SourceSpan
   }
 

@@ -49,8 +49,15 @@ spec = do
       fooOf (privateOf intType) `shouldBeSubtypeOf` privateOf (fooOf intType)
     it "rejects a private covariant data argument <: public data" $
       fooOf (privateOf intType) `shouldNotBeSubtypeOf` fooOf intType
-    it "does not distribute the attribute into invariant data arguments" $
-      invOf (privateOf intType) `shouldNotBeSubtypeOf` privateOf (invOf intType)
+    it "accepts a private invariant data argument under a private expectation (world)" $
+      -- inside @inv[...] of private@ the world is private, so the invariant argument is compared as
+      -- inside @inv[...] of private@ the world is private, so the invariant argument is compared as
+      -- private on both sides — @inv[integer of private]@ matches @inv[integer]@ there.
+      -- private on both sides — @inv[integer of private]@ matches @inv[integer]@ there.
+
+      -- inside @inv[...] of private@ the world is private, so the invariant argument is compared as
+      -- private on both sides — @inv[integer of private]@ matches @inv[integer]@ there.
+      invOf (privateOf intType) `shouldBeSubtypeOf` privateOf (invOf intType)
     it "accepts an invariant data <: itself of private" $
       invOf intType `shouldBeSubtypeOf` privateOf (invOf intType)
     it "rejects null <: integer" $
@@ -112,42 +119,45 @@ spec = do
       (typeErrorCode <$> normalizerErrors (void (normalizeEffect (SemanticEffectRequest askName (Map.singleton "X" (SemanticGenericArgumentType SemanticTypeInteger))))))
         `shouldBe` ["K3008"]
 
-  describe "pushAttribute" $ do
-    it "distributes into object fields and rest" $
-      runPush privateAttribute (objectOf [("x", intType)])
-        `shouldBe` withAttribute privateAttribute (objectWith [("x", privateOf intType)] (privateOf unknownType))
-    it "reaches the function return but not the argument" $
-      runPush privateAttribute (functionOf intType intType)
-        `shouldBe` withAttribute privateAttribute (functionOf intType (privateOf intType))
-    it "distributes into covariant data arguments" $
-      runPush privateAttribute (fooOf intType)
-        `shouldBe` withAttribute privateAttribute (fooOf (privateOf intType))
-    it "leaves invariant data arguments untouched" $
-      runPush privateAttribute (invOf intType)
-        `shouldBe` withAttribute privateAttribute (invOf intType)
-    it "is idempotent" $
-      runPush privateAttribute (runPush privateAttribute (objectOf [("x", intType)]))
-        `shouldBe` runPush privateAttribute (objectOf [("x", intType)])
-    it "is the identity for the bottom (public) attribute" $
-      runPush bottomAttribute (objectOf [("x", privateOf intType)])
-        `shouldBe` objectOf [("x", privateOf intType)]
+  describe "subtype (world)" $ do
+    it "accepts a public function as a private function" $
+      -- a public function is usable in a private context; lifting to accept / return private is not
+      -- a public function is usable in a private context; lifting to accept / return private is not
+      -- a declassification, so this holds (the reverse does not).
+      -- a declassification, so this holds (the reverse does not).
 
-  describe "normalizeType" $ do
-    it "pushes 'of private' into object fields" $
+      -- a public function is usable in a private context; lifting to accept / return private is not
+      -- a declassification, so this holds (the reverse does not).
+      functionOf intType intType `shouldBeSubtypeOf` privateOf (functionOf intType intType)
+    it "rejects a private function as a public function" $
+      privateOf (functionOf intType intType) `shouldNotBeSubtypeOf` functionOf intType intType
+    it "compares a private union's public-looking branch as private" $
+      -- the object branch of @(integer of private) | {x: integer}@ is observed privately because the
+      -- the object branch of @(integer of private) | {x: integer}@ is observed privately because the
+      -- node is private, so a fully-private object fits under it — without any attribute push-down.
+      -- node is private, so a fully-private object fits under it — without any attribute push-down.
+
+      -- the object branch of @(integer of private) | {x: integer}@ is observed privately because the
+      -- node is private, so a fully-private object fits under it — without any attribute push-down.
+      privateOf (objectOf [("x", intType)])
+        `shouldBeSubtypeOf` runNormalizer (union (privateOf intType) (objectOf [("x", intType)]))
+
+  describe "normalizeType" $
+    it "puts 'of private' on the node, fields untouched (no distribution)" $
       runNormalizer (normalizeType (SemanticTypeAttribute semanticIntObject SemanticAttributePrivate))
-        `shouldBe` runPush privateAttribute (objectOf [("x", intType)])
+        `shouldBe` privateOf (objectOf [("x", intType)])
 
   describe "denormalize" $ do
-    it "renders concise (reverse-push) attributes instead of per-field private" $
-      runNormalizer (denormalize (runPush privateAttribute (objectOf [("x", intType)])))
+    it "renders the node attribute, with fields exactly where they sit" $
+      runNormalizer (denormalize (privateOf (objectOf [("x", intType)])))
         `shouldBe` SemanticTypeAttribute semanticIntObject SemanticAttributePrivate
     it "leaves a public type unwrapped" $
       runNormalizer (denormalize intType) `shouldBe` SemanticTypeInteger
     it "round-trips through normalizeType on a normal-form type" $
-      runNormalizer (normalizeType =<< denormalize (runPush privateAttribute (objectOf [("x", intType)])))
-        `shouldBe` runPush privateAttribute (objectOf [("x", intType)])
+      runNormalizer (normalizeType =<< denormalize (privateOf (objectOf [("x", intType)])))
+        `shouldBe` privateOf (objectOf [("x", intType)])
     it "renders in surface syntax via renderSemanticType" $
-      renderSemanticType (runNormalizer (denormalize (runPush privateAttribute (objectOf [("x", intType)]))))
+      renderSemanticType (runNormalizer (denormalize (privateOf (objectOf [("x", intType)]))))
         `shouldBe` "{x: integer} of private"
 
 shouldBeSubtypeOf :: NormalizedType -> NormalizedType -> Expectation
@@ -232,7 +242,8 @@ environment =
         Map.fromList
           [ (boundedGeneric, NormalizedGenericArgumentType intType),
             (boundedEffectGeneric, NormalizedGenericArgumentEffect (NormalizedEffectRow EffectRow {request = Map.singleton logName mempty, generic = mempty, shadowed = mempty}))
-          ]
+          ],
+      world = bottomAttribute
     }
   where
     dataInfoOf qualifiedName argumentVariance =
@@ -247,15 +258,6 @@ environment =
           genericParameters = [],
           request = (bottomType, bottomType)
         }
-
-runPush :: NormalizedAttribute -> NormalizedType -> NormalizedType
-runPush attribute normalizedType = runNormalizer (pushAttribute attribute normalizedType)
-
-privateAttribute :: NormalizedAttribute
-privateAttribute = NormalizedAttribute {private = True, generic = Set.empty}
-
-withAttribute :: NormalizedAttribute -> NormalizedType -> NormalizedType
-withAttribute attribute normalizedType = normalizedType {attribute = attribute}
 
 layerType :: LayeredType -> NormalizedType
 layerType layer = NormalizedType {baseType = NormalizedBaseTypeLayered layer, generics = Set.empty, attribute = bottomAttribute}
@@ -278,10 +280,10 @@ nullType = layerType neverLayer {nullLayer = True}
 genericOf :: GenericId -> NormalizedType
 genericOf genericId = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton genericId, attribute = bottomAttribute}
 
--- | Make a type private. Since 'subtype' assumes normal form, this pushes the attribute down
--- the same way 'normalizeType' would for an @of private@ annotation.
+-- | Make a type private: set the @private@ flag on its node attribute. With world-based subtyping
+-- the attribute is not distributed — it sits on the node, the way the user would write @of private@.
 privateOf :: NormalizedType -> NormalizedType
-privateOf = runPush privateAttribute
+privateOf normalizedType = normalizedType {attribute = normalizedType.attribute {private = True}}
 
 functionOf :: NormalizedType -> NormalizedType -> NormalizedType
 functionOf argumentType returnType = layerType neverLayer {functionLayer = Just NormalizedFunction {argumentType = argumentType, returnType = returnType, effect = bottomEffect}}
