@@ -7,7 +7,7 @@
 --   * 'TypeLattice' — types, effects, attributes and generic arguments all support the same three
 --     relations: join (union), meet (intersection) and ordering (subtype). Join and meet are
 --     written once as 'combine', parameterised by a 'LatticeDirection'; every dual rule
---     (absent slots, contravariant positions, shadowed sets) flips the direction instead of
+--     (absent slots, contravariant positions, effect-tail lacks) flips the direction instead of
 --     duplicating the traversal.
 --
 --   * The subtyping /world/ — an attribute is not distributed into a type's interior; instead
@@ -105,17 +105,6 @@ requestInfoFor qualifiedName = do
       tell [TypeErrorUnknownRequest $ UnknownRequestErrorInfo {expected = qualifiedName}]
       pure Nothing
     Just requestInfo -> pure (Just requestInfo)
-
--- | The upper bound registered for each generic id. An id with no registered bound defaults to
--- the kind's top ("no upper bound ~> extends top"), so an unbounded generic can never pass a
--- subtype check vacuously.
-genericBoundsFor :: NormalizedGenericArgument -> Set GenericId -> Normalizer (List NormalizedGenericArgument)
-genericBoundsFor defaultBound generics =
-  asks
-    ( \environment ->
-        (\genericId -> Map.findWithDefault defaultBound genericId environment.genericBoundEnvironment)
-          <$> Set.toList generics
-    )
 
 -- | Report when a data / request application does not supply exactly the declared generic
 -- arguments. Runs once, at the semantic -> normalized boundary ('normalizeType' /
@@ -281,17 +270,9 @@ normalizeEffect effect = case effect of
   SemanticEffectRequest qualifiedName genericArguments -> do
     checkRequestArity qualifiedName genericArguments
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
-    pure $
-      NormalizedEffectRow $
-        EffectRow
-          { request = Map.singleton qualifiedName normalizedGenericArguments,
-            generic = mempty,
-            shadowed = mempty
-          }
+    pure $ NormalizedEffectRow $ EffectRow {request = Map.singleton qualifiedName normalizedGenericArguments, tails = mempty}
   SemanticEffectGeneric genericArgumentName ->
-    pure $
-      NormalizedEffectRow $
-        EffectRow {request = mempty, generic = Set.singleton genericArgumentName, shadowed = mempty}
+    pure $ NormalizedEffectRow $ EffectRow {request = mempty, tails = Map.singleton genericArgumentName mempty}
   SemanticEffectOverwrite baseEffect overwrites -> do
     normalized <- normalizeEffect baseEffect
     overwriteRequests <-
@@ -307,15 +288,11 @@ normalizeEffect effect = case effect of
       NormalizedEffectAny -> NormalizedEffectAny
       NormalizedEffectRow effectRow ->
         NormalizedEffectRow $
-          effectRow
-            { request = Map.union overwriteRequests effectRow.request,
-              -- NOTE: a shadow is a guarantee about the base's generic part. Over a concrete base
-              -- the overwrite is already applied to the request map, so no shadow is recorded;
-              -- over a base with generics the base's own shadows must survive (union, not replace).
-              shadowed =
-                if Set.null effectRow.generic
-                  then effectRow.shadowed
-                  else Set.union effectRow.shadowed (Map.keysSet overwriteRequests)
+          EffectRow
+            { -- the overwrite wins over the base's concrete request of the same name (left-biased union)
+              request = Map.union overwriteRequests effectRow.request,
+              -- and over every tail's contribution: the overwritten names are removed from each tail
+              tails = Map.map (Set.union (Map.keysSet overwriteRequests)) effectRow.tails
             }
   SemanticEffectUnion effects -> foldM union bottomEffect =<< mapM normalizeEffect effects
 
@@ -339,7 +316,7 @@ normalizeFieldInformation fieldInformation = do
 ------------------------------------------------------------------------------------------------
 
 -- | Which lattice operation 'combine' computes. Dual rules (contravariant positions, absent
--- slots, shadowed sets) flip the direction with 'dualDirection' instead of duplicating code.
+-- slots, effect-tail lacks) flip the direction with 'dualDirection' instead of duplicating code.
 data LatticeDirection = Join | Meet
   deriving (Eq, Show)
 
@@ -439,15 +416,7 @@ instance TypeLattice NormalizedEffect where
       -- meet keeps only requests present in both
       combinedRequests <-
         keyedMerge direction (combineRequestArguments direction) leftRow.request rightRow.request
-      pure $
-        NormalizedEffectRow $
-          EffectRow
-            { request = combinedRequests,
-              generic = combineSet direction leftRow.generic rightRow.generic,
-              -- NOTE: shadowing is contravariant: a request is shadowed in the join only if
-              -- shadowed on both sides, and in the meet if shadowed on either side
-              shadowed = combineSet (dualDirection direction) leftRow.shadowed rightRow.shadowed
-            }
+      pure $ NormalizedEffectRow $ EffectRow {request = combinedRequests, tails = combineTails direction leftRow.tails rightRow.tails}
 
   subtype left right = case (left, right) of
     (NormalizedEffectAny, NormalizedEffectAny) -> pure ()
@@ -455,12 +424,12 @@ instance TypeLattice NormalizedEffect where
       tellEffectMismatch "Any effect cannot be a subtype of a known effect" left right
     (NormalizedEffectRow _, NormalizedEffectAny) -> pure ()
     (NormalizedEffectRow _, NormalizedEffectRow rightRow) -> do
-      -- Resolve the left's effect-generics to their upper bounds (transitively), treating the
-      -- supertype's own effect-generics as already covered, then compare requests and shadowing.
-      effectiveLeft <- boundedEffect rightRow.generic left
+      -- Expand the left's tails to their upper bounds (transitively), treating the supertype's own
+      -- tails as already covered, then compare requests and tail lacks.
+      effectiveLeft <- boundedEffect rightRow.tails left
       case effectiveLeft of
-        -- A left-only effect-generic is unbounded (any), so the effective left effect is any and
-        -- cannot be a subtype of a known effect row.
+        -- A left-only tail is unbounded (any), so the effective left effect is any and cannot be a
+        -- subtype of a known effect row.
         NormalizedEffectAny -> tellEffectMismatch "A left-only effect generic is unbounded, so the left effect is effectively any" effectiveLeft right
         NormalizedEffectRow effectiveLeftRow -> do
           -- NOTE: requests are covariant; every request the left performs must appear on the right
@@ -473,15 +442,32 @@ instance TypeLattice NormalizedEffect where
                     mapM_ (\requestInfo -> subtypeArgumentsWith (variancesByName requestInfo.genericParameters) leftArguments rightArguments) maybeRequestInfo
             )
             (Map.toList effectiveLeftRow.request)
-          -- NOTE: shadowing is contravariant: the left's shadowed set must cover the right's
-          unless (rightRow.shadowed `Set.isSubsetOf` effectiveLeftRow.shadowed) $
-            tellEffectMismatch "Effect shadowed requests are incompatible" effectiveLeft right
+          -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
+          -- only if the right removes no more requests than the left (right lacks ⊆ left lacks).
+          mapM_
+            ( \(genericId, leftLacks) ->
+                case Map.lookup genericId rightRow.tails of
+                  Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
+                  Just rightLacks ->
+                    unless (rightLacks `Set.isSubsetOf` leftLacks) $
+                      tellEffectMismatch "Effect generic overrides are incompatible" effectiveLeft right
+            )
+            (Map.toList effectiveLeftRow.tails)
 
 -- | Combine the argument maps of one request name according to the request's declared variances.
 combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer (Map Text NormalizedGenericArgument)
 combineRequestArguments direction qualifiedName leftArguments rightArguments = do
   maybeRequestInfo <- requestInfoFor qualifiedName
   combineArgumentMap direction ((\requestInfo -> variancesByName requestInfo.genericParameters) <$> maybeRequestInfo) leftArguments rightArguments
+
+-- | Combine the tails of two effect rows. A tail variable behaves covariantly (the join keeps tails
+-- of either side, the meet only shared ones), but its lacks set is contravariant: @E \\ left@ joined
+-- with @E \\ right@ is @E \\ (left ∩ right)@ (removed only if removed on both), and met is
+-- @E \\ (left ∪ right)@. So the keys combine per the direction and the lacks per the dual.
+combineTails :: LatticeDirection -> Map GenericId (Set QualifiedName) -> Map GenericId (Set QualifiedName) -> Map GenericId (Set QualifiedName)
+combineTails = \case
+  Join -> Map.unionWith Set.intersection
+  Meet -> Map.intersectionWith Set.union
 
 instance TypeLattice NormalizedGenericArgument where
   combine direction leftArgument rightArgument = case (leftArgument, rightArgument) of
@@ -787,78 +773,90 @@ subtypeArgumentsWith variances leftArguments rightArguments =
 -- Generic upper bounds
 ------------------------------------------------------------------------------------------------
 
--- | Raise a value to the upper bounds of its own generics by absorbing the bounds in,
--- transitively: a bound may itself introduce more generics, which are then resolved too. Generics
--- in @coveredGenerics@ are left untouched (they are "already covered" — e.g. the supertype's own
--- generics during a subtype check, which cancel rather than expand). Generics that appear only
--- inside nested layers (object fields, sequence elements, …) are NOT touched here; they live in
--- those nested values' own generics sets and are resolved when the comparison recurses into them.
-resolveUpperBounds ::
-  NormalizedGenericArgument ->
-  (a -> Set GenericId) ->
-  (a -> NormalizedGenericArgument -> Normalizer a) ->
-  Set GenericId ->
-  a ->
-  Normalizer a
-resolveUpperBounds defaultBound genericsOf absorbBound coveredGenerics = resolve Set.empty
+-- | The upper-bound argument registered for a generic id, if any (callers default an absent one to
+-- their own kind's top, so an unbounded generic never passes a subtype check vacuously).
+boundArgumentFor :: GenericId -> Normalizer (Maybe NormalizedGenericArgument)
+boundArgumentFor genericId = asks (\environment -> Map.lookup genericId environment.genericBoundEnvironment)
+
+-- | Iterate a value's generics to a fixpoint: resolve every not-yet-covered generic with @absorb@,
+-- repeating because a bound may introduce further generics. @coveredGenerics@ are left untouched
+-- (the supertype's own generics during a subtype check cancel rather than expand); generics nested
+-- in inner layers are resolved when the comparison recurses into them, not here.
+resolveGenerics :: (a -> Set GenericId) -> (a -> GenericId -> Normalizer a) -> Set GenericId -> a -> Normalizer a
+resolveGenerics genericsOf absorb coveredGenerics = resolve Set.empty
   where
     resolve resolvedGenerics current = do
       let genericsToResolve = Set.difference (genericsOf current) (Set.union coveredGenerics resolvedGenerics)
       if Set.null genericsToResolve
         then pure current
         else do
-          bounds <- genericBoundsFor defaultBound genericsToResolve
-          next <- foldM absorbBound current bounds
-          resolve (Set.union resolvedGenerics genericsToResolve) next
+          raised <- foldM absorb current (Set.toList genericsToResolve)
+          resolve (Set.union resolvedGenerics genericsToResolve) raised
 
+-- | Raise a type to the upper bounds of its own generics, joining ('union') each bound in; an
+-- unregistered generic extends the type top.
 boundedType :: Set GenericId -> NormalizedType -> Normalizer NormalizedType
-boundedType = resolveUpperBounds (NormalizedGenericArgumentType topType) (\normalizedType -> normalizedType.generics) absorbBound
+boundedType = resolveGenerics (\normalizedType -> normalizedType.generics) absorbBound
   where
-    absorbBound accumulated = \case
-      NormalizedGenericArgumentType bound -> union accumulated bound
-      other -> do
-        tellKindMismatch GenericKindType (kindOf other) "Expected a type bound for a type generic"
-        pure accumulated
+    absorbBound accumulated genericId = do
+      maybeArgument <- boundArgumentFor genericId
+      case maybeArgument of
+        Nothing -> union accumulated topType
+        Just (NormalizedGenericArgumentType bound) -> union accumulated bound
+        Just other -> accumulated <$ tellKindMismatch GenericKindType (kindOf other) "Expected a type bound for a type generic"
 
-boundedEffect :: Set GenericId -> NormalizedEffect -> Normalizer NormalizedEffect
-boundedEffect = resolveUpperBounds (NormalizedGenericArgumentEffect topEffect) effectGenerics absorbBound
-  where
-    effectGenerics = \case
-      NormalizedEffectAny -> Set.empty
-      NormalizedEffectRow effectRow -> effectRow.generic
-    absorbBound accumulated = \case
-      NormalizedGenericArgumentEffect bound -> absorbEffectBound accumulated bound
-      other -> do
-        tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect bound for an effect generic"
-        pure accumulated
-
--- | Absorb an effect generic's upper bound into the row that carried the generic. Not a lattice
--- join: the row's shadowed names replace the generic part's contribution (that is what a shadow
--- means), so they are dropped from the bound before joining, and the row's shadow guarantees
--- survive the absorption.
-absorbEffectBound :: NormalizedEffect -> NormalizedEffect -> Normalizer NormalizedEffect
-absorbEffectBound accumulated bound = case (accumulated, bound) of
-  (NormalizedEffectAny, _) -> pure NormalizedEffectAny
-  (_, NormalizedEffectAny) -> pure NormalizedEffectAny
-  (NormalizedEffectRow accumulatedRow, NormalizedEffectRow boundRow) -> do
-    combinedRequests <-
-      keyedMerge Join (combineRequestArguments Join) accumulatedRow.request (Map.withoutKeys boundRow.request accumulatedRow.shadowed)
-    pure $
-      NormalizedEffectRow $
-        EffectRow
-          { request = combinedRequests,
-            generic = Set.union accumulatedRow.generic boundRow.generic,
-            shadowed = Set.union accumulatedRow.shadowed boundRow.shadowed
-          }
-
+-- | Raise an attribute to the upper bounds of its own generics; as 'boundedType', for the attribute
+-- lattice.
 boundedAttribute :: Set GenericId -> NormalizedAttribute -> Normalizer NormalizedAttribute
-boundedAttribute = resolveUpperBounds (NormalizedGenericArgumentAttribute topAttribute) (\attribute -> attribute.generic) absorbBound
+boundedAttribute = resolveGenerics (\attribute -> attribute.generic) absorbBound
   where
-    absorbBound accumulated = \case
-      NormalizedGenericArgumentAttribute bound -> union accumulated bound
-      other -> do
-        tellKindMismatch GenericKindAttribute (kindOf other) "Expected an attribute bound for an attribute generic"
-        pure accumulated
+    absorbBound accumulated genericId = do
+      maybeArgument <- boundArgumentFor genericId
+      case maybeArgument of
+        Nothing -> union accumulated topAttribute
+        Just (NormalizedGenericArgumentAttribute bound) -> union accumulated bound
+        Just other -> accumulated <$ tellKindMismatch GenericKindAttribute (kindOf other) "Expected an attribute bound for an attribute generic"
+
+-- | Restrict an effect to lack the given request names: drop them from its concrete requests and
+-- add them to every tail's lacks set. This re-applies an override's precedence wherever a tail is
+-- replaced by a concrete effect (bound expansion, substitution). @all@ has no representable
+-- restriction, so it is returned unchanged (a sound over-approximation).
+restrictEffect :: Set QualifiedName -> NormalizedEffect -> NormalizedEffect
+restrictEffect lacks = \case
+  NormalizedEffectAny -> NormalizedEffectAny
+  NormalizedEffectRow effectRow ->
+    NormalizedEffectRow
+      EffectRow
+        { request = Map.withoutKeys effectRow.request lacks,
+          tails = Map.map (Set.union lacks) effectRow.tails
+        }
+
+-- | The declared upper bound of an effect generic; an unregistered generic defaults to @all@. The
+-- effect lattice resolves tails bespoke (see 'boundedEffect'), so it is not folded by 'boundedType'.
+effectBoundFor :: GenericId -> Normalizer NormalizedEffect
+effectBoundFor genericId = do
+  maybeArgument <- boundArgumentFor genericId
+  case maybeArgument of
+    Nothing -> pure topEffect
+    Just (NormalizedGenericArgumentEffect bound) -> pure bound
+    Just other -> topEffect <$ tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect bound for an effect generic"
+
+-- | Expand an effect's tails to their upper bounds, transitively: each tail @(E, lacks)@ becomes
+-- @E@'s bound restricted to lack those names ('restrictEffect'), joined in. Tails in @coveredTails@
+-- are left in place (the supertype's own tails during a subtype check cancel rather than expand).
+boundedEffect :: Map GenericId (Set QualifiedName) -> NormalizedEffect -> Normalizer NormalizedEffect
+boundedEffect coveredTails = resolve Set.empty
+  where
+    resolve resolvedTails = \case
+      NormalizedEffectAny -> pure NormalizedEffectAny
+      NormalizedEffectRow effectRow -> do
+        let tailsToExpand = Map.withoutKeys effectRow.tails (Set.union (Map.keysSet coveredTails) resolvedTails)
+        if Map.null tailsToExpand
+          then pure (NormalizedEffectRow effectRow)
+          else do
+            expansions <- mapM (\(genericId, lacks) -> restrictEffect lacks <$> effectBoundFor genericId) (Map.toList tailsToExpand)
+            raised <- foldM union (NormalizedEffectRow effectRow {tails = Map.withoutKeys effectRow.tails (Map.keysSet tailsToExpand)}) expansions
+            resolve (Set.union resolvedTails (Map.keysSet tailsToExpand)) raised
 
 ------------------------------------------------------------------------------------------------
 -- Argument traversal: attribute push-down and generic substitution
@@ -937,18 +935,23 @@ substituteType substitution normalizedType = do
           visitAttribute = substituteAttribute substitution
         }
 
--- | As 'substituteType', for effects (effect-kind generic ids and the request arguments).
+-- | As 'substituteType', for effects (effect-kind generic ids and the request arguments). A tail
+-- @(E, lacks)@ whose @E@ is substituted is replaced by its replacement restricted to lack those
+-- names ('restrictEffect') — the override's precedence, re-applied at substitution as at bound
+-- expansion.
 substituteEffect :: Map GenericId NormalizedGenericArgument -> NormalizedEffect -> Normalizer NormalizedEffect
 substituteEffect substitution effect = case effect of
   NormalizedEffectAny -> pure NormalizedEffectAny
   NormalizedEffectRow effectRow -> do
     substitutedRequests <- mapM (mapM (substituteGenericArgument substitution)) effectRow.request
-    substituteGenerics
-      GenericKindEffect
-      (\accumulated -> \case NormalizedGenericArgumentEffect replacement -> Just (union accumulated replacement); _ -> Nothing)
-      substitution
-      (\generics -> NormalizedEffectRow $ effectRow {request = substitutedRequests, generic = generics})
-      effectRow.generic
+    let (replacedTails, keptTails) = Map.partitionWithKey (\genericId _ -> Map.member genericId substitution) effectRow.tails
+        base = NormalizedEffectRow effectRow {request = substitutedRequests, tails = keptTails}
+    foldM spliceTail base (Map.toList replacedTails)
+  where
+    spliceTail accumulated (genericId, lacks) = case Map.lookup genericId substitution of
+      Just (NormalizedGenericArgumentEffect replacement) -> union accumulated (restrictEffect lacks replacement)
+      Just other -> accumulated <$ tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect argument for an effect generic"
+      Nothing -> pure accumulated
 
 -- | As 'substituteType', for attributes (attribute-kind generic ids).
 substituteAttribute :: Map GenericId NormalizedGenericArgument -> NormalizedAttribute -> Normalizer NormalizedAttribute
@@ -1096,7 +1099,7 @@ denormalizeEffect effect = case effect of
   NormalizedEffectAny -> pure SemanticEffectAny
   NormalizedEffectRow effectRow -> do
     requestEffects <- mapM (uncurry denormalizeRequest) (Map.toList effectRow.request)
-    let genericEffects = SemanticEffectGeneric <$> Set.toList effectRow.generic
+    let genericEffects = SemanticEffectGeneric <$> Map.keys effectRow.tails
     pure $ case requestEffects <> genericEffects of
       [] -> SemanticEffectPure
       [single] -> single

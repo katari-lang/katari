@@ -96,17 +96,26 @@ spec = do
         `shouldBe` NormalizedEffectRow
           EffectRow
             { request = Map.fromList [(askName, mempty), (logName, mempty)],
-              generic = Set.singleton effectGeneric,
-              shadowed = Set.fromList [askName, logName]
+              tails = Map.singleton effectGeneric (Set.fromList [askName, logName])
             }
     it "records no shadow over a concrete base" $
       runNormalizer (normalizeEffect (SemanticEffectOverwrite (SemanticEffectRequest askName mempty) [(askName, mempty)]))
         `shouldBe` NormalizedEffectRow
           EffectRow
             { request = Map.singleton askName mempty,
-              generic = mempty,
-              shadowed = mempty
+              tails = mempty
             }
+
+  describe "substituteEffect (override precedence)" $
+    it "carries a tail's lacks onto the substituted effect" $
+      -- @{...E, ask}[E := G]@ is @{...G, ask}@: substituting a tail re-applies the override, so @G@
+      -- is restricted to lack ask (the flat-shadowed predecessor dropped this).
+      runNormalizer
+        ( substituteEffect
+            (Map.singleton effectGeneric (NormalizedGenericArgumentEffect (NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton substituteTargetGeneric mempty})))
+            (NormalizedEffectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton effectGeneric (Set.singleton askName)})
+        )
+        `shouldBe` NormalizedEffectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton substituteTargetGeneric (Set.singleton askName)}
 
   describe "normalizeType (generic arity)" $ do
     it "accepts a data application with exactly the declared arguments" $
@@ -190,6 +199,10 @@ effectGeneric = GenericId 2
 boundedEffectGeneric :: GenericId
 boundedEffectGeneric = GenericId 3
 
+-- | The effect generic that 'effectGeneric' is substituted by in the override-precedence test.
+substituteTargetGeneric :: GenericId
+substituteTargetGeneric = GenericId 4
+
 fooName :: QualifiedName
 fooName = QualifiedName {moduleName = ModuleName "test", name = "foo"}
 
@@ -202,24 +215,22 @@ askName = QualifiedName {moduleName = ModuleName "test", name = "ask"}
 logName :: QualifiedName
 logName = QualifiedName {moduleName = ModuleName "test", name = "log"}
 
--- | @{...E, ask}@ with @E@'s bound being @log@: requests {ask}, generic {E}, shadowed {ask}.
+-- | @{...E, ask}@ with @E@'s bound being @log@: request ask, tail E lacking ask.
 shadowingRow :: NormalizedEffect
 shadowingRow =
   NormalizedEffectRow
     EffectRow
       { request = Map.singleton askName mempty,
-        generic = Set.singleton boundedEffectGeneric,
-        shadowed = Set.singleton askName
+        tails = Map.singleton boundedEffectGeneric (Set.singleton askName)
       }
 
--- | @{...log, ask}@ written concretely: requests {ask, log}, shadowed {ask}.
+-- | @{...log, ask}@ written concretely: requests ask and log, no tail.
 shadowedSupertype :: NormalizedEffect
 shadowedSupertype =
   NormalizedEffectRow
     EffectRow
       { request = Map.fromList [(askName, mempty), (logName, mempty)],
-        generic = mempty,
-        shadowed = Set.singleton askName
+        tails = mempty
       }
 
 -- | data foo[T](x: T) with T covariant, and inv[T](x: T) with a (hand-declared) invariant T.
@@ -241,7 +252,7 @@ environment =
       genericBoundEnvironment =
         Map.fromList
           [ (boundedGeneric, NormalizedGenericArgumentType intType),
-            (boundedEffectGeneric, NormalizedGenericArgumentEffect (NormalizedEffectRow EffectRow {request = Map.singleton logName mempty, generic = mempty, shadowed = mempty}))
+            (boundedEffectGeneric, NormalizedGenericArgumentEffect (NormalizedEffectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
           ],
       world = bottomAttribute
     }

@@ -90,10 +90,12 @@ data NormalizedEffect where
   NormalizedEffectRow :: EffectRow -> NormalizedEffect
   deriving (Eq, Ord, Show)
 
+-- | An effect is the union of its concrete @request@s and its @tails@. Each tail maps an
+-- effect-generic variable to the request names removed from it (its "lacks" set): @(E, lacks)@
+-- denotes @E@ with every request in @lacks@ overridden, recording the @{...E, req}@ overrides.
 data EffectRow = EffectRow
   { request :: Map QualifiedName (Map Text NormalizedGenericArgument),
-    generic :: Set GenericId,
-    shadowed :: Set QualifiedName
+    tails :: Map GenericId (Set QualifiedName)
   }
   deriving (Eq, Ord, Show)
 
@@ -130,7 +132,7 @@ bottomAttribute :: NormalizedAttribute
 bottomAttribute = NormalizedAttribute {private = False, generic = Set.empty}
 
 bottomEffect :: NormalizedEffect
-bottomEffect = NormalizedEffectRow $ EffectRow {request = mempty, generic = mempty, shadowed = mempty}
+bottomEffect = NormalizedEffectRow $ EffectRow {request = mempty, tails = mempty}
 
 topType :: NormalizedType
 topType = NormalizedType {baseType = NormalizedBaseTypeUnknown, generics = Set.empty, attribute = topAttribute}
