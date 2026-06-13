@@ -58,6 +58,10 @@ library:
     - Katari.Typechecker.Environment
     - Katari.Typechecker.Check
     - Katari.Parser
+    - Katari.Parser.Lexer
+    - Katari.Parser.Type
+    - Katari.Parser.Pattern
+    - Katari.Parser.Expression
     - Katari.Lowering
     - Katari.Schema
     - Katari.Compile
