@@ -1,7 +1,0 @@
-@"Greet via an external (host-provided JS)."
-external extGreet(name: string) -> string from "FFI:ext_agent.extGreet"
-
-@"Calls extGreet and returns its result verbatim."
-agent main() -> string {
-  extGreet(name = "ext")
-}

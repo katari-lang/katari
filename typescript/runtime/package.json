@@ -1,0 +1,55 @@
+{
+  "name": "@katari-lang/runtime",
+  "version": "0.1.0-rc6",
+  "description": "Runtime server for Katari Language",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "bin": {
+    "katari-api-server": "dist/bin.mjs"
+  },
+  "files": [
+    "dist",
+    "drizzle"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx watch src/bin.ts",
+    "start": "node dist/bin.mjs",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "generate-snapshot": "drizzle-kit generate"
+  },
+  "author": "yukikurage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/runtime"
+  },
+  "homepage": "https://katari-lang.dev",
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "@hono/zod-validator": "^0.8.0",
+    "@katari-lang/types": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.24",
+    "postgres": "^3.4.9",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "drizzle-kit": "^0.31.10",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

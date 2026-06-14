@@ -1,0 +1,103 @@
+name: katari-compiler
+version: 0.1.0.0
+license: MIT
+author: "yukikurage"
+
+language: GHC2021
+
+dependencies:
+  - base >= 4.7 && < 5
+  - megaparsec
+  - parser-combinators
+  - text
+  - bytestring
+  - containers
+  - mtl
+  - transformers
+  - aeson
+  - prettyprinter
+  - prettyprinter-ansi-terminal
+  - hashable
+  - safe
+  - vector
+  - parallel
+  - async
+  - stm
+
+# NOTE: -Wmissing-export-lists is intentionally absent: modules export everything while the
+# scrap-and-build is in motion.
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wmissing-home-modules
+  - -Wpartial-fields
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.Data.AST
+    - Katari.Data.SourceSpan
+    - Katari.Data.SemanticType
+    - Katari.Data.GenericKind
+    - Katari.Data.Id
+    - Katari.Data.QualifiedName
+    - Katari.Data.Environment
+    - Katari.Data.NormalizedType
+    - Katari.Data.ModuleName
+    - Katari.Data.Variance
+    - Katari.Data.IR
+    - Katari.Error
+    - Katari.Panic
+    - Katari.Diagnostics
+    - Katari.Identifier
+    - Katari.Identifier.Monad
+    - Katari.Identifier.Type
+    - Katari.Identifier.Pattern
+    - Katari.Identifier.Expression
+    - Katari.Typechecker.Normalizer
+    - Katari.Typechecker.Environment
+    - Katari.Typechecker.Check
+    - Katari.Parser
+    - Katari.Parser.Lexer
+    - Katari.Parser.Type
+    - Katari.Parser.Pattern
+    - Katari.Parser.Expression
+    - Katari.Lowering
+    - Katari.Schema
+    - Katari.Compile
+
+tests:
+  compiler-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-compiler
+      - hspec
+    build-tools:
+      - hspec-discover
+
+default-extensions:
+  - DataKinds
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - RecordWildCards
+  - OverloadedRecordDot
+  - TypeFamilies
+  - GADTs
+  - QuantifiedConstraints
+  - UndecidableInstances
+  - DerivingStrategies
+  - TypeData
+  - StrictData
+  - LiberalTypeSynonyms
+  - ImpredicativeTypes

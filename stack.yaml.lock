@@ -11,13 +11,6 @@ packages:
       size: 6430
   original:
     hackage: tomland-1.3.3.3
-- completed:
-    hackage: validation-selective-0.2.0.0@sha256:a88df9c19a26509fc4b8098b2e110336efda7e4bc0389dd58bcf327e1726005e,3917
-    pantry-tree:
-      sha256: 82a8a83073ac0a360b72c27a8fb6952b4566a20d1ea389b65f738303423177da
-      size: 697
-  original:
-    hackage: validation-selective-0.2.0.0
 snapshots:
 - completed:
     sha256: 238fa745b64f91184f9aa518fe04bdde6552533d169b0da5256670df83a0f1a9

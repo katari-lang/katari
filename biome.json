@@ -1,12 +1,12 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.16/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "files": {
-    "includes": [
-      "typescript/packages/*/src/**/*.ts",
-      "typescript/packages/*/src/**/*.tsx",
-      "e2e/**/*.ts",
-      "scripts/**/*.mjs"
-    ]
+    "includes": ["typescript/*/src/**/*.ts", "typescript/*/src/**/*.tsx"]
   },
   "formatter": {
     "indentStyle": "space",
@@ -14,29 +14,21 @@
     "lineWidth": 100
   },
   "linter": {
+    "enabled": true,
     "rules": {
-      "recommended": true,
-      "correctness": {
-        "noUnusedImports": "warn",
-        "noUnusedVariables": "warn",
-        "noUnusedFunctionParameters": "off"
-      },
-      "complexity": {
-        "useLiteralKeys": "off"
-      },
-      "style": {
-        "noNonNullAssertion": "off",
-        "useNodejsImportProtocol": "off",
-        "useImportType": "warn"
-      },
-      "suspicious": {
-        "noExplicitAny": "off",
-        "noArrayIndexKey": "off"
-      },
-      "a11y": {
-        "noStaticElementInteractions": "off",
-        "useKeyWithClickEvents": "off",
-        "noLabelWithoutControl": "off"
+      "recommended": true
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double"
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
       }
     }
   }

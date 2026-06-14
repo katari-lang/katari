@@ -1,7 +1,0 @@
-[package]
-name = "use_return"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

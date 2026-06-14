@@ -1,36 +1,3 @@
-# Haskell / Stack
-.stack-work/
-*.cabal
-dist-newstyle/
-*.hi
-*.o
-.hie/
-.hls/
-
-# Rust / Cargo
-rust/target/
-
-# Node / TypeScript
-node_modules/
-dist/
-
-# Katari project-local artefacts
-.katari/
-
-# Release / publish staging (created by scripts/stage-binary-packages.mjs
-# and the release-npm workflow)
-.binaries/
-.staged/
-*.vsix
-
-# Review notes
-review/
-
-# Editor / OS
-.DS_Store
-.env
-.idea/
-.vscode/
-*~
-*.swp
-.claude/
+/node_modules/
+/.stack-work/
+/.vscode/
