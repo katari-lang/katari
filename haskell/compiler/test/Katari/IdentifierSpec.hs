@@ -113,7 +113,32 @@ identifySpec = do
 
   describe "identifyModule (with modifiers)" $ do
     it "reports a with-modifier targeting a non-state variable (K2007)" $
-      codesOf (identify emptyContext modifierNonStateProgram) `shouldContain` ["K2007"]
+      codesOf (identify emptyContext modifierNonStateProgram) `shouldBe` ["K2007"]
+
+  describe "identifyModule (then clauses)" $ do
+    -- A `then` clause's `next`/`break` targets the *enclosing* for/handler (the parser routes the
+    -- keyword by the lexically-innermost loop context, which the `then` clause sits outside of), so a
+    -- `with` modifier there resolves against that enclosing state — not the just-finished loop's own.
+    it "resolves a then-clause `next ... with` against the enclosing handler state" $
+      diagnosticsOf (identify emptyContext thenTargetsHandlerProgram) `shouldSatisfy` null
+
+    it "resolves a then-clause `next ... with` against the enclosing outer loop state" $
+      diagnosticsOf
+        ( identify
+            emptyContext
+            "agent main() -> integer {\n\
+            \  for (let x in [1], var a = 0) {\n\
+            \    for (let y in [2]) { next y } then (z) { next z with { a = a + 1 } }\n\
+            \    next a\n\
+            \  }\n\
+            \}\n"
+        )
+        `shouldSatisfy` null
+
+    it "reads the loop's own state as a value in its then clause" $
+      diagnosticsOf
+        (identify emptyContext "agent main() -> integer {\n  for (let x in [1], var a = 0) {\n    next a + x\n  } then (y) {\n    a + y\n  }\n}\n")
+        `shouldSatisfy` null
 
   describe "identifyModule (field access vs module qualification)" $ do
     it "synthesises a qualified reference for module.member" $ do
@@ -145,16 +170,16 @@ identifySpec = do
       diagnosticsOf (identify contextWithLib "import lib\nagent main(p: lib.pair) -> integer { 1 }") `shouldSatisfy` null
 
     it "reports an undefined module member (K2002)" $
-      codesOf (identify contextWithLib "import lib\nagent main() -> integer { lib.missing(x = 6) }") `shouldContain` ["K2002"]
+      codesOf (identify contextWithLib "import lib\nagent main() -> integer { lib.missing(x = 6) }") `shouldBe` ["K2002"]
 
     it "reports an unknown imported module (K2005)" $
-      codesOf (identify emptyContext "import nonexistent\nagent main() -> integer { 1 }") `shouldContain` ["K2005"]
+      codesOf (identify emptyContext "import nonexistent\nagent main() -> integer { 1 }") `shouldBe` ["K2005"]
 
     it "reports an unknown imported name (K2006)" $
-      codesOf (identify contextWithLib "import { missing } from lib\nagent main() -> integer { 1 }") `shouldContain` ["K2006"]
+      codesOf (identify contextWithLib "import { missing } from lib\nagent main() -> integer { 1 }") `shouldBe` ["K2006"]
 
     it "reports a non-module qualifier (K2004)" $
-      codesOf (identify emptyContext "data point(x: integer)\nagent main() -> point.field { 1 }") `shouldContain` ["K2004"]
+      codesOf (identify emptyContext "data point(x: integer)\nagent main() -> point.field { 1 }") `shouldBe` ["K2004"]
 
 ---------------------------------------------------------------------------------------------------
 -- Symbol table (LSP visibility + go-to-definition)
@@ -230,6 +255,24 @@ modifierNonStateProgram =
   \agent main() -> integer {\n\
   \  use handler (var counter = 1) {\n\
   \    request tick() { next counter with { bogus = counter } }\n\
+  \  }\n\
+  \  tick()\n\
+  \}\n"
+
+-- | A @for@ nested in a request handler: the @for@'s @then@ clause does @next ... with@ targeting the
+-- handler state (the @then@ clause's @next@ binds to the enclosing handler, not the just-finished for).
+thenTargetsHandlerProgram :: Text
+thenTargetsHandlerProgram =
+  "request tick() -> integer\n\
+  \agent main() -> integer {\n\
+  \  use handler (var counter = 1) {\n\
+  \    request tick() {\n\
+  \      for (let x in [1]) {\n\
+  \        next x\n\
+  \      } then (z) {\n\
+  \        next counter with { counter = counter + 1 }\n\
+  \      }\n\
+  \    }\n\
   \  }\n\
   \  tick()\n\
   \}\n"

@@ -63,25 +63,12 @@ resolveObjectTypeField field = do
 -- Type names
 ---------------------------------------------------------------------------------------------------
 
+-- | The reference (and its K2002 diagnostic) point at the member name only — @node.typeReference@
+-- carries the member span when qualified, while @node.sourceSpan@ spans the whole @module.Name@.
 resolveTypeNameNode :: TypeNameNode Parsed -> Identifier (TypeNameNode Identified)
-resolveTypeNameNode node = case node.moduleQualifier of
-  Nothing -> do
-    typeReference <- resolveTypeReference node.sourceSpan node.name
-    pure TypeNameNode {moduleQualifier = Nothing, name = node.name, typeReference = typeReference, sourceSpan = node.sourceSpan}
-  Just qualifier -> do
-    (identifiedQualifier, moduleResolution) <- resolveModuleQualifier qualifier
-    -- The reference (and its K2002 diagnostic) point at the member name only — @node.typeReference@
-    -- carries the member span, while @node.sourceSpan@ spans the whole @module.Name@.
-    typeResolution <- case moduleResolution of
-      Nothing -> pure Nothing
-      Just moduleName -> resolveTypeMember node.typeReference.sourceSpan moduleName node.name
-    pure
-      TypeNameNode
-        { moduleQualifier = Just identifiedQualifier,
-          name = node.name,
-          typeReference = identifiedReference node.typeReference.sourceSpan typeResolution,
-          sourceSpan = node.sourceSpan
-        }
+resolveTypeNameNode node = do
+  (moduleQualifier, typeReference) <- resolveQualifiedReference resolveTypeReference resolveTypeMember node.moduleQualifier node.name node.typeReference
+  pure TypeNameNode {moduleQualifier = moduleQualifier, name = node.name, typeReference = typeReference, sourceSpan = node.sourceSpan}
 
 ---------------------------------------------------------------------------------------------------
 -- Generic parameters

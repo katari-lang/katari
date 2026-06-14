@@ -16,7 +16,7 @@ module Katari.Identifier where
 import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -99,8 +99,9 @@ resolveModule :: ImportContext -> Module Parsed -> Identifier IdentifiedModule
 resolveModule importContext parsedModule = do
   moduleName <- currentModuleName
   importBindings <- resolveImports parsedModule.declarations
-  let ownBindings = concatMap (declarationBindings moduleName) parsedModule.declarations
-  reportTopLevelDuplicates parsedModule.declarations
+  let ownBindingGroups = declarationBindings moduleName <$> parsedModule.declarations
+      ownBindings = concat ownBindingGroups
+  reportTopLevelDuplicates ownBindingGroups
   withScope (ambientToScope importContext) $
     bindInScope parsedModule.sourceSpan (importBindings <> ownBindings) $ do
       declarations <- traverse resolveDeclaration parsedModule.declarations
@@ -171,47 +172,37 @@ addImportItem moduleName moduleInterface item =
 ---------------------------------------------------------------------------------------------------
 
 -- | Report a duplicate (K2003) once per declaration that re-introduces a name in a namespace it
--- already occupies. A value and a type may share a name (distinct namespaces), so that is not a
--- duplicate; a request / data redeclared (both namespaces) is reported once, not twice. Imports and
--- ambient names may be shadowed silently.
-reportTopLevelDuplicates :: List (Declaration Parsed) -> Identifier ()
-reportTopLevelDuplicates = go Set.empty Set.empty . mapMaybe topLevelName
+-- already occupies. Driven by the same per-declaration 'declarationBindings' as the scope and the
+-- export scan (no separate classification to drift): each group is one declaration's bindings, keyed
+-- by name and namespace. A value and a type may share a name (distinct namespaces), so that is not a
+-- duplicate; a request / data redeclared (both namespaces) clashes in both but is reported once per
+-- declaration, not once per namespace. Imports and ambient names may be shadowed silently.
+reportTopLevelDuplicates :: List (List Binding) -> Identifier ()
+reportTopLevelDuplicates = go Set.empty
   where
-    go :: Set Text -> Set Text -> List TopLevelName -> Identifier ()
-    go seenVariable seenType introductions = case introductions of
+    go :: Set (Text, Namespace) -> List (List Binding) -> Identifier ()
+    go seen groups = case groups of
       [] -> pure ()
-      introduction : rest -> do
-        let clashes =
-              (introduction.introducesVariable && Set.member introduction.name seenVariable)
-                || (introduction.introducesType && Set.member introduction.name seenType)
-        when clashes (reportDuplicateName introduction.sourceSpan introduction.name)
-        go
-          (if introduction.introducesVariable then Set.insert introduction.name seenVariable else seenVariable)
-          (if introduction.introducesType then Set.insert introduction.name seenType else seenType)
-          rest
+      group : rest -> do
+        let keys = bindingKey <$> group
+        when (any (`Set.member` seen) keys) (reportGroupDuplicate group)
+        go (foldr Set.insert seen keys) rest
 
--- | A top-level name and the namespaces its declaration introduces it into.
-data TopLevelName = TopLevelName
-  { name :: Text,
-    sourceSpan :: SourceSpan,
-    introducesVariable :: Bool,
-    introducesType :: Bool
-  }
+    reportGroupDuplicate group = case group of
+      [] -> pure ()
+      binding : _ -> reportDuplicateName binding.definitionSpan binding.name
 
-topLevelName :: Declaration Parsed -> Maybe TopLevelName
-topLevelName = \case
-  DeclarationAgent declaration -> Just (variableName declaration.name declaration.sourceSpan)
-  DeclarationExternalAgent declaration -> Just (variableName declaration.name declaration.sourceSpan)
-  DeclarationPrimitiveAgent declaration -> Just (variableName declaration.name declaration.sourceSpan)
-  DeclarationRequest declaration -> Just (valueAndTypeName declaration.name declaration.sourceSpan)
-  DeclarationData declaration -> Just (valueAndTypeName declaration.name declaration.sourceSpan)
-  DeclarationTypeSynonym declaration -> Just (typeName declaration.name declaration.sourceSpan)
-  DeclarationImport _ -> Nothing
-  DeclarationError _ -> Nothing
+-- | The namespace a top-level binding occupies, for duplicate detection.
+data Namespace = NamespaceVariable | NamespaceType | NamespaceModule
+  deriving stock (Eq, Ord)
+
+bindingKey :: Binding -> (Text, Namespace)
+bindingKey binding = (binding.name, namespaceOf binding.resolution)
   where
-    variableName name sourceSpan = TopLevelName {name = name, sourceSpan = sourceSpan, introducesVariable = True, introducesType = False}
-    typeName name sourceSpan = TopLevelName {name = name, sourceSpan = sourceSpan, introducesVariable = False, introducesType = True}
-    valueAndTypeName name sourceSpan = TopLevelName {name = name, sourceSpan = sourceSpan, introducesVariable = True, introducesType = True}
+    namespaceOf = \case
+      SymbolVariable _ -> NamespaceVariable
+      SymbolType _ -> NamespaceType
+      SymbolModule _ -> NamespaceModule
 
 ---------------------------------------------------------------------------------------------------
 -- Declarations

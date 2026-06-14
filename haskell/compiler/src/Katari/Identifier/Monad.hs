@@ -384,6 +384,30 @@ reportMember sourceSpan moduleName name = \case
   Just resolution -> pure (Just resolution)
   Nothing -> reportUndefinedMember sourceSpan moduleName name >> pure Nothing
 
+-- | Resolve a (possibly @module.@-qualified) name reference in a single namespace, returning the
+-- identified qualifier (if any) and the resolved reference. A bare name goes through @resolveBare@
+-- (K2001 if undefined); a qualified @module.name@ resolves the qualifier in the module namespace
+-- (K2004 / K2001) and then the member through that module's interface via @resolveMember@ (K2002 if
+-- absent). Shared by the type-name, constructor, and request-handler reference resolvers so the three
+-- never disagree on the qualified/bare handling. The reference span (member-only when qualified) comes
+-- from @reference@.
+resolveQualifiedReference ::
+  (ReferenceResolution Identified nameReferenceKind ~ Maybe resolution) =>
+  (SourceSpan -> Text -> Identifier (Reference Identified nameReferenceKind)) ->
+  (SourceSpan -> ModuleName -> Text -> Identifier (Maybe resolution)) ->
+  Maybe (ModuleQualifier Parsed) ->
+  Text ->
+  Reference Parsed nameReferenceKind ->
+  Identifier (Maybe (ModuleQualifier Identified), Reference Identified nameReferenceKind)
+resolveQualifiedReference resolveBare resolveMember moduleQualifier name reference = case moduleQualifier of
+  Nothing -> do
+    resolved <- resolveBare reference.sourceSpan name
+    pure (Nothing, resolved)
+  Just qualifier -> do
+    (identifiedQualifier, moduleResolution) <- resolveModuleQualifier qualifier
+    memberResolution <- maybe (pure Nothing) (\moduleName -> resolveMember reference.sourceSpan moduleName name) moduleResolution
+    pure (Just identifiedQualifier, identifiedReference reference.sourceSpan memberResolution)
+
 -- | Resolve a @with@ modifier target: it must name an enclosing @for@ / @handler@ state variable, not
 -- an arbitrary in-scope local. Reports K2007 otherwise.
 resolveStateVariableReference :: SourceSpan -> Text -> Identifier (Reference Identified VariableReference)

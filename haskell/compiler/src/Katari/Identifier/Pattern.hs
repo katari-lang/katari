@@ -86,14 +86,7 @@ resolveConstructorReference ::
   Text ->
   Reference Parsed VariableReference ->
   Identifier (Maybe (ModuleQualifier Identified), Reference Identified VariableReference)
-resolveConstructorReference moduleQualifier name reference = case moduleQualifier of
-  Nothing -> do
-    resolvedReference <- resolveVariableReference reference.sourceSpan name
-    pure (Nothing, resolvedReference)
-  Just qualifier -> do
-    (identifiedQualifier, moduleResolution) <- resolveModuleQualifier qualifier
-    variableResolution <- maybe (pure Nothing) (\moduleName -> resolveVariableMember reference.sourceSpan moduleName name) moduleResolution
-    pure (Just identifiedQualifier, identifiedReference reference.sourceSpan variableResolution)
+resolveConstructorReference = resolveQualifiedReference resolveVariableReference resolveVariableMember
 
 ---------------------------------------------------------------------------------------------------
 -- Parameter bindings (agent / request-handler formal parameters)

@@ -259,14 +259,7 @@ resolveRequestReference ::
   Text ->
   Reference Parsed TypeReference ->
   Identifier (Maybe (ModuleQualifier Identified), Reference Identified TypeReference)
-resolveRequestReference moduleQualifier name reference = case moduleQualifier of
-  Nothing -> do
-    typeReference <- resolveTypeReference reference.sourceSpan name
-    pure (Nothing, typeReference)
-  Just qualifier -> do
-    (identifiedQualifier, moduleResolution) <- resolveModuleQualifier qualifier
-    typeResolution <- maybe (pure Nothing) (\moduleName -> resolveTypeMember reference.sourceSpan moduleName name) moduleResolution
-    pure (Just identifiedQualifier, identifiedReference reference.sourceSpan typeResolution)
+resolveRequestReference = resolveQualifiedReference resolveTypeReference resolveTypeMember
 
 ---------------------------------------------------------------------------------------------------
 -- Blocks and statements
