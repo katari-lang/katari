@@ -142,7 +142,8 @@ nameType = do
                         sourceSpan = first.sourceSpan
                       },
                 name = second.value,
-                typeReference = parsedReference sourceSpan,
+                -- The reference points at the member name only; @sourceSpan@ spans the whole @module.Name@.
+                typeReference = parsedReference second.sourceSpan,
                 sourceSpan = sourceSpan
               }
 

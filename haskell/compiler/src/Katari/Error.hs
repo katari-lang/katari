@@ -200,6 +200,8 @@ data IdentifierError where
   IdentifierErrorUnknownImportModule :: UnknownImportModuleErrorInfo -> IdentifierError
   -- | An import item is not exported by its source module.
   IdentifierErrorUnknownImportName :: UnknownImportNameErrorInfo -> IdentifierError
+  -- | A @with@ modifier targets a name that is not an enclosing @for@ / @handler@ state variable.
+  IdentifierErrorUndefinedStateVariable :: UndefinedStateVariableErrorInfo -> IdentifierError
   deriving (Eq, Ord, Show)
 
 identifierErrorCode :: IdentifierError -> Text
@@ -210,6 +212,7 @@ identifierErrorCode = \case
   IdentifierErrorNotAModule _ -> "K2004"
   IdentifierErrorUnknownImportModule _ -> "K2005"
   IdentifierErrorUnknownImportName _ -> "K2006"
+  IdentifierErrorUndefinedStateVariable _ -> "K2007"
 
 identifierErrorSeverity :: IdentifierError -> Severity
 identifierErrorSeverity = \case
@@ -219,6 +222,7 @@ identifierErrorSeverity = \case
   IdentifierErrorNotAModule _ -> SeverityError
   IdentifierErrorUnknownImportModule _ -> SeverityError
   IdentifierErrorUnknownImportName _ -> SeverityError
+  IdentifierErrorUndefinedStateVariable _ -> SeverityError
 
 renderIdentifierError :: IdentifierError -> Text
 renderIdentifierError identifierError =
@@ -229,6 +233,7 @@ renderIdentifierError identifierError =
     IdentifierErrorNotAModule info -> info.name <> " is not a module"
     IdentifierErrorUnknownImportModule info -> "Imported module does not exist: " <> renderModuleName info.moduleName
     IdentifierErrorUnknownImportName info -> "Module " <> renderModuleName info.moduleName <> " does not export " <> info.name
+    IdentifierErrorUndefinedStateVariable info -> info.name <> " is not a loop or handler state variable"
 
 newtype UndefinedNameErrorInfo = UndefinedNameErrorInfo
   { name :: Text
@@ -259,6 +264,11 @@ newtype UnknownImportModuleErrorInfo = UnknownImportModuleErrorInfo
 data UnknownImportNameErrorInfo = UnknownImportNameErrorInfo
   { moduleName :: ModuleName,
     name :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+newtype UndefinedStateVariableErrorInfo = UndefinedStateVariableErrorInfo
+  { name :: Text
   }
   deriving (Eq, Ord, Show)
 

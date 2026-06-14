@@ -698,5 +698,5 @@ qualifiedName = do
     Just second ->
       ( Just ModuleQualifier {name = first.value, moduleReference = parsedReference first.sourceSpan, sourceSpan = first.sourceSpan},
         second.value,
-        mergeSpans first.sourceSpan second.sourceSpan
+        second.sourceSpan
       )

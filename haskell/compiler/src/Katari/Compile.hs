@@ -21,7 +21,8 @@ import Katari.Data.IR (LoweredModule)
 import Katari.Data.Id (TypeResolution, VariableResolution)
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Diagnostics (Diagnostics)
-import Katari.Identifier (IdentifiedModule (..), ImportContext (..), ModuleInterface, ScopeIndex, identifyModule, scanExports)
+import Katari.Identifier (identifyModule, scanExports)
+import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..), ModuleInterface, SymbolTable)
 import Katari.Lowering (lowerModule)
 import Katari.Parser (parseModule)
 import Katari.Schema (SchemaEntry, buildSchema)
@@ -33,16 +34,17 @@ import Katari.Typechecker.Environment (buildEnvironment)
 data CompileInput = CompileInput
   { sources :: Map ModuleName Text,
     ambientVariables :: Map Text VariableResolution,
-    ambientTypes :: Map Text TypeResolution
+    ambientTypes :: Map Text TypeResolution,
+    ambientModules :: Map Text ModuleName
   }
 
 -- | The product of a compile: each module's lowered output (uploaded individually) and schema, the
--- LSP scope index and typed AST per module (for query / hover), and every diagnostic emitted along
+-- LSP symbol table and typed AST per module (for query / hover), and every diagnostic emitted along
 -- the way.
 data CompileResult = CompileResult
   { loweredModules :: Map ModuleName LoweredModule,
     schemas :: Map ModuleName (List SchemaEntry),
-    scopeIndexes :: Map ModuleName ScopeIndex,
+    symbolTables :: Map ModuleName SymbolTable,
     typedModules :: Map ModuleName (Module Typed),
     diagnostics :: Diagnostics
   }
@@ -52,7 +54,7 @@ compile input =
   CompileResult
     { loweredModules = loweredModules,
       schemas = moduleSchemas,
-      scopeIndexes = (\identifiedModule -> identifiedModule.scopeIndex) <$> identifiedModules,
+      symbolTables = (\identifiedModule -> identifiedModule.symbolTable) <$> identifiedModules,
       typedModules = typedModules,
       diagnostics =
         parseDiagnostics
@@ -75,7 +77,8 @@ compile input =
       ImportContext
         { moduleInterfaces = interfaces,
           ambientVariables = input.ambientVariables,
-          ambientTypes = input.ambientTypes
+          ambientTypes = input.ambientTypes,
+          ambientModules = input.ambientModules
         }
 
     -- Identify (per module; no dependency ordering needed — all interfaces are already available).

@@ -114,17 +114,18 @@ constructorFilterOrVariablePattern = do
 constructorPattern :: SyntacticTypeExpression Parsed -> List (FieldPattern Parsed) -> SourceSpan -> Parser PatternP
 constructorPattern head' fields parenSpan =
   case constructorHead head' of
-    Just (moduleQualifier, name, genericArguments, headSpan) ->
+    Just (moduleQualifier, name, genericArguments, referenceSpan) ->
       pure
         ( PatternConstructor
             ConstructorPattern
               { moduleQualifier = moduleQualifier,
                 name = name,
-                constructorReference = parsedReference headSpan,
+                -- The reference points at the constructor name only; the pattern spans the whole head.
+                constructorReference = parsedReference referenceSpan,
                 genericArguments = genericArguments,
                 instantiation = (),
                 fields = fields,
-                sourceSpan = mergeSpans headSpan parenSpan,
+                sourceSpan = mergeSpans (sourceSpanOf head') parenSpan,
                 typeOf = ()
               }
         )
@@ -155,13 +156,14 @@ variableSpan nameSpan annotation defaultValue =
     Just parameterDefault' -> mergeSpans nameSpan parameterDefault'.sourceSpan
     Nothing -> maybe nameSpan (mergeSpans nameSpan . sourceSpanOf) annotation
 
--- | Decompose a parsed head type into its constructor parts (qualifier, name, generic arguments),
--- or 'Nothing' if it is not a (possibly applied) name.
+-- | Decompose a parsed head type into its constructor parts (qualifier, name, generic arguments, and
+-- the span of the constructor name itself for its reference), or 'Nothing' if it is not a (possibly
+-- applied) name.
 constructorHead :: SyntacticTypeExpression Parsed -> Maybe (Maybe (ModuleQualifier Parsed), Text, List (SyntacticTypeExpression Parsed), SourceSpan)
 constructorHead = \case
-  TypeName node -> Just (node.moduleQualifier, node.name, [], node.sourceSpan)
+  TypeName node -> Just (node.moduleQualifier, node.name, [], node.typeReference.sourceSpan)
   TypeApplication node -> case node.applicationHead of
-    TypeName inner -> Just (inner.moduleQualifier, inner.name, node.applicationArguments, node.sourceSpan)
+    TypeName inner -> Just (inner.moduleQualifier, inner.name, node.applicationArguments, inner.typeReference.sourceSpan)
     _ -> Nothing
   _ -> Nothing
 

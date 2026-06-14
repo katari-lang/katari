@@ -1,190 +1,339 @@
--- | The Identifier pass resolves every name reference in a 'Katari.Data.AST.Parsed' module against
--- the names in scope, producing a 'Katari.Data.AST.Identified' module (each reference carries a
--- @Just@ resolution, or @Nothing@ when it could not be resolved). This module defines the monad it
--- runs in (the environment, state, and capabilities — fresh-id supply, scope, diagnostics), the I/O
--- of the pass (its entry points and the cross-module interface they exchange), and stubbed bodies
--- for the resolution walk itself, which is filled in incrementally.
+-- | The Identifier pass resolves every name reference in a 'Parsed' module against the names in
+-- scope, producing an 'Identified' module (each reference carries a @Just@ resolution, or @Nothing@
+-- when it could not be resolved). This module is the entry point and the top-level orchestration:
+-- the export scan, import resolution, the top-level scope it assembles, and the declaration dispatch.
+-- Expressions / statements / types / patterns are resolved in the @Katari.Identifier.*@ submodules,
+-- over the monad in "Katari.Identifier.Monad".
+--
+-- Resolution is per-module and order-independent at the top level: 'scanExports' yields every
+-- module's interface up front, so 'identifyModule' resolves bodies against a fixed import context and
+-- tolerates import cycles. Within a module, all top-level names are in scope everywhere (mutual
+-- recursion); a name re-introduced in a namespace it already occupies is reported (K2003), but a
+-- value and a type may share a name (distinct namespaces). Type-synonym cycles are left for the
+-- checker.
 module Katari.Identifier where
 
-import Control.Monad.RWS.CPS (RWS, evalRWS)
-import Control.Monad.RWS.Class (MonadReader, MonadState, asks, local, state)
-import Data.Map (Map)
+import Control.Applicative ((<|>))
+import Control.Monad (when)
 import Data.Map qualified as Map
+import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Data.AST (Module, Phase (..))
-import Katari.Data.Id (GenericId (..), LocalVariableId (..), TypeResolution, VariableResolution)
-import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.AST
+import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.SourceSpan (SourceSpan)
 import Katari.Diagnostics (Diagnostics)
+import Katari.Identifier.Expression (resolveAgentDeclaration)
+import Katari.Identifier.Monad
+import Katari.Identifier.Type (resolveParameterSignature, resolveType, withGenericParameters)
 
--- | The names visible at a point in the source, one map per namespace the Identifier resolves.
--- Top-level and imported names seed it; local bindings (parameters, generics, @let@) extend it
--- through 'MonadReader''s 'local'. Labels are resolved type-directed by the checker, not here, so
--- there is no label namespace.
-data Scope = Scope
-  { variableBindings :: Map Text VariableResolution,
-    typeBindings :: Map Text TypeResolution,
-    moduleBindings :: Map Text ModuleName
-  }
-  deriving stock (Eq, Show)
-
-emptyScope :: Scope
-emptyScope = Scope {variableBindings = Map.empty, typeBindings = Map.empty, moduleBindings = Map.empty}
-
--- | Read-only context of the pass: the module being identified (to qualify its own declarations)
--- and the names currently in scope.
-data IdentifierEnvironment = IdentifierEnvironment
-  { moduleName :: ModuleName,
-    scope :: Scope
-  }
-
--- | The fresh-id supply, threaded as state across the whole pass (counters only ever increase).
-data IdentifierState = IdentifierState
-  { nextGenericId :: Int,
-    nextLocalVariableId :: Int
-  }
-
-initialIdentifierState :: IdentifierState
-initialIdentifierState = IdentifierState {nextGenericId = 0, nextLocalVariableId = 0}
-
--- | The Identifier monad: read the scope, accumulate diagnostics, supply fresh ids. A plain RWS
--- alias (like the Normalizer); emission, supply, and scope are free functions over the mtl classes.
-type Identifier a = RWS IdentifierEnvironment Diagnostics IdentifierState a
-
-runIdentifier :: IdentifierEnvironment -> Identifier a -> (a, Diagnostics)
-runIdentifier environment action = evalRWS action environment initialIdentifierState
-
--- Fresh-id supply ---------------------------------------------------------------------------------
-
-freshGenericId :: (MonadState IdentifierState m) => m GenericId
-freshGenericId = state (\current -> (GenericId current.nextGenericId, current {nextGenericId = current.nextGenericId + 1}))
-
-freshLocalVariableId :: (MonadState IdentifierState m) => m LocalVariableId
-freshLocalVariableId = state (\current -> (LocalVariableId current.nextLocalVariableId, current {nextLocalVariableId = current.nextLocalVariableId + 1}))
-
--- Scope -------------------------------------------------------------------------------------------
-
-lookupVariable :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe VariableResolution)
-lookupVariable name = asks (\environment -> Map.lookup name environment.scope.variableBindings)
-
-lookupType :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe TypeResolution)
-lookupType name = asks (\environment -> Map.lookup name environment.scope.typeBindings)
-
-lookupModule :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe ModuleName)
-lookupModule name = asks (\environment -> Map.lookup name environment.scope.moduleBindings)
-
--- | Run an action with one more variable binding in scope (restored on exit).
-withVariable :: (MonadReader IdentifierEnvironment m) => Text -> VariableResolution -> m a -> m a
-withVariable name resolution =
-  local (overScope (\scope -> scope {variableBindings = Map.insert name resolution scope.variableBindings}))
-
--- | Run an action with one more type binding in scope (restored on exit).
-withType :: (MonadReader IdentifierEnvironment m) => Text -> TypeResolution -> m a -> m a
-withType name resolution =
-  local (overScope (\scope -> scope {typeBindings = Map.insert name resolution scope.typeBindings}))
-
-overScope :: (Scope -> Scope) -> IdentifierEnvironment -> IdentifierEnvironment
-overScope f environment = environment {scope = f environment.scope}
-
--- Module interface (cross-module name-resolution surface) -----------------------------------------
-
--- | One exported name's name-resolution surface: the namespaces it populates and what each resolves
--- to. Minimal by design — only what an importing module needs to resolve the name. Type shapes,
--- generic arity and variance are not here; the global env-build pass derives those from the
--- identified declarations for the checker.
-data ExportedSymbol = ExportedSymbol
-  { variable :: Maybe VariableResolution,
-    typeLevel :: Maybe TypeResolution
-  }
-  deriving stock (Eq, Show)
-
--- | What a module exposes to importers, keyed by exported name. Produced by 'scanExports' from the
--- parsed module alone (the export surface does not depend on imports), so every module's interface
--- is available before any module is resolved — letting 'identifyModule' run per-module and tolerate
--- import cycles.
-newtype ModuleInterface = ModuleInterface
-  { exports :: Map Text ExportedSymbol
-  }
-  deriving stock (Eq, Show)
-
--- | The context an 'identifyModule' run resolves against: the interfaces of every importable module
--- and the ambient names injected into every module (primitive / stdlib seeds). The driver builds
--- this from the 'scanExports' results before resolving bodies.
-data ImportContext = ImportContext
-  { moduleInterfaces :: Map ModuleName ModuleInterface,
-    ambientVariables :: Map Text VariableResolution,
-    ambientTypes :: Map Text TypeResolution
-  }
-  deriving stock (Eq, Show)
-
--- Scope-frame index (LSP) -------------------------------------------------------------------------
-
--- | The names visible across one lexical region, captured as the region is left. The LSP layer
--- answers "what is in scope at this position?" by finding the innermost frame whose span contains
--- it.
-data ScopeFrame = ScopeFrame
-  { sourceSpan :: SourceSpan,
-    visibleScope :: Scope
-  }
-  deriving stock (Eq, Show)
-
--- | Every scope frame captured while resolving a module, for offline visibility queries.
-newtype ScopeIndex = ScopeIndex
-  { frames :: List ScopeFrame
-  }
-  deriving stock (Eq, Show)
-
-emptyScopeIndex :: ScopeIndex
-emptyScopeIndex = ScopeIndex {frames = []}
-
--- Identifier output -------------------------------------------------------------------------------
-
--- | The product of resolving one module: the identified AST (every reference carries its
--- resolution) and the scope-frame index for LSP. The cross-module data is recovered elsewhere — this
--- module's 'ModuleInterface' from 'scanExports', and the declarations the global env-build consumes
--- by filtering 'identifiedAst' — so neither is duplicated here.
-data IdentifiedModule = IdentifiedModule
-  { identifiedAst :: Module Identified,
-    scopeIndex :: ScopeIndex
-  }
-  deriving stock (Eq, Show)
-
--- Entry points ------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------
+-- Export scan
+---------------------------------------------------------------------------------------------------
 
 -- | Project a parsed module's public surface. Import-independent and side-effect-free: a name is
 -- exported by virtue of being a top-level declaration, so neither imports nor bodies are consulted.
---
--- TODO: walk the top-level declarations and populate the export map. Currently a stub returning the
--- empty interface.
+-- Built from the same 'declarationBindings' the module's own top-level scope is, so the interface and
+-- the in-module resolution never disagree. Names are merged per namespace ('mergeExportedSymbol'), so
+-- a value and a type that share a name both survive.
 scanExports :: ModuleName -> Module Parsed -> ModuleInterface
-scanExports _moduleName _parsedModule = ModuleInterface {exports = Map.empty}
+scanExports moduleName parsedModule =
+  ModuleInterface {exports = Map.fromListWith mergeExportedSymbol [(binding.name, exportedSymbolOf binding) | binding <- concatMap (declarationBindings moduleName) parsedModule.declarations]}
+
+-- | Every top-level binding a declaration introduces: its module-qualified resolution and the span of
+-- its defining occurrence, one per namespace it populates. The single source of truth shared by the
+-- export scan and the module's own top-level scope.
+declarationBindings :: ModuleName -> Declaration Parsed -> List Binding
+declarationBindings moduleName = \case
+  DeclarationAgent declaration -> [ownVariable declaration.name declaration.variableReference]
+  DeclarationExternalAgent declaration -> [ownVariable declaration.name declaration.variableReference]
+  DeclarationPrimitiveAgent declaration -> [ownVariable declaration.name declaration.variableReference]
+  DeclarationRequest declaration -> [ownVariable declaration.name declaration.variableReference, ownType declaration.name declaration.typeReference]
+  DeclarationData declaration -> [ownVariable declaration.name declaration.variableReference, ownType declaration.name declaration.typeReference]
+  DeclarationTypeSynonym declaration -> [ownType declaration.name declaration.typeReference]
+  DeclarationImport _ -> []
+  DeclarationError _ -> []
+  where
+    ownVariable name reference = variableBinding name reference.sourceSpan (qualifiedVariableResolution moduleName name)
+    ownType name reference = typeBinding name reference.sourceSpan (qualifiedTypeResolution moduleName name)
+
+exportedSymbolOf :: Binding -> ExportedSymbol
+exportedSymbolOf binding = case binding.resolution of
+  SymbolVariable resolution -> ExportedSymbol {variable = Just resolution, typeLevel = Nothing}
+  SymbolType resolution -> ExportedSymbol {variable = Nothing, typeLevel = Just resolution}
+  SymbolModule _ -> ExportedSymbol {variable = Nothing, typeLevel = Nothing}
+
+-- | Combine two same-named exported symbols, keeping a resolution from either namespace (so a value
+-- and a type sharing a name both survive). On a genuine same-namespace clash the earlier-scanned
+-- resolution is kept; the duplicate is reported separately by 'reportTopLevelDuplicates'.
+mergeExportedSymbol :: ExportedSymbol -> ExportedSymbol -> ExportedSymbol
+mergeExportedSymbol newer older =
+  ExportedSymbol {variable = older.variable <|> newer.variable, typeLevel = older.typeLevel <|> newer.typeLevel}
+
+---------------------------------------------------------------------------------------------------
+-- Entry point
+---------------------------------------------------------------------------------------------------
 
 -- | Resolve every name reference in a parsed module against the names in scope, producing the
--- identified module (AST + scope-frame index) and the diagnostics emitted along the way.
---
--- TODO: 'resolveModule' (the walk) and 'initialScope' (import / ambient seeding) are stubs; the body
--- is filled in incrementally.
+-- identified module (AST + symbol table) and the diagnostics emitted along the way.
 identifyModule :: ImportContext -> ModuleName -> Module Parsed -> (IdentifiedModule, Diagnostics)
 identifyModule importContext moduleName parsedModule =
-  runIdentifier environment (resolveModule parsedModule)
+  runIdentifier environment (resolveModule importContext parsedModule)
   where
     environment =
       IdentifierEnvironment
         { moduleName = moduleName,
-          scope = initialScope importContext
+          moduleInterfaces = importContext.moduleInterfaces,
+          scope = emptyScope,
+          stateVariables = Map.empty
         }
 
--- | Seed a module's top-level scope from the ambient names and the interfaces of its imports.
---
--- TODO: resolve the module's import declarations against 'moduleInterfaces' and layer them over the
--- ambient names and this module's own top-level declarations. Currently the empty scope.
-initialScope :: ImportContext -> Scope
-initialScope _importContext = emptyScope
+-- | Assemble the top-level scope (own declarations and imports over the ambient names), report
+-- duplicate top-level names, then resolve every declaration under it. The own and imported names are
+-- recorded as symbols visible over the whole module; the ambient names are in scope for resolution
+-- but not recorded (they have no source to navigate to).
+resolveModule :: ImportContext -> Module Parsed -> Identifier IdentifiedModule
+resolveModule importContext parsedModule = do
+  moduleName <- currentModuleName
+  importBindings <- resolveImports parsedModule.declarations
+  let ownBindings = concatMap (declarationBindings moduleName) parsedModule.declarations
+  reportTopLevelDuplicates parsedModule.declarations
+  withScope (ambientToScope importContext) $
+    bindInScope parsedModule.sourceSpan (importBindings <> ownBindings) $ do
+      declarations <- traverse resolveDeclaration parsedModule.declarations
+      symbols <- currentSymbols
+      pure
+        IdentifiedModule
+          { identifiedAst = Module {declarations = declarations, sourceSpan = parsedModule.sourceSpan},
+            symbolTable = SymbolTable {symbols = symbols}
+          }
 
--- | The resolution walk: 'Module' 'Parsed' to 'Module' 'Identified', capturing scope frames as it
--- descends.
---
--- TODO: not yet implemented.
-resolveModule :: Module Parsed -> Identifier IdentifiedModule
-resolveModule _parsedModule = error "Katari.Identifier.resolveModule: not yet implemented"
+ambientToScope :: ImportContext -> Scope
+ambientToScope importContext =
+  Scope
+    { variableBindings = importContext.ambientVariables,
+      typeBindings = importContext.ambientTypes,
+      moduleBindings = importContext.ambientModules
+    }
+
+---------------------------------------------------------------------------------------------------
+-- Imports
+---------------------------------------------------------------------------------------------------
+
+-- | Resolve every import declaration into the bindings it contributes (later imports win on a name
+-- clash, as 'bindInScope' inserts them in order). Reports K2005 (unknown module) / K2006 (unknown /
+-- wrong-namespace name).
+resolveImports :: List (Declaration Parsed) -> Identifier (List Binding)
+resolveImports declarations = concat <$> traverse resolveImport [importDeclaration | DeclarationImport importDeclaration <- declarations]
+
+resolveImport :: ImportDeclaration -> Identifier (List Binding)
+resolveImport importDeclaration = case importDeclaration.kind of
+  ImportModule moduleImport -> resolveModuleImport importDeclaration.sourceSpan moduleImport
+  ImportNames namesImport -> resolveNamesImport importDeclaration.sourceSpan namesImport
+
+resolveModuleImport :: SourceSpan -> ModuleImport -> Identifier (List Binding)
+resolveModuleImport sourceSpan moduleImport = do
+  interface <- lookupModuleInterface moduleImport.moduleName
+  case interface of
+    Nothing -> reportUnknownImportModule sourceSpan moduleImport.moduleName >> pure []
+    Just _ ->
+      let qualifier = fromMaybe (lastSegment moduleImport.moduleName) moduleImport.alias
+       in pure [moduleBinding qualifier sourceSpan moduleImport.moduleName]
+
+-- | The trailing dot-segment of a module name, used as the qualifier of an unaliased prefix import.
+lastSegment :: ModuleName -> Text
+lastSegment (ModuleName moduleName) = Text.takeWhileEnd (/= '.') moduleName
+
+resolveNamesImport :: SourceSpan -> NamesImport -> Identifier (List Binding)
+resolveNamesImport sourceSpan namesImport = do
+  interface <- lookupModuleInterface namesImport.moduleName
+  case interface of
+    Nothing -> reportUnknownImportModule sourceSpan namesImport.moduleName >> pure []
+    Just moduleInterface -> concat <$> traverse (addImportItem namesImport.moduleName moduleInterface) namesImport.items
+
+-- | Resolve one imported name into the binding it adds (def span = the import item itself). Reports
+-- K2006 when the module does not export it in the requested namespace.
+addImportItem :: ModuleName -> ModuleInterface -> ImportItem -> Identifier (List Binding)
+addImportItem moduleName moduleInterface item =
+  case Map.lookup item.name moduleInterface.exports of
+    Nothing -> unknown
+    Just symbol -> case item.kind of
+      ImportItemValue -> maybe unknown (\resolution -> pure [variableBinding item.name item.sourceSpan resolution]) symbol.variable
+      ImportItemType -> maybe unknown (\resolution -> pure [typeBinding item.name item.sourceSpan resolution]) symbol.typeLevel
+  where
+    unknown = reportUnknownImportName item.sourceSpan moduleName item.name >> pure []
+
+---------------------------------------------------------------------------------------------------
+-- Duplicate top-level names
+---------------------------------------------------------------------------------------------------
+
+-- | Report a duplicate (K2003) once per declaration that re-introduces a name in a namespace it
+-- already occupies. A value and a type may share a name (distinct namespaces), so that is not a
+-- duplicate; a request / data redeclared (both namespaces) is reported once, not twice. Imports and
+-- ambient names may be shadowed silently.
+reportTopLevelDuplicates :: List (Declaration Parsed) -> Identifier ()
+reportTopLevelDuplicates = go Set.empty Set.empty . mapMaybe topLevelName
+  where
+    go :: Set Text -> Set Text -> List TopLevelName -> Identifier ()
+    go seenVariable seenType introductions = case introductions of
+      [] -> pure ()
+      introduction : rest -> do
+        let clashes =
+              (introduction.introducesVariable && Set.member introduction.name seenVariable)
+                || (introduction.introducesType && Set.member introduction.name seenType)
+        when clashes (reportDuplicateName introduction.sourceSpan introduction.name)
+        go
+          (if introduction.introducesVariable then Set.insert introduction.name seenVariable else seenVariable)
+          (if introduction.introducesType then Set.insert introduction.name seenType else seenType)
+          rest
+
+-- | A top-level name and the namespaces its declaration introduces it into.
+data TopLevelName = TopLevelName
+  { name :: Text,
+    sourceSpan :: SourceSpan,
+    introducesVariable :: Bool,
+    introducesType :: Bool
+  }
+
+topLevelName :: Declaration Parsed -> Maybe TopLevelName
+topLevelName = \case
+  DeclarationAgent declaration -> Just (variableName declaration.name declaration.sourceSpan)
+  DeclarationExternalAgent declaration -> Just (variableName declaration.name declaration.sourceSpan)
+  DeclarationPrimitiveAgent declaration -> Just (variableName declaration.name declaration.sourceSpan)
+  DeclarationRequest declaration -> Just (valueAndTypeName declaration.name declaration.sourceSpan)
+  DeclarationData declaration -> Just (valueAndTypeName declaration.name declaration.sourceSpan)
+  DeclarationTypeSynonym declaration -> Just (typeName declaration.name declaration.sourceSpan)
+  DeclarationImport _ -> Nothing
+  DeclarationError _ -> Nothing
+  where
+    variableName name sourceSpan = TopLevelName {name = name, sourceSpan = sourceSpan, introducesVariable = True, introducesType = False}
+    typeName name sourceSpan = TopLevelName {name = name, sourceSpan = sourceSpan, introducesVariable = False, introducesType = True}
+    valueAndTypeName name sourceSpan = TopLevelName {name = name, sourceSpan = sourceSpan, introducesVariable = True, introducesType = True}
+
+---------------------------------------------------------------------------------------------------
+-- Declarations
+---------------------------------------------------------------------------------------------------
+
+resolveDeclaration :: Declaration Parsed -> Identifier (Declaration Identified)
+resolveDeclaration = \case
+  DeclarationAgent declaration -> do
+    ownResolution <- ownVariableResolution declaration.name
+    DeclarationAgent <$> resolveAgentDeclaration ownResolution declaration
+  DeclarationRequest declaration -> DeclarationRequest <$> resolveRequestDeclaration declaration
+  DeclarationExternalAgent declaration -> DeclarationExternalAgent <$> resolveExternalAgentDeclaration declaration
+  DeclarationPrimitiveAgent declaration -> DeclarationPrimitiveAgent <$> resolvePrimitiveAgentDeclaration declaration
+  DeclarationData declaration -> DeclarationData <$> resolveDataDeclaration declaration
+  DeclarationTypeSynonym declaration -> DeclarationTypeSynonym <$> resolveTypeSynonymDeclaration declaration
+  DeclarationImport declaration -> pure (DeclarationImport declaration)
+  DeclarationError sourceSpan -> pure (DeclarationError sourceSpan)
+
+-- | The defining occurrence of a top-level declaration's own name resolves to its qualified name.
+ownVariableReference :: Reference Parsed VariableReference -> Text -> Identifier (Reference Identified VariableReference)
+ownVariableReference reference name = do
+  resolution <- ownVariableResolution name
+  pure (identifiedReference reference.sourceSpan (Just resolution))
+
+ownTypeReference :: Reference Parsed TypeReference -> Text -> Identifier (Reference Identified TypeReference)
+ownTypeReference reference name = do
+  resolution <- ownTypeResolution name
+  pure (identifiedReference reference.sourceSpan (Just resolution))
+
+-- | The shared envelope of a signature declaration (request / external / primitive / data): open the
+-- generic parameters over the declaration, resolve the parameter signatures and the own name, then
+-- hand them to the continuation that assembles the specific declaration record.
+withSignatureParts ::
+  SourceSpan ->
+  List (GenericParameter Parsed) ->
+  List (ParameterSignature Parsed) ->
+  Reference Parsed VariableReference ->
+  Text ->
+  (List (GenericParameter Identified) -> List (ParameterSignature Identified) -> Reference Identified VariableReference -> Identifier result) ->
+  Identifier result
+withSignatureParts declarationSpan genericParameters parameters variableReferenceNode name continuation =
+  withGenericParameters declarationSpan genericParameters $ \identifiedGenerics -> do
+    identifiedParameters <- traverse resolveParameterSignature parameters
+    variableReference <- ownVariableReference variableReferenceNode name
+    continuation identifiedGenerics identifiedParameters variableReference
+
+resolveRequestDeclaration :: RequestDeclaration Parsed -> Identifier (RequestDeclaration Identified)
+resolveRequestDeclaration declaration =
+  withSignatureParts declaration.sourceSpan declaration.genericParameters declaration.parameters declaration.variableReference declaration.name $ \genericParameters parameters variableReference -> do
+    returnType <- resolveType declaration.returnType
+    typeReference <- ownTypeReference declaration.typeReference declaration.name
+    pure
+      RequestDeclaration
+        { annotation = declaration.annotation,
+          name = declaration.name,
+          variableReference = variableReference,
+          typeReference = typeReference,
+          genericParameters = genericParameters,
+          parameters = parameters,
+          returnType = returnType,
+          sourceSpan = declaration.sourceSpan
+        }
+
+resolveExternalAgentDeclaration :: ExternalAgentDeclaration Parsed -> Identifier (ExternalAgentDeclaration Identified)
+resolveExternalAgentDeclaration declaration =
+  withSignatureParts declaration.sourceSpan declaration.genericParameters declaration.parameters declaration.variableReference declaration.name $ \genericParameters parameters variableReference -> do
+    returnType <- resolveType declaration.returnType
+    effects <- traverse resolveType declaration.effects
+    pure
+      ExternalAgentDeclaration
+        { annotation = declaration.annotation,
+          name = declaration.name,
+          variableReference = variableReference,
+          genericParameters = genericParameters,
+          parameters = parameters,
+          returnType = returnType,
+          effects = effects,
+          sourceSpan = declaration.sourceSpan
+        }
+
+resolvePrimitiveAgentDeclaration :: PrimitiveAgentDeclaration Parsed -> Identifier (PrimitiveAgentDeclaration Identified)
+resolvePrimitiveAgentDeclaration declaration =
+  withSignatureParts declaration.sourceSpan declaration.genericParameters declaration.parameters declaration.variableReference declaration.name $ \genericParameters parameters variableReference -> do
+    returnType <- resolveType declaration.returnType
+    effects <- traverse resolveType declaration.effects
+    pure
+      PrimitiveAgentDeclaration
+        { annotation = declaration.annotation,
+          name = declaration.name,
+          variableReference = variableReference,
+          genericParameters = genericParameters,
+          parameters = parameters,
+          returnType = returnType,
+          effects = effects,
+          sourceSpan = declaration.sourceSpan
+        }
+
+resolveDataDeclaration :: DataDeclaration Parsed -> Identifier (DataDeclaration Identified)
+resolveDataDeclaration declaration =
+  withSignatureParts declaration.sourceSpan declaration.genericParameters declaration.parameters declaration.variableReference declaration.name $ \genericParameters parameters variableReference -> do
+    typeReference <- ownTypeReference declaration.typeReference declaration.name
+    pure
+      DataDeclaration
+        { annotation = declaration.annotation,
+          name = declaration.name,
+          variableReference = variableReference,
+          typeReference = typeReference,
+          genericParameters = genericParameters,
+          parameters = parameters,
+          sourceSpan = declaration.sourceSpan
+        }
+
+resolveTypeSynonymDeclaration :: TypeSynonymDeclaration Parsed -> Identifier (TypeSynonymDeclaration Identified)
+resolveTypeSynonymDeclaration declaration =
+  withGenericParameters declaration.sourceSpan declaration.genericParameters $ \genericParameters -> do
+    definition <- resolveType declaration.definition
+    typeReference <- ownTypeReference declaration.typeReference declaration.name
+    pure
+      TypeSynonymDeclaration
+        { name = declaration.name,
+          typeReference = typeReference,
+          genericParameters = genericParameters,
+          definition = definition,
+          sourceSpan = declaration.sourceSpan
+        }

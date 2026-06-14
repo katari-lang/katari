@@ -228,9 +228,14 @@ data ModuleImport = ModuleImport
 
 data ImportItem = ImportItem
   { kind :: ImportItemKind,
-    name :: Text
+    name :: Text,
+    -- | Span of the imported name itself (the defining handle for go-to-definition / find-references).
+    sourceSpan :: SourceSpan
   }
   deriving stock (Eq, Show)
+
+instance HasSourceSpan ImportItem where
+  sourceSpanOf item = item.sourceSpan
 
 -- | Namespace of an import item; @type@ prefix selects the type namespace.
 data ImportItemKind where

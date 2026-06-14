@@ -286,7 +286,7 @@ importItem :: Parser ImportItem
 importItem = do
   kind <- option ImportItemValue (ImportItemType <$ keyword "type")
   name <- identifier
-  pure ImportItem {kind = kind, name = name.value}
+  pure ImportItem {kind = kind, name = name.value, sourceSpan = name.sourceSpan}
 
 -- | A dotted module name @foo.bar.baz@, with the span of the whole reference.
 moduleNameReference :: Parser (ModuleName, SourceSpan)

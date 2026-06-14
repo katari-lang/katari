@@ -1,0 +1,418 @@
+-- | The monad the Identifier pass runs in, and its cross-module name-resolution surface.
+--
+-- A name reference is resolved by looking it up in the 'Scope' (three namespaces: variable, type,
+-- module — labels are resolved type-directed by the checker, so there is no label namespace). The
+-- pass reads the scope (extended downward with 'bindInScope' as bindings come into view), accumulates
+-- 'Diagnostics', and supplies fresh ids for generics and local variables.
+--
+-- As it binds names, the pass also records a 'Symbol' for each — name, defining-occurrence span, the
+-- source region the binding is visible over, and what it resolves to — into a flat 'SymbolTable'.
+-- This replaces a separate scope-snapshot index: a binding's visibility is its 'scope' span, and an
+-- occurrence's definition is found by resolving its target through the table. The two are kept in
+-- lockstep by 'bindInScope', which extends the resolution scope and records the symbols together.
+--
+-- Lives apart from the entry module ("Katari.Identifier") so the resolution walk
+-- (@Katari.Identifier.*@) can import the monad without the import cycle that putting it next to the
+-- orchestration would create.
+module Katari.Identifier.Monad where
+
+import Control.Monad.RWS.CPS (RWS, evalRWS)
+import Control.Monad.RWS.Class (MonadReader, MonadState, MonadWriter, asks, gets, local, modify, state)
+import Data.List (find, foldl', sortOn)
+import Data.Map (Map)
+import Data.Map qualified as Map
+import Data.Maybe (isJust)
+import Data.Ord (Down (..))
+import Data.Text (Text)
+import GHC.List (List)
+import Katari.Data.AST (Module, ModuleQualifier (..), Phase (..), Reference (..), ReferenceKind (..), ReferenceResolution)
+import Katari.Data.Id (GenericId (..), LocalVariableId (..), TypeResolution (..), VariableResolution (..))
+import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.QualifiedName (QualifiedName (..))
+import Katari.Data.SourceSpan (Position, SourceSpan (..), spanContains)
+import Katari.Diagnostics (Diagnostics, reportAt)
+import Katari.Error (CompilerError (..), DuplicateNameErrorInfo (..), IdentifierError (..), NotAModuleErrorInfo (..), UndefinedMemberErrorInfo (..), UndefinedNameErrorInfo (..), UndefinedStateVariableErrorInfo (..), UnknownImportModuleErrorInfo (..), UnknownImportNameErrorInfo (..))
+
+---------------------------------------------------------------------------------------------------
+-- Scope (the resolution environment)
+---------------------------------------------------------------------------------------------------
+
+-- | The names visible at a point in the source, one map per namespace the Identifier resolves.
+-- Top-level and imported names seed it; local bindings (parameters, generics, @let@) extend it
+-- through 'MonadReader''s 'local' (see 'bindInScope'). This is an internal resolution detail — the
+-- LSP-facing visibility surface is the 'SymbolTable', not this.
+data Scope = Scope
+  { variableBindings :: Map Text VariableResolution,
+    typeBindings :: Map Text TypeResolution,
+    moduleBindings :: Map Text ModuleName
+  }
+  deriving stock (Eq, Show)
+
+emptyScope :: Scope
+emptyScope = Scope {variableBindings = Map.empty, typeBindings = Map.empty, moduleBindings = Map.empty}
+
+---------------------------------------------------------------------------------------------------
+-- Cross-module interface
+---------------------------------------------------------------------------------------------------
+
+-- | One exported name's name-resolution surface: the namespaces it populates and what each resolves
+-- to. Minimal by design — only what an importing module needs. Type shapes, generic arity and
+-- variance are not here; the global env-build pass derives those from the identified declarations.
+data ExportedSymbol = ExportedSymbol
+  { variable :: Maybe VariableResolution,
+    typeLevel :: Maybe TypeResolution
+  }
+  deriving stock (Eq, Show)
+
+-- | What a module exposes to importers, keyed by exported name. Produced by @scanExports@ from the
+-- parsed module alone (import-independent), so every module's interface is available before any
+-- module is resolved — letting @identifyModule@ run per-module and tolerate import cycles.
+newtype ModuleInterface = ModuleInterface
+  { exports :: Map Text ExportedSymbol
+  }
+  deriving stock (Eq, Show)
+
+-- | The context an @identifyModule@ run resolves against: the interfaces of every importable module
+-- and the ambient names injected into every module (primitive / stdlib seeds). Ambient modules
+-- (@array@, @string@, ...) are visible unqualified in the module namespace; their members resolve
+-- through the corresponding 'moduleInterfaces' entry.
+data ImportContext = ImportContext
+  { moduleInterfaces :: Map ModuleName ModuleInterface,
+    ambientVariables :: Map Text VariableResolution,
+    ambientTypes :: Map Text TypeResolution,
+    ambientModules :: Map Text ModuleName
+  }
+  deriving stock (Eq, Show)
+
+---------------------------------------------------------------------------------------------------
+-- Symbol table (LSP)
+---------------------------------------------------------------------------------------------------
+
+-- | What a 'Symbol' resolves to, tagged by namespace. Mirrors the three resolution kinds the pass
+-- produces; the namespace a symbol lives in is implied by the constructor.
+data SymbolResolution
+  = SymbolVariable VariableResolution
+  | SymbolType TypeResolution
+  | SymbolModule ModuleName
+  deriving stock (Eq, Show)
+
+-- | One binding the pass introduced: its name, the span of its /defining/ occurrence (where to jump
+-- for go-to-definition), the source region it is visible over (its scope, 'region'), and what it
+-- resolves to. Every occurrence of the binding shares this — they carry the same 'resolution', and
+-- look the rest up here. Synthetic / ambient names (no source) are not recorded.
+data Symbol = Symbol
+  { name :: Text,
+    definitionSpan :: SourceSpan,
+    region :: SourceSpan,
+    resolution :: SymbolResolution
+  }
+  deriving stock (Eq, Show)
+
+-- | Every binding recorded while resolving a module: the source of LSP visibility, go-to-definition,
+-- and find-references queries. Replaces the old scope-snapshot index.
+newtype SymbolTable = SymbolTable
+  { symbols :: List Symbol
+  }
+  deriving stock (Eq, Show)
+
+-- | Insert a name's resolution into the scope map for its namespace. Shared by 'scopeAt' (replaying
+-- the symbol table) and 'extendScope' (extending the live resolution scope) so the two never disagree
+-- on how a resolution lands in a 'Scope'.
+insertResolution :: Text -> SymbolResolution -> Scope -> Scope
+insertResolution name resolution scope = case resolution of
+  SymbolVariable target -> scope {variableBindings = Map.insert name target scope.variableBindings}
+  SymbolType target -> scope {typeBindings = Map.insert name target scope.typeBindings}
+  SymbolModule target -> scope {moduleBindings = Map.insert name target scope.moduleBindings}
+
+-- | The names visible at @position@: every symbol whose 'region' contains it, assembled into a
+-- 'Scope'. Inner bindings shadow outer ones — symbols are installed outermost-first (widest region
+-- first), so a tighter region's binding overwrites the one it shadows.
+scopeAt :: SymbolTable -> Position -> Scope
+scopeAt table position = foldl' install emptyScope ordered
+  where
+    visible = filter (\symbol -> spanContains symbol.region position) table.symbols
+    ordered = sortOn (\symbol -> (symbol.region.start, Down symbol.region.end)) visible
+    install scope symbol = insertResolution symbol.name symbol.resolution scope
+
+-- | Where the binding behind a resolution is defined (go-to-definition). 'Nothing' for a resolution
+-- with no recorded binding in this module (a cross-module or synthetic name — resolve it through the
+-- defining module's table instead).
+definitionSpanOf :: SymbolTable -> SymbolResolution -> Maybe SourceSpan
+definitionSpanOf table resolution =
+  (.definitionSpan) <$> find (\symbol -> symbol.resolution == resolution) table.symbols
+
+---------------------------------------------------------------------------------------------------
+-- Identifier output
+---------------------------------------------------------------------------------------------------
+
+-- | The product of resolving one module: the identified AST (every reference carries its
+-- resolution) and the symbol table for LSP. The cross-module data is recovered elsewhere — the
+-- 'ModuleInterface' from @scanExports@, the declarations the global env-build consumes by filtering
+-- 'identifiedAst' — so neither is duplicated here.
+data IdentifiedModule = IdentifiedModule
+  { identifiedAst :: Module Identified,
+    symbolTable :: SymbolTable
+  }
+  deriving stock (Eq, Show)
+
+---------------------------------------------------------------------------------------------------
+-- Monad
+---------------------------------------------------------------------------------------------------
+
+-- | Read-only context of the pass: the module being identified (to qualify its own declarations),
+-- the interfaces it resolves @module.member@ references against, the names currently in scope, and
+-- the enclosing @for@ / @handler@ state variables (the only names a @with@ modifier may target).
+data IdentifierEnvironment = IdentifierEnvironment
+  { moduleName :: ModuleName,
+    moduleInterfaces :: Map ModuleName ModuleInterface,
+    scope :: Scope,
+    stateVariables :: Map Text VariableResolution
+  }
+
+-- | The fresh-id supply (counters only ever increase) plus the symbols recorded for the LSP table,
+-- threaded as state across the whole pass.
+data IdentifierState = IdentifierState
+  { nextGenericId :: Int,
+    nextLocalVariableId :: Int,
+    recordedSymbols :: List Symbol
+  }
+
+initialIdentifierState :: IdentifierState
+initialIdentifierState = IdentifierState {nextGenericId = 0, nextLocalVariableId = 0, recordedSymbols = []}
+
+-- | The Identifier monad: read the scope, accumulate diagnostics, supply fresh ids. A plain RWS
+-- alias (like the Normalizer); emission, supply, and scope are free functions over the mtl classes.
+type Identifier a = RWS IdentifierEnvironment Diagnostics IdentifierState a
+
+runIdentifier :: IdentifierEnvironment -> Identifier a -> (a, Diagnostics)
+runIdentifier environment action = evalRWS action environment initialIdentifierState
+
+-- Fresh-id supply ---------------------------------------------------------------------------------
+
+freshGenericId :: (MonadState IdentifierState m) => m GenericId
+freshGenericId = state (\current -> (GenericId current.nextGenericId, current {nextGenericId = current.nextGenericId + 1}))
+
+freshLocalVariableId :: (MonadState IdentifierState m) => m LocalVariableId
+freshLocalVariableId = state (\current -> (LocalVariableId current.nextLocalVariableId, current {nextLocalVariableId = current.nextLocalVariableId + 1}))
+
+-- Environment access ------------------------------------------------------------------------------
+
+currentModuleName :: (MonadReader IdentifierEnvironment m) => m ModuleName
+currentModuleName = asks (.moduleName)
+
+lookupModuleInterface :: (MonadReader IdentifierEnvironment m) => ModuleName -> m (Maybe ModuleInterface)
+lookupModuleInterface name = asks (\environment -> Map.lookup name environment.moduleInterfaces)
+
+-- | The variable resolution a top-level name carries: its module-qualified name. Shared by the
+-- export scan and the defining-occurrence resolution so the two never disagree.
+qualifiedVariableResolution :: ModuleName -> Text -> VariableResolution
+qualifiedVariableResolution moduleName name = VariableResolutionQualifiedName QualifiedName {moduleName = moduleName, name = name}
+
+-- | The type resolution a top-level name carries: its module-qualified name.
+qualifiedTypeResolution :: ModuleName -> Text -> TypeResolution
+qualifiedTypeResolution moduleName name = TypeResolutionQualifiedName QualifiedName {moduleName = moduleName, name = name}
+
+-- | A reference to one of this module's own top-level declarations, as a value.
+ownVariableResolution :: (MonadReader IdentifierEnvironment m) => Text -> m VariableResolution
+ownVariableResolution name = do
+  moduleName <- currentModuleName
+  pure (qualifiedVariableResolution moduleName name)
+
+-- | A reference to one of this module's own top-level declarations, as a type.
+ownTypeResolution :: (MonadReader IdentifierEnvironment m) => Text -> m TypeResolution
+ownTypeResolution name = do
+  moduleName <- currentModuleName
+  pure (qualifiedTypeResolution moduleName name)
+
+-- Scope lookup ------------------------------------------------------------------------------------
+
+lookupVariable :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe VariableResolution)
+lookupVariable name = asks (\environment -> Map.lookup name environment.scope.variableBindings)
+
+lookupType :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe TypeResolution)
+lookupType name = asks (\environment -> Map.lookup name environment.scope.typeBindings)
+
+lookupModule :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe ModuleName)
+lookupModule name = asks (\environment -> Map.lookup name environment.scope.moduleBindings)
+
+-- | The enclosing @for@ / @handler@ state variable a @with@ modifier name targets, if any.
+lookupStateVariable :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe VariableResolution)
+lookupStateVariable name = asks (\environment -> Map.lookup name environment.stateVariables)
+
+-- Scope extension ---------------------------------------------------------------------------------
+
+overScope :: (Scope -> Scope) -> IdentifierEnvironment -> IdentifierEnvironment
+overScope f environment = environment {scope = f environment.scope}
+
+-- | Run an action with the scope replaced (used to install the ambient / top-level base scope).
+withScope :: (MonadReader IdentifierEnvironment m) => Scope -> m a -> m a
+withScope scope = local (\environment -> environment {scope = scope})
+
+-- | Run an action with the enclosing state variables replaced — the @var@ state of the @for@ /
+-- @handler@ whose body the action resolves. Each loop / handler owns its own state, so this replaces
+-- rather than extends.
+withStateVariables :: (MonadReader IdentifierEnvironment m) => Map Text VariableResolution -> m a -> m a
+withStateVariables states = local (\environment -> environment {stateVariables = states})
+
+-- | A name the walk brings into scope: its text, the span of its defining occurrence, and what it
+-- resolves to. The scope region (the same for every name bound together) is supplied by 'bindInScope'.
+data Binding = Binding
+  { name :: Text,
+    definitionSpan :: SourceSpan,
+    resolution :: SymbolResolution
+  }
+
+variableBinding :: Text -> SourceSpan -> VariableResolution -> Binding
+variableBinding name definitionSpan target = Binding {name = name, definitionSpan = definitionSpan, resolution = SymbolVariable target}
+
+typeBinding :: Text -> SourceSpan -> TypeResolution -> Binding
+typeBinding name definitionSpan target = Binding {name = name, definitionSpan = definitionSpan, resolution = SymbolType target}
+
+moduleBinding :: Text -> SourceSpan -> ModuleName -> Binding
+moduleBinding name definitionSpan target = Binding {name = name, definitionSpan = definitionSpan, resolution = SymbolModule target}
+
+-- | Bring @bindings@ into scope over @region@: record a 'Symbol' for each (visible over @region@) and
+-- extend the resolution scope, then run the action. Recording and scoping happen together so the LSP
+-- table and the resolution scope can never drift apart.
+bindInScope :: SourceSpan -> List Binding -> Identifier a -> Identifier a
+bindInScope region bindings action = do
+  recordSymbols [Symbol {name = binding.name, definitionSpan = binding.definitionSpan, region = region, resolution = binding.resolution} | binding <- bindings]
+  local (extendScope bindings) action
+
+-- | Extend a scope with bindings (later bindings win on a name clash within the list).
+extendScope :: List Binding -> IdentifierEnvironment -> IdentifierEnvironment
+extendScope bindings = overScope (\scope -> foldl' addBinding scope bindings)
+  where
+    addBinding scope binding = insertResolution binding.name binding.resolution scope
+
+-- | The variable bindings among @bindings@, as a name map — the @for@ / @handler@ state a @with@
+-- modifier may target. Used with 'withStateVariables'.
+stateVariableMap :: List Binding -> Map Text VariableResolution
+stateVariableMap bindings = Map.fromList [(binding.name, target) | binding <- bindings, SymbolVariable target <- [binding.resolution]]
+
+-- | Resolve each item — each yielding a resolved node and the bindings it introduces — collecting the
+-- resolved nodes and concatenating their bindings. The shared shape of the pattern / parameter
+-- list resolvers.
+resolveAll :: (a -> Identifier (b, List Binding)) -> List a -> Identifier (List b, List Binding)
+resolveAll resolve items = fmap concat . unzip <$> traverse resolve items
+
+-- | Append symbols to the table (newest first; 'scopeAt' is order-independent up to shadow ties).
+recordSymbols :: List Symbol -> Identifier ()
+recordSymbols newSymbols = modify (\current -> current {recordedSymbols = newSymbols <> current.recordedSymbols})
+
+-- | The symbols recorded so far (read after the walk to build the 'SymbolTable').
+currentSymbols :: Identifier (List Symbol)
+currentSymbols = gets (.recordedSymbols)
+
+---------------------------------------------------------------------------------------------------
+-- Reference construction + resolution
+---------------------------------------------------------------------------------------------------
+
+-- | Build an 'Identified' reference whose resolution is the @Maybe@ produced by a lookup. The
+-- @sourceSpan@ is the occurrence's own span; the binding's definition / scope live in the symbol
+-- table, keyed by the resolution.
+identifiedReference ::
+  (ReferenceResolution Identified nameReferenceKind ~ Maybe resolution) =>
+  SourceSpan ->
+  Maybe resolution ->
+  Reference Identified nameReferenceKind
+identifiedReference sourceSpan resolution = Reference {sourceSpan = sourceSpan, resolution = resolution}
+
+-- | Resolve a bare variable name, reporting K2001 when it is in no variable binding (a module name
+-- used as a value lands here too — it is not a value).
+resolveVariableReference :: SourceSpan -> Text -> Identifier (Reference Identified VariableReference)
+resolveVariableReference sourceSpan name = do
+  resolution <- lookupVariable name
+  reportWhenUnresolved sourceSpan name resolution
+  pure (identifiedReference sourceSpan resolution)
+
+-- | Resolve a bare (unqualified) type name, reporting K2001 when it is in no type binding.
+resolveTypeReference :: SourceSpan -> Text -> Identifier (Reference Identified TypeReference)
+resolveTypeReference sourceSpan name = do
+  resolution <- lookupType name
+  reportWhenUnresolved sourceSpan name resolution
+  pure (identifiedReference sourceSpan resolution)
+
+reportWhenUnresolved :: SourceSpan -> Text -> Maybe resolution -> Identifier ()
+reportWhenUnresolved sourceSpan name = \case
+  Just _ -> pure ()
+  Nothing -> reportUndefinedName sourceSpan name
+
+-- | Resolve a name in the module namespace, reporting K2004 when it is a value / type rather than a
+-- module, or K2001 when it is undefined entirely.
+resolveModuleName :: SourceSpan -> Text -> Identifier (Maybe ModuleName)
+resolveModuleName sourceSpan name = do
+  resolution <- lookupModule name
+  case resolution of
+    Just _ -> pure ()
+    Nothing -> do
+      definedOtherwise <- (\variable typeLevel -> isJust variable || isJust typeLevel) <$> lookupVariable name <*> lookupType name
+      if definedOtherwise
+        then reportNotAModule sourceSpan name
+        else reportUndefinedName sourceSpan name
+  pure resolution
+
+-- | Resolve a parsed @module.@ qualifier into its identified form and the module it names.
+resolveModuleQualifier :: ModuleQualifier Parsed -> Identifier (ModuleQualifier Identified, Maybe ModuleName)
+resolveModuleQualifier qualifier = do
+  moduleResolution <- resolveModuleName qualifier.sourceSpan qualifier.name
+  pure
+    ( ModuleQualifier {name = qualifier.name, moduleReference = identifiedReference qualifier.sourceSpan moduleResolution, sourceSpan = qualifier.sourceSpan},
+      moduleResolution
+    )
+
+-- | Resolve a member of @moduleName@ in the variable namespace, reporting K2002 when absent.
+resolveVariableMember :: SourceSpan -> ModuleName -> Text -> Identifier (Maybe VariableResolution)
+resolveVariableMember sourceSpan moduleName name = do
+  interface <- lookupModuleInterface moduleName
+  reportMember sourceSpan moduleName name (interface >>= memberVariable name)
+
+-- | Resolve a member of @moduleName@ in the type namespace, reporting K2002 when absent.
+resolveTypeMember :: SourceSpan -> ModuleName -> Text -> Identifier (Maybe TypeResolution)
+resolveTypeMember sourceSpan moduleName name = do
+  interface <- lookupModuleInterface moduleName
+  reportMember sourceSpan moduleName name (interface >>= memberType name)
+
+memberVariable :: Text -> ModuleInterface -> Maybe VariableResolution
+memberVariable name moduleInterface = Map.lookup name moduleInterface.exports >>= (.variable)
+
+memberType :: Text -> ModuleInterface -> Maybe TypeResolution
+memberType name moduleInterface = Map.lookup name moduleInterface.exports >>= (.typeLevel)
+
+reportMember :: SourceSpan -> ModuleName -> Text -> Maybe resolution -> Identifier (Maybe resolution)
+reportMember sourceSpan moduleName name = \case
+  Just resolution -> pure (Just resolution)
+  Nothing -> reportUndefinedMember sourceSpan moduleName name >> pure Nothing
+
+-- | Resolve a @with@ modifier target: it must name an enclosing @for@ / @handler@ state variable, not
+-- an arbitrary in-scope local. Reports K2007 otherwise.
+resolveStateVariableReference :: SourceSpan -> Text -> Identifier (Reference Identified VariableReference)
+resolveStateVariableReference sourceSpan name = do
+  resolution <- lookupStateVariable name
+  case resolution of
+    Just _ -> pure ()
+    Nothing -> reportUndefinedStateVariable sourceSpan name
+  pure (identifiedReference sourceSpan resolution)
+
+-- Diagnostics -------------------------------------------------------------------------------------
+
+reportUndefinedName :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
+reportUndefinedName sourceSpan name = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorUndefinedName UndefinedNameErrorInfo {name = name}))
+
+reportUndefinedMember :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> Text -> m ()
+reportUndefinedMember sourceSpan moduleName name = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorUndefinedMember UndefinedMemberErrorInfo {moduleName = moduleName, name = name}))
+
+reportDuplicateName :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
+reportDuplicateName sourceSpan name = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorDuplicateName DuplicateNameErrorInfo {name = name}))
+
+reportNotAModule :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
+reportNotAModule sourceSpan name = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorNotAModule NotAModuleErrorInfo {name = name}))
+
+reportUnknownImportModule :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> m ()
+reportUnknownImportModule sourceSpan moduleName = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorUnknownImportModule UnknownImportModuleErrorInfo {moduleName = moduleName}))
+
+reportUnknownImportName :: (MonadWriter Diagnostics m) => SourceSpan -> ModuleName -> Text -> m ()
+reportUnknownImportName sourceSpan moduleName name = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorUnknownImportName UnknownImportNameErrorInfo {moduleName = moduleName, name = name}))
+
+reportUndefinedStateVariable :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
+reportUndefinedStateVariable sourceSpan name = reportAt sourceSpan (CompilerErrorIdentifier (IdentifierErrorUndefinedStateVariable UndefinedStateVariableErrorInfo {name = name}))
