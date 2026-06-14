@@ -26,7 +26,7 @@ import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..), Modul
 import Katari.Lowering (lowerModule)
 import Katari.Parser (parseModule)
 import Katari.Schema (SchemaEntry, buildSchema)
-import Katari.Typechecker.Check (checkModule)
+import Katari.Typechecker (checkModule)
 import Katari.Typechecker.Environment (buildEnvironment)
 
 -- | What to compile: the source of every module, plus the ambient names injected into every module

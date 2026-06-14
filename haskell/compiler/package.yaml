@@ -58,9 +58,9 @@ library:
     - Katari.Identifier.Type
     - Katari.Identifier.Pattern
     - Katari.Identifier.Expression
+    - Katari.Typechecker
     - Katari.Typechecker.Normalizer
     - Katari.Typechecker.Environment
-    - Katari.Typechecker.Check
     - Katari.Parser
     - Katari.Parser.Lexer
     - Katari.Parser.Type

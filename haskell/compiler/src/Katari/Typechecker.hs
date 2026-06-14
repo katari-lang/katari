@@ -2,9 +2,13 @@
 -- against the global 'TypeEnvironment', producing a 'Typed' AST (every expression / pattern carries
 -- its 'Katari.Data.SemanticType.SemanticType') and diagnostics. Per-module: once the environment is
 -- built, modules check independently. The cross-module type info lives in the environment, so a
--- module's result is just its own typed AST. This module defines the phase's I/O; the checker is not
--- yet implemented.
-module Katari.Typechecker.Check where
+-- module's result is just its own typed AST.
+--
+-- This is the phase's entry point and top-level orchestration (the declaration dispatch), mirroring
+-- "Katari.Parser" / "Katari.Identifier": the per-kind checking walks live in the @Katari.Typechecker.*@
+-- submodules ('Katari.Typechecker.Normalizer' for the type lattice, 'Katari.Typechecker.Environment'
+-- for the global env). The checker is not yet implemented.
+module Katari.Typechecker where
 
 import Katari.Data.AST (Module, Phase (Identified, Typed))
 import Katari.Diagnostics (Diagnostics)
@@ -15,4 +19,4 @@ import Katari.Typechecker.Environment (TypeEnvironment)
 --
 -- TODO: the bidirectional checker is not yet implemented.
 checkModule :: TypeEnvironment -> Module Identified -> (Module Typed, Diagnostics)
-checkModule _environment _module = error "Katari.Typechecker.Check.checkModule: not yet implemented"
+checkModule _environment _module = error "Katari.Typechecker.checkModule: not yet implemented"
