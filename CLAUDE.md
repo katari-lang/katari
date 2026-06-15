@@ -84,6 +84,8 @@ Github CI will run `pnpm run typecheck` and `pnpm run lint` on every push and pu
 ### Coding Rules
 
 - Do not use abbreviations in variable and function names. Exception: `id` only
+- Comments should be complete sentences and explain the "why" behind the code, not the "what".
+- Comments should be concise but sufficiently explanatory.
 
 - Haskell
   - Do not use partial functions (e.g. head, tail, fromJust, etc.)

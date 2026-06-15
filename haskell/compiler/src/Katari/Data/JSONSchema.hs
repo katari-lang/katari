@@ -1,7 +1,8 @@
 -- | A passive representation of the subset of JSON Schema the Katari runtime needs (the @input@ /
 -- @output@ / @requests@ schemas carried by every callable, see "Katari.Data.IR"). It only models
 -- the keywords Katari emits and serialises to a standard JSON Schema document via its 'ToJSON'
--- instance.
+-- instance — apart from the generic-reference sentinel ('SchemaGeneric'), which the runtime resolves
+-- into a standard schema at @get_metadata@.
 --
 -- This is the representation only. The (non-trivial) conversion from a 'Katari.Data.SemanticType'
 -- to a 'JSONSchema' — @file@ / @agent@ / @data@ / @private@-attributed types are not obvious — will
@@ -13,9 +14,11 @@ import Data.Aeson (ToJSON (..), Value, object, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Text (Text)
 import GHC.List (List)
+import Katari.Data.Id (GenericId)
 
 -- | A JSON Schema document. The shapes the compiler emits: the primitive @type@s, @const@, @array@,
--- @object@, @anyOf@ unions, the empty schema (anything), and the @{"not": {}}@ bottom.
+-- @object@, @anyOf@ unions, the empty schema (anything), the @{"not": {}}@ bottom, and a generic
+-- reference slot ('SchemaGeneric') serialised as a sentinel for the runtime to fill.
 data JSONSchema where
   -- | @{}@ — matches any value (e.g. @unknown@, @json@).
   SchemaAny :: JSONSchema
@@ -39,6 +42,11 @@ data JSONSchema where
   SchemaObject :: ObjectSchema -> JSONSchema
   -- | @{"anyOf": [...]}@ — a union.
   SchemaAnyOf :: List JSONSchema -> JSONSchema
+  -- | A type-generic reference slot (by 'GenericId'). Serialised to the IR wire as a @{"$generic": id}@
+  -- sentinel; the runtime fills it at @get_metadata@ from a value's attached substitution (mapped onto
+  -- this id through 'Katari.Data.IR.SchemaInfo.genericBindings'), so it never appears in the final
+  -- AI-facing schema.
+  SchemaGeneric :: GenericId -> JSONSchema
   deriving stock (Eq, Show)
 
 -- | The body of a 'SchemaObject'. Field order is preserved as written.
@@ -68,6 +76,10 @@ instance ToJSON JSONSchema where
           "additionalProperties" .= objectSchema.additionalProperties
         ]
     SchemaAnyOf branches -> object ["anyOf" .= branches]
+    -- A generic-reference sentinel preserved on the wire (the id must survive so the runtime can match
+    -- it against 'SchemaInfo.genericBindings'); the runtime replaces it at get_metadata, so it must not
+    -- survive into the final AI-facing schema.
+    SchemaGeneric genericId -> object ["$generic" .= genericId]
     where
       typed :: Text -> Value
       typed typeName = object ["type" .= typeName]
