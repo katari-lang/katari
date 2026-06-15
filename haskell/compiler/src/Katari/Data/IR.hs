@@ -19,11 +19,13 @@
 --     kind (return / break / for-break, next / for-next) is implied by that block's role.
 --   * No type information. The public schema of each 'BlockAgent' lives in 'IRModule.schemas'.
 --
--- The JSON encoding (consumed by the TS runtime) is intentionally not derived yet — it is co-designed
--- with the runtime once that exists. 'Katari.Data.JSONSchema' already serialises (schemas are needed
--- independently of the IR's own wire format).
+-- The JSON encoding (consumed by the TS runtime) is the 'ToJSON' instances at the bottom of this
+-- module; it mirrors @typescript/types/src/ir.ts@ exactly (the two are co-designed). Sum types are
+-- @kind@-tagged with their payload inlined; 'BlockId'-keyed maps become objects with string keys.
 module Katari.Data.IR where
 
+import Data.Aeson (ToJSON (..), ToJSONKey, Value, object, (.=))
+import Data.Aeson.Types (Pair)
 import Data.Map (Map)
 import Data.Text (Text)
 import Data.Word (Word32)
@@ -41,10 +43,14 @@ import Katari.Data.QualifiedName (QualifiedName)
 -- by 'QualifiedName', never by a foreign 'BlockId'.
 newtype BlockId = BlockId Word32
   deriving stock (Eq, Ord, Show)
+  -- \| Wire form: a JSON number as a value, and a decimal-string object key (the runtime's IR maps
+  -- are keyed by 'BlockId', e.g. @{"0": {...}}@).
+  deriving newtype (ToJSON, ToJSONKey)
 
 -- | IR-level variable. Lowering allocates one per value slot within a block's scope.
 newtype VariableId = VariableId Word32
   deriving stock (Eq, Ord, Show)
+  deriving newtype (ToJSON)
 
 ---------------------------------------------------------------------------------------------------
 -- Module
@@ -337,7 +343,8 @@ data CalleeReference where
 data Literal where
   LiteralNull :: Literal
   LiteralBoolean :: Bool -> Literal
-  LiteralInteger :: Integer -> Literal
+  -- Machine-width ('Int'), matching the runtime's JS-number value model (see 'LiteralValueInteger').
+  LiteralInteger :: Int -> Literal
   LiteralNumber :: Double -> Literal
   LiteralString :: Text -> Literal
   deriving stock (Eq, Show)
@@ -416,3 +423,146 @@ data GenericArgumentSchema where
   GenericArgumentType :: JSONSchema -> GenericArgumentSchema
   GenericArgumentRequests :: List RequestSchema -> GenericArgumentSchema
   deriving stock (Eq, Show)
+
+---------------------------------------------------------------------------------------------------
+-- JSON encoding
+--
+-- The wire format consumed by the TS runtime; it mirrors @typescript/types/src/ir.ts@ exactly (the
+-- two are co-designed). Sum types are tagged with a @kind@ discriminator and their payload fields are
+-- inlined alongside it; records serialise to plain objects; 'BlockId' / 'VariableId' / 'GenericId'
+-- are JSON numbers, and maps keyed by 'BlockId' / 'QualifiedName' become objects with string keys.
+---------------------------------------------------------------------------------------------------
+
+-- | Build a kind-tagged JSON object @{"kind": tag, ...fields}@ — the encoding every IR sum type uses.
+taggedObject :: Text -> List Pair -> Value
+taggedObject tag fields = object (("kind" .= tag) : fields)
+
+instance ToJSON Metadata where
+  toJSON metadata = object ["schemaVersion" .= metadata.schemaVersion]
+
+instance ToJSON IRModule where
+  toJSON irModule =
+    object
+      [ "metadata" .= irModule.metadata,
+        "blocks" .= irModule.blocks,
+        "schemas" .= irModule.schemas,
+        "entries" .= irModule.entries,
+        "names" .= irModule.names
+      ]
+
+instance ToJSON Block where
+  toJSON block = case block of
+    BlockAgent agent ->
+      taggedObject "agent" ["parameter" .= agent.parameter, "defaults" .= agent.defaults, "body" .= agent.body]
+    BlockSequence body ->
+      taggedObject "sequence" ["operations" .= body.operations, "result" .= body.result]
+    BlockPrimitive primitive -> taggedObject "primitive" ["name" .= primitive.name]
+    BlockConstruct construct -> taggedObject "construct" ["name" .= construct.name]
+    BlockRequest request -> taggedObject "request" ["name" .= request.name]
+    BlockExternal external -> taggedObject "external" ["key" .= external.key]
+    BlockMatch match ->
+      taggedObject "match" ["subject" .= match.subject, "arms" .= match.arms, "fallback" .= match.fallback]
+    BlockFor for ->
+      taggedObject
+        "for"
+        [ "parallel" .= for.parallel,
+          "iterators" .= for.iterators,
+          "states" .= for.states,
+          "body" .= for.body,
+          "thenClause" .= for.thenClause
+        ]
+    BlockHandle handle ->
+      taggedObject
+        "handle"
+        [ "parallel" .= handle.parallel,
+          "states" .= handle.states,
+          "body" .= handle.body,
+          "handlers" .= handle.handlers,
+          "thenClause" .= handle.thenClause
+        ]
+    BlockParallel parallelBlock -> taggedObject "parallel" ["elements" .= parallelBlock.elements]
+
+instance ToJSON MatchArm where
+  toJSON arm = object ["pattern" .= arm.pattern, "body" .= arm.body]
+
+instance ToJSON Handler where
+  toJSON handler = object ["request" .= handler.request, "parameter" .= handler.parameter, "body" .= handler.body]
+
+instance ToJSON ThenClause where
+  toJSON thenClause = object ["parameter" .= thenClause.parameter, "body" .= thenClause.body]
+
+instance ToJSON Operation where
+  toJSON operation = case operation of
+    OperationCall op -> taggedObject "call" ["target" .= op.target, "output" .= op.output]
+    OperationDelegate op ->
+      taggedObject "delegate" ["target" .= op.target, "argument" .= op.argument, "output" .= op.output]
+    OperationLoadLiteral op -> taggedObject "loadLiteral" ["output" .= op.output, "value" .= op.value]
+    OperationMakeClosure op -> taggedObject "makeClosure" ["output" .= op.output, "agent" .= op.agent]
+    OperationMakeRecord op -> taggedObject "makeRecord" ["entries" .= op.entries, "output" .= op.output]
+    OperationMakeTuple op -> taggedObject "makeTuple" ["elements" .= op.elements, "output" .= op.output]
+    OperationGetField op ->
+      taggedObject "getField" ["source" .= op.source, "field" .= op.field, "output" .= op.output]
+    OperationBindPattern op -> taggedObject "bindPattern" ["source" .= op.source, "pattern" .= op.pattern]
+    OperationApplyGenerics op ->
+      taggedObject "applyGenerics" ["source" .= op.source, "generics" .= op.generics, "output" .= op.output]
+    OperationExit op -> taggedObject "exit" ["target" .= op.target, "value" .= op.value]
+    OperationContinue op ->
+      taggedObject "continue" ["target" .= op.target, "value" .= op.value, "modifiers" .= op.modifiers]
+
+instance ToJSON CalleeReference where
+  toJSON reference = case reference of
+    CalleeName name -> taggedObject "name" ["name" .= name]
+    CalleeValue variable -> taggedObject "value" ["variable" .= variable]
+
+instance ToJSON Literal where
+  toJSON literal = case literal of
+    LiteralNull -> taggedObject "null" []
+    LiteralBoolean value -> taggedObject "boolean" ["value" .= value]
+    LiteralInteger value -> taggedObject "integer" ["value" .= value]
+    LiteralNumber value -> taggedObject "number" ["value" .= value]
+    LiteralString value -> taggedObject "string" ["value" .= value]
+
+instance ToJSON Pattern where
+  toJSON pattern = case pattern of
+    PatternAny -> taggedObject "any" []
+    PatternVariable variable -> taggedObject "variable" ["variable" .= variable]
+    PatternLiteral value -> taggedObject "literal" ["value" .= value]
+    PatternConstructor name fields -> taggedObject "constructor" ["name" .= name, "fields" .= fields]
+    PatternTuple elements -> taggedObject "tuple" ["elements" .= elements]
+    PatternRecord fields -> taggedObject "record" ["fields" .= fields]
+    PatternTypeGuard tag inner -> taggedObject "typeGuard" ["tag" .= tag, "pattern" .= inner]
+
+instance ToJSON TypeTag where
+  toJSON tag = case tag of
+    TagNull -> "null"
+    TagBoolean -> "boolean"
+    TagInteger -> "integer"
+    TagNumber -> "number"
+    TagString -> "string"
+    TagFile -> "file"
+    TagArray -> "array"
+    TagRecord -> "record"
+    TagAgent -> "agent"
+
+instance ToJSON SchemaInfo where
+  toJSON schemaInfo =
+    object
+      [ "input" .= schemaInfo.input,
+        "output" .= schemaInfo.output,
+        "requests" .= schemaInfo.requests,
+        "genericBindings" .= schemaInfo.genericBindings
+      ]
+
+instance ToJSON RequestSchema where
+  toJSON requestSchema = case requestSchema of
+    RequestConcrete descriptor -> taggedObject "concrete" ["descriptor" .= descriptor]
+    RequestGeneric generic -> taggedObject "generic" ["generic" .= generic]
+
+instance ToJSON RequestDescriptor where
+  toJSON descriptor =
+    object ["name" .= descriptor.name, "input" .= descriptor.input, "output" .= descriptor.output]
+
+instance ToJSON GenericArgumentSchema where
+  toJSON argument = case argument of
+    GenericArgumentType schema -> taggedObject "type" ["schema" .= schema]
+    GenericArgumentRequests requests -> taggedObject "requests" ["requests" .= requests]

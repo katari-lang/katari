@@ -12,7 +12,7 @@ module Katari.Parser.Lexer where
 
 import Control.Monad (void, when)
 import Control.Monad.Reader (ReaderT, asks, local)
-import Control.Monad.State.Strict (State)
+import Control.Monad.Writer.CPS (Writer)
 import Data.Char (isAlphaNum, isLetter)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -23,8 +23,9 @@ import GHC.List (List)
 import Katari.Data.AST (LiteralValue (..), Reference (..))
 import Katari.Data.AST qualified as AST
 import Katari.Data.SourceSpan (HasSourceSpan (..), Located (..), Position (..), SourceSpan (..))
-import Katari.Diagnostics (Diagnostics)
-import Text.Megaparsec hiding (State)
+import Katari.Diagnostics (Diagnostics, reportAt)
+import Katari.Error (CompilerError (..), ParseError (..), UnsafeIntegerLiteralInfo (..))
+import Text.Megaparsec
 import Text.Megaparsec.Char (char, space1, string)
 import Text.Megaparsec.Char.Lexer qualified as Lexer
 
@@ -57,10 +58,13 @@ initialContext :: ParseContext
 initialContext = ParseContext {loopContext = LoopContextNone, spaceMode = SpaceModeMultiline}
 
 -- | The parser: megaparsec over 'Text', with the immutable 'ParseContext' threaded by a reader so
--- the space mode and loop context flow down the tree (and back up via 'local'), over a 'State' that
--- accumulates the recovered 'Diagnostics' (appended only in 'withRecovery' handlers, never inside a
--- backtracking branch, so the no-rollback-on-backtrack caveat does not apply).
-type Parser = ParsecT Void Text (ReaderT ParseContext (State Diagnostics))
+-- the space mode and loop context flow down the tree (and back up via 'local'), over a 'Writer' that
+-- accumulates 'Diagnostics' (the same 'MonadWriter' the rest of the compiler reports into, so the
+-- shared 'Katari.Diagnostics.reportAt' works here too). Diagnostics are appended only in
+-- 'withRecovery' handlers and in token warnings that are backtracking-safe by construction (a
+-- consumed token is the same token in any successful parse, and duplicates are deduped on
+-- finalization), so the no-rollback-on-backtrack caveat of a 'Writer' under 'ParsecT' does not bite.
+type Parser = ParsecT Void Text (ReaderT ParseContext (Writer Diagnostics))
 
 -- | Run @parser@ with the space mode forced to multiline for its extent (used inside brackets).
 multiline :: Parser a -> Parser a
@@ -198,18 +202,32 @@ toLocated (value, sourceSpan) = Located {value = value, sourceSpan = sourceSpan}
 
 -- | An unsigned numeric literal: integer unless a fractional or exponent part is present.
 numericLiteral :: Parser (Located LiteralValue)
-numericLiteral = toLocated <$> lexeme (try float <|> integer)
+numericLiteral = toLocated <$> lexeme (try float <|> integerLiteral Lexer.decimal)
   where
     float = LiteralValueNumber <$> Lexer.float
-    integer = LiteralValueInteger <$> Lexer.decimal
 
 -- | A signed numeric literal — only where no surrounding operator could supply the sign (a
 -- parameter default), so unary minus is unavailable there.
 signedNumericLiteral :: Parser (Located LiteralValue)
-signedNumericLiteral = toLocated <$> lexeme (try signedFloat <|> signedInteger)
+signedNumericLiteral = toLocated <$> lexeme (try signedFloat <|> integerLiteral (Lexer.signed (pure ()) Lexer.decimal))
   where
     signedFloat = LiteralValueNumber <$> Lexer.signed (pure ()) Lexer.float
-    signedInteger = LiteralValueInteger <$> Lexer.signed (pure ()) Lexer.decimal
+
+-- | Read an integer literal from @digits@, warning (but not failing) if its magnitude exceeds what a
+-- runtime number represents exactly; the value is then narrowed to the machine-width 'Int' the AST
+-- carries. Appending the warning here is safe despite the no-append-during-backtracking caveat on the
+-- 'Diagnostics' state: duplicates are deduped in 'finalizeDiagnostics', and a digit sequence consumed
+-- by 'Lexer.decimal' is an integer literal in every successful parse, so no spurious or lost warning
+-- can result.
+integerLiteral :: Parser Integer -> Parser LiteralValue
+integerLiteral digits = do
+  (value, sourceSpan) <- spanning digits
+  when (abs value > maximumSafeInteger) $
+    reportAt sourceSpan (CompilerErrorParse (ParseErrorUnsafeIntegerLiteral (UnsafeIntegerLiteralInfo {value = value})))
+  pure (LiteralValueInteger (fromInteger value))
+  where
+    -- Number.MAX_SAFE_INTEGER: the largest integer a JS double represents exactly.
+    maximumSafeInteger = 2 ^ (53 :: Int) - 1
 
 -- | A double-quoted string with the usual escapes. Interpolation (@${...}@) belongs to f-strings
 -- ('Katari.Parser.Expression'), so a plain string treats @$@ literally.

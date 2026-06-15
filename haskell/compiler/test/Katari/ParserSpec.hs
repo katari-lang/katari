@@ -1,8 +1,11 @@
 module Katari.ParserSpec (spec) where
 
+import Data.Foldable (toList)
 import Data.Text (Text)
 import Katari.Data.AST
 import Katari.Data.ModuleName (ModuleName (..))
+import Katari.Data.SourceSpan (Located (..))
+import Katari.Error (compilerErrorCode)
 import Katari.Parser (parseModule)
 import Test.Hspec
 
@@ -15,6 +18,10 @@ parseClean source = do
 
 shouldFail :: Text -> Expectation
 shouldFail source = snd (parseModule (ModuleName "test") source) `shouldNotSatisfy` null
+
+-- | The diagnostic codes emitted while parsing @source@.
+codesOf :: Text -> [Text]
+codesOf source = [compilerErrorCode located.value | located <- toList (snd (parseModule (ModuleName "test") source))]
 
 -- | The single agent declaration's body block, or a test failure.
 soleAgentBody :: Module Parsed -> IO (Block Parsed)
@@ -233,6 +240,15 @@ spec = do
 
     it "reports a diagnostic on malformed input" $
       shouldFail "agent main( -> string { }"
+
+  describe "integer literals" $ do
+    it "warns (K1002) on an integer literal beyond the safe range but still parses it" $ do
+      -- 2^53 + 1: not representable exactly by a runtime number.
+      let (module', diagnostics) = parseModule (ModuleName "test") "agent main() -> integer { 9007199254740993 }"
+      map (compilerErrorCode . (.value)) (toList diagnostics) `shouldBe` ["K1002"]
+      module'.declarations `shouldSatisfy` (not . null)
+    it "does not warn at the safe-range boundary (2^53 - 1)" $
+      codesOf "agent main() -> integer { 9007199254740991 }" `shouldBe` []
 
   describe "error recovery" $ do
     it "recovers at the next declaration and keeps the good ones" $ do

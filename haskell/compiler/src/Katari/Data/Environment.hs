@@ -93,6 +93,11 @@ genericParameterNames = map (.name)
 genericIdsByName :: List GenericParameterInfo -> Map Text GenericId
 genericIdsByName parameters = Map.fromList [(parameter.name, parameter.genericId) | parameter <- parameters]
 
+-- | The generic-id to parameter-name map. Variance inference keys occurrences of a declaration's own
+-- generics by name rather than by id, because generic ids are only unique within a single module.
+namesByGenericId :: List GenericParameterInfo -> Map GenericId Text
+namesByGenericId parameters = Map.fromList [(parameter.genericId, parameter.name) | parameter <- parameters]
+
 -- | The parameter-name to variance map (used by the lattice and subtyping of generic arguments).
 variancesByName :: List GenericParameterInfo -> Map Text Variance
 variancesByName parameters = Map.fromList [(parameter.name, parameter.variance) | parameter <- parameters]

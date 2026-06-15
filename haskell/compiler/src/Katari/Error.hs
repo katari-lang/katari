@@ -86,6 +86,16 @@ renderTypeError typeError =
         <> "]\n  actual:   ["
         <> Text.intercalate ", " info.actual
         <> "]"
+    TypeErrorApplicationArity info ->
+      "Wrong number of type arguments for "
+        <> info.head
+        <> " (expected "
+        <> Text.pack (show info.expected)
+        <> ", actual "
+        <> Text.pack (show info.actual)
+        <> ")"
+    TypeErrorSynonymCycle info -> "Type synonym " <> renderQualifiedName info.name <> " expands to itself (cyclic synonym)"
+    TypeErrorMalformedType info -> info.reason
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -94,6 +104,15 @@ data TypeError where
   TypeErrorCannotBeIntersected :: CannotBeIntersectedErrorInfo -> TypeError
   TypeErrorKind :: KindErrorInfo -> TypeError
   TypeErrorGenericArity :: GenericArityErrorInfo -> TypeError
+  -- | A type application supplies the wrong number of bracket arguments for its head.
+  TypeErrorApplicationArity :: ApplicationArityErrorInfo -> TypeError
+  -- | A type synonym refers to itself (directly or through other synonyms); expansion would not
+  -- terminate, so it is rejected.
+  TypeErrorSynonymCycle :: SynonymCycleErrorInfo -> TypeError
+  -- | A structurally ill-formed type annotation the other cases do not cover (e.g. applying
+  -- arguments to a head that takes none, or an override that does not name a request). The specific
+  -- failure is in @reason@.
+  TypeErrorMalformedType :: MalformedTypeErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -103,6 +122,9 @@ typeErrorCode = \case
   TypeErrorCannotBeIntersected _ -> "K3006"
   TypeErrorKind _ -> "K3007"
   TypeErrorGenericArity _ -> "K3008"
+  TypeErrorApplicationArity _ -> "K3009"
+  TypeErrorSynonymCycle _ -> "K3010"
+  TypeErrorMalformedType _ -> "K3011"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -113,6 +135,9 @@ typeErrorSeverity = \case
   TypeErrorCannotBeIntersected _ -> SeverityError
   TypeErrorKind _ -> SeverityError
   TypeErrorGenericArity _ -> SeverityError
+  TypeErrorApplicationArity _ -> SeverityError
+  TypeErrorSynonymCycle _ -> SeverityError
+  TypeErrorMalformedType _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -151,6 +176,25 @@ data GenericArityErrorInfo = GenericArityErrorInfo
   }
   deriving (Eq, Ord, Show)
 
+-- | @head@ is the rendered application head (a synonym / data / request name, or @array@ / @record@),
+-- since it is not always a 'QualifiedName'. @expected@ / @actual@ are positional argument counts.
+data ApplicationArityErrorInfo = ApplicationArityErrorInfo
+  { head :: Text,
+    expected :: Int,
+    actual :: Int
+  }
+  deriving (Eq, Ord, Show)
+
+newtype SynonymCycleErrorInfo = SynonymCycleErrorInfo
+  { name :: QualifiedName
+  }
+  deriving (Eq, Ord, Show)
+
+newtype MalformedTypeErrorInfo = MalformedTypeErrorInfo
+  { reason :: Text
+  }
+  deriving (Eq, Ord, Show)
+
 ------------------------------------------------------------------------------------------------
 -- Parser errors (K1xxx)
 ------------------------------------------------------------------------------------------------
@@ -159,25 +203,37 @@ data GenericArityErrorInfo = GenericArityErrorInfo
 -- parser distinguishes more failure shapes.
 data ParseError where
   ParseErrorSyntax :: SyntaxErrorInfo -> ParseError
+  ParseErrorUnsafeIntegerLiteral :: UnsafeIntegerLiteralInfo -> ParseError
   deriving (Eq, Ord, Show)
 
 parseErrorCode :: ParseError -> Text
 parseErrorCode = \case
   ParseErrorSyntax _ -> "K1001"
+  ParseErrorUnsafeIntegerLiteral _ -> "K1002"
 
 parseErrorSeverity :: ParseError -> Severity
 parseErrorSeverity = \case
   ParseErrorSyntax _ -> SeverityError
+  ParseErrorUnsafeIntegerLiteral _ -> SeverityWarning
 
 renderParseError :: ParseError -> Text
 renderParseError parseError =
   parseErrorCode parseError <> ": " <> case parseError of
     ParseErrorSyntax info -> info.message
+    ParseErrorUnsafeIntegerLiteral info ->
+      "Integer literal " <> Text.pack (show info.value) <> " exceeds the safe integer range (±(2^53 − 1)) and will lose precision in the runtime's number value."
 
 -- | A syntax / lexical error; the parser produces the human-readable @message@, so it is carried
 -- rather than reconstructed from structured fields.
 newtype SyntaxErrorInfo = SyntaxErrorInfo
   { message :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | An integer literal whose magnitude exceeds what the runtime's JS-number value model represents
+-- exactly. A warning, not an error: the value is still accepted (narrowed to a machine 'Int').
+newtype UnsafeIntegerLiteralInfo = UnsafeIntegerLiteralInfo
+  { value :: Integer
   }
   deriving (Eq, Ord, Show)
 

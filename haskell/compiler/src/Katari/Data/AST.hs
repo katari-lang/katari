@@ -140,7 +140,9 @@ instance HasSourceSpan (ParameterSignature phase) where
   sourceSpanOf signature = signature.sourceSpan
 
 data LiteralValue where
-  LiteralValueInteger :: Integer -> LiteralValue
+  -- Integer literals are machine-width ('Int'), not arbitrary-precision: the value model is a JS
+  -- number (an IEEE-754 double) end to end, so the compiler carries no precision the runtime cannot.
+  LiteralValueInteger :: Int -> LiteralValue
   LiteralValueNumber :: Double -> LiteralValue
   LiteralValueString :: Text -> LiteralValue
   LiteralValueBoolean :: Bool -> LiteralValue

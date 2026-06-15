@@ -11,9 +11,8 @@ module Katari.Parser where
 
 import Control.Monad (guard, void)
 import Control.Monad.Reader (runReaderT)
-import Control.Monad.State.Strict (modify, runState)
+import Control.Monad.Writer.CPS (runWriter)
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Void (Void)
@@ -21,7 +20,7 @@ import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
 import Katari.Data.SourceSpan (HasSourceSpan (..), Located (..), SourceSpan (..))
-import Katari.Diagnostics (Diagnostics)
+import Katari.Diagnostics (Diagnostics, diagnosticAt, report)
 import Katari.Error (CompilerError (..), ParseError (ParseErrorSyntax), SyntaxErrorInfo (..))
 import Katari.Parser.Expression (agentDeclarationWith)
 import Katari.Parser.Lexer
@@ -39,7 +38,7 @@ import Text.Megaparsec.Char (char)
 -- the 'Left' branch is a safety net for a failure no recovery handler caught.
 parseModule :: ModuleName -> Text -> (Module Parsed, Diagnostics)
 parseModule moduleName source =
-  case runState (runReaderT (runParserT moduleParser fileName source) initialContext) mempty of
+  case runWriter (runReaderT (runParserT moduleParser fileName source) initialContext) of
     (Right module', diagnostics) -> (module', diagnostics)
     (Left bundle, diagnostics) -> (errorModule bundle, diagnostics <> bundleToDiagnostics bundle)
   where
@@ -69,7 +68,7 @@ recoverableDeclaration = do
 recoverDeclaration :: SourcePos -> Megaparsec.ParseError Text Void -> Parser (Declaration Parsed)
 recoverDeclaration startPosition syntaxError = do
   errorPosition <- getSourcePos
-  modify (Seq.|> syntaxDiagnostic errorPosition syntaxError)
+  report (syntaxDiagnostic errorPosition syntaxError)
   skipToDeclarationSync
   DeclarationError . spanBetween startPosition <$> getSourcePos
 
@@ -111,11 +110,9 @@ bundleToDiagnostics bundle =
    in foldMap toDiagnostic errorsWithPosition
   where
     toDiagnostic (singleError, sourcePosition) =
-      Seq.singleton
-        Located
-          { value = CompilerErrorParse (ParseErrorSyntax SyntaxErrorInfo {message = Text.strip (Text.pack (parseErrorTextPretty singleError))}),
-            sourceSpan = pointSpan sourcePosition
-          }
+      diagnosticAt
+        (pointSpan sourcePosition)
+        (CompilerErrorParse (ParseErrorSyntax SyntaxErrorInfo {message = Text.strip (Text.pack (parseErrorTextPretty singleError))}))
 
 firstErrorSpan :: ParseErrorBundle Text Void -> SourceSpan
 firstErrorSpan bundle =

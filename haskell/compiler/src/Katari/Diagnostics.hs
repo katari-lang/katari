@@ -19,10 +19,20 @@ import Katari.Error (CompilerError, renderLocatedCompilerError)
 -- the span-free Normalizer keeps its own @[TypeError]@ and is bridged into this by the checker.
 type Diagnostics = Seq (Located CompilerError)
 
+-- | A single diagnostic as a 'Diagnostics' value, for pure builders that @mconcat@ / @foldMap@ their
+-- results rather than emitting into a 'MonadWriter'. This module is the only place that knows the
+-- 'Seq' encoding of 'Diagnostics'.
+diagnosticAt :: SourceSpan -> CompilerError -> Diagnostics
+diagnosticAt sourceSpan compilerError = Seq.singleton (Located {value = compilerError, sourceSpan = sourceSpan})
+
+-- | Emit one already-located diagnostic.
+report :: (MonadWriter Diagnostics m) => Located CompilerError -> m ()
+report located = tell (Seq.singleton located)
+
 -- | Emit an error at the given source span. Phases hold the AST node they are reporting about, so
 -- this is the form they use.
 reportAt :: (MonadWriter Diagnostics m) => SourceSpan -> CompilerError -> m ()
-reportAt sourceSpan compilerError = tell (Seq.singleton (Located {value = compilerError, sourceSpan = sourceSpan}))
+reportAt sourceSpan compilerError = report (Located {value = compilerError, sourceSpan = sourceSpan})
 
 -- | Run a sub-computation and hand back its diagnostics instead of letting them propagate — for
 -- checks that inspect their own errors before deciding what to surface.

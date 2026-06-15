@@ -15,13 +15,12 @@ module Katari.Compile where
 
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Katari.Data.AST (Module, Phase (Parsed, Typed))
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.SourceSpan (Located (..), sourceSpanOf)
-import Katari.Diagnostics (Diagnostics)
+import Katari.Data.SourceSpan (sourceSpanOf)
+import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..), IdentifierError (..), ReservedModuleNameErrorInfo (..))
 import Katari.Identifier (identifyModule, scanExports)
 import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..), ModuleInterface, SymbolTable)
@@ -87,11 +86,9 @@ compile input =
     userKeys = Map.keysSet admissibleUserSources
     reservedDiagnostics = Map.foldMapWithKey reservedDiagnostic reservedUserSources
     reservedDiagnostic moduleName source =
-      Seq.singleton
-        Located
-          { value = CompilerErrorIdentifier (IdentifierErrorReservedModuleName ReservedModuleNameErrorInfo {moduleName = moduleName}),
-            sourceSpan = sourceSpanOf (fst (parseModule moduleName source))
-          }
+      diagnosticAt
+        (sourceSpanOf (fst (parseModule moduleName source)))
+        (CompilerErrorIdentifier (IdentifierErrorReservedModuleName ReservedModuleNameErrorInfo {moduleName = moduleName}))
 
     -- Parse: the stdlib parse is the shared 'stdlibParsed' CAF; only the user modules are parsed here.
     userParsed :: Map ModuleName (Module Parsed, Diagnostics)
@@ -114,9 +111,10 @@ compile input =
     identifiedModules = fst <$> identified
     identifyDiagnostics = foldMap snd identified
 
-    -- Build the global type environment from every identified module.
+    -- Build the global type environment from every identified module (keyed by module name, so each
+    -- declaration's qualified name is the key joined with the declaration name).
     (typeEnvironment, environmentDiagnostics) =
-      buildEnvironment ((\identified' -> identified'.identifiedAst) <$> Map.elems identifiedModules)
+      buildEnvironment ((\identified' -> identified'.identifiedAst) <$> identifiedModules)
 
     -- Check (per module, against the read-only global environment).
     -- TODO: gate lowering on the absence of errors once diagnostics carry severity here.
