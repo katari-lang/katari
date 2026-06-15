@@ -73,14 +73,16 @@ newtype ModuleInterface = ModuleInterface
   deriving stock (Eq, Show)
 
 -- | The context an @identifyModule@ run resolves against: the interfaces of every importable module
--- and the ambient names injected into every module (primitive / stdlib seeds). Ambient modules
--- (@array@, @string@, ...) are visible unqualified in the module namespace; their members resolve
--- through the corresponding 'moduleInterfaces' entry.
+-- and the default-import roots opened into every module. Primitive / stdlib are ordinary modules
+-- (compiled like any other and present in 'moduleInterfaces'); flagging a module name in
+-- 'defaultImports' brings the root and each of its submodules into every module's scope as a module
+-- qualifier (by last segment), without a special resolution path. Nothing is opened /unqualified/:
+-- a reference into a default-imported module goes through its qualifier (e.g. @array.range@), and
+-- operators desugar to qualified @primitive.*@ calls. The expansion lives in
+-- 'Katari.Identifier.defaultImportScope'.
 data ImportContext = ImportContext
   { moduleInterfaces :: Map ModuleName ModuleInterface,
-    ambientVariables :: Map Text VariableResolution,
-    ambientTypes :: Map Text TypeResolution,
-    ambientModules :: Map Text ModuleName
+    defaultImports :: List ModuleName
   }
   deriving stock (Eq, Show)
 

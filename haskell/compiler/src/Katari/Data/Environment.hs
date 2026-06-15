@@ -38,6 +38,14 @@ data GenericParameterInfo = GenericParameterInfo
   }
   deriving (Eq, Show)
 
+-- NOTE: 'DataInfo' / 'RequestInfo' / 'ValueInfo' / 'SynonymInfo' below share the @{name,
+-- genericParameters, <payload>}@ shape but are deliberately kept as four distinct records rather than
+-- a single @Scheme payload@. The payloads differ in kind (a type, a @(parameter, return)@ pair, an
+-- agent type, a kind-agnostic argument) and the semantic field name (@constructor@ / @request@ /
+-- @valueType@ / @definition@) documents each at its use site — a generic @.payload@ would erase that.
+-- There is no behavioural duplication to fold: the generic helpers below operate on the shared
+-- 'genericParameters' list directly, not through any of these records.
+
 data DataInfo typeShape = DataInfo
   { name :: QualifiedName,
     genericParameters :: List GenericParameterInfo,

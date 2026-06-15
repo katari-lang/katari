@@ -160,8 +160,14 @@ identifySpec = do
     it "imports a name unqualified" $
       diagnosticsOf (identify contextWithLib "import { double } from lib\nagent main() -> integer { double(x = 6) }") `shouldSatisfy` null
 
-    it "resolves a member of an ambient module" $
-      diagnosticsOf (identify contextWithAmbient "agent main() -> integer { array.range(n = 3) }") `shouldSatisfy` null
+    it "resolves a submodule member of a default-import module via its qualifier" $
+      diagnosticsOf (identify contextWithDefaultImport "agent main() -> integer { array.range(n = 3) }") `shouldSatisfy` null
+
+    it "resolves a root member of a default-import module via the root qualifier" $
+      diagnosticsOf (identify contextWithDefaultImport "agent main() -> integer { std.helper(x = 3) }") `shouldSatisfy` null
+
+    it "does not bring a default-import module's names into scope unqualified" $
+      codesOf (identify contextWithDefaultImport "agent main() -> integer { helper(x = 3) }") `shouldBe` ["K2001"]
 
     it "imports a module under an alias" $
       diagnosticsOf (identify contextWithLib "import lib as l\nagent main() -> integer { l.double(x = 6) }") `shouldSatisfy` null
@@ -180,6 +186,32 @@ identifySpec = do
 
     it "reports a non-module qualifier (K2004)" $
       codesOf (identify emptyContext "data point(x: integer)\nagent main() -> point.field { 1 }") `shouldBe` ["K2004"]
+
+  describe "identifyModule (operator desugar)" $ do
+    it "desugars a binary operator to a qualified primitive call (no primitive context needed)" $
+      case operatorCall "agent main() -> integer { 1 + 2 }" of
+        Just (callee, _) -> calleeQualifiedName callee `shouldBe` Just (ModuleName "primitive", "add")
+        Nothing -> expectationFailure "binary operator did not desugar to a call"
+
+    it "passes the operands as left / right arguments" $
+      case operatorCall "agent main() -> integer { 1 + 2 }" of
+        Just (_, arguments) -> ((.name) <$> arguments) `shouldBe` ["left", "right"]
+        Nothing -> expectationFailure "binary operator did not desugar to a call"
+
+    it "desugars a unary operator to a qualified primitive call" $
+      case operatorCall "agent main() -> integer { -x }" of
+        Just (callee, arguments) -> do
+          calleeQualifiedName callee `shouldBe` Just (ModuleName "primitive", "negate")
+          ((.name) <$> arguments) `shouldBe` ["value"]
+        Nothing -> expectationFailure "unary operator did not desugar to a call"
+
+    it "resolves operators without any import context (self-contained desugar)" $
+      diagnosticsOf (identify emptyContext "agent main() -> boolean { (1 + 2) == 3 }") `shouldSatisfy` null
+
+    it "is immune to a user binding that shadows the operator's name" $
+      case operatorCall "agent main() -> integer { let add = 5\n 1 + 2 }" of
+        Just (callee, _) -> calleeQualifiedName callee `shouldBe` Just (ModuleName "primitive", "add")
+        Nothing -> expectationFailure "binary operator did not desugar to a call"
 
 ---------------------------------------------------------------------------------------------------
 -- Symbol table (LSP visibility + go-to-definition)
@@ -279,16 +311,25 @@ thenTargetsHandlerProgram =
 
 emptyContext :: ImportContext
 emptyContext =
-  ImportContext {moduleInterfaces = Map.empty, ambientVariables = Map.empty, ambientTypes = Map.empty, ambientModules = Map.empty}
+  ImportContext {moduleInterfaces = Map.empty, defaultImports = []}
 
 contextWithLib :: ImportContext
 contextWithLib = emptyContext {moduleInterfaces = Map.singleton (ModuleName "lib") (interfaceOf "lib" "agent double(x: integer) -> integer { x }\ndata pair(a: integer)")}
 
-contextWithAmbient :: ImportContext
-contextWithAmbient =
+-- | A default-import root @std@ (with a submodule @std.array@) used to exercise the default-import
+-- expansion: @std@ and @std.array@ are reachable as the qualifiers @std@ and @array@, while nothing is
+-- brought into scope unqualified. (The real default root is @primitive@, but that is a reserved word
+-- and so cannot be written as a qualifier in source — see 'Katari.Stdlib'; operators reach it by a
+-- directly-constructed reference, not through scope.)
+contextWithDefaultImport :: ImportContext
+contextWithDefaultImport =
   emptyContext
-    { moduleInterfaces = Map.singleton (ModuleName "array") (interfaceOf "array" "agent range(n: integer) -> integer { n }"),
-      ambientModules = Map.singleton "array" (ModuleName "array")
+    { moduleInterfaces =
+        Map.fromList
+          [ (ModuleName "std", interfaceOf "std" "agent helper(x: integer) -> integer { x }"),
+            (ModuleName "std.array", interfaceOf "std.array" "agent range(n: integer) -> integer { n }")
+          ],
+      defaultImports = [ModuleName "std"]
     }
 
 spanWidth :: SourceSpan -> Int
@@ -328,6 +369,21 @@ mainReturn module' = agentNamed "main" module' >>= (.body.returnExpression)
 mainCallCallee :: Module Identified -> Maybe (Expression Identified)
 mainCallCallee module' = case mainReturn module' of
   Just (ExpressionCall call) -> Just call.callee
+  _ -> Nothing
+
+-- | Identify @source@ (no import context) and return @main@'s body call: its callee and arguments.
+-- Used to inspect what an operator desugared to.
+operatorCall :: Text -> Maybe (Expression Identified, [CallArgument Identified])
+operatorCall source = case mainReturn (moduleOf (identify emptyContext source)) of
+  Just (ExpressionCall call) -> Just (call.callee, call.arguments)
+  _ -> Nothing
+
+-- | The @(module, name)@ a qualified-reference callee resolves to, if it is one.
+calleeQualifiedName :: Expression Identified -> Maybe (ModuleName, Text)
+calleeQualifiedName = \case
+  ExpressionQualifiedReference reference -> case reference.variableReference.resolution of
+    Just (VariableResolutionQualifiedName qualifiedName) -> Just (qualifiedName.moduleName, qualifiedName.name)
+    _ -> Nothing
   _ -> Nothing
 
 isQualifiedReference :: Expression Identified -> Bool

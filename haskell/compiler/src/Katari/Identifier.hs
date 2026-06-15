@@ -15,15 +15,15 @@ module Katari.Identifier where
 
 import Control.Applicative ((<|>))
 import Control.Monad (when)
+import Data.List (foldl')
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.ModuleName (ModuleName (..))
+import Katari.Data.ModuleName (ModuleName, covers, lastSegment)
 import Katari.Data.SourceSpan (SourceSpan)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Identifier.Expression (resolveAgentDeclaration)
@@ -91,10 +91,11 @@ identifyModule importContext moduleName parsedModule =
           stateVariables = Map.empty
         }
 
--- | Assemble the top-level scope (own declarations and imports over the ambient names), report
--- duplicate top-level names, then resolve every declaration under it. The own and imported names are
--- recorded as symbols visible over the whole module; the ambient names are in scope for resolution
--- but not recorded (they have no source to navigate to).
+-- | Assemble the top-level scope (own declarations and imports over the default-imported names),
+-- report duplicate top-level names, then resolve every declaration under it. The own and imported
+-- names are recorded as symbols visible over the whole module; the default-imported names are in scope
+-- for resolution but not recorded (the user's source has no import statement to navigate to, and they
+-- resolve through their own defining module's table anyway).
 resolveModule :: ImportContext -> Module Parsed -> Identifier IdentifiedModule
 resolveModule importContext parsedModule = do
   moduleName <- currentModuleName
@@ -102,7 +103,7 @@ resolveModule importContext parsedModule = do
   let ownBindingGroups = declarationBindings moduleName <$> parsedModule.declarations
       ownBindings = concat ownBindingGroups
   reportTopLevelDuplicates ownBindingGroups
-  withScope (ambientToScope importContext) $
+  withScope (defaultImportScope importContext) $
     bindInScope parsedModule.sourceSpan (importBindings <> ownBindings) $ do
       declarations <- traverse resolveDeclaration parsedModule.declarations
       symbols <- currentSymbols
@@ -112,13 +113,28 @@ resolveModule importContext parsedModule = do
             symbolTable = SymbolTable {symbols = symbols}
           }
 
-ambientToScope :: ImportContext -> Scope
-ambientToScope importContext =
-  Scope
-    { variableBindings = importContext.ambientVariables,
-      typeBindings = importContext.ambientTypes,
-      moduleBindings = importContext.ambientModules
-    }
+-- | The base resolution scope every module is identified under: the default-import roots, expanded to
+-- module (prefix) imports. Each root and every module under it (its @root.@-prefixed descendants, by
+-- 'Katari.Data.ModuleName.covers') is brought into scope as a module qualifier by its last segment —
+-- so a default import of @primitive@ makes @primitive.add@ resolvable and @primitive.array@ reachable
+-- as the qualifier @array@ (hence @array.range@). Nothing is brought in unqualified: every reference
+-- into a default-imported module goes through its qualifier, and operators desugar to qualified
+-- @primitive.*@ calls (see "Katari.Identifier.Expression"), so no name-opening is needed.
+--
+-- Qualifiers are keyed by last segment, so two covered modules sharing a last segment would collide.
+-- The covered set is the default-import roots' own descendants — the wired-in stdlib, which is
+-- compiler-controlled and kept collision-free by "Katari.StdlibSpec"; a user module cannot enter it
+-- (the driver rejects a user module under a reserved namespace, see 'Katari.Stdlib.isReservedModuleName').
+-- The fold is over 'Map.keys' (sorted module names), so with collisions ruled out the order is
+-- immaterial. The module's own and imported names bind over this base and shadow it. These qualifiers
+-- carry no navigable source, so they are installed as the base scope (via 'withScope') rather than
+-- recorded as symbols.
+defaultImportScope :: ImportContext -> Scope
+defaultImportScope importContext = foldl' qualify emptyScope coveredModules
+  where
+    coveredModules = filter covered (Map.keys importContext.moduleInterfaces)
+    covered moduleName = any (`covers` moduleName) importContext.defaultImports
+    qualify scope moduleName = insertResolution (lastSegment moduleName) (SymbolModule moduleName) scope
 
 ---------------------------------------------------------------------------------------------------
 -- Imports
@@ -143,10 +159,6 @@ resolveModuleImport sourceSpan moduleImport = do
     Just _ ->
       let qualifier = fromMaybe (lastSegment moduleImport.moduleName) moduleImport.alias
        in pure [moduleBinding qualifier sourceSpan moduleImport.moduleName]
-
--- | The trailing dot-segment of a module name, used as the qualifier of an unaliased prefix import.
-lastSegment :: ModuleName -> Text
-lastSegment (ModuleName moduleName) = Text.takeWhileEnd (/= '.') moduleName
 
 resolveNamesImport :: SourceSpan -> NamesImport -> Identifier (List Binding)
 resolveNamesImport sourceSpan namesImport = do

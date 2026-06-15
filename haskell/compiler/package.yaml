@@ -23,6 +23,12 @@ dependencies:
   - parallel
   - async
   - stm
+  - file-embed
+  - filepath
+
+# Stdlib sources embedded into the binary at build time by 'Katari.Stdlib' (Data.FileEmbed).
+extra-source-files:
+  - stdlib/**/*.ktr
 
 # NOTE: -Wmissing-export-lists is intentionally absent: modules export everything while the
 # scrap-and-build is in motion.
@@ -49,10 +55,13 @@ library:
     - Katari.Data.NormalizedType
     - Katari.Data.ModuleName
     - Katari.Data.Variance
+    - Katari.Data.JSONSchema
     - Katari.Data.IR
     - Katari.Error
     - Katari.Panic
     - Katari.Diagnostics
+    - Katari.Primitive
+    - Katari.Stdlib
     - Katari.Identifier
     - Katari.Identifier.Monad
     - Katari.Identifier.Type
@@ -67,7 +76,6 @@ library:
     - Katari.Parser.Pattern
     - Katari.Parser.Expression
     - Katari.Lowering
-    - Katari.Schema
     - Katari.Compile
 
 tests:

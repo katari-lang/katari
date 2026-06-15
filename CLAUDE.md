@@ -4,6 +4,11 @@
 
 This project is under development phase, so you can change anything; architecture, design, API, etc. You don't need to worry about backward compatibility or breaking changes.
 
+CURRENT Phase:
+
+- branch main: prototyping (completed)
+- ★ branch scrap-and-build: refactoring and redesigning the codebase based on the prototype, and implementing the core features of Katari runtime and compiler (in progress)
+
 ## Overview
 
 - Katari is Language to write orchestration logic for AI agents

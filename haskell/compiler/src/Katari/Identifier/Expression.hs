@@ -22,12 +22,20 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.Id (VariableResolution (..))
-import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.ModuleName (ModuleName, renderModuleName)
 import Katari.Data.SourceSpan (SourceSpan (..))
 import Katari.Identifier.Monad
 import Katari.Identifier.Pattern (resolveParameterBinding, resolvePattern)
 import Katari.Identifier.Type (resolveType, withGenericParameters)
 import Katari.Panic (panic)
+import Katari.Primitive
+  ( binaryOperatorLeftLabel,
+    binaryOperatorName,
+    binaryOperatorRightLabel,
+    primitiveModuleName,
+    unaryOperatorName,
+    unaryOperatorOperandLabel,
+  )
 
 ---------------------------------------------------------------------------------------------------
 -- Expressions
@@ -50,13 +58,8 @@ resolveExpression = \case
     callee <- resolveExpression node.callee
     arguments <- traverse resolveCallArgument node.arguments
     pure (ExpressionCall CallExpression {callee = callee, arguments = arguments, sourceSpan = node.sourceSpan, typeOf = ()})
-  ExpressionBinaryOperator node -> do
-    left <- resolveExpression node.left
-    right <- resolveExpression node.right
-    pure (ExpressionBinaryOperator BinaryOperatorExpression {operator = node.operator, left = left, right = right, sourceSpan = node.sourceSpan, typeOf = ()})
-  ExpressionUnaryOperator node -> do
-    operand <- resolveExpression node.operand
-    pure (ExpressionUnaryOperator UnaryOperatorExpression {operator = node.operator, operand = operand, sourceSpan = node.sourceSpan, typeOf = ()})
+  ExpressionBinaryOperator node -> resolveBinaryOperator node
+  ExpressionUnaryOperator node -> resolveUnaryOperator node
   ExpressionIf node -> do
     condition <- resolveExpression node.condition
     thenBlock <- resolveBlock node.thenBlock
@@ -147,6 +150,66 @@ qualifiedReference node variableExpression moduleName = do
             typeOf = ()
           }
     )
+
+---------------------------------------------------------------------------------------------------
+-- Operator desugar (@a \<op\> b@ ~> @primitive.\<name\>(left = a, right = b)@)
+---------------------------------------------------------------------------------------------------
+
+-- | Desugar a binary operator into a call to its 'Katari.Primitive' implementation. The callee is a
+-- qualified reference to @primitive.\<name\>@ built directly, not resolved through scope: so it is
+-- immune to a user binding that shadows the operator's name, and it needs no @primitive@ interface in
+-- scope to resolve (operator-using modules identify cleanly even with no import context). The
+-- 'Katari.Primitive' table and the embedded @primitive@ module are kept in agreement by
+-- "Katari.StdlibSpec".
+resolveBinaryOperator :: BinaryOperatorExpression Parsed -> Identifier (Expression Identified)
+resolveBinaryOperator node = do
+  left <- resolveExpression node.left
+  right <- resolveExpression node.right
+  pure
+    ( primitiveCall
+        node.sourceSpan
+        (binaryOperatorName node.operator)
+        [(binaryOperatorLeftLabel, left), (binaryOperatorRightLabel, right)]
+    )
+
+resolveUnaryOperator :: UnaryOperatorExpression Parsed -> Identifier (Expression Identified)
+resolveUnaryOperator node = do
+  operand <- resolveExpression node.operand
+  pure (primitiveCall node.sourceSpan (unaryOperatorName node.operator) [(unaryOperatorOperandLabel, operand)])
+
+-- | A call to a member of the wired-in @primitive@ module: @primitive.\<member\>(label = value, ...)@.
+-- The callee is a qualified reference whose @primitive@-module resolution is constructed directly (no
+-- scope lookup), so the desugar does not depend on @primitive@ being in scope. Every synthetic node is
+-- anchored to @sourceSpan@ (the operator's own span), so diagnostics and LSP positions point at the
+-- operator the user wrote.
+primitiveCall :: SourceSpan -> Text -> List (Text, Expression Identified) -> Expression Identified
+primitiveCall sourceSpan member arguments =
+  ExpressionCall
+    CallExpression
+      { callee = callee,
+        arguments = argument <$> arguments,
+        sourceSpan = sourceSpan,
+        typeOf = ()
+      }
+  where
+    callee =
+      ExpressionQualifiedReference
+        QualifiedReferenceExpression
+          { moduleQualifier =
+              ModuleQualifier
+                { name = renderModuleName primitiveModuleName,
+                  moduleReference = identifiedReference sourceSpan (Just primitiveModuleName),
+                  sourceSpan = sourceSpan
+                },
+            name = member,
+            variableReference = identifiedReference sourceSpan (Just (qualifiedVariableResolution primitiveModuleName member)),
+            sourceSpan = sourceSpan,
+            typeOf = ()
+          }
+    -- Synthetic labels carry no navigable source (resolution is @()@ for label references), so the
+    -- label reference is built directly rather than through 'identifiedReference'.
+    argument (label, value) =
+      CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = value, sourceSpan = sourceSpan}
 
 ---------------------------------------------------------------------------------------------------
 -- match / for / handler

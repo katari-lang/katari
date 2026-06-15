@@ -1,0 +1,49 @@
+// The wired-in `primitive` module. Every operator desugars to one of these functions, and the module
+// is default-imported into every user module (so `primitive.add` and stdlib submodules resolve).
+//
+// Generic bounds give operators precise typing: an arithmetic operator over `T extends number`
+// preserves `integer` when both operands are integers, and widens to `number` otherwise.
+
+// Arithmetic -------------------------------------------------------------------------------------
+
+@"Add two numbers; preserves integer when both operands are integers."
+primitive agent add[T extends number](left: T, right: T) -> T
+@"Subtract two numbers; preserves integer when both operands are integers."
+primitive agent subtract[T extends number](left: T, right: T) -> T
+@"Multiply two numbers; preserves integer when both operands are integers."
+primitive agent multiply[T extends number](left: T, right: T) -> T
+@"Floor-modulo two numbers; preserves integer when both operands are integers."
+primitive agent modulo[T extends number](left: T, right: T) -> T
+@"Divide two numbers; always yields a number."
+primitive agent divide(left: number, right: number) -> number
+@"Negate a number; preserves integer."
+primitive agent negate[T extends number](value: T) -> T
+
+// Comparison -------------------------------------------------------------------------------------
+
+@"Whether two values are equal."
+primitive agent equal[T](left: T, right: T) -> boolean
+@"Whether two values are not equal."
+primitive agent not_equal[T](left: T, right: T) -> boolean
+@"Whether the left number is less than the right."
+primitive agent less_than[T extends number](left: T, right: T) -> boolean
+@"Whether the left number is less than or equal to the right."
+primitive agent less_or_equal[T extends number](left: T, right: T) -> boolean
+@"Whether the left number is greater than the right."
+primitive agent greater_than[T extends number](left: T, right: T) -> boolean
+@"Whether the left number is greater than or equal to the right."
+primitive agent greater_or_equal[T extends number](left: T, right: T) -> boolean
+
+// Logical ----------------------------------------------------------------------------------------
+
+@"Logical conjunction."
+primitive agent and(left: boolean, right: boolean) -> boolean
+@"Logical disjunction."
+primitive agent or(left: boolean, right: boolean) -> boolean
+@"Logical negation."
+primitive agent not(value: boolean) -> boolean
+
+// String -----------------------------------------------------------------------------------------
+
+@"Concatenate two strings."
+primitive agent concat(left: string, right: string) -> string
