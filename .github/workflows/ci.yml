@@ -103,7 +103,7 @@ jobs:
         run: stack build --fast
 
       - name: Build (TypeScript)
-        run: pnpm -r --filter "./typescript/packages/*" run build
+        run: pnpm -r run build
 
       - name: Test
         run: pnpm run test

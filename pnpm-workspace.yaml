@@ -5,5 +5,7 @@ allowBuilds:
   esbuild: true
   lefthook: true
 
+# Exclude specific versions from the minimum release age check.
+# Update this list when upgrading the pinned package.
 minimumReleaseAgeExclude:
   - hono@4.12.24

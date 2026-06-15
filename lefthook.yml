@@ -5,5 +5,6 @@ pre-commit:
       run: pnpm run typecheck
     format:
       run: pnpm run format
+      stage_fixed: true
     lint:
       run: pnpm run lint
