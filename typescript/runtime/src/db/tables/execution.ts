@@ -1,6 +1,6 @@
 // The execution layer: instances (the ownership / cascade / load unit), the request/capability edges
-// (delegations, escalations), the API's per-run management record (runs + escalations audit), and
-// the durable record of in-flight external calls for crash recovery.
+// (delegations, escalations), and the API's per-run management record (runs + escalations audit).
+// In-flight external (FFI) calls live as `ExternalThread` rows in `threads`, not a separate table.
 //
 // An instance is ephemeral: it self-deletes at its terminal (the project cascade is only a crash
 // backstop), and terminal outcomes live on `runs`, not here. The parent→child edge is the `delegations`
@@ -11,19 +11,10 @@
 // cannot be deleted).
 
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
-import {
-  index,
-  integer,
-  jsonb,
-  pgTable,
-  primaryKey,
-  text,
-  timestamp,
-  uuid,
-} from "drizzle-orm/pg-core";
+import { index, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import type { InstanceStatus } from "../../runtime/engine/types.js";
 import type { DelegateTarget } from "../../runtime/event/types.js";
-import type { Value } from "../../runtime/value/types.js";
+import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
 export const instances = pgTable(
@@ -47,6 +38,9 @@ export const instances = pgTable(
       .references(() => snapshots.id),
     /** running | cancelling — an instance is ephemeral, so it has no terminal state (that lives on `runs`). */
     status: text("status").$type<InstanceStatus>().notNull(),
+    /** The generic substitution this activation was summoned with (from the spawning `delegate.generics`).
+     *  Inner scopes inherit it implicitly; not stored on `scopes`. */
+    ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -131,21 +125,3 @@ export const runEscalationsAudit = pgTable(
   },
   (table) => [primaryKey({ columns: [table.runId, table.escalationId] })],
 );
-
-/** In-flight external (FFI) call: a suspended `external` thread awaiting the sidecar, for crash recovery. */
-export const externalCalls = pgTable("external_calls", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  projectId: uuid("project_id")
-    .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
-  instanceId: uuid("instance_id")
-    .notNull()
-    .references(() => instances.id, { onDelete: "cascade" }),
-  /** The engine-local thread (within the instance) that is suspended on this call. */
-  threadId: integer("thread_id").notNull(),
-  /** The external dispatch key the handler interprets. */
-  key: text("key").notNull(),
-  argument: jsonb("argument").$type<Value | null>(),
-  state: text("state").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});

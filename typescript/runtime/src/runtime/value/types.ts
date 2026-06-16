@@ -1,15 +1,24 @@
 // Value: the runtime's in-memory value model. Scalars and small composites are inline; large bytes
-// (big strings / files / secrets) live in a content-addressed blob and are referenced by a `ref`
-// value. Callable values come in two shapes — a top-level named agent (`agent`) and a `closure`
+// (big strings / files) live in a content-addressed blob and are referenced by a `ref` value.
+// Callable values come in two shapes — a top-level named agent (`agent`) and a `closure`
 // (案2: a block + captured scope carried directly as a value, with no separate closure entity).
 //
 // This is also the JSON shape stored at rest: `scope_variables.value` holds a `Value`, a blob's
-// bytes live in the BlobStore (keyed by `blobId`), and the ref keeps only the handle + metadata.
+// bytes live in the BlobStore (S3 object key `{projectId}/{blobId}`), and the ref keeps only the
+// handle + metadata.
+//
+// A `Value` carries an optional `private` flag (intersection on every variant). It is the single
+// source of truth for "treat this value as private" — used by persistence (encrypt-at-rest), by
+// transport (warn / redact on emission), and by logging (redaction). The flag is preserved across
+// every operation that reproduces the value as-is.
 
 import type { BlockId, GenericArgumentSchema, QualifiedName } from "@katari-lang/types";
 import type { BlobId, ScopeId, SnapshotId } from "../ids.js";
 
-export type Value =
+/** The privacy SSoT: when true, the value is treated as private at rest, in transit, and in logs. */
+export type PrivacyMarker = { private?: boolean };
+
+export type Value = (
   | { kind: "null" }
   | { kind: "boolean"; value: boolean }
   | { kind: "integer"; value: number }
@@ -20,10 +29,12 @@ export type Value =
   | { kind: "array"; elements: Value[] }
   | BlobRefValue
   | ClosureValue
-  | AgentValue;
+  | AgentValue
+) &
+  PrivacyMarker;
 
-/** The semantic kind of the bytes a blob holds. Distinguishes content compare / display / crypto-at-rest. */
-export type SemanticKind = "string" | "file" | "secret";
+/** The semantic kind of the bytes a blob holds. Distinguishes content compare / display. */
+export type SemanticKind = "string" | "file";
 
 /** A reference to a content-addressed blob (the second axis of the value model alongside the blob itself). */
 export type BlobRefValue = {

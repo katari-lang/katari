@@ -23,7 +23,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { Thread, ThreadStatus } from "../../runtime/engine/types.js";
-import type { GenericSubstitution, SemanticKind, Value } from "../../runtime/value/types.js";
+import type { SemanticKind, Value } from "../../runtime/value/types.js";
 import { instances } from "./execution.js";
 import { projects } from "./projects.js";
 
@@ -61,7 +61,6 @@ export const scopes = pgTable(
     ownerInstanceId: uuid("owner_instance_id").references(() => instances.id, {
       onDelete: "cascade",
     }),
-    ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
     /** This scope's variable slots, `VariableId -> Value`, inline (see the file header). */
     values: jsonb("values").$type<Record<number, Value>>().notNull(),
   },

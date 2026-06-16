@@ -37,22 +37,40 @@ export type Metadata = {
 /** One module's lowered output. Callables resolve by `QualifiedName` through `entries`. */
 export type IRModule = {
   metadata: Metadata;
-  /** Every block (an agent wrapper, an agent body, a leaf body, or a structural node), keyed by `BlockId`. */
-  blocks: Record<number, Block>;
-  /** The schema of every agent block; keyed by `BlockId`. Leaf bodies and structural nodes have none. */
-  schemas: Record<number, SchemaInfo>;
+  /** Every block, wrapped in a `BlockInformation` that carries the parameters its scope is seeded with. */
+  blocks: Record<number, BlockInformation>;
   /** Top-level callable name -> its agent `BlockId`, for resolving a delegate `CalleeName` at run time. */
   entries: Record<QualifiedName, BlockId>;
   /** Debug-only block names (pretty printer / traces); ignored on the hot path. */
   names: Record<number, string>;
 };
 
+// ─── Block wrapper ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A block plus the parameter map the runtime uses to seed its thread's scope on entry.
+ *
+ * `parameters` is name -> the `VariableId` in this block's scope that receives the passed-in value.
+ * Used by:
+ *   - Agent body: `parameter` -> the agent's argument value.
+ *   - For body Sequence: `iterator` -> current element; `state_0`, `state_1`, ... -> current states.
+ *   - For then-clause body: `result` -> the mapped output array; `state_0`, ... -> final states.
+ *   - Handler body: `parameter` -> the request argument; `state_0`, ... -> current states.
+ *   - Handle then-clause body: `result` -> body result; `state_0`, ... -> final states.
+ *
+ * Structural-node blocks themselves (Match / For / Handle / Parallel) are IR constants and carry
+ * no parameters; the entries above name their body / handler / then-clause Sequence blocks.
+ */
+export type BlockInformation = {
+  block: Block;
+  parameters: Record<string, VariableId>;
+};
+
 // ─── Blocks (each runs as its own thread) ──────────────────────────────────────────────────────
 
 /**
- * A schedulable unit. `agent` is the sole value-addressable wrapper (it carries the calling
- * convention and a schema); every other block is reached only as an agent's body or as a structural
- * node, and carries no schema.
+ * A schedulable unit. `agent` is the sole value-addressable wrapper (it carries a schema); every
+ * other block is reached only as an agent's body or as a structural node, and carries no schema.
  */
 export type Block =
   | AgentBlock
@@ -67,19 +85,13 @@ export type Block =
   | ParallelBlock;
 
 /**
- * The single value-addressable callable. The incoming argument binds to `parameter` in a fresh
- * scope (a `return` boundary); omitted optional fields are filled from `defaults`; then `body` runs.
- * `defaults` carries the `?=` defaults of a non-pattern parameter list (a `data` / `request` /
- * `external` / `primitive` callable, whose parameters are plain `label: type ?= default` signatures);
- * a user `agent`'s parameters are patterns (`label => pattern`, with `x ?= v` sugar for `x => x ?= v`),
- * so its defaults live in those patterns (the `default` pattern variant) and `defaults` is empty.
- * Whether a call commits is the body's property (derived at run time), not stored here.
+ * The single value-addressable callable. The argument binds via the body's `BlockInformation.parameters`
+ * (`parameter`). Whether a call commits is the body's property (derived at run time), not stored here.
  */
 export type AgentBlock = {
   kind: "agent";
-  parameter: VariableId | null;
-  defaults: Record<string, Literal>;
   body: BlockId;
+  schema: SchemaInfo;
 };
 
 /** An agent / structural body: a list of operations plus the variable holding its value (if any). */
@@ -89,17 +101,41 @@ export type SequenceBlock = {
   result: VariableId | null;
 };
 
-/** Leaf body — a built-in primitive (resolved against the runtime's prim registry by `name`). */
-export type PrimitiveBlock = { kind: "primitive"; name: string };
+/**
+ * Leaf body — a built-in primitive (resolved against the runtime's prim registry by `name`).
+ * `input` is the in-scope variable holding the argument (seeded by the wrapping agent via
+ * `BlockInformation.parameters`). `defaults` fills `null` entries before invoking the prim.
+ */
+export type PrimitiveBlock = {
+  kind: "primitive";
+  name: string;
+  input: VariableId;
+  defaults: Record<string, Literal>;
+};
 
-/** Leaf body — a data constructor: build the tagged value of `name` from the argument. */
-export type ConstructBlock = { kind: "construct"; name: QualifiedName };
+/** Leaf body — a data constructor: build the tagged value of `name` from `input`, after filling `defaults`. */
+export type ConstructBlock = {
+  kind: "construct";
+  name: QualifiedName;
+  input: VariableId;
+  defaults: Record<string, Literal>;
+};
 
-/** Leaf body — a request: raise `name` as an escalation to the enclosing handler. */
-export type RequestBlock = { kind: "request"; name: QualifiedName };
+/** Leaf body — a request: raise `name` as an escalation, carrying `input` (after filling `defaults`). */
+export type RequestBlock = {
+  kind: "request";
+  name: QualifiedName;
+  input: VariableId;
+  defaults: Record<string, Literal>;
+};
 
-/** Leaf body — an external agent dispatched by the external handler via the opaque `key`. */
-export type ExternalBlock = { kind: "external"; key: string };
+/** Leaf body — an external agent dispatched by the external handler via `key`, with `input` as the argument. */
+export type ExternalBlock = {
+  kind: "external";
+  key: string;
+  input: VariableId;
+  defaults: Record<string, Literal>;
+};
 
 /** `match subject { ... }`: try `arms` in order, run the first match's body (or `fallback`). */
 export type MatchBlock = {
@@ -113,39 +149,48 @@ export type MatchArm = { pattern: Pattern; body: BlockId };
 
 /**
  * `[par] for (pattern in source; var s = init) { body } [then (p) { ... }]`. Each iteration's
- * `next` value is collected, in source order, into the mapped output array.
+ * `next` value is collected, in source order, into the mapped output array. `source` and
+ * `initialStates` are in the caller's scope; the runtime seeds the body's `iterator` / `state_N`
+ * parameters from them per iteration.
  */
 export type ForBlock = {
   kind: "for";
   parallel: boolean;
-  /** (element var bound in the body scope, source-array var in the caller scope), one per iterator. */
-  iterators: Array<[VariableId, VariableId]>;
-  /** (state var in the body scope, initial-value var in the caller scope). Empty when parallel. */
-  states: Array<[VariableId, VariableId]>;
+  /** The source array to iterate, in the caller's scope. */
+  source: VariableId;
+  /** Initial state values in the caller's scope, in order; the Nth seeds the body's `state_N`. Empty when parallel. */
+  initialStates: VariableId[];
   body: BlockId;
   thenClause: ThenClause | null;
 };
 
-/** A `handle` scope: run `body`, dispatch escalations to `handlers`, run `thenClause` on completion. */
+/**
+ * A `handle` scope: run `body`, dispatch escalations to `handlers`, run `thenClause` on completion.
+ * `initialStates` are in the caller's scope; they seed the body / handler `state_N` parameters.
+ */
 export type HandleBlock = {
   kind: "handle";
   parallel: boolean;
-  states: Array<[VariableId, VariableId]>;
+  initialStates: VariableId[];
   body: BlockId;
   handlers: Handler[];
   thenClause: ThenClause | null;
 };
 
-/** One request handler. On a matching escalation the request argument binds to `parameter`. */
+/**
+ * One request handler. On a matching escalation the runtime seeds the handler body's scope (the
+ * request argument as `parameter`, the current states as `state_N`; see `BlockInformation`) and runs `body`.
+ */
 export type Handler = {
   request: QualifiedName;
-  parameter: VariableId | null;
   body: BlockId;
 };
 
-/** A `then (pattern) { body }` clause: `parameter` receives the produced value. */
+/**
+ * A `then (pattern) { body }` clause. The produced value (the for-mapping array / the handle body's
+ * result) is seeded as the clause body's `result` parameter, alongside the final `state_N`s.
+ */
 export type ThenClause = {
-  parameter: VariableId | null;
   body: BlockId;
 };
 
@@ -273,10 +318,9 @@ export type SchemaInfo = {
   input: JSONSchema;
   output: JSONSchema;
   requests: RequestSchema[];
-  /** This callable's generic parameters, in declaration order: each name paired with the `GenericId`
-   *  its references use in `input` / `output` (`$generic`) and `requests`. The bridge from a
-   *  name-keyed application onto the id-keyed template. */
-  genericBindings: Array<[string, GenericId]>;
+  /** This callable's generic parameters, keyed by name: each maps to the `GenericId` its references
+   *  use in `input` / `output` (`$generic`) and `requests`. */
+  genericBindings: Record<string, GenericId>;
 };
 
 /** One requests-schema entry: a concrete request, or a reference to an effect-generic parameter. */

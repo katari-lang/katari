@@ -1,7 +1,7 @@
 // Branded identifier types for the runtime. Two families:
 //
-//   - Persistent UUIDs (project / snapshot / instance / delegation / escalation / run / blob /
-//     external-call) — stable across processes, the keys of the DB tables.
+//   - Persistent UUIDs (project / snapshot / instance / delegation / escalation / run / blob) —
+//     stable across processes, the keys of the DB tables.
 //   - Engine-local integers (thread / scope / call / ask) — allocated by the engine inside an
 //     instance (or, for scopes, the per-project CORE-global store). Cheap monotonic counters.
 //
@@ -15,7 +15,6 @@ export type InstanceId = Brand<string, "InstanceId">;
 export type DelegationId = Brand<string, "DelegationId">;
 export type EscalationId = Brand<string, "EscalationId">;
 export type RunId = Brand<string, "RunId">;
-export type ExternalCallId = Brand<string, "ExternalCallId">;
 export type BlobId = Brand<string, "BlobId">;
 
 /** Unique within one instance's thread tree. */

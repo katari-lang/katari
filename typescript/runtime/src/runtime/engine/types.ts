@@ -26,8 +26,6 @@ export type Scope = {
   owner: InstanceId | null;
   /** VariableId -> Value. */
   values: Record<number, Value>;
-  /** The ambient generic substitution of the enclosing activation; inner scopes inherit it. */
-  ambientGenerics?: GenericSubstitution;
 };
 
 // ─── Thread ──────────────────────────────────────────────────────────────────────────────────────
@@ -57,7 +55,8 @@ export type Thread =
   | ForThread
   | HandleThread
   | ParallelThread
-  | DelegateThread;
+  | DelegateThread
+  | ExternalThread;
 
 /** Runs a `sequence` block's operations one at a time, awaiting any spawning op before advancing. */
 export type SequenceThread = ThreadBase & {
@@ -83,7 +82,7 @@ export type ForThread = ThreadBase & {
   /** Mapped next-values by iteration index (sparse until all land, in the parallel case); the dense
    *  source-ordered array is materialised at completion. Mirrors `ParallelThread.collected`. */
   collected: Record<number, Value>;
-  /** Current state-var values (sequential `var s = ...`): VariableId -> Value. */
+  /** Current state values (sequential `var s = ...`): index N -> the current value of `state_N`. */
   states: Record<number, Value>;
   /** Iteration index -> the child call running it (one for sequential, many concurrent for parallel). */
   pending: Record<number, CallId>;
@@ -93,7 +92,7 @@ export type ForThread = ThreadBase & {
 export type HandleThread = ThreadBase & {
   kind: "handle";
   parallel: boolean;
-  /** Current state-var values: VariableId -> Value. */
+  /** Current state values: index N -> the current value of `state_N`. */
   states: Record<number, Value>;
   /** The body / a handler body currently in flight. */
   pending: PendingCall | null;
@@ -122,6 +121,20 @@ export type DelegateThread = ThreadBase & {
   inboundEscalations: Record<string, EscalationId>;
 };
 
+/**
+ * The thread running an `ExternalBlock` body: suspended on the external handler (FFI / sidecar).
+ * This replaces the separate `external_calls` table — recovery scans `threads where kind='external'`.
+ */
+export type ExternalThread = ThreadBase & {
+  kind: "external";
+  /** The dispatch key the handler interprets. */
+  key: string;
+  /** The argument value passed to the handler (after `defaults` were applied). */
+  argument: Value | null;
+  /** open | done — the lifecycle of this external dispatch (acknowledgement still pending vs landed). */
+  externalState: "open" | "done";
+};
+
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 
 export type InstanceStatus = "running" | "cancelling";
@@ -132,6 +145,9 @@ export type InstanceStatus = "running" | "cancelling";
  * here — they live in the per-project store (`ProjectStore.scopes`); this instance owns a subset of
  * them via `Scope.owner`. An instance is ephemeral (no terminal status — that lives on the run record);
  * its parent is not a field but is recovered through its `delegationId` (→ `delegations.callerInstanceId`).
+ *
+ * `ambientGenerics` is this activation's generic substitution (carried in on the spawning `delegate`
+ * event). Inner scopes do not store it; they look it up on the instance.
  */
 export type Instance = {
   id: InstanceId;
@@ -142,6 +158,8 @@ export type Instance = {
    *  standalone instance attribute. */
   target: DelegateTarget;
   status: InstanceStatus;
+  /** The ambient generic substitution for this activation (from the spawning `delegate.generics`). */
+  ambientGenerics?: GenericSubstitution;
   rootThreadId: ThreadId;
   /** ThreadId -> Thread (instance-local). */
   threads: Record<number, Thread>;
