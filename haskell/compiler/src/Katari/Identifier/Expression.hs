@@ -82,8 +82,10 @@ resolveExpression = \case
   ExpressionQualifiedReference _ ->
     panic "Identifier.resolveExpression: the parser never produces ExpressionQualifiedReference"
 
-resolveRecordEntry :: (Text, Expression Parsed) -> Identifier (Text, Expression Identified)
-resolveRecordEntry (name, value) = (,) name <$> resolveExpression value
+resolveRecordEntry :: RecordEntry Parsed -> Identifier (RecordEntry Identified)
+resolveRecordEntry entry = do
+  value <- resolveExpression entry.value
+  pure RecordEntry {name = entry.name, value = value, sourceSpan = entry.sourceSpan}
 
 resolveCallArgument :: CallArgument Parsed -> Identifier (CallArgument Identified)
 resolveCallArgument argument = do
@@ -180,7 +182,7 @@ primitiveCall sourceSpan member arguments =
   ExpressionCall
     CallExpression
       { callee = callee,
-        arguments = argument <$> arguments,
+        arguments = buildArgument <$> arguments,
         sourceSpan = sourceSpan,
         typeOf = ()
       }
@@ -200,7 +202,7 @@ primitiveCall sourceSpan member arguments =
             typeOf = ()
           }
     -- Synthetic labels carry no navigable source (label resolution is @()@), so the reference is built directly.
-    argument (label, value) =
+    buildArgument (label, value) =
       CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = value, sourceSpan = sourceSpan}
 
 ---------------------------------------------------------------------------------------------------
@@ -253,7 +255,9 @@ resolveThenClause varScope thenClause = do
   pure ThenClause {binder = binder, body = body, sourceSpan = thenClause.sourceSpan}
 
 -- | @var name [: T] = initial@ — the initial is resolved in the enclosing scope; the name gets a
--- fresh local id. Returns the identified bindings and the scope additions they make.
+-- fresh local id. Returns the identified bindings and the scope additions they make. No sibling @var@
+-- is in scope while its initial resolves, so the initials are mutually blind — a later @var@'s
+-- initial cannot reference an earlier sibling (they are all one-time values of the enclosing scope).
 resolveVariableBindings :: List (VariableBinding Parsed) -> Identifier (List (VariableBinding Identified), List Binding)
 resolveVariableBindings bindings = unzip <$> traverse resolveVariableBinding bindings
 
@@ -405,7 +409,9 @@ restOfBlock :: SourceSpan -> SourceSpan -> SourceSpan
 restOfBlock statementSpan blockSpan = SourceSpan {filePath = blockSpan.filePath, start = statementSpan.end, end = blockSpan.end}
 
 -- | The region a local @agent@ is visible over: from its declaration (self-recursive — visible in
--- its own body) to the end of the enclosing block.
+-- its own body) to the end of the enclosing block. Because the region starts at the declaration (not
+-- the block top), sibling local agents are /not/ mutually recursive: only a later statement sees an
+-- earlier local agent. (Top-level declarations, whose scope is the whole module, are.)
 localAgentScope :: SourceSpan -> SourceSpan -> SourceSpan
 localAgentScope declarationSpan blockSpan = SourceSpan {filePath = blockSpan.filePath, start = declarationSpan.start, end = blockSpan.end}
 

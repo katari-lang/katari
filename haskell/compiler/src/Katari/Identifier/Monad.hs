@@ -10,12 +10,13 @@
 -- (@Katari.Identifier.*@) can import the monad without an import cycle.
 module Katari.Identifier.Monad where
 
+import Control.Monad (when)
 import Control.Monad.RWS.CPS (RWS, evalRWS)
-import Control.Monad.RWS.Class (MonadReader, MonadState, MonadWriter, asks, gets, local, modify, state)
+import Control.Monad.RWS.Class (MonadWriter, asks, gets, local, modify, state)
 import Data.List (find, foldl', sortOn)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import GHC.List (List)
@@ -181,20 +182,20 @@ runIdentifier environment action = evalRWS action environment initialIdentifierS
 
 -- | A fresh generic id, stamped with the module currently being identified so the id is globally
 -- unique despite the per-module counter (see 'Katari.Data.Id.GenericId').
-freshGenericId :: (MonadReader IdentifierEnvironment m, MonadState IdentifierState m) => m GenericId
+freshGenericId :: Identifier GenericId
 freshGenericId = do
   moduleName <- currentModuleName
   state (\current -> (GenericId moduleName current.nextGenericId, current {nextGenericId = current.nextGenericId + 1}))
 
-freshLocalVariableId :: (MonadState IdentifierState m) => m LocalVariableId
+freshLocalVariableId :: Identifier LocalVariableId
 freshLocalVariableId = state (\current -> (LocalVariableId current.nextLocalVariableId, current {nextLocalVariableId = current.nextLocalVariableId + 1}))
 
 -- Environment access ------------------------------------------------------------------------------
 
-currentModuleName :: (MonadReader IdentifierEnvironment m) => m ModuleName
+currentModuleName :: Identifier ModuleName
 currentModuleName = asks (.moduleName)
 
-lookupModuleInterface :: (MonadReader IdentifierEnvironment m) => ModuleName -> m (Maybe ModuleInterface)
+lookupModuleInterface :: ModuleName -> Identifier (Maybe ModuleInterface)
 lookupModuleInterface name = asks (\environment -> Map.lookup name environment.moduleInterfaces)
 
 -- | The variable resolution a top-level name carries: its module-qualified name. Shared by the
@@ -207,42 +208,38 @@ qualifiedTypeResolution :: ModuleName -> Text -> TypeResolution
 qualifiedTypeResolution moduleName name = TypeResolutionQualifiedName QualifiedName {moduleName = moduleName, name = name}
 
 -- | A reference to one of this module's own top-level declarations, as a value.
-ownVariableResolution :: (MonadReader IdentifierEnvironment m) => Text -> m VariableResolution
+ownVariableResolution :: Text -> Identifier VariableResolution
 ownVariableResolution name = do
   moduleName <- currentModuleName
   pure (qualifiedVariableResolution moduleName name)
 
 -- | A reference to one of this module's own top-level declarations, as a type.
-ownTypeResolution :: (MonadReader IdentifierEnvironment m) => Text -> m TypeResolution
+ownTypeResolution :: Text -> Identifier TypeResolution
 ownTypeResolution name = do
   moduleName <- currentModuleName
   pure (qualifiedTypeResolution moduleName name)
 
 -- Scope lookup ------------------------------------------------------------------------------------
 
-lookupVariable :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe VariableResolution)
+lookupVariable :: Text -> Identifier (Maybe VariableResolution)
 lookupVariable name = asks (\environment -> Map.lookup name environment.scope.variableBindings)
 
-lookupType :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe TypeResolution)
+lookupType :: Text -> Identifier (Maybe TypeResolution)
 lookupType name = asks (\environment -> Map.lookup name environment.scope.typeBindings)
 
-lookupModule :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe ModuleName)
+lookupModule :: Text -> Identifier (Maybe ModuleName)
 lookupModule name = asks (\environment -> Map.lookup name environment.scope.moduleBindings)
 
 -- | The enclosing @for@ / @handler@ state variable a @with@ modifier name targets, if any.
-lookupStateVariable :: (MonadReader IdentifierEnvironment m) => Text -> m (Maybe VariableResolution)
+lookupStateVariable :: Text -> Identifier (Maybe VariableResolution)
 lookupStateVariable name = asks (\environment -> Map.lookup name environment.stateVariables)
 
 -- Scope extension ---------------------------------------------------------------------------------
 
--- | Run an action with the scope replaced (used to install the ambient / top-level base scope).
-withScope :: (MonadReader IdentifierEnvironment m) => Scope -> m a -> m a
-withScope scope = local (\environment -> environment {scope = scope})
-
 -- | Run an action with the enclosing state variables replaced — the @var@ state of the @for@ /
 -- @handler@ whose body the action resolves. Each loop / handler owns its own state, so this replaces
 -- rather than extends.
-withStateVariables :: (MonadReader IdentifierEnvironment m) => Map Text VariableResolution -> m a -> m a
+withStateVariables :: Map Text VariableResolution -> Identifier a -> Identifier a
 withStateVariables states = local (\environment -> environment {stateVariables = states})
 
 -- | A name the walk brings into scope: its text, the span of its defining occurrence, and what it
@@ -285,7 +282,10 @@ stateVariableMap bindings = Map.fromList [(binding.name, target) | binding <- bi
 -- resolved nodes and concatenating their bindings. The shared shape of the pattern / parameter
 -- list resolvers.
 resolveAll :: (a -> Identifier (b, List Binding)) -> List a -> Identifier (List b, List Binding)
-resolveAll resolve items = fmap concat . unzip <$> traverse resolve items
+resolveAll resolve items = do
+  pairs <- traverse resolve items
+  let (nodes, bindingGroups) = unzip pairs
+  pure (nodes, concat bindingGroups)
 
 -- | Append symbols to the table (newest first; 'scopeAt' is order-independent up to shadow ties).
 recordSymbols :: List Symbol -> Identifier ()
@@ -322,7 +322,7 @@ resolveBareReference ::
   Identifier (Reference Identified nameReferenceKind)
 resolveBareReference lookupName reportMissing sourceSpan name = do
   resolution <- lookupName name
-  maybe (reportMissing sourceSpan name) (const (pure ())) resolution
+  when (isNothing resolution) (reportMissing sourceSpan name)
   pure (identifiedReference sourceSpan resolution)
 
 -- | Resolve a bare variable name, reporting K2001 when it is in no variable binding (a module name

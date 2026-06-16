@@ -233,12 +233,12 @@ recordLiteral = do
   (entries, sourceSpan) <- bracesMultiline (commaSeparated recordEntry)
   pure (ExpressionRecord RecordExpression {entries = entries, sourceSpan = sourceSpan, typeOf = ()})
 
-recordEntry :: Parser (Text, ExpressionP)
+recordEntry :: Parser (RecordEntry Parsed)
 recordEntry = do
   name <- identifier
   assignEquals
   value <- expression
-  pure (name.value, value)
+  pure RecordEntry {name = name.value, value = value, sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf value)}
 
 blockExpression :: Parser ExpressionP
 blockExpression = do
@@ -467,7 +467,7 @@ handlerBody parallel leadingSpan = do
 requestHandler :: Parser (RequestHandler Parsed)
 requestHandler = do
   requestSpan <- keyword "request"
-  (moduleQualifier, name, nameSpan) <- qualifiedName
+  (moduleQualifier, member) <- qualifiedName
   genericArguments <- option [] (fst <$> brackets (commaSeparated1 typeExpression))
   parameters <- fst <$> parens (commaSeparated parameterBinding)
   returnType <- optional (symbol "->" *> typeExpression)
@@ -475,8 +475,8 @@ requestHandler = do
   pure
     RequestHandler
       { moduleQualifier = moduleQualifier,
-        name = name,
-        typeReference = parsedReference nameSpan,
+        name = member.value,
+        typeReference = parsedReference member.sourceSpan,
         genericArguments = genericArguments,
         instantiation = (),
         parameters = parameters,
@@ -559,6 +559,8 @@ finishElement = \case
   BlockElementStatement statement -> do
     (statements, returnExpression) <- nextItems
     pure (statement : statements, returnExpression)
+  -- A trailing expression with nothing after it is the block's value. A trailing separator yields an
+  -- empty tail too, so @{ e; }@ keeps @e@ as the value (the language has no value-discarding @;@).
   BlockElementExpression value -> do
     rest <- nextItems
     pure $ case rest of
@@ -695,24 +697,3 @@ modifier = do
 
 nullExpression :: SourceSpan -> ExpressionP
 nullExpression sourceSpan = ExpressionLiteral LiteralExpression {value = LiteralValueNull, sourceSpan = sourceSpan, typeOf = ()}
-
----------------------------------------------------------------------------------------------------
--- Shared helpers
----------------------------------------------------------------------------------------------------
-
--- | @=@ (not @==@ or @=>@), consuming the following newline so a value may begin on the next line.
-assignEquals :: Parser ()
-assignEquals = void (try (string "=" <* notFollowedBy (oneOf ['=', '>']))) <* multilineSpace
-
--- | @[module.]name@ — a possibly-qualified reference name, with the member's span.
-qualifiedName :: Parser (Maybe (ModuleQualifier Parsed), Text, SourceSpan)
-qualifiedName = do
-  first <- identifier
-  member <- optional (symbol "." *> identifier)
-  pure $ case member of
-    Nothing -> (Nothing, first.value, first.sourceSpan)
-    Just second ->
-      ( Just ModuleQualifier {name = first.value, moduleReference = parsedReference first.sourceSpan, sourceSpan = first.sourceSpan},
-        second.value,
-        second.sourceSpan
-      )

@@ -10,16 +10,9 @@ import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.SemanticType (SemanticGenericArgument, SemanticType)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
 
-type data ReferenceKind where
-  VariableReference :: ReferenceKind
-  TypeReference :: ReferenceKind
-  ModuleReference :: ReferenceKind
-  LabelReference :: ReferenceKind
+type data ReferenceKind = VariableReference | TypeReference | ModuleReference | LabelReference
 
-type data Phase where
-  Parsed :: Phase
-  Identified :: Phase
-  Typed :: Phase
+type data Phase = Parsed | Identified | Typed
 
 -- | Identifier resolves references
 type family ReferenceResolution (phase :: Phase) (nameReferenceKind :: ReferenceKind) :: Type where
@@ -238,9 +231,7 @@ instance HasSourceSpan ImportItem where
   sourceSpanOf item = item.sourceSpan
 
 -- | Namespace of an import item; @type@ prefix selects the type namespace.
-data ImportItemKind where
-  ImportItemValue :: ImportItemKind
-  ImportItemType :: ImportItemKind
+data ImportItemKind = ImportItemValue | ImportItemType
   deriving stock (Eq, Show)
 
 -- | @external agent name[generics](label : type ?= default, ...) -> T with E@.
@@ -262,6 +253,11 @@ instance HasSourceSpan (ExternalAgentDeclaration phase) where
 -- | @primitive agent name[generics](label : type ?= default, ...) -> T with E@.
 -- Prim-specific typing (numeric join, element-type propagation, taint) is expressed
 -- through generics / attributes, so there is no @using@ rule escape hatch.
+--
+-- Structurally identical to 'ExternalAgentDeclaration' today, but kept a distinct type on purpose:
+-- the two are different concepts (a primitive is compiler-provided; an external is a runtime-provided
+-- endpoint), their @effects = Nothing@ default differs (pure vs capture), and they lower differently.
+-- The field coincidence is not meaningful, so they are not merged behind a shared tag.
 data PrimitiveAgentDeclaration (phase :: Phase) = PrimitiveAgentDeclaration
   { annotation :: Maybe Text,
     name :: Text,
@@ -338,7 +334,8 @@ data Statement (phase :: Phase) where
   StatementForNext :: ForNextStatement phase -> Statement phase
   -- | @break v@ inside a @for@ body
   StatementForBreak :: ForBreakStatement phase -> Statement phase
-  -- | Sentinel left by parser recovery; details live in the parallel parse-error list
+  -- | Reserved sentinel for statement-level recovery. The parser does not emit it yet (it recovers
+  -- only at declaration boundaries), but downstream walkers transport it so the slot exists already.
   StatementError :: SourceSpan -> Statement phase
 
 instance HasSourceSpan (Statement phase) where
@@ -671,13 +668,13 @@ instance HasSourceSpan (SyntacticTypeExpression phase) where
     TypeAttributeLiteral node -> node.sourceSpan
     TypeOverride node -> node.sourceSpan
 
-data PrimitiveTypeKind where
-  PrimitiveTypeKindNull :: PrimitiveTypeKind
-  PrimitiveTypeKindInteger :: PrimitiveTypeKind
-  PrimitiveTypeKindNumber :: PrimitiveTypeKind
-  PrimitiveTypeKindString :: PrimitiveTypeKind
-  PrimitiveTypeKindBoolean :: PrimitiveTypeKind
-  PrimitiveTypeKindFile :: PrimitiveTypeKind
+data PrimitiveTypeKind
+  = PrimitiveTypeKindNull
+  | PrimitiveTypeKindInteger
+  | PrimitiveTypeKindNumber
+  | PrimitiveTypeKindString
+  | PrimitiveTypeKindBoolean
+  | PrimitiveTypeKindFile
   deriving stock (Eq, Show)
 
 data PrimitiveTypeNode = PrimitiveTypeNode
@@ -769,9 +766,7 @@ data AttributedTypeNode (phase :: Phase) = AttributedTypeNode
 instance HasSourceSpan (AttributedTypeNode phase) where
   sourceSpanOf node = node.sourceSpan
 
-data AttributeLiteralKind where
-  AttributeLiteralPublic :: AttributeLiteralKind
-  AttributeLiteralPrivate :: AttributeLiteralKind
+data AttributeLiteralKind = AttributeLiteralPublic | AttributeLiteralPrivate
   deriving stock (Eq, Show)
 
 data AttributeLiteralNode = AttributeLiteralNode
@@ -883,15 +878,25 @@ data TupleExpression (phase :: Phase) = TupleExpression
 instance HasSourceSpan (TupleExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | Keys are values on the wire, not references
 data RecordExpression (phase :: Phase) = RecordExpression
-  { entries :: List (Text, Expression phase),
+  { entries :: List (RecordEntry phase),
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }
 
 instance HasSourceSpan (RecordExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
+
+-- | @label = value@ in a record literal. The key is a value on the wire, not a reference to a
+-- declaration, so it carries no resolution — only its own span, for key-level diagnostics.
+data RecordEntry (phase :: Phase) = RecordEntry
+  { name :: Text,
+    value :: Expression phase,
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (RecordEntry phase) where
+  sourceSpanOf entry = entry.sourceSpan
 
 -- | Arguments are keyword-labelled; source order is preserved
 data CallExpression (phase :: Phase) = CallExpression
@@ -915,26 +920,24 @@ data CallArgument (phase :: Phase) = CallArgument
 instance HasSourceSpan (CallArgument phase) where
   sourceSpanOf argument = argument.sourceSpan
 
-data BinaryOperator where
-  BinaryOperatorAdd :: BinaryOperator
-  BinaryOperatorSubtract :: BinaryOperator
-  BinaryOperatorMultiply :: BinaryOperator
-  BinaryOperatorDivide :: BinaryOperator
-  BinaryOperatorModulo :: BinaryOperator
-  BinaryOperatorEqual :: BinaryOperator
-  BinaryOperatorNotEqual :: BinaryOperator
-  BinaryOperatorLessThan :: BinaryOperator
-  BinaryOperatorLessOrEqual :: BinaryOperator
-  BinaryOperatorGreaterThan :: BinaryOperator
-  BinaryOperatorGreaterOrEqual :: BinaryOperator
-  BinaryOperatorAnd :: BinaryOperator
-  BinaryOperatorOr :: BinaryOperator
-  BinaryOperatorConcat :: BinaryOperator
+data BinaryOperator
+  = BinaryOperatorAdd
+  | BinaryOperatorSubtract
+  | BinaryOperatorMultiply
+  | BinaryOperatorDivide
+  | BinaryOperatorModulo
+  | BinaryOperatorEqual
+  | BinaryOperatorNotEqual
+  | BinaryOperatorLessThan
+  | BinaryOperatorLessOrEqual
+  | BinaryOperatorGreaterThan
+  | BinaryOperatorGreaterOrEqual
+  | BinaryOperatorAnd
+  | BinaryOperatorOr
+  | BinaryOperatorConcat
   deriving stock (Eq, Show, Bounded, Enum)
 
-data UnaryOperator where
-  UnaryOperatorNegate :: UnaryOperator
-  UnaryOperatorNot :: UnaryOperator
+data UnaryOperator = UnaryOperatorNegate | UnaryOperatorNot
   deriving stock (Eq, Show, Bounded, Enum)
 
 data BinaryOperatorExpression (phase :: Phase) = BinaryOperatorExpression
@@ -1481,6 +1484,10 @@ deriving stock instance (ShowPhase phase) => Show (TupleExpression phase)
 deriving stock instance (EqPhase phase) => Eq (RecordExpression phase)
 
 deriving stock instance (ShowPhase phase) => Show (RecordExpression phase)
+
+deriving stock instance (EqPhase phase) => Eq (RecordEntry phase)
+
+deriving stock instance (ShowPhase phase) => Show (RecordEntry phase)
 
 deriving stock instance (EqPhase phase) => Eq (CallExpression phase)
 

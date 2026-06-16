@@ -67,10 +67,10 @@ spec = do
       boundOfData (build "data box[T](value: T)") "box" "T" `shouldBe` Nothing
 
   describe "buildEnvironment (cross-module variance)" $
-    it "keeps two modules' generics distinct even when they share a generic id" $ do
-      -- Each module restarts generic-id numbering at 0, so box.T and sink.U both get id 0. Keying the
-      -- variance fixed point by id (rather than by qualified name + parameter name) would conflate them
-      -- and collapse both to Invariant.
+    it "keeps two modules' generics distinct even when they share a generic id index" $ do
+      -- Each module restarts generic-id numbering at 0, so box.T and sink.U share the raw index 0. A
+      -- 'GenericId' carries its declaring module, so the two stay distinct keys in the variance fixed
+      -- point; a key that dropped the module would conflate them and collapse both to Invariant.
       let environment =
             buildModules
               [ (ModuleName "a", "data box[T](value: T)"),

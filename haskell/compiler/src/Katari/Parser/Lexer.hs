@@ -6,8 +6,9 @@
 -- (the "virtual semicolon" the old compiler inserted at lex time). We realise that in a
 -- scannerless parser with two space consumers selected by the reader context: at the statement
 -- level the line-local 'lineSpace' stops at a newline, while everything bracketed switches to the
--- newline-eating 'multilineSpace'. Continuation points (after an operator, a comma, or an opening
--- bracket) opt back into newline-eating so a construct may still span lines.
+-- newline-eating 'multilineSpace'. Continuation points opt back into newline-eating so a construct
+-- may still span lines: an operator forces it explicitly, and everything between brackets (where the
+-- comma-separated lists live) is already in multiline mode.
 module Katari.Parser.Lexer where
 
 import Control.Monad (void, when)
@@ -20,7 +21,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Void (Void)
 import GHC.List (List)
-import Katari.Data.AST (LiteralValue (..), Reference (..))
+import Katari.Data.AST (LiteralValue (..), ModuleQualifier (..), Reference (..))
 import Katari.Data.AST qualified as AST
 import Katari.Data.SourceSpan (HasSourceSpan (..), Located (..), Position (..), SourceSpan (..))
 import Katari.Diagnostics (Diagnostics, reportAt)
@@ -34,18 +35,13 @@ import Text.Megaparsec.Char.Lexer qualified as Lexer
 ---------------------------------------------------------------------------------------------------
 
 -- | Whether a newline currently separates tokens (line) or is plain whitespace (multiline).
-data SpaceMode where
-  SpaceModeLine :: SpaceMode
-  SpaceModeMultiline :: SpaceMode
+data SpaceMode = SpaceModeLine | SpaceModeMultiline
   deriving stock (Eq, Show)
 
 -- | The nearest enclosing control construct, so @next@ / @break@ resolve to the for-loop or the
 -- request-handler form without re-deciding it downstream. Reset to 'LoopContextNone' when crossing
 -- an agent boundary (a nested closure does not see the outer loop / handler).
-data LoopContext where
-  LoopContextNone :: LoopContext
-  LoopContextFor :: LoopContext
-  LoopContextHandler :: LoopContext
+data LoopContext = LoopContextNone | LoopContextFor | LoopContextHandler
   deriving stock (Eq, Show)
 
 data ParseContext = ParseContext
@@ -114,19 +110,19 @@ spaceConsumer =
 ---------------------------------------------------------------------------------------------------
 
 positionOf :: SourcePos -> Position
-positionOf sourcePos = Position {line = unPos sourcePos.sourceLine, column = unPos sourcePos.sourceColumn}
+positionOf sourcePosition = Position {line = unPos sourcePosition.sourceLine, column = unPos sourcePosition.sourceColumn}
 
 spanBetween :: SourcePos -> SourcePos -> SourceSpan
-spanBetween startPos endPos =
+spanBetween startPosition endPosition =
   SourceSpan
-    { filePath = sourceName startPos,
-      start = positionOf startPos,
-      end = positionOf endPos
+    { filePath = sourceName startPosition,
+      start = positionOf startPosition,
+      end = positionOf endPosition
     }
 
 -- | A zero-width span at a single position (for an empty range or a single-spot error).
 pointSpan :: SourcePos -> SourceSpan
-pointSpan sourcePos = spanBetween sourcePos sourcePos
+pointSpan sourcePosition = spanBetween sourcePosition sourcePosition
 
 -- | The span starting at @first@ and ending at @second@; child spans of a composite node are
 -- merged with this (the leaves carry accurate spans, so the result excludes trailing whitespace).
@@ -142,10 +138,10 @@ lastSpanOr = foldl (\_ element -> sourceSpanOf element)
 -- trailing whitespace). The token-level building block for accurate spans.
 spanning :: Parser a -> Parser (a, SourceSpan)
 spanning raw = do
-  startPos <- getSourcePos
+  startPosition <- getSourcePos
   result <- raw
-  endPos <- getSourcePos
-  pure (result, spanBetween startPos endPos)
+  endPosition <- getSourcePos
+  pure (result, spanBetween startPosition endPosition)
 
 -- | The span of @raw@'s consumed characters, discarding its result.
 rawSpan :: Parser a -> Parser SourceSpan
@@ -163,11 +159,11 @@ lexeme raw = spanning raw <* spaceConsumer
 symbol :: Text -> Parser SourceSpan
 symbol text = snd <$> lexeme (void (string text))
 
--- | A punctuation / operator token that must not be the prefix of a longer one (e.g. @=@ is a
--- token only when not followed by @=@ or @>@, which would make it @==@ or @=>@).
-symbolNotFollowedBy :: Text -> List Char -> Parser SourceSpan
-symbolNotFollowedBy text disallowed =
-  snd <$> lexeme (try (string text <* notFollowedBy (oneOf disallowed)))
+-- | @=@ (not @==@ or @=>@), consuming the following newline so the right-hand side may begin on the
+-- next line. The binding / assignment separator of @let@, @var@, call arguments, record entries, and
+-- type synonyms.
+assignEquals :: Parser ()
+assignEquals = void (try (string "=" <* notFollowedBy (oneOf ['=', '>']))) <* multilineSpace
 
 -- | A reserved word, matched only as a whole word (not as a prefix of an identifier).
 keyword :: Text -> Parser SourceSpan
@@ -215,10 +211,7 @@ signedNumericLiteral = toLocated <$> lexeme (try signedFloat <|> integerLiteral 
 
 -- | Read an integer literal from @digits@, warning (but not failing) if its magnitude exceeds what a
 -- runtime number represents exactly; the value is then narrowed to the machine-width 'Int' the AST
--- carries. Appending the warning here is safe despite the no-append-during-backtracking caveat on the
--- 'Diagnostics' state: duplicates are deduped in 'finalizeDiagnostics', and a digit sequence consumed
--- by 'Lexer.decimal' is an integer literal in every successful parse, so no spurious or lost warning
--- can result.
+-- carries. Reporting the warning here is backtracking-safe for the reasons given on the 'Parser' type.
 integerLiteral :: Parser Integer -> Parser LiteralValue
 integerLiteral digits = do
   (value, sourceSpan) <- spanning digits
@@ -264,10 +257,10 @@ literalValue =
       nullLiteral
     ]
 
--- | A literal in a parameter-default position, where unary minus is unavailable, so a signed
--- numeric literal is read directly.
-defaultLiteralValue :: Parser (Located LiteralValue)
-defaultLiteralValue =
+-- | A literal that carries its own leading sign (parameter defaults and literal patterns), where no
+-- unary-minus operator is in scope to supply it.
+signedLiteralValue :: Parser (Located LiteralValue)
+signedLiteralValue =
   choice
     [ signedNumericLiteral,
       fmap LiteralValueString <$> stringLiteral,
@@ -336,6 +329,21 @@ commaSeparated1 element = sepEndBy1 element (symbol ",")
 -- 'ReferenceResolution' type family reduces to @()@ for 'AST.Parsed' at every reference kind).
 parsedReference :: SourceSpan -> Reference AST.Parsed nameReferenceKind
 parsedReference sourceSpan = Reference {sourceSpan = sourceSpan, resolution = ()}
+
+-- | @[module.]name@ — an optionally module-qualified reference (one qualifier segment). Returns the
+-- optional @module.@ qualifier and the member name with its own span; the whole-reference span runs
+-- from the qualifier (when present) through the member. Shared by the value-reference and type-name
+-- parsers so the @module.@ shape lives in one place.
+qualifiedName :: Parser (Maybe (ModuleQualifier AST.Parsed), Located Text)
+qualifiedName = do
+  first <- identifier
+  member <- optional (symbol "." *> identifier)
+  pure $ case member of
+    Nothing -> (Nothing, first)
+    Just second ->
+      ( Just ModuleQualifier {name = first.value, moduleReference = parsedReference first.sourceSpan, sourceSpan = first.sourceSpan},
+        second
+      )
 
 ---------------------------------------------------------------------------------------------------
 -- Reserved words

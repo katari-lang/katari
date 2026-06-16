@@ -84,8 +84,9 @@ withGenericParameters region parameters continuation = do
     identifiedParameters <- traverse resolvePreparedGenericParameter prepared
     continuation identifiedParameters
 
--- | Assign a fresh id to a generic parameter and derive the resolution its name will carry (its
--- kind decides which generic resolution).
+-- | Assign a fresh id to a generic parameter; its name resolves to that id. The parameter's kind
+-- (type / effect / attribute) does not affect the resolution — it travels on the 'GenericParameter'
+-- node's @kind@ field and is consulted later, so every kind resolves through 'TypeResolutionGeneric'.
 prepareGenericParameter :: GenericParameter Parsed -> Identifier (GenericParameter Parsed, TypeResolution)
 prepareGenericParameter parameter = do
   genericId <- freshGenericId

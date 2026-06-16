@@ -117,36 +117,21 @@ attributeLiteralType =
 
 -- | @[module.]name@ — a kind-agnostic name reference, optionally qualified by exactly one module
 -- segment. Builtins (@integer@, @array@, ...) are matched by earlier atoms, so they never reach
--- here as names.
+-- here as names. The reference points at the member name only; the node span covers the whole
+-- @module.Name@.
 nameType :: Parser TypeExpression
 nameType = do
-  first <- identifier
-  member <- optional (symbol "." *> identifier)
-  pure $ case member of
-    Nothing ->
-      TypeName
+  (moduleQualifier, member) <- qualifiedName
+  let wholeSpan = maybe member.sourceSpan (\qualifier -> mergeSpans qualifier.sourceSpan member.sourceSpan) moduleQualifier
+  pure
+    ( TypeName
         TypeNameNode
-          { moduleQualifier = Nothing,
-            name = first.value,
-            typeReference = parsedReference first.sourceSpan,
-            sourceSpan = first.sourceSpan
+          { moduleQualifier = moduleQualifier,
+            name = member.value,
+            typeReference = parsedReference member.sourceSpan,
+            sourceSpan = wholeSpan
           }
-    Just second ->
-      let sourceSpan = mergeSpans first.sourceSpan second.sourceSpan
-       in TypeName
-            TypeNameNode
-              { moduleQualifier =
-                  Just
-                    ModuleQualifier
-                      { name = first.value,
-                        moduleReference = parsedReference first.sourceSpan,
-                        sourceSpan = first.sourceSpan
-                      },
-                name = second.value,
-                -- The reference points at the member name only; @sourceSpan@ spans the whole @module.Name@.
-                typeReference = parsedReference second.sourceSpan,
-                sourceSpan = sourceSpan
-              }
+    )
 
 -- | @[T1, T2, ...]@ — a tuple type of any arity, including the empty @[]@ and the single-element
 -- @[T]@. Tuples are bracketed (matching tuple values and patterns); @array[T]@ / @record[T]@ are
@@ -211,8 +196,9 @@ agentType = do
           }
     )
 
--- | The parameter side of an agent type: the labelled sugar @(label : T, ...)@ desugars to an
--- object type; otherwise a single type (which may itself be @(T)@ or @(T1, T2)@).
+-- | The parameter side of an agent type: the labelled sugar @(label : T, ...)@ desugars to an object
+-- type; otherwise a single application-level type. It binds tighter than @|@ and @of@, so a union or
+-- attributed parameter must be parenthesised (e.g. @agent (A | B) -> R@), keeping the @->@ unambiguous.
 agentParameterType :: Parser TypeExpression
 agentParameterType = try objectSugar <|> applicationType
   where
@@ -279,5 +265,5 @@ parameterSignature = do
 parameterDefault :: Parser ParameterDefault
 parameterDefault = do
   defaultSpan <- symbol "?="
-  value <- defaultLiteralValue
+  value <- signedLiteralValue
   pure ParameterDefault {value = value.value, sourceSpan = mergeSpans defaultSpan value.sourceSpan}

@@ -4,7 +4,6 @@
 module Katari.Data.Environment where
 
 import Data.Map (Map)
-import Data.Map qualified as Map
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.GenericKind (GenericKind)
@@ -69,26 +68,3 @@ data SynonymInformation = SynonymInformation
     definition :: NormalizedKindedType
   }
   deriving (Eq, Show)
-
--- | The declared parameters in declaration order, each paired with its name. The single place the
--- 'parameterNames' order and the 'parameterInformation' map are zipped back together, so consumers
--- that need ordered, named parameters (argument elaboration, id substitution) share one definition.
-orderedParameters :: GenericParameters -> List (Text, GenericParameterInformation)
-orderedParameters parameters =
-  [(name, info) | name <- parameters.parameterNames, Just info <- [Map.lookup name parameters.parameterInformation]]
-
--- | The declared parameter names, in declaration order (the positional form for diagnostics / zips).
-genericParameterNames :: GenericParameters -> List Text
-genericParameterNames parameters = parameters.parameterNames
-
--- | The generic-id to parameter-name map. Variance inference keys a declaration's own generics by
--- name rather than by id (ids are only unique once paired with their module), so it reads occurrences
--- back through this.
-namesByGenericId :: GenericParameters -> Map GenericId Text
-namesByGenericId parameters = Map.fromList [(info.genericId, name) | (name, info) <- orderedParameters parameters]
-
--- | The generic-id to declared-kind map of a declaration's parameters. The elaborator wraps a generic
--- leaf at the kind looked up here, because a bare type-name reference no longer carries its kind (see
--- 'Katari.Data.Id.TypeResolution').
-parameterKinds :: GenericParameters -> Map GenericId GenericKind
-parameterKinds parameters = Map.fromList [(info.genericId, info.kind) | info <- Map.elems parameters.parameterInformation]

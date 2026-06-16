@@ -3,10 +3,12 @@
 -- between phases so it need not be reshuffled once the internals land.
 --
 -- No import-graph topological sort is needed: 'scanExports' is import-independent, so every module's
--- interface is available before any module is identified, and identify / check run per module. The
--- one global step is 'buildEnvironment' (variance is a cross-module fixed point).
+-- interface is available before any module is identified, and parse / scanExports / identify / lower
+-- run per module. The two global steps are 'buildEnvironment' (variance is a cross-module fixed point)
+-- and 'checkProgram' (an agent may infer its return / effect from agents it calls, across modules and
+-- through mutual recursion, so the checker walks the whole program in value-dependency order).
 --
--- > parse* -> scanExports* -> identify* -> [global] buildEnvironment -> check* -> lower*
+-- > parse* -> scanExports* -> identify* -> [global] buildEnvironment -> [global] check -> lower*
 --
 -- The runtime uploads modules individually, so lowering produces an 'IRModule' per module and there
 -- is no whole-program link step. Each callable's schema travels inside its 'IRModule'
@@ -16,10 +18,11 @@ module Katari.Compile where
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Katari.Data.AST (Module, Phase (Identified, Parsed, Typed))
 import Katari.Data.IR (IRModule)
-import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.SourceSpan (sourceSpanOf)
+import Katari.Data.ModuleName (ModuleName, renderModuleName)
+import Katari.Data.SourceSpan (Position (..), SourceSpan (..))
 import Katari.Diagnostics (Diagnostics, diagnosticAt, hasErrors)
 import Katari.Error (CompilerError (..), IdentifierError (..), ReservedModuleNameErrorInfo (..))
 import Katari.Identifier (identifyModule, scanExports)
@@ -70,24 +73,27 @@ compile input =
     { -- Lowering is gated on the program being error-free: never emit IR for code that failed to
       -- parse / resolve / type-check (a warning does not block it).
       loweredModules =
-        if hasErrors preLoweringDiagnostics
-          then mempty
-          else Map.restrictKeys (fst <$> lowered) userKeys,
+        if lowerable
+          then Map.restrictKeys (fst <$> lowered) userKeys
+          else mempty,
       symbolTables = Map.restrictKeys ((\identifiedModule -> identifiedModule.symbolTable) <$> identifiedModules) userKeys,
       typedModules = Map.restrictKeys typedModules userKeys,
       diagnostics = preLoweringDiagnostics <> lowerDiagnostics
     }
   where
-    -- Split off user modules whose name is compiler-reserved: report each (K2008, anchored at the
-    -- offending module's span) and keep only the admissible ones. Reserved names never reach the
-    -- pipeline, so they neither shadow the stdlib nor pollute the default-import namespace.
+    -- Split off user modules whose name is compiler-reserved: report each (K2008) and keep only the
+    -- admissible ones. Reserved names never reach the pipeline, so they neither shadow the stdlib nor
+    -- pollute the default-import namespace.
     (reservedUserSources, admissibleUserSources) =
       Map.partitionWithKey (\moduleName _ -> Stdlib.isReservedModuleName moduleName) input.sources
     userKeys = Map.keysSet admissibleUserSources
+    -- Anchored at the module's file start, not a parsed span: a reserved module is excluded from the
+    -- pipeline (never parsed), and its name comes from the file path, not source, so there is no
+    -- narrower span to point at.
     reservedDiagnostics = Map.foldMapWithKey reservedDiagnostic reservedUserSources
-    reservedDiagnostic moduleName source =
+    reservedDiagnostic moduleName _source =
       diagnosticAt
-        (sourceSpanOf (fst (parseModule moduleName source)))
+        (moduleStartSpan moduleName)
         (CompilerErrorIdentifier (IdentifierErrorReservedModuleName ReservedModuleNameErrorInfo {moduleName = moduleName}))
 
     -- Parse: the stdlib parse is the shared 'stdlibParsed' CAF; only the user modules are parsed here.
@@ -110,25 +116,34 @@ compile input =
     identified = Map.mapWithKey (identifyModule importContext) parsedModules
     identifiedModules = fst <$> identified
     identifyDiagnostics = foldMap snd identified
+    identifiedAsts :: Map ModuleName (Module Identified)
+    identifiedAsts = (\identified' -> identified'.identifiedAst) <$> identifiedModules
 
     -- Build the global type environment from every identified module (keyed by module name, so each
     -- declaration's qualified name is the key joined with the declaration name).
-    (typeEnvironment, environmentDiagnostics) =
-      buildEnvironment ((\identified' -> identified'.identifiedAst) <$> identifiedModules)
+    (typeEnvironment, environmentDiagnostics) = buildEnvironment identifiedAsts
 
     -- Check (whole-program, in value-dependency order). An agent may infer its return / effect from
     -- agents it calls — across modules and through mutual recursion — so the checker walks the value
     -- SCCs ('valueSCCs') to grow the value environment dependency-first; it cannot run per module.
-    identifiedAsts :: Map ModuleName (Module Identified)
-    identifiedAsts = (\identified' -> identified'.identifiedAst) <$> identifiedModules
     (typedModules, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs identifiedAsts) identifiedAsts
 
     -- Everything emitted before lowering; lowering (and its diagnostics) is skipped when this has any
     -- error, so a failed compile yields no IR rather than IR built from an ill-typed AST.
     preLoweringDiagnostics =
       reservedDiagnostics <> parseDiagnostics <> identifyDiagnostics <> environmentDiagnostics <> checkDiagnostics
+    lowerable = not (hasErrors preLoweringDiagnostics)
 
     -- Lower (per module). No link step — modules are uploaded individually; schemas travel in the IR.
     lowered :: Map ModuleName (IRModule, Diagnostics)
     lowered = Map.mapWithKey lowerModule typedModules
-    lowerDiagnostics = if hasErrors preLoweringDiagnostics then mempty else foldMap snd lowered
+    lowerDiagnostics = if lowerable then foldMap snd lowered else mempty
+
+-- | An empty span at the start of a module's file (line 1, column 1). The file path matches the one
+-- 'Katari.Parser.parseModule' stamps on a module's spans, so a driver-level diagnostic about a module
+-- as a whole (which has no narrower source location) renders against the same file.
+moduleStartSpan :: ModuleName -> SourceSpan
+moduleStartSpan moduleName =
+  SourceSpan {filePath = Text.unpack (renderModuleName moduleName), start = fileStart, end = fileStart}
+  where
+    fileStart = Position {line = 1, column = 1}

@@ -49,7 +49,7 @@ wildcardPattern = do
 -- | @42@ / @"foo"@ / @true@ / @null@ — a refutable literal (signed numerics allowed).
 literalPattern :: Parser PatternP
 literalPattern = do
-  value <- defaultLiteralValue
+  value <- signedLiteralValue
   pure (PatternLiteral LiteralPattern {value = value.value, sourceSpan = value.sourceSpan, typeOf = ()})
 
 -- | @{ label => pattern, ... }@ — a subset match against a record value.
@@ -114,15 +114,15 @@ constructorFilterOrVariablePattern = do
 constructorPattern :: SyntacticTypeExpression Parsed -> List (FieldPattern Parsed) -> SourceSpan -> Parser PatternP
 constructorPattern head' fields parenSpan =
   case constructorHead head' of
-    Just (moduleQualifier, name, genericArguments, referenceSpan) ->
+    Just decomposed ->
       pure
         ( PatternConstructor
             ConstructorPattern
-              { moduleQualifier = moduleQualifier,
-                name = name,
+              { moduleQualifier = decomposed.moduleQualifier,
+                name = decomposed.name,
                 -- The reference points at the constructor name only; the pattern spans the whole head.
-                constructorReference = parsedReference referenceSpan,
-                genericArguments = genericArguments,
+                constructorReference = parsedReference decomposed.nameSpan,
+                genericArguments = decomposed.genericArguments,
                 instantiation = (),
                 fields = fields,
                 sourceSpan = mergeSpans (sourceSpanOf head') parenSpan,
@@ -156,14 +156,21 @@ variableSpan nameSpan annotation defaultValue =
     Just parameterDefault' -> mergeSpans nameSpan parameterDefault'.sourceSpan
     Nothing -> maybe nameSpan (mergeSpans nameSpan . sourceSpanOf) annotation
 
--- | Decompose a parsed head type into its constructor parts (qualifier, name, generic arguments, and
--- the span of the constructor name itself for its reference), or 'Nothing' if it is not a (possibly
--- applied) name.
-constructorHead :: SyntacticTypeExpression Parsed -> Maybe (Maybe (ModuleQualifier Parsed), Text, List (SyntacticTypeExpression Parsed), SourceSpan)
+-- | A parsed head type decomposed into its constructor parts: the @nameSpan@ is the constructor name
+-- alone (for its reference), while the head node still carries the whole-head span.
+data ConstructorHead = ConstructorHead
+  { moduleQualifier :: Maybe (ModuleQualifier Parsed),
+    name :: Text,
+    genericArguments :: List (SyntacticTypeExpression Parsed),
+    nameSpan :: SourceSpan
+  }
+
+-- | Decompose a head into its constructor parts, or 'Nothing' if it is not a (possibly applied) name.
+constructorHead :: SyntacticTypeExpression Parsed -> Maybe ConstructorHead
 constructorHead = \case
-  TypeName node -> Just (node.moduleQualifier, node.name, [], node.typeReference.sourceSpan)
+  TypeName node -> Just ConstructorHead {moduleQualifier = node.moduleQualifier, name = node.name, genericArguments = [], nameSpan = node.typeReference.sourceSpan}
   TypeApplication node -> case node.applicationHead of
-    TypeName inner -> Just (inner.moduleQualifier, inner.name, node.applicationArguments, inner.typeReference.sourceSpan)
+    TypeName inner -> Just ConstructorHead {moduleQualifier = inner.moduleQualifier, name = inner.name, genericArguments = node.applicationArguments, nameSpan = inner.typeReference.sourceSpan}
     _ -> Nothing
   _ -> Nothing
 

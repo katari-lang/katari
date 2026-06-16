@@ -2,7 +2,7 @@
 -- union / intersection lattice, subtyping, generic substitution, and denormalization back to
 -- display-oriented semantic types. The passive data definitions live in "Katari.Data.NormalizedType".
 --
--- Three structural ideas organise this module:
+-- Two structural ideas organise this module:
 --
 --   * 'TypeLattice' — types, effects, attributes and generic arguments all support the same three
 --     relations: join (union), meet (intersection) and ordering (subtype). Join and meet are
@@ -15,9 +15,6 @@
 --     compares every attribute joined with it. Descending through a private expectation raises the
 --     world ('withWorld'), so "a value observed through a private container is itself private" holds
 --     without any eager push-down. Attributes therefore stay exactly where they were written.
---
---   * 'traverseArguments' — generic substitution ('substituteType') rebuilds every nested argument
---     position; this is its shared traversal.
 --
 -- Errors carry 'SemanticGenericArgument' payloads (user-facing types), so normalized nodes are
 -- denormalized at the report site; see the @tell*@ helpers.
@@ -865,56 +862,8 @@ boundedEffect coveredTails = resolve Set.empty
             resolve (Set.union resolvedTails (Map.keysSet tailsToExpand)) raised
 
 ------------------------------------------------------------------------------------------------
--- Argument traversal: attribute push-down and generic substitution
+-- Generic substitution
 ------------------------------------------------------------------------------------------------
-
--- | Callbacks of 'traverseArguments', one per argument kind.
-data ArgumentVisitor = ArgumentVisitor
-  { visitType :: NormalizedType -> Normalizer NormalizedType,
-    visitEffect :: NormalizedEffect -> Normalizer NormalizedEffect,
-    visitAttribute :: NormalizedAttribute -> Normalizer NormalizedAttribute
-  }
-
--- | Rebuild every nested argument position of a layered type: object fields and rest, sequence
--- items and rest, the function argument / return / effect, and data arguments. Variance-agnostic —
--- its one user, 'substituteType', rebuilds every position alike.
-traverseArguments :: ArgumentVisitor -> LayeredType -> Normalizer LayeredType
-traverseArguments visitor layered = do
-  visitedFunctionLayer <- traverse visitFunction layered.functionLayer
-  visitedSequenceLayer <- traverse visitSequence layered.sequenceLayer
-  visitedObjectLayer <- traverse visitObject layered.objectLayer
-  visitedDataLayer <- traverse (traverse visitArgument) layered.dataLayer
-  pure $
-    layered
-      { functionLayer = visitedFunctionLayer,
-        sequenceLayer = visitedSequenceLayer,
-        objectLayer = visitedObjectLayer,
-        dataLayer = visitedDataLayer
-      }
-  where
-    visitFunction function =
-      NormalizedFunction
-        <$> visitor.visitType function.argumentType
-        <*> visitor.visitType function.returnType
-        <*> visitor.visitEffect function.effect
-    visitSequence normalizedSequence = do
-      visitedItems <- mapM visitor.visitType normalizedSequence.items
-      visitedRest <- visitor.visitType normalizedSequence.rest
-      pure $ NormalizedSequence {items = visitedItems, rest = visitedRest}
-    visitObject normalizedObject = do
-      visitedFields <-
-        mapM
-          ( \fieldInformation -> do
-              visitedFieldType <- visitor.visitType fieldInformation.normalizedType
-              pure fieldInformation {normalizedType = visitedFieldType}
-          )
-          normalizedObject.fields
-      visitedRest <- visitor.visitType normalizedObject.rest
-      pure $ NormalizedObject {fields = visitedFields, rest = visitedRest}
-    visitArgument = \case
-      NormalizedKindedTypeType normalizedType -> NormalizedKindedTypeType <$> visitor.visitType normalizedType
-      NormalizedKindedTypeEffect effect -> NormalizedKindedTypeEffect <$> visitor.visitEffect effect
-      NormalizedKindedTypeAttribute attribute -> NormalizedKindedTypeAttribute <$> visitor.visitAttribute attribute
 
 -- | Literal substitution of generic ids. A generic id occurring in a node's generics set is
 -- removed and its replacement unioned into that node (the set representation means "this node is
@@ -925,21 +874,36 @@ substituteType :: Map GenericId NormalizedKindedType -> NormalizedType -> Normal
 substituteType substitution normalizedType = do
   substitutedBaseType <- case normalizedType.baseType of
     NormalizedBaseTypeUnknown -> pure NormalizedBaseTypeUnknown
-    NormalizedBaseTypeLayered layered -> NormalizedBaseTypeLayered <$> traverseArguments substituteVisitor layered
+    NormalizedBaseTypeLayered layered -> NormalizedBaseTypeLayered <$> substituteLayered layered
   substitutedAttribute <- substituteAttribute substitution normalizedType.attribute
-  substituteGenerics
-    GenericKindType
-    (\accumulated -> \case NormalizedKindedTypeType replacement -> Just (union accumulated replacement); _ -> Nothing)
-    substitution
-    (\generics -> normalizedType {baseType = substitutedBaseType, attribute = substitutedAttribute, generics = generics})
-    normalizedType.generics
+  -- Replace the node's own type generics: drop each replaced id from the set and union its (type)
+  -- replacement into the node.
+  let (replaced, kept) = Set.partition (`Map.member` substitution) normalizedType.generics
+      base = normalizedType {baseType = substitutedBaseType, attribute = substitutedAttribute, generics = kept}
+  foldM absorbType base (Map.elems (Map.restrictKeys substitution replaced))
   where
-    substituteVisitor =
-      ArgumentVisitor
-        { visitType = substituteType substitution,
-          visitEffect = substituteEffect substitution,
-          visitAttribute = substituteAttribute substitution
-        }
+    absorbType accumulated = \case
+      NormalizedKindedTypeType replacement -> union accumulated replacement
+      other -> accumulated <$ tellKindMismatch GenericKindType (kindOf other) "Expected a type argument for a type generic"
+    substituteLayered layered = do
+      functionLayer <- traverse substituteFunction layered.functionLayer
+      sequenceLayer <- traverse substituteSequence layered.sequenceLayer
+      objectLayer <- traverse substituteObject layered.objectLayer
+      dataLayer <- traverse (traverse (substituteGenericArgument substitution)) layered.dataLayer
+      pure layered {functionLayer = functionLayer, sequenceLayer = sequenceLayer, objectLayer = objectLayer, dataLayer = dataLayer}
+    substituteFunction function =
+      NormalizedFunction
+        <$> substituteType substitution function.argumentType
+        <*> substituteType substitution function.returnType
+        <*> substituteEffect substitution function.effect
+    substituteSequence normalizedSequence = do
+      items <- mapM (substituteType substitution) normalizedSequence.items
+      rest <- substituteType substitution normalizedSequence.rest
+      pure NormalizedSequence {items = items, rest = rest}
+    substituteObject normalizedObject = do
+      fields <- mapM (\field -> (\substituted -> field {normalizedType = substituted}) <$> substituteType substitution field.normalizedType) normalizedObject.fields
+      rest <- substituteType substitution normalizedObject.rest
+      pure NormalizedObject {fields = fields, rest = rest}
 
 -- | As 'substituteType', for effects (effect-kind generic ids and the request arguments). A tail
 -- @(E, lacks)@ whose @E@ is substituted is replaced by its replacement restricted to lack those
@@ -961,47 +925,20 @@ substituteEffect substitution effect = case effect of
 
 -- | As 'substituteType', for attributes (attribute-kind generic ids).
 substituteAttribute :: Map GenericId NormalizedKindedType -> NormalizedAttribute -> Normalizer NormalizedAttribute
-substituteAttribute substitution attribute =
-  substituteGenerics
-    GenericKindAttribute
-    (\accumulated -> \case NormalizedKindedTypeAttribute replacement -> Just (union accumulated replacement); _ -> Nothing)
-    substitution
-    (\generics -> NormalizedAttribute {private = attribute.private, generic = generics})
-    attribute.generic
+substituteAttribute substitution attribute = do
+  let (replaced, kept) = Set.partition (`Map.member` substitution) attribute.generic
+      base = NormalizedAttribute {private = attribute.private, generic = kept}
+  foldM absorbAttribute base (Map.elems (Map.restrictKeys substitution replaced))
+  where
+    absorbAttribute accumulated = \case
+      NormalizedKindedTypeAttribute replacement -> union accumulated replacement
+      other -> accumulated <$ tellKindMismatch GenericKindAttribute (kindOf other) "Expected an attribute argument for an attribute generic"
 
 substituteGenericArgument :: Map GenericId NormalizedKindedType -> NormalizedKindedType -> Normalizer NormalizedKindedType
 substituteGenericArgument substitution genericArgument = case genericArgument of
   NormalizedKindedTypeType normalizedType -> NormalizedKindedTypeType <$> substituteType substitution normalizedType
   NormalizedKindedTypeEffect effect -> NormalizedKindedTypeEffect <$> substituteEffect substitution effect
   NormalizedKindedTypeAttribute attribute -> NormalizedKindedTypeAttribute <$> substituteAttribute substitution attribute
-
--- | The shared core of the @substitute*@ family: split a generics set into replaced and kept ids,
--- rebuild the node with the kept ones, then absorb each replacement of the expected kind
--- (reporting a kind mismatch otherwise).
-substituteGenerics ::
-  GenericKind ->
-  (a -> NormalizedKindedType -> Maybe (Normalizer a)) ->
-  Map GenericId NormalizedKindedType ->
-  (Set GenericId -> a) ->
-  Set GenericId ->
-  Normalizer a
-substituteGenerics expectedKind absorbReplacement substitution rebuild generics = do
-  let (replacedGenerics, keptGenerics) = Set.partition (`Map.member` substitution) generics
-  foldM
-    absorb
-    (rebuild keptGenerics)
-    (Map.elems (Map.restrictKeys substitution replacedGenerics))
-  where
-    absorb accumulated replacement = case absorbReplacement accumulated replacement of
-      Just absorbed -> absorbed
-      Nothing -> do
-        tellKindMismatch expectedKind (kindOf replacement) ("Expected " <> article expectedKind <> " argument for " <> article expectedKind <> " generic")
-        pure accumulated
-    -- NOTE: the indefinite article agrees with the kind's spoken name (a type / an effect / an attribute).
-    article = \case
-      GenericKindType -> "a type"
-      GenericKindEffect -> "an effect"
-      GenericKindAttribute -> "an attribute"
 
 ------------------------------------------------------------------------------------------------
 -- Denormalization (normalized -> display-oriented semantic)

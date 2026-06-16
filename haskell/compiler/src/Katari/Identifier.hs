@@ -63,6 +63,7 @@ exportedSymbolOf :: Binding -> ExportedSymbol
 exportedSymbolOf binding = case binding.resolution of
   SymbolVariable resolution -> ExportedSymbol {variable = Just resolution, typeLevel = Nothing}
   SymbolType resolution -> ExportedSymbol {variable = Nothing, typeLevel = Just resolution}
+  -- Declarations never produce a module binding (modules come only from imports), so this is unreachable.
   SymbolModule _ -> ExportedSymbol {variable = Nothing, typeLevel = Nothing}
 
 -- | Combine two same-named exported symbols, keeping a resolution from either namespace (so a value
@@ -80,13 +81,14 @@ mergeExportedSymbol newer older =
 -- identified module (AST + symbol table) and the diagnostics emitted along the way.
 identifyModule :: ImportContext -> ModuleName -> Module Parsed -> (IdentifiedModule, Diagnostics)
 identifyModule importContext moduleName parsedModule =
-  runIdentifier environment (resolveModule importContext parsedModule)
+  runIdentifier environment (resolveModule parsedModule)
   where
     environment =
       IdentifierEnvironment
         { moduleName = moduleName,
           moduleInterfaces = importContext.moduleInterfaces,
-          scope = emptyScope,
+          -- The default-import qualifiers form the base scope; own and imported names extend it downward.
+          scope = defaultImportScope importContext,
           stateVariables = Map.empty
         }
 
@@ -94,22 +96,21 @@ identifyModule importContext moduleName parsedModule =
 -- duplicate top-level names, then resolve every declaration under it. Own and imported names are
 -- recorded as symbols visible over the whole module; the default-import base is not recorded (it has no
 -- import statement to navigate to — see 'defaultImportScope').
-resolveModule :: ImportContext -> Module Parsed -> Identifier IdentifiedModule
-resolveModule importContext parsedModule = do
+resolveModule :: Module Parsed -> Identifier IdentifiedModule
+resolveModule parsedModule = do
   moduleName <- currentModuleName
   importBindings <- resolveImports parsedModule.declarations
   let ownBindingGroups = declarationBindings moduleName <$> parsedModule.declarations
       ownBindings = concat ownBindingGroups
   reportTopLevelDuplicates ownBindingGroups
-  withScope (defaultImportScope importContext) $
-    bindInScope parsedModule.sourceSpan (importBindings <> ownBindings) $ do
-      declarations <- traverse resolveDeclaration parsedModule.declarations
-      symbols <- currentSymbols
-      pure
-        IdentifiedModule
-          { identifiedAst = Module {declarations = declarations, sourceSpan = parsedModule.sourceSpan},
-            symbolTable = SymbolTable {symbols = symbols}
-          }
+  bindInScope parsedModule.sourceSpan (importBindings <> ownBindings) $ do
+    declarations <- traverse resolveDeclaration parsedModule.declarations
+    symbols <- currentSymbols
+    pure
+      IdentifiedModule
+        { identifiedAst = Module {declarations = declarations, sourceSpan = parsedModule.sourceSpan},
+          symbolTable = SymbolTable {symbols = symbols}
+        }
 
 -- | The base scope every module is identified under: each default-import root and its @root.@-prefixed
 -- descendants (by 'Katari.Data.ModuleName.covers') brought in as a module qualifier keyed by its last
@@ -120,8 +121,8 @@ resolveModule importContext parsedModule = do
 -- Keying by last segment would collide if two covered modules shared one, but the covered set is the
 -- wired-in stdlib — compiler-controlled and kept collision-free by "Katari.StdlibSpec" (a user module
 -- cannot enter a reserved namespace), so the fold order is immaterial. The module's own and imported
--- names shadow this base. These qualifiers carry no navigable source, so they are the base scope
--- (via 'withScope') rather than recorded symbols.
+-- names shadow this base. These qualifiers carry no navigable source, so they are the module's base
+-- scope (installed in 'identifyModule') rather than recorded symbols.
 defaultImportScope :: ImportContext -> Scope
 defaultImportScope importContext = foldl' qualify emptyScope coveredModules
   where

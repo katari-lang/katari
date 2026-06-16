@@ -7,14 +7,15 @@
 -- may be inferred from its body) is built demand-driven by the checker (Phase C) as it recurses
 -- through definitions, so it is deliberately absent from 'TypeEnvironment'.
 --
--- The pass runs in four stages:
+-- The pass runs in four stages ('buildEnvironment' chains them top to bottom):
 --
---   1. collect — gather the data / request / synonym declarations, keyed by qualified name;
---   2. elaborate — turn each declaration's annotated types into semantic form
+--   1. collect ('collectDeclarations') — gather the data / request / synonym declarations;
+--   2. elaborate ('elaborateAll') — turn each declaration's annotated types into semantic form
 --      ("Katari.Typechecker.Elaborate"), expanding synonyms;
---   3. variance — infer each generic parameter's variance by a fixed point over the elaborated
---      (pre-normalized) shapes;
---   4. normalize — with variance in hand, normalize the shapes into the lattice's internal form.
+--   3. variance ('inferVariance') — infer each generic parameter's variance by a fixed point over the
+--      elaborated (pre-normalized) shapes;
+--   4. normalize ('normalizeAll') — with variance in hand, normalize the shapes into the lattice's
+--      internal form.
 module Katari.Typechecker.Environment where
 
 import Control.Monad.RWS.CPS (runRWS)
@@ -24,17 +25,17 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), SynonymEnvironment, SynonymInformation (..), namesByGenericId, parameterKinds)
+import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), SynonymEnvironment, SynonymInformation (..))
 import Katari.Data.Id (GenericId, TypeResolution (..))
 import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.NormalizedType (NormalizedKindedType (..), bottomAttribute, bottomType)
+import Katari.Data.NormalizedType (NormalizedKindedType, bottomAttribute, bottomType)
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
 import Katari.Data.SourceSpan (SourceSpan)
 import Katari.Data.Variance (Variance (..), composeVariance, joinVariance)
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
-import Katari.Typechecker.Elaborate (Elaborate, SynonymSignature (..), elaborate, elaborateAsType, emptyContext, runElaborate)
+import Katari.Typechecker.Elaborate (Elaborate, ElaborateContext, SynonymSignature (..), elaborate, elaborateAsType, emptyContext, runElaborate, withOwnGenerics)
 import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment (..), normalizeGenericArgument, normalizeType)
 
 -- | The read-only type-level environment the checker consults across the whole program:
@@ -93,143 +94,168 @@ data CollectedSynonym = CollectedSynonym
     sourceSpan :: SourceSpan
   }
 
--- | The 'GenericParameterInformation' of one declared generic, paired with its (still syntactic) @extends@
--- bound if it has one. Both 'variance' ('Bivariant') and 'upperBound' ('Nothing') start as
--- placeholders that the env-build's later stages fill (variance by the fixed point, the bound by
--- elaborating + normalizing it). 'Nothing' for the whole result if the identifier left the parameter
--- unresolved, which should not happen for a declaration's own generics.
-collectGenericParameter :: GenericParameter Identified -> Maybe ((Text, GenericParameterInformation), Maybe (GenericId, SyntacticTypeExpression Identified))
+-- | One declared generic reduced to its 'GenericParameterInformation' (whose 'variance' / 'upperBound'
+-- start as placeholders the later stages fill) and its still-syntactic @extends@ bound, if any.
+-- 'Nothing' if the identifier left the parameter unresolved, which should not happen for a
+-- declaration's own generic.
+collectGenericParameter :: GenericParameter Identified -> Maybe (Text, GenericParameterInformation, Maybe (SyntacticTypeExpression Identified))
 collectGenericParameter parameter = case parameter.typeReference.resolution of
   Just (TypeResolutionGeneric genericId) ->
     Just
-      ( (parameter.name, GenericParameterInformation {genericId = genericId, kind = parameter.kind, variance = Bivariant, upperBound = Nothing}),
-        (,) genericId <$> parameter.upperBound
+      ( parameter.name,
+        GenericParameterInformation {genericId = genericId, kind = parameter.kind, variance = Bivariant, upperBound = Nothing},
+        parameter.upperBound
       )
   _ -> Nothing
 
--- | A declaration's collected generic parameters (in declaration order, by name) and the syntactic
--- @extends@ bounds among them, keyed by generic id. The bounds are elaborated + normalized and
--- stamped back onto the parameters' 'upperBound' once the normalizer environment is available.
+-- | A declaration's collected generic parameters (in declaration order, by name) and its syntactic
+-- @extends@ bounds, keyed by generic id. The bounds are elaborated + normalized and stamped onto the
+-- parameters' 'upperBound' once the normalizer environment is available.
 collectGenericParameters :: List (GenericParameter Identified) -> (GenericParameters, Map GenericId (SyntacticTypeExpression Identified))
 collectGenericParameters parameters =
   let collected = mapMaybe collectGenericParameter parameters
-      named = map fst collected
-   in ( GenericParameters {parameterNames = map fst named, parameterInformation = Map.fromList named},
-        Map.fromList (mapMaybe snd collected)
+   in ( GenericParameters
+          { parameterNames = [name | (name, _, _) <- collected],
+            parameterInformation = Map.fromList [(name, info) | (name, info, _) <- collected]
+          },
+        Map.fromList [(info.genericId, bound) | (_, info, Just bound) <- collected]
       )
 
--- | Walk every module's declarations once, splitting out the data / request / synonym declarations
--- with their qualified names. Other declarations (agents / externals / primitives / imports) belong
--- to the value world and are ignored here.
+-- | Split every module's declarations into the data / request / synonym lists, keyed by qualified
+-- name. Other declarations (agents / externals / primitives / imports) belong to the value world and
+-- are dropped here. Each kind is filtered out by its constructor in the comprehension generator.
 collectDeclarations :: Map ModuleName (Module Identified) -> (List CollectedData, List CollectedRequest, List CollectedSynonym)
 collectDeclarations modules =
-  mconcat
-    [ collectOne moduleName declaration
-      | (moduleName, module') <- Map.toList modules,
-        declaration <- module'.declarations
-    ]
+  ( [collectData moduleName declaration | (moduleName, DeclarationData declaration) <- declarations],
+    [collectRequest moduleName declaration | (moduleName, DeclarationRequest declaration) <- declarations],
+    [collectSynonym moduleName declaration | (moduleName, DeclarationTypeSynonym declaration) <- declarations]
+  )
   where
-    collectOne moduleName = \case
-      DeclarationData declaration ->
-        let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
-         in ( [ CollectedData
-                  { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
-                    genericParameters = genericParameters,
-                    genericBounds = genericBounds,
-                    parameters = declaration.parameters,
-                    sourceSpan = declaration.sourceSpan
-                  }
-              ],
-              [],
-              []
-            )
-      DeclarationRequest declaration ->
-        let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
-         in ( [],
-              [ CollectedRequest
-                  { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
-                    genericParameters = genericParameters,
-                    genericBounds = genericBounds,
-                    parameters = declaration.parameters,
-                    returnType = declaration.returnType,
-                    sourceSpan = declaration.sourceSpan
-                  }
-              ],
-              []
-            )
-      DeclarationTypeSynonym declaration ->
-        let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
-         in ( [],
-              [],
-              [ CollectedSynonym
-                  { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
-                    genericParameters = genericParameters,
-                    genericBounds = genericBounds,
-                    body = declaration.definition,
-                    sourceSpan = declaration.sourceSpan
-                  }
-              ]
-            )
-      _ -> ([], [], [])
+    declarations = [(moduleName, declaration) | (moduleName, module') <- Map.toList modules, declaration <- module'.declarations]
+    collectData moduleName declaration =
+      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+       in CollectedData
+            { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
+              genericParameters = genericParameters,
+              genericBounds = genericBounds,
+              parameters = declaration.parameters,
+              sourceSpan = declaration.sourceSpan
+            }
+    collectRequest moduleName declaration =
+      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+       in CollectedRequest
+            { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
+              genericParameters = genericParameters,
+              genericBounds = genericBounds,
+              parameters = declaration.parameters,
+              returnType = declaration.returnType,
+              sourceSpan = declaration.sourceSpan
+            }
+    collectSynonym moduleName declaration =
+      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+       in CollectedSynonym
+            { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
+              genericParameters = genericParameters,
+              genericBounds = genericBounds,
+              body = declaration.definition,
+              sourceSpan = declaration.sourceSpan
+            }
 
 ------------------------------------------------------------------------------------------------
 -- Stage 2: elaborate each declaration's annotated types
 ------------------------------------------------------------------------------------------------
 
+-- | The elaborated (pre-normalized) shape of every declaration, carried from the elaborate stage to
+-- the variance and normalize stages. A synonym body / generic bound is 'Nothing' (poison) when it
+-- rests on an unresolved name.
+data ElaboratedShapes = ElaboratedShapes
+  { dataShapes :: List (CollectedData, SemanticType),
+    requestShapes :: List (CollectedRequest, (SemanticType, SemanticType)),
+    synonymShapes :: List (CollectedSynonym, Maybe SemanticGenericArgument),
+    boundShapes :: Map QualifiedName (Map GenericId (Maybe SemanticGenericArgument))
+  }
+
 -- | A data type's / request's constructor object: each parameter becomes a required field (a value's
 -- fields are always present once constructed; a parameter default is a call-site concern, not part of
 -- the read shape).
 constructorObject :: List (ParameterSignature Identified) -> Elaborate SemanticType
-constructorObject parameters = do
-  fields <- traverse field parameters
-  pure (SemanticTypeObject (Map.fromList fields))
+constructorObject parameters = SemanticTypeObject . Map.fromList <$> traverse field parameters
   where
     field signature = do
       fieldType <- elaborateAsType signature.parameterType
       pure (signature.name, FieldInformation {semanticType = fieldType, optional = False})
 
+-- | The elaborator's signature registry over every collected declaration.
+elaborateContextFor :: List CollectedData -> List CollectedRequest -> List CollectedSynonym -> ElaborateContext
+elaborateContextFor collectedData collectedRequests collectedSynonyms =
+  emptyContext
+    (Map.fromList [(item.qualifiedName, item.genericParameters) | item <- collectedData])
+    (Map.fromList [(item.qualifiedName, item.genericParameters) | item <- collectedRequests])
+    (Map.fromList [(item.qualifiedName, SynonymSignature {genericParameters = item.genericParameters, body = item.body}) | item <- collectedSynonyms])
+
+-- | Elaborate every declaration's annotated types in one run (sharing the registry, accumulating
+-- diagnostics). Each declaration's body is elaborated with its own generics in scope ('withOwnGenerics').
+elaborateAll :: ElaborateContext -> (List CollectedData, List CollectedRequest, List CollectedSynonym) -> (ElaboratedShapes, Diagnostics)
+elaborateAll context (collectedData, collectedRequests, collectedSynonyms) =
+  runElaborate context $ do
+    dataShapes <-
+      traverse (\item -> (,) item <$> withOwnGenerics item.genericParameters (constructorObject item.parameters)) collectedData
+    requestShapes <-
+      traverse
+        ( \item ->
+            (,) item
+              <$> withOwnGenerics
+                item.genericParameters
+                ((,) <$> constructorObject item.parameters <*> elaborateAsType item.returnType)
+        )
+        collectedRequests
+    synonymShapes <-
+      traverse (\item -> (,) item <$> withOwnGenerics item.genericParameters (elaborate item.body)) collectedSynonyms
+    -- A bound elaborates with the same kind-agnostic 'elaborate' synonyms use (a bound is a type /
+    -- effect / attribute), with its declaration's generics in scope.
+    boundShapes <-
+      Map.fromList
+        <$> traverse
+          (\(qualifiedName, generics, bounds) -> (,) qualifiedName <$> withOwnGenerics generics (traverse elaborate bounds))
+          boundedDeclarations
+    pure ElaboratedShapes {dataShapes = dataShapes, requestShapes = requestShapes, synonymShapes = synonymShapes, boundShapes = boundShapes}
+  where
+    boundedDeclarations =
+      [(item.qualifiedName, item.genericParameters, item.genericBounds) | item <- collectedData]
+        <> [(item.qualifiedName, item.genericParameters, item.genericBounds) | item <- collectedRequests]
+        <> [(item.qualifiedName, item.genericParameters, item.genericBounds) | item <- collectedSynonyms]
+
 ------------------------------------------------------------------------------------------------
 -- Stage 3: variance inference
+--
+-- A variance variable is just a 'GenericId' (globally unique once paired with its module). Inference
+-- starts every parameter at 'Bivariant' and joins in each occurrence's polarity to a fixed point.
 ------------------------------------------------------------------------------------------------
 
--- | A variance variable the fixed point solves for: a declaration's qualified name paired with one of
--- its own generic parameter /names/. Keyed by name, not generic id, because generic ids are only
--- unique within a single module — a cross-module fixed point keyed by raw id would conflate two
--- modules' parameters that happen to share an id.
-type VarianceVariable = (QualifiedName, Text)
-
--- | What the variance walk needs: the declaration whose shape is currently being walked (its name and
--- its own generic ids → names, so an occurrence of one of its generics resolves to a variance
--- variable) and the current estimate being iterated.
+-- | What the variance walk needs: the name -> id map of every declaration's parameters (so an
+-- argument named at an application site resolves to the generic id whose variance it constrains) and
+-- the current estimate being iterated.
 data VarianceContext = VarianceContext
-  { currentName :: QualifiedName,
-    currentParameterNames :: Map GenericId Text,
-    estimate :: Map VarianceVariable Variance
+  { parameterIdsByName :: Map QualifiedName (Map Text GenericId),
+    estimate :: Map GenericId Variance
   }
 
-mergeVariances :: List (Map VarianceVariable Variance) -> Map VarianceVariable Variance
+mergeVariances :: List (Map GenericId Variance) -> Map GenericId Variance
 mergeVariances = Map.unionsWith joinVariance
 
--- | The variance contribution of an occurrence of one of the current declaration's own generics. A
--- declaration body only ever references its own generic parameters, so an id absent from the current
--- declaration contributes nothing (it should not arise).
-occurrence :: VarianceContext -> GenericId -> Variance -> Map VarianceVariable Variance
-occurrence context genericId sign =
-  case Map.lookup genericId context.currentParameterNames of
-    Just parameterName -> Map.singleton (context.currentName, parameterName) sign
-    Nothing -> Map.empty
-
--- | The current variance of a nested declaration's parameter, defaulting to 'Bivariant' (unconstrained
--- / not yet seen). An unknown declaration likewise defaults to 'Bivariant'.
+-- | The variance of a nested declaration's parameter (looked up by the argument's name through the
+-- declaration's name -> id map), defaulting to 'Bivariant' (unconstrained / not yet seen).
 nestedVariance :: VarianceContext -> QualifiedName -> Text -> Variance
 nestedVariance context qualifiedName parameterName =
-  Map.findWithDefault Bivariant (qualifiedName, parameterName) context.estimate
+  case Map.lookup qualifiedName context.parameterIdsByName >>= Map.lookup parameterName of
+    Just genericId -> Map.findWithDefault Bivariant genericId context.estimate
+    Nothing -> Bivariant
 
 -- | Collect each generic's variance contribution within a type, observed at the outer polarity
 -- @sign@. Joined across every occurrence.
-walkType :: VarianceContext -> Variance -> SemanticType -> Map VarianceVariable Variance
+walkType :: VarianceContext -> Variance -> SemanticType -> Map GenericId Variance
 walkType context sign = \case
-  SemanticTypeGeneric genericId -> occurrence context genericId sign
+  SemanticTypeGeneric genericId -> Map.singleton genericId sign
   SemanticTypeAgent parameterType returnType effect ->
     mergeVariances
       [ walkType context (composeVariance sign Contravariant) parameterType,
@@ -246,9 +272,9 @@ walkType context sign = \case
   -- Primitive / never / unknown / null carry no generics.
   _ -> Map.empty
 
-walkEffect :: VarianceContext -> Variance -> SemanticEffect -> Map VarianceVariable Variance
+walkEffect :: VarianceContext -> Variance -> SemanticEffect -> Map GenericId Variance
 walkEffect context sign = \case
-  SemanticEffectGeneric genericId -> occurrence context genericId sign
+  SemanticEffectGeneric genericId -> Map.singleton genericId sign
   SemanticEffectRequest qualifiedName arguments -> walkApplicationArguments context sign qualifiedName arguments
   SemanticEffectUnion effects -> mergeVariances (map (walkEffect context sign) effects)
   SemanticEffectOverwrite baseEffect overrides ->
@@ -262,86 +288,90 @@ walkEffect context sign = \case
 -- | Walk a nested data / request application's arguments. Both a data type's @SemanticTypeData@ and a
 -- request's @SemanticEffectRequest@ are applications of a declaration's parameters, so each argument is
 -- observed at the outer polarity composed with the applied parameter's (currently estimated) variance.
-walkApplicationArguments :: VarianceContext -> Variance -> QualifiedName -> Map Text SemanticGenericArgument -> Map VarianceVariable Variance
+walkApplicationArguments :: VarianceContext -> Variance -> QualifiedName -> Map Text SemanticGenericArgument -> Map GenericId Variance
 walkApplicationArguments context sign qualifiedName arguments =
   mergeVariances
     [ walkArgument context (composeVariance sign (nestedVariance context qualifiedName parameterName)) argument
       | (parameterName, argument) <- Map.toList arguments
     ]
 
-walkAttribute :: VarianceContext -> Variance -> SemanticAttribute -> Map VarianceVariable Variance
+walkAttribute :: VarianceContext -> Variance -> SemanticAttribute -> Map GenericId Variance
 walkAttribute context sign = \case
-  SemanticAttributeGeneric genericId -> occurrence context genericId sign
+  SemanticAttributeGeneric genericId -> Map.singleton genericId sign
   SemanticAttributeUnion attributes -> mergeVariances (map (walkAttribute context sign) attributes)
   SemanticAttributePublic -> Map.empty
   SemanticAttributePrivate -> Map.empty
 
-walkArgument :: VarianceContext -> Variance -> SemanticGenericArgument -> Map VarianceVariable Variance
+walkArgument :: VarianceContext -> Variance -> SemanticGenericArgument -> Map GenericId Variance
 walkArgument context sign = \case
   SemanticGenericArgumentType semanticType -> walkType context sign semanticType
   SemanticGenericArgumentEffect effect -> walkEffect context sign effect
   SemanticGenericArgumentAttribute attribute -> walkAttribute context sign attribute
 
--- | One shape whose generics' variance is being inferred: a data constructor (sole covariant root) or
--- a request, whose parameter object is covariant and return type contravariant (dual to a function,
--- because the performer supplies the parameter and consumes the return through the handler).
+-- | One shape whose generics' variance is being inferred: its own parameter ids (which the result is
+-- keyed by) and the (rooted) sub-shapes contributing usage. A data constructor is a sole covariant
+-- root; a request's parameter object is covariant and its return type contravariant (dual to a
+-- function, because the performer supplies the parameter and consumes the return through the handler).
 data VarianceShape = VarianceShape
-  { qualifiedName :: QualifiedName,
-    -- | This declaration's own generic ids → names, so the walk can key occurrences by variance variable.
-    parameterNames :: Map GenericId Text,
-    -- | The (rooted) sub-shapes contributing usage: each a (base polarity, type) pair.
+  { ownParameterIds :: List GenericId,
     roots :: List (Variance, SemanticType)
   }
 
+-- | The variance shapes of the data constructors and requests (synonyms are expanded away, so they
+-- carry no variance of their own).
+varianceShapesOf :: ElaboratedShapes -> List VarianceShape
+varianceShapesOf shapes =
+  [VarianceShape {ownParameterIds = ownParameterIdsOf item.genericParameters, roots = [(Covariant, constructor)]} | (item, constructor) <- shapes.dataShapes]
+    <> [VarianceShape {ownParameterIds = ownParameterIdsOf item.genericParameters, roots = [(Covariant, parameterObject), (Contravariant, returnType)]} | (item, (parameterObject, returnType)) <- shapes.requestShapes]
+
+ownParameterIdsOf :: GenericParameters -> List GenericId
+ownParameterIdsOf parameters = [info.genericId | info <- Map.elems parameters.parameterInformation]
+
+-- | Every data type's / request's parameter name -> id map, so a nested application's argument name
+-- resolves to the generic id whose variance it constrains.
+parameterIdsByNameOf :: ElaboratedShapes -> Map QualifiedName (Map Text GenericId)
+parameterIdsByNameOf shapes =
+  Map.fromList $
+    [(item.qualifiedName, (.genericId) <$> item.genericParameters.parameterInformation) | (item, _) <- shapes.dataShapes]
+      <> [(item.qualifiedName, (.genericId) <$> item.genericParameters.parameterInformation) | (item, _) <- shapes.requestShapes]
+
 -- | One pass of the fixed point: recompute every variance variable from the current estimate. A
 -- generic absent from its shape's usage is 'Bivariant'.
-varianceIteration :: List VarianceShape -> Map VarianceVariable Variance -> Map VarianceVariable Variance
-varianceIteration shapes currentEstimate =
+varianceIteration :: Map QualifiedName (Map Text GenericId) -> List VarianceShape -> Map GenericId Variance -> Map GenericId Variance
+varianceIteration parameterIdsByName shapes currentEstimate =
   Map.fromList
-    [ ((shape.qualifiedName, parameterName), Map.findWithDefault Bivariant (shape.qualifiedName, parameterName) usage)
+    [ (genericId, Map.findWithDefault Bivariant genericId usage)
       | shape <- shapes,
-        let context = VarianceContext {currentName = shape.qualifiedName, currentParameterNames = shape.parameterNames, estimate = currentEstimate}
+        let context = VarianceContext {parameterIdsByName = parameterIdsByName, estimate = currentEstimate}
             usage = mergeVariances [walkType context sign root | (sign, root) <- shape.roots],
-        parameterName <- Map.elems shape.parameterNames
+        genericId <- shape.ownParameterIds
     ]
 
 -- | Iterate 'varianceIteration' to its (least) fixed point. The variance lattice is finite and the
 -- step is monotone from the all-'Bivariant' bottom, so this terminates.
-inferVariance :: List VarianceShape -> Map VarianceVariable Variance
-inferVariance shapes = settle Map.empty
+inferVariance :: Map QualifiedName (Map Text GenericId) -> List VarianceShape -> Map GenericId Variance
+inferVariance parameterIdsByName shapes = settle Map.empty
   where
     settle current =
-      let next = varianceIteration shapes current
+      let next = varianceIteration parameterIdsByName shapes current
        in if next == current then current else settle next
 
 ------------------------------------------------------------------------------------------------
--- Driver
+-- Stage 4: normalize the elaborated shapes (with variance and bounds in hand)
 ------------------------------------------------------------------------------------------------
 
--- | Re-stamp a declaration's parameters with each parameter's inferred variance (keyed by the
--- parameter name, which is its key in 'parameterInformation'). Rebuilt rather than record-updated
--- because @variance@ / @upperBound@ are shared field names, making a duplicate-field update ambiguous.
-applyVariance :: Map VarianceVariable Variance -> QualifiedName -> GenericParameters -> GenericParameters
-applyVariance variances qualifiedName parameters =
-  GenericParameters
-    { parameterNames = parameters.parameterNames,
-      parameterInformation =
-        Map.mapWithKey
-          ( \name parameter ->
-              GenericParameterInformation
-                { genericId = parameter.genericId,
-                  kind = parameter.kind,
-                  variance = Map.findWithDefault Bivariant (qualifiedName, name) variances,
-                  upperBound = parameter.upperBound
-                }
-          )
-          parameters.parameterInformation
-    }
+-- | Stamp each parameter with its inferred variance (an unconstrained parameter stays 'Bivariant').
+applyVariance :: Map GenericId Variance -> GenericParameters -> GenericParameters
+applyVariance variances parameters =
+  parameters {parameterInformation = stamp <$> parameters.parameterInformation}
+  where
+    stamp parameter = parameter {variance = Map.findWithDefault Bivariant parameter.genericId variances}
 
 -- | Stamp a parameter's normalized @extends@ upper bound (looked up by its generic id) onto its
 -- 'upperBound'; an unbounded parameter keeps 'Nothing'. Rebuilt rather than record-updated because
--- @upperBound@ is also a field of the AST 'GenericParameter', making a record update an ambiguous
--- (and now deprecated) duplicate-field update.
+-- 'upperBound' is shared with the AST 'GenericParameter', which makes a field update ambiguous (and
+-- -XDuplicateRecordFields-deprecated); 'applyVariance' updates 'variance' in place because that field
+-- is unique to 'GenericParameterInformation'.
 stampBound :: Map GenericId NormalizedKindedType -> GenericParameterInformation -> GenericParameterInformation
 stampBound bounds parameter =
   GenericParameterInformation
@@ -351,142 +381,63 @@ stampBound bounds parameter =
       upperBound = Map.lookup parameter.genericId bounds
     }
 
--- | Run a normalization sub-computation, anchoring any type errors it emits at @sourceSpan@.
+-- | Run a normalization sub-computation, anchoring any type errors it emits at @sourceSpan@. The
+-- normalizer is span-free, so a declaration's errors all anchor at the declaration as a whole.
 runNormalize :: NormalizerEnvironment -> SourceSpan -> Normalizer a -> (a, Diagnostics)
 runNormalize environment sourceSpan action =
   let (result, _, errors) = runRWS action environment ()
    in (result, foldMap (diagnosticAt sourceSpan . CompilerErrorType) errors)
 
--- | Build the global type-level environment from every identified module (keyed by module name, so a
--- declaration's qualified name is the key joined with the declaration name). The data / request /
--- synonym declarations are filtered out of the identified ASTs, their annotated types elaborated and
--- normalized, variance inferred by a global fixed point, and synonyms expanded during elaboration.
-buildEnvironment :: Map ModuleName (Module Identified) -> (TypeEnvironment, Diagnostics)
-buildEnvironment modules = (environment, elaborateDiagnostics <> normalizeDiagnostics)
+-- | Normalize every elaborated shape into its 'TypeEnvironment' entry. The variance is already
+-- inferred; the bounds are normalized here and stamped onto each parameter's 'upperBound'.
+normalizeAll :: Map GenericId Variance -> ElaboratedShapes -> (TypeEnvironment, Diagnostics)
+normalizeAll variances shapes = (environment, dataDiagnostics <> requestDiagnostics <> synonymDiagnostics)
   where
-    (collectedData, collectedRequests, collectedSynonyms) = collectDeclarations modules
+    -- Stamp variance onto every declaration's parameters once, up front.
+    stampedData = [(item, applyVariance variances item.genericParameters, semantic) | (item, semantic) <- shapes.dataShapes]
+    stampedRequests = [(item, applyVariance variances item.genericParameters, payload) | (item, payload) <- shapes.requestShapes]
+    stampedSynonyms = [(item, applyVariance variances item.genericParameters, body) | (item, body) <- shapes.synonymShapes]
 
-    -- Stage 2: the elaborator's signature registry, then elaborate every declaration's annotated
-    -- types in one run (sharing the registry, accumulating diagnostics).
-    elaborateContext =
-      emptyContext
-        (Map.fromList [(item.qualifiedName, item.genericParameters) | item <- collectedData])
-        (Map.fromList [(item.qualifiedName, item.genericParameters) | item <- collectedRequests])
-        ( Map.fromList
-            [ (item.qualifiedName, SynonymSignature {genericParameters = item.genericParameters, body = item.body})
-              | item <- collectedSynonyms
-            ]
-        )
-        genericKinds
-
-    -- The declared kind of every generic in the program, by id (ids are globally unique once stamped
-    -- with their module), so the elaborator can wrap a generic leaf at the kind its declaration gave it.
-    genericKinds =
-      Map.unions $
-        [parameterKinds item.genericParameters | item <- collectedData]
-          <> [parameterKinds item.genericParameters | item <- collectedRequests]
-          <> [parameterKinds item.genericParameters | item <- collectedSynonyms]
-
-    -- Every declaration's syntactic @extends@ bounds, keyed by declaration then generic id, so the
-    -- elaborate / normalize stages process them alongside the constructor / request / definition shapes.
-    allGenericBounds =
-      Map.fromList
-        ( [(item.qualifiedName, item.genericBounds) | item <- collectedData]
-            <> [(item.qualifiedName, item.genericBounds) | item <- collectedRequests]
-            <> [(item.qualifiedName, item.genericBounds) | item <- collectedSynonyms]
-        )
-
-    ((dataShapesSemantic, requestShapesSemantic, synonymShapesSemantic, boundShapesSemantic), elaborateDiagnostics) =
-      runElaborate elaborateContext $ do
-        dataShapes <- traverse (\item -> (,) item <$> constructorObject item.parameters) collectedData
-        requestShapes <-
-          traverse
-            ( \item -> do
-                parameterObject <- constructorObject item.parameters
-                returnType <- elaborateAsType item.returnType
-                pure (item, (parameterObject, returnType))
-            )
-            collectedRequests
-        synonymShapes <- traverse (\item -> (,) item <$> elaborate item.body) collectedSynonyms
-        -- A bound is kind-agnostic (a type / effect / attribute), so it elaborates with 'elaborate'
-        -- (the same kind-agnostic elaborator synonyms use), not 'elaborateAsType'.
-        boundShapes <- traverse (traverse elaborate) allGenericBounds
-        pure (dataShapes, requestShapes, synonymShapes, boundShapes)
-
-    -- Stage 3: infer variance over the elaborated (pre-normalized) shapes.
-    varianceShapes =
-      [ VarianceShape {qualifiedName = item.qualifiedName, parameterNames = namesByGenericId item.genericParameters, roots = [(Covariant, constructor)]}
-        | (item, constructor) <- dataShapesSemantic
-      ]
-        <> [ VarianceShape {qualifiedName = item.qualifiedName, parameterNames = namesByGenericId item.genericParameters, roots = [(Covariant, parameterObject), (Contravariant, returnType)]}
-             | (item, (parameterObject, returnType)) <- requestShapesSemantic
-           ]
-
-    variances = inferVariance varianceShapes
-
-    -- Stage 4: stamp the inferred variance onto each declaration's parameters once, then normalize
-    -- the elaborated shapes. The normalizer reads only the parameter lists (for arity / variance),
-    -- never the constructor, so a placeholder constructor is fine.
-    dataStamped = [(item, applyVariance variances item.qualifiedName item.genericParameters, semantic) | (item, semantic) <- dataShapesSemantic]
-    requestStamped = [(item, applyVariance variances item.qualifiedName item.genericParameters, shape) | (item, shape) <- requestShapesSemantic]
-    synonymStamped = [(item, applyVariance variances item.qualifiedName item.genericParameters, maybeSemantic) | (item, maybeSemantic) <- synonymShapesSemantic]
-
+    -- The normalizer reads only the parameter lists (for arity / variance), never the constructor, so
+    -- a placeholder constructor / request shape is fine while the declarations normalize.
     normalizerEnvironment =
       NormalizerEnvironment
-        { dataEnvironment =
-            Map.fromList
-              [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = bottomType}) | (item, parameters, _) <- dataStamped],
-          requestEnvironment =
-            Map.fromList
-              [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, request = (bottomType, bottomType)}) | (item, parameters, _) <- requestStamped],
-          -- Normalization never resolves a generic's bound (that is a subtyping-time concern), so no
-          -- in-scope generics are needed to normalize the declarations themselves.
+        { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = bottomType}) | (item, parameters, _) <- stampedData],
+          requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, request = (bottomType, bottomType)}) | (item, parameters, _) <- stampedRequests],
+          -- Normalization never resolves a generic's bound (a subtyping-time concern), so no in-scope
+          -- generics are needed to normalize the declarations themselves.
           genericsInScope = mempty,
           world = bottomAttribute
         }
 
-    (dataInfos, dataNormalizeDiagnostics) =
-      unzipDiagnostics
-        [ let (constructor, constructorDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType semantic)
-              (boundedParameters, boundDiagnostics) = stampBoundsAt item.qualifiedName item.sourceSpan parameters
-           in (DataInformation {name = item.qualifiedName, genericParameters = boundedParameters, constructor = constructor}, constructorDiagnostics <> boundDiagnostics)
-          | (item, parameters, semantic) <- dataStamped
-        ]
-
-    (requestInfos, requestNormalizeDiagnostics) =
-      unzipDiagnostics
-        [ let (parameterType, parameterDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType parameterObject)
-              (returnType, returnDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType returnSemantic)
-              (boundedParameters, boundDiagnostics) = stampBoundsAt item.qualifiedName item.sourceSpan parameters
-           in ( RequestInformation {name = item.qualifiedName, genericParameters = boundedParameters, request = (parameterType, returnType)},
-                parameterDiagnostics <> returnDiagnostics <> boundDiagnostics
-              )
-          | (item, parameters, (parameterObject, returnSemantic)) <- requestStamped
-        ]
-
-    (synonymInfos, synonymNormalizeDiagnostics) =
-      unzipDiagnostics
-        [ let semantic = fromMaybe (SemanticGenericArgumentType SemanticTypeNever) maybeSemantic
-              (definition, definitionDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeGenericArgument semantic)
-              (boundedParameters, boundDiagnostics) = stampBoundsAt item.qualifiedName item.sourceSpan parameters
-           in (SynonymInformation {name = item.qualifiedName, genericParameters = boundedParameters, definition = definition}, definitionDiagnostics <> boundDiagnostics)
-          | (item, parameters, maybeSemantic) <- synonymStamped
-        ]
-
-    -- Normalize a declaration's collected @extends@ bounds and stamp each onto its parameter's
-    -- 'upperBound' (the parameters already carry their inferred variance from 'applyVariance'); an
-    -- unbounded parameter keeps 'Nothing'. The bounds normalize in the same environment as the rest of
-    -- the declaration so they see the same data / request / synonym types.
-    stampBoundsAt qualifiedName sourceSpan parameters =
-      let -- A bound that failed to elaborate is 'Nothing' (its diagnostic was already emitted at the
-          -- elaborate stage); drop those, so an unresolved bound leaves its parameter unbounded.
-          semanticBounds = Map.mapMaybe id (Map.findWithDefault mempty qualifiedName boundShapesSemantic)
+    -- Normalize a declaration's collected @extends@ bounds and stamp each onto its parameters'
+    -- 'upperBound' (the parameters already carry their inferred variance); an unbounded or
+    -- failed-to-elaborate parameter keeps 'Nothing'.
+    stampBoundsFor qualifiedName sourceSpan parameters =
+      let semanticBounds = Map.mapMaybe id (Map.findWithDefault mempty qualifiedName shapes.boundShapes)
           (normalizedBounds, diagnostics) = runNormalize normalizerEnvironment sourceSpan (traverse normalizeGenericArgument semanticBounds)
-       in ( GenericParameters {parameterNames = parameters.parameterNames, parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation},
-            diagnostics
-          )
+       in (parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}, diagnostics)
 
-    normalizeDiagnostics = dataNormalizeDiagnostics <> requestNormalizeDiagnostics <> synonymNormalizeDiagnostics
+    normalizeData item parameters semantic =
+      let (constructor, constructorDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType semantic)
+          (boundedParameters, boundDiagnostics) = stampBoundsFor item.qualifiedName item.sourceSpan parameters
+       in (DataInformation {name = item.qualifiedName, genericParameters = boundedParameters, constructor = constructor}, constructorDiagnostics <> boundDiagnostics)
+
+    normalizeRequest item parameters (parameterObject, returnSemantic) =
+      let (parameterType, parameterDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType parameterObject)
+          (returnType, returnDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType returnSemantic)
+          (boundedParameters, boundDiagnostics) = stampBoundsFor item.qualifiedName item.sourceSpan parameters
+       in (RequestInformation {name = item.qualifiedName, genericParameters = boundedParameters, request = (parameterType, returnType)}, parameterDiagnostics <> returnDiagnostics <> boundDiagnostics)
+
+    normalizeSynonym item parameters maybeSemantic =
+      let semantic = fromMaybe (SemanticGenericArgumentType SemanticTypeNever) maybeSemantic
+          (definition, definitionDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeGenericArgument semantic)
+          (boundedParameters, boundDiagnostics) = stampBoundsFor item.qualifiedName item.sourceSpan parameters
+       in (SynonymInformation {name = item.qualifiedName, genericParameters = boundedParameters, definition = definition}, definitionDiagnostics <> boundDiagnostics)
+
+    (dataInfos, dataDiagnostics) = unzipDiagnostics [normalizeData item parameters semantic | (item, parameters, semantic) <- stampedData]
+    (requestInfos, requestDiagnostics) = unzipDiagnostics [normalizeRequest item parameters payload | (item, parameters, payload) <- stampedRequests]
+    (synonymInfos, synonymDiagnostics) = unzipDiagnostics [normalizeSynonym item parameters body | (item, parameters, body) <- stampedSynonyms]
 
     environment =
       TypeEnvironment
@@ -494,6 +445,19 @@ buildEnvironment modules = (environment, elaborateDiagnostics <> normalizeDiagno
           requestEnvironment = Map.fromList [(info.name, info) | info <- requestInfos],
           synonymEnvironment = Map.fromList [(info.name, info) | info <- synonymInfos]
         }
+
+------------------------------------------------------------------------------------------------
+-- Driver
+------------------------------------------------------------------------------------------------
+
+-- | Build the global type-level environment from every identified module by chaining the four stages.
+buildEnvironment :: Map ModuleName (Module Identified) -> (TypeEnvironment, Diagnostics)
+buildEnvironment modules = (environment, elaborateDiagnostics <> normalizeDiagnostics)
+  where
+    collected@(collectedData, collectedRequests, collectedSynonyms) = collectDeclarations modules
+    (shapes, elaborateDiagnostics) = elaborateAll (elaborateContextFor collectedData collectedRequests collectedSynonyms) collected
+    variances = inferVariance (parameterIdsByNameOf shapes) (varianceShapesOf shapes)
+    (environment, normalizeDiagnostics) = normalizeAll variances shapes
 
 unzipDiagnostics :: List (a, Diagnostics) -> (List a, Diagnostics)
 unzipDiagnostics items = (map fst items, foldMap snd items)

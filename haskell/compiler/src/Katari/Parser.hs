@@ -18,7 +18,7 @@ import Data.Text qualified as Text
 import Data.Void (Void)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
+import Katari.Data.ModuleName (ModuleName (..), moduleNameFromSegments, renderModuleName)
 import Katari.Data.SourceSpan (HasSourceSpan (..), Located (..), SourceSpan (..))
 import Katari.Diagnostics (Diagnostics, diagnosticAt, report)
 import Katari.Error (CompilerError (..), ParseError (ParseErrorSyntax), SyntaxErrorInfo (..))
@@ -239,7 +239,7 @@ typeSynonymDeclaration = do
   typeSpan <- keyword "type"
   name <- identifier
   generics <- genericParameters
-  _ <- symbolNotFollowedBy "=" ['=', '>']
+  assignEquals
   definition <- typeExpression
   pure
     TypeSynonymDeclaration
@@ -291,5 +291,4 @@ moduleNameReference = do
   first <- identifier
   rest <- many (symbol "." *> identifier)
   let segments = first : rest
-      name = Text.intercalate "." (map (.value) segments)
-  pure (ModuleName name, mergeSpans first.sourceSpan (lastSpanOr first.sourceSpan rest))
+  pure (moduleNameFromSegments (map (.value) segments), mergeSpans first.sourceSpan (lastSpanOr first.sourceSpan rest))

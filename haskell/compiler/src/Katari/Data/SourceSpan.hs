@@ -52,11 +52,8 @@ renderSourceSpan sourceSpan =
     <> ":"
     <> Text.pack (show sourceSpan.start.column)
 
+-- | The derived 'Ord' on 'Position' is line-then-column, i.e. document order, so containment is a
+-- plain range test.
 spanContains :: SourceSpan -> Position -> Bool
 spanContains sourceSpan position =
-  ( sourceSpan.start.line < position.line
-      || sourceSpan.start.line == position.line && sourceSpan.start.column <= position.column
-  )
-    && ( position.line < sourceSpan.end.line
-           || position.line == sourceSpan.end.line && position.column <= sourceSpan.end.column
-       )
+  sourceSpan.start <= position && position <= sourceSpan.end

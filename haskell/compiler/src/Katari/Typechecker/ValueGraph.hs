@@ -103,7 +103,7 @@ referencesInExpression = \case
   ExpressionLiteral _ -> Set.empty
   ExpressionVariable expression -> referenceOf expression.variableReference
   ExpressionTuple expression -> foldMap referencesInExpression expression.elements
-  ExpressionRecord expression -> foldMap (referencesInExpression . snd) expression.entries
+  ExpressionRecord expression -> foldMap (\entry -> referencesInExpression entry.value) expression.entries
   ExpressionCall expression -> referencesInExpression expression.callee <> foldMap referencesInCallArgument expression.arguments
   ExpressionBinaryOperator expression -> referencesInExpression expression.left <> referencesInExpression expression.right
   ExpressionUnaryOperator expression -> referencesInExpression expression.operand

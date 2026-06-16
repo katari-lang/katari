@@ -34,17 +34,10 @@ report located = tell (Seq.singleton located)
 reportAt :: (MonadWriter Diagnostics m) => SourceSpan -> CompilerError -> m ()
 reportAt sourceSpan compilerError = report (Located {value = compilerError, sourceSpan = sourceSpan})
 
--- | Run a sub-computation and hand back its diagnostics instead of letting them propagate — for
--- checks that inspect their own errors before deciding what to surface.
-capture :: (MonadWriter Diagnostics m) => m a -> m (a, Diagnostics)
-capture action = pass $ do
-  (result, diagnostics) <- listen action
-  pure ((result, diagnostics), const mempty)
-
 -- | Whether any diagnostic is an error (rather than a warning). Used to gate later phases — lowering
 -- does not run on a program with errors, so it never emits IR for code that did not type-check.
 hasErrors :: Diagnostics -> Bool
-hasErrors = any (isError . (.value)) . toList
+hasErrors = any (isError . (.value))
   where
     isError compilerError = case severityOf compilerError of
       SeverityError -> True
