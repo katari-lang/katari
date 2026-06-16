@@ -1,5 +1,5 @@
 {
-  "id": "76c2ad7f-7b5c-46c3-8f07-c82c7571bb79",
+  "id": "5a8a58d3-e4b7-47a3-aaa1-6ac423e95e1b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -58,7 +58,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "blobs_owner_instance_id_idx": {
+          "name": "blobs_owner_instance_id_idx",
+          "columns": [
+            {
+              "expression": "owner_instance_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "blobs_project_id_projects_id_fk": {
           "name": "blobs_project_id_projects_id_fk",
@@ -101,68 +117,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.scope_variables": {
-      "name": "scope_variables",
-      "schema": "",
-      "columns": {
-        "project_id": {
-          "name": "project_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "scope_id": {
-          "name": "scope_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "var_id": {
-          "name": "var_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "value": {
-          "name": "value",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "scope_variables_project_id_scope_id_scopes_project_id_scope_id_fk": {
-          "name": "scope_variables_project_id_scope_id_scopes_project_id_scope_id_fk",
-          "tableFrom": "scope_variables",
-          "tableTo": "scopes",
-          "columnsFrom": [
-            "project_id",
-            "scope_id"
-          ],
-          "columnsTo": [
-            "project_id",
-            "scope_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "scope_variables_project_id_scope_id_var_id_pk": {
-          "name": "scope_variables_project_id_scope_id_var_id_pk",
-          "columns": [
-            "project_id",
-            "scope_id",
-            "var_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.scopes": {
       "name": "scopes",
       "schema": "",
@@ -196,9 +150,31 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
+        },
+        "values": {
+          "name": "values",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "scopes_owner_instance_id_idx": {
+          "name": "scopes_owner_instance_id_idx",
+          "columns": [
+            {
+              "expression": "owner_instance_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "scopes_project_id_projects_id_fk": {
           "name": "scopes_project_id_projects_id_fk",
@@ -406,7 +382,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "delegations_caller_instance_id_idx": {
+          "name": "delegations_caller_instance_id_idx",
+          "columns": [
+            {
+              "expression": "caller_instance_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "delegations_project_id_projects_id_fk": {
           "name": "delegations_project_id_projects_id_fk",
@@ -431,7 +423,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -632,12 +624,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "parent_instance_id": {
-          "name": "parent_instance_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "delegation_id": {
           "name": "delegation_id",
           "type": "uuid",
@@ -677,7 +663,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "instances_project_id_idx": {
+          "name": "instances_project_id_idx",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "instances_project_id_projects_id_fk": {
           "name": "instances_project_id_projects_id_fk",
@@ -692,17 +694,17 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "instances_parent_instance_id_instances_id_fk": {
-          "name": "instances_parent_instance_id_instances_id_fk",
+        "instances_delegation_id_delegations_id_fk": {
+          "name": "instances_delegation_id_delegations_id_fk",
           "tableFrom": "instances",
-          "tableTo": "instances",
+          "tableTo": "delegations",
           "columnsFrom": [
-            "parent_instance_id"
+            "delegation_id"
           ],
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "instances_snapshot_id_snapshots_id_fk": {
@@ -812,7 +814,7 @@
           "name": "instance_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "snapshot_id": {
           "name": "snapshot_id",
@@ -908,7 +910,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "runs_snapshot_id_snapshots_id_fk": {

@@ -80,7 +80,8 @@ atomType =
       TypeArray <$> keyword "array",
       TypeRecord <$> keyword "record",
       bracesType,
-      tupleOrParenType,
+      bracketTupleType,
+      parenType,
       nameType
     ]
 
@@ -147,13 +148,18 @@ nameType = do
                 sourceSpan = sourceSpan
               }
 
--- | @(T)@ grouping / @(T1, T2, ...)@ tuple / @()@ empty tuple.
-tupleOrParenType :: Parser TypeExpression
-tupleOrParenType = do
-  (elements, sourceSpan) <- parens (commaSeparated typeExpression)
-  pure $ case elements of
-    [singleType] -> singleType
-    _ -> TypeTuple TupleTypeNode {elementTypes = elements, sourceSpan = sourceSpan}
+-- | @[T1, T2, ...]@ — a tuple type of any arity, including the empty @[]@ and the single-element
+-- @[T]@. Tuples are bracketed (matching tuple values and patterns); @array[T]@ / @record[T]@ are
+-- keyword applications, and @(T)@ is mere grouping (see 'parenType').
+bracketTupleType :: Parser TypeExpression
+bracketTupleType = do
+  (elementTypes, sourceSpan) <- brackets (commaSeparated typeExpression)
+  pure (TypeTuple TupleTypeNode {elementTypes = elementTypes, sourceSpan = sourceSpan})
+
+-- | @(T)@ — grouping only. Tuples moved to @[...]@, so parentheses no longer build a tuple; they
+-- only override precedence around a single type.
+parenType :: Parser TypeExpression
+parenType = fst <$> parens typeExpression
 
 -- | @{label : T, ...}@ object type, or @{...E, request[args], ...}@ effect override.
 bracesType :: Parser TypeExpression

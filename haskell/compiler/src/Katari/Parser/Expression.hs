@@ -41,7 +41,7 @@ expression = makeExprParser term operatorTable
 
 operatorTable :: List (List (Operator Parser ExpressionP))
 operatorTable =
-  [ [prefixOperatorNot UnaryOperatorNot "!" '=', prefixOperator UnaryOperatorNegate "-"],
+  [ [prefixOperators],
     [binary BinaryOperatorMultiply "*", binary BinaryOperatorDivide "/", binary BinaryOperatorModulo "%"],
     [binary BinaryOperatorConcat "++", binaryNot BinaryOperatorAdd "+" '+', binary BinaryOperatorSubtract "-"],
     [ binary BinaryOperatorLessOrEqual "<=",
@@ -60,11 +60,14 @@ binary operator text = InfixL (makeBinary operator <$ operatorToken text)
 binaryNot :: BinaryOperator -> Text -> Char -> Operator Parser ExpressionP
 binaryNot operator text disallowed = InfixL (makeBinary operator <$ operatorTokenNot text disallowed)
 
-prefixOperator :: UnaryOperator -> Text -> Operator Parser ExpressionP
-prefixOperator operator text = Prefix (makePrefix operator <$> operatorTokenSpan text)
-
-prefixOperatorNot :: UnaryOperator -> Text -> Char -> Operator Parser ExpressionP
-prefixOperatorNot operator text disallowed = Prefix (makePrefix operator <$> operatorTokenSpanNot text disallowed)
+-- | The unary-prefix precedence level. 'makeExprParser' applies at most one 'Prefix' per level, so a
+-- stack of prefixes (@!!x@, @- -x@, @-!x@) is parsed here as a run and composed (outermost first).
+prefixOperators :: Operator Parser ExpressionP
+prefixOperators = Prefix (foldr (.) id <$> some singlePrefix)
+  where
+    singlePrefix =
+      (makePrefix UnaryOperatorNot <$> operatorTokenSpanNot "!" '=')
+        <|> (makePrefix UnaryOperatorNegate <$> operatorTokenSpan "-")
 
 makeBinary :: BinaryOperator -> ExpressionP -> ExpressionP -> ExpressionP
 makeBinary operator left right =
@@ -316,7 +319,9 @@ templateElement = templateInterpolation <|> templateStringChunk
 
 templateInterpolation :: Parser (TemplateElement Parsed)
 templateInterpolation = do
-  (value, sourceSpan) <- spanning (string "${" *> multiline expression <* char '}')
+  -- Consume any space after @${@ before the expression: a primary only eats its /trailing/ space, so
+  -- without this @${ expr }@ (with inner padding) would fail where @${expr}@ succeeds.
+  (value, sourceSpan) <- spanning (string "${" *> multilineSpace *> multiline expression <* char '}')
   pure (TemplateElementExpression TemplateExpressionElement {value = value, sourceSpan = sourceSpan})
 
 templateStringChunk :: Parser (TemplateElement Parsed)
@@ -491,15 +496,26 @@ agentDeclaration = optional docAnnotation >>= agentDeclarationWith
 
 -- | The agent declaration after its (already-parsed) doc annotation, so the top-level dispatcher can
 -- consume the shared annotation once and commit to this branch on the @agent@ / @private@ keyword.
+--
+-- The signature is parsed in line mode so the body's @{@ must sit on the same line as the signature's
+-- last token (generics / parameters still wrap freely inside their brackets). This rejects an Allman
+-- @agent f() -> R \n { ... }@ uniformly — a top-level agent now behaves like a local one and like the
+-- @if@ / @for@ / @match@ control constructs, whose brace is already same-line.
 agentDeclarationWith :: Maybe (Located Text) -> Parser (AgentDeclaration Parsed)
 agentDeclarationWith annotation = do
-  privateSpan <- optional (keyword "private")
-  agentSpan <- keyword "agent"
-  name <- identifier
-  generics <- genericParameters
-  parameters <- fst <$> parens (commaSeparated parameterBinding)
-  returnType <- optional (symbol "->" *> typeExpression)
-  effects <- optional (keyword "with" *> typeExpression)
+  -- Only the signature is line-scoped (so the body brace must be same-line — generics / parameters
+  -- still wrap inside their brackets). The body 'block' runs in the ambient mode, so its closing @}@
+  -- consumes the trailing newline the top-level dispatcher relies on to reach the next declaration.
+  (privateSpan, agentSpan, name, generics, parameters, returnType, effects) <-
+    lineScoped $ do
+      privateSpan <- optional (keyword "private")
+      agentSpan <- keyword "agent"
+      name <- identifier
+      generics <- genericParameters
+      parameters <- fst <$> parens (commaSeparated parameterBinding)
+      returnType <- optional (symbol "->" *> typeExpression)
+      effects <- optional (keyword "with" *> typeExpression)
+      pure (privateSpan, agentSpan, name, generics, parameters, returnType, effects)
   body <- withLoopContext LoopContextNone block
   let startSpan = maybe (fromMaybe agentSpan privateSpan) (.sourceSpan) annotation
   pure

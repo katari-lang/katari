@@ -38,7 +38,7 @@ spec = do
       renderSemanticType (SemanticTypeData fooName (Map.singleton "T" (SemanticGenericArgumentType SemanticTypeInteger)))
         `shouldBe` "foo[integer]"
     it "renders array and generic placeholders" $
-      renderSemanticType (SemanticTypeArray (SemanticTypeGeneric (GenericId 0)))
+      renderSemanticType (SemanticTypeArray (SemanticTypeGeneric (GenericId (ModuleName "test") 0)))
         `shouldBe` "array[T0]"
 
   describe "renderTypeError" $ do

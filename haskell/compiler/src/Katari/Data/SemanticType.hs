@@ -88,7 +88,7 @@ renderSemanticType = render False
       SemanticTypeArray itemType -> "array[" <> render False itemType <> "]"
       SemanticTypeRecord SemanticTypeUnknown -> "record"
       SemanticTypeRecord valueType -> "record[" <> render False valueType <> "]"
-      SemanticTypeTuple itemTypes -> "(" <> Text.intercalate ", " (render False <$> itemTypes) <> ")"
+      SemanticTypeTuple itemTypes -> "[" <> Text.intercalate ", " (render False <$> itemTypes) <> "]"
       SemanticTypeData qualifiedName arguments -> qualifiedName.name <> renderSemanticGenericArguments arguments
       SemanticTypeGeneric genericId -> "T" <> renderGenericId genericId
       SemanticTypeObject fields ->
@@ -167,4 +167,4 @@ renderSemanticGenericArguments arguments = case Map.toAscList arguments of
   manyArguments -> "[" <> Text.intercalate ", " [argumentName <> ": " <> renderSemanticGenericArgument argument | (argumentName, argument) <- manyArguments] <> "]"
 
 renderGenericId :: GenericId -> Text
-renderGenericId (GenericId identifier) = Text.pack (show identifier)
+renderGenericId (GenericId _ index) = Text.pack (show index)

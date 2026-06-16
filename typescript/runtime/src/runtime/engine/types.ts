@@ -17,8 +17,8 @@ import type { GenericSubstitution, Value } from "../value/types.js";
  * A lexical-binding tree node. CORE-global (one store per project, shared across instances) and
  * owned by an instance for cascade / ascent / intra-instance GC. `owner` is the instance that
  * created it; it rises to an ancestor when an escaping value carries it up, or to `null` while
- * in-transit mid-ascent (mirrors a blob's owner). Variables are kept inline here in memory; at rest
- * they are rows in `scope_variables`.
+ * in-transit mid-ascent (mirrors a blob's owner). Variables ride inline both in memory and at rest
+ * (the `scopes.values` JSON column).
  */
 export type Scope = {
   id: ScopeId;
@@ -80,8 +80,9 @@ export type ForThread = ThreadBase & {
   parallel: boolean;
   /** Sequential: the current iteration index. */
   cursor: number;
-  /** Mapped next-values in source order (sparse until all iterations land, for the parallel case). */
-  collected: Value[];
+  /** Mapped next-values by iteration index (sparse until all land, in the parallel case); the dense
+   *  source-ordered array is materialised at completion. Mirrors `ParallelThread.collected`. */
+  collected: Record<number, Value>;
   /** Current state-var values (sequential `var s = ...`): VariableId -> Value. */
   states: Record<number, Value>;
   /** Iteration index -> the child call running it (one for sequential, many concurrent for parallel). */
@@ -123,18 +124,19 @@ export type DelegateThread = ThreadBase & {
 
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 
-export type InstanceStatus = "running" | "cancelling" | "completed";
+export type InstanceStatus = "running" | "cancelling";
 
 /**
  * One agent activation: a thread tree plus the bookkeeping to route inbound external events to the
  * right waiting thread. This is the unit of ownership and of load/persist (a shard). Scopes are NOT
  * here — they live in the per-project store (`ProjectStore.scopes`); this instance owns a subset of
- * them via `Scope.owner`.
+ * them via `Scope.owner`. An instance is ephemeral (no terminal status — that lives on the run record);
+ * its parent is not a field but is recovered through its `delegationId` (→ `delegations.callerInstanceId`).
  */
 export type Instance = {
   id: InstanceId;
-  parentId: InstanceId | null;
-  /** The delegation that summoned this instance (`null` only for the project root). */
+  /** The delegation that summoned this instance (`null` only for the project root); the parent is
+   *  recovered from it. Also the correlation id of this instance's `delegateAck`. */
   delegationId: DelegationId | null;
   /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here, not as a
    *  standalone instance attribute. */

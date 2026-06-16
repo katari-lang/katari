@@ -34,7 +34,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Common (intersectWithKeyM, unionWithKeyM)
-import Katari.Data.Environment (DataEnvironment, DataInfo (..), GenericBoundEnvironment, GenericParameterInfo, RequestEnvironment, RequestInfo (..), genericIdsByName, genericParameterNames, variancesByName)
+import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..))
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId)
 import Katari.Data.NormalizedType
@@ -49,9 +49,12 @@ import Katari.Panic (panic)
 ------------------------------------------------------------------------------------------------
 
 data NormalizerEnvironment = NormalizerEnvironment
-  { dataEnvironment :: DataEnvironment NormalizedType,
-    requestEnvironment :: RequestEnvironment NormalizedType,
-    genericBoundEnvironment :: GenericBoundEnvironment NormalizedGenericArgument,
+  { dataEnvironment :: DataEnvironment,
+    requestEnvironment :: RequestEnvironment,
+    -- | The generic parameters currently in scope, keyed by id, so 'boundArgumentFor' can resolve a
+    -- generic's declared upper bound during a subtype check. Empty while the env-build normalizes the
+    -- declarations themselves (their own bounds are not resolved there); populated by the checker.
+    genericsInScope :: Map GenericId GenericParameterInformation,
     -- | The attribute of the context the current 'subtype' comparison is nested inside: bottom
     -- (public) at the top level, raised by 'withWorld' as the comparison descends through private
     -- expectations. Every attribute is compared joined with it.
@@ -90,46 +93,44 @@ withWorld attribute = local (\environment -> environment {world = joinAttribute 
 -- user-facing "undefined name" belongs to the identifier phase (K2xxx).
 ------------------------------------------------------------------------------------------------
 
-dataInfoFor :: QualifiedName -> Normalizer (DataInfo NormalizedType)
+dataInfoFor :: QualifiedName -> Normalizer DataInformation
 dataInfoFor qualifiedName = do
-  maybeDataInfo <- asks (\environment -> Map.lookup qualifiedName environment.dataEnvironment)
-  case maybeDataInfo of
+  maybeDataInformation <- asks (\environment -> Map.lookup qualifiedName environment.dataEnvironment)
+  case maybeDataInformation of
     Just dataInfo -> pure dataInfo
     Nothing -> panic ("data type absent from the environment after name resolution: " <> renderQualifiedName qualifiedName)
 
-requestInfoFor :: QualifiedName -> Normalizer (RequestInfo NormalizedType)
+requestInfoFor :: QualifiedName -> Normalizer RequestInformation
 requestInfoFor qualifiedName = do
-  maybeRequestInfo <- asks (\environment -> Map.lookup qualifiedName environment.requestEnvironment)
-  case maybeRequestInfo of
+  maybeRequestInformation <- asks (\environment -> Map.lookup qualifiedName environment.requestEnvironment)
+  case maybeRequestInformation of
     Just requestInfo -> pure requestInfo
     Nothing -> panic ("request absent from the environment after name resolution: " <> renderQualifiedName qualifiedName)
 
 -- | Report when a data / request application does not supply exactly the declared generic
 -- arguments. Runs once, at the semantic -> normalized boundary ('normalizeType' /
 -- 'normalizeEffect'); the lattice and subtype code assume complete argument maps afterwards.
-checkGenericArity :: QualifiedName -> List GenericParameterInfo -> Map Text a -> Normalizer ()
+checkGenericArity :: QualifiedName -> Map Text GenericParameterInformation -> Map Text a -> Normalizer ()
 checkGenericArity qualifiedName declaredParameters arguments =
-  unless (Map.keysSet arguments == Set.fromList declaredNames) $
+  unless (Map.keysSet declaredParameters == Map.keysSet arguments) $
     tell
       [ TypeErrorGenericArity $
           GenericArityErrorInfo
             { name = qualifiedName,
-              expected = declaredNames,
+              expected = Map.keys declaredParameters,
               actual = Map.keys arguments
             }
       ]
-  where
-    declaredNames = genericParameterNames declaredParameters
 
 checkDataArity :: QualifiedName -> Map Text a -> Normalizer ()
 checkDataArity qualifiedName arguments = do
   dataInfo <- dataInfoFor qualifiedName
-  checkGenericArity qualifiedName dataInfo.genericParameters arguments
+  checkGenericArity qualifiedName dataInfo.genericParameters.parameterInformation arguments
 
 checkRequestArity :: QualifiedName -> Map Text a -> Normalizer ()
 checkRequestArity qualifiedName arguments = do
   requestInfo <- requestInfoFor qualifiedName
-  checkGenericArity qualifiedName requestInfo.genericParameters arguments
+  checkGenericArity qualifiedName requestInfo.genericParameters.parameterInformation arguments
 
 ------------------------------------------------------------------------------------------------
 -- Error reporting
@@ -187,7 +188,7 @@ panicUnknownGeneric genericArgumentName =
 
 -- | An invariant generic argument received two different instantiations; report it for the
 -- direction ('Join' = union, 'Meet' = intersection) being computed.
-tellInvariantMismatch :: LatticeDirection -> NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer ()
+tellInvariantMismatch :: LatticeDirection -> NormalizedKindedType -> NormalizedKindedType -> Normalizer ()
 tellInvariantMismatch direction leftArgument rightArgument = do
   leftSemantic <- denormalizeGenericArgument leftArgument
   rightSemantic <- denormalizeGenericArgument rightArgument
@@ -221,12 +222,17 @@ normalizeType semanticBaseType = case semanticBaseType of
     pure $ layered neverLayer {functionLayer = Just NormalizedFunction {argumentType = normalizedArgument, returnType = normalizedReturnType, effect = normalizedEffect}}
   SemanticTypeArray itemType -> do
     normalizedItemType <- normalizeType itemType
-    -- NOTE: an array is a sequence with no fixed prefix; every element falls under `rest`
-    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = [], rest = normalizedItemType}}
+    -- NOTE: an array is a homogeneous sequence with no fixed prefix; every position reads as the
+    -- element type or @null@ (an out-of-range read is null), so the tail is @item | null@. That null
+    -- in the tail is exactly what makes @array[T] </: [T]@ — an array cannot stand in for a
+    -- fixed-length tuple, because its positions may be absent (@item | null </: item@).
+    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = [], rest = orNull normalizedItemType}}
   SemanticTypeTuple itemTypes -> do
     normalizedItemTypes <- mapM normalizeType itemTypes
-    -- NOTE: a tuple's tail is open (rest = unknown of public), mirroring how an object's other fields default to unknown of public
-    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = normalizedItemTypes, rest = publicUnknown}}
+    -- NOTE: a tuple is fixed-length: there are no positions past its prefix, so the tail is @null@
+    -- (a read past the end is null). This @null@ tail (against an array's @item | null@) is what lets
+    -- a tuple stand in for an array (@[T] <: array[T]@) while keeping the unsound reverse out.
+    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = normalizedItemTypes, rest = publicNull}}
   SemanticTypeData qualifiedName genericArguments -> do
     checkDataArity qualifiedName genericArguments
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
@@ -239,7 +245,11 @@ normalizeType semanticBaseType = case semanticBaseType of
     pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = normalizedFields, rest = publicUnknown}}
   SemanticTypeRecord recordType -> do
     normalizedRecordType <- normalizeType recordType
-    pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = mempty, rest = normalizedRecordType}}
+    -- NOTE: a @record[T]@ is a homogeneous object with no fixed fields; reading any key gives
+    -- @T | null@ (an absent key is null), mirroring @array[T]@. A fixed object literal keeps its open
+    -- @unknown@ tail (width subtyping ignores undeclared keys); only the homogeneous record carries
+    -- the typed @T | null@ tail.
+    pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = mempty, rest = orNull normalizedRecordType}}
   SemanticTypeUnion semanticTypes -> foldM union bottomType =<< mapM normalizeType semanticTypes
   SemanticTypeAttribute baseType attribute -> do
     normalized <- normalizeType baseType
@@ -252,6 +262,12 @@ normalizeType semanticBaseType = case semanticBaseType of
     public base = NormalizedType {baseType = base, generics = Set.empty, attribute = bottomAttribute}
     layered = public . NormalizedBaseTypeLayered
     publicUnknown = public NormalizedBaseTypeUnknown
+    publicNull = layered neverLayer {nullLayer = True}
+    -- A homogeneous container reads as @element | null@ (an out-of-range / absent read is null). On
+    -- @unknown@ (already the top, which subsumes null) this is the identity.
+    orNull normalizedType = case normalizedType.baseType of
+      NormalizedBaseTypeUnknown -> normalizedType
+      NormalizedBaseTypeLayered layer -> normalizedType {baseType = NormalizedBaseTypeLayered layer {nullLayer = True}}
 
 normalizeAttribute :: SemanticAttribute -> Normalizer NormalizedAttribute
 normalizeAttribute attribute = case attribute of
@@ -293,11 +309,11 @@ normalizeEffect effect = case effect of
             }
   SemanticEffectUnion effects -> foldM union bottomEffect =<< mapM normalizeEffect effects
 
-normalizeGenericArgument :: SemanticGenericArgument -> Normalizer NormalizedGenericArgument
+normalizeGenericArgument :: SemanticGenericArgument -> Normalizer NormalizedKindedType
 normalizeGenericArgument genericArgument = case genericArgument of
-  SemanticGenericArgumentAttribute attribute -> NormalizedGenericArgumentAttribute <$> normalizeAttribute attribute
-  SemanticGenericArgumentEffect effect -> NormalizedGenericArgumentEffect <$> normalizeEffect effect
-  SemanticGenericArgumentType semanticType -> NormalizedGenericArgumentType <$> normalizeType semanticType
+  SemanticGenericArgumentAttribute attribute -> NormalizedKindedTypeAttribute <$> normalizeAttribute attribute
+  SemanticGenericArgumentEffect effect -> NormalizedKindedTypeEffect <$> normalizeEffect effect
+  SemanticGenericArgumentType semanticType -> NormalizedKindedTypeType <$> normalizeType semanticType
 
 normalizeFieldInformation :: FieldInformation -> Normalizer NormalizedFieldInformation
 normalizeFieldInformation fieldInformation = do
@@ -436,7 +452,7 @@ instance TypeLattice NormalizedEffect where
                   Nothing -> tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName) effectiveLeft right
                   Just rightArguments -> do
                     requestInfo <- requestInfoFor qualifiedName
-                    subtypeArgumentsWith (variancesByName requestInfo.genericParameters) leftArguments rightArguments
+                    subtypeArgumentsWith ((.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
             )
             (Map.toList effectiveLeftRow.request)
           -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
@@ -452,10 +468,10 @@ instance TypeLattice NormalizedEffect where
             (Map.toList effectiveLeftRow.tails)
 
 -- | Combine the argument maps of one request name according to the request's declared variances.
-combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer (Map Text NormalizedGenericArgument)
+combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Map Text NormalizedKindedType)
 combineRequestArguments direction qualifiedName leftArguments rightArguments = do
   requestInfo <- requestInfoFor qualifiedName
-  combineArgumentMap direction (variancesByName requestInfo.genericParameters) leftArguments rightArguments
+  combineArgumentMap direction ((.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
 
 -- | Combine the tails of two effect rows. A tail variable behaves covariantly (the join keeps tails
 -- of either side, the meet only shared ones), but its lacks set is contravariant: @E \\ left@ joined
@@ -466,14 +482,14 @@ combineTails = \case
   Join -> Map.unionWith Set.intersection
   Meet -> Map.intersectionWith Set.union
 
-instance TypeLattice NormalizedGenericArgument where
+instance TypeLattice NormalizedKindedType where
   combine direction leftArgument rightArgument = case (leftArgument, rightArgument) of
-    (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) ->
-      NormalizedGenericArgumentType <$> combine direction leftType rightType
-    (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) ->
-      NormalizedGenericArgumentEffect <$> combine direction leftEffect rightEffect
-    (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) ->
-      NormalizedGenericArgumentAttribute <$> combine direction leftAttribute rightAttribute
+    (NormalizedKindedTypeType leftType, NormalizedKindedTypeType rightType) ->
+      NormalizedKindedTypeType <$> combine direction leftType rightType
+    (NormalizedKindedTypeEffect leftEffect, NormalizedKindedTypeEffect rightEffect) ->
+      NormalizedKindedTypeEffect <$> combine direction leftEffect rightEffect
+    (NormalizedKindedTypeAttribute leftAttribute, NormalizedKindedTypeAttribute rightAttribute) ->
+      NormalizedKindedTypeAttribute <$> combine direction leftAttribute rightAttribute
     _ -> do
       tellKindMismatch (kindOf leftArgument) (kindOf rightArgument) $ case direction of
         Join -> "Generic arguments with different kinds cannot be unioned"
@@ -481,9 +497,9 @@ instance TypeLattice NormalizedGenericArgument where
       pure leftArgument -- NOTE: either side works; the pair is not combinable anyway
 
   subtype leftArgument rightArgument = case (leftArgument, rightArgument) of
-    (NormalizedGenericArgumentType leftType, NormalizedGenericArgumentType rightType) -> subtype leftType rightType
-    (NormalizedGenericArgumentEffect leftEffect, NormalizedGenericArgumentEffect rightEffect) -> subtype leftEffect rightEffect
-    (NormalizedGenericArgumentAttribute leftAttribute, NormalizedGenericArgumentAttribute rightAttribute) -> subtype leftAttribute rightAttribute
+    (NormalizedKindedTypeType leftType, NormalizedKindedTypeType rightType) -> subtype leftType rightType
+    (NormalizedKindedTypeEffect leftEffect, NormalizedKindedTypeEffect rightEffect) -> subtype leftEffect rightEffect
+    (NormalizedKindedTypeAttribute leftAttribute, NormalizedKindedTypeAttribute rightAttribute) -> subtype leftAttribute rightAttribute
     _ -> tellKindMismatch (kindOf rightArgument) (kindOf leftArgument) "Generic argument kinds are incompatible"
 
 -- | join = (||), meet = (&&). Doubles as the optionality combiner of 'mergeObject': a field is
@@ -554,7 +570,7 @@ combineLayers direction left right = do
         <*> combine direction leftFunction.effect rightFunction.effect
     combineDataArguments qualifiedName leftArguments rightArguments = do
       dataInfo <- dataInfoFor qualifiedName
-      combineArgumentMap direction (variancesByName dataInfo.genericParameters) leftArguments rightArguments
+      combineArgumentMap direction ((.variance) <$> dataInfo.genericParameters.parameterInformation) leftArguments rightArguments
 
 -- | Combine the named generic arguments of one data type or request, each according to its
 -- declared variance:
@@ -564,7 +580,7 @@ combineLayers direction left right = do
 --   bivariant     -> unconstrained; combine in the same direction
 -- Ex) req1[T, U] covariant in T, contravariant in U:
 --     req1[int, string] | req1[string, number] ~> req1[int | string, string & number]
-combineArgumentMap :: LatticeDirection -> Map Text Variance -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer (Map Text NormalizedGenericArgument)
+combineArgumentMap :: LatticeDirection -> Map Text Variance -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Map Text NormalizedKindedType)
 combineArgumentMap direction variances = unionWithKeyM combineNamedArgument
   where
     combineNamedArgument genericArgumentName leftArgument rightArgument = case Map.lookup genericArgumentName variances of
@@ -624,9 +640,10 @@ mergeObject combineType combineOptional leftObject rightObject = do
   mergedRest <- combineType leftObject.rest rightObject.rest
   pure $ NormalizedObject {fields = mergedFields, rest = mergedRest}
 
--- | Merge two sequences position-by-position.
--- Ex) [number, string] | [boolean] ~> [number | boolean, string | unknown]
---     [number, string] & [boolean] ~> [number & boolean, string & unknown]
+-- | Merge two sequences position-by-position; a position present on only one side is combined with
+-- the other side's tail ('rest'), which is @null@ for a tuple.
+-- Ex) [number, string] | [boolean] ~> [number | boolean, string | null]
+--     [number, string] & [boolean] ~> [number & boolean, string & null]
 mergeSequence ::
   (NormalizedType -> NormalizedType -> Normalizer NormalizedType) ->
   NormalizedSequence ->
@@ -703,14 +720,14 @@ subtypeObject leftObject rightObject = do
 -- The constructor instance is the data value's interior, so it is compared with the left node's
 -- attribute joined into the world ('withWorld') — observed through the data's handle, by the same
 -- contextual rule the rest of subtyping uses.
-subtypeData :: NormalizedAttribute -> Map QualifiedName (Map Text NormalizedGenericArgument) -> NormalizedType -> LayeredType -> Normalizer ()
+subtypeData :: NormalizedAttribute -> Map QualifiedName (Map Text NormalizedKindedType) -> NormalizedType -> LayeredType -> Normalizer ()
 subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.toList leftDataLayer)
   where
     checkData (qualifiedName, leftArguments) = do
       dataInfo <- dataInfoFor qualifiedName
       case Map.lookup qualifiedName rightLayer.dataLayer of
         Just rightArguments -> do
-          ((), nominalErrors) <- captureErrors $ subtypeArgumentsWith (variancesByName dataInfo.genericParameters) leftArguments rightArguments
+          ((), nominalErrors) <- captureErrors $ subtypeArgumentsWith ((.variance) <$> dataInfo.genericParameters.parameterInformation) leftArguments rightArguments
           unless (null nominalErrors) $ do
             ((), constructorErrors) <- constructorCheck dataInfo leftArguments
             -- NOTE: when both fail, report the nominal errors; they refer to the type as written
@@ -729,11 +746,11 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
 
 -- | The generic-id substitution that instantiates a data declaration's constructor with the
 -- arguments of one application of it.
-constructorSubstitution :: DataInfo NormalizedType -> Map Text NormalizedGenericArgument -> Map GenericId NormalizedGenericArgument
+constructorSubstitution :: DataInformation -> Map Text NormalizedKindedType -> Map GenericId NormalizedKindedType
 constructorSubstitution dataInfo arguments =
   Map.fromList
     [ (genericId, argument)
-      | (genericArgumentName, genericId) <- Map.toList (genericIdsByName dataInfo.genericParameters),
+      | (genericArgumentName, genericId) <- Map.toList ((.genericId) <$> dataInfo.genericParameters.parameterInformation),
         Just argument <- [Map.lookup genericArgumentName arguments]
     ]
 
@@ -744,7 +761,7 @@ constructorSubstitution dataInfo arguments =
 --   contravariant -> right <: left
 --   invariant     -> both directions
 --   bivariant     -> no constraint
-subtypeArgumentsWith :: Map Text Variance -> Map Text NormalizedGenericArgument -> Map Text NormalizedGenericArgument -> Normalizer ()
+subtypeArgumentsWith :: Map Text Variance -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer ()
 subtypeArgumentsWith variances leftArguments rightArguments =
   mapM_ checkNamedArgument (Map.toList (Map.intersectionWith (,) leftArguments rightArguments))
   where
@@ -764,8 +781,8 @@ subtypeArgumentsWith variances leftArguments rightArguments =
 
 -- | The upper-bound argument registered for a generic id, if any (callers default an absent one to
 -- their own kind's top, so an unbounded generic never passes a subtype check vacuously).
-boundArgumentFor :: GenericId -> Normalizer (Maybe NormalizedGenericArgument)
-boundArgumentFor genericId = asks (\environment -> Map.lookup genericId environment.genericBoundEnvironment)
+boundArgumentFor :: GenericId -> Normalizer (Maybe NormalizedKindedType)
+boundArgumentFor genericId = asks (\environment -> Map.lookup genericId environment.genericsInScope >>= (.upperBound))
 
 -- | Iterate a value's generics to a fixpoint: resolve every not-yet-covered generic with @absorb@,
 -- repeating because a bound may introduce further generics. @coveredGenerics@ are left untouched
@@ -791,7 +808,7 @@ boundedType = resolveGenerics (\normalizedType -> normalizedType.generics) absor
       maybeArgument <- boundArgumentFor genericId
       case maybeArgument of
         Nothing -> union accumulated topType
-        Just (NormalizedGenericArgumentType bound) -> union accumulated bound
+        Just (NormalizedKindedTypeType bound) -> union accumulated bound
         Just other -> accumulated <$ tellKindMismatch GenericKindType (kindOf other) "Expected a type bound for a type generic"
 
 -- | Raise an attribute to the upper bounds of its own generics; as 'boundedType', for the attribute
@@ -803,7 +820,7 @@ boundedAttribute = resolveGenerics (\attribute -> attribute.generic) absorbBound
       maybeArgument <- boundArgumentFor genericId
       case maybeArgument of
         Nothing -> union accumulated topAttribute
-        Just (NormalizedGenericArgumentAttribute bound) -> union accumulated bound
+        Just (NormalizedKindedTypeAttribute bound) -> union accumulated bound
         Just other -> accumulated <$ tellKindMismatch GenericKindAttribute (kindOf other) "Expected an attribute bound for an attribute generic"
 
 -- | Restrict an effect to lack the given request names: drop them from its concrete requests and
@@ -827,7 +844,7 @@ effectBoundFor genericId = do
   maybeArgument <- boundArgumentFor genericId
   case maybeArgument of
     Nothing -> pure topEffect
-    Just (NormalizedGenericArgumentEffect bound) -> pure bound
+    Just (NormalizedKindedTypeEffect bound) -> pure bound
     Just other -> topEffect <$ tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect bound for an effect generic"
 
 -- | Expand an effect's tails to their upper bounds, transitively: each tail @(E, lacks)@ becomes
@@ -895,16 +912,16 @@ traverseArguments visitor layered = do
       visitedRest <- visitor.visitType normalizedObject.rest
       pure $ NormalizedObject {fields = visitedFields, rest = visitedRest}
     visitArgument = \case
-      NormalizedGenericArgumentType normalizedType -> NormalizedGenericArgumentType <$> visitor.visitType normalizedType
-      NormalizedGenericArgumentEffect effect -> NormalizedGenericArgumentEffect <$> visitor.visitEffect effect
-      NormalizedGenericArgumentAttribute attribute -> NormalizedGenericArgumentAttribute <$> visitor.visitAttribute attribute
+      NormalizedKindedTypeType normalizedType -> NormalizedKindedTypeType <$> visitor.visitType normalizedType
+      NormalizedKindedTypeEffect effect -> NormalizedKindedTypeEffect <$> visitor.visitEffect effect
+      NormalizedKindedTypeAttribute attribute -> NormalizedKindedTypeAttribute <$> visitor.visitAttribute attribute
 
 -- | Literal substitution of generic ids. A generic id occurring in a node's generics set is
 -- removed and its replacement unioned into that node (the set representation means "this node is
 -- a union with the generic", so unioning the replacement in is exact substitution, not an
 -- approximation), and nested argument positions are substituted recursively. Ids missing from the
 -- map are left untouched. Used to instantiate a data constructor type with concrete arguments.
-substituteType :: Map GenericId NormalizedGenericArgument -> NormalizedType -> Normalizer NormalizedType
+substituteType :: Map GenericId NormalizedKindedType -> NormalizedType -> Normalizer NormalizedType
 substituteType substitution normalizedType = do
   substitutedBaseType <- case normalizedType.baseType of
     NormalizedBaseTypeUnknown -> pure NormalizedBaseTypeUnknown
@@ -912,7 +929,7 @@ substituteType substitution normalizedType = do
   substitutedAttribute <- substituteAttribute substitution normalizedType.attribute
   substituteGenerics
     GenericKindType
-    (\accumulated -> \case NormalizedGenericArgumentType replacement -> Just (union accumulated replacement); _ -> Nothing)
+    (\accumulated -> \case NormalizedKindedTypeType replacement -> Just (union accumulated replacement); _ -> Nothing)
     substitution
     (\generics -> normalizedType {baseType = substitutedBaseType, attribute = substitutedAttribute, generics = generics})
     normalizedType.generics
@@ -928,7 +945,7 @@ substituteType substitution normalizedType = do
 -- @(E, lacks)@ whose @E@ is substituted is replaced by its replacement restricted to lack those
 -- names ('restrictEffect') — the override's precedence, re-applied at substitution as at bound
 -- expansion.
-substituteEffect :: Map GenericId NormalizedGenericArgument -> NormalizedEffect -> Normalizer NormalizedEffect
+substituteEffect :: Map GenericId NormalizedKindedType -> NormalizedEffect -> Normalizer NormalizedEffect
 substituteEffect substitution effect = case effect of
   NormalizedEffectAny -> pure NormalizedEffectAny
   NormalizedEffectRow effectRow -> do
@@ -938,33 +955,33 @@ substituteEffect substitution effect = case effect of
     foldM spliceTail base (Map.toList replacedTails)
   where
     spliceTail accumulated (genericId, lacks) = case Map.lookup genericId substitution of
-      Just (NormalizedGenericArgumentEffect replacement) -> union accumulated (restrictEffect lacks replacement)
+      Just (NormalizedKindedTypeEffect replacement) -> union accumulated (restrictEffect lacks replacement)
       Just other -> accumulated <$ tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect argument for an effect generic"
       Nothing -> pure accumulated
 
 -- | As 'substituteType', for attributes (attribute-kind generic ids).
-substituteAttribute :: Map GenericId NormalizedGenericArgument -> NormalizedAttribute -> Normalizer NormalizedAttribute
+substituteAttribute :: Map GenericId NormalizedKindedType -> NormalizedAttribute -> Normalizer NormalizedAttribute
 substituteAttribute substitution attribute =
   substituteGenerics
     GenericKindAttribute
-    (\accumulated -> \case NormalizedGenericArgumentAttribute replacement -> Just (union accumulated replacement); _ -> Nothing)
+    (\accumulated -> \case NormalizedKindedTypeAttribute replacement -> Just (union accumulated replacement); _ -> Nothing)
     substitution
     (\generics -> NormalizedAttribute {private = attribute.private, generic = generics})
     attribute.generic
 
-substituteGenericArgument :: Map GenericId NormalizedGenericArgument -> NormalizedGenericArgument -> Normalizer NormalizedGenericArgument
+substituteGenericArgument :: Map GenericId NormalizedKindedType -> NormalizedKindedType -> Normalizer NormalizedKindedType
 substituteGenericArgument substitution genericArgument = case genericArgument of
-  NormalizedGenericArgumentType normalizedType -> NormalizedGenericArgumentType <$> substituteType substitution normalizedType
-  NormalizedGenericArgumentEffect effect -> NormalizedGenericArgumentEffect <$> substituteEffect substitution effect
-  NormalizedGenericArgumentAttribute attribute -> NormalizedGenericArgumentAttribute <$> substituteAttribute substitution attribute
+  NormalizedKindedTypeType normalizedType -> NormalizedKindedTypeType <$> substituteType substitution normalizedType
+  NormalizedKindedTypeEffect effect -> NormalizedKindedTypeEffect <$> substituteEffect substitution effect
+  NormalizedKindedTypeAttribute attribute -> NormalizedKindedTypeAttribute <$> substituteAttribute substitution attribute
 
 -- | The shared core of the @substitute*@ family: split a generics set into replaced and kept ids,
 -- rebuild the node with the kept ones, then absorb each replacement of the expected kind
 -- (reporting a kind mismatch otherwise).
 substituteGenerics ::
   GenericKind ->
-  (a -> NormalizedGenericArgument -> Maybe (Normalizer a)) ->
-  Map GenericId NormalizedGenericArgument ->
+  (a -> NormalizedKindedType -> Maybe (Normalizer a)) ->
+  Map GenericId NormalizedKindedType ->
   (Set GenericId -> a) ->
   Set GenericId ->
   Normalizer a
@@ -1019,6 +1036,19 @@ denormalizeBaseType baseType generics = case baseType of
       [single] -> single
       many -> SemanticTypeUnion many
 
+-- | The element type a homogeneous @array[T]@ / @record[T]@ displays. Their normalized tail is
+-- @T | null@ (every position / key read is out-of-range-nullable), so the surface form drops the
+-- implicit @null@. When the tail is exactly @null@ the element type genuinely is @null@, so it is
+-- kept — an @array[null]@ must not render as @array[never]@.
+displayElementType :: NormalizedType -> NormalizedType
+displayElementType rest = case rest.baseType of
+  NormalizedBaseTypeUnknown -> rest
+  NormalizedBaseTypeLayered layer ->
+    let stripped = rest {baseType = NormalizedBaseTypeLayered layer {nullLayer = False}}
+     in if stripped.baseType == NormalizedBaseTypeLayered neverLayer && Set.null stripped.generics
+          then rest
+          else stripped
+
 -- | One semantic type per active layer (in a fixed order); the caller unions them.
 denormalizeLayers :: LayeredType -> Normalizer (List SemanticType)
 denormalizeLayers layeredType = do
@@ -1042,9 +1072,12 @@ denormalizeLayers layeredType = do
     Just normalizedSequence ->
       if null normalizedSequence.items
         then do
-          semanticItem <- denormalize normalizedSequence.rest
+          -- A homogeneous array's tail is @T | null@; the surface form is @array[T]@, so the implicit
+          -- out-of-range null is dropped for display ('displayElementType').
+          semanticItem <- denormalize (displayElementType normalizedSequence.rest)
           pure [SemanticTypeArray semanticItem]
         else do
+          -- A tuple's @null@ tail is implicit (a fixed-length sequence), so only the prefix is shown.
           semanticItems <- mapM denormalize normalizedSequence.items
           pure [SemanticTypeTuple semanticItems]
   objectPart <- case layeredType.objectLayer of
@@ -1052,7 +1085,7 @@ denormalizeLayers layeredType = do
     Just normalizedObject ->
       if Map.null normalizedObject.fields
         then do
-          semanticRecord <- denormalize normalizedObject.rest
+          semanticRecord <- denormalize (displayElementType normalizedObject.rest)
           pure [SemanticTypeRecord semanticRecord]
         else do
           semanticFields <- mapM denormalizeFieldInformation normalizedObject.fields
@@ -1065,16 +1098,16 @@ denormalizeFieldInformation fieldInformation = do
   semanticFieldType <- denormalize fieldInformation.normalizedType
   pure FieldInformation {semanticType = semanticFieldType, optional = fieldInformation.optional}
 
-denormalizeData :: QualifiedName -> Map Text NormalizedGenericArgument -> Normalizer SemanticType
+denormalizeData :: QualifiedName -> Map Text NormalizedKindedType -> Normalizer SemanticType
 denormalizeData qualifiedName arguments = do
   semanticArguments <- mapM denormalizeGenericArgument arguments
   pure $ SemanticTypeData qualifiedName semanticArguments
 
-denormalizeGenericArgument :: NormalizedGenericArgument -> Normalizer SemanticGenericArgument
+denormalizeGenericArgument :: NormalizedKindedType -> Normalizer SemanticGenericArgument
 denormalizeGenericArgument genericArgument = case genericArgument of
-  NormalizedGenericArgumentType normalizedType -> SemanticGenericArgumentType <$> denormalize normalizedType
-  NormalizedGenericArgumentEffect effect -> SemanticGenericArgumentEffect <$> denormalizeEffect effect
-  NormalizedGenericArgumentAttribute attribute -> pure $ SemanticGenericArgumentAttribute (denormalizeAttribute attribute)
+  NormalizedKindedTypeType normalizedType -> SemanticGenericArgumentType <$> denormalize normalizedType
+  NormalizedKindedTypeEffect effect -> SemanticGenericArgumentEffect <$> denormalizeEffect effect
+  NormalizedKindedTypeAttribute attribute -> pure $ SemanticGenericArgumentAttribute (denormalizeAttribute attribute)
 
 denormalizeAttribute :: NormalizedAttribute -> SemanticAttribute
 denormalizeAttribute attribute =
@@ -1094,7 +1127,7 @@ denormalizeEffect effect = case effect of
       [single] -> single
       many -> SemanticEffectUnion many
 
-denormalizeRequest :: QualifiedName -> Map Text NormalizedGenericArgument -> Normalizer SemanticEffect
+denormalizeRequest :: QualifiedName -> Map Text NormalizedKindedType -> Normalizer SemanticEffect
 denormalizeRequest qualifiedName arguments = do
   semanticArguments <- mapM denormalizeGenericArgument arguments
   pure $ SemanticEffectRequest qualifiedName semanticArguments

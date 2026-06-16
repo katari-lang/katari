@@ -68,7 +68,11 @@ export type Block =
 
 /**
  * The single value-addressable callable. The incoming argument binds to `parameter` in a fresh
- * scope (a `return` boundary); omitted optionals are filled from `defaults`; then `body` runs.
+ * scope (a `return` boundary); omitted optional fields are filled from `defaults`; then `body` runs.
+ * `defaults` carries the `?=` defaults of a non-pattern parameter list (a `data` / `request` /
+ * `external` / `primitive` callable, whose parameters are plain `label: type ?= default` signatures);
+ * a user `agent`'s parameters are patterns (`label => pattern`, with `x ?= v` sugar for `x => x ?= v`),
+ * so its defaults live in those patterns (the `default` pattern variant) and `defaults` is empty.
  * Whether a call commits is the body's property (derived at run time), not stored here.
  */
 export type AgentBlock = {
@@ -246,7 +250,9 @@ export type Pattern =
   | { kind: "constructor"; name: QualifiedName; fields: Array<[string, Pattern]> }
   | { kind: "tuple"; elements: Pattern[] }
   | { kind: "record"; fields: Array<[string, Pattern]> }
-  | { kind: "typeGuard"; tag: TypeTag; pattern: Pattern };
+  | { kind: "typeGuard"; tag: TypeTag; pattern: Pattern }
+  /** A `?=` default: when the matched value is absent/null, substitute `value`, then match `pattern`. */
+  | { kind: "default"; value: Literal; pattern: Pattern };
 
 /** The runtime-checkable tag a `T(pattern)` type filter narrows on. */
 export type TypeTag =
@@ -296,7 +302,8 @@ export type JSONSchema = {
   items?: JSONSchema;
   properties?: Record<string, JSONSchema>;
   required?: string[];
-  additionalProperties?: boolean;
+  /** A boolean (closed/open object), or the schema every other key must match (a `record[T]` tail). */
+  additionalProperties?: boolean | JSONSchema;
   anyOf?: JSONSchema[];
   not?: JSONSchema;
   $generic?: GenericId;

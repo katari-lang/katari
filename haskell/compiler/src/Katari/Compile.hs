@@ -16,19 +16,20 @@ module Katari.Compile where
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Text (Text)
-import Katari.Data.AST (Module, Phase (Parsed, Typed))
+import Katari.Data.AST (Module, Phase (Identified, Parsed, Typed))
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.SourceSpan (sourceSpanOf)
-import Katari.Diagnostics (Diagnostics, diagnosticAt)
+import Katari.Diagnostics (Diagnostics, diagnosticAt, hasErrors)
 import Katari.Error (CompilerError (..), IdentifierError (..), ReservedModuleNameErrorInfo (..))
 import Katari.Identifier (identifyModule, scanExports)
 import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..), ModuleInterface, SymbolTable)
 import Katari.Lowering (lowerModule)
 import Katari.Parser (parseModule)
 import Katari.Stdlib qualified as Stdlib
-import Katari.Typechecker (checkModule)
+import Katari.Typechecker (checkProgram)
 import Katari.Typechecker.Environment (buildEnvironment)
+import Katari.Typechecker.ValueGraph (valueSCCs)
 
 -- | What to compile: the user's module sources. The wired-in stdlib is added automatically by
 -- 'compile'.
@@ -66,16 +67,15 @@ stdlibInterfaces = Map.mapWithKey scanExports (fst <$> stdlibParsed)
 compile :: CompileInput -> CompileResult
 compile input =
   CompileResult
-    { loweredModules = Map.restrictKeys (fst <$> lowered) userKeys,
+    { -- Lowering is gated on the program being error-free: never emit IR for code that failed to
+      -- parse / resolve / type-check (a warning does not block it).
+      loweredModules =
+        if hasErrors preLoweringDiagnostics
+          then mempty
+          else Map.restrictKeys (fst <$> lowered) userKeys,
       symbolTables = Map.restrictKeys ((\identifiedModule -> identifiedModule.symbolTable) <$> identifiedModules) userKeys,
       typedModules = Map.restrictKeys typedModules userKeys,
-      diagnostics =
-        reservedDiagnostics
-          <> parseDiagnostics
-          <> identifyDiagnostics
-          <> environmentDiagnostics
-          <> checkDiagnostics
-          <> lowerDiagnostics
+      diagnostics = preLoweringDiagnostics <> lowerDiagnostics
     }
   where
     -- Split off user modules whose name is compiler-reserved: report each (K2008, anchored at the
@@ -116,14 +116,19 @@ compile input =
     (typeEnvironment, environmentDiagnostics) =
       buildEnvironment ((\identified' -> identified'.identifiedAst) <$> identifiedModules)
 
-    -- Check (per module, against the read-only global environment).
-    -- TODO: gate lowering on the absence of errors once diagnostics carry severity here.
-    checked :: Map ModuleName (Module Typed, Diagnostics)
-    checked = (\identified' -> checkModule typeEnvironment identified'.identifiedAst) <$> identifiedModules
-    typedModules = fst <$> checked
-    checkDiagnostics = foldMap snd checked
+    -- Check (whole-program, in value-dependency order). An agent may infer its return / effect from
+    -- agents it calls — across modules and through mutual recursion — so the checker walks the value
+    -- SCCs ('valueSCCs') to grow the value environment dependency-first; it cannot run per module.
+    identifiedAsts :: Map ModuleName (Module Identified)
+    identifiedAsts = (\identified' -> identified'.identifiedAst) <$> identifiedModules
+    (typedModules, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs identifiedAsts) identifiedAsts
+
+    -- Everything emitted before lowering; lowering (and its diagnostics) is skipped when this has any
+    -- error, so a failed compile yields no IR rather than IR built from an ill-typed AST.
+    preLoweringDiagnostics =
+      reservedDiagnostics <> parseDiagnostics <> identifyDiagnostics <> environmentDiagnostics <> checkDiagnostics
 
     -- Lower (per module). No link step — modules are uploaded individually; schemas travel in the IR.
     lowered :: Map ModuleName (IRModule, Diagnostics)
     lowered = Map.mapWithKey lowerModule typedModules
-    lowerDiagnostics = foldMap snd lowered
+    lowerDiagnostics = if hasErrors preLoweringDiagnostics then mempty else foldMap snd lowered

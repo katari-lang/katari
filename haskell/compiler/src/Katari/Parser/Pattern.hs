@@ -58,13 +58,13 @@ recordPattern = do
   (fields, sourceSpan) <- bracesMultiline (commaSeparated fieldPattern)
   pure (PatternRecord RecordPattern {fields = fields, sourceSpan = sourceSpan, typeOf = ()})
 
--- | @(p1, p2, ...)@ tuple, @(p)@ grouping, @()@ empty tuple.
+-- | @[p1, p2, ...]@ — a tuple pattern of any arity, including the empty @[]@ and the single @[p]@.
+-- Tuples are bracketed (matching tuple values and types); a head's @(...)@ is constructor /
+-- type-filter arguments, not a tuple.
 tuplePattern :: Parser PatternP
 tuplePattern = do
-  (elements, sourceSpan) <- parens (commaSeparated pattern')
-  pure $ case elements of
-    [singlePattern] -> singlePattern
-    _ -> PatternTuple TuplePattern {elements = elements, sourceSpan = sourceSpan, typeOf = ()}
+  (elements, sourceSpan) <- brackets (commaSeparated pattern')
+  pure (PatternTuple TuplePattern {elements = elements, sourceSpan = sourceSpan, typeOf = ()})
 
 -- | @label => pattern@ — one field of a constructor / record pattern.
 fieldPattern :: Parser (FieldPattern Parsed)

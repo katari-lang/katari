@@ -161,9 +161,7 @@ instance HasSourceSpan ParameterDefault where
 
 -- | @[private] agent name[generics](label => pattern, ...) -> T with E { body }@.
 -- @private@ marks the agent's handle private: it may be called only from a private world (the body
--- of another @private@ agent). Orthogonal to a private return type (@-> T of private@) — a private
--- handle restricts who may call it, a private return restricts what the result may flow into. See
--- the attribute world model in "Katari.Typechecker.Normalizer".
+-- of another @private@ agent).
 data AgentDeclaration (phase :: Phase) = AgentDeclaration
   { annotation :: Maybe Text,
     -- | @private agent@ — handle private (callable only from a private world)
@@ -615,11 +613,9 @@ instance HasSourceSpan (RecordPattern phase) where
 -- Type-level syntax (types, effects, attributes)
 --
 -- One kind-agnostic syntax tree for everything that appears in a type position:
--- ordinary types, @with@-clause effects, and @of@ attributes. The parser cannot
--- tell which kind a bare name or a @|@ union denotes — only the checker, after
--- name resolution, can — so all three kinds share 'SyntacticTypeExpression' and the
--- checker splits them by kind. The @Type@ prefix is kept for brevity but spans
--- every kind, not just types.
+-- ordinary types, @with@-clause effects, and @of@ attributes.
+-- All three kinds share 'SyntacticTypeExpression' and the
+-- checker splits them by kind. (Because parsers don't know the kind of a type)
 ---------------------------------------------------------------------------------------------------------------
 
 data SyntacticTypeExpression (phase :: Phase) where
@@ -718,9 +714,7 @@ instance HasSourceSpan (AgentTypeNode phase) where
 
 -- | @head[argument, ...]@. Arguments are parsed uniformly as type-level syntax; the
 -- checker splits them into type / effect / attribute arguments by the head's
--- generic-parameter kinds. The resolved substitution is not stored here — the
--- annotation's meaning lives in the computed 'SemanticType' — so this node stays
--- phase-transportable by 'retagSyntacticTypeExpression'.
+-- generic-parameter kinds.
 data TypeApplicationTypeNode (phase :: Phase) = TypeApplicationTypeNode
   { applicationHead :: SyntacticTypeExpression phase,
     applicationArguments :: List (SyntacticTypeExpression phase),

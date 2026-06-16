@@ -38,7 +38,7 @@ data JSONSchema where
   SchemaConst :: Value -> JSONSchema
   -- | @{"type": "array", "items": s}@
   SchemaArray :: JSONSchema -> JSONSchema
-  -- | @{"type": "object", "properties": {...}, "required": [...], "additionalProperties": b}@
+  -- | @{"type": "object", "properties": {...}, "required": [...], "additionalProperties": b | s}@
   SchemaObject :: ObjectSchema -> JSONSchema
   -- | @{"anyOf": [...]}@ — a union.
   SchemaAnyOf :: List JSONSchema -> JSONSchema

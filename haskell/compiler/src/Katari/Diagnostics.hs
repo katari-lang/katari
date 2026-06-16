@@ -13,7 +13,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.SourceSpan (Located (..), SourceSpan)
-import Katari.Error (CompilerError, renderLocatedCompilerError)
+import Katari.Error (CompilerError, Severity (..), renderLocatedCompilerError, severityOf)
 
 -- | The errors a phase has accumulated, in emission order. Phases use this as their writer monoid;
 -- the span-free Normalizer keeps its own @[TypeError]@ and is bridged into this by the checker.
@@ -40,6 +40,15 @@ capture :: (MonadWriter Diagnostics m) => m a -> m (a, Diagnostics)
 capture action = pass $ do
   (result, diagnostics) <- listen action
   pure ((result, diagnostics), const mempty)
+
+-- | Whether any diagnostic is an error (rather than a warning). Used to gate later phases — lowering
+-- does not run on a program with errors, so it never emits IR for code that did not type-check.
+hasErrors :: Diagnostics -> Bool
+hasErrors = any (isError . (.value)) . toList
+  where
+    isError compilerError = case severityOf compilerError of
+      SeverityError -> True
+      SeverityWarning -> False
 
 -- | Order a phase's accumulated diagnostics by source position and drop exact duplicates (one node
 -- may be reported more than once before spans distinguish the occurrences).

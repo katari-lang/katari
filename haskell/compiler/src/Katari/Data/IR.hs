@@ -1,23 +1,13 @@
--- | The intermediate representation handed to the runtime, one 'IRModule' per source module (the
--- runtime uploads modules individually — there is no whole-program link step).
---
--- Shape (see the design discussion / docs for the rationale):
---
---   * Every block runs as its own thread (the unit the engine schedules and checkpoints). A
---     'BlockAgent' is the sole value-addressable wrapper — it carries the whole calling convention (a
---     single argument, defaults, and a schema in 'IRModule.schemas') and runs a body block; that body
---     (an agent 'BlockSequence', a leaf 'BlockPrimitive' / 'BlockConstruct' / 'BlockRequest' /
---     'BlockExternal', or a 'BlockHandle' for @where { handlers }@) is what the call actually does. The
---     remaining blocks are structural nodes that inherit the caller's scope.
+-- | The intermediate representation handed to the runtime, one 'IRModule' per source module.
+--   * Every block runs as its own thread
 --   * Invocation is split by what it summons, not by two verbs at the call site:
 --       - 'OperationCall' enters a local structural node (by 'BlockId', no argument, in the same scope);
 --       - 'OperationDelegate' invokes a 'BlockAgent' (by 'QualifiedName' — cross-module-safe — or by value,
 --         with the single argument). Whether a delegation commits the transaction is a property of that
---         agent's body (external / effectful prim commit; pure prim / ctor stay in-transaction), so it
---         is derived at run time and not encoded in the op.
+--         agent's body.
 --   * Non-local control ('OperationExit' / 'OperationContinue') names the enclosing block it unwinds to / resumes; the
 --     kind (return / break / for-break, next / for-next) is implied by that block's role.
---   * No type information. The public schema of each 'BlockAgent' lives in 'IRModule.schemas'.
+--   * No type information. The public schema of each 'BlockAgent' lives in its 'Agent.schema'.
 --
 -- The JSON encoding (consumed by the TS runtime) is the 'ToJSON' instances at the bottom of this
 -- module; it mirrors @typescript/types/src/ir.ts@ exactly (the two are co-designed). Sum types are
@@ -38,13 +28,12 @@ import Katari.Data.QualifiedName (QualifiedName)
 -- Identifiers
 ---------------------------------------------------------------------------------------------------
 
--- | Block identifier, unique within an 'IRModule'. The key of 'IRModule.blocks' / 'IRModule.schemas'
+-- | Block identifier, unique within an 'IRModule'. The key of 'IRModule.blocks'
 -- and the target of an 'OperationCall' / 'OperationMakeClosure'. Module-local: a cross-module callee is addressed
 -- by 'QualifiedName', never by a foreign 'BlockId'.
 newtype BlockId = BlockId Word32
   deriving stock (Eq, Ord, Show)
-  -- \| Wire form: a JSON number as a value, and a decimal-string object key (the runtime's IR maps
-  -- are keyed by 'BlockId', e.g. @{"0": {...}}@).
+  -- \| Wire form: a JSON number as a value, and a decimal-string object key. e.g. @{"0": {...}}@).
   deriving newtype (ToJSON, ToJSONKey)
 
 -- | IR-level variable. Lowering allocates one per value slot within a block's scope.
@@ -57,9 +46,7 @@ newtype VariableId = VariableId Word32
 ---------------------------------------------------------------------------------------------------
 
 newtype Metadata = Metadata
-  { -- | Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject
-    -- stale bundles.
-    schemaVersion :: Int
+  { schemaVersion :: Int
   }
   deriving stock (Eq, Show)
 
@@ -68,15 +55,12 @@ currentMetadata :: Metadata
 currentMetadata = Metadata {schemaVersion = 1}
 
 -- | One module's lowered output. The runtime loads it and resolves callables by 'QualifiedName'
--- through 'entries' (cross-module names resolve against the defining module's entries the same way).
+-- through 'entries'
 data IRModule = IRModule
   { metadata :: Metadata,
     -- | Every block (a 'BlockAgent' wrapper, an agent body, a leaf body, or a structural node), keyed by id.
-    blocks :: Map BlockId Block,
-    -- | The schema of every 'BlockAgent'. Only 'BlockAgent's appear here — leaf bodies and structural
-    -- nodes have none. A closure value resolves to its 'BlockAgent', so its schema is reachable here too
-    -- (by 'BlockId'), not only top-level names.
-    schemas :: Map BlockId SchemaInfo,
+    -- Each is wrapped in a 'BlockInformation' that carries how its thread's scope is seeded on entry.
+    blocks :: Map BlockId BlockInformation,
     -- | Top-level callable name -> its 'BlockAgent', for resolving an 'OperationDelegate' 'CalleeName' at run time.
     entries :: Map QualifiedName BlockId,
     -- | Debug-only block names (pretty printer / traces). The runtime's hot path ignores it.
@@ -88,10 +72,23 @@ data IRModule = IRModule
 -- Blocks (each runs as its own thread)
 ---------------------------------------------------------------------------------------------------
 
--- | A schedulable unit. 'BlockAgent' is the sole value-addressable wrapper (it carries the calling
--- convention and a schema in 'IRModule.schemas'); every other block is reached only as some
--- 'BlockAgent'\'s body or as a structural node, and carries no schema.
+data BlockInformation = BlockInformation
+  { block :: Block,
+    -- | Runtime will be insert variables to scope with passed parameters. parameter: {name: value, name: value,...}
+    -- Used by:
+    --  Agent: the agent's argument (as object)
+    --  Sequence: when the block is...
+    --   Body of for: {iterator: value, state_0: value, state_1: value,...}  (each iterator body thread should have its own iterator variable & states)
+    --   Then clause of for: {result: value, state_0: value, state_1: value,...} (then clause body will receive the result of for-mapping and the final states)
+    --   Handler body: {paramter: value, state_0: value, state_1: value,...} (handler body will receive the request parameter and the final states)
+    --   Handler then clause: {result: value, state_0: value, state_1: value,...} (then clause body will receive the result of handle target and the final states)
+    parameters :: Map Text VariableId
+  }
+  deriving stock (Eq, Show)
+
+-- | A schedulable unit.
 data Block where
+  -- | Sole value-addressable wrapper
   BlockAgent :: Agent -> Block
   -- | An agent body (user code): operations run in the agent's fresh scope.
   BlockSequence :: Sequence -> Block
@@ -106,44 +103,55 @@ data Block where
   BlockMatch :: Match -> Block
   BlockFor :: For -> Block
   BlockHandle :: Handle -> Block
-  -- | A parallel sequence literal (@par [e1, ...]@): its elements run concurrently.
+  -- | A parallel sequence literal (@parallel [e1, ...]@): its elements run concurrently.
   BlockParallel :: ParallelBlock -> Block
   deriving stock (Eq, Show)
 
 -- | The single value-addressable callable: every agent / external / primitive / data-constructor /
--- request declaration, and every closure, lowers to one of these. It owns the whole calling
--- convention — the incoming argument binds to 'parameter' in a fresh scope (a @return@ boundary) and
--- omitted optionals are filled from 'defaults' — and then runs 'body'. The body is what the call
--- actually does: a 'BlockSequence' (agent code), a leaf ('BlockPrimitive' / 'BlockConstruct' /
--- 'BlockRequest' / 'BlockExternal'), or a 'BlockHandle' (@where { handlers }@). Whether the call
--- commits is the body's property (effectful leaf → suspend\/commit; pure leaf → in-transaction), so
--- it is derived at run time, not stored here. Its schema is in 'IRModule.schemas', keyed by this
--- block's id; the scope parent (isolated vs a closure's captured scope) comes from how the value was
--- summoned (a bare callable vs a closure value), not from a field here.
+-- request declaration, and every closure, lowers to one of these.
 data Agent = Agent
-  { parameter :: Maybe VariableId,
-    defaults :: Map Text Literal,
-    body :: BlockId
+  { body :: BlockId,
+    schema :: SchemaInformation
   }
   deriving stock (Eq, Show)
 
--- | A built-in primitive leaf: consumes the wrapping 'Agent'\'s argument (bound to 'parameter' in the
--- inherited scope) and is resolved against the runtime's prim registry by 'name'.
-newtype Primitive = Primitive {name :: Text}
+-- | A built-in primitive leaf: reads its argument from 'input' (seeded into the inherited scope by the
+-- wrapping agent) and is resolved against the runtime's prim registry by 'name'.
+-- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before invoking the prim.
+data Primitive = Primitive
+  { name :: Text,
+    input :: VariableId,
+    defaults :: Map Text Literal
+  }
   deriving stock (Eq, Show)
 
 -- | A data-constructor leaf: build the tagged value of 'name' from the wrapping 'Agent'\'s argument.
-newtype Construct = Construct {name :: QualifiedName}
+-- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before constructing the value.
+data Construct = Construct
+  { name :: QualifiedName,
+    input :: VariableId,
+    defaults :: Map Text Literal
+  }
   deriving stock (Eq, Show)
 
 -- | A request leaf: raise 'name' as an escalation to the enclosing handler, carrying the wrapping
 -- 'Agent'\'s argument.
-newtype Request = Request {name :: QualifiedName}
+-- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before raising the request.
+data Request = Request
+  { name :: QualifiedName,
+    input :: VariableId,
+    defaults :: Map Text Literal
+  }
   deriving stock (Eq, Show)
 
 -- | An external-agent leaf: the external handler dispatches it. 'key' is the opaque dispatch key the
 -- handler interprets.
-newtype External = External {key :: Text}
+-- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before dispatching the external.
+data External = External
+  { key :: Text,
+    input :: VariableId,
+    defaults :: Map Text Literal
+  }
   deriving stock (Eq, Show)
 
 -- | A block body: a list of operations plus the variable holding its value (if any).
@@ -176,10 +184,12 @@ data MatchArm = MatchArm
 -- @next@ value is collected, in source order, into the mapped output array.
 data For = For
   { parallel :: Bool,
-    -- | (element var bound in the body scope, source-array var in the caller scope), one per iterator.
-    iterators :: List (VariableId, VariableId),
-    -- | (state var in the body scope, initial-value var in the caller scope). Empty when parallel.
-    states :: List (VariableId, VariableId),
+    -- | The source array to iterate, in the caller's scope. Each element is bound to the body block's
+    -- @iterator@ parameter (that body var lives in the body block's 'BlockInformation.parameters').
+    source :: VariableId,
+    -- | Initial state values in the caller's scope, in order: the Nth binds to the body block's
+    -- @state_N@ parameter. Empty when parallel.
+    initialStates :: List VariableId,
     body :: BlockId,
     thenClause :: Maybe ThenClause
   }
@@ -189,27 +199,29 @@ data For = For
 -- 'thenClause'. State vars are seeded from the caller's scope.
 data Handle = Handle
   { parallel :: Bool,
-    states :: List (VariableId, VariableId),
+    -- | Initial state values in the caller's scope, in order: the Nth binds to the body / handler
+    -- block's @state_N@ parameter. Empty when parallel.
+    initialStates :: List VariableId,
     body :: BlockId,
     handlers :: List Handler,
     thenClause :: Maybe ThenClause
   }
   deriving stock (Eq, Show)
 
--- | One request handler. On a matching escalation the runtime binds the request arguments to
--- 'parameter' (in the handler body's scope) and runs 'body'.
+-- | One request handler. On a matching escalation the runtime seeds the handler body's scope (the
+-- request argument as its @parameter@, the current states as @state_N@; see 'BlockInformation') and
+-- runs 'body'.
 data Handler = Handler
   { request :: QualifiedName,
-    parameter :: Maybe VariableId,
     body :: BlockId
   }
   deriving stock (Eq, Show)
 
--- | A @then (pattern) { body }@ clause: 'parameter' receives the produced value (the for-mapping
--- array / the handle body's result), bound in the clause body's scope.
-data ThenClause = ThenClause
-  { parameter :: Maybe VariableId,
-    body :: BlockId
+-- | A @then (pattern) { body }@ clause. The produced value (the for-mapping array / the handle body's
+-- result) is seeded into the clause body's scope as its @result@ parameter, alongside the final
+-- @state_N@s (see 'BlockInformation'); the clause then runs 'body'.
+newtype ThenClause = ThenClause
+  { body :: BlockId
   }
   deriving stock (Eq, Show)
 
@@ -309,7 +321,7 @@ data ApplyGenericsOperation = ApplyGenericsOperation
   { source :: VariableId,
     -- | Apply the target's generics by name; any reference inside a 'GenericArgumentSchema' is by
     -- 'GenericId' (resolved against the current frame's generic environment). The resolved callee's
-    -- 'SchemaInfo.genericBindings' maps these names back onto its template's 'GenericId's.
+    -- 'SchemaInformation.genericBindings' maps these names back onto its template's 'GenericId's.
     generics :: List (Text, GenericArgumentSchema),
     output :: VariableId
   }
@@ -367,6 +379,10 @@ data Pattern where
   -- | A runtime type guard (@T(pattern)@): matches when the value's runtime tag is 'TypeTag', then
   -- matches the inner pattern against it.
   PatternTypeGuard :: TypeTag -> Pattern -> Pattern
+  -- | A @?=@ default: when the matched value is absent / null, substitute the 'Literal' and match the
+  -- inner pattern against it; otherwise match the inner pattern directly. The destructuring
+  -- counterpart of 'GetFieldOperation.defaultValue', usable in any @let@ / @match@ pattern position.
+  PatternDefault :: Literal -> Pattern -> Pattern
   deriving stock (Eq, Show)
 
 -- | The runtime-checkable tag a @T(pattern)@ type filter narrows on.
@@ -390,21 +406,18 @@ data TypeTag where
 
 -- | The public schema of one callable: its input, output, the requests it may raise, and the binding
 -- of its generic parameter names to the 'GenericId's its template references.
-data SchemaInfo = SchemaInfo
+data SchemaInformation = SchemaInformation
   { input :: JSONSchema,
     output :: JSONSchema,
     requests :: List RequestSchema,
-    -- | This callable's generic parameters, in declaration order: each name paired with the
-    -- 'GenericId' its references use in 'input' / 'output' ('SchemaGeneric') and 'requests'
-    -- ('RequestGeneric'). The single bridge from a name-keyed application (an 'ApplyGenericsOperation'
-    -- / a value's attached substitution) onto the id-keyed template — used both to build a frame's
-    -- generic environment on delegation and to fill the @get_metadata@ schema.
-    genericBindings :: List (Text, GenericId)
+    -- | This callable's generic parameters, keyed by name: each maps to the 'GenericId' its references
+    -- use in 'input' / 'output' ('SchemaGeneric') and 'requests' ('RequestGeneric').
+    genericBindings :: Map Text GenericId
   }
   deriving stock (Eq, Show)
 
 -- | One entry of a callable's requests schema: a concrete request, or a reference to an effect-generic
--- parameter (by 'GenericId'; filled from the substituted effect via 'SchemaInfo.genericBindings').
+-- parameter (by 'GenericId'; filled from the substituted effect via 'SchemaInformation.genericBindings').
 data RequestSchema where
   RequestConcrete :: RequestDescriptor -> RequestSchema
   RequestGeneric :: GenericId -> RequestSchema
@@ -445,29 +458,36 @@ instance ToJSON IRModule where
     object
       [ "metadata" .= irModule.metadata,
         "blocks" .= irModule.blocks,
-        "schemas" .= irModule.schemas,
         "entries" .= irModule.entries,
         "names" .= irModule.names
       ]
 
+instance ToJSON BlockInformation where
+  toJSON blockInformation =
+    object ["block" .= blockInformation.block, "parameters" .= blockInformation.parameters]
+
 instance ToJSON Block where
   toJSON block = case block of
     BlockAgent agent ->
-      taggedObject "agent" ["parameter" .= agent.parameter, "defaults" .= agent.defaults, "body" .= agent.body]
+      taggedObject "agent" ["body" .= agent.body, "schema" .= agent.schema]
     BlockSequence body ->
       taggedObject "sequence" ["operations" .= body.operations, "result" .= body.result]
-    BlockPrimitive primitive -> taggedObject "primitive" ["name" .= primitive.name]
-    BlockConstruct construct -> taggedObject "construct" ["name" .= construct.name]
-    BlockRequest request -> taggedObject "request" ["name" .= request.name]
-    BlockExternal external -> taggedObject "external" ["key" .= external.key]
+    BlockPrimitive primitive ->
+      taggedObject "primitive" ["name" .= primitive.name, "input" .= primitive.input, "defaults" .= primitive.defaults]
+    BlockConstruct construct ->
+      taggedObject "construct" ["name" .= construct.name, "input" .= construct.input, "defaults" .= construct.defaults]
+    BlockRequest request ->
+      taggedObject "request" ["name" .= request.name, "input" .= request.input, "defaults" .= request.defaults]
+    BlockExternal external ->
+      taggedObject "external" ["key" .= external.key, "input" .= external.input, "defaults" .= external.defaults]
     BlockMatch match ->
       taggedObject "match" ["subject" .= match.subject, "arms" .= match.arms, "fallback" .= match.fallback]
     BlockFor for ->
       taggedObject
         "for"
         [ "parallel" .= for.parallel,
-          "iterators" .= for.iterators,
-          "states" .= for.states,
+          "source" .= for.source,
+          "initialStates" .= for.initialStates,
           "body" .= for.body,
           "thenClause" .= for.thenClause
         ]
@@ -475,7 +495,7 @@ instance ToJSON Block where
       taggedObject
         "handle"
         [ "parallel" .= handle.parallel,
-          "states" .= handle.states,
+          "initialStates" .= handle.initialStates,
           "body" .= handle.body,
           "handlers" .= handle.handlers,
           "thenClause" .= handle.thenClause
@@ -486,10 +506,10 @@ instance ToJSON MatchArm where
   toJSON arm = object ["pattern" .= arm.pattern, "body" .= arm.body]
 
 instance ToJSON Handler where
-  toJSON handler = object ["request" .= handler.request, "parameter" .= handler.parameter, "body" .= handler.body]
+  toJSON handler = object ["request" .= handler.request, "body" .= handler.body]
 
 instance ToJSON ThenClause where
-  toJSON thenClause = object ["parameter" .= thenClause.parameter, "body" .= thenClause.body]
+  toJSON thenClause = object ["body" .= thenClause.body]
 
 instance ToJSON Operation where
   toJSON operation = case operation of
@@ -531,6 +551,7 @@ instance ToJSON Pattern where
     PatternTuple elements -> taggedObject "tuple" ["elements" .= elements]
     PatternRecord fields -> taggedObject "record" ["fields" .= fields]
     PatternTypeGuard tag inner -> taggedObject "typeGuard" ["tag" .= tag, "pattern" .= inner]
+    PatternDefault value inner -> taggedObject "default" ["value" .= value, "pattern" .= inner]
 
 instance ToJSON TypeTag where
   toJSON tag = case tag of
@@ -544,7 +565,7 @@ instance ToJSON TypeTag where
     TagRecord -> "record"
     TagAgent -> "agent"
 
-instance ToJSON SchemaInfo where
+instance ToJSON SchemaInformation where
   toJSON schemaInfo =
     object
       [ "input" .= schemaInfo.input,

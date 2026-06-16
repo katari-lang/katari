@@ -8,8 +8,7 @@ module Katari.Identifier.Type where
 
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.GenericKind (GenericKind (..))
-import Katari.Data.Id (GenericId, TypeResolution (..))
+import Katari.Data.Id (TypeResolution (..))
 import Katari.Data.SourceSpan (SourceSpan)
 import Katari.Identifier.Monad
 
@@ -90,13 +89,7 @@ withGenericParameters region parameters continuation = do
 prepareGenericParameter :: GenericParameter Parsed -> Identifier (GenericParameter Parsed, TypeResolution)
 prepareGenericParameter parameter = do
   genericId <- freshGenericId
-  pure (parameter, genericResolution parameter.kind genericId)
-
-genericResolution :: GenericKind -> GenericId -> TypeResolution
-genericResolution kind genericId = case kind of
-  GenericKindType -> TypeResolutionGenericType genericId
-  GenericKindEffect -> TypeResolutionGenericEffect genericId
-  GenericKindAttribute -> TypeResolutionGenericAttribute genericId
+  pure (parameter, TypeResolutionGeneric genericId)
 
 resolvePreparedGenericParameter :: (GenericParameter Parsed, TypeResolution) -> Identifier (GenericParameter Identified)
 resolvePreparedGenericParameter (parameter, resolution) = do

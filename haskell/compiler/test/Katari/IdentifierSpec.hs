@@ -33,7 +33,7 @@ monadSpec = do
   describe "fresh-id supply" $
     it "hands out increasing generic ids" $
       fst (runIdentifier environment (sequence [freshGenericId, freshGenericId, freshGenericId]))
-        `shouldBe` [GenericId 0, GenericId 1, GenericId 2]
+        `shouldBe` [GenericId (ModuleName "test") 0, GenericId (ModuleName "test") 1, GenericId (ModuleName "test") 2]
 
   describe "scope" $ do
     it "finds a binding added with bindInScope" $

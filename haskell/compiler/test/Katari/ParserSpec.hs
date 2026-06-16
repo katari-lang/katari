@@ -108,8 +108,11 @@ spec = do
           length dataDeclaration.parameters `shouldBe` 2
         _ -> expectationFailure "expected one data"
 
+    it "rejects a newline before an agent's body brace (no Allman braces)" $
+      shouldFail "agent main() -> integer\n{ 1 }"
+
     it "parses a type synonym with generics" $ do
-      module' <- parseClean "type pair[T] = (T, T)"
+      module' <- parseClean "type pair[T] = [T, T]"
       case module'.declarations of
         [DeclarationTypeSynonym synonym] -> synonym.name `shouldBe` "pair"
         _ -> expectationFailure "expected one type synonym"
@@ -210,6 +213,25 @@ spec = do
           ExpressionTypeApplication _ -> pure ()
           _ -> expectationFailure "expected a generic instantiation callee"
         _ -> expectationFailure "expected a call"
+
+    it "parses an f-string interpolation with inner padding" $ do
+      body <- parseClean "agent main() -> string { f\"x=${ total }\" }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionTemplate _) -> pure ()
+        _ -> expectationFailure "expected a template expression"
+
+    it "parses stacked prefix operators (the second applies to the first's operand)" $ do
+      body <- parseClean "agent main() -> boolean { !!flag }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionUnaryOperator outer) -> case outer.operand of
+          ExpressionUnaryOperator _ -> pure ()
+          _ -> expectationFailure "expected a nested unary operator (the inner !)"
+        _ -> expectationFailure "expected a unary operator"
+
+    it "parses mixed and spaced prefix-operator stacks" $ do
+      _ <- parseClean "agent main() -> integer { - -x }" >>= soleAgentBody
+      _ <- parseClean "agent main() -> integer { -!x }" >>= soleAgentBody
+      pure ()
 
   describe "handlers, use, next/break" $ do
     it "parses a use of an inline handler with next/break" $ do

@@ -1,18 +1,19 @@
-// The CORE engine graph, persisted row-wise (3NF): one row per thread, scope, and scope variable;
-// blobs are a ledger (bytes live in the BlobStore). All cascade with their owner instance.
+// The CORE engine graph, persisted row-wise (3NF): one row per thread and per scope; blobs are a
+// ledger (bytes live in the BlobStore). All cascade with their owner instance.
 //
 //   - threads: instance-local; cascade with the instance.
 //   - scopes / blobs: CORE-global per project, owned by an instance (mutable on ascent → nullable);
 //     cascade with the owner instance.
-//   - scope_variables: cascade with their scope via a composite FK.
 //
-// The irreducibly-recursive leaves (a `Value`, a thread's variant state) stay as typed JSON columns —
-// the structure is normalised, the leaves are not (a `Value` is a record/array/ref tree).
+// A scope's variables are not their own table: nothing fetches a single variable across scopes, and a
+// `Value` is already an irreducible JSON leaf, so decomposing the map into rows buys no relational
+// structure — the whole variable map rides inline in `scopes.values` (the engine holds it as one inline
+// map too). The other recursive leaf (a thread's variant state) likewise stays a typed JSON column.
 
 import type { Json } from "@katari-lang/types";
 import {
   bigint,
-  foreignKey,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -61,25 +62,13 @@ export const scopes = pgTable(
       onDelete: "cascade",
     }),
     ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
-  },
-  (table) => [primaryKey({ columns: [table.projectId, table.scopeId] })],
-);
-
-export const scopeVariables = pgTable(
-  "scope_variables",
-  {
-    projectId: uuid("project_id").notNull(),
-    scopeId: integer("scope_id").notNull(),
-    varId: integer("var_id").notNull(),
-    value: jsonb("value").$type<Value>().notNull(),
+    /** This scope's variable slots, `VariableId -> Value`, inline (see the file header). */
+    values: jsonb("values").$type<Record<number, Value>>().notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.projectId, table.scopeId, table.varId] }),
-    // A variable lives exactly as long as its scope.
-    foreignKey({
-      columns: [table.projectId, table.scopeId],
-      foreignColumns: [scopes.projectId, scopes.scopeId],
-    }).onDelete("cascade"),
+    primaryKey({ columns: [table.projectId, table.scopeId] }),
+    // The engine loads / ascends scopes by owner, so the partial-load and ascent paths need this.
+    index("scopes_owner_instance_id_idx").on(table.ownerInstanceId),
   ],
 );
 
@@ -101,5 +90,9 @@ export const blobs = pgTable(
     semanticKind: text("semantic_kind").$type<SemanticKind>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.projectId, table.blobId] })],
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.blobId] }),
+    // Loaded / ascended by owner, like scopes.
+    index("blobs_owner_instance_id_idx").on(table.ownerInstanceId),
+  ],
 );

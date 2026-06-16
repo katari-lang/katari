@@ -17,7 +17,6 @@ lowerModule _moduleName _module =
   ( IRModule
       { metadata = currentMetadata,
         blocks = mempty,
-        schemas = mempty,
         entries = mempty,
         names = mempty
       },

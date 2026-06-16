@@ -1,21 +1,18 @@
 -- | Resolving expressions, statements, blocks, handlers, and the (locally declarable) agent
--- declaration. The bulk of the walk.
+-- declaration — the bulk of the walk. Three things are more than a mechanical rebuild:
 --
--- Three things are more than a mechanical rebuild:
+--   * A block resolves its statements with a sequential scope: a @let@ binds for the statements after
+--     it (non-recursive — the value resolves first), a local @agent@ binds before its own body
+--     (self-recursive), a @use@ binds its optional pattern over its continuation block. Each binding is
+--     recorded with the exact region it is visible over.
 --
---   * A block resolves its statements with a sequential scope — a @let@ binds for the statements
---     that follow it (the binding is non-recursive; the value is resolved first), a local @agent@
---     binds before its own body (self-recursive). A @use@ binds (its optional pattern) over its
---     continuation block. Each binding is recorded with the exact region it is visible over.
+--   * @object.field@ becomes a module-qualified reference when @object@ is a bare name that resolves to
+--     a module and /not/ to a value (a value shadows a like-named module); otherwise it stays a field
+--     access (the field label is resolved type-directed by the checker).
 --
---   * @object.field@ becomes a module-qualified reference when @object@ is a bare name that resolves
---     to a module and /not/ to a value (a value shadows a like-named module). Otherwise it stays a
---     field access (the field label is resolved type-directed by the checker, not here).
---
---   * A @for@ / @handler@ binds its @var@ state over the body and the @then@ clause, the loop
---     pattern over the body only, and request-handler / lambda parameters over their bodies. The
---     @var@ state is also installed as the enclosing state ('withStateVariables') so a @with@
---     modifier can target exactly those names (and nothing else).
+--   * A @for@ / @handler@ binds its @var@ state over the body and the @then@ clause, the loop pattern
+--     over the body only, and parameters over their bodies. The @var@ state is also installed as the
+--     enclosing state ('withStateVariables') so a @with@ modifier can target exactly those names.
 module Katari.Identifier.Expression where
 
 import Data.Text (Text)
@@ -155,12 +152,7 @@ qualifiedReference node variableExpression moduleName = do
 -- Operator desugar (@a \<op\> b@ ~> @primitive.\<name\>(left = a, right = b)@)
 ---------------------------------------------------------------------------------------------------
 
--- | Desugar a binary operator into a call to its 'Katari.Primitive' implementation. The callee is a
--- qualified reference to @primitive.\<name\>@ built directly, not resolved through scope: so it is
--- immune to a user binding that shadows the operator's name, and it needs no @primitive@ interface in
--- scope to resolve (operator-using modules identify cleanly even with no import context). The
--- 'Katari.Primitive' table and the embedded @primitive@ module are kept in agreement by
--- "Katari.StdlibSpec".
+-- | Desugar a binary operator @a \<op\> b@ into @primitive.\<name\>(left = a, right = b)@.
 resolveBinaryOperator :: BinaryOperatorExpression Parsed -> Identifier (Expression Identified)
 resolveBinaryOperator node = do
   left <- resolveExpression node.left
@@ -178,10 +170,11 @@ resolveUnaryOperator node = do
   pure (primitiveCall node.sourceSpan (unaryOperatorName node.operator) [(unaryOperatorOperandLabel, operand)])
 
 -- | A call to a member of the wired-in @primitive@ module: @primitive.\<member\>(label = value, ...)@.
--- The callee is a qualified reference whose @primitive@-module resolution is constructed directly (no
--- scope lookup), so the desugar does not depend on @primitive@ being in scope. Every synthetic node is
--- anchored to @sourceSpan@ (the operator's own span), so diagnostics and LSP positions point at the
--- operator the user wrote.
+-- The callee's qualified reference is constructed directly, not resolved through scope, so the desugar
+-- is immune to a user binding that shadows the name and needs no @primitive@ interface in scope (the
+-- 'Katari.Primitive' table and the embedded module are kept in agreement by "Katari.StdlibSpec"). Every
+-- synthetic node is anchored to @sourceSpan@ (the operator's own span) so diagnostics and LSP point at
+-- what the user wrote.
 primitiveCall :: SourceSpan -> Text -> List (Text, Expression Identified) -> Expression Identified
 primitiveCall sourceSpan member arguments =
   ExpressionCall
@@ -206,8 +199,7 @@ primitiveCall sourceSpan member arguments =
             sourceSpan = sourceSpan,
             typeOf = ()
           }
-    -- Synthetic labels carry no navigable source (resolution is @()@ for label references), so the
-    -- label reference is built directly rather than through 'identifiedReference'.
+    -- Synthetic labels carry no navigable source (label resolution is @()@), so the reference is built directly.
     argument (label, value) =
       CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = value, sourceSpan = sourceSpan}
 
@@ -221,6 +213,15 @@ resolveCaseArm arm = do
   body <- bindInScope arm.body.sourceSpan bindings (resolveBlock arm.body)
   pure CaseArm {pattern = casePattern, body = body, sourceSpan = arm.sourceSpan}
 
+-- | Bind a @for@ / request-handler body under its state: the @var@ state and the body-local bindings
+-- (loop pattern or handler parameters) both scope over the body, while the @var@ state alone is
+-- installed as the @with@-modifier target set. Pairing the two here keeps them in step — a @then@
+-- clause deliberately omits the install, so its @with@ sees the enclosing loop's state (see
+-- 'resolveThenClause').
+bindBodyWithState :: SourceSpan -> List Binding -> List Binding -> Identifier a -> Identifier a
+bindBodyWithState region stateBindings localBindings =
+  bindInScope region (stateBindings <> localBindings) . withStateVariables (stateVariableMap stateBindings)
+
 -- | The loop pattern's variables scope over the body only; the @var@ state scopes over the body and
 -- the @then@ clause (and is the only thing a @with@ modifier may target there); @var@ / loop-source
 -- expressions are resolved in the enclosing scope.
@@ -229,7 +230,7 @@ resolveFor node = do
   source <- resolveExpression node.inBinding.source
   (varBindings, varScope) <- resolveVariableBindings node.varBindings
   (loopPattern, loopBindings) <- resolvePattern node.inBinding.pattern
-  body <- bindInScope node.body.sourceSpan (varScope <> loopBindings) (withStateVariables (stateVariableMap varScope) (resolveBlock node.body))
+  body <- bindBodyWithState node.body.sourceSpan varScope loopBindings (resolveBlock node.body)
   thenClause <- traverse (resolveThenClause varScope) node.thenClause
   pure
     ( ExpressionFor
@@ -302,7 +303,7 @@ resolveRequestHandler stateScope handler = do
   genericArguments <- traverse resolveType handler.genericArguments
   (parameters, parameterBindings) <- resolveParameterBindings handler.parameters
   returnType <- traverse resolveType handler.returnType
-  body <- bindInScope handler.body.sourceSpan (stateScope <> parameterBindings) (withStateVariables (stateVariableMap stateScope) (resolveBlock handler.body))
+  body <- bindBodyWithState handler.body.sourceSpan stateScope parameterBindings (resolveBlock handler.body)
   pure
     RequestHandler
       { moduleQualifier = moduleQualifier,

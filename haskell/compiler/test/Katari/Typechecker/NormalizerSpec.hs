@@ -6,7 +6,7 @@ import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
-import Katari.Data.Environment (DataInfo (..), GenericParameterInfo (..), RequestInfo (..))
+import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..))
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId (..))
 import Katari.Data.ModuleName (ModuleName (..))
@@ -75,6 +75,39 @@ spec = do
     it "cancels a generic shared by both sides" $
       genericOf unboundedGeneric `shouldBeSubtypeOf` genericOf unboundedGeneric
 
+  describe "subtype (sequences)" $ do
+    -- A tuple is fixed-length (tail @null@); an array is homogeneous (tail @element | null@). So a
+    -- tuple stands in for an array, but never the reverse — an array's positions may be absent.
+    it "accepts a tuple as an array" $
+      semanticSubtypeErrors (SemanticTypeTuple [SemanticTypeInteger]) (SemanticTypeArray SemanticTypeInteger) `shouldBe` []
+    it "accepts an empty tuple as an array" $
+      semanticSubtypeErrors (SemanticTypeTuple []) (SemanticTypeArray SemanticTypeInteger) `shouldBe` []
+    it "accepts a multi-element tuple as an array of the element union" $
+      semanticSubtypeErrors
+        (SemanticTypeTuple [SemanticTypeInteger, SemanticTypeString])
+        (SemanticTypeArray (SemanticTypeUnion [SemanticTypeInteger, SemanticTypeString]))
+        `shouldBe` []
+    it "rejects an array as a fixed-length tuple (positions may be absent)" $
+      semanticSubtypeErrors (SemanticTypeArray SemanticTypeInteger) (SemanticTypeTuple [SemanticTypeInteger]) `shouldSatisfy` (not . null)
+    it "rejects an array as a tuple even when the element type matches the prefix" $
+      semanticSubtypeErrors (SemanticTypeArray SemanticTypeInteger) (SemanticTypeTuple [SemanticTypeInteger, SemanticTypeInteger]) `shouldSatisfy` (not . null)
+    it "rejects a wider tuple as a narrower tuple (tuples are fixed-length)" $
+      semanticSubtypeErrors (SemanticTypeTuple [SemanticTypeInteger, SemanticTypeString]) (SemanticTypeTuple [SemanticTypeInteger]) `shouldSatisfy` (not . null)
+
+  describe "subtype (objects keep width subtyping)" $ do
+    -- A fixed object literal keeps its open @unknown@ tail, so an object with extra fields is a
+    -- subtype of one with fewer (unlike tuples, which are fixed-length).
+    it "accepts an object with an extra field as one with fewer" $
+      semanticSubtypeErrors
+        (SemanticTypeObject (Map.fromList [("a", requiredField SemanticTypeInteger), ("b", requiredField SemanticTypeString)]))
+        (SemanticTypeObject (Map.singleton "a" (requiredField SemanticTypeInteger)))
+        `shouldBe` []
+    it "rejects an object missing a required field" $
+      semanticSubtypeErrors
+        (SemanticTypeObject (Map.singleton "a" (requiredField SemanticTypeInteger)))
+        (SemanticTypeObject (Map.fromList [("a", requiredField SemanticTypeInteger), ("b", requiredField SemanticTypeString)]))
+        `shouldSatisfy` (not . null)
+
   describe "subtype (unknown compares only the outermost attribute)" $ do
     it "accepts a public object <: unknown" $
       objectOf [("x", intType)] `shouldBeSubtypeOf` unknownType
@@ -112,7 +145,7 @@ spec = do
       -- is restricted to lack ask (the flat-shadowed predecessor dropped this).
       runNormalizer
         ( substituteEffect
-            (Map.singleton effectGeneric (NormalizedGenericArgumentEffect (NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton substituteTargetGeneric mempty})))
+            (Map.singleton effectGeneric (NormalizedKindedTypeEffect (NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton substituteTargetGeneric mempty})))
             (NormalizedEffectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton effectGeneric (Set.singleton askName)})
         )
         `shouldBe` NormalizedEffectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton substituteTargetGeneric (Set.singleton askName)}
@@ -168,9 +201,31 @@ spec = do
     it "renders in surface syntax via renderSemanticType" $
       renderSemanticType (runNormalizer (denormalize (privateOf (objectOf [("x", intType)]))))
         `shouldBe` "{x: integer} of private"
+    it "denormalizes array[integer] without the implicit out-of-range null" $
+      runNormalizer (denormalize =<< normalizeType (SemanticTypeArray SemanticTypeInteger))
+        `shouldBe` SemanticTypeArray SemanticTypeInteger
+    it "denormalizes record[integer] without the implicit absent-key null" $
+      runNormalizer (denormalize =<< normalizeType (SemanticTypeRecord SemanticTypeInteger))
+        `shouldBe` SemanticTypeRecord SemanticTypeInteger
+    it "round-trips a tuple's fixed prefix through normalize/denormalize" $
+      runNormalizer (denormalize =<< normalizeType (SemanticTypeTuple [SemanticTypeInteger, SemanticTypeString]))
+        `shouldBe` SemanticTypeTuple [SemanticTypeInteger, SemanticTypeString]
 
 shouldBeSubtypeOf :: NormalizedType -> NormalizedType -> Expectation
 shouldBeSubtypeOf left right = normalizerErrors (subtype left right) `shouldBe` []
+
+-- | Normalize both semantic types, then check @left <: right@, returning the subtype errors. Lets a
+-- test state the relation in surface terms (@array[T]@, @[T, U]@) rather than building normalized
+-- nodes by hand.
+semanticSubtypeErrors :: SemanticType -> SemanticType -> List NormalizeError
+semanticSubtypeErrors left right =
+  normalizerErrors $ do
+    normalizedLeft <- normalizeType left
+    normalizedRight <- normalizeType right
+    subtype normalizedLeft normalizedRight
+
+requiredField :: SemanticType -> FieldInformation
+requiredField semanticType = FieldInformation {semanticType = semanticType, optional = False}
 
 shouldNotBeSubtypeOf :: NormalizedType -> NormalizedType -> Expectation
 shouldNotBeSubtypeOf left right = normalizerErrors (subtype left right) `shouldSatisfy` (not . null)
@@ -181,27 +236,31 @@ runNormalizer action = let (result, _, _) = runRWS action environment () in resu
 normalizerErrors :: Normalizer a -> List NormalizeError
 normalizerErrors action = let (_, _, errors) = runRWS action environment () in errors
 
+-- | The module every test generic is stamped with (ids are globally unique once paired with it).
+testModule :: ModuleName
+testModule = ModuleName "test"
+
 genericT :: GenericId
-genericT = GenericId 0
+genericT = GenericId testModule 0
 
 -- | Registered in 'environment' with the bound @integer@.
 boundedGeneric :: GenericId
-boundedGeneric = GenericId 1
+boundedGeneric = GenericId testModule 1
 
 -- | Not registered in 'environment'; its bound defaults to top.
 unboundedGeneric :: GenericId
-unboundedGeneric = GenericId 9
+unboundedGeneric = GenericId testModule 9
 
 effectGeneric :: GenericId
-effectGeneric = GenericId 2
+effectGeneric = GenericId testModule 2
 
 -- | Registered in 'environment' with the effect bound @log@.
 boundedEffectGeneric :: GenericId
-boundedEffectGeneric = GenericId 3
+boundedEffectGeneric = GenericId testModule 3
 
 -- | The effect generic that 'effectGeneric' is substituted by in the override-precedence test.
 substituteTargetGeneric :: GenericId
-substituteTargetGeneric = GenericId 4
+substituteTargetGeneric = GenericId testModule 4
 
 fooName :: QualifiedName
 fooName = QualifiedName {moduleName = ModuleName "test", name = "foo"}
@@ -249,26 +308,48 @@ environment =
           [ (askName, requestInfoOf askName),
             (logName, requestInfoOf logName)
           ],
-      genericBoundEnvironment =
+      -- The in-scope generics for the test: two bounded parameters whose 'upperBound' is read by the
+      -- bound-resolution checks ('boundedType' / 'effectBoundFor'). 'GenericParameterInformation' is the
+      -- single source of truth for a bound (there is no separate id -> bound map).
+      genericsInScope =
         Map.fromList
-          [ (boundedGeneric, NormalizedGenericArgumentType intType),
-            (boundedEffectGeneric, NormalizedGenericArgumentEffect (NormalizedEffectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
+          [ (boundedGeneric, boundedTypeParameter),
+            (boundedEffectGeneric, boundedEffectParameter)
           ],
       world = bottomAttribute
     }
   where
     dataInfoOf qualifiedName argumentVariance =
-      DataInfo
+      DataInformation
         { name = qualifiedName,
-          genericParameters = [GenericParameterInfo {name = "T", genericId = genericT, kind = GenericKindType, variance = argumentVariance}],
+          genericParameters =
+            GenericParameters
+              { parameterNames = ["T"],
+                parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, upperBound = Nothing}
+              },
           constructor = objectOf [("x", genericOf genericT)]
         }
     requestInfoOf qualifiedName =
-      RequestInfo
+      RequestInformation
         { name = qualifiedName,
-          genericParameters = [],
+          genericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty},
           request = (bottomType, bottomType)
         }
+
+-- | A type-kind generic registered in 'environment' (in scope) with the upper bound @integer@.
+boundedTypeParameter :: GenericParameterInformation
+boundedTypeParameter =
+  GenericParameterInformation {genericId = boundedGeneric, kind = GenericKindType, variance = Bivariant, upperBound = Just (NormalizedKindedTypeType intType)}
+
+-- | An effect-kind generic registered in 'environment' (in scope) with the effect upper bound @log@.
+boundedEffectParameter :: GenericParameterInformation
+boundedEffectParameter =
+  GenericParameterInformation
+    { genericId = boundedEffectGeneric,
+      kind = GenericKindEffect,
+      variance = Bivariant,
+      upperBound = Just (NormalizedKindedTypeEffect (NormalizedEffectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
+    }
 
 layerType :: LayeredType -> NormalizedType
 layerType layer = NormalizedType {baseType = NormalizedBaseTypeLayered layer, generics = Set.empty, attribute = bottomAttribute}
@@ -300,10 +381,10 @@ functionOf :: NormalizedType -> NormalizedType -> NormalizedType
 functionOf argumentType returnType = layerType neverLayer {functionLayer = Just NormalizedFunction {argumentType = argumentType, returnType = returnType, effect = bottomEffect}}
 
 fooOf :: NormalizedType -> NormalizedType
-fooOf argument = layerType neverLayer {dataLayer = Map.singleton fooName (Map.singleton "T" (NormalizedGenericArgumentType argument))}
+fooOf argument = layerType neverLayer {dataLayer = Map.singleton fooName (Map.singleton "T" (NormalizedKindedTypeType argument))}
 
 invOf :: NormalizedType -> NormalizedType
-invOf argument = layerType neverLayer {dataLayer = Map.singleton invName (Map.singleton "T" (NormalizedGenericArgumentType argument))}
+invOf argument = layerType neverLayer {dataLayer = Map.singleton invName (Map.singleton "T" (NormalizedKindedTypeType argument))}
 
 objectOf :: List (Text, NormalizedType) -> NormalizedType
 objectOf fieldList = objectWith fieldList unknownType

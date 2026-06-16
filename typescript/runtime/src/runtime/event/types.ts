@@ -23,8 +23,9 @@ import type { GenericSubstitution, Value } from "../value/types.js";
 
 // ─── Internal (intra-instance, thread ↔ thread) ────────────────────────────────────────────────
 
-/** Pre-evaluated state-var modifiers on `next` / `next-for` asks: VariableId -> new Value. */
-export type ModMap = Record<number, Value>;
+/** Pre-evaluated state-var modifiers on `next` / `next-for` asks: VariableId -> new Value. (Mirrors
+ *  the IR's `with (name = e, ...)` `modifiers`.) */
+export type ModifierMap = Record<number, Value>;
 
 /**
  * Every kind of "ask the parent for something", with the data each carries inline. `request` is
@@ -34,8 +35,8 @@ export type ModMap = Record<number, Value>;
  */
 export type AskKind =
   | { kind: "request"; request: QualifiedName; argument: Value | null }
-  | { kind: "next"; value: Value; mods: ModMap; target: BlockId }
-  | { kind: "next-for"; value: Value; mods: ModMap; target: BlockId }
+  | { kind: "next"; value: Value; modifiers: ModifierMap; target: BlockId }
+  | { kind: "next-for"; value: Value; modifiers: ModifierMap; target: BlockId }
   | { kind: "return"; value: Value; target: BlockId }
   | { kind: "break"; value: Value; target: BlockId }
   | { kind: "break-for"; value: Value; target: BlockId };

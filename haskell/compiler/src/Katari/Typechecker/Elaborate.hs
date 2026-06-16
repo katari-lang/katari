@@ -25,7 +25,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (GenericParameterInfo (..), genericParameterNames)
+import Katari.Data.Environment (GenericParameterInformation (..), GenericParameters (..), orderedParameters)
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId, TypeResolution (..))
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
@@ -42,16 +42,20 @@ import Katari.Error (ApplicationArityErrorInfo (..), CompilerError (..), KindErr
 -- to expand. The body is kept raw — not pre-elaborated — so expansion under a fresh argument
 -- substitution is a plain recursive 'elaborate'.
 data SynonymSignature = SynonymSignature
-  { genericParameters :: List GenericParameterInfo,
+  { genericParameters :: GenericParameters,
     body :: SyntacticTypeExpression Identified
   }
 
 -- | Everything elaboration consults. The three signature maps are the read-only registry of nominal
 -- declarations; 'substitution' and 'visitingSynonyms' change as synonym expansion descends.
 data ElaborateContext = ElaborateContext
-  { dataSignatures :: Map QualifiedName (List GenericParameterInfo),
-    requestSignatures :: Map QualifiedName (List GenericParameterInfo),
+  { dataSignatures :: Map QualifiedName GenericParameters,
+    requestSignatures :: Map QualifiedName GenericParameters,
     synonymSignatures :: Map QualifiedName SynonymSignature,
+    -- | The declared kind of every in-scope generic, by id. A bare type-name reference no longer
+    -- carries its kind (see 'Katari.Data.Id.TypeResolution'), so a generic leaf is wrapped at the kind
+    -- looked up here. Ids are globally unique, so one flat map covers every declaration's generics.
+    genericKinds :: Map GenericId GenericKind,
     -- | The generic-id substitution in force: a generic name bound here elaborates to its binding
     -- instead of a scheme variable. Empty when elaborating a top-level declaration (its own generics
     -- stay as 'SemanticTypeGeneric' / etc.); extended by synonym expansion.
@@ -64,15 +68,17 @@ data ElaborateContext = ElaborateContext
 -- | A fresh context over a signature registry, with no substitution and nothing being expanded — the
 -- starting point for elaborating a top-level declaration's annotations.
 emptyContext ::
-  Map QualifiedName (List GenericParameterInfo) ->
-  Map QualifiedName (List GenericParameterInfo) ->
+  Map QualifiedName GenericParameters ->
+  Map QualifiedName GenericParameters ->
   Map QualifiedName SynonymSignature ->
+  Map GenericId GenericKind ->
   ElaborateContext
-emptyContext dataSignatures requestSignatures synonymSignatures =
+emptyContext dataSignatures requestSignatures synonymSignatures genericKinds =
   ElaborateContext
     { dataSignatures = dataSignatures,
       requestSignatures = requestSignatures,
       synonymSignatures = synonymSignatures,
+      genericKinds = genericKinds,
       substitution = mempty,
       visitingSynonyms = mempty
     }
@@ -246,9 +252,17 @@ elaborateNameApplied :: TypeNameNode Identified -> List (SyntacticTypeExpression
 elaborateNameApplied node arguments applicationSpan = case node.typeReference.resolution of
   -- The identifier already reported the undefined name (K2xxx); stay silent.
   Nothing -> pure Nothing
-  Just (TypeResolutionGenericType genericId) -> elaborateGeneric node genericId (SemanticGenericArgumentType (SemanticTypeGeneric genericId)) arguments
-  Just (TypeResolutionGenericEffect genericId) -> elaborateGeneric node genericId (SemanticGenericArgumentEffect (SemanticEffectGeneric genericId)) arguments
-  Just (TypeResolutionGenericAttribute genericId) -> elaborateGeneric node genericId (SemanticGenericArgumentAttribute (SemanticAttributeGeneric genericId)) arguments
+  Just (TypeResolutionGeneric genericId) -> do
+    -- The identifier resolves a name to a generic id without committing to a kind (a bare reference
+    -- cannot tell type / effect / attribute apart). Recover the kind from the declared-kind map and
+    -- wrap the scheme variable accordingly. A missing entry should not arise for an in-scope generic;
+    -- default to a type rather than fail.
+    genericKinds <- asks (.genericKinds)
+    let schemeVariable = case Map.findWithDefault GenericKindType genericId genericKinds of
+          GenericKindType -> SemanticGenericArgumentType (SemanticTypeGeneric genericId)
+          GenericKindEffect -> SemanticGenericArgumentEffect (SemanticEffectGeneric genericId)
+          GenericKindAttribute -> SemanticGenericArgumentAttribute (SemanticAttributeGeneric genericId)
+    elaborateGeneric node genericId schemeVariable arguments
   Just (TypeResolutionQualifiedName qualifiedName) -> elaborateQualified qualifiedName arguments applicationSpan
 
 -- | A generic name resolves to its binding (when a synonym expansion bound it) or the scheme variable
@@ -284,10 +298,10 @@ elaborateQualified qualifiedName arguments applicationSpan = do
 -- | Zip declared parameters with positional arguments (arity-checked), elaborating each at its
 -- parameter's kind. The result is keyed by parameter name, the form 'SemanticTypeData' /
 -- 'SemanticEffectRequest' carry.
-elaborateNamedArguments :: QualifiedName -> List GenericParameterInfo -> List (SyntacticTypeExpression Identified) -> SourceSpan -> Elaborate (Maybe (Map Text SemanticGenericArgument))
+elaborateNamedArguments :: QualifiedName -> GenericParameters -> List (SyntacticTypeExpression Identified) -> SourceSpan -> Elaborate (Maybe (Map Text SemanticGenericArgument))
 elaborateNamedArguments qualifiedName parameters arguments applicationSpan = do
   maybeArguments <- elaborateArgumentList (renderQualifiedName qualifiedName) parameters arguments applicationSpan
-  pure $ Map.fromList . zip (genericParameterNames parameters) <$> maybeArguments
+  pure $ Map.fromList . zip parameters.parameterNames <$> maybeArguments
 
 -- | Expand a synonym: bind its parameters to the elaborated arguments and elaborate its raw body
 -- under that substitution, guarding against (mutual) recursion with 'visitingSynonyms'.
@@ -301,7 +315,7 @@ elaborateSynonym qualifiedName synonym arguments applicationSpan = do
       case maybeArguments of
         Nothing -> pure Nothing
         Just elaborated -> do
-          let binding = Map.fromList (zip (map (.genericId) synonym.genericParameters) elaborated)
+          let binding = Map.fromList (zip [info.genericId | (_, info) <- orderedParameters synonym.genericParameters] elaborated)
           local
             ( \context ->
                 context
@@ -313,15 +327,17 @@ elaborateSynonym qualifiedName synonym arguments applicationSpan = do
 
 -- | The shared positional-argument elaboration: arity-check, then elaborate each argument coerced to
 -- its parameter's kind. 'Nothing' only on an arity mismatch (already reported).
-elaborateArgumentList :: Text -> List GenericParameterInfo -> List (SyntacticTypeExpression Identified) -> SourceSpan -> Elaborate (Maybe (List SemanticGenericArgument))
+elaborateArgumentList :: Text -> GenericParameters -> List (SyntacticTypeExpression Identified) -> SourceSpan -> Elaborate (Maybe (List SemanticGenericArgument))
 elaborateArgumentList headLabel parameters arguments applicationSpan
-  | length arguments /= length parameters =
+  | length arguments /= length ordered =
       Nothing
         <$ reportTypeError
           applicationSpan
-          (TypeErrorApplicationArity (ApplicationArityErrorInfo {head = headLabel, expected = length parameters, actual = length arguments}))
+          (TypeErrorApplicationArity (ApplicationArityErrorInfo {head = headLabel, expected = length ordered, actual = length arguments}))
   | otherwise =
-      Just <$> zipWithM (\parameter argument -> requireArgumentKind (sourceSpanOf argument) parameter.kind =<< elaborate argument) parameters arguments
+      Just <$> zipWithM (\(_, parameter) argument -> requireArgumentKind (sourceSpanOf argument) parameter.kind =<< elaborate argument) ordered arguments
+  where
+    ordered = orderedParameters parameters
 
 -- | The @array@ / @record@ type constructors, applied to their one element type.
 elaborateApplication :: TypeApplicationTypeNode Identified -> Elaborate (Maybe SemanticGenericArgument)

@@ -1,16 +1,15 @@
 -- | The Identifier pass resolves every name reference in a 'Parsed' module against the names in
--- scope, producing an 'Identified' module (each reference carries a @Just@ resolution, or @Nothing@
--- when it could not be resolved). This module is the entry point and the top-level orchestration:
--- the export scan, import resolution, the top-level scope it assembles, and the declaration dispatch.
--- Expressions / statements / types / patterns are resolved in the @Katari.Identifier.*@ submodules,
--- over the monad in "Katari.Identifier.Monad".
+-- scope, producing an 'Identified' module (each reference carries 'Just' its resolution, or 'Nothing'
+-- when unresolved). This module is the entry point and orchestration: the export scan, import
+-- resolution, the top-level scope, and declaration dispatch. Expressions, statements, types, and
+-- patterns are resolved in the @Katari.Identifier.*@ submodules over the monad in
+-- "Katari.Identifier.Monad".
 --
--- Resolution is per-module and order-independent at the top level: 'scanExports' yields every
--- module's interface up front, so 'identifyModule' resolves bodies against a fixed import context and
--- tolerates import cycles. Within a module, all top-level names are in scope everywhere (mutual
--- recursion); a name re-introduced in a namespace it already occupies is reported (K2003), but a
--- value and a type may share a name (distinct namespaces). Type-synonym cycles are left for the
--- checker.
+-- Resolution is per-module and order-independent: 'scanExports' yields every module's interface up
+-- front, so 'identifyModule' resolves bodies against a fixed import context and tolerates import
+-- cycles. All of a module's top-level names are in scope throughout it (mutual recursion); a value and
+-- a type may share a name (distinct namespaces), but re-using a name within one namespace is K2003.
+-- Type-synonym cycles are left for the checker.
 module Katari.Identifier where
 
 import Control.Applicative ((<|>))
@@ -34,14 +33,14 @@ import Katari.Identifier.Type (resolveParameterSignature, resolveType, withGener
 -- Export scan
 ---------------------------------------------------------------------------------------------------
 
--- | Project a parsed module's public surface. Import-independent and side-effect-free: a name is
--- exported by virtue of being a top-level declaration, so neither imports nor bodies are consulted.
--- Built from the same 'declarationBindings' the module's own top-level scope is, so the interface and
--- the in-module resolution never disagree. Names are merged per namespace ('mergeExportedSymbol'), so
--- a value and a type that share a name both survive.
+-- | Project a parsed module's public surface: every top-level declaration is exported (imports and
+-- bodies are not consulted, so this is import-independent). Built from the same 'declarationBindings'
+-- as the module's own top-level scope, so the interface and in-module resolution never disagree.
 scanExports :: ModuleName -> Module Parsed -> ModuleInterface
 scanExports moduleName parsedModule =
-  ModuleInterface {exports = Map.fromListWith mergeExportedSymbol [(binding.name, exportedSymbolOf binding) | binding <- concatMap (declarationBindings moduleName) parsedModule.declarations]}
+  ModuleInterface {exports = Map.fromListWith mergeExportedSymbol entries}
+  where
+    entries = [(binding.name, exportedSymbolOf binding) | binding <- concatMap (declarationBindings moduleName) parsedModule.declarations]
 
 -- | Every top-level binding a declaration introduces: its module-qualified resolution and the span of
 -- its defining occurrence, one per namespace it populates. The single source of truth shared by the
@@ -91,11 +90,10 @@ identifyModule importContext moduleName parsedModule =
           stateVariables = Map.empty
         }
 
--- | Assemble the top-level scope (own declarations and imports over the default-imported names),
--- report duplicate top-level names, then resolve every declaration under it. The own and imported
--- names are recorded as symbols visible over the whole module; the default-imported names are in scope
--- for resolution but not recorded (the user's source has no import statement to navigate to, and they
--- resolve through their own defining module's table anyway).
+-- | Assemble the top-level scope (own declarations and imports over the default-import base), report
+-- duplicate top-level names, then resolve every declaration under it. Own and imported names are
+-- recorded as symbols visible over the whole module; the default-import base is not recorded (it has no
+-- import statement to navigate to — see 'defaultImportScope').
 resolveModule :: ImportContext -> Module Parsed -> Identifier IdentifiedModule
 resolveModule importContext parsedModule = do
   moduleName <- currentModuleName
@@ -113,22 +111,17 @@ resolveModule importContext parsedModule = do
             symbolTable = SymbolTable {symbols = symbols}
           }
 
--- | The base resolution scope every module is identified under: the default-import roots, expanded to
--- module (prefix) imports. Each root and every module under it (its @root.@-prefixed descendants, by
--- 'Katari.Data.ModuleName.covers') is brought into scope as a module qualifier by its last segment —
--- so a default import of @primitive@ makes @primitive.add@ resolvable and @primitive.array@ reachable
--- as the qualifier @array@ (hence @array.range@). Nothing is brought in unqualified: every reference
--- into a default-imported module goes through its qualifier, and operators desugar to qualified
--- @primitive.*@ calls (see "Katari.Identifier.Expression"), so no name-opening is needed.
+-- | The base scope every module is identified under: each default-import root and its @root.@-prefixed
+-- descendants (by 'Katari.Data.ModuleName.covers') brought in as a module qualifier keyed by its last
+-- segment — so a default import of @primitive@ makes @primitive.add@ resolvable and @primitive.array@
+-- reachable as the qualifier @array@. Nothing is opened unqualified; every reference goes through a
+-- qualifier (operators desugar to qualified @primitive.*@ calls, see "Katari.Identifier.Expression").
 --
--- Qualifiers are keyed by last segment, so two covered modules sharing a last segment would collide.
--- The covered set is the default-import roots' own descendants — the wired-in stdlib, which is
--- compiler-controlled and kept collision-free by "Katari.StdlibSpec"; a user module cannot enter it
--- (the driver rejects a user module under a reserved namespace, see 'Katari.Stdlib.isReservedModuleName').
--- The fold is over 'Map.keys' (sorted module names), so with collisions ruled out the order is
--- immaterial. The module's own and imported names bind over this base and shadow it. These qualifiers
--- carry no navigable source, so they are installed as the base scope (via 'withScope') rather than
--- recorded as symbols.
+-- Keying by last segment would collide if two covered modules shared one, but the covered set is the
+-- wired-in stdlib — compiler-controlled and kept collision-free by "Katari.StdlibSpec" (a user module
+-- cannot enter a reserved namespace), so the fold order is immaterial. The module's own and imported
+-- names shadow this base. These qualifiers carry no navigable source, so they are the base scope
+-- (via 'withScope') rather than recorded symbols.
 defaultImportScope :: ImportContext -> Scope
 defaultImportScope importContext = foldl' qualify emptyScope coveredModules
   where
@@ -183,12 +176,10 @@ addImportItem moduleName moduleInterface item =
 -- Duplicate top-level names
 ---------------------------------------------------------------------------------------------------
 
--- | Report a duplicate (K2003) once per declaration that re-introduces a name in a namespace it
--- already occupies. Driven by the same per-declaration 'declarationBindings' as the scope and the
--- export scan (no separate classification to drift): each group is one declaration's bindings, keyed
--- by name and namespace. A value and a type may share a name (distinct namespaces), so that is not a
--- duplicate; a request / data redeclared (both namespaces) clashes in both but is reported once per
--- declaration, not once per namespace. Imports and ambient names may be shadowed silently.
+-- | Report K2003 once per declaration that re-introduces a name in a namespace it already occupies.
+-- Each group is one declaration's bindings (the same 'declarationBindings' the scope uses), keyed by
+-- name and namespace: a value and a type may share a name, but a request / data redeclared clashes in
+-- both namespaces yet is reported once. Imports and ambient names may be shadowed silently.
 reportTopLevelDuplicates :: List (List Binding) -> Identifier ()
 reportTopLevelDuplicates = go Set.empty
   where

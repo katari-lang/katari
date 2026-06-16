@@ -1,12 +1,11 @@
 module Katari.Typechecker.EnvironmentSpec (spec) where
 
 import Data.Foldable (toList)
-import Data.List (find)
 import Data.Map qualified as Map
 import Data.Text (Text)
-import Katari.Data.Environment (DataInfo (..), GenericParameterInfo (..), RequestInfo (..), SynonymInfo (..))
+import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), SynonymInformation (..))
 import Katari.Data.ModuleName (ModuleName (..))
-import Katari.Data.NormalizedType (NormalizedType)
+import Katari.Data.NormalizedType (NormalizedKindedType, NormalizedType)
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..))
 import Katari.Data.Variance (Variance (..))
@@ -54,6 +53,18 @@ spec = do
       varianceOfRequest (build "request ask[T]() -> T") "ask" "T" `shouldBe` Just Contravariant
     it "infers covariant for a request parameter" $
       varianceOfRequest (build "request tell[T](message: T) -> null") "tell" "T" `shouldBe` Just Covariant
+
+  describe "buildEnvironment (generic upper bounds)" $ do
+    it "stores a declared upper bound, normalized so equal bound texts agree" $ do
+      -- @integer@ is concrete (no generic ids), so the two declarations' bounds normalize identically
+      -- even though their parameter ids differ — proving the bound is captured and normalized, not dropped.
+      let environment = build "data a[T extends integer](v: T)\ndata b[U extends integer](v: U)"
+      boundOfData environment "a" "T" `shouldBe` boundOfData environment "b" "U"
+    it "distinguishes different declared bounds" $ do
+      let environment = build "data a[T extends integer](v: T)\ndata b[U extends string](v: U)"
+      boundOfData environment "a" "T" `shouldNotBe` boundOfData environment "b" "U"
+    it "leaves an unbounded parameter without a bound" $
+      boundOfData (build "data box[T](value: T)") "box" "T" `shouldBe` Nothing
 
   describe "buildEnvironment (cross-module variance)" $
     it "keeps two modules' generics distinct even when they share a generic id" $ do
@@ -123,33 +134,39 @@ buildDiagnostics = snd . buildWithDiagnostics
 codesOf :: Diagnostics -> [Text]
 codesOf = map (\Located {value = compilerError} -> compilerErrorCode compilerError) . toList
 
-dataInfoOf :: TypeEnvironment -> Text -> Maybe (DataInfo NormalizedType)
+dataInfoOf :: TypeEnvironment -> Text -> Maybe DataInformation
 dataInfoOf environment name = Map.lookup (qualifiedNameOf name) environment.dataEnvironment
 
 constructorOf :: TypeEnvironment -> Text -> Maybe NormalizedType
 constructorOf environment name = (.constructor) <$> dataInfoOf environment name
 
 dataParameterNames :: TypeEnvironment -> Text -> Maybe [Text]
-dataParameterNames environment name = map (.name) . (.genericParameters) <$> dataInfoOf environment name
+dataParameterNames environment name = (\info -> info.genericParameters.parameterNames) <$> dataInfoOf environment name
 
 synonymParameterNames :: TypeEnvironment -> Text -> Maybe [Text]
 synonymParameterNames environment name =
-  map (.name) . (.genericParameters) <$> Map.lookup (qualifiedNameOf name) environment.synonymEnvironment
+  (\info -> info.genericParameters.parameterNames) <$> Map.lookup (qualifiedNameOf name) environment.synonymEnvironment
 
 varianceOfData :: TypeEnvironment -> Text -> Text -> Maybe Variance
 varianceOfData environment dataName parameterName = do
   info <- dataInfoOf environment dataName
-  parameter <- find (\p -> p.name == parameterName) info.genericParameters
+  parameter <- Map.lookup parameterName info.genericParameters.parameterInformation
   pure parameter.variance
+
+boundOfData :: TypeEnvironment -> Text -> Text -> Maybe NormalizedKindedType
+boundOfData environment dataName parameterName = do
+  info <- dataInfoOf environment dataName
+  parameter <- Map.lookup parameterName info.genericParameters.parameterInformation
+  parameter.upperBound
 
 varianceOfDataIn :: TypeEnvironment -> ModuleName -> Text -> Text -> Maybe Variance
 varianceOfDataIn environment moduleName dataName parameterName = do
   info <- Map.lookup (QualifiedName {moduleName = moduleName, name = dataName}) environment.dataEnvironment
-  parameter <- find (\p -> p.name == parameterName) info.genericParameters
+  parameter <- Map.lookup parameterName info.genericParameters.parameterInformation
   pure parameter.variance
 
 varianceOfRequest :: TypeEnvironment -> Text -> Text -> Maybe Variance
 varianceOfRequest environment requestName parameterName = do
   info <- Map.lookup (qualifiedNameOf requestName) environment.requestEnvironment
-  parameter <- find (\p -> p.name == parameterName) info.genericParameters
+  parameter <- Map.lookup parameterName info.genericParameters.parameterInformation
   pure parameter.variance

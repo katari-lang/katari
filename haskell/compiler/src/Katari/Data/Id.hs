@@ -1,11 +1,22 @@
 module Katari.Data.Id where
 
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (ToJSON (..))
+import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName)
 
-newtype GenericId = GenericId Int
+-- | A generic parameter's identity. The raw index is supplied per module (the identifier runs once
+-- per module, resetting the counter), so it is paired with the declaring 'ModuleName' to be globally
+-- unique: the type-level environment and a cross-module SCC check both hold generics from several
+-- modules at once, and a bare per-module index would conflate two modules' parameters that share one.
+data GenericId = GenericId ModuleName Int
   deriving stock (Eq, Ord, Show)
-  deriving newtype (ToJSON, FromJSON)
+
+-- | On the IR wire a generic is identified by its raw index only. Every schema belongs to a single
+-- declaration, so within one callable the index is already unambiguous; the declaring module is
+-- compiler-internal disambiguation the runtime never needs. The @{"$generic": id}@ sentinel and a
+-- callable's @genericBindings@ both serialize through this, so they always agree.
+instance ToJSON GenericId where
+  toJSON (GenericId _ index) = toJSON index
 
 newtype LocalVariableId = LocalVariableId Int
   deriving stock (Eq, Ord, Show)
@@ -15,10 +26,7 @@ data VariableResolution where
   VariableResolutionQualifiedName :: QualifiedName -> VariableResolution
   deriving stock (Eq, Ord, Show)
 
--- | Shared type for type, effect, and attribute resolution
 data TypeResolution where
+  TypeResolutionGeneric :: GenericId -> TypeResolution
   TypeResolutionQualifiedName :: QualifiedName -> TypeResolution
-  TypeResolutionGenericType :: GenericId -> TypeResolution -- [T]
-  TypeResolutionGenericEffect :: GenericId -> TypeResolution -- [effect T]
-  TypeResolutionGenericAttribute :: GenericId -> TypeResolution -- [attribute T]
   deriving stock (Eq, Ord, Show)
