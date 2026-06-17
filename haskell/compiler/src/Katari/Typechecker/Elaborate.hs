@@ -45,6 +45,7 @@ data SynonymSignature = SynonymSignature
   { genericParameters :: GenericParameters,
     body :: SyntacticTypeExpression Identified
   }
+  deriving (Eq, Show)
 
 -- | Everything elaboration consults. The three signature maps are the read-only registry of nominal
 -- declarations; 'substitution' and 'visitingSynonyms' change as the in-scope generics and synonym
@@ -63,6 +64,7 @@ data ElaborateContext = ElaborateContext
     -- looping.
     visitingSynonyms :: Set QualifiedName
   }
+  deriving (Eq, Show)
 
 -- | A fresh context over a signature registry, with nothing in scope and nothing being expanded —
 -- the starting point before 'withOwnGenerics' brings a declaration's generics into scope.

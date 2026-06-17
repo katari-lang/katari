@@ -3,7 +3,8 @@
 -- expression / pattern is the denormalized semantic type of that node.
 --
 -- The public entry points are 'synthExpression' / 'checkExpression' / 'synthBlock' / 'checkBlock' /
--- 'walkStatements' / 'checkPattern' / 'synthAgent' / 'buildAgentSeed' / 'checkAgentBody'.
+-- 'walkStatements' / 'checkPattern' / 'synthAgent' / 'prepareAgent' / 'seedAgentType' /
+-- 'checkAgentBody'.
 -- Convenience wrappers ('synthExpressionType', 'synthAgentType') drop the typed AST and yield just
 -- the normalized type — used by tests that only need the type-level result.
 module Katari.Typechecker.Check where
@@ -12,7 +13,7 @@ import Control.Monad (foldM, unless, when, zipWithM)
 import Control.Monad.RWS.Class (asks, tell)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
@@ -21,11 +22,20 @@ import Katari.Data.Environment (DataInformation (..), GenericParameterInformatio
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
 import Katari.Data.NormalizedType
-import Katari.Data.QualifiedName (QualifiedName (..))
+import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticType)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Diagnostics (diagnosticAt)
-import Katari.Error (CompilerError (..), MalformedTypeErrorInfo (..), TypeError (..))
+import Katari.Error
+  ( ApplicationArityErrorInfo (..),
+    CompilerError (..),
+    ExpectedShapeErrorInfo (..),
+    MalformedTypeErrorInfo (..),
+    MisplacedJumpErrorInfo (..),
+    MissingAnnotationErrorInfo (..),
+    TypeError (..),
+  )
+import Katari.Panic (panic)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
@@ -215,18 +225,7 @@ runLetStatement letStmt rest continuation = case letStmt.pattern of
                     sourceSpan = letStmt.sourceSpan
                   }
           pure (result, StatementLet typedLetStmt : restTyped)
-    _ -> do
-      reportNotYetSupported (sourceSpanOf letStmt) "Variable in `let` must resolve to a local"
-      (typedValue, valueType) <- synthExpression letStmt.value
-      (typedPattern, _, _) <- checkPattern letStmt.pattern valueType
-      (result, restTyped) <- walkStatements rest continuation
-      let typedLetStmt =
-            LetStatement
-              { pattern = typedPattern,
-                value = typedValue,
-                sourceSpan = letStmt.sourceSpan
-              }
-      pure (result, StatementLet typedLetStmt : restTyped)
+    _ -> panic "runLetStatement: let-bound variable is not resolved to a local"
   otherPattern -> do
     (typedValue, valueType) <- synthExpression letStmt.value
     (typedPattern, _, bindings) <- checkPattern otherPattern valueType
@@ -252,12 +251,7 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
       withLocal localId LocalBinding {localType = agentType} $
         walkStatements rest continuation
     pure (result, StatementAgent typedDeclaration : restTyped)
-  _ -> do
-    reportNotYetSupported declaration.sourceSpan "Local agent must resolve to a local variable"
-    (result, restTyped) <- walkStatements rest continuation
-    -- Best-effort: still type-check the declaration's body and emit the typed declaration.
-    (typedDeclaration, _) <- synthAgent declaration
-    pure (result, StatementAgent typedDeclaration : restTyped)
+  _ -> panic "runLocalAgentStatement: local agent is not resolved to a local"
 
 ------------------------------------------------------------------------------------------------
 -- @use@ statement
@@ -271,11 +265,14 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 
 handleUseStatement :: UseStatement Identified -> Checker (UseStatement Typed)
 handleUseStatement useStmt = do
-  binderInfo <- extractUseBinder useStmt.binder useStmt.sourceSpan
-  let bindingType = maybe nullType snd binderInfo
-      bindings = case binderInfo of
-        Just (localId, valueType) -> [(localId, LocalBinding {localType = valueType})]
-        Nothing -> []
+  -- The binder declares the continuation's value type A (required per Q1); without a binder the
+  -- continuation receives null.
+  (bindingType, typedBinder, bindings) <- case useStmt.binder of
+    Nothing -> pure (nullType, Nothing, [])
+    Just patternNode -> do
+      (declaredType, typedPattern, binderBindings) <-
+        checkAnnotatedBinder "`use` binder requires an explicit type annotation" patternNode
+      pure (declaredType, Just typedPattern, binderBindings)
   contexts <- asks (.jumps)
   let resultType = fromMaybe topType contexts.returnTarget
   (inferredContinuationEffect, typedBody) <-
@@ -301,14 +298,7 @@ handleUseStatement useStmt = do
     Just (_, function) -> do
       runNormalizer useStmt.sourceSpan (subtype providerExpectedArgument function.argumentType)
       emitEffect useStmt.sourceSpan function.effect
-    Nothing ->
-      reportNotYetSupported useStmt.sourceSpan "`use` provider must be a callable agent type"
-  -- Retag the binder pattern (if any) to Typed by re-running checkPattern against the binder type.
-  typedBinder <- case useStmt.binder of
-    Nothing -> pure Nothing
-    Just patternNode -> do
-      (typedPat, _, _) <- checkPattern patternNode bindingType
-      pure (Just typedPat)
+    Nothing -> reportExpectedShape useStmt.sourceSpan "a callable agent" providerType
   pure
     UseStatement
       { binder = typedBinder,
@@ -316,27 +306,6 @@ handleUseStatement useStmt = do
         body = typedBody,
         sourceSpan = useStmt.sourceSpan
       }
-
-extractUseBinder ::
-  Maybe (Pattern Identified) ->
-  SourceSpan ->
-  Checker (Maybe (LocalVariableId, NormalizedType))
-extractUseBinder Nothing _ = pure Nothing
-extractUseBinder (Just patternNode) sourceSpan = case patternNode of
-  PatternVariable variablePattern ->
-    case (variablePattern.variableReference.resolution, variablePattern.typeAnnotation) of
-      (Just (VariableResolutionLocalVariable localId), Just annotation) -> do
-        valueType <- elaborateAndNormalizeType annotation
-        pure (Just (localId, valueType))
-      (Just (VariableResolutionLocalVariable localId), Nothing) -> do
-        reportNotYetSupported sourceSpan "`let x = use ...` requires an explicit type annotation on x (Q1)"
-        pure (Just (localId, bottomType))
-      _ -> do
-        reportNotYetSupported sourceSpan "`use` binder must resolve to a local variable"
-        pure Nothing
-  _ -> do
-    reportNotYetSupported sourceSpan "Pattern destructuring in `use` binder is not yet supported"
-    pure Nothing
 
 ------------------------------------------------------------------------------------------------
 -- Per-expression synthesis (produces Typed AST + NormalizedType)
@@ -371,16 +340,10 @@ synthVariableExpression expression = do
       maybeBinding <- asks (\environment -> Map.lookup localId environment.locals)
       case maybeBinding of
         Just binding -> pure binding.localType
-        Nothing -> do
-          reportNotYetSupported expression.sourceSpan "Local variable is not in scope (checker invariant)"
-          pure bottomType
-    Just (VariableResolutionQualifiedName qualifiedName) -> do
-      maybeValue <- asks (\environment -> Map.lookup qualifiedName environment.valueEnvironment)
-      case maybeValue of
-        Just info -> pure info.valueType
-        Nothing -> do
-          reportNotYetSupported expression.sourceSpan ("Top-level value not yet registered: " <> qualifiedName.name)
-          pure bottomType
+        Nothing -> panic "synthVariableExpression: resolved local variable is not in scope"
+    Just (VariableResolutionQualifiedName qualifiedName) -> lookupTopLevelValue expression.sourceSpan qualifiedName
+    -- The identifier already reported an undefined name (K2001); synthesize to bottom so the
+    -- surrounding context still produces a shape.
     Nothing -> pure bottomType
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -399,13 +362,8 @@ synthQualifiedReferenceExpression ::
   Checker (Expression Typed, NormalizedType)
 synthQualifiedReferenceExpression expression = do
   nt <- case expression.variableReference.resolution of
-    Just (VariableResolutionQualifiedName qualifiedName) -> do
-      maybeValue <- asks (\environment -> Map.lookup qualifiedName environment.valueEnvironment)
-      case maybeValue of
-        Just info -> pure info.valueType
-        Nothing -> do
-          reportNotYetSupported expression.sourceSpan ("Top-level value not yet registered: " <> qualifiedName.name)
-          pure bottomType
+    Just (VariableResolutionQualifiedName qualifiedName) -> lookupTopLevelValue expression.sourceSpan qualifiedName
+    -- The identifier already reported the failure; synthesize to bottom.
     _ -> pure bottomType
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -523,7 +481,7 @@ synthFieldAccessExpression expression = do
         Just field -> pure field.normalizedType
         Nothing -> pure normalizedObject.rest
     _ -> do
-      reportNotYetSupported expression.sourceSpan "Field access on a non-object type"
+      reportExpectedShape expression.sourceSpan "an object" objectType
       pure bottomType
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -598,9 +556,7 @@ synthCallExpression expression = do
   (typedCallee, calleeType) <- synthExpression expression.callee
   case extractFunction calleeType of
     Nothing -> do
-      reportNotYetSupported
-        expression.sourceSpan
-        "Callee is not a single function type (multi-layer, generic, or non-function callees are not yet supported)"
+      reportExpectedShape expression.sourceSpan "a callable agent" calleeType
       typedArgs <- traverse retagCallArgument expression.arguments
       semantic <- denormalizeAt expression.sourceSpan bottomType
       pure
@@ -731,11 +687,11 @@ collectLayerAttributes layer =
       collectDataAttributes layer.dataLayer
     ]
 
+-- | A function value's observable privacy flows only from what it can produce — its result. The
+-- argument is contravariant (the caller supplies it), so a private parameter does not make a pure
+-- call's result private and must not be collected.
 collectFunctionAttributes :: NormalizedFunction -> NormalizedAttribute
-collectFunctionAttributes function =
-  joinAttribute
-    (collectAttributeUnion function.argumentType)
-    (collectAttributeUnion function.returnType)
+collectFunctionAttributes function = collectAttributeUnion function.returnType
 
 collectSequenceAttributes :: NormalizedSequence -> NormalizedAttribute
 collectSequenceAttributes normalizedSequence =
@@ -871,7 +827,7 @@ checkReturnStatement returnStmt = do
   typedValue <- case contexts.returnTarget of
     Just target -> checkExpression returnStmt.value target
     Nothing -> do
-      reportNotYetSupported returnStmt.sourceSpan "`return` is only allowed inside an agent body"
+      reportMisplacedJump returnStmt.sourceSpan "return" "an agent body"
       (typed, _) <- synthExpression returnStmt.value
       pure typed
   pure ReturnStatement {value = typedValue, sourceSpan = returnStmt.sourceSpan}
@@ -887,7 +843,7 @@ checkForNextStatement forNextStmt = do
       typedModifiers <- checkModifiers forNextStmt.modifiers
       pure (typedValue, typedModifiers)
     [] -> do
-      reportNotYetSupported forNextStmt.sourceSpan "`next` outside a `for` body"
+      reportMisplacedJump forNextStmt.sourceSpan "next" "a `for` body"
       (typed, _) <- synthExpression forNextStmt.value
       typedModifiers <- traverse retagModifier forNextStmt.modifiers
       pure (typed, typedModifiers)
@@ -903,12 +859,13 @@ checkForBreakStatement forBreakStmt = do
   contexts <- asks (.jumps)
   typedValue <- case contexts.forContexts of
     (frame : _) -> do
+      -- A `break` value is the loop's early-exit result, checked against the frame's break-result
+      -- type; it is not a `next` element, so it must not feed the element accumulator.
       (typed, valueType) <- synthExpression forBreakStmt.value
       runNormalizer forBreakStmt.sourceSpan (subtype valueType frame.breakResultType)
-      emitForNextType forBreakStmt.sourceSpan valueType
       pure typed
     [] -> do
-      reportNotYetSupported forBreakStmt.sourceSpan "`break` outside a `for` body"
+      reportMisplacedJump forBreakStmt.sourceSpan "break" "a `for` body"
       (typed, _) <- synthExpression forBreakStmt.value
       pure typed
   pure ForBreakStatement {value = typedValue, sourceSpan = forBreakStmt.sourceSpan}
@@ -925,6 +882,10 @@ emitEffect sourceSpan effectToEmit = do
   joined <- runNormalizer sourceSpan (union current effectToEmit)
   setEffectAccumulator joined
 
+-- | Check @with x = e@ modifiers against the state variable's type. The identifier resolves every
+-- modifier target to an enclosing @for@ / handler state variable (K2007 covers the rest), and that
+-- variable is in scope while its body is walked, so an unresolved or out-of-scope target here is a
+-- compiler bug.
 checkModifiers :: List (Modifier Identified) -> Checker (List (Modifier Typed))
 checkModifiers = traverse checkOneModifier
   where
@@ -941,26 +902,8 @@ checkModifiers = traverse checkOneModifier
                   value = typedValue,
                   sourceSpan = modifier.sourceSpan
                 }
-          Nothing -> do
-            reportNotYetSupported modifier.sourceSpan "Modifier target is not a state variable in scope"
-            (typed, _) <- synthExpression modifier.value
-            pure
-              Modifier
-                { name = modifier.name,
-                  variableReference = retagReference modifier.variableReference,
-                  value = typed,
-                  sourceSpan = modifier.sourceSpan
-                }
-      _ -> do
-        reportNotYetSupported modifier.sourceSpan "Modifier target must resolve to a state variable"
-        (typed, _) <- synthExpression modifier.value
-        pure
-          Modifier
-            { name = modifier.name,
-              variableReference = retagReference modifier.variableReference,
-              value = typed,
-              sourceSpan = modifier.sourceSpan
-            }
+          Nothing -> panic "checkModifiers: modifier target local is not in scope"
+      _ -> panic "checkModifiers: modifier target is not resolved to a local variable"
 
 retagModifier :: Modifier Identified -> Checker (Modifier Typed)
 retagModifier modifier = do
@@ -979,7 +922,7 @@ checkBreakStatement breakStmt = do
   typedValue <- case contexts.handleContexts of
     (frame : _) -> checkExpression breakStmt.value frame.handlerResultType
     [] -> do
-      reportNotYetSupported breakStmt.sourceSpan "`break` outside a request handler body"
+      reportMisplacedJump breakStmt.sourceSpan "break" "a request handler body"
       (typed, _) <- synthExpression breakStmt.value
       pure typed
   pure BreakStatement {value = typedValue, sourceSpan = breakStmt.sourceSpan}
@@ -993,7 +936,7 @@ checkNextStatement nextStmt = do
       typedModifiers <- checkModifiers nextStmt.modifiers
       pure (typedValue, typedModifiers)
     [] -> do
-      reportNotYetSupported nextStmt.sourceSpan "`next` outside a request handler body"
+      reportMisplacedJump nextStmt.sourceSpan "next" "a request handler body"
       (typed, _) <- synthExpression nextStmt.value
       typedModifiers <- traverse retagModifier nextStmt.modifiers
       pure (typed, typedModifiers)
@@ -1069,6 +1012,11 @@ checkPattern pattern scrutinee = case pattern of
   PatternTypeFilter typeFilterPattern -> do
     matchedType <- elaborateAndNormalizeType typeFilterPattern.matchedType
     (typedInner, innerCover, innerBindings) <- checkPattern typeFilterPattern.inner matchedType
+    -- The cover (what this arm matches) is @matchedType ∧ innerCover@. 'intersect' under-approximates
+    -- the meet on generics, which is exactly the sound direction here: covers are used only for the
+    -- exhaustiveness lower bound @scrutinee <: ⋃ covers@, never to narrow a bound variable (the inner
+    -- pattern is checked against @matchedType@ directly above), so the Normalizer's narrowing caveat
+    -- does not apply.
     cover <- runNormalizer (sourceSpanOf typeFilterPattern) (intersect matchedType innerCover)
     semantic <- denormalizeAt typeFilterPattern.sourceSpan cover
     pure
@@ -1137,6 +1085,7 @@ checkPattern pattern scrutinee = case pattern of
           substitution <-
             buildGenericSubstitution
               constructorPattern.sourceSpan
+              (renderQualifiedName qualifiedName)
               dataInfo.genericParameters
               constructorPattern.genericArguments
           instantiatedConstructor <-
@@ -1171,33 +1120,14 @@ checkPattern pattern scrutinee = case pattern of
               cover,
               allBindings
             )
-        Nothing -> do
-          reportNotYetSupported constructorPattern.sourceSpan "Data type not registered in the type environment (internal)"
-          fallbackConstructorPattern constructorPattern topType []
-    _ -> do
-      reportNotYetSupported constructorPattern.sourceSpan "Constructor pattern must reference a data type"
-      fallbackConstructorPattern constructorPattern topType []
+        -- The identifier resolved this constructor and the env-build registered every data type, so
+        -- a resolved constructor name absent from the data environment is a compiler bug.
+        Nothing -> panic ("checkPattern: data type not registered: " <> renderQualifiedName qualifiedName)
+    _ -> panic "checkPattern: constructor pattern is not resolved to a data type"
   where
     bindingsFor maybeLocal bindingType = case maybeLocal of
       Just localId -> [(localId, LocalBinding {localType = bindingType})]
       Nothing -> []
-    fallbackConstructorPattern node cover bindings = do
-      semantic <- denormalizeAt node.sourceSpan cover
-      pure
-        ( PatternConstructor
-            ConstructorPattern
-              { moduleQualifier = retagModuleQualifier <$> node.moduleQualifier,
-                name = node.name,
-                constructorReference = retagReference node.constructorReference,
-                genericArguments = retagSyntacticTypeExpression <$> node.genericArguments,
-                instantiation = mempty,
-                fields = [],
-                sourceSpan = node.sourceSpan,
-                typeOf = semantic
-              },
-          cover,
-          bindings
-        )
 
 extractTupleElementTypes :: NormalizedType -> Int -> List NormalizedType
 extractTupleElementTypes scrutinee count = case scrutinee.baseType of
@@ -1239,17 +1169,12 @@ synthMatchExpression :: MatchExpression Identified -> Checker (Expression Typed,
 synthMatchExpression expression = do
   (typedSubject, scrutineeType) <- synthExpression expression.subject
   results <- traverse (processCase scrutineeType) expression.cases
-  nt <- case results of
-    [] -> do
-      reportNotYetSupported expression.sourceSpan "Match expression must have at least one case"
-      pure bottomType
-    ((firstCover, firstBody, _) : rest) -> do
-      let restCovers = [c | (c, _, _) <- rest]
-          restBodies = [b | (_, b, _) <- rest]
-      unionCover <- foldM combineUnion firstCover restCovers
-      unionBodyType <- foldM combineUnion firstBody restBodies
-      runNormalizer expression.sourceSpan (subtype scrutineeType unionCover)
-      pure unionBodyType
+  -- The arm covers union to a sound lower bound of what the match accepts; exhaustiveness is then
+  -- @scrutinee <: ⋃ covers@. Folding from 'bottomType' makes an empty match (covers union to never)
+  -- fail this check for any inhabited scrutinee, with no special case.
+  unionCover <- foldM combineUnion bottomType [cover | (cover, _, _) <- results]
+  nt <- foldM combineUnion bottomType [body | (_, body, _) <- results]
+  runNormalizer expression.sourceSpan (subtype scrutineeType unionCover)
   let typedCases = [arm | (_, _, arm) <- results]
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -1338,7 +1263,7 @@ extractIterableElementType sourceSpan source = case source.baseType of
       [] -> pure normalizedSequence.rest
       (firstItem : restItems) -> foldM combineUnion firstItem restItems
   _ -> do
-    reportNotYetSupported sourceSpan "`for` source must be a sequence (array or tuple) type"
+    reportExpectedShape sourceSpan "a sequence (array or tuple)" source
     pure bottomType
   where
     combineUnion accumulator next = runNormalizer sourceSpan (union accumulator next)
@@ -1377,9 +1302,7 @@ withVarBindingTyped binding continuation = do
           }
   case maybeLocalId of
     Just localId -> withLocal localId LocalBinding {localType = initialType} (continuation typedBinding)
-    Nothing -> do
-      reportNotYetSupported binding.sourceSpan "Variable binding must resolve to a local"
-      continuation typedBinding
+    Nothing -> panic "withVarBindingTyped: state variable binding is not resolved to a local"
 
 arrayOf :: NormalizedType -> NormalizedType
 arrayOf elementType =
@@ -1409,12 +1332,13 @@ synthHandlerExpression expression = do
   (resultType, residualEffect) <- elaborateHandlerGenerics expression
   (typedVarBindings, (handledNames, typedHandlers)) <-
     withVarBindingsTypedReturning expression.stateVariables $ do
-      (_, results) <-
+      (handlerBodyEffect, results) <-
         withEffectInference $
           traverse (walkRequestHandler resultType residualEffect) expression.handlers
-      let names = mapMaybe fst results
-          typedHs = snd <$> results
-      pure (names, typedHs)
+      -- Every request body runs inside the handler, so the effects it performs must lie within the
+      -- handler's declared residual effect E.
+      runNormalizer expression.sourceSpan (subtype handlerBodyEffect residualEffect)
+      pure (fst <$> results, snd <$> results)
   continuationEffect <-
     foldM (joinRequestIntoEffect expression.sourceSpan) residualEffect handledNames
   let continuationAgent =
@@ -1453,12 +1377,14 @@ synthHandlerExpression expression = do
           (typedPat, _, bs) <- checkPattern binder resultType
           pure (Just typedPat, bs)
         Nothing -> pure (Nothing, [])
-      (_, typedBody) <-
+      (thenEffect, typedBody) <-
         withEffectInference $
           withParameters thenBindings $ do
             (tb, nt) <- synthBlock thenClause.body
             runNormalizer thenClause.sourceSpan (subtype nt resultType)
             pure tb
+      -- The then clause runs as the handler's finalizer, so its effects are also bounded by E.
+      runNormalizer thenClause.sourceSpan (subtype thenEffect residualEffect)
       pure
         ( Just
             ThenClause
@@ -1505,102 +1431,81 @@ elaborateHandlerGenerics expression = case expression.genericArguments of
     resolvedEffect <- elaborateAndNormalizeEffect effectArgument
     pure (resolvedResult, resolvedEffect)
   _ -> do
-    reportNotYetSupported
-      expression.sourceSpan
-      "handler[R, E] requires exactly two generic arguments (Q1: handler generics are explicit)"
+    reportApplicationArity expression.sourceSpan "handler" 2 (length expression.genericArguments)
     pure (bottomType, bottomEffect)
 
+-- | Walk one request handler: instantiate the request's parameter / return type with the handler's
+-- generic arguments, check the handler's parameters accept the request's argument object, then walk
+-- the body. The body's tail is an implicit @break@ to the handler result @R@, so its type must be a
+-- subtype of @R@. Returns the handled request name (for the continuation effect) and the typed node.
 walkRequestHandler ::
   NormalizedType ->
   NormalizedEffect ->
   RequestHandler Identified ->
-  Checker (Maybe QualifiedName, RequestHandler Typed)
-walkRequestHandler resultType residualEffect handler = case handler.typeReference.resolution of
-  Just (TypeResolutionQualifiedName requestName) -> do
-    requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
-    case Map.lookup requestName requestEnv of
-      Just requestInfo -> do
-        substitution <-
-          buildGenericSubstitution
-            handler.sourceSpan
-            requestInfo.genericParameters
-            handler.genericArguments
-        let (rawParam, rawReturn) = requestInfo.request
-        instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution rawParam)
-        instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution rawReturn)
-        (paramObject, paramBindings, typedParams) <- buildParameterScopeTyped handler.parameters
-        runNormalizer handler.sourceSpan (subtype instantiatedParam paramObject)
-        let interceptedArguments =
-              Map.fromList
-                [ (paramName, argument)
-                  | (paramName, info) <- Map.toList requestInfo.genericParameters.parameterInformation,
-                    Just argument <- [Map.lookup info.genericId substitution]
-                ]
-            context =
-              HandleContext
-                { handlerResultType = resultType,
-                  handlerResidualEffect = residualEffect,
-                  handledRequests = Map.singleton requestName interceptedArguments,
-                  currentRequestReturnType = instantiatedReturn
-                }
-        ((typedBlock, _), _) <-
-          pushHandleContext context $
-            withParameters paramBindings $
-              withBodyTypedReturn handler.body
-        let typedHandler =
-              RequestHandler
-                { moduleQualifier = retagModuleQualifier <$> handler.moduleQualifier,
-                  name = handler.name,
-                  typeReference = retagReference handler.typeReference,
-                  genericArguments = retagSyntacticTypeExpression <$> handler.genericArguments,
-                  instantiation = mempty,
-                  parameters = typedParams,
-                  returnType = retagSyntacticTypeExpression <$> handler.returnType,
-                  body = typedBlock,
-                  sourceSpan = handler.sourceSpan
-                }
-        pure (Just requestName, typedHandler)
-      Nothing -> do
-        reportNotYetSupported handler.sourceSpan "Request not registered in the type environment (internal)"
-        fallbackHandler
-  _ -> do
-    reportNotYetSupported handler.sourceSpan "Request handler must reference a request"
-    fallbackHandler
-  where
-    fallbackHandler = do
-      (_, _, typedParams) <- buildParameterScopeTyped handler.parameters
-      (typedBlock, _) <- synthBlock handler.body
-      let typedHandler =
-            RequestHandler
-              { moduleQualifier = retagModuleQualifier <$> handler.moduleQualifier,
-                name = handler.name,
-                typeReference = retagReference handler.typeReference,
-                genericArguments = retagSyntacticTypeExpression <$> handler.genericArguments,
-                instantiation = mempty,
-                parameters = typedParams,
-                returnType = retagSyntacticTypeExpression <$> handler.returnType,
-                body = typedBlock,
-                sourceSpan = handler.sourceSpan
-              }
-      pure (Nothing, typedHandler)
-
--- | Walk the body of a request handler returning the typed block.
-withBodyTypedReturn :: Block Identified -> Checker ((Block Typed, NormalizedType), ())
-withBodyTypedReturn block = do
-  result <- synthBlock block
-  pure (result, ())
+  Checker (QualifiedName, RequestHandler Typed)
+walkRequestHandler resultType residualEffect handler = do
+  requestName <- case handler.typeReference.resolution of
+    Just (TypeResolutionQualifiedName name) -> pure name
+    _ -> panic "walkRequestHandler: request handler is not resolved to a request"
+  requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
+  requestInfo <- case Map.lookup requestName requestEnv of
+    Just info -> pure info
+    Nothing -> panic ("walkRequestHandler: request not registered: " <> renderQualifiedName requestName)
+  substitution <-
+    buildGenericSubstitution
+      handler.sourceSpan
+      (renderQualifiedName requestName)
+      requestInfo.genericParameters
+      handler.genericArguments
+  let (rawParam, rawReturn) = requestInfo.request
+  instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution rawParam)
+  instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution rawReturn)
+  (paramObject, paramBindings, typedParams) <- buildParameterScopeTyped handler.parameters
+  runNormalizer handler.sourceSpan (subtype instantiatedParam paramObject)
+  let interceptedArguments =
+        Map.fromList
+          [ (paramName, argument)
+            | (paramName, info) <- Map.toList requestInfo.genericParameters.parameterInformation,
+              Just argument <- [Map.lookup info.genericId substitution]
+          ]
+      context =
+        HandleContext
+          { handlerResultType = resultType,
+            handlerResidualEffect = residualEffect,
+            handledRequests = Map.singleton requestName interceptedArguments,
+            currentRequestReturnType = instantiatedReturn
+          }
+  (typedBlock, bodyType) <-
+    pushHandleContext context $
+      withParameters paramBindings $
+        synthBlock handler.body
+  runNormalizer handler.sourceSpan (subtype bodyType resultType)
+  let typedHandler =
+        RequestHandler
+          { moduleQualifier = retagModuleQualifier <$> handler.moduleQualifier,
+            name = handler.name,
+            typeReference = retagReference handler.typeReference,
+            genericArguments = retagSyntacticTypeExpression <$> handler.genericArguments,
+            instantiation = mempty,
+            parameters = typedParams,
+            returnType = retagSyntacticTypeExpression <$> handler.returnType,
+            body = typedBlock,
+            sourceSpan = handler.sourceSpan
+          }
+  pure (requestName, typedHandler)
 
 buildGenericSubstitution ::
   SourceSpan ->
+  Text ->
   GenericParameters ->
   List (SyntacticTypeExpression Identified) ->
   Checker (Map GenericId NormalizedKindedType)
-buildGenericSubstitution sourceSpan parameters argumentExpressions = do
+buildGenericSubstitution sourceSpan headName parameters argumentExpressions = do
   let parameterNames = parameters.parameterNames
       parameterInfo = parameters.parameterInformation
   if length parameterNames /= length argumentExpressions
     then do
-      reportNotYetSupported sourceSpan "Wrong number of explicit generic arguments"
+      reportApplicationArity sourceSpan headName (length parameterNames) (length argumentExpressions)
       pure mempty
     else
       Map.fromList . catMaybes
@@ -1649,103 +1554,116 @@ namedObjectType fieldList =
 -- Agent declarations
 ------------------------------------------------------------------------------------------------
 
-synthAgent :: AgentDeclaration Identified -> Checker (AgentDeclaration Typed, NormalizedType)
-synthAgent declaration = do
-  (agentOuterAttribute, declaredAttribute) <- agentAttributes declaration
-  (parameterObject, parameterBindings, typedParams) <- buildParameterScopeTyped declaration.parameters
+-- | Everything an agent's body walk needs that does not depend on the body itself: the outer /
+-- declared attributes, the parameter object type and per-parameter scope, and the elaborated return
+-- / effect annotations. Computed once per agent (also reused across the two-pass cyclic walk) so
+-- parameter annotations are never elaborated — nor their diagnostics emitted — twice.
+data AgentPreparation = AgentPreparation
+  { outerAttribute :: NormalizedAttribute,
+    declaredAttribute :: NormalizedAttribute,
+    parameterObject :: NormalizedType,
+    parameterBindings :: List (LocalVariableId, LocalBinding),
+    typedParameters :: List (ParameterBinding Typed),
+    annotatedReturnType :: Maybe NormalizedType,
+    annotatedEffect :: Maybe NormalizedEffect
+  }
+
+prepareAgent :: AgentDeclaration Identified -> Checker AgentPreparation
+prepareAgent declaration = do
+  (outerAttribute, declaredAttribute) <- agentAttributes declaration
+  (parameterObject, parameterBindings, typedParameters) <- buildParameterScopeTyped declaration.parameters
   annotatedReturnType <- traverse elaborateAndNormalizeType declaration.returnType
   annotatedEffect <- traverse elaborateAndNormalizeEffect declaration.effects
+  pure
+    AgentPreparation
+      { outerAttribute = outerAttribute,
+        declaredAttribute = declaredAttribute,
+        parameterObject = parameterObject,
+        parameterBindings = parameterBindings,
+        typedParameters = typedParameters,
+        annotatedReturnType = annotatedReturnType,
+        annotatedEffect = annotatedEffect
+      }
+
+-- | Build the 'Typed' agent declaration; every field but the parameters and body is a mechanical
+-- retag of the identified declaration.
+assembleTypedAgentDeclaration ::
+  AgentDeclaration Identified ->
+  List (ParameterBinding Typed) ->
+  Block Typed ->
+  AgentDeclaration Typed
+assembleTypedAgentDeclaration declaration typedParameters typedBody =
+  AgentDeclaration
+    { annotation = declaration.annotation,
+      private = declaration.private,
+      name = declaration.name,
+      variableReference = retagReference declaration.variableReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
+      parameters = typedParameters,
+      returnType = retagSyntacticTypeExpression <$> declaration.returnType,
+      effects = retagSyntacticTypeExpression <$> declaration.effects,
+      body = typedBody,
+      sourceSpan = declaration.sourceSpan
+    }
+
+-- | Check one acyclic agent. The annotation policy is optional: a missing return type is
+-- synthesized from the body, a missing effect defaults to the body's inferred effect.
+synthAgent :: AgentDeclaration Identified -> Checker (AgentDeclaration Typed, NormalizedType)
+synthAgent declaration = do
+  preparation <- prepareAgent declaration
   (inferredEffect, (typedBody, bodyReturnType)) <-
-    withEffectInference $ case annotatedReturnType of
-      Just expected -> do
-        typedB <-
-          withWorld declaredAttribute
-            . withParameters parameterBindings
-            . withReturnTarget expected
-            $ checkBlock declaration.body expected
-        pure (typedB, expected)
-      Nothing ->
-        withWorld declaredAttribute
-          . withParameters parameterBindings
-          . withReturnTarget topType
-          $ synthBlock declaration.body
-  finalEffect <- case annotatedEffect of
+    withEffectInference
+      $ withWorld preparation.declaredAttribute
+        . withParameters preparation.parameterBindings
+      $ case preparation.annotatedReturnType of
+        Just expected -> do
+          typedB <- withReturnTarget expected (checkBlock declaration.body expected)
+          pure (typedB, expected)
+        Nothing -> withReturnTarget topType (synthBlock declaration.body)
+  finalEffect <- case preparation.annotatedEffect of
     Just declared -> do
       runNormalizer declaration.sourceSpan (subtype inferredEffect declared)
       pure declared
     Nothing -> pure inferredEffect
-  let typedDeclaration =
-        AgentDeclaration
-          { annotation = declaration.annotation,
-            private = declaration.private,
-            name = declaration.name,
-            variableReference = retagReference declaration.variableReference,
-            genericParameters = retagGenericParameter <$> declaration.genericParameters,
-            parameters = typedParams,
-            returnType = retagSyntacticTypeExpression <$> declaration.returnType,
-            effects = retagSyntacticTypeExpression <$> declaration.effects,
-            body = typedBody,
-            sourceSpan = declaration.sourceSpan
-          }
-  pure (typedDeclaration, assembleAgent agentOuterAttribute parameterObject bodyReturnType finalEffect)
+  pure
+    ( assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody,
+      assembleAgent preparation.outerAttribute preparation.parameterObject bodyReturnType finalEffect
+    )
 
 synthAgentType :: AgentDeclaration Identified -> Checker NormalizedType
 synthAgentType = fmap snd . synthAgent
 
-buildAgentSeed :: AgentDeclaration Identified -> Checker NormalizedType
-buildAgentSeed declaration = do
-  (agentOuterAttribute, _) <- agentAttributes declaration
-  (parameterObject, _, _) <- buildParameterScopeTyped declaration.parameters
-  annotatedReturnType <- traverse elaborateAndNormalizeType declaration.returnType
-  annotatedEffect <- traverse elaborateAndNormalizeEffect declaration.effects
+-- | The seed scheme of one member of a recursive group, from its (required) return / effect
+-- annotations. Takes the member's 'prepareAgent' result so the parameters are not elaborated twice
+-- (the body pass reuses the same preparation).
+seedAgentType :: AgentDeclaration Identified -> AgentPreparation -> Checker NormalizedType
+seedAgentType declaration preparation = do
   when (isNothing declaration.returnType) $
-    reportNotYetSupported
-      declaration.sourceSpan
-      "Return type annotation is required for an agent in a (mutually) recursive group"
+    reportMissingAnnotation declaration.sourceSpan ("agent `" <> declaration.name <> "` in a recursive group requires an explicit return type")
   when (isNothing declaration.effects) $
-    reportNotYetSupported
-      declaration.sourceSpan
-      "Effect annotation is required for an agent in a (mutually) recursive group"
+    reportMissingAnnotation declaration.sourceSpan ("agent `" <> declaration.name <> "` in a recursive group requires an explicit effect annotation")
   pure $
     assembleAgent
-      agentOuterAttribute
-      parameterObject
-      (fromMaybe bottomType annotatedReturnType)
-      (fromMaybe bottomEffect annotatedEffect)
+      preparation.outerAttribute
+      preparation.parameterObject
+      (fromMaybe bottomType preparation.annotatedReturnType)
+      (fromMaybe bottomEffect preparation.annotatedEffect)
 
-checkAgentBody ::
-  AgentDeclaration Identified ->
-  NormalizedType ->
-  Checker (AgentDeclaration Typed)
-checkAgentBody declaration seed = do
-  (_, declaredAttribute) <- agentAttributes declaration
-  (_, parameterBindings, typedParams) <- buildParameterScopeTyped declaration.parameters
-  typedBody <- case extractFunction seed of
-    Just (_, function) -> do
-      (inferredEffect, typedB) <-
-        withEffectInference
-          $ withWorld declaredAttribute
-            . withParameters parameterBindings
-            . withReturnTarget function.returnType
-          $ checkBlock declaration.body function.returnType
-      runNormalizer declaration.sourceSpan (subtype inferredEffect function.effect)
-      pure typedB
-    Nothing -> do
-      (typedB, _) <- synthBlock declaration.body
-      pure typedB
-  pure
-    AgentDeclaration
-      { annotation = declaration.annotation,
-        private = declaration.private,
-        name = declaration.name,
-        variableReference = retagReference declaration.variableReference,
-        genericParameters = retagGenericParameter <$> declaration.genericParameters,
-        parameters = typedParams,
-        returnType = retagSyntacticTypeExpression <$> declaration.returnType,
-        effects = retagSyntacticTypeExpression <$> declaration.effects,
-        body = typedBody,
-        sourceSpan = declaration.sourceSpan
-      }
+-- | Check one recursive-group member's body against its seed scheme (built by 'seedAgentType' and
+-- carried as the function extracted from that seed), reusing its 'prepareAgent' result.
+checkAgentBody :: AgentDeclaration Identified -> AgentPreparation -> NormalizedType -> Checker (AgentDeclaration Typed)
+checkAgentBody declaration preparation seed = do
+  function <- case extractFunction seed of
+    Just (_, fn) -> pure fn
+    Nothing -> panic "checkAgentBody: agent seed is not a function type"
+  (inferredEffect, typedBody) <-
+    withEffectInference
+      $ withWorld preparation.declaredAttribute
+        . withParameters preparation.parameterBindings
+        . withReturnTarget function.returnType
+      $ checkBlock declaration.body function.returnType
+  runNormalizer declaration.sourceSpan (subtype inferredEffect function.effect)
+  pure (assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody)
 
 agentAttributes ::
   AgentDeclaration Identified ->
@@ -1779,7 +1697,34 @@ assembleAgent agentOuterAttribute parameterObject returnType effect =
       attribute = agentOuterAttribute
     }
 
--- | Build the parameter object type, per-parameter bindings, and per-parameter Typed nodes.
+-- | The declared type of a binding-site pattern (an agent parameter, a @use@ binder): a variable /
+-- wildcard pattern's annotation, or a type filter's matched type. Other shapes (a bare tuple /
+-- record destructuring) carry no annotation of their own, so the binder must wrap them in a type
+-- filter — @label => ((x, y) : T)@.
+patternTypeAnnotation :: Pattern Identified -> Maybe (SyntacticTypeExpression Identified)
+patternTypeAnnotation = \case
+  PatternVariable variablePattern -> variablePattern.typeAnnotation
+  PatternWildcard wildcardPattern -> wildcardPattern.typeAnnotation
+  PatternTypeFilter typeFilterPattern -> Just typeFilterPattern.matchedType
+  _ -> Nothing
+
+-- | Check a binding-site pattern that must declare its own type. 'checkPattern' against 'topType'
+-- both produces the typed pattern + bindings (destructuring included) and computes the pattern's
+-- cover, which — because the pattern pins its type via an annotation — is exactly the declared type.
+-- A missing annotation is reported and the cover degrades to 'topType'.
+checkAnnotatedBinder ::
+  Text ->
+  Pattern Identified ->
+  Checker (NormalizedType, Pattern Typed, List (LocalVariableId, LocalBinding))
+checkAnnotatedBinder reason pattern = do
+  when (isNothing (patternTypeAnnotation pattern)) $
+    reportMissingAnnotation (sourceSpanOf pattern) reason
+  (typedPattern, declaredType, bindings) <- checkPattern pattern topType
+  pure (declaredType, typedPattern, bindings)
+
+-- | Build the parameter object type, per-parameter bindings, and per-parameter Typed nodes. Each
+-- parameter's @label => pattern@ is checked as an annotated binder, so destructuring parameters are
+-- supported uniformly with simple @label : T@ ones.
 buildParameterScopeTyped ::
   List (ParameterBinding Identified) ->
   Checker
@@ -1797,50 +1742,28 @@ buildParameterScopeTyped parameters = do
                   NormalizedObject
                     { fields =
                         Map.fromList
-                          [ (name, NormalizedFieldInformation {normalizedType = normalizedType, optional = False})
-                            | (name, _, normalizedType, _) <- entries
+                          [ (name, NormalizedFieldInformation {normalizedType = parameterType, optional = False})
+                            | (name, parameterType, _, _) <- entries
                           ],
                       rest = unknownType
                     }
             }
-      bindings =
-        [ (localId, LocalBinding {localType = normalizedType})
-          | (_, Just localId, normalizedType, _) <- entries
-        ]
+      bindings = concat [bs | (_, _, bs, _) <- entries]
       typedParameters = [tp | (_, _, _, tp) <- entries]
   pure (parameterObject, bindings, typedParameters)
   where
-    buildOne parameter = case parameter.bindPattern of
-      PatternVariable variablePattern ->
-        case (variablePattern.variableReference.resolution, variablePattern.typeAnnotation) of
-          (Just (VariableResolutionLocalVariable localId), Just annotation) -> do
-            parameterType <- elaborateAndNormalizeType annotation
-            (typedPattern, _, _) <- checkPattern parameter.bindPattern parameterType
-            let typedBinding = mkTypedParameter parameter typedPattern
-            pure (parameter.name, Just localId, parameterType, typedBinding)
-          (Just (VariableResolutionLocalVariable localId), Nothing) -> do
-            reportNotYetSupported parameter.sourceSpan "Agent parameter requires a type annotation"
-            (typedPattern, _, _) <- checkPattern parameter.bindPattern bottomType
-            let typedBinding = mkTypedParameter parameter typedPattern
-            pure (parameter.name, Just localId, bottomType, typedBinding)
-          _ -> do
-            reportNotYetSupported parameter.sourceSpan "Agent parameter must resolve to a local variable"
-            (typedPattern, _, _) <- checkPattern parameter.bindPattern bottomType
-            let typedBinding = mkTypedParameter parameter typedPattern
-            pure (parameter.name, Nothing, bottomType, typedBinding)
-      _ -> do
-        reportNotYetSupported parameter.sourceSpan "Pattern destructuring in agent parameters is not yet supported"
-        (typedPattern, _, _) <- checkPattern parameter.bindPattern bottomType
-        let typedBinding = mkTypedParameter parameter typedPattern
-        pure (parameter.name, Nothing, bottomType, typedBinding)
-    mkTypedParameter parameter typedPattern =
-      ParameterBinding
-        { annotation = parameter.annotation,
-          name = parameter.name,
-          labelReference = retagReference parameter.labelReference,
-          bindPattern = typedPattern,
-          sourceSpan = parameter.sourceSpan
-        }
+    buildOne parameter = do
+      (parameterType, typedPattern, bindings) <-
+        checkAnnotatedBinder ("agent parameter `" <> parameter.name <> "` requires a type annotation") parameter.bindPattern
+      let typedBinding =
+            ParameterBinding
+              { annotation = parameter.annotation,
+                name = parameter.name,
+                labelReference = retagReference parameter.labelReference,
+                bindPattern = typedPattern,
+                sourceSpan = parameter.sourceSpan
+              }
+      pure (parameter.name, parameterType, bindings, typedBinding)
 
 ------------------------------------------------------------------------------------------------
 -- Annotation elaboration
@@ -1863,9 +1786,51 @@ privateAttribute = NormalizedAttribute {private = True, generic = mempty}
 -- Helpers
 ------------------------------------------------------------------------------------------------
 
-reportNotYetSupported :: SourceSpan -> Text -> Checker ()
-reportNotYetSupported sourceSpan reason =
-  tell (diagnosticAt sourceSpan (CompilerErrorType (TypeErrorMalformedType MalformedTypeErrorInfo {reason = reason})))
+reportType :: SourceSpan -> TypeError -> Checker ()
+reportType sourceSpan typeError = tell (diagnosticAt sourceSpan (CompilerErrorType typeError))
+
+-- | A @return@ / @break@ / @next@ used where its target context does not exist.
+reportMisplacedJump :: SourceSpan -> Text -> Text -> Checker ()
+reportMisplacedJump sourceSpan keyword requiredContext =
+  reportType sourceSpan (TypeErrorMisplacedJump MisplacedJumpErrorInfo {keyword = keyword, requiredContext = requiredContext})
+
+-- | A required type / effect annotation the checker does not infer is absent.
+reportMissingAnnotation :: SourceSpan -> Text -> Checker ()
+reportMissingAnnotation sourceSpan reason =
+  reportType sourceSpan (TypeErrorMissingAnnotation MissingAnnotationErrorInfo {reason = reason})
+
+-- | An expression is used where a particular shape (callable / sequence / object) is needed but its
+-- type does not provide it. The actual type is denormalized for the message.
+reportExpectedShape :: SourceSpan -> Text -> NormalizedType -> Checker ()
+reportExpectedShape sourceSpan expected actualType = do
+  actual <- denormalizeAt sourceSpan actualType
+  reportType sourceSpan (TypeErrorExpectedShape ExpectedShapeErrorInfo {expected = expected, actual = actual})
+
+-- | The wrong number of explicit type arguments for an application head (e.g. @handler[R, E]@ or a
+-- request / data type's generics).
+reportApplicationArity :: SourceSpan -> Text -> Int -> Int -> Checker ()
+reportApplicationArity sourceSpan headName expected actual =
+  reportType sourceSpan (TypeErrorApplicationArity ApplicationArityErrorInfo {head = headName, expected = expected, actual = actual})
+
+-- | A construct the checker does not yet handle (distinct from a user error). The only remaining
+-- case is a reference to a top-level value whose scheme the checker does not build — an external /
+-- primitive agent or a data constructor; their value schemes are signature-determined but not yet
+-- seeded into the value environment.
+reportUnsupported :: SourceSpan -> Text -> Checker ()
+reportUnsupported sourceSpan reason =
+  reportType sourceSpan (TypeErrorMalformedType MalformedTypeErrorInfo {reason = reason})
+
+-- | Look up a resolved top-level value's scheme. Agents are seeded by the SCC driver before any
+-- caller is walked; externals / primitives / data constructors are signature-determined values the
+-- checker does not yet seed, so a miss is that gap (reported via 'reportUnsupported'), not a bug.
+lookupTopLevelValue :: SourceSpan -> QualifiedName -> Checker NormalizedType
+lookupTopLevelValue sourceSpan qualifiedName = do
+  maybeValue <- asks (\environment -> Map.lookup qualifiedName environment.valueEnvironment)
+  case maybeValue of
+    Just info -> pure info.valueType
+    Nothing -> do
+      reportUnsupported sourceSpan ("Top-level value not yet typed by the checker: " <> renderQualifiedName qualifiedName)
+      pure bottomType
 
 denormalizeAt :: SourceSpan -> NormalizedType -> Checker SemanticType
 denormalizeAt sourceSpan normalizedType = runNormalizer sourceSpan (denormalize normalizedType)

@@ -25,23 +25,22 @@ import Katari.Data.Id (VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName (..))
 
--- | One node of the graph: a top-level agent, carrying its qualified name, home module, and the
--- declaration itself (so the driver can check it without a second lookup).
+-- | One node of the graph: a top-level agent, carrying its identifier-resolved qualified name and
+-- the declaration itself (so the driver can check it without a second lookup).
 data ValueNode = ValueNode
   { qualifiedName :: QualifiedName,
-    moduleName :: ModuleName,
     declaration :: AgentDeclaration Identified
   }
 
--- | Every top-level @agent@ across all modules, in module-then-declaration order.
+-- | Every top-level @agent@ across all modules, in module-then-declaration order. Identity comes
+-- from the identifier-resolved defining reference, never from the declaration's name text.
 topLevelAgents :: Map ModuleName (Module Identified) -> List ValueNode
 topLevelAgents modules =
   [ ValueNode
-      { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
-        moduleName = moduleName,
+      { qualifiedName = referencedVariableName declaration.variableReference,
         declaration = declaration
       }
-    | (moduleName, module') <- Map.toList modules,
+    | module' <- Map.elems modules,
       DeclarationAgent declaration <- module'.declarations
   ]
 

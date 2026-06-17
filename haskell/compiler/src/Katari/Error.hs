@@ -8,7 +8,7 @@ import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
-import Katari.Data.SemanticType (SemanticGenericArgument, renderSemanticGenericArgument)
+import Katari.Data.SemanticType (SemanticGenericArgument, SemanticType, renderSemanticGenericArgument, renderSemanticType)
 import Katari.Data.SourceSpan (Located (..), renderSourceSpan)
 
 -- | Every error the compiler can emit, tagged by the phase that produced it.
@@ -96,6 +96,10 @@ renderTypeError typeError =
         <> ")"
     TypeErrorSynonymCycle info -> "Type synonym " <> renderQualifiedName info.name <> " expands to itself (cyclic synonym)"
     TypeErrorMalformedType info -> info.reason
+    TypeErrorMisplacedJump info -> "`" <> info.keyword <> "` is only valid inside " <> info.requiredContext
+    TypeErrorMissingAnnotation info -> info.reason
+    TypeErrorExpectedShape info ->
+      "Expected " <> info.expected <> ", but the expression has type " <> renderSemanticType info.actual
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -113,6 +117,15 @@ data TypeError where
   -- arguments to a head that takes none, or an override that does not name a request). The specific
   -- failure is in @reason@.
   TypeErrorMalformedType :: MalformedTypeErrorInfo -> TypeError
+  -- | A @return@ / @break@ / @next@ used where its target context does not exist (e.g. @return@ at
+  -- module top level, @break@ outside a @for@ or request-handler body).
+  TypeErrorMisplacedJump :: MisplacedJumpErrorInfo -> TypeError
+  -- | A required type / effect annotation is absent where the checker does not infer one (e.g. a
+  -- @use@ binder, a (mutually) recursive agent's return / effect, an agent parameter).
+  TypeErrorMissingAnnotation :: MissingAnnotationErrorInfo -> TypeError
+  -- | An expression is used where a particular shape is needed (a callable agent, a sequence, an
+  -- object) but its type does not provide it.
+  TypeErrorExpectedShape :: ExpectedShapeErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -125,6 +138,9 @@ typeErrorCode = \case
   TypeErrorApplicationArity _ -> "K3009"
   TypeErrorSynonymCycle _ -> "K3010"
   TypeErrorMalformedType _ -> "K3011"
+  TypeErrorMisplacedJump _ -> "K3012"
+  TypeErrorMissingAnnotation _ -> "K3013"
+  TypeErrorExpectedShape _ -> "K3014"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -138,6 +154,9 @@ typeErrorSeverity = \case
   TypeErrorApplicationArity _ -> SeverityError
   TypeErrorSynonymCycle _ -> SeverityError
   TypeErrorMalformedType _ -> SeverityError
+  TypeErrorMisplacedJump _ -> SeverityError
+  TypeErrorMissingAnnotation _ -> SeverityError
+  TypeErrorExpectedShape _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -192,6 +211,27 @@ newtype SynonymCycleErrorInfo = SynonymCycleErrorInfo
 
 newtype MalformedTypeErrorInfo = MalformedTypeErrorInfo
   { reason :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @keyword@ is the jump that has no target (@return@ / @break@ / @next@); @requiredContext@ names
+-- the enclosing construct it needs (e.g. "an agent body", "a `for` body").
+data MisplacedJumpErrorInfo = MisplacedJumpErrorInfo
+  { keyword :: Text,
+    requiredContext :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+newtype MissingAnnotationErrorInfo = MissingAnnotationErrorInfo
+  { reason :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @expected@ names the shape the position requires (e.g. "a callable agent"); @actual@ is the type
+-- the expression actually has, rendered in surface syntax.
+data ExpectedShapeErrorInfo = ExpectedShapeErrorInfo
+  { expected :: Text,
+    actual :: SemanticType
   }
   deriving (Eq, Ord, Show)
 

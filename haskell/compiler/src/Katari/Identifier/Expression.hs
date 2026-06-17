@@ -53,6 +53,7 @@ resolveExpression = \case
     pure (ExpressionRecord RecordExpression {entries = entries, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionCall node -> do
     callee <- resolveExpression node.callee
+    reportDuplicateLabels [(argument.name, argument.sourceSpan) | argument <- node.arguments]
     arguments <- traverse resolveCallArgument node.arguments
     pure (ExpressionCall CallExpression {callee = callee, arguments = arguments, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionBinaryOperator node -> resolveBinaryOperator node
@@ -460,4 +461,18 @@ resolveAgentDeclaration ownResolution declaration =
         }
 
 resolveParameterBindings :: List (ParameterBinding Parsed) -> Identifier (List (ParameterBinding Identified), List Binding)
-resolveParameterBindings = resolveAll resolveParameterBinding
+resolveParameterBindings parameters = do
+  reportDuplicateLabels [(parameter.name, parameter.sourceSpan) | parameter <- parameters]
+  resolveAll resolveParameterBinding parameters
+
+-- | Report K2003 for each label that repeats among sibling labels (agent / handler parameter
+-- labels, call-argument labels), at the offending occurrence. The first occurrence is kept, so a
+-- downstream phase can key an object by the label without silently dropping a field.
+reportDuplicateLabels :: List (Text, SourceSpan) -> Identifier ()
+reportDuplicateLabels = go []
+  where
+    go seen labels = case labels of
+      [] -> pure ()
+      (label, sourceSpan) : rest
+        | label `elem` seen -> reportDuplicateName sourceSpan label >> go seen rest
+        | otherwise -> go (label : seen) rest

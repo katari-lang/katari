@@ -51,7 +51,11 @@ import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment (..), no
 data TypeEnvironment = TypeEnvironment
   { dataEnvironment :: DataEnvironment,
     requestEnvironment :: RequestEnvironment,
-    synonymEnvironment :: SynonymEnvironment
+    synonymEnvironment :: SynonymEnvironment,
+    -- | The elaborator's signature registry over every declaration. Built once here so the checker
+    -- (Phase C) can elaborate annotations written inside agent bodies without re-collecting the
+    -- declarations.
+    elaborateContext :: ElaborateContext
   }
   deriving stock (Eq, Show)
 
@@ -60,7 +64,8 @@ emptyTypeEnvironment =
   TypeEnvironment
     { dataEnvironment = mempty,
       requestEnvironment = mempty,
-      synonymEnvironment = mempty
+      synonymEnvironment = mempty,
+      elaborateContext = emptyContext mempty mempty mempty
     }
 
 ------------------------------------------------------------------------------------------------
@@ -126,35 +131,35 @@ collectGenericParameters parameters =
 -- are dropped here. Each kind is filtered out by its constructor in the comprehension generator.
 collectDeclarations :: Map ModuleName (Module Identified) -> (List CollectedData, List CollectedRequest, List CollectedSynonym)
 collectDeclarations modules =
-  ( [collectData moduleName declaration | (moduleName, DeclarationData declaration) <- declarations],
-    [collectRequest moduleName declaration | (moduleName, DeclarationRequest declaration) <- declarations],
-    [collectSynonym moduleName declaration | (moduleName, DeclarationTypeSynonym declaration) <- declarations]
+  ( [collectData declaration | DeclarationData declaration <- declarations],
+    [collectRequest declaration | DeclarationRequest declaration <- declarations],
+    [collectSynonym declaration | DeclarationTypeSynonym declaration <- declarations]
   )
   where
-    declarations = [(moduleName, declaration) | (moduleName, module') <- Map.toList modules, declaration <- module'.declarations]
-    collectData moduleName declaration =
+    declarations = [declaration | module' <- Map.elems modules, declaration <- module'.declarations]
+    collectData declaration =
       let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
        in CollectedData
-            { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
+            { qualifiedName = referencedVariableName declaration.variableReference,
               genericParameters = genericParameters,
               genericBounds = genericBounds,
               parameters = declaration.parameters,
               sourceSpan = declaration.sourceSpan
             }
-    collectRequest moduleName declaration =
+    collectRequest declaration =
       let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
        in CollectedRequest
-            { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
+            { qualifiedName = referencedTypeName declaration.typeReference,
               genericParameters = genericParameters,
               genericBounds = genericBounds,
               parameters = declaration.parameters,
               returnType = declaration.returnType,
               sourceSpan = declaration.sourceSpan
             }
-    collectSynonym moduleName declaration =
+    collectSynonym declaration =
       let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
        in CollectedSynonym
-            { qualifiedName = QualifiedName {moduleName = moduleName, name = declaration.name},
+            { qualifiedName = referencedTypeName declaration.typeReference,
               genericParameters = genericParameters,
               genericBounds = genericBounds,
               body = declaration.definition,
@@ -390,8 +395,8 @@ runNormalize environment sourceSpan action =
 
 -- | Normalize every elaborated shape into its 'TypeEnvironment' entry. The variance is already
 -- inferred; the bounds are normalized here and stamped onto each parameter's 'upperBound'.
-normalizeAll :: Map GenericId Variance -> ElaboratedShapes -> (TypeEnvironment, Diagnostics)
-normalizeAll variances shapes = (environment, dataDiagnostics <> requestDiagnostics <> synonymDiagnostics)
+normalizeAll :: ElaborateContext -> Map GenericId Variance -> ElaboratedShapes -> (TypeEnvironment, Diagnostics)
+normalizeAll elaborateContext variances shapes = (environment, dataDiagnostics <> requestDiagnostics <> synonymDiagnostics)
   where
     -- Stamp variance onto every declaration's parameters once, up front.
     stampedData = [(item, applyVariance variances item.genericParameters, semantic) | (item, semantic) <- shapes.dataShapes]
@@ -443,7 +448,8 @@ normalizeAll variances shapes = (environment, dataDiagnostics <> requestDiagnost
       TypeEnvironment
         { dataEnvironment = Map.fromList [(info.name, info) | info <- dataInfos],
           requestEnvironment = Map.fromList [(info.name, info) | info <- requestInfos],
-          synonymEnvironment = Map.fromList [(info.name, info) | info <- synonymInfos]
+          synonymEnvironment = Map.fromList [(info.name, info) | info <- synonymInfos],
+          elaborateContext = elaborateContext
         }
 
 ------------------------------------------------------------------------------------------------
@@ -455,9 +461,10 @@ buildEnvironment :: Map ModuleName (Module Identified) -> (TypeEnvironment, Diag
 buildEnvironment modules = (environment, elaborateDiagnostics <> normalizeDiagnostics)
   where
     collected@(collectedData, collectedRequests, collectedSynonyms) = collectDeclarations modules
-    (shapes, elaborateDiagnostics) = elaborateAll (elaborateContextFor collectedData collectedRequests collectedSynonyms) collected
+    elaborateContext = elaborateContextFor collectedData collectedRequests collectedSynonyms
+    (shapes, elaborateDiagnostics) = elaborateAll elaborateContext collected
     variances = inferVariance (parameterIdsByNameOf shapes) (varianceShapesOf shapes)
-    (environment, normalizeDiagnostics) = normalizeAll variances shapes
+    (environment, normalizeDiagnostics) = normalizeAll elaborateContext variances shapes
 
 unzipDiagnostics :: List (a, Diagnostics) -> (List a, Diagnostics)
 unzipDiagnostics items = (map fst items, foldMap snd items)

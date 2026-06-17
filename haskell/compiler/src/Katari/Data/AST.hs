@@ -4,11 +4,14 @@ import Data.Kind (Type)
 import Data.Map (Map)
 import Data.Text (Text)
 import GHC.List (List)
+import GHC.Stack (HasCallStack)
 import Katari.Data.GenericKind (GenericKind (..))
-import Katari.Data.Id (TypeResolution, VariableResolution)
+import Katari.Data.Id (TypeResolution (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.QualifiedName (QualifiedName)
 import Katari.Data.SemanticType (SemanticGenericArgument, SemanticType)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
+import Katari.Panic (panic)
 
 type data ReferenceKind = VariableReference | TypeReference | ModuleReference | LabelReference
 
@@ -1100,6 +1103,24 @@ data QualifiedReferenceExpression (phase :: Phase) = QualifiedReferenceExpressio
 
 instance HasSourceSpan (QualifiedReferenceExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
+
+---------------------------------------------------------------------------------------------------------------
+-- Resolved identity
+--
+-- A top-level declaration's own reference is resolved by the identifier to the declaration's
+-- module-qualified name, so post-identifier phases read identity from the reference rather than
+-- rebuilding it from the declaration's name text. An unresolved own reference is a compiler bug.
+---------------------------------------------------------------------------------------------------------------
+
+referencedVariableName :: (HasCallStack) => Reference Identified VariableReference -> QualifiedName
+referencedVariableName reference = case reference.resolution of
+  Just (VariableResolutionQualifiedName qualifiedName) -> qualifiedName
+  _ -> panic "referencedVariableName: declaration variable reference is not resolved to a qualified name"
+
+referencedTypeName :: (HasCallStack) => Reference Identified TypeReference -> QualifiedName
+referencedTypeName reference = case reference.resolution of
+  Just (TypeResolutionQualifiedName qualifiedName) -> qualifiedName
+  _ -> panic "referencedTypeName: declaration type reference is not resolved to a qualified name"
 
 ---------------------------------------------------------------------------------------------------------------
 -- Phase retagging helpers

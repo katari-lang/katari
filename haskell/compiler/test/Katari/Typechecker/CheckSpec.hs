@@ -5,8 +5,8 @@ import Data.Map qualified as Map
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (GenericParameters (..), ValueEnvironment, ValueInformation (..))
-import Katari.Data.Id (LocalVariableId (..), VariableResolution (..))
+import Katari.Data.Environment (GenericParameters (..), RequestInformation (..), ValueEnvironment, ValueInformation (..))
+import Katari.Data.Id (LocalVariableId (..), TypeResolution (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
@@ -24,11 +24,13 @@ import Katari.Typechecker.Context
     pushForContext,
     pushHandleContext,
     runChecker,
+    runNormalizer,
     withEffectInference,
     withReturnTarget,
   )
-import Katari.Typechecker.Environment (emptyTypeEnvironment)
-import Katari.Typechecker.Normalizer (joinAttribute)
+import Katari.Typechecker.Elaborate (emptyContext)
+import Katari.Typechecker.Environment (TypeEnvironment (..), emptyTypeEnvironment)
+import Katari.Typechecker.Normalizer (joinAttribute, union)
 import Test.Hspec
 
 spec :: Spec
@@ -48,9 +50,6 @@ spec = do
   describe "synthExpressionType (local variable)" $ do
     it "reads a bound local's type" $
       synthIn [(LocalVariableId 0, stringType)] (variableExpression (LocalVariableId 0)) `shouldBe` stringType
-    it "an unbound local resolves to bottom and reports a diagnostic" $
-      let (result, diagnostics) = runAt mempty mempty (synthExpressionType (variableExpression (LocalVariableId 7)))
-       in (result, hasErrorCode "K3011" diagnostics) `shouldBe` (bottomType, True)
     it "reads a top-level value's scheme from the value environment" $
       let agentScheme = simpleScheme topLevelName integerType
           environment = checkerEnvironmentWith mempty (Map.singleton topLevelName agentScheme)
@@ -68,10 +67,10 @@ spec = do
   describe "synthExpressionType (if)" $ do
     it "if-then-else unions the branches" $
       synthAt (ifExpression (booleanLiteral True) [integerLiteral 1] (Just [stringLiteral "x"]))
-        `shouldSatisfy` isUnion integerType stringType
+        `shouldBe` unionOf integerType stringType
     it "if without else unions the then-branch with null" $
       synthAt (ifExpression (booleanLiteral True) [integerLiteral 1] Nothing)
-        `shouldSatisfy` isUnion integerType nullType
+        `shouldBe` unionOf integerType nullType
     it "rejects a non-boolean condition" $
       let (_, diagnostics) = runAt mempty mempty (synthExpressionType (ifExpression (integerLiteral 1) [nullLiteral] Nothing))
        in hasErrorCode "K3001" diagnostics `shouldBe` True
@@ -179,7 +178,7 @@ spec = do
                 (literalPattern (LiteralValueBoolean False), exprBlock (stringLiteral "no"))
               ]
           (result, _) = runAt scrutineeLocal mempty (synthExpressionType matchExpr)
-       in result `shouldSatisfy` isUnion integerType stringType
+       in result `shouldBe` unionOf integerType stringType
 
   describe "let (annotation and destructuring)" $ do
     it "let x : integer = 1 binds x at integer" $
@@ -431,7 +430,7 @@ spec = do
        in -- The continuation subtype check at the use site catches the over-broad body effect.
           hasErrorCode "K3001" diagnostics `shouldBe` True
 
-    it "let x = use ... without annotation is K3011" $
+    it "let x = use ... without annotation is K3013" $
       let providerType =
             NormalizedType
               { baseType =
@@ -460,7 +459,7 @@ spec = do
                 }
           action = withReturnTarget topType (walkStatements [useStmt] (pure ()))
           (_, diagnostics) = runAt providerLocal mempty action
-       in hasErrorCode "K3011" diagnostics `shouldBe` True
+       in hasErrorCode "K3013" diagnostics `shouldBe` True
 
   describe "synthExpressionType (handler)" $ do
     it "handler[integer, all] {} produces the expected outer agent type" $
@@ -495,10 +494,10 @@ spec = do
               }
        in (result, toList diagnostics) `shouldBe` (expected, [])
 
-    it "handler with the wrong number of generic arguments is K3011" $
+    it "handler with the wrong number of generic arguments is K3009" $
       let handlerExpr = handlerExpressionBuilder [] [] Nothing
           (_, diagnostics) = runAt mempty mempty (synthExpressionType handlerExpr)
-       in hasErrorCode "K3011" diagnostics `shouldBe` True
+       in hasErrorCode "K3009" diagnostics `shouldBe` True
 
     it "with a then clause whose body produces R, the handler still has R as its result" $
       let handlerExpr =
@@ -516,6 +515,48 @@ spec = do
               []
               (Just (Nothing, exprBlock (stringLiteral "no")))
           (_, diagnostics) = runAt mempty mempty (synthExpressionType handlerExpr)
+       in hasErrorCode "K3001" diagnostics `shouldBe` True
+
+  describe "request handler body" $ do
+    it "rejects a request body whose tail type is not the handler result R" $
+      -- handler[integer, all] { request req() { "no" } } — the body's implicit break yields a string.
+      let handlerExpr =
+            handlerExpressionBuilder
+              [integerAnnotation, allEffectAnnotation]
+              [requestHandlerForFake (exprBlock (stringLiteral "no"))]
+              Nothing
+          (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
+       in hasErrorCode "K3001" diagnostics `shouldBe` True
+
+    it "accepts a request body whose tail type is the handler result R" $
+      let handlerExpr =
+            handlerExpressionBuilder
+              [integerAnnotation, allEffectAnnotation]
+              [requestHandlerForFake (exprBlock (integerLiteral 7))]
+              Nothing
+          (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
+       in toList diagnostics `shouldBe` []
+
+    it "rejects a request body whose effect exceeds the handler's residual effect E" $
+      -- handler[integer, req] { request req() { secondRequestCallable(); 0 } }: the body performs a
+      -- different request than E permits.
+      let callable =
+            agentNormalized
+              bottomAttribute
+              (paramObject [("x", integerType)])
+              integerType
+              (NormalizedEffectRow EffectRow {request = Map.singleton secondRequestName mempty, tails = mempty})
+          callExpr = callExpression (variableExpression (LocalVariableId 9)) [("x", integerLiteral 1)]
+          handlerExpr =
+            handlerExpressionBuilder
+              [integerAnnotation, requestEffectAnnotation fakeRequestName]
+              [requestHandlerForFake (bodyOf [StatementExpression callExpr] (Just (integerLiteral 0)))]
+              Nothing
+          environment =
+            (initialCheckerEnvironment typeEnvironmentWithFakeRequest)
+              { locals = Map.singleton (LocalVariableId 9) LocalBinding {localType = callable}
+              }
+          (_, diagnostics) = runChecker environment (synthExpressionType handlerExpr)
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
   describe "synthExpressionType (for)" $ do
@@ -556,7 +597,7 @@ spec = do
           (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
        in (result, toList diagnostics) `shouldBe` (stringType, [])
 
-    it "reports K3011 when the source is not a sequence" $
+    it "reports K3014 when the source is not a sequence" $
       let sourceLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = integerType}
           forExpr =
             forExpressionBuilder
@@ -565,7 +606,7 @@ spec = do
               (Block {statements = [forNextStatementBuilder (integerLiteral 1)], returnExpression = Nothing, sourceSpan = testSpan})
               Nothing
           (_, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
-       in hasErrorCode "K3011" diagnostics `shouldBe` True
+       in hasErrorCode "K3014" diagnostics `shouldBe` True
 
   describe "jump statements" $ do
     it "`return` matches the agent's return type" $
@@ -578,9 +619,9 @@ spec = do
           (_, diagnostics) = runAt mempty mempty action
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
-    it "`return` outside an agent body is K3011" $
+    it "`return` outside an agent body is K3012" $
       let (_, diagnostics) = runAt mempty mempty (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
-       in hasErrorCode "K3011" diagnostics `shouldBe` True
+       in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`next` inside a for frame matches the frame's nextElementType" $
       let frame = ForContext {nextElementType = integerType, breakResultType = stringType}
@@ -600,9 +641,9 @@ spec = do
           (_, diagnostics) = runAt mempty mempty action
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
-    it "for-`next` outside any `for` body is K3011" $
+    it "for-`next` outside any `for` body is K3012" $
       let (_, diagnostics) = runAt mempty mempty (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
-       in hasErrorCode "K3011" diagnostics `shouldBe` True
+       in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`break` inside a handler frame matches the frame's handlerResultType" $
       let frame =
@@ -616,9 +657,9 @@ spec = do
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
-    it "handler-`break` outside any handler is K3011" $
+    it "handler-`break` outside any handler is K3012" $
       let (_, diagnostics) = runAt mempty mempty (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
-       in hasErrorCode "K3011" diagnostics `shouldBe` True
+       in hasErrorCode "K3012" diagnostics `shouldBe` True
 
   describe "synthExpressionType (call)" $ do
     it "pure call with matching arg returns the function's return type" $
@@ -666,11 +707,11 @@ spec = do
           (_, diagnostics) = runAt localBindings mempty (synthExpressionType call)
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
-    it "reports a non-callable callee with K3011" $
+    it "reports a non-callable callee with K3014" $
       let localBindings = Map.singleton (LocalVariableId 0) LocalBinding {localType = integerType}
           call = callExpression (variableExpression (LocalVariableId 0)) []
           (result, diagnostics) = runAt localBindings mempty (synthExpressionType call)
-       in (result, hasErrorCode "K3011" diagnostics) `shouldBe` (bottomType, True)
+       in (result, hasErrorCode "K3014" diagnostics) `shouldBe` (bottomType, True)
 
     it "pure call lifts a nested private field through the return type (structural lift)" $
       let -- Pure callee: agent({x: {y: int}}) -> int — expects an object with an int field
@@ -749,25 +790,10 @@ recordNormalized fieldList =
               }
       }
 
--- | True iff the type is the normalized union of the two given branches (in either order). Both
--- branches are primitive types, so the order in the merged 'LayeredType' is irrelevant — the test
--- only checks that the resulting layer carries both flags / slots.
-isUnion :: NormalizedType -> NormalizedType -> NormalizedType -> Bool
-isUnion left right actual =
-  isLayered actual && hasAllOf left actual && hasAllOf right actual
-  where
-    isLayered normalizedType = case normalizedType.baseType of
-      NormalizedBaseTypeLayered _ -> True
-      _ -> False
-    hasAllOf branch normalizedType = case (branch.baseType, normalizedType.baseType) of
-      (NormalizedBaseTypeLayered branchLayer, NormalizedBaseTypeLayered actualLayer) ->
-        layerSubsumes branchLayer actualLayer
-      _ -> False
-    layerSubsumes branchLayer actualLayer =
-      (not branchLayer.nullLayer || actualLayer.nullLayer)
-        && (not branchLayer.stringLayer || actualLayer.stringLayer)
-        && (not branchLayer.booleanLayer || actualLayer.booleanLayer)
-        && (branchLayer.numberLayer <= actualLayer.numberLayer)
+-- | The normalized union of two types, computed by the real lattice join, so a union assertion is
+-- exact equality rather than slot-subset satisfaction.
+unionOf :: NormalizedType -> NormalizedType -> NormalizedType
+unionOf left right = fst (runAt mempty mempty (runNormalizer testSpan (union left right)))
 
 ------------------------------------------------------------------------------------------------
 -- AST builders (Identified phase) — minimal scaffolding for tests
@@ -957,8 +983,62 @@ nonPureAgentType outerAttribute parameterType returnType =
 fakeRequestName :: QualifiedName
 fakeRequestName = QualifiedName {moduleName = ModuleName "test", name = "req"}
 
+secondRequestName :: QualifiedName
+secondRequestName = QualifiedName {moduleName = ModuleName "test", name = "req2"}
+
 paramObject :: List (Text, NormalizedType) -> NormalizedType
 paramObject = recordNormalized
+
+------------------------------------------------------------------------------------------------
+-- Request handler fixtures
+------------------------------------------------------------------------------------------------
+
+-- | A type environment with 'fakeRequestName' registered — in the request environment (so the
+-- checker can walk a handler for it) and the elaborator's registry (so a request-name effect
+-- annotation resolves). The request takes no arguments and returns null.
+typeEnvironmentWithFakeRequest :: TypeEnvironment
+typeEnvironmentWithFakeRequest =
+  TypeEnvironment
+    { dataEnvironment = mempty,
+      requestEnvironment =
+        Map.singleton
+          fakeRequestName
+          RequestInformation
+            { name = fakeRequestName,
+              genericParameters = emptyGenerics,
+              request = (recordNormalized [], nullType)
+            },
+      synonymEnvironment = mempty,
+      elaborateContext = emptyContext mempty (Map.singleton fakeRequestName emptyGenerics) mempty
+    }
+  where
+    emptyGenerics = GenericParameters {parameterNames = [], parameterInformation = mempty}
+
+-- | A handler for 'fakeRequestName' with no parameters and the given body.
+requestHandlerForFake :: Block Identified -> RequestHandler Identified
+requestHandlerForFake body =
+  RequestHandler
+    { moduleQualifier = Nothing,
+      name = "req",
+      typeReference = Reference {sourceSpan = testSpan, resolution = Just (TypeResolutionQualifiedName fakeRequestName)},
+      genericArguments = [],
+      instantiation = (),
+      parameters = [],
+      returnType = Nothing,
+      body = body,
+      sourceSpan = testSpan
+    }
+
+-- | The effect @{req}@ written as a bare request name (resolved to the given request).
+requestEffectAnnotation :: QualifiedName -> SyntacticTypeExpression Identified
+requestEffectAnnotation requestName =
+  TypeName
+    TypeNameNode
+      { moduleQualifier = Nothing,
+        name = requestName.name,
+        typeReference = Reference {sourceSpan = testSpan, resolution = Just (TypeResolutionQualifiedName requestName)},
+        sourceSpan = testSpan
+      }
 
 ------------------------------------------------------------------------------------------------
 -- Agent declaration fixtures

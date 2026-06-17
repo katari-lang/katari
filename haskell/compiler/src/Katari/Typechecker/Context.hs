@@ -42,7 +42,7 @@ import Katari.Data.QualifiedName (QualifiedName)
 import Katari.Data.SourceSpan (SourceSpan)
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
-import Katari.Typechecker.Elaborate (Elaborate, ElaborateContext, emptyContext, runElaborate)
+import Katari.Typechecker.Elaborate (Elaborate, runElaborate)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
 import Katari.Typechecker.Normalizer
   ( Normalizer,
@@ -123,13 +123,10 @@ data HandleContext = HandleContext
 
 -- | The checker's read-only environment.
 data CheckerEnvironment = CheckerEnvironment
-  { -- | The global type-level environment built by the env-build phase.
+  { -- | The global type-level environment built by the env-build phase. Also carries the
+    -- elaborator's signature registry ('elaborateContext'), so the checker can elaborate type /
+    -- effect / attribute annotations encountered inside agent bodies.
     typeEnvironment :: TypeEnvironment,
-    -- | The elaborator's signature registry, so the checker can elaborate type / effect /
-    -- attribute annotations encountered inside agent bodies (the env-build already used this for
-    -- the declaration shapes; the per-agent walker uses it again for parameter and let
-    -- annotations).
-    elaborateContext :: ElaborateContext,
     -- | Top-level values whose scheme is known; grown SCC by SCC by the driver as components are
     -- checked, so a callee is registered before any caller is walked.
     valueEnvironment :: ValueEnvironment,
@@ -177,26 +174,17 @@ initialCheckerState =
 type Checker a = RWS CheckerEnvironment Diagnostics CheckerState a
 
 -- | A fresh checker environment over the given type environment, with nothing else in scope. The
--- elaborate context defaults to the empty registry (no nominal types known) — the driver
--- overwrites this with the real context built from the program's declarations via
--- 'withElaborateContext'.
+-- elaborate context the checker uses comes from 'typeEnvironment' ('TypeEnvironment.elaborateContext').
 initialCheckerEnvironment :: TypeEnvironment -> CheckerEnvironment
 initialCheckerEnvironment typeEnv =
   CheckerEnvironment
     { typeEnvironment = typeEnv,
-      elaborateContext = emptyContext mempty mempty mempty,
       valueEnvironment = mempty,
       locals = mempty,
       genericsInScope = mempty,
       world = bottomAttribute,
       jumps = emptyJumpContexts
     }
-
--- | Install an 'ElaborateContext' on a checker environment. The driver uses this once the
--- declarations have been collected; the field is small so a plain field-set works (no name clash
--- with 'NormalizerEnvironment').
-withElaborateContext :: ElaborateContext -> CheckerEnvironment -> CheckerEnvironment
-withElaborateContext context environment = environment {elaborateContext = context}
 
 runChecker :: CheckerEnvironment -> Checker a -> (a, Diagnostics)
 runChecker environment action =
@@ -239,7 +227,7 @@ runNormalizer sourceSpan action = do
 -- 'normalizeEffect' through 'runNormalizer'".
 runElaborator :: Elaborate a -> Checker a
 runElaborator action = do
-  context <- asks (.elaborateContext)
+  context <- asks (.typeEnvironment.elaborateContext)
   let (result, diagnostics) = runElaborate context action
   tell diagnostics
   pure result
@@ -389,7 +377,6 @@ rebuildWithWorld :: CheckerEnvironment -> NormalizedAttribute -> CheckerEnvironm
 rebuildWithWorld environment newWorld =
   CheckerEnvironment
     { typeEnvironment = environment.typeEnvironment,
-      elaborateContext = environment.elaborateContext,
       valueEnvironment = environment.valueEnvironment,
       locals = environment.locals,
       genericsInScope = environment.genericsInScope,
@@ -401,7 +388,6 @@ rebuildWithGenerics :: CheckerEnvironment -> Map GenericId GenericParameterInfor
 rebuildWithGenerics environment newGenerics =
   CheckerEnvironment
     { typeEnvironment = environment.typeEnvironment,
-      elaborateContext = environment.elaborateContext,
       valueEnvironment = environment.valueEnvironment,
       locals = environment.locals,
       genericsInScope = newGenerics,

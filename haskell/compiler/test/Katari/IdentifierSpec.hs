@@ -111,6 +111,12 @@ identifySpec = do
     it "does not treat a value and a type sharing a name as a duplicate" $
       diagnosticsOf (identify emptyContext "type Foo = integer\nagent Foo() -> integer { 1 }\nagent bar() -> Foo { Foo() }") `shouldSatisfy` null
 
+    it "reports a duplicate parameter label (K2003)" $
+      codesOf (identify emptyContext "agent foo(x: integer, x: integer) -> integer { x }") `shouldBe` ["K2003"]
+
+    it "reports a duplicate call-argument label (K2003)" $
+      codesOf (identify emptyContext "agent target(value: integer) -> integer { value }\nagent caller() -> integer { target(value = 1, value = 2) }") `shouldBe` ["K2003"]
+
   describe "identifyModule (with modifiers)" $ do
     it "reports a with-modifier targeting a non-state variable (K2007)" $
       codesOf (identify emptyContext modifierNonStateProgram) `shouldBe` ["K2007"]
