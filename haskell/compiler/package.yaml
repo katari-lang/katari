@@ -57,6 +57,7 @@ library:
     - Katari.Data.Variance
     - Katari.Data.JSONSchema
     - Katari.Data.IR
+    - Katari.Schema
     - Katari.Error
     - Katari.Panic
     - Katari.Diagnostics

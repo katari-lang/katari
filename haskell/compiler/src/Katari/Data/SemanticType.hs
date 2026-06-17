@@ -8,6 +8,10 @@ import GHC.List (List)
 import Katari.Data.Id (GenericId (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 
+-- $setup
+-- The substitution machinery below ('substituteGenerics') is consumed by "Katari.Schema" when it
+-- specialises a generic @data@ reference's field types before turning them into a JSON Schema.
+
 data FieldInformation = FieldInformation
   { semanticType :: SemanticType,
     optional :: Bool
@@ -168,3 +172,57 @@ renderSemanticGenericArguments arguments = case Map.toAscList arguments of
 
 renderGenericId :: GenericId -> Text
 renderGenericId (GenericId _ index) = Text.pack (show index)
+
+-- | Substitute generic parameters throughout a type. Each 'SemanticTypeGeneric' /
+-- 'SemanticEffectGeneric' / 'SemanticAttributeGeneric' whose 'GenericId' is in the map is replaced by
+-- the bound argument (a kind mismatch — e.g. an effect bound to a type-generic id — leaves the
+-- placeholder untouched rather than crashing). A bound argument is inserted as-is, so any generic the
+-- argument itself mentions survives for a later substitution.
+substituteGenerics :: Map GenericId SemanticGenericArgument -> SemanticType -> SemanticType
+substituteGenerics substitution = substituteType
+  where
+    substituteType semanticType = case semanticType of
+      SemanticTypeNever -> SemanticTypeNever
+      SemanticTypeUnknown -> SemanticTypeUnknown
+      SemanticTypeNull -> SemanticTypeNull
+      SemanticTypeInteger -> SemanticTypeInteger
+      SemanticTypeNumber -> SemanticTypeNumber
+      SemanticTypeString -> SemanticTypeString
+      SemanticTypeBoolean -> SemanticTypeBoolean
+      SemanticTypeFile -> SemanticTypeFile
+      SemanticTypeAgent parameterType returnType effect ->
+        SemanticTypeAgent (substituteType parameterType) (substituteType returnType) (substituteEffect effect)
+      SemanticTypeArray itemType -> SemanticTypeArray (substituteType itemType)
+      SemanticTypeTuple itemTypes -> SemanticTypeTuple (substituteType <$> itemTypes)
+      SemanticTypeData qualifiedName arguments -> SemanticTypeData qualifiedName (substituteArgument <$> arguments)
+      SemanticTypeObject fields -> SemanticTypeObject (substituteField <$> fields)
+      SemanticTypeRecord valueType -> SemanticTypeRecord (substituteType valueType)
+      SemanticTypeUnion branches -> SemanticTypeUnion (substituteType <$> branches)
+      SemanticTypeGeneric genericId -> case Map.lookup genericId substitution of
+        Just (SemanticGenericArgumentType replacement) -> replacement
+        _ -> SemanticTypeGeneric genericId
+      SemanticTypeAttribute baseType attribute ->
+        SemanticTypeAttribute (substituteType baseType) (substituteAttribute attribute)
+    substituteField field =
+      FieldInformation {semanticType = substituteType field.semanticType, optional = field.optional}
+    substituteArgument argument = case argument of
+      SemanticGenericArgumentType argumentType -> SemanticGenericArgumentType (substituteType argumentType)
+      SemanticGenericArgumentEffect argumentEffect -> SemanticGenericArgumentEffect (substituteEffect argumentEffect)
+      SemanticGenericArgumentAttribute argumentAttribute -> SemanticGenericArgumentAttribute (substituteAttribute argumentAttribute)
+    substituteEffect effect = case effect of
+      SemanticEffectPure -> SemanticEffectPure
+      SemanticEffectAny -> SemanticEffectAny
+      SemanticEffectRequest qualifiedName arguments -> SemanticEffectRequest qualifiedName (substituteArgument <$> arguments)
+      SemanticEffectUnion effects -> SemanticEffectUnion (substituteEffect <$> effects)
+      SemanticEffectOverwrite baseEffect overwrites ->
+        SemanticEffectOverwrite (substituteEffect baseEffect) [(qualifiedName, substituteArgument <$> arguments) | (qualifiedName, arguments) <- overwrites]
+      SemanticEffectGeneric genericId -> case Map.lookup genericId substitution of
+        Just (SemanticGenericArgumentEffect replacement) -> replacement
+        _ -> SemanticEffectGeneric genericId
+    substituteAttribute attribute = case attribute of
+      SemanticAttributePublic -> SemanticAttributePublic
+      SemanticAttributePrivate -> SemanticAttributePrivate
+      SemanticAttributeUnion attributes -> SemanticAttributeUnion (substituteAttribute <$> attributes)
+      SemanticAttributeGeneric genericId -> case Map.lookup genericId substitution of
+        Just (SemanticGenericArgumentAttribute replacement) -> replacement
+        _ -> SemanticAttributeGeneric genericId

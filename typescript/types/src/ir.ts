@@ -343,7 +343,10 @@ export type GenericArgumentSchema =
 export type JSONSchema = {
   type?: "null" | "boolean" | "integer" | "number" | "string" | "array" | "object";
   const?: Json;
+  /** A homogeneous array's element schema (every element matches it). */
   items?: JSONSchema;
+  /** A tuple's positional element schemas (`[A, B]` -> one schema per position). */
+  prefixItems?: JSONSchema[];
   properties?: Record<string, JSONSchema>;
   required?: string[];
   /** A boolean (closed/open object), or the schema every other key must match (a `record[T]` tail). */

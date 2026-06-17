@@ -4,10 +4,9 @@
 -- instance — apart from the generic-reference sentinel ('SchemaGeneric'), which the runtime resolves
 -- into a standard schema at @get_metadata@.
 --
--- This is the representation only. The (non-trivial) conversion from a 'Katari.Data.SemanticType'
--- to a 'JSONSchema' — @file@ / @agent@ / @data@ / @private@-attributed types are not obvious — will
--- live in "Katari.Lowering" (which fills each callable's 'Katari.Data.IR.SchemaInfo', keyed by
--- 'Katari.Data.IR.BlockId') and is intentionally not implemented yet.
+-- This is the representation only. The conversion from a 'Katari.Data.SemanticType' to a 'JSONSchema'
+-- — @file@ / @agent@ / @data@ / @private@-attributed types are not obvious — lives in "Katari.Schema";
+-- "Katari.Lowering" then threads its results into each callable's 'Katari.Data.IR.SchemaInformation'.
 module Katari.Data.JSONSchema where
 
 import Data.Aeson (ToJSON (..), Value, object, (.=))
@@ -36,8 +35,10 @@ data JSONSchema where
   SchemaString :: JSONSchema
   -- | @{"const": v}@ — exactly this literal (e.g. a data constructor's @$constructor@ tag).
   SchemaConst :: Value -> JSONSchema
-  -- | @{"type": "array", "items": s}@
+  -- | @{"type": "array", "items": s}@ — a homogeneous array (every element matches @s@).
   SchemaArray :: JSONSchema -> JSONSchema
+  -- | @{"type": "array", "prefixItems": [...]}@ — a fixed-length tuple (one schema per position).
+  SchemaTuple :: List JSONSchema -> JSONSchema
   -- | @{"type": "object", "properties": {...}, "required": [...], "additionalProperties": b | s}@
   SchemaObject :: ObjectSchema -> JSONSchema
   -- | @{"anyOf": [...]}@ — a union.
@@ -53,8 +54,15 @@ data JSONSchema where
 data ObjectSchema = ObjectSchema
   { properties :: List (Text, JSONSchema),
     required :: List Text,
-    additionalProperties :: Bool
+    additionalProperties :: AdditionalProperties
   }
+  deriving stock (Eq, Show)
+
+-- | A JSON Schema @additionalProperties@ value: a boolean (an open or closed object) or the schema
+-- every not-explicitly-named key must satisfy (the value type of a @record[T]@).
+data AdditionalProperties where
+  AdditionalPropertiesBoolean :: Bool -> AdditionalProperties
+  AdditionalPropertiesSchema :: JSONSchema -> AdditionalProperties
   deriving stock (Eq, Show)
 
 instance ToJSON JSONSchema where
@@ -68,6 +76,7 @@ instance ToJSON JSONSchema where
     SchemaString -> typed "string"
     SchemaConst constant -> object ["const" .= constant]
     SchemaArray items -> object ["type" .= ("array" :: Text), "items" .= items]
+    SchemaTuple itemSchemas -> object ["type" .= ("array" :: Text), "prefixItems" .= itemSchemas]
     SchemaObject objectSchema ->
       object
         [ "type" .= ("object" :: Text),
@@ -83,3 +92,8 @@ instance ToJSON JSONSchema where
     where
       typed :: Text -> Value
       typed typeName = object ["type" .= typeName]
+
+instance ToJSON AdditionalProperties where
+  toJSON additionalProperties = case additionalProperties of
+    AdditionalPropertiesBoolean allowed -> toJSON allowed
+    AdditionalPropertiesSchema valueSchema -> toJSON valueSchema
