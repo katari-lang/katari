@@ -1230,6 +1230,120 @@ retagGenericParameter parameter =
       sourceSpan = parameter.sourceSpan
     }
 
+-- | Retag a 'ParameterSignature' (used in declarations that don't carry a body — data / request /
+-- external / primitive). Structural — no checker types are populated here.
+retagParameterSignature ::
+  ( ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference,
+    ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
+  ) =>
+  ParameterSignature phase1 ->
+  ParameterSignature phase2
+retagParameterSignature signature =
+  ParameterSignature
+    { annotation = signature.annotation,
+      name = signature.name,
+      labelReference = retagReference signature.labelReference,
+      parameterType = retagSyntacticTypeExpression signature.parameterType,
+      defaultValue = signature.defaultValue,
+      sourceSpan = signature.sourceSpan
+    }
+
+-- | Retag a 'DataDeclaration'. No body, no expression-level typing — purely structural.
+retagDataDeclaration ::
+  ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
+    ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
+    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+  ) =>
+  DataDeclaration phase1 ->
+  DataDeclaration phase2
+retagDataDeclaration declaration =
+  DataDeclaration
+    { annotation = declaration.annotation,
+      name = declaration.name,
+      variableReference = retagReference declaration.variableReference,
+      typeReference = retagReference declaration.typeReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
+      parameters = retagParameterSignature <$> declaration.parameters,
+      sourceSpan = declaration.sourceSpan
+    }
+
+retagRequestDeclaration ::
+  ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
+    ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
+    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+  ) =>
+  RequestDeclaration phase1 ->
+  RequestDeclaration phase2
+retagRequestDeclaration declaration =
+  RequestDeclaration
+    { annotation = declaration.annotation,
+      name = declaration.name,
+      variableReference = retagReference declaration.variableReference,
+      typeReference = retagReference declaration.typeReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
+      parameters = retagParameterSignature <$> declaration.parameters,
+      returnType = retagSyntacticTypeExpression declaration.returnType,
+      sourceSpan = declaration.sourceSpan
+    }
+
+retagExternalAgentDeclaration ::
+  ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
+    ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
+    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+  ) =>
+  ExternalAgentDeclaration phase1 ->
+  ExternalAgentDeclaration phase2
+retagExternalAgentDeclaration declaration =
+  ExternalAgentDeclaration
+    { annotation = declaration.annotation,
+      name = declaration.name,
+      variableReference = retagReference declaration.variableReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
+      parameters = retagParameterSignature <$> declaration.parameters,
+      returnType = retagSyntacticTypeExpression declaration.returnType,
+      effects = retagSyntacticTypeExpression <$> declaration.effects,
+      sourceSpan = declaration.sourceSpan
+    }
+
+retagPrimitiveAgentDeclaration ::
+  ( ReferenceResolution phase1 VariableReference ~ ReferenceResolution phase2 VariableReference,
+    ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference,
+    ReferenceResolution phase1 LabelReference ~ ReferenceResolution phase2 LabelReference
+  ) =>
+  PrimitiveAgentDeclaration phase1 ->
+  PrimitiveAgentDeclaration phase2
+retagPrimitiveAgentDeclaration declaration =
+  PrimitiveAgentDeclaration
+    { annotation = declaration.annotation,
+      name = declaration.name,
+      variableReference = retagReference declaration.variableReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
+      parameters = retagParameterSignature <$> declaration.parameters,
+      returnType = retagSyntacticTypeExpression declaration.returnType,
+      effects = retagSyntacticTypeExpression <$> declaration.effects,
+      sourceSpan = declaration.sourceSpan
+    }
+
+retagTypeSynonymDeclaration ::
+  ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
+  ) =>
+  TypeSynonymDeclaration phase1 ->
+  TypeSynonymDeclaration phase2
+retagTypeSynonymDeclaration declaration =
+  TypeSynonymDeclaration
+    { name = declaration.name,
+      typeReference = retagReference declaration.typeReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
+      definition = retagSyntacticTypeExpression declaration.definition,
+      sourceSpan = declaration.sourceSpan
+    }
+
 ---------------------------------------------------------------------------------------------------------------
 -- Aggregate Eq / Show constraints
 ---------------------------------------------------------------------------------------------------------------

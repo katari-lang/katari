@@ -72,6 +72,8 @@ library:
     - Katari.Typechecker.Elaborate
     - Katari.Typechecker.Environment
     - Katari.Typechecker.ValueGraph
+    - Katari.Typechecker.Context
+    - Katari.Typechecker.Check
     - Katari.Parser
     - Katari.Parser.Lexer
     - Katari.Parser.Type
