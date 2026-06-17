@@ -745,17 +745,18 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
               right
             tell constructorErrors
     constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do
-      constructorInstance <- substituteType (constructorSubstitution dataInfo leftArguments) dataInfo.constructor
+      constructorInstance <- substituteType (genericSubstitution dataInfo.genericParameters leftArguments) dataInfo.constructor
       subtype constructorInstance right
 
--- | The generic-id substitution that instantiates a data declaration's constructor with the
--- arguments of one application of it.
-constructorSubstitution :: DataInformation -> Map Text NormalizedKindedType -> Map GenericId NormalizedKindedType
-constructorSubstitution dataInfo arguments =
+-- | The generic-id substitution that instantiates a quantified body (a data constructor, a request,
+-- a value scheme) with arguments supplied by parameter /name/: each declared parameter's id mapped to
+-- its argument. The single name->id bridge every name-keyed instantiation site shares.
+genericSubstitution :: GenericParameters -> Map Text NormalizedKindedType -> Map GenericId NormalizedKindedType
+genericSubstitution parameters arguments =
   Map.fromList
-    [ (genericId, argument)
-      | (genericArgumentName, genericId) <- Map.toList ((.genericId) <$> dataInfo.genericParameters.parameterInformation),
-        Just argument <- [Map.lookup genericArgumentName arguments]
+    [ (info.genericId, argument)
+      | (name, info) <- Map.toList parameters.parameterInformation,
+        Just argument <- [Map.lookup name arguments]
     ]
 
 -- | Compare the named generic arguments of one data type or request pointwise, each according to

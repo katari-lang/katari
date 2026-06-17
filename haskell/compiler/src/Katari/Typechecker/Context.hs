@@ -46,7 +46,9 @@ import Katari.Typechecker.Normalizer
   ( Normalizer,
     NormalizerEnvironment,
     SubtypingContext (..),
+    TypeLattice,
     joinAttribute,
+    union,
   )
 
 ------------------------------------------------------------------------------------------------
@@ -120,39 +122,35 @@ data CheckerEnvironment = CheckerEnvironment
     jumps :: JumpContexts
   }
 
--- | Per-walk mutable state.
---
---   * 'forBodyAccumulator' — the union of every @next@ value type seen so far inside the
---     innermost enclosing @for@ body, used to infer the for expression's element type. Outside
---     any for body it sits at 'bottomType' and is meaningless; 'withForInference' is the only
---     entry that observes it.
---   * 'effectAccumulator' — the union of every effect contribution seen so far inside the
---     innermost enclosing /effect-collection scope/ (a 'withEffectInference' run). Non-pure calls
---     and 'use' statements emit into it, so the scope reads back the body's inferred effect.
---     Outside an inference scope it sits at 'bottomEffect' (pure).
---
--- Other walks (ordinary subtype checks) ignore these slots. Both are scoped via their respective
--- @with*Inference@ helpers, which snapshot/restore around the inner walk so a nested scope sees
--- only its own contributions.
+-- | Per-walk mutable state: the accumulators an /inference scope/ collects into. Each sits at its
+-- bottom outside its scope and is meaningful only inside the matching @with*Inference@ run, which
+-- 'collecting' snapshots / resets / restores so a nested scope sees only its own contributions.
 data CheckerState = CheckerState
-  { -- | The union of every @next@ value type in the innermost @for@ body — its inferred element type.
-    forBodyAccumulator :: NormalizedType,
-    -- | The union of every @break@ value type in the innermost @for@ body — the short-circuit results
-    -- the @for@ may evaluate to in addition to its normal (array / then) result.
-    forBreakAccumulator :: NormalizedType,
+  { -- | What the innermost @for@ body has produced so far; bottom outside a @for@.
+    forAccumulator :: ForAccumulator,
+    -- | The union of every effect contribution in the innermost effect-collection scope (a
+    -- 'withEffectInference' run): non-pure calls and @use@ statements emit into it. Bottom (pure)
+    -- outside such a scope.
     effectAccumulator :: NormalizedEffect
   }
   deriving stock (Eq, Show)
 
+-- | What a @for@ body produces, accumulated as the body is walked: the union of every @next@ value
+-- (the inferred element type) and every @break@ value (the short-circuit results the @for@ may yield
+-- in addition to its normal array / then result).
+data ForAccumulator = ForAccumulator
+  { nextElements :: NormalizedType,
+    breakResults :: NormalizedType
+  }
+  deriving stock (Eq, Show)
+
+emptyForAccumulator :: ForAccumulator
+emptyForAccumulator = ForAccumulator {nextElements = bottomType, breakResults = bottomType}
+
 -- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
 -- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
-initialCheckerState =
-  CheckerState
-    { forBodyAccumulator = bottomType,
-      forBreakAccumulator = bottomType,
-      effectAccumulator = bottomEffect
-    }
+initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect}
 
 -- | The checker monad: read-only environment, 'Diagnostics' writer, 'CheckerState' state.
 type Checker a = RWS CheckerEnvironment Diagnostics CheckerState a
@@ -289,65 +287,52 @@ pushHandleContext context =
   local (\environment -> environment {jumps = environment.jumps {handleContexts = context : environment.jumps.handleContexts}})
 
 ------------------------------------------------------------------------------------------------
--- For-body next-type inference
+-- Inference scopes
+--
+-- An inference scope runs a sub-walk with one accumulator reset to its bottom, then reads back what
+-- the walk collected and restores the outer value, so a nested scope sees only its own contributions.
+-- 'collecting' is that pattern, once; 'accumulateInto' is the dual emit (union a contribution in).
 ------------------------------------------------------------------------------------------------
 
--- | Run @action@ with fresh @for@ accumulators (bottom) and return the action's result alongside the
--- inferred next-element type and break-result type of the for body. The outer accumulators are saved
--- before the action and restored after, so a nested for body sees only its own contributions. The
--- 'effectAccumulator' is left untouched (different scope axis).
---
--- The for body walker accumulates each @next@ value into 'forBodyAccumulator' (the element type) and
--- each @break@ value into 'forBreakAccumulator' (the short-circuit result) via
--- 'Katari.Typechecker.Check.emitForNextType' / 'Katari.Typechecker.Check.emitForBreakType'.
+-- | Run @action@ with the accumulator the lens selects reset to @zero@, restore the outer value after,
+-- and return what the action collected alongside its result.
+collecting :: (CheckerState -> a) -> (a -> CheckerState -> CheckerState) -> a -> Checker b -> Checker (a, b)
+collecting get put zero action = do
+  saved <- gets get
+  modify (put zero)
+  result <- action
+  collected <- gets get
+  modify (put saved)
+  pure (collected, result)
+
+-- | Union @addition@ into the accumulator the lens selects, through the normalizer (anchored at
+-- @sourceSpan@). The dual of 'collecting': the emit sites feed a scope.
+accumulateInto :: (TypeLattice a) => (CheckerState -> a) -> (a -> CheckerState -> CheckerState) -> SourceSpan -> a -> Checker ()
+accumulateInto get put sourceSpan addition = do
+  current <- gets get
+  joined <- runNormalizer sourceSpan (union current addition)
+  modify (put joined)
+
+-- | Run a @for@ body collecting its inferred next-element and break-result types (see
+-- 'ForAccumulator'); the effect accumulator is left untouched (a different scope axis).
 withForInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
 withForInference action = do
-  savedNext <- gets (.forBodyAccumulator)
-  savedBreak <- gets (.forBreakAccumulator)
-  modify (\s -> s {forBodyAccumulator = bottomType, forBreakAccumulator = bottomType})
-  result <- action
-  inferredNext <- gets (.forBodyAccumulator)
-  inferredBreak <- gets (.forBreakAccumulator)
-  modify (\s -> s {forBodyAccumulator = savedNext, forBreakAccumulator = savedBreak})
-  pure (inferredNext, inferredBreak, result)
+  (accumulator, result) <- collecting (.forAccumulator) (\value state -> state {forAccumulator = value}) emptyForAccumulator action
+  pure (accumulator.nextElements, accumulator.breakResults, result)
 
--- | Read / replace the @for@ accumulators. Reserved for the for body walker; ordinary expression
--- walks do not consult them.
-getForBodyAccumulator :: Checker NormalizedType
-getForBodyAccumulator = gets (.forBodyAccumulator)
-
-setForBodyAccumulator :: NormalizedType -> Checker ()
-setForBodyAccumulator newValue =
-  modify (\s -> s {forBodyAccumulator = newValue})
-
-getForBreakAccumulator :: Checker NormalizedType
-getForBreakAccumulator = gets (.forBreakAccumulator)
-
-setForBreakAccumulator :: NormalizedType -> Checker ()
-setForBreakAccumulator newValue =
-  modify (\s -> s {forBreakAccumulator = newValue})
-
-------------------------------------------------------------------------------------------------
--- Effect aggregation
-------------------------------------------------------------------------------------------------
-
--- | Run @action@ with a fresh 'effectAccumulator' (bottom) and return both the action's result
--- and the accumulator's final value — the inferred residual effect of the walked scope. The outer
--- state is saved before the action and restored after, so the inner effects do not leak out
--- (used to isolate handler request bodies and @use@ continuations: the requests they perform are
--- handled within and don't propagate to the enclosing agent's effect).
+-- | Run an effect-collection scope (a handler request body, a @use@ continuation) returning its
+-- inferred residual effect; the effects performed inside do not leak to the enclosing scope.
 withEffectInference :: Checker a -> Checker (NormalizedEffect, a)
-withEffectInference action = do
-  saved <- gets (.effectAccumulator)
-  modify (\s -> s {effectAccumulator = bottomEffect})
-  result <- action
-  inferred <- gets (.effectAccumulator)
-  modify (\s -> s {effectAccumulator = saved})
-  pure (inferred, result)
+withEffectInference = collecting (.effectAccumulator) (\value state -> state {effectAccumulator = value}) bottomEffect
 
-getEffectAccumulator :: Checker NormalizedEffect
-getEffectAccumulator = gets (.effectAccumulator)
+-- | A @for@ body's @next@ value joins the inferred element type.
+emitForNextType :: SourceSpan -> NormalizedType -> Checker ()
+emitForNextType = accumulateInto (\state -> state.forAccumulator.nextElements) (\value state -> state {forAccumulator = state.forAccumulator {nextElements = value}})
 
-setEffectAccumulator :: NormalizedEffect -> Checker ()
-setEffectAccumulator newValue =
-  modify (\s -> s {effectAccumulator = newValue})
+-- | A @for@ body's @break@ value joins the short-circuit results.
+emitForBreakType :: SourceSpan -> NormalizedType -> Checker ()
+emitForBreakType = accumulateInto (\state -> state.forAccumulator.breakResults) (\value state -> state {forAccumulator = state.forAccumulator {breakResults = value}})
+
+-- | An effect contribution (a non-pure call, a @use@) joins the enclosing scope's inferred effect.
+emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
+emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectAccumulator = value})

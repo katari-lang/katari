@@ -23,7 +23,7 @@ import Data.Map (Map)
 import Data.Map qualified as Map
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (Scheme (..))
+import Katari.Data.Environment (Scheme)
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Diagnostics (Diagnostics)
@@ -119,8 +119,8 @@ checkCyclic nodes = do
   typedAgents <-
     local (extendValueEnvironment seedMap) $
       foldM
-        ( \acc (node, declaration, preparation, scheme) -> do
-            typedDecl <- checkAgentBody declaration preparation scheme.valueType
+        ( \acc (node, declaration, preparation, _) -> do
+            typedDecl <- checkAgentBody declaration preparation
             pure (Map.insert node.qualifiedName typedDecl acc)
         )
         Map.empty
