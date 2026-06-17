@@ -23,9 +23,8 @@ import Data.Map (Map)
 import Data.Map qualified as Map
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (GenericParameters (..), ValueInformation (..))
+import Katari.Data.Environment (Scheme (..))
 import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.NormalizedType (NormalizedType)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
@@ -77,7 +76,7 @@ walkSCCs = foldM (\acc scc -> (acc <>) <$> walkOne scc) mempty
 -- | Run one component's checker action: forward its diagnostics, fold the new value-environment
 -- entries into the driver state, and return the new typed agent declarations.
 driveOne ::
-  Checker (Map QualifiedName ValueInformation, Map QualifiedName (AgentDeclaration Typed)) ->
+  Checker (Map QualifiedName Scheme, Map QualifiedName (AgentDeclaration Typed)) ->
   Driver (Map QualifiedName (AgentDeclaration Typed))
 driveOne action = do
   environment <- get
@@ -92,11 +91,11 @@ driveOne action = do
 -- returned for module assembly.
 checkAcyclic ::
   ValueNode ->
-  Checker (Map QualifiedName ValueInformation, Map QualifiedName (AgentDeclaration Typed))
+  Checker (Map QualifiedName Scheme, Map QualifiedName (AgentDeclaration Typed))
 checkAcyclic node = do
-  (typedDeclaration, agentType) <- synthAgent node.declaration
+  (typedDeclaration, scheme) <- synthAgent node.declaration
   pure
-    ( Map.singleton node.qualifiedName (schemeOf node.qualifiedName agentType),
+    ( Map.singleton node.qualifiedName scheme,
       Map.singleton node.qualifiedName typedDeclaration
     )
 
@@ -105,7 +104,7 @@ checkAcyclic node = do
 -- body against its own seed (with all seeds in scope).
 checkCyclic ::
   List ValueNode ->
-  Checker (Map QualifiedName ValueInformation, Map QualifiedName (AgentDeclaration Typed))
+  Checker (Map QualifiedName Scheme, Map QualifiedName (AgentDeclaration Typed))
 checkCyclic nodes = do
   seeds <- traverse seedOf nodes
   let seedMap = Map.fromList [(node.qualifiedName, scheme) | (node, _, scheme) <- seeds]
@@ -124,16 +123,8 @@ checkCyclic nodes = do
     -- preparation for both the seed scheme and the body check, so nothing is done twice.
     seedOf node = do
       preparation <- prepareAgent node.declaration
-      seedType <- seedAgentType node.declaration preparation
-      pure (node, preparation, schemeOf node.qualifiedName seedType)
-
-schemeOf :: QualifiedName -> NormalizedType -> ValueInformation
-schemeOf qualifiedName agentType =
-  ValueInformation
-    { name = qualifiedName,
-      genericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty},
-      valueType = agentType
-    }
+      scheme <- seedAgentType node.declaration preparation
+      pure (node, preparation, scheme)
 
 -- | Build one module's 'Typed' AST. Each agent declaration is looked up by its identifier-resolved
 -- identity in the typed-agent map (every top-level agent is a value node, so the entry always

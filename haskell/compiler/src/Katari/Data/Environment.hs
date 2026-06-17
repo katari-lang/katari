@@ -16,7 +16,7 @@ type DataEnvironment = Map QualifiedName DataInformation
 
 type RequestEnvironment = Map QualifiedName RequestInformation
 
-type ValueEnvironment = Map QualifiedName ValueInformation
+type ValueEnvironment = Map QualifiedName Scheme
 
 type SynonymEnvironment = Map QualifiedName SynonymInformation
 
@@ -36,6 +36,24 @@ data GenericParameters = GenericParameters
   }
   deriving (Eq, Show)
 
+emptyGenericParameters :: GenericParameters
+emptyGenericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty}
+
+-- | A value's type as carried in every environment (top-level values and locals alike): its
+-- quantified generic parameters plus the type body, which references those generics by 'GenericId'.
+-- A non-generic value has empty 'genericParameters'. Synthesis / checking work with bare
+-- 'NormalizedType's (a scheme is instantiated at the reference site), so 'Scheme' appears only where
+-- a value is stored, never as an expression's synthesized type.
+data Scheme = Scheme
+  { genericParameters :: GenericParameters,
+    valueType :: NormalizedType
+  }
+  deriving (Eq, Show)
+
+-- | A non-generic scheme over a bare type.
+monoScheme :: NormalizedType -> Scheme
+monoScheme bodyType = Scheme {genericParameters = emptyGenericParameters, valueType = bodyType}
+
 data DataInformation = DataInformation
   { name :: QualifiedName,
     genericParameters :: GenericParameters,
@@ -50,14 +68,6 @@ data RequestInformation = RequestInformation
   { name :: QualifiedName,
     genericParameters :: GenericParameters,
     request :: (NormalizedType, NormalizedType) -- (request parameter, request return type)
-  }
-  deriving (Eq, Show)
-
--- | A top-level agent / external / primitive / data / request declaration.
-data ValueInformation = ValueInformation
-  { name :: QualifiedName,
-    genericParameters :: GenericParameters,
-    valueType :: NormalizedType
   }
   deriving (Eq, Show)
 

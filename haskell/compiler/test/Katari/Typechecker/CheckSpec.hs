@@ -2,15 +2,18 @@ module Katari.Typechecker.CheckSpec (spec) where
 
 import Data.Foldable (toList)
 import Data.Map qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (GenericParameters (..), RequestInformation (..), ValueEnvironment, ValueInformation (..))
-import Katari.Data.Id (LocalVariableId (..), TypeResolution (..), VariableResolution (..))
+import Katari.Data.Environment (GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), ValueEnvironment, monoScheme)
+import Katari.Data.GenericKind (GenericKind (..))
+import Katari.Data.Id (GenericId (..), LocalVariableId (..), TypeResolution (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
+import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (Diagnostics)
 import Katari.Error (CompilerError (..), typeErrorCode)
 import Katari.Typechecker.Check
@@ -19,7 +22,6 @@ import Katari.Typechecker.Context
     CheckerEnvironment (..),
     ForContext (..),
     HandleContext (..),
-    LocalBinding (..),
     initialCheckerEnvironment,
     pushForContext,
     pushHandleContext,
@@ -51,7 +53,7 @@ spec = do
     it "reads a bound local's type" $
       synthIn [(LocalVariableId 0, stringType)] (variableExpression (LocalVariableId 0)) `shouldBe` stringType
     it "reads a top-level value's scheme from the value environment" $
-      let agentScheme = simpleScheme topLevelName integerType
+      let agentScheme = simpleScheme integerType
           environment = checkerEnvironmentWith mempty (Map.singleton topLevelName agentScheme)
           (result, _) = runChecker environment (synthExpressionType (qualifiedVariableExpression topLevelName))
        in result `shouldBe` integerType
@@ -124,7 +126,7 @@ spec = do
 
   describe "synthExpressionType (match)" $ do
     it "rejects a match on `unknown` without a wildcard case" $
-      let scrutineeLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = unknownType}
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme unknownType)
           subject = variableExpression (LocalVariableId 0)
           matchExpr =
             matchExpression
@@ -134,7 +136,7 @@ spec = do
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
     it "accepts a match on `unknown` with a wildcard case" $
-      let scrutineeLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = unknownType}
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme unknownType)
           subject = variableExpression (LocalVariableId 0)
           matchExpr =
             matchExpression
@@ -144,7 +146,7 @@ spec = do
        in (result, toList diagnostics) `shouldBe` (integerType, [])
 
     it "covers an integer scrutinee with literal cases (intentionally permissive)" $
-      let scrutineeLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = integerType}
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme integerType)
           subject = variableExpression (LocalVariableId 0)
           matchExpr =
             matchExpression
@@ -156,7 +158,7 @@ spec = do
        in (result, toList diagnostics) `shouldBe` (stringType, [])
 
     it "narrows the binder's type inside a TypeFilter pattern" $
-      let scrutineeLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = unknownType}
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme unknownType)
           subject = variableExpression (LocalVariableId 0)
           narrowed = typeFilterPattern integerAnnotation (variablePatternForLocal (LocalVariableId 1))
           matchExpr =
@@ -169,7 +171,7 @@ spec = do
        in (result, toList diagnostics) `shouldBe` (integerType, [])
 
     it "unions the body types across cases" $
-      let scrutineeLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = booleanType}
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme booleanType)
           subject = variableExpression (LocalVariableId 0)
           matchExpr =
             matchExpression
@@ -225,7 +227,7 @@ spec = do
 
     it "aggregates a non-pure call's effect into the body's inferred effect" $
       let callableType = nonPureAgentType bottomAttribute (paramObject [("x", integerType)]) integerType
-          callableLocal = Map.singleton (LocalVariableId 10) LocalBinding {localType = callableType}
+          callableLocal = Map.singleton (LocalVariableId 10) (monoScheme callableType)
           callExpr =
             callExpression
               (variableExpression (LocalVariableId 10))
@@ -247,7 +249,7 @@ spec = do
 
     it "annotated effect `all` accepts a body with a smaller inferred effect" $
       let callableType = nonPureAgentType bottomAttribute (paramObject [("x", integerType)]) integerType
-          callableLocal = Map.singleton (LocalVariableId 10) LocalBinding {localType = callableType}
+          callableLocal = Map.singleton (LocalVariableId 10) (monoScheme callableType)
           callExpr =
             callExpression
               (variableExpression (LocalVariableId 10))
@@ -373,7 +375,7 @@ spec = do
                 generics = mempty,
                 attribute = bottomAttribute
               }
-          providerLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = providerType}
+          providerLocal = Map.singleton (LocalVariableId 0) (monoScheme providerType)
           useStmt = useStatementBuilder (Just (LocalVariableId 1, integerAnnotation)) (variableExpression (LocalVariableId 0)) (exprBlock (stringLiteral "ok"))
           action = withReturnTarget stringType (walkStatements [useStmt] (pure ()))
           (_, diagnostics) = runAt providerLocal mempty action
@@ -412,8 +414,8 @@ spec = do
           nonPureCallable = nonPureAgentType bottomAttribute (paramObject [("x", integerType)]) integerType
           localBindings =
             Map.fromList
-              [ (LocalVariableId 0, LocalBinding {localType = providerType}),
-                (LocalVariableId 2, LocalBinding {localType = nonPureCallable})
+              [ (LocalVariableId 0, monoScheme providerType),
+                (LocalVariableId 2, monoScheme nonPureCallable)
               ]
           -- use's body calls the non-pure callable — its inferred effect includes fakeRequestName.
           callInBody =
@@ -447,7 +449,7 @@ spec = do
                 generics = mempty,
                 attribute = bottomAttribute
               }
-          providerLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = providerType}
+          providerLocal = Map.singleton (LocalVariableId 0) (monoScheme providerType)
           -- Binder without annotation (only the var pattern, typeAnnotation = Nothing)
           useStmt =
             StatementUse
@@ -554,14 +556,14 @@ spec = do
               Nothing
           environment =
             (initialCheckerEnvironment typeEnvironmentWithFakeRequest)
-              { locals = Map.singleton (LocalVariableId 9) LocalBinding {localType = callable}
+              { locals = Map.singleton (LocalVariableId 9) (monoScheme callable)
               }
           (_, diagnostics) = runChecker environment (synthExpressionType handlerExpr)
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
   describe "synthExpressionType (for)" $ do
     it "synthesizes array[T | null] from a body whose `next` emits T" $
-      let sourceLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = tupleNormalized [integerType]}
+      let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType]))
           forExpr =
             forExpressionBuilder
               (variablePatternForLocal (LocalVariableId 1))
@@ -574,7 +576,7 @@ spec = do
 
     it "unions multiple `next` value types across the body" $
       let -- Tuple has two positions of differing types; iteration yields int|string per element.
-          sourceLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = tupleNormalized [integerType, stringType]}
+          sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType, stringType]))
           forExpr =
             forExpressionBuilder
               (variablePatternForLocal (LocalVariableId 1))
@@ -586,7 +588,7 @@ spec = do
           extractSequenceElement result `shouldSatisfy` carriesIntegerAndString
 
     it "with a then clause, evaluates to the then body's type" $
-      let sourceLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = tupleNormalized [integerType]}
+      let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType]))
           forExpr =
             forExpressionBuilder
               (variablePatternForLocal (LocalVariableId 1))
@@ -598,7 +600,7 @@ spec = do
        in (result, toList diagnostics) `shouldBe` (stringType, [])
 
     it "reports K3014 when the source is not a sequence" $
-      let sourceLocal = Map.singleton (LocalVariableId 0) LocalBinding {localType = integerType}
+      let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme integerType)
           forExpr =
             forExpressionBuilder
               (variablePatternForLocal (LocalVariableId 1))
@@ -664,7 +666,7 @@ spec = do
   describe "synthExpressionType (call)" $ do
     it "pure call with matching arg returns the function's return type" $
       let calleeType = pureAgentType (paramObject [("x", integerType)]) integerType
-          localBindings = Map.singleton (LocalVariableId 0) LocalBinding {localType = calleeType}
+          localBindings = Map.singleton (LocalVariableId 0) (monoScheme calleeType)
           call = callExpression (variableExpression (LocalVariableId 0)) [("x", integerLiteral 1)]
           (result, diagnostics) = runAt localBindings mempty (synthExpressionType call)
        in (result, toList diagnostics) `shouldBe` (integerType, [])
@@ -673,8 +675,8 @@ spec = do
       let calleeType = pureAgentType (paramObject [("x", integerType)]) integerType
           localBindings =
             Map.fromList
-              [ (LocalVariableId 0, LocalBinding {localType = calleeType}),
-                (LocalVariableId 1, LocalBinding {localType = ofPrivate integerType})
+              [ (LocalVariableId 0, monoScheme calleeType),
+                (LocalVariableId 1, monoScheme (ofPrivate integerType))
               ]
           privateArg = variableExpression (LocalVariableId 1)
           call = callExpression (variableExpression (LocalVariableId 0)) [("x", privateArg)]
@@ -683,14 +685,14 @@ spec = do
 
     it "non-pure call in a matching world returns the declared return type without lift" $
       let calleeType = nonPureAgentType bottomAttribute (paramObject [("x", integerType)]) integerType
-          localBindings = Map.singleton (LocalVariableId 0) LocalBinding {localType = calleeType}
+          localBindings = Map.singleton (LocalVariableId 0) (monoScheme calleeType)
           call = callExpression (variableExpression (LocalVariableId 0)) [("x", integerLiteral 1)]
           (result, diagnostics) = runAt localBindings mempty (synthExpressionType call)
        in (result, toList diagnostics) `shouldBe` (integerType, [])
 
     it "rejects a private non-pure callee in a public world" $
       let calleeType = nonPureAgentType privateAttribute (paramObject [("x", integerType)]) integerType
-          localBindings = Map.singleton (LocalVariableId 0) LocalBinding {localType = calleeType}
+          localBindings = Map.singleton (LocalVariableId 0) (monoScheme calleeType)
           call = callExpression (variableExpression (LocalVariableId 0)) [("x", integerLiteral 1)]
           (_, diagnostics) = runAt localBindings mempty (synthExpressionType call)
        in hasErrorCode "K3001" diagnostics `shouldBe` True
@@ -699,8 +701,8 @@ spec = do
       let calleeType = nonPureAgentType bottomAttribute (paramObject [("x", integerType)]) integerType
           localBindings =
             Map.fromList
-              [ (LocalVariableId 0, LocalBinding {localType = calleeType}),
-                (LocalVariableId 1, LocalBinding {localType = ofPrivate integerType})
+              [ (LocalVariableId 0, monoScheme calleeType),
+                (LocalVariableId 1, monoScheme (ofPrivate integerType))
               ]
           privateArg = variableExpression (LocalVariableId 1)
           call = callExpression (variableExpression (LocalVariableId 0)) [("x", privateArg)]
@@ -708,7 +710,7 @@ spec = do
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
     it "reports a non-callable callee with K3014" $
-      let localBindings = Map.singleton (LocalVariableId 0) LocalBinding {localType = integerType}
+      let localBindings = Map.singleton (LocalVariableId 0) (monoScheme integerType)
           call = callExpression (variableExpression (LocalVariableId 0)) []
           (result, diagnostics) = runAt localBindings mempty (synthExpressionType call)
        in (result, hasErrorCode "K3014" diagnostics) `shouldBe` (bottomType, True)
@@ -723,8 +725,8 @@ spec = do
           nestedPrivateArg = recordNormalized [("y", ofPrivate integerType)]
           localBindings =
             Map.fromList
-              [ (LocalVariableId 0, LocalBinding {localType = calleeType}),
-                (LocalVariableId 1, LocalBinding {localType = nestedPrivateArg})
+              [ (LocalVariableId 0, monoScheme calleeType),
+                (LocalVariableId 1, monoScheme nestedPrivateArg)
               ]
           call =
             callExpression
@@ -734,18 +736,39 @@ spec = do
        in -- The nested private attribute lifts: the return is observed as private.
           (result, toList diagnostics) `shouldBe` (ofPrivate integerType, [])
 
+  describe "explicit generic application" $ do
+    it "instantiates a generic value's scheme by explicit type argument" $
+      -- A top-level `agent[a](x: a) -> a` applied as `topAgent[integer]` instantiates to
+      -- `agent(x: integer) -> integer`.
+      let environment = checkerEnvironmentWith mempty (Map.singleton topLevelName (identityScheme aId))
+          application = typeApplication (qualifiedVariableExpression topLevelName) [integerAnnotation]
+          (result, diagnostics) = runChecker environment (synthExpressionType application)
+          expected = pureAgentType (paramObject [("x", integerType)]) integerType
+       in (result, toList diagnostics) `shouldBe` (expected, [])
+
+    it "rejects the wrong number of explicit type arguments (K3009)" $
+      let environment = checkerEnvironmentWith mempty (Map.singleton topLevelName (identityScheme aId))
+          application = typeApplication (qualifiedVariableExpression topLevelName) [integerAnnotation, stringAnnotation]
+          (_, diagnostics) = runChecker environment (synthExpressionType application)
+       in hasErrorCode "K3009" diagnostics `shouldBe` True
+
+    it "rejects a bare reference to a generic value, unapplied (K3013)" $
+      let environment = checkerEnvironmentWith mempty (Map.singleton topLevelName (identityScheme aId))
+          (_, diagnostics) = runChecker environment (synthExpressionType (qualifiedVariableExpression topLevelName))
+       in hasErrorCode "K3013" diagnostics `shouldBe` True
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------
 
 -- | Build a checker environment with the given locals and value entries in scope. Other fields
 -- stay at their defaults so the test exercises the expression walk in isolation.
-checkerEnvironmentWith :: Map.Map LocalVariableId LocalBinding -> ValueEnvironment -> CheckerEnvironment
+checkerEnvironmentWith :: Map.Map LocalVariableId Scheme -> ValueEnvironment -> CheckerEnvironment
 checkerEnvironmentWith locals values =
   let baseEnvironment = initialCheckerEnvironment emptyTypeEnvironment
    in baseEnvironment {locals = locals, valueEnvironment = values}
 
-runAt :: Map.Map LocalVariableId LocalBinding -> ValueEnvironment -> Checker a -> (a, Diagnostics)
+runAt :: Map.Map LocalVariableId Scheme -> ValueEnvironment -> Checker a -> (a, Diagnostics)
 runAt locals values = runChecker (checkerEnvironmentWith locals values)
 
 -- | Synthesize an expression's type in the empty environment.
@@ -755,7 +778,7 @@ synthAt expression = fst (runAt mempty mempty (synthExpressionType expression))
 -- | Synthesize an expression's type with the given local bindings in scope.
 synthIn :: List (LocalVariableId, NormalizedType) -> Expression Identified -> NormalizedType
 synthIn bindings expression =
-  let locals = Map.fromList [(localId, LocalBinding {localType = boundType}) | (localId, boundType) <- bindings]
+  let locals = Map.fromList [(localId, monoScheme boundType) | (localId, boundType) <- bindings]
    in fst (runAt locals mempty (synthExpressionType expression))
 
 ------------------------------------------------------------------------------------------------
@@ -805,13 +828,8 @@ testSpan = SourceSpan {filePath = "<test>", start = Position {line = 1, column =
 topLevelName :: QualifiedName
 topLevelName = QualifiedName {moduleName = ModuleName "test", name = "topAgent"}
 
-simpleScheme :: QualifiedName -> NormalizedType -> ValueInformation
-simpleScheme qualifiedName valueType =
-  ValueInformation
-    { name = qualifiedName,
-      genericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty},
-      valueType = valueType
-    }
+simpleScheme :: NormalizedType -> Scheme
+simpleScheme = monoScheme
 
 integerLiteral :: Int -> Expression Identified
 integerLiteral n = ExpressionLiteral LiteralExpression {value = LiteralValueInteger n, sourceSpan = testSpan, typeOf = ()}
@@ -988,6 +1006,45 @@ secondRequestName = QualifiedName {moduleName = ModuleName "test", name = "req2"
 
 paramObject :: List (Text, NormalizedType) -> NormalizedType
 paramObject = recordNormalized
+
+------------------------------------------------------------------------------------------------
+-- Generic fixtures
+------------------------------------------------------------------------------------------------
+
+aId :: GenericId
+aId = GenericId (ModuleName "test") 0
+
+-- | A bare generic type variable.
+genericVariable :: GenericId -> NormalizedType
+genericVariable genericId =
+  NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton genericId, attribute = bottomAttribute}
+
+-- | The scheme of a generic identity agent @agent[a](x: a) -> a@, quantified over the given id.
+identityScheme :: GenericId -> Scheme
+identityScheme genericId =
+  Scheme
+    { genericParameters =
+        GenericParameters
+          { parameterNames = ["a"],
+            parameterInformation =
+              Map.singleton
+                "a"
+                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, upperBound = Nothing}
+          },
+      valueType = pureAgentType (paramObject [("x", genericVariable genericId)]) (genericVariable genericId)
+    }
+
+-- | An explicit generic application @callee[args]@.
+typeApplication :: Expression Identified -> List (SyntacticTypeExpression Identified) -> Expression Identified
+typeApplication callee typeArguments =
+  ExpressionTypeApplication
+    TypeApplicationExpression
+      { callee = callee,
+        typeArguments = typeArguments,
+        instantiation = (),
+        sourceSpan = testSpan,
+        typeOf = ()
+      }
 
 ------------------------------------------------------------------------------------------------
 -- Request handler fixtures

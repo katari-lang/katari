@@ -103,6 +103,15 @@ withOwnGenerics parameters =
   where
     ownGenerics = Map.fromList [(info.genericId, schemeVariableFor info.kind info.genericId) | info <- Map.elems parameters.parameterInformation]
 
+-- | Add a set of in-scope generics to an 'ElaborateContext', so the checker can elaborate a body
+-- annotation that references an agent / handler generic at the generic's declared kind rather than
+-- the type-kinded default of 'elaborateGeneric'.
+scopeGenerics :: Map GenericId GenericParameterInformation -> ElaborateContext -> ElaborateContext
+scopeGenerics generics context =
+  context {substitution = Map.union scoped context.substitution}
+  where
+    scoped = Map.mapWithKey (\genericId info -> schemeVariableFor info.kind genericId) generics
+
 reportTypeError :: SourceSpan -> TypeError -> Elaborate ()
 reportTypeError sourceSpan typeError = reportAt sourceSpan (CompilerErrorType typeError)
 

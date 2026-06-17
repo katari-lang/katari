@@ -25,8 +25,8 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.Environment
   ( GenericParameterInformation,
+    Scheme,
     ValueEnvironment,
-    ValueInformation,
   )
 import Katari.Data.Id (GenericId, LocalVariableId)
 import Katari.Data.NormalizedType
@@ -42,25 +42,13 @@ import Katari.Data.QualifiedName (QualifiedName)
 import Katari.Data.SourceSpan (SourceSpan)
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
-import Katari.Typechecker.Elaborate (Elaborate, runElaborate)
+import Katari.Typechecker.Elaborate (Elaborate, runElaborate, scopeGenerics)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
 import Katari.Typechecker.Normalizer
   ( Normalizer,
     NormalizerEnvironment (..),
     joinAttribute,
   )
-
-------------------------------------------------------------------------------------------------
--- Local bindings
-------------------------------------------------------------------------------------------------
-
--- | What a local variable contributes to the checker scope: the variable's normalized type at its
--- binding site. Reading a variable yields this type as-is; the current world is applied
--- contextually by 'Katari.Typechecker.Normalizer.subtype' at the use site, so no push-down here.
-newtype LocalBinding = LocalBinding
-  { localType :: NormalizedType
-  }
-  deriving stock (Eq, Show)
 
 ------------------------------------------------------------------------------------------------
 -- Jump contexts
@@ -130,8 +118,10 @@ data CheckerEnvironment = CheckerEnvironment
     -- | Top-level values whose scheme is known; grown SCC by SCC by the driver as components are
     -- checked, so a callee is registered before any caller is walked.
     valueEnvironment :: ValueEnvironment,
-    -- | Locals in scope, keyed by 'LocalVariableId' (the identifier-resolved variable id).
-    locals :: Map LocalVariableId LocalBinding,
+    -- | Locals in scope, keyed by 'LocalVariableId' (the identifier-resolved variable id). A local
+    -- holds a 'Scheme' like a top-level value — usually non-generic, but a local @agent@ may declare
+    -- generics, so explicit application works on locals too.
+    locals :: Map LocalVariableId Scheme,
     -- | The generic parameters in scope (an agent's / handler's declared generics). The normalizer
     -- consults their declared upper bounds during subtype.
     genericsInScope :: Map GenericId GenericParameterInformation,
@@ -228,7 +218,9 @@ runNormalizer sourceSpan action = do
 runElaborator :: Elaborate a -> Checker a
 runElaborator action = do
   context <- asks (.typeEnvironment.elaborateContext)
-  let (result, diagnostics) = runElaborate context action
+  generics <- asks (.genericsInScope)
+  let scoped = scopeGenerics generics context
+      (result, diagnostics) = runElaborate scoped action
   tell diagnostics
   pure result
 
@@ -249,30 +241,30 @@ withWorld attribute = local (\environment -> rebuildWithWorld environment (joinA
 -- Environment extension
 ------------------------------------------------------------------------------------------------
 
--- | Bring a local variable into scope for the sub-action.
-withLocal :: LocalVariableId -> LocalBinding -> Checker a -> Checker a
-withLocal variableId binding =
-  local (\environment -> environment {locals = Map.insert variableId binding environment.locals})
+-- | Bring a local variable's scheme into scope for the sub-action.
+withLocal :: LocalVariableId -> Scheme -> Checker a -> Checker a
+withLocal variableId scheme =
+  local (\environment -> environment {locals = Map.insert variableId scheme environment.locals})
 
--- | Bring a list of @(localId, binding)@ pairs into scope for the sub-action — the
--- multi-parameter form of 'withLocal'. Used to bind every parameter of an agent / handler at once
--- before the body runs.
-withParameters :: List (LocalVariableId, LocalBinding) -> Checker a -> Checker a
+-- | Bring a list of @(localId, scheme)@ pairs into scope for the sub-action — the multi-parameter
+-- form of 'withLocal'. Used to bind every parameter of an agent / handler at once before the body
+-- runs.
+withParameters :: List (LocalVariableId, Scheme) -> Checker a -> Checker a
 withParameters bindings continuation = foldr applyOne continuation bindings
   where
-    applyOne (localId, binding) = withLocal localId binding
+    applyOne (localId, scheme) = withLocal localId scheme
 
 -- | Bring a top-level (qualified) value into scope. The SCC driver uses this to grow the value
 -- environment as each component is checked.
-withValue :: QualifiedName -> ValueInformation -> Checker a -> Checker a
-withValue qualifiedName info =
-  local (\environment -> environment {valueEnvironment = Map.insert qualifiedName info environment.valueEnvironment})
+withValue :: QualifiedName -> Scheme -> Checker a -> Checker a
+withValue qualifiedName scheme =
+  local (\environment -> environment {valueEnvironment = Map.insert qualifiedName scheme environment.valueEnvironment})
 
 -- | Permanently register a top-level value in the checker environment from this point onward.
 -- 'withValue' scopes the registration to a sub-action; 'extendValueEnvironment' is the variant
 -- used when iterating SCCs at the driver level (the registration must persist for the rest of the
 -- walk, not just one sub-action).
-extendValueEnvironment :: Map QualifiedName ValueInformation -> CheckerEnvironment -> CheckerEnvironment
+extendValueEnvironment :: Map QualifiedName Scheme -> CheckerEnvironment -> CheckerEnvironment
 extendValueEnvironment additions environment =
   environment {valueEnvironment = environment.valueEnvironment <> additions}
 
