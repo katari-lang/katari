@@ -599,6 +599,27 @@ spec = do
           (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
        in (result, toList diagnostics) `shouldBe` (stringType, [])
 
+    it "includes a `break` value in the for's result type (short-circuit)" $
+      let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType]))
+          forExpr =
+            forExpressionBuilder
+              (variablePatternForLocal (LocalVariableId 1))
+              (variableExpression (LocalVariableId 0))
+              ( Block
+                  { statements =
+                      [ forNextStatementBuilder (variableExpression (LocalVariableId 1)),
+                        forBreakStatementBuilder (stringLiteral "done")
+                      ],
+                    returnExpression = Nothing,
+                    sourceSpan = testSpan
+                  }
+              )
+              Nothing
+          (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
+          -- array[integer | null] (from `next`) unioned with the break value's type.
+          expected = unionOf (arrayOfNullable integerType) stringType
+       in (result, toList diagnostics) `shouldBe` (expected, [])
+
     it "reports K3014 when the source is not a sequence" $
       let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme integerType)
           forExpr =
@@ -625,23 +646,15 @@ spec = do
       let (_, diagnostics) = runAt mempty mempty (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
-    it "`next` inside a for frame matches the frame's nextElementType" $
-      let frame = ForContext {nextElementType = integerType, breakResultType = stringType}
-          action = pushForContext frame (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
+    it "`next` inside a for body is accepted (the element type is inferred)" $
+      let action = pushForContext ForContext (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
-    it "`break` inside a for frame matches the frame's breakResultType" $
-      let frame = ForContext {nextElementType = integerType, breakResultType = stringType}
-          action = pushForContext frame (walkStatements [forBreakStatementBuilder (stringLiteral "x")] (pure ()))
+    it "`break` inside a for body is accepted (it short-circuits with its value)" $
+      let action = pushForContext ForContext (walkStatements [forBreakStatementBuilder (stringLiteral "x")] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
-
-    it "for-`next` value mismatch with the frame is K3001" $
-      let frame = ForContext {nextElementType = integerType, breakResultType = stringType}
-          action = pushForContext frame (walkStatements [forNextStatementBuilder (stringLiteral "x")] (pure ()))
-          (_, diagnostics) = runAt mempty mempty action
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
 
     it "for-`next` outside any `for` body is K3012" $
       let (_, diagnostics) = runAt mempty mempty (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))

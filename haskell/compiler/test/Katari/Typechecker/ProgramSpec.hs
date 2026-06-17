@@ -24,6 +24,9 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "resolves a data constructor reference" $
     typeErrorCodes [("test", "data point(x: integer)\nagent make() -> point { point(x = 1) }")] `shouldBe` []
 
+  it "reads a field from a data value" $
+    typeErrorCodes [("test", "data point(x: integer)\nagent getX(p: point) -> integer { p.x }")] `shouldBe` []
+
   it "resolves a request reference" $
     typeErrorCodes [("test", "request tick() -> integer\nagent run() -> integer { tick() }")] `shouldBe` []
 

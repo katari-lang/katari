@@ -77,13 +77,10 @@ emptyJumpContexts =
       handleContexts = []
     }
 
--- | What a @for@ body's @next@ and @break@ expect.
+-- | A marker that the walk is inside a @for@ body, so a @next@ / @break@ knows it has a target. The
+-- element type and the break-result type are inferred (accumulated in 'CheckerState'), not fixed up
+-- front, so the frame carries no expected types.
 data ForContext = ForContext
-  { -- | The element type the @for@ emits per iteration; each @next@ value must be a subtype.
-    nextElementType :: NormalizedType,
-    -- | The @for@ expression's overall result type that @break@ yields.
-    breakResultType :: NormalizedType
-  }
   deriving stock (Eq, Show)
 
 -- | What a @handler@ body and its request handlers expect: the handler's overall result type @R@
@@ -146,17 +143,22 @@ data CheckerEnvironment = CheckerEnvironment
 -- @with*Inference@ helpers, which snapshot/restore around the inner walk so a nested scope sees
 -- only its own contributions.
 data CheckerState = CheckerState
-  { forBodyAccumulator :: NormalizedType,
+  { -- | The union of every @next@ value type in the innermost @for@ body — its inferred element type.
+    forBodyAccumulator :: NormalizedType,
+    -- | The union of every @break@ value type in the innermost @for@ body — the short-circuit results
+    -- the @for@ may evaluate to in addition to its normal (array / then) result.
+    forBreakAccumulator :: NormalizedType,
     effectAccumulator :: NormalizedEffect
   }
   deriving stock (Eq, Show)
 
--- | The initial state — both accumulators at their bottoms (a join with anything is the other
--- thing, so a not-yet-walked scope starts collecting from there).
+-- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
+-- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
 initialCheckerState =
   CheckerState
     { forBodyAccumulator = bottomType,
+      forBreakAccumulator = bottomType,
       effectAccumulator = bottomEffect
     }
 
@@ -302,34 +304,40 @@ pushHandleContext context =
 -- For-body next-type inference
 ------------------------------------------------------------------------------------------------
 
--- | Run @action@ with a fresh 'forBodyAccumulator' (bottom) and return both the action's result
--- and the accumulator's final value — the inferred next-element type of the for body. The outer
--- state's accumulator is saved before the action and restored after, so a nested for body sees
--- only its own contributions. The 'effectAccumulator' is left untouched (different scope axis).
+-- | Run @action@ with fresh @for@ accumulators (bottom) and return the action's result alongside the
+-- inferred next-element type and break-result type of the for body. The outer accumulators are saved
+-- before the action and restored after, so a nested for body sees only its own contributions. The
+-- 'effectAccumulator' is left untouched (different scope axis).
 --
--- The for body walker accumulates each @forNext@ / @forBreak@ value's type into the slot via
--- 'Katari.Typechecker.Check.emitForNextType'; after the body walk, the slot holds the union of
--- every contributed type, which becomes the homogeneous element type of the for expression's
--- result array.
-withForInference :: Checker a -> Checker (NormalizedType, a)
+-- The for body walker accumulates each @next@ value into 'forBodyAccumulator' (the element type) and
+-- each @break@ value into 'forBreakAccumulator' (the short-circuit result) via
+-- 'Katari.Typechecker.Check.emitForNextType' / 'Katari.Typechecker.Check.emitForBreakType'.
+withForInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
 withForInference action = do
-  saved <- gets (.forBodyAccumulator)
-  modify (\s -> s {forBodyAccumulator = bottomType})
+  savedNext <- gets (.forBodyAccumulator)
+  savedBreak <- gets (.forBreakAccumulator)
+  modify (\s -> s {forBodyAccumulator = bottomType, forBreakAccumulator = bottomType})
   result <- action
-  inferred <- gets (.forBodyAccumulator)
-  modify (\s -> s {forBodyAccumulator = saved})
-  pure (inferred, result)
+  inferredNext <- gets (.forBodyAccumulator)
+  inferredBreak <- gets (.forBreakAccumulator)
+  modify (\s -> s {forBodyAccumulator = savedNext, forBreakAccumulator = savedBreak})
+  pure (inferredNext, inferredBreak, result)
 
--- | Read the current 'forBodyAccumulator'. Reserved for the for body walker;
--- ordinary expression walks should not consult this.
+-- | Read / replace the @for@ accumulators. Reserved for the for body walker; ordinary expression
+-- walks do not consult them.
 getForBodyAccumulator :: Checker NormalizedType
 getForBodyAccumulator = gets (.forBodyAccumulator)
 
--- | Replace the 'forBodyAccumulator' with a new value (typically the join of the old value with a
--- forNext / forBreak contribution).
 setForBodyAccumulator :: NormalizedType -> Checker ()
 setForBodyAccumulator newValue =
   modify (\s -> s {forBodyAccumulator = newValue})
+
+getForBreakAccumulator :: Checker NormalizedType
+getForBreakAccumulator = gets (.forBreakAccumulator)
+
+setForBreakAccumulator :: NormalizedType -> Checker ()
+setForBreakAccumulator newValue =
+  modify (\s -> s {forBreakAccumulator = newValue})
 
 ------------------------------------------------------------------------------------------------
 -- Effect aggregation

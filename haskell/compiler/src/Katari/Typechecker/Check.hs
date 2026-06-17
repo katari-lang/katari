@@ -13,7 +13,7 @@ import Control.Monad (foldM, unless, when, zipWithM)
 import Control.Monad.RWS.Class (asks, tell)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
@@ -30,7 +30,6 @@ import Katari.Error
   ( ApplicationArityErrorInfo (..),
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
-    MalformedTypeErrorInfo (..),
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     TypeError (..),
@@ -44,12 +43,14 @@ import Katari.Typechecker.Context
     JumpContexts (..),
     getEffectAccumulator,
     getForBodyAccumulator,
+    getForBreakAccumulator,
     pushForContext,
     pushHandleContext,
     runElaborator,
     runNormalizer,
     setEffectAccumulator,
     setForBodyAccumulator,
+    setForBreakAccumulator,
     withEffectInference,
     withForInference,
     withGeneric,
@@ -337,7 +338,7 @@ synthLiteralValue = \case
 
 synthVariableExpression :: VariableExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthVariableExpression expression = do
-  scheme <- lookupScheme expression.sourceSpan expression.variableReference.resolution
+  scheme <- lookupScheme expression.variableReference.resolution
   nt <- instantiateBare expression.sourceSpan scheme
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -355,7 +356,7 @@ synthQualifiedReferenceExpression ::
   QualifiedReferenceExpression Identified ->
   Checker (Expression Typed, NormalizedType)
 synthQualifiedReferenceExpression expression = do
-  scheme <- lookupScheme expression.sourceSpan expression.variableReference.resolution
+  scheme <- lookupScheme expression.variableReference.resolution
   nt <- instantiateBare expression.sourceSpan scheme
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -468,10 +469,9 @@ synthFieldAccessExpression ::
 synthFieldAccessExpression expression = do
   (typedObject, objectType) <- synthExpression expression.object
   nt <- case objectType.baseType of
-    NormalizedBaseTypeLayered layer | Just normalizedObject <- layer.objectLayer ->
-      case Map.lookup expression.fieldName normalizedObject.fields of
-        Just field -> pure field.normalizedType
-        Nothing -> pure normalizedObject.rest
+    NormalizedBaseTypeLayered layer
+      | isJust layer.objectLayer || not (Map.null layer.dataLayer) ->
+          fieldOfLayer expression.sourceSpan expression.fieldName layer
     _ -> do
       reportExpectedShape expression.sourceSpan "an object" objectType
       pure bottomType
@@ -487,6 +487,40 @@ synthFieldAccessExpression expression = do
           },
       nt
     )
+
+-- | The type of a field read from a value's layer: the union over its structural object (if any) and
+-- every nominal data type it may be (each data type's constructor object, instantiated). Subtyping
+-- already relates a data value to its fields, so a field access is the read at that relation.
+fieldOfLayer :: SourceSpan -> Text -> LayeredType -> Checker NormalizedType
+fieldOfLayer sourceSpan fieldName layer = do
+  let structural = maybe [] (\object -> [objectFieldType object fieldName]) layer.objectLayer
+  nominal <- traverse (dataFieldType sourceSpan fieldName) (Map.toList layer.dataLayer)
+  foldM (\accumulated fieldType -> runNormalizer sourceSpan (union accumulated fieldType)) bottomType (structural <> nominal)
+
+-- | A field's type in an object (its declared field, or the object's @rest@ for an undeclared key).
+objectFieldType :: NormalizedObject -> Text -> NormalizedType
+objectFieldType object fieldName = case Map.lookup fieldName object.fields of
+  Just field -> field.normalizedType
+  Nothing -> object.rest
+
+-- | A field's type in a nominal data value: the data type's constructor object instantiated with the
+-- value's generic arguments, then read like any object.
+dataFieldType :: SourceSpan -> Text -> (QualifiedName, Map Text NormalizedKindedType) -> Checker NormalizedType
+dataFieldType sourceSpan fieldName (dataName, arguments) = do
+  dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
+  case Map.lookup dataName dataEnvironment of
+    Just info -> do
+      let substitution =
+            Map.fromList
+              [ (parameterInfo.genericId, argument)
+                | (parameterName, parameterInfo) <- Map.toList info.genericParameters.parameterInformation,
+                  Just argument <- [Map.lookup parameterName arguments]
+              ]
+      constructorObject <- runNormalizer sourceSpan (substituteType substitution info.constructor)
+      pure $ case constructorObject.baseType of
+        NormalizedBaseTypeLayered constructorLayer | Just object <- constructorLayer.objectLayer -> objectFieldType object fieldName
+        _ -> bottomType
+    Nothing -> panic ("dataFieldType: data type not registered: " <> renderQualifiedName dataName)
 
 synthTypeApplicationExpression ::
   TypeApplicationExpression Identified ->
@@ -519,7 +553,7 @@ synthTypeApplicationExpression expression = do
 synthApplicationCallee :: Expression Identified -> Checker (Expression Typed, Scheme)
 synthApplicationCallee = \case
   ExpressionVariable variable -> do
-    scheme <- lookupScheme variable.sourceSpan variable.variableReference.resolution
+    scheme <- lookupScheme variable.variableReference.resolution
     semantic <- denormalizeAt variable.sourceSpan scheme.valueType
     pure
       ( ExpressionVariable
@@ -532,7 +566,7 @@ synthApplicationCallee = \case
         scheme
       )
   ExpressionQualifiedReference reference -> do
-    scheme <- lookupScheme reference.sourceSpan reference.variableReference.resolution
+    scheme <- lookupScheme reference.variableReference.resolution
     semantic <- denormalizeAt reference.sourceSpan scheme.valueType
     pure
       ( ExpressionQualifiedReference
@@ -866,9 +900,9 @@ checkForNextStatement :: ForNextStatement Identified -> Checker (ForNextStatemen
 checkForNextStatement forNextStmt = do
   contexts <- asks (.jumps)
   (typedValue, typedModifiers) <- case contexts.forContexts of
-    (frame : _) -> do
+    (_ : _) -> do
+      -- The element type is inferred: each `next` value joins the for-body accumulator.
       (typedValue, valueType) <- synthExpression forNextStmt.value
-      runNormalizer forNextStmt.sourceSpan (subtype valueType frame.nextElementType)
       emitForNextType forNextStmt.sourceSpan valueType
       typedModifiers <- checkModifiers forNextStmt.modifiers
       pure (typedValue, typedModifiers)
@@ -888,11 +922,11 @@ checkForBreakStatement :: ForBreakStatement Identified -> Checker (ForBreakState
 checkForBreakStatement forBreakStmt = do
   contexts <- asks (.jumps)
   typedValue <- case contexts.forContexts of
-    (frame : _) -> do
-      -- A `break` value is the loop's early-exit result, checked against the frame's break-result
-      -- type; it is not a `next` element, so it must not feed the element accumulator.
+    (_ : _) -> do
+      -- A `break` short-circuits the for with its value; that value joins the break accumulator, so
+      -- the for's result type includes it. It is not a `next` element.
       (typed, valueType) <- synthExpression forBreakStmt.value
-      runNormalizer forBreakStmt.sourceSpan (subtype valueType frame.breakResultType)
+      emitForBreakType forBreakStmt.sourceSpan valueType
       pure typed
     [] -> do
       reportMisplacedJump forBreakStmt.sourceSpan "break" "a `for` body"
@@ -905,6 +939,12 @@ emitForNextType sourceSpan valueType = do
   current <- getForBodyAccumulator
   joined <- runNormalizer sourceSpan (union current valueType)
   setForBodyAccumulator joined
+
+emitForBreakType :: SourceSpan -> NormalizedType -> Checker ()
+emitForBreakType sourceSpan valueType = do
+  current <- getForBreakAccumulator
+  joined <- runNormalizer sourceSpan (union current valueType)
+  setForBreakAccumulator joined
 
 emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
 emitEffect sourceSpan effectToEmit = do
@@ -1239,18 +1279,18 @@ synthForExpression expression = do
   (typedSource, sourceType) <- synthExpression expression.inBinding.source
   elementType <- extractIterableElementType (sourceSpanOf expression.inBinding.source) sourceType
   (typedPattern, _, patternBindings) <- checkPattern expression.inBinding.pattern elementType
-  let placeholderFrame =
-        ForContext {nextElementType = topType, breakResultType = topType}
-  (inferredNextType, (typedBody, typedVarBindings)) <-
+  (inferredNextType, inferredBreakType, (typedBody, typedVarBindings)) <-
     withForInference $
-      pushForContext placeholderFrame $
+      pushForContext ForContext $
         withParameters patternBindings $
           withVarBindingsTyped expression.varBindings $
             \tvbs -> do
               (tb, _) <- synthBlock expression.body
               pure (tb, tvbs)
   let arrayType = arrayOf (orNullType inferredNextType)
-  (typedThen, finalType) <- case expression.thenClause of
+  -- The for's normal result is its array (or the then clause's value); a `break` short-circuits with
+  -- its own value, so the result type also includes every break value.
+  (typedThen, normalType) <- case expression.thenClause of
     Nothing -> pure (Nothing, arrayType)
     Just thenClause -> do
       (typedBinder, thenBindings) <- case thenClause.binder of
@@ -1266,6 +1306,7 @@ synthForExpression expression = do
                 sourceSpan = thenClause.sourceSpan
               }
       pure (Just typedThen, thenBodyType)
+  finalType <- runNormalizer expression.sourceSpan (union normalType inferredBreakType)
   semantic <- denormalizeAt expression.sourceSpan finalType
   pure
     ( ExpressionFor
@@ -1957,20 +1998,12 @@ reportApplicationArity :: SourceSpan -> Text -> Int -> Int -> Checker ()
 reportApplicationArity sourceSpan headName expected actual =
   reportType sourceSpan (TypeErrorApplicationArity ApplicationArityErrorInfo {head = headName, expected = expected, actual = actual})
 
--- | A construct the checker does not yet handle (distinct from a user error). The only remaining
--- case is a reference to a top-level value whose scheme the checker does not build — an external /
--- primitive agent or a data constructor; their value schemes are signature-determined but not yet
--- seeded into the value environment.
-reportUnsupported :: SourceSpan -> Text -> Checker ()
-reportUnsupported sourceSpan reason =
-  reportType sourceSpan (TypeErrorMalformedType MalformedTypeErrorInfo {reason = reason})
-
--- | The 'Scheme' a resolved value reference denotes, without instantiating it. A resolved local not
--- in scope is a compiler bug; an unresolved reference (the identifier already reported it) and an
--- unregistered top-level value (the external / primitive / constructor gap, reported via
--- 'reportUnsupported') degrade to a non-generic bottom.
-lookupScheme :: SourceSpan -> Maybe VariableResolution -> Checker Scheme
-lookupScheme sourceSpan = \case
+-- | The 'Scheme' a resolved value reference denotes, without instantiating it. Every top-level value
+-- is seeded into the value environment by the SCC driver before any reference to it is checked, and
+-- the identifier resolves every local, so a resolved reference is always found — a miss is a
+-- compiler bug. An /unresolved/ reference (the identifier already reported it) degrades to bottom.
+lookupScheme :: Maybe VariableResolution -> Checker Scheme
+lookupScheme = \case
   Just (VariableResolutionLocalVariable localId) -> do
     maybeScheme <- asks (\environment -> Map.lookup localId environment.locals)
     case maybeScheme of
@@ -1980,9 +2013,7 @@ lookupScheme sourceSpan = \case
     maybeScheme <- asks (\environment -> Map.lookup qualifiedName environment.valueEnvironment)
     case maybeScheme of
       Just scheme -> pure scheme
-      Nothing -> do
-        reportUnsupported sourceSpan ("Top-level value not yet typed by the checker: " <> renderQualifiedName qualifiedName)
-        pure (monoScheme bottomType)
+      Nothing -> panic ("lookupScheme: top-level value not seeded: " <> renderQualifiedName qualifiedName)
   Nothing -> pure (monoScheme bottomType)
 
 -- | The bare type of a value used where it is not explicitly applied. A generic value must be
