@@ -297,7 +297,7 @@ shadowedSupertype =
 -- 'boundedEffectGeneric' extends the effect log.
 environment :: NormalizerEnvironment
 environment =
-  NormalizerEnvironment
+  SubtypingContext
     { dataEnvironment =
         Map.fromList
           [ (fooName, dataInfoOf fooName Covariant),

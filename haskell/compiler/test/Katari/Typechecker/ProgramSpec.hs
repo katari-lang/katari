@@ -1,13 +1,12 @@
 module Katari.Typechecker.ProgramSpec (spec) where
 
 import Data.Foldable (toList)
-import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Text (Text)
-import Katari.Data.AST (Module, Phase (Identified))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.SourceSpan (Located (..))
-import Katari.Error (CompilerError (..), typeErrorCode)
+import Katari.Diagnostics (Diagnostics)
+import Katari.Error (CompilerError (..), compilerErrorCode, typeErrorCode)
 import Katari.Identifier (identifyModule, scanExports)
 import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..))
 import Katari.Parser (parseModule)
@@ -39,8 +38,8 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "instantiates a generic primitive applied explicitly" $
     typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity[integer](value = 1) }")] `shouldBe` []
 
-  it "rejects a generic primitive referenced without explicit application (K3013)" $
-    typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity(value = 1) }")] `shouldContain` ["K3013"]
+  it "rejects a generic primitive referenced without explicit application (K3015)" $
+    typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity(value = 1) }")] `shouldContain` ["K3015"]
 
   it "uses a generic's bound when checking the body (a `T extends number` is a number)" $
     typeErrorCodes [("test", "agent widen[T extends number](x: T) -> number { x }")] `shouldBe` []
@@ -51,22 +50,40 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects an explicit type argument that violates the bound (K3001)" $
     typeErrorCodes [("test", "primitive agent num[a extends number](value: a) -> a\nagent run() -> string { num[string](value = \"x\") }")] `shouldContain` ["K3001"]
 
+  it "a for `then` clause may read a `var` state variable" $
+    typeErrorCodes [("test", "agent run() -> integer { for (x in [1], var total = 0) { next x with total = total + x } then (r) { total } }")] `shouldBe` []
+
+  it "a record pattern reads a field from a nominal data value" $
+    typeErrorCodes [("test", "data point(x: integer)\nagent getX(p: point) -> integer { match (p) { case { x => v } -> v } }")] `shouldBe` []
+
+  it "calls a value whose generic bound is a function type" $
+    typeErrorCodes [("test", "agent apply[F extends agent (x: integer) -> integer](f: F) -> integer { f(x = 1) }")] `shouldBe` []
+
+  it "rejects duplicate generic parameter names (K2003)" $
+    allErrorCodes [("test", "agent foo[a, a](x: integer) -> integer { x }")] `shouldContain` ["K2003"]
+
+  it "a generic's own `extends` bound does not resolve to itself (K2001)" $
+    allErrorCodes [("test", "agent foo[a extends a](x: a) -> a { x }")] `shouldContain` ["K2001"]
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------
 
--- | Parse, identify, build the type environment, and run 'checkProgram'; return the codes of every
--- type error it emits (so @== []@ asserts a clean check).
+-- | The codes of every /type/ error a whole-program run emits (so @== []@ asserts a clean check).
 typeErrorCodes :: [(Text, Text)] -> [Text]
 typeErrorCodes sources =
-  let modules = identifyModules sources
-      (typeEnvironment, _) = buildEnvironment modules
-      (_, diagnostics) = checkProgram typeEnvironment (valueSCCs modules) modules
-   in [typeErrorCode typeError | located <- toList diagnostics, CompilerErrorType typeError <- [located.value]]
+  [typeErrorCode typeError | located <- toList (runProgramDiagnostics sources), CompilerErrorType typeError <- [located.value]]
 
-identifyModules :: [(Text, Text)] -> Map ModuleName (Module Identified)
-identifyModules sources =
-  Map.fromList [(moduleName, (fst (identifyModule importContext moduleName parsedModule)).identifiedAst) | (moduleName, parsedModule) <- parsedModules]
+-- | The codes of every diagnostic across all phases, so identifier-phase errors (K2xxx) are visible
+-- too — the type-only 'typeErrorCodes' driver drops them.
+allErrorCodes :: [(Text, Text)] -> [Text]
+allErrorCodes sources = [compilerErrorCode located.value | located <- toList (runProgramDiagnostics sources)]
+
+-- | Parse, identify, build the type environment, and run 'checkProgram'; the combined diagnostics of
+-- the identify, env-build, and check phases.
+runProgramDiagnostics :: [(Text, Text)] -> Diagnostics
+runProgramDiagnostics sources =
+  identifyDiagnostics <> envDiagnostics <> checkDiagnostics
   where
     parsedModules = [(ModuleName name, fst (parseModule (ModuleName name) source)) | (name, source) <- sources]
     importContext =
@@ -74,3 +91,8 @@ identifyModules sources =
         { moduleInterfaces = Map.fromList [(moduleName, scanExports moduleName parsedModule) | (moduleName, parsedModule) <- parsedModules],
           defaultImports = []
         }
+    identifiedResults = [(moduleName, identifyModule importContext moduleName parsedModule) | (moduleName, parsedModule) <- parsedModules]
+    modules = Map.fromList [(moduleName, (fst result).identifiedAst) | (moduleName, result) <- identifiedResults]
+    identifyDiagnostics = foldMap (snd . snd) identifiedResults
+    (typeEnvironment, envDiagnostics) = buildEnvironment modules
+    (_, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs modules) modules

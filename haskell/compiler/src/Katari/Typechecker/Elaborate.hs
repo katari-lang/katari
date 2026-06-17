@@ -33,6 +33,7 @@ import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), 
 import Katari.Data.SourceSpan (SourceSpan, sourceSpanOf)
 import Katari.Diagnostics (Diagnostics, reportAt)
 import Katari.Error (ApplicationArityErrorInfo (..), CompilerError (..), KindErrorInfo (..), MalformedTypeErrorInfo (..), SynonymCycleErrorInfo (..), TypeError (..))
+import Katari.Panic (panic)
 
 ------------------------------------------------------------------------------------------------
 -- The elaborator monad and its context
@@ -308,10 +309,10 @@ elaborateQualified qualifiedName arguments applicationSpan = do
       maybe (pure Nothing) (pureEffect . SemanticEffectRequest qualifiedName) maybeArguments
     (_, _, Just synonym) -> elaborateSynonym qualifiedName synonym arguments applicationSpan
     (Nothing, Nothing, Nothing) ->
-      -- The identifier resolved this to a qualified name, but it is no nominal type. A reference to a
-      -- value (e.g. an agent) in a type position is the only way here, which the identifier's
-      -- namespacing should already forbid; report rather than panic, to be safe.
-      Nothing <$ reportMalformed applicationSpan (renderQualifiedName qualifiedName <> " is not a type, effect, or attribute")
+      -- A type-position name resolves only to a data type, request, or synonym — every one of which
+      -- the env-build collects into these registries — so a resolved name absent from all three is a
+      -- compiler-invariant violation, not a user error.
+      panic ("elaborateQualified: resolved type name is not a data type, request, or synonym: " <> renderQualifiedName qualifiedName)
 
 -- | Expand a synonym: bind its parameters (by generic id) to the elaborated arguments and elaborate
 -- its raw body under that binding, guarding against (mutual) recursion with 'visitingSynonyms'.

@@ -100,6 +100,10 @@ renderTypeError typeError =
     TypeErrorMissingAnnotation info -> info.reason
     TypeErrorExpectedShape info ->
       "Expected " <> info.expected <> ", but the expression has type " <> renderSemanticType info.actual
+    TypeErrorGenericNotApplied info ->
+      "This generic value must be applied to explicit type arguments ["
+        <> Text.intercalate ", " info.parameters
+        <> "] (generic inference is not supported)"
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -126,6 +130,9 @@ data TypeError where
   -- | An expression is used where a particular shape is needed (a callable agent, a sequence, an
   -- object) but its type does not provide it.
   TypeErrorExpectedShape :: ExpectedShapeErrorInfo -> TypeError
+  -- | A generic value is referenced without explicit type arguments. Generic inference is not
+  -- supported, so a generic value must be applied (@value[T, ...]@) at every use site.
+  TypeErrorGenericNotApplied :: GenericNotAppliedErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -141,6 +148,7 @@ typeErrorCode = \case
   TypeErrorMisplacedJump _ -> "K3012"
   TypeErrorMissingAnnotation _ -> "K3013"
   TypeErrorExpectedShape _ -> "K3014"
+  TypeErrorGenericNotApplied _ -> "K3015"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -157,6 +165,7 @@ typeErrorSeverity = \case
   TypeErrorMisplacedJump _ -> SeverityError
   TypeErrorMissingAnnotation _ -> SeverityError
   TypeErrorExpectedShape _ -> SeverityError
+  TypeErrorGenericNotApplied _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -232,6 +241,12 @@ newtype MissingAnnotationErrorInfo = MissingAnnotationErrorInfo
 data ExpectedShapeErrorInfo = ExpectedShapeErrorInfo
   { expected :: Text,
     actual :: SemanticType
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @parameters@ are the declared generic parameter names the value still needs explicit arguments for.
+newtype GenericNotAppliedErrorInfo = GenericNotAppliedErrorInfo
+  { parameters :: List Text
   }
   deriving (Eq, Ord, Show)
 

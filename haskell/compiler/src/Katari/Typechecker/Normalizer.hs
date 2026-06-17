@@ -45,7 +45,11 @@ import Katari.Panic (panic)
 -- The normalizer monad
 ------------------------------------------------------------------------------------------------
 
-data NormalizerEnvironment = NormalizerEnvironment
+-- | The context every subtype / union / intersect comparison runs against: the nominal environment,
+-- the in-scope generics (for their declared bounds), and the subtyping 'world'. The checker embeds
+-- this verbatim ('Katari.Typechecker.Context.CheckerEnvironment') rather than duplicating its fields,
+-- so there is a single source of truth and no projection copy.
+data SubtypingContext = SubtypingContext
   { dataEnvironment :: DataEnvironment,
     requestEnvironment :: RequestEnvironment,
     -- | The generic parameters currently in scope, keyed by id, so 'boundArgumentFor' can resolve a
@@ -58,6 +62,9 @@ data NormalizerEnvironment = NormalizerEnvironment
     world :: NormalizedAttribute
   }
   deriving (Eq, Show)
+
+-- | The normalizer runs over exactly the subtyping context.
+type NormalizerEnvironment = SubtypingContext
 
 type NormalizeError = TypeError
 

@@ -36,7 +36,7 @@ import Katari.Data.Variance (Variance (..), composeVariance, joinVariance)
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
 import Katari.Typechecker.Elaborate (Elaborate, ElaborateContext, SynonymSignature (..), elaborate, elaborateAsType, emptyContext, runElaborate, withOwnGenerics)
-import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment (..), normalizeGenericArgument, normalizeType)
+import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, SubtypingContext (..), normalizeGenericArgument, normalizeType)
 
 -- | The read-only type-level environment the checker consults across the whole program:
 --
@@ -406,7 +406,7 @@ normalizeAll elaborateContext variances shapes = (environment, dataDiagnostics <
     -- The normalizer reads only the parameter lists (for arity / variance), never the constructor, so
     -- a placeholder constructor / request shape is fine while the declarations normalize.
     normalizerEnvironment =
-      NormalizerEnvironment
+      SubtypingContext
         { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = bottomType}) | (item, parameters, _) <- stampedData],
           requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, request = (bottomType, bottomType)}) | (item, parameters, _) <- stampedRequests],
           -- Normalization never resolves a generic's bound (a subtyping-time concern), so no in-scope

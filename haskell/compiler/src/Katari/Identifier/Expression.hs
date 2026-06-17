@@ -464,15 +464,3 @@ resolveParameterBindings :: List (ParameterBinding Parsed) -> Identifier (List (
 resolveParameterBindings parameters = do
   reportDuplicateLabels [(parameter.name, parameter.sourceSpan) | parameter <- parameters]
   resolveAll resolveParameterBinding parameters
-
--- | Report K2003 for each label that repeats among sibling labels (agent / handler parameter
--- labels, call-argument labels), at the offending occurrence. The first occurrence is kept, so a
--- downstream phase can key an object by the label without silently dropping a field.
-reportDuplicateLabels :: List (Text, SourceSpan) -> Identifier ()
-reportDuplicateLabels = go []
-  where
-    go seen labels = case labels of
-      [] -> pure ()
-      (label, sourceSpan) : rest
-        | label `elem` seen -> reportDuplicateName sourceSpan label >> go seen rest
-        | otherwise -> go (label : seen) rest

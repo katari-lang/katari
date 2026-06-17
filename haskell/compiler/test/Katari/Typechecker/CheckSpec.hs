@@ -29,6 +29,7 @@ import Katari.Typechecker.Context
     runNormalizer,
     withEffectInference,
     withReturnTarget,
+    withWorld,
   )
 import Katari.Typechecker.Elaborate (emptyContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..), emptyTypeEnvironment)
@@ -342,8 +343,8 @@ spec = do
               bottomEffect
           (result, diagnostics) =
             runChecker
-              (rebuildWithPrivateWorld (initialCheckerEnvironment emptyTypeEnvironment))
-              (synthAgentType declaration)
+              (initialCheckerEnvironment emptyTypeEnvironment)
+              (withWorld privateAttribute (synthAgentType declaration))
        in (result, toList diagnostics) `shouldBe` (expected, [])
 
   describe "use statement" $ do
@@ -664,8 +665,6 @@ spec = do
       let frame =
             HandleContext
               { handlerResultType = integerType,
-                handlerResidualEffect = bottomEffect,
-                handledRequests = mempty,
                 currentRequestReturnType = topType
               }
           action = pushHandleContext frame (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
@@ -765,10 +764,10 @@ spec = do
           (_, diagnostics) = runChecker environment (synthExpressionType application)
        in hasErrorCode "K3009" diagnostics `shouldBe` True
 
-    it "rejects a bare reference to a generic value, unapplied (K3013)" $
+    it "rejects a bare reference to a generic value, unapplied (K3015)" $
       let environment = checkerEnvironmentWith mempty (Map.singleton topLevelName (identityScheme aId))
           (_, diagnostics) = runChecker environment (synthExpressionType (qualifiedVariableExpression topLevelName))
-       in hasErrorCode "K3013" diagnostics `shouldBe` True
+       in hasErrorCode "K3015" diagnostics `shouldBe` True
 
 ------------------------------------------------------------------------------------------------
 -- Runners
@@ -1141,14 +1140,6 @@ agentDeclarationWith parameters returnType effects isPrivate body =
       body = body,
       sourceSpan = testSpan
     }
-
--- | A checker environment with its world set to private. Rebuilt explicitly to dodge the
--- DuplicateRecordFields ambiguity on the shared @world@ field (same workaround as
--- 'rebuildWithWorld' in 'Katari.Typechecker.Context').
-rebuildWithPrivateWorld :: CheckerEnvironment -> CheckerEnvironment
-rebuildWithPrivateWorld environment =
-  let _ = environment.world -- touched so the field name resolves locally
-   in environment {world = privateAttribute}
 
 paramBindingFor :: Text -> LocalVariableId -> SyntacticTypeExpression Identified -> ParameterBinding Identified
 paramBindingFor paramName localId annotation =

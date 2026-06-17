@@ -74,15 +74,25 @@ resolveTypeNameNode node = do
 ---------------------------------------------------------------------------------------------------
 
 -- | Bind a declaration's generic parameters (fresh ids, by kind) over @region@ (the declaration's
--- span — generics scope over its whole signature and body), resolve their bounds within that scope
--- (so a bound may mention a sibling generic), and run the continuation with the identified parameters
--- still in scope.
+-- span — generics scope over its whole signature and body) and run the continuation with them in
+-- scope. Duplicate parameter names are rejected (K2003).
+--
+-- Each parameter's @extends@ bound resolves against the outer scope and the /preceding/ siblings, but
+-- never its own id: @a extends a@ therefore refers to an outer @a@ (or is undefined), never to itself,
+-- which keeps the bound relation acyclic — while @[a extends b, c extends a]@ still lets @c@'s bound
+-- mention the earlier @a@.
 withGenericParameters :: SourceSpan -> List (GenericParameter Parsed) -> (List (GenericParameter Identified) -> Identifier a) -> Identifier a
 withGenericParameters region parameters continuation = do
+  reportDuplicateLabels [(parameter.name, parameter.sourceSpan) | parameter <- parameters]
   prepared <- traverse prepareGenericParameter parameters
-  bindInScope region [typeBinding parameter.name parameter.typeReference.sourceSpan resolution | (parameter, resolution) <- prepared] $ do
-    identifiedParameters <- traverse resolvePreparedGenericParameter prepared
-    continuation identifiedParameters
+  identifiedParameters <- resolveBounds [] prepared
+  bindInScope region (genericBinding <$> prepared) (continuation identifiedParameters)
+  where
+    resolveBounds _ [] = pure []
+    resolveBounds preceding (current : rest) = do
+      identified <- withResolutionScope preceding (resolvePreparedGenericParameter current)
+      (identified :) <$> resolveBounds (preceding <> [genericBinding current]) rest
+    genericBinding (parameter, resolution) = typeBinding parameter.name parameter.typeReference.sourceSpan resolution
 
 -- | Assign a fresh id to a generic parameter; its name resolves to that id. The parameter's kind
 -- (type / effect / attribute) does not affect the resolution — it travels on the 'GenericParameter'

@@ -267,6 +267,12 @@ bindInScope region bindings action = do
   recordSymbols [Symbol {name = binding.name, definitionSpan = binding.definitionSpan, region = region, resolution = binding.resolution} | binding <- bindings]
   local (extendScope bindings) action
 
+-- | Extend the resolution scope with @bindings@ without recording them as definitions. Used when a
+-- name must resolve inside a sub-scope before its defining occurrence is recorded once elsewhere —
+-- e.g. a generic's @extends@ bound resolving against its preceding siblings.
+withResolutionScope :: List Binding -> Identifier a -> Identifier a
+withResolutionScope bindings = local (extendScope bindings)
+
 -- | Extend a scope with bindings (later bindings win on a name clash within the list).
 extendScope :: List Binding -> IdentifierEnvironment -> IdentifierEnvironment
 extendScope bindings environment = environment {scope = foldl' addBinding environment.scope bindings}
@@ -426,6 +432,18 @@ reportUndefinedMember sourceSpan moduleName name = reportIdentifierError sourceS
 
 reportDuplicateName :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
 reportDuplicateName sourceSpan name = reportIdentifierError sourceSpan (IdentifierErrorDuplicateName DuplicateNameErrorInfo {name = name})
+
+-- | Report K2003 for each label that repeats among sibling labels (agent / handler parameter labels,
+-- call-argument labels, generic parameter names), at the offending occurrence. The first occurrence
+-- is kept, so a downstream phase can key a map by the label without silently dropping an entry.
+reportDuplicateLabels :: List (Text, SourceSpan) -> Identifier ()
+reportDuplicateLabels = go []
+  where
+    go seen labels = case labels of
+      [] -> pure ()
+      (label, sourceSpan) : rest
+        | label `elem` seen -> reportDuplicateName sourceSpan label >> go seen rest
+        | otherwise -> go (label : seen) rest
 
 reportNotAModule :: (MonadWriter Diagnostics m) => SourceSpan -> Text -> m ()
 reportNotAModule sourceSpan name = reportIdentifierError sourceSpan (IdentifierErrorNotAModule NotAModuleErrorInfo {name = name})

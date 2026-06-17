@@ -21,7 +21,6 @@ import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (MonadWriter (..), asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.Environment
   ( GenericParameterInformation,
@@ -32,7 +31,6 @@ import Katari.Data.Id (GenericId, LocalVariableId)
 import Katari.Data.NormalizedType
   ( NormalizedAttribute,
     NormalizedEffect,
-    NormalizedKindedType,
     NormalizedType,
     bottomAttribute,
     bottomEffect,
@@ -46,7 +44,8 @@ import Katari.Typechecker.Elaborate (Elaborate, runElaborate, scopeGenerics)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
 import Katari.Typechecker.Normalizer
   ( Normalizer,
-    NormalizerEnvironment (..),
+    NormalizerEnvironment,
+    SubtypingContext (..),
     joinAttribute,
   )
 
@@ -83,18 +82,12 @@ emptyJumpContexts =
 data ForContext = ForContext
   deriving stock (Eq, Show)
 
--- | What a @handler@ body and its request handlers expect: the handler's overall result type @R@
--- and residual effect @E@, plus the substitution of every request the handler intercepts (so
--- @next@'s value type inside @request foo(...) { ... }@ is @foo@'s return type instantiated with
--- those arguments).
+-- | What a @handler@'s request-handler bodies consult: the handler's overall result type @R@ (the
+-- target of a @break@) and the expected value type of a @next@ in the current request handler.
 data HandleContext = HandleContext
   { -- | The handler's overall result type @R@. A @break@ inside a request handler body yields @R@;
     -- so does the @then@ clause's body type.
     handlerResultType :: NormalizedType,
-    -- | The residual effect @E@ the handler exposes; the continuation's effect is @E ∪ handled@.
-    handlerResidualEffect :: NormalizedEffect,
-    -- | The requests this handler intercepts, with their normalized argument substitution.
-    handledRequests :: Map QualifiedName (Map Text NormalizedKindedType),
     -- | The expected type of @next e@ inside the current request handler body — the intercepted
     -- request's return type with the handler's generic arguments substituted in. One frame is
     -- pushed per request handler walk, so the innermost frame always carries the right value.
@@ -119,12 +112,11 @@ data CheckerEnvironment = CheckerEnvironment
     -- holds a 'Scheme' like a top-level value — usually non-generic, but a local @agent@ may declare
     -- generics, so explicit application works on locals too.
     locals :: Map LocalVariableId Scheme,
-    -- | The generic parameters in scope (an agent's / handler's declared generics). The normalizer
-    -- consults their declared upper bounds during subtype.
-    genericsInScope :: Map GenericId GenericParameterInformation,
-    -- | The attribute of the lexical scope we are inside. Top-level is the bottom (public); a
-    -- @private agent@ body raises it; subtype joins it into both sides.
-    world :: NormalizedAttribute,
+    -- | The context the normalizer runs against: the nominal environment, the generics in scope (an
+    -- agent's / handler's declared generics, whose bounds 'subtype' consults), and the lexical 'world'
+    -- attribute (top-level public; a @private agent@ body raises it). Carried verbatim so the checker
+    -- and the normalizer share one source of truth — 'normalizerEnvironment' is just its projection.
+    subtyping :: SubtypingContext,
     jumps :: JumpContexts
   }
 
@@ -173,8 +165,13 @@ initialCheckerEnvironment typeEnv =
     { typeEnvironment = typeEnv,
       valueEnvironment = mempty,
       locals = mempty,
-      genericsInScope = mempty,
-      world = bottomAttribute,
+      subtyping =
+        SubtypingContext
+          { dataEnvironment = typeEnv.dataEnvironment,
+            requestEnvironment = typeEnv.requestEnvironment,
+            genericsInScope = mempty,
+            world = bottomAttribute
+          },
       jumps = emptyJumpContexts
     }
 
@@ -186,21 +183,10 @@ runChecker environment action =
 -- Normalizer bridging
 ------------------------------------------------------------------------------------------------
 
--- | The 'NormalizerEnvironment' projected from the current checker environment. The normalizer
--- shares the world and the generics-in-scope, so @subtype@ / @union@ / @intersect@ behave
--- consistently inside and outside the checker.
+-- | The normalizer runs against exactly the checker's embedded subtyping context, so @subtype@ /
+-- @union@ / @intersect@ behave consistently inside and outside the checker.
 normalizerEnvironment :: Checker NormalizerEnvironment
-normalizerEnvironment = do
-  typeEnv <- asks (.typeEnvironment)
-  generics <- asks (.genericsInScope)
-  currentWorld <- asks (.world)
-  pure
-    NormalizerEnvironment
-      { dataEnvironment = typeEnv.dataEnvironment,
-        requestEnvironment = typeEnv.requestEnvironment,
-        genericsInScope = generics,
-        world = currentWorld
-      }
+normalizerEnvironment = asks (.subtyping)
 
 -- | Run a 'Normalizer' sub-action with the current checker environment, anchoring its errors at
 -- the given source span. The normalizer is span-free (it operates over already-normalized types),
@@ -220,7 +206,7 @@ runNormalizer sourceSpan action = do
 runElaborator :: Elaborate a -> Checker a
 runElaborator action = do
   context <- asks (.typeEnvironment.elaborateContext)
-  generics <- asks (.genericsInScope)
+  generics <- asks (\environment -> environment.subtyping.genericsInScope)
   let scoped = scopeGenerics generics context
       (result, diagnostics) = runElaborate scoped action
   tell diagnostics
@@ -230,14 +216,19 @@ runElaborator action = do
 -- World propagation
 ------------------------------------------------------------------------------------------------
 
+-- | The attribute of the lexical scope the checker is currently inside (the @world@ a @private agent@
+-- raises). The closure attribute a nested agent inherits.
+currentWorld :: Checker NormalizedAttribute
+currentWorld = asks (\environment -> environment.subtyping.world)
+
+-- | Modify the embedded subtyping context for the sub-action.
+overSubtyping :: (SubtypingContext -> SubtypingContext) -> Checker a -> Checker a
+overSubtyping update = local (\environment -> environment {subtyping = update environment.subtyping})
+
 -- | Raise the world by @attribute@ for the sub-action: every comparison inside observes the new
 -- world. The lexical body of a @private agent@ uses this, joining its declared attribute in.
---
--- 'world' is shared with 'NormalizerEnvironment' under DuplicateRecordFields, so the record is
--- rebuilt explicitly rather than record-updated (same workaround as
--- 'Katari.Typechecker.Environment.stampBound' — the @{world = ...}@ update is ambiguous).
 withWorld :: NormalizedAttribute -> Checker a -> Checker a
-withWorld attribute = local (\environment -> rebuildWithWorld environment (joinAttribute environment.world attribute))
+withWorld attribute = overSubtyping (\context -> context {world = joinAttribute context.world attribute})
 
 ------------------------------------------------------------------------------------------------
 -- Environment extension
@@ -272,12 +263,9 @@ extendValueEnvironment additions environment =
 
 -- | Bring an in-scope generic parameter into scope for the sub-action (used while checking an
 -- agent / handler with declared generics; the parameter's bound is consulted by 'subtype').
---
--- 'genericsInScope' is also shared with 'NormalizerEnvironment'; explicit rebuild for the same
--- reason as 'withWorld' (see comment there).
 withGeneric :: GenericId -> GenericParameterInformation -> Checker a -> Checker a
 withGeneric genericId info =
-  local (\environment -> rebuildWithGenerics environment (Map.insert genericId info environment.genericsInScope))
+  overSubtyping (\context -> context {genericsInScope = Map.insert genericId info context.genericsInScope})
 
 ------------------------------------------------------------------------------------------------
 -- Jump contexts
@@ -363,34 +351,3 @@ getEffectAccumulator = gets (.effectAccumulator)
 setEffectAccumulator :: NormalizedEffect -> Checker ()
 setEffectAccumulator newValue =
   modify (\s -> s {effectAccumulator = newValue})
-
-------------------------------------------------------------------------------------------------
--- Record-update workarounds
---
--- Two of 'CheckerEnvironment''s field names ('world', 'genericsInScope') collide with
--- 'NormalizerEnvironment'. Under DuplicateRecordFields, the @{world = ...}@ / @{genericsInScope = ...}@
--- record updates are flagged ambiguous (-Wambiguous-fields), so each is rebuilt by an explicit
--- constructor instead — same workaround as 'Katari.Typechecker.Environment.stampBound'.
-------------------------------------------------------------------------------------------------
-
-rebuildWithWorld :: CheckerEnvironment -> NormalizedAttribute -> CheckerEnvironment
-rebuildWithWorld environment newWorld =
-  CheckerEnvironment
-    { typeEnvironment = environment.typeEnvironment,
-      valueEnvironment = environment.valueEnvironment,
-      locals = environment.locals,
-      genericsInScope = environment.genericsInScope,
-      world = newWorld,
-      jumps = environment.jumps
-    }
-
-rebuildWithGenerics :: CheckerEnvironment -> Map GenericId GenericParameterInformation -> CheckerEnvironment
-rebuildWithGenerics environment newGenerics =
-  CheckerEnvironment
-    { typeEnvironment = environment.typeEnvironment,
-      valueEnvironment = environment.valueEnvironment,
-      locals = environment.locals,
-      genericsInScope = newGenerics,
-      world = environment.world,
-      jumps = environment.jumps
-    }
