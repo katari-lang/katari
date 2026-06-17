@@ -61,7 +61,7 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Normalizer (denormalize, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (denormalize, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, substituteGenericArgument, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -1595,18 +1595,18 @@ buildGenericSubstitution sourceSpan headName parameters argumentExpressions = do
             pure (NormalizedKindedTypeAttribute normalized)
         pure (Just (info.genericId, kinded))
 
--- | Check each explicit type argument against its parameter's @extends@ upper bound, with the
+-- | Check each explicit argument against its parameter's @extends@ upper bound, with the
 -- substitution applied to the bound first (a bound may reference other generics being applied, e.g.
--- @[a, b extends a]@). A violation surfaces as a subtype error. Only type-kinded bounds are checked;
--- effect / attribute bounds are not yet enforced.
+-- @[a, b extends a]@). A violation surfaces as a subtype error. Type, effect, and attribute bounds
+-- are all handled by the kinded 'subtype' / 'substituteGenericArgument'.
 checkGenericBounds :: SourceSpan -> GenericParameters -> Map GenericId NormalizedKindedType -> Checker ()
 checkGenericBounds sourceSpan parameters substitution =
   mapM_ checkOne (Map.elems parameters.parameterInformation)
   where
     checkOne info = case (info.upperBound, Map.lookup info.genericId substitution) of
-      (Just (NormalizedKindedTypeType boundType), Just (NormalizedKindedTypeType argumentType)) -> do
-        instantiatedBound <- runNormalizer sourceSpan (substituteType substitution boundType)
-        runNormalizer sourceSpan (subtype argumentType instantiatedBound)
+      (Just bound, Just argument) -> do
+        instantiatedBound <- runNormalizer sourceSpan (substituteGenericArgument substitution bound)
+        runNormalizer sourceSpan (subtype argument instantiatedBound)
       _ -> pure ()
 
 joinRequestIntoEffect ::
