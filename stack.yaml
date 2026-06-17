@@ -2,6 +2,8 @@ snapshot: lts-22.44 # GHC 9.6.7
 
 packages:
   - haskell/compiler
+  - haskell/project
 
-extra-deps:
-  - tomland-1.3.3.3
+# toml-reader (katari.toml / katari.lock / snapshot parsing) ships in lts-22.44, so it needs no
+# extra-deps pin.
+extra-deps: []
