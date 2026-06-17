@@ -39,6 +39,15 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects a generic primitive referenced without explicit application (K3013)" $
     typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity(value = 1) }")] `shouldContain` ["K3013"]
 
+  it "uses a generic's bound when checking the body (a `T extends number` is a number)" $
+    typeErrorCodes [("test", "agent widen[T extends number](x: T) -> number { x }")] `shouldBe` []
+
+  it "accepts an explicit type argument that satisfies the bound" $
+    typeErrorCodes [("test", "primitive agent num[a extends number](value: a) -> a\nagent run() -> integer { num[integer](value = 1) }")] `shouldBe` []
+
+  it "rejects an explicit type argument that violates the bound (K3001)" $
+    typeErrorCodes [("test", "primitive agent num[a extends number](value: a) -> a\nagent run() -> string { num[string](value = \"x\") }")] `shouldContain` ["K3001"]
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

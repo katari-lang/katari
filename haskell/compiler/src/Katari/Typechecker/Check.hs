@@ -58,8 +58,8 @@ import Katari.Typechecker.Context
     withReturnTarget,
     withWorld,
   )
-import Katari.Typechecker.Elaborate (elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
-import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters)
+import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
+import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
 import Katari.Typechecker.Normalizer (denormalize, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
@@ -1537,9 +1537,10 @@ buildGenericSubstitution sourceSpan headName parameters argumentExpressions = do
     then do
       reportApplicationArity sourceSpan headName (length parameterNames) (length argumentExpressions)
       pure mempty
-    else
-      Map.fromList . catMaybes
-        <$> zipWithM (elaborateArgument parameterInfo) parameterNames argumentExpressions
+    else do
+      substitution <- Map.fromList . catMaybes <$> zipWithM (elaborateArgument parameterInfo) parameterNames argumentExpressions
+      checkGenericBounds sourceSpan parameters substitution
+      pure substitution
   where
     elaborateArgument parameterInfo parameterName argument = case Map.lookup parameterName parameterInfo of
       Nothing -> pure Nothing
@@ -1552,6 +1553,20 @@ buildGenericSubstitution sourceSpan headName parameters argumentExpressions = do
             normalized <- runNormalizer (sourceSpanOf argument) (normalizeAttribute semantic)
             pure (NormalizedKindedTypeAttribute normalized)
         pure (Just (info.genericId, kinded))
+
+-- | Check each explicit type argument against its parameter's @extends@ upper bound, with the
+-- substitution applied to the bound first (a bound may reference other generics being applied, e.g.
+-- @[a, b extends a]@). A violation surfaces as a subtype error. Only type-kinded bounds are checked;
+-- effect / attribute bounds are not yet enforced.
+checkGenericBounds :: SourceSpan -> GenericParameters -> Map GenericId NormalizedKindedType -> Checker ()
+checkGenericBounds sourceSpan parameters substitution =
+  mapM_ checkOne (Map.elems parameters.parameterInformation)
+  where
+    checkOne info = case (info.upperBound, Map.lookup info.genericId substitution) of
+      (Just (NormalizedKindedTypeType boundType), Just (NormalizedKindedTypeType argumentType)) -> do
+        instantiatedBound <- runNormalizer sourceSpan (substituteType substitution boundType)
+        runNormalizer sourceSpan (subtype argumentType instantiatedBound)
+      _ -> pure ()
 
 joinRequestIntoEffect ::
   SourceSpan ->
@@ -1602,10 +1617,29 @@ data AgentPreparation = AgentPreparation
 -- | The agent's own generic parameters are in scope ('withGenerics') while its parameter / return /
 -- effect annotations are elaborated, since those may reference them. The same generics are brought
 -- back into scope when the body is walked (in 'synthAgent' / 'checkAgentBody').
+-- | Collect a declaration's generic parameters and stamp each one's @extends@ upper bound. A bound
+-- may reference sibling generics, so it is elaborated with the generics in scope. The bounds are
+-- consulted by the normalizer while checking a body (raising a generic to its bound) and by
+-- 'buildGenericSubstitution' when an explicit type argument is supplied.
+boundedGenericParameters :: List (GenericParameter Identified) -> Checker GenericParameters
+boundedGenericParameters declarations = do
+  let (parameters, syntacticBounds) = collectGenericParameters declarations
+  withGenerics parameters $ do
+    normalizedBounds <- Map.fromList . catMaybes <$> traverse normalizeBound (Map.toList syntacticBounds)
+    pure parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}
+  where
+    normalizeBound (genericId, expression) = do
+      maybeSemantic <- runElaborator (elaborate expression)
+      case maybeSemantic of
+        Just semantic -> do
+          normalized <- runNormalizer (sourceSpanOf expression) (normalizeGenericArgument semantic)
+          pure (Just (genericId, normalized))
+        Nothing -> pure Nothing
+
 prepareAgent :: AgentDeclaration Identified -> Checker AgentPreparation
 prepareAgent declaration = do
   (outerAttribute, declaredAttribute) <- agentAttributes declaration
-  let (genericParameters, _genericBounds) = collectGenericParameters declaration.genericParameters
+  genericParameters <- boundedGenericParameters declaration.genericParameters
   withGenerics genericParameters $ do
     (parameterObject, parameterBindings, typedParameters) <- buildParameterScopeTyped declaration.parameters
     annotatedReturnType <- traverse elaborateAndNormalizeType declaration.returnType
@@ -1729,7 +1763,7 @@ signatureValueScheme ::
   Maybe (SyntacticTypeExpression Identified) ->
   Checker Scheme
 signatureValueScheme genericDeclarations parameters returnType effectExpression = do
-  let (genericParameters, _genericBounds) = collectGenericParameters genericDeclarations
+  genericParameters <- boundedGenericParameters genericDeclarations
   withGenerics genericParameters $ do
     fields <- traverse (\signature -> (,) signature.name <$> elaborateAndNormalizeType signature.parameterType) parameters
     returnNormalized <- elaborateAndNormalizeType returnType
