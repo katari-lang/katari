@@ -58,9 +58,9 @@ import Katari.Typechecker.Context
     withReturnTarget,
     withWorld,
   )
-import Katari.Typechecker.Elaborate (elaborateAsAttribute, elaborateAsEffect, elaborateAsType)
+import Katari.Typechecker.Elaborate (elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters)
-import Katari.Typechecker.Normalizer (denormalize, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeType, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (denormalize, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -1712,6 +1712,69 @@ checkAgentBody declaration preparation seed = do
       $ checkBlock declaration.body function.returnType
   runNormalizer declaration.sourceSpan (subtype inferredEffect function.effect)
   pure (assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody)
+
+------------------------------------------------------------------------------------------------
+-- Signature-determined value schemes (data constructor / external / primitive / request)
+--
+-- These have no body to infer from; their scheme is built from their signature, quantified over
+-- their generics. The driver seeds them into the value environment alongside agent schemes.
+------------------------------------------------------------------------------------------------
+
+-- | The value scheme of an @external@ / @primitive@ agent: @agent(params) -> return with effects@,
+-- quantified over its generics. (Both kinds share these fields, so the driver passes them in.)
+signatureValueScheme ::
+  List (GenericParameter Identified) ->
+  List (ParameterSignature Identified) ->
+  SyntacticTypeExpression Identified ->
+  Maybe (SyntacticTypeExpression Identified) ->
+  Checker Scheme
+signatureValueScheme genericDeclarations parameters returnType effectExpression = do
+  let (genericParameters, _genericBounds) = collectGenericParameters genericDeclarations
+  withGenerics genericParameters $ do
+    fields <- traverse (\signature -> (,) signature.name <$> elaborateAndNormalizeType signature.parameterType) parameters
+    returnNormalized <- elaborateAndNormalizeType returnType
+    effectNormalized <- maybe (pure bottomEffect) elaborateAndNormalizeEffect effectExpression
+    pure
+      Scheme
+        { genericParameters = genericParameters,
+          valueType = assembleAgent bottomAttribute (namedObjectType fields) returnNormalized effectNormalized
+        }
+
+-- | The value scheme of a data constructor: @agent(constructorObject) -> Data[generics]@ (pure),
+-- read from the already-normalized 'DataInformation'. The constructor's parameters are a required
+-- field object; the return is the nominal data type applied to the data type's own generics.
+dataValueScheme :: SourceSpan -> QualifiedName -> Checker Scheme
+dataValueScheme sourceSpan qualifiedName = do
+  dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
+  case Map.lookup qualifiedName dataEnvironment of
+    Just info -> do
+      arguments <- ownGenericArguments sourceSpan info.genericParameters
+      let returnType = layeredOf neverLayer {dataLayer = Map.singleton qualifiedName arguments}
+      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute info.constructor returnType bottomEffect}
+    Nothing -> panic ("dataValueScheme: data type not registered: " <> renderQualifiedName qualifiedName)
+
+-- | The value scheme of a request performed as a value: @agent(param) -> return with {request}@,
+-- read from the already-normalized 'RequestInformation'. The effect is the request applied to its
+-- own generics.
+requestValueScheme :: SourceSpan -> QualifiedName -> Checker Scheme
+requestValueScheme sourceSpan qualifiedName = do
+  requestEnvironment <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
+  case Map.lookup qualifiedName requestEnvironment of
+    Just info -> do
+      arguments <- ownGenericArguments sourceSpan info.genericParameters
+      let (parameterType, returnType) = info.request
+          effect = NormalizedEffectRow EffectRow {request = Map.singleton qualifiedName arguments, tails = mempty}
+      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute parameterType returnType effect}
+    Nothing -> panic ("requestValueScheme: request not registered: " <> renderQualifiedName qualifiedName)
+
+-- | A nominal declaration applied to its own generic parameters as arguments (keyed by parameter
+-- name): the @[a, b]@ of a data type's @Data[a, b]@ return or a request's @{req[a, b]}@ effect.
+ownGenericArguments :: SourceSpan -> GenericParameters -> Checker (Map Text NormalizedKindedType)
+ownGenericArguments sourceSpan parameters =
+  Map.fromList
+    <$> traverse
+      (\(name, info) -> (,) name <$> runNormalizer sourceSpan (normalizeGenericArgument (schemeVariableFor info.kind info.genericId)))
+      (Map.toList parameters.parameterInformation)
 
 agentAttributes ::
   AgentDeclaration Identified ->

@@ -17,6 +17,7 @@ module Katari.Typechecker.ValueGraph where
 import Data.Graph (SCC (..), stronglyConnComp)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import GHC.List (List)
@@ -25,41 +26,64 @@ import Katari.Data.Id (VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName (..))
 
--- | One node of the graph: a top-level agent, carrying its identifier-resolved qualified name and
+-- | Every top-level value declaration is a node. Only an @agent@ has a body whose checking can
+-- depend on other values' schemes; the rest are signature-determined, so they reference no value
+-- and are always acyclic sources — but they are still nodes, so the driver seeds every value's
+-- scheme through one uniform walk.
+data ValueDeclaration
+  = ValueAgent (AgentDeclaration Identified)
+  | ValueData (DataDeclaration Identified)
+  | ValueExternal (ExternalAgentDeclaration Identified)
+  | ValuePrimitive (PrimitiveAgentDeclaration Identified)
+  | ValueRequest (RequestDeclaration Identified)
+
+-- | One node of the graph: a top-level value, carrying its identifier-resolved qualified name and
 -- the declaration itself (so the driver can check it without a second lookup).
 data ValueNode = ValueNode
   { qualifiedName :: QualifiedName,
-    declaration :: AgentDeclaration Identified
+    declaration :: ValueDeclaration
   }
 
--- | Every top-level @agent@ across all modules, in module-then-declaration order. Identity comes
--- from the identifier-resolved defining reference, never from the declaration's name text.
-topLevelAgents :: Map ModuleName (Module Identified) -> List ValueNode
-topLevelAgents modules =
-  [ ValueNode
-      { qualifiedName = referencedVariableName declaration.variableReference,
-        declaration = declaration
-      }
-    | module' <- Map.elems modules,
-      DeclarationAgent declaration <- module'.declarations
-  ]
+-- | The value node a declaration contributes, if any (synonyms / imports / errors are not values).
+-- Identity comes from the identifier-resolved defining reference, never from the declaration's name.
+valueNodeOf :: Declaration Identified -> Maybe ValueNode
+valueNodeOf = \case
+  DeclarationAgent declaration -> Just (node declaration.variableReference (ValueAgent declaration))
+  DeclarationData declaration -> Just (node declaration.variableReference (ValueData declaration))
+  DeclarationExternalAgent declaration -> Just (node declaration.variableReference (ValueExternal declaration))
+  DeclarationPrimitiveAgent declaration -> Just (node declaration.variableReference (ValuePrimitive declaration))
+  DeclarationRequest declaration -> Just (node declaration.variableReference (ValueRequest declaration))
+  _ -> Nothing
+  where
+    node reference value = ValueNode {qualifiedName = referencedVariableName reference, declaration = value}
+
+-- | Every top-level value across all modules, in module-then-declaration order.
+topLevelValues :: Map ModuleName (Module Identified) -> List ValueNode
+topLevelValues modules = mapMaybe valueNodeOf [declaration | module' <- Map.elems modules, declaration <- module'.declarations]
 
 -- | The dependency-first strongly-connected components of the value graph. An edge @a -> b@ means
--- agent @a@ references agent @b@; 'stronglyConnComp' orders the components so that a component is
--- listed before any component that depends on it (callees before callers).
+-- value @a@'s body references value @b@; 'stronglyConnComp' orders the components so that a
+-- component is listed before any component that depends on it (callees before callers).
 valueSCCs :: Map ModuleName (Module Identified) -> List (SCC ValueNode)
 valueSCCs modules = stronglyConnComp (valueGraph modules)
 
--- | The graph as 'stronglyConnComp' input: each agent with its key and the keys of the top-level
--- agents it references (references to non-agent values are dropped — they are not nodes).
+-- | The value references a node's body makes. Only an agent has a body; signature-determined values
+-- reference no other value's scheme.
+referencesInValue :: ValueDeclaration -> Set QualifiedName
+referencesInValue = \case
+  ValueAgent declaration -> referencesInBlock declaration.body
+  _ -> Set.empty
+
+-- | The graph as 'stronglyConnComp' input: each value with its key and the keys of the values it
+-- references (restricted to value nodes; a reference to anything else is dropped).
 valueGraph :: Map ModuleName (Module Identified) -> List (ValueNode, QualifiedName, List QualifiedName)
 valueGraph modules =
-  [ (node, node.qualifiedName, Set.toList (Set.intersection (referencesInAgent node.declaration) agentNames))
+  [ (node, node.qualifiedName, Set.toList (Set.intersection (referencesInValue node.declaration) valueNames))
     | node <- nodes
   ]
   where
-    nodes = topLevelAgents modules
-    agentNames = Set.fromList [node.qualifiedName | node <- nodes]
+    nodes = topLevelValues modules
+    valueNames = Set.fromList [node.qualifiedName | node <- nodes]
 
 ------------------------------------------------------------------------------------------------
 -- Reference collection: every top-level value an agent's body (including nested agent bodies)
@@ -67,9 +91,6 @@ valueGraph modules =
 -- Patterns bind / match against constructors and types, never an agent value, so they contribute no
 -- edges and are not traversed.
 ------------------------------------------------------------------------------------------------
-
-referencesInAgent :: AgentDeclaration Identified -> Set QualifiedName
-referencesInAgent declaration = referencesInBlock declaration.body
 
 referenceOf :: Reference Identified VariableReference -> Set QualifiedName
 referenceOf reference = case reference.resolution of

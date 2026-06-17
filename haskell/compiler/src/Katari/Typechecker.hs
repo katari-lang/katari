@@ -28,7 +28,7 @@ import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
-import Katari.Typechecker.Check (checkAgentBody, prepareAgent, seedAgentType, synthAgent)
+import Katari.Typechecker.Check (checkAgentBody, dataValueScheme, prepareAgent, requestValueScheme, seedAgentType, signatureValueScheme, synthAgent)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment,
@@ -37,7 +37,7 @@ import Katari.Typechecker.Context
     initialCheckerState,
   )
 import Katari.Typechecker.Environment (TypeEnvironment)
-import Katari.Typechecker.ValueGraph (ValueNode (..))
+import Katari.Typechecker.ValueGraph (ValueDeclaration (..), ValueNode (..))
 
 -- | Check the whole identified program against the global type environment, walking the value
 -- dependency order ('Katari.Typechecker.ValueGraph.valueSCCs') so a value's inferred return /
@@ -86,18 +86,26 @@ driveOne action = do
   put (extendValueEnvironment valueAdditions environment)
   pure typedAgents
 
--- | Check one non-recursive component. Annotation policy is optional — a missing return type is
--- synthesized from the body, a missing effect defaults to pure. The typed agent declaration is
--- returned for module assembly.
+-- | Check one non-recursive component and produce its scheme (for the value environment) plus, for
+-- an agent, its typed declaration (for module assembly). A signature-determined value (data
+-- constructor / external / primitive / request) contributes only its scheme.
 checkAcyclic ::
   ValueNode ->
   Checker (Map QualifiedName Scheme, Map QualifiedName (AgentDeclaration Typed))
-checkAcyclic node = do
-  (typedDeclaration, scheme) <- synthAgent node.declaration
-  pure
-    ( Map.singleton node.qualifiedName scheme,
-      Map.singleton node.qualifiedName typedDeclaration
-    )
+checkAcyclic node = case node.declaration of
+  ValueAgent declaration -> do
+    (typedDeclaration, scheme) <- synthAgent declaration
+    pure (Map.singleton node.qualifiedName scheme, Map.singleton node.qualifiedName typedDeclaration)
+  ValueData declaration -> signatureOnly (dataValueScheme declaration.sourceSpan node.qualifiedName)
+  ValueExternal declaration ->
+    signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects)
+  ValuePrimitive declaration ->
+    signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects)
+  ValueRequest declaration -> signatureOnly (requestValueScheme declaration.sourceSpan node.qualifiedName)
+  where
+    signatureOnly build = do
+      scheme <- build
+      pure (Map.singleton node.qualifiedName scheme, Map.empty)
 
 -- | Check one (mutually) recursive component. Annotations are required (inference does not cross a
 -- recursion). Walked in two passes: seed each member's scheme from its annotations, then check each
@@ -107,24 +115,27 @@ checkCyclic ::
   Checker (Map QualifiedName Scheme, Map QualifiedName (AgentDeclaration Typed))
 checkCyclic nodes = do
   seeds <- traverse seedOf nodes
-  let seedMap = Map.fromList [(node.qualifiedName, scheme) | (node, _, scheme) <- seeds]
+  let seedMap = Map.fromList [(node.qualifiedName, scheme) | (node, _, _, scheme) <- seeds]
   typedAgents <-
     local (extendValueEnvironment seedMap) $
       foldM
-        ( \acc (node, preparation, scheme) -> do
-            typedDecl <- checkAgentBody node.declaration preparation scheme.valueType
+        ( \acc (node, declaration, preparation, scheme) -> do
+            typedDecl <- checkAgentBody declaration preparation scheme.valueType
             pure (Map.insert node.qualifiedName typedDecl acc)
         )
         Map.empty
         seeds
   pure (seedMap, typedAgents)
   where
-    -- Prepare each member once (parameters elaborated, attributes computed) and reuse that
-    -- preparation for both the seed scheme and the body check, so nothing is done twice.
-    seedOf node = do
-      preparation <- prepareAgent node.declaration
-      scheme <- seedAgentType node.declaration preparation
-      pure (node, preparation, scheme)
+    -- Only agents can form a recursive component: every other value is signature-determined and has
+    -- no value-level edges, so it is always an acyclic source. Prepare each member once and reuse
+    -- the preparation for both the seed scheme and the body check.
+    seedOf node = case node.declaration of
+      ValueAgent declaration -> do
+        preparation <- prepareAgent declaration
+        scheme <- seedAgentType declaration preparation
+        pure (node, declaration, preparation, scheme)
+      _ -> panic "checkCyclic: only agents can form a recursive component"
 
 -- | Build one module's 'Typed' AST. Each agent declaration is looked up by its identifier-resolved
 -- identity in the typed-agent map (every top-level agent is a value node, so the entry always

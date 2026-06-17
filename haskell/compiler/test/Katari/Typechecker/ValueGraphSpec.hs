@@ -39,14 +39,14 @@ spec = do
     it "marks an acyclic agent as not cyclic" $
       map isCyclic (sccsOf [("test", "agent a() -> integer { 1 }")]) `shouldBe` [False]
 
-  describe "valueSCCs (non-agent references are not edges)" $ do
-    it "ignores a data-constructor reference" $ do
+  describe "valueSCCs (every top-level value is a node)" $ do
+    it "orders a referenced data constructor before the agent (an acyclic source)" $ do
       let sccs = sccsOf [("test", "data point(x: integer)\nagent a() -> integer { let p = point(x = 1)\np.x }")]
-      sccNames sccs `shouldBe` [["a"]]
-      map isCyclic sccs `shouldBe` [False]
-    it "ignores a request reference" $
+      sccNames sccs `shouldBe` [["point"], ["a"]]
+      map isCyclic sccs `shouldBe` [False, False]
+    it "orders a referenced request before the agent" $
       sccNames (sccsOf [("test", "request tick() -> integer\nagent a() -> integer { tick() }")])
-        `shouldBe` [["a"]]
+        `shouldBe` [["tick"], ["a"]]
 
   describe "valueSCCs (cross-module)" $
     it "links an agent to an agent it calls in another module" $ do
