@@ -11,6 +11,14 @@ type Brand<T, B extends string> = T & { readonly __brand: B };
 
 export type ProjectId = Brand<string, "ProjectId">;
 export type SnapshotId = Brand<string, "SnapshotId">;
+/** Content hash of one module's IR (hex SHA-256 of its canonical serialisation): the key of the
+ *  content-addressed module store and the value a snapshot's manifest maps each module name to.
+ *  Computed by the CLI (`Katari.Project.Upload.hashModule`) and treated as an opaque key here. */
+export type ModuleHash = Brand<string, "ModuleHash">;
+
+/** Brand a wire-supplied string as a `ModuleHash`. The runtime trusts the CLI's hash as an opaque
+ *  key (it does not recompute it), so this is the single boundary cast. */
+export const toModuleHash = (value: string): ModuleHash => value as ModuleHash;
 export type InstanceId = Brand<string, "InstanceId">;
 export type DelegationId = Brand<string, "DelegationId">;
 export type EscalationId = Brand<string, "EscalationId">;

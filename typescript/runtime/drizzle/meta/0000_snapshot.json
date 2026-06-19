@@ -1,5 +1,5 @@
 {
-  "id": "5a8a58d3-e4b7-47a3-aaa1-6ac423e95e1b",
+  "id": "ccf8f4c2-4e7e-43d8-b8ec-7d7b9104a505",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -142,12 +142,6 @@
         "owner_instance_id": {
           "name": "owner_instance_id",
           "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ambient_generics": {
-          "name": "ambient_generics",
-          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
@@ -517,96 +511,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.external_calls": {
-      "name": "external_calls",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "instance_id": {
-          "name": "instance_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "thread_id": {
-          "name": "thread_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "key": {
-          "name": "key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "argument": {
-          "name": "argument",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "external_calls_project_id_projects_id_fk": {
-          "name": "external_calls_project_id_projects_id_fk",
-          "tableFrom": "external_calls",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "external_calls_instance_id_instances_id_fk": {
-          "name": "external_calls_instance_id_instances_id_fk",
-          "tableFrom": "external_calls",
-          "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.instances": {
       "name": "instances",
       "schema": "",
@@ -647,6 +551,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "ambient_generics": {
+          "name": "ambient_generics",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -1000,6 +910,66 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.modules": {
+      "name": "modules",
+      "schema": "",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hash": {
+          "name": "hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ir": {
+          "name": "ir",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "modules_project_id_projects_id_fk": {
+          "name": "modules_project_id_projects_id_fk",
+          "tableFrom": "modules",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "modules_project_id_hash_pk": {
+          "name": "modules_project_id_hash_pk",
+          "columns": [
+            "project_id",
+            "hash"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.projects": {
       "name": "projects",
       "schema": "",
@@ -1029,6 +999,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "head_snapshot_id": {
+          "name": "head_snapshot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1038,7 +1014,21 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {},
+      "foreignKeys": {
+        "projects_head_snapshot_id_snapshots_id_fk": {
+          "name": "projects_head_snapshot_id_snapshots_id_fk",
+          "tableFrom": "projects",
+          "tableTo": "snapshots",
+          "columnsFrom": [
+            "head_snapshot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "projects_name_unique": {

@@ -42,3 +42,9 @@ export class UnprocessableEntityError extends AppError {
     super(422, "unprocessable_entity", message, details);
   }
 }
+
+export class NotImplementedError extends AppError {
+  constructor(message = "Not Implemented", details?: unknown) {
+    super(501, "not_implemented", message, details);
+  }
+}

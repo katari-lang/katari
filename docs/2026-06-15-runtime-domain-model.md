@@ -37,7 +37,8 @@ root だけ。
 ```
 System (host process)
   └─ Project ─────────────── isolation boundary / 永続 / 明示削除まで
-       ├─ Snapshot ───────── code version = IR modules + schema + sidecar bundle
+       ├─ Module store ───── content-addressed IR (project, moduleHash) → IRModule
+       ├─ Snapshot ───────── code version = per-module hash の manifest + sidecar bundle
        └─ root Instance ──── project に 1 つ (parent = null)
             ├─ Instance ──── run の root agent (user が起動)
             │    └─ Instance ── その agent が呼んだ別 agent (= 子 activation)
@@ -118,15 +119,24 @@ project 削除で配下を全 cascade (snapshots / instances / env / blobs / …
 ほぼ削除しない。
 
 ### Snapshot
-code version。deploy するとその版の IR module 群 + schema + sidecar bundle が確定する。
-**project の唯一の直接の子**。instance は `current_snapshot` でどの版で走るかを参照
-(削除は RESTRICT 相当: 走っている版は消せない / 先に instance を terminate)。
+code version。**「一貫した世界の 1 版」= per-module hash の manifest**
+(`Map ModuleName moduleHash` + sidecar bundle + message)。IR 本体は同梱せず Module store
+(下記) を参照する。これにより CLI は **module 単位で差分アップロード**でき、版間で無変更な
+module は dedup される。**project の唯一の直接の子**。instance は起動 target の `snapshot`
+でどの版で走るかを pin (削除は RESTRICT 相当: 走っている版は消せない / 先に instance を
+terminate)。project は `head_snapshot_id` で「今ライブな版」を指し、deploy で前進・rollback で
+付け替える。詳細は [per-module-snapshot](2026-06-19-per-module-snapshot.md)。
+
+### Module (store)
+content-addressed な IR の格納単位。`(project, moduleHash) → IRModule`、`moduleHash` は
+`IRModule` の canonical serialization の hex SHA-256 (`Katari.Project.Upload.hashModule`)。
+不変・自動 dedup。snapshot はここを hash で参照する。
 
 ### IR / Block
-compiler の出力 (`Katari.Data.IR`)。`BlockAgent` が唯一の value-addressable callable
-(呼び出し規約 + schema を持つ)。runtime は snapshot から IRModule を読み、`QualifiedName`
-→ `BlockId` を `entries` で解決して thread を起こす。**runtime は IR を変更しない**
-(読むだけ)。
+compiler の出力 (`Katari.Data.IR`)、**1 IRModule / source module**。`BlockAgent` が唯一の
+value-addressable callable (呼び出し規約 + schema を持つ)。runtime は **snapshot → moduleHash
+→ Module store → IRModule** と一段間接で読み、`QualifiedName` → `BlockId` を `entries` で
+解決して thread を起こす。**runtime は IR を変更しない** (読むだけ)。
 
 ### Instance (旧 Entity)
 **cross-instance 実行ツリーのノード**。delegate で召喚され、scope / blob を **所有**する単位であり、
@@ -301,7 +311,7 @@ frontend API。request/response の CRUD + 起動トリガ。`routes → service
 | リソース | 操作 |
 |----------|------|
 | Project | create / list / get / delete |
-| Snapshot | deploy (IR bundle upload) / list / get |
+| Snapshot | deploy (per-module 差分 upload + manifest commit) / head / list / get |
 | Run | start / list / get / cancel |
 | Escalation | list (open) / answer |
 | File (blob) | upload / download / list / delete |
@@ -353,9 +363,13 @@ EAV 化はしない)。`⌫` = `ON DELETE CASCADE`。
 
 ```sql
 -- ── hierarchy ──────────────────────────────────────────────
-projects(id, name UNIQUE, description, readme, created_at)
+projects(id, name UNIQUE, description, readme,
+         head_snapshot_id→snapshots (set null),    -- 「今ライブな版」。deploy で前進・rollback で付け替え
+         created_at)
+modules(project_id→projects ⌫, hash, ir JSONB,     -- content-addressed IR store: (project, hash) → IRModule
+        created_at, PK(project_id, hash))           -- hash = canonical IRModule の hex SHA-256。不変・dedup
 snapshots(id, project_id→projects ⌫, modules JSONB, sidecar_bundle JSONB,
-          message, created_at)   -- IR を 1 構造化 blob で (moduleName→IRModule)。schema は IRModule.schemas 内
+          message, created_at)   -- modules = moduleName→hash の manifest (IR は modules テーブルを参照)。schema は IRModule.schemas 内
 
 -- ── 実行ツリー (instance = ephemeral, delegation 中心) ─────
 instances(
@@ -432,5 +446,6 @@ external_calls(id, project_id→projects ⌫, instance_id→instances ⌫,
 
 - multi-server (project affinity / LRU eviction / cross-server ascent handshake)
 - observable streaming (building ref / mid-stream subscribe / valueReady internal event)
-- snapshot migration (instance の `current_snapshot` 付け替え)
+- snapshot migration (**走行中** instance の pin 付け替え)。project head の付け替え (= rollback /
+  deploy) は per-module snapshot の storage が既に許す ([per-module-snapshot](2026-06-19-per-module-snapshot.md))
 - module の process 分割 (6-event protocol を process 境界に切り直し)
