@@ -74,6 +74,8 @@ tests:
       - temporary
       - text
       - containers
+      # An unused Manager for exercising loadSnapshotFromUrl over file:// (no network involved).
+      - http-client
     build-tools:
       - hspec-discover
 

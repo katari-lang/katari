@@ -14,7 +14,7 @@ import Katari.Project.Config
   )
 import Katari.Project.Discovery (SourceEntry (..))
 import Katari.Project.Error (ProjectError (..))
-import Katari.Project.Lockfile (LockedPackage (..), LockedSource (..), Lockfile (..), PathLock (..))
+import Katari.Project.Lockfile (LockedSource (..), Lockfile (..), PathLock (..))
 import Katari.Project.Resolve
   ( ProjectAssembly (..),
     ResolvedPackage (..),
@@ -134,5 +134,4 @@ spec = do
           lockfile = lockfileFromResolved project
       lockfile.version `shouldBe` 1
       lockfile.snapshot `shouldBe` Nothing
-      Map.lookup "lib" lockfile.packages
-        `shouldBe` Just LockedPackage {name = "lib", source = provenance}
+      Map.lookup "lib" lockfile.packages `shouldBe` Just provenance

@@ -52,20 +52,17 @@ module Katari.Project.Config
   )
 where
 
-import Control.Exception (IOException, try)
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Project.Error
   ( FileErrorInfo (..),
-    ParseErrorInfo (..),
     ProjectError (..),
-    ValidationErrorInfo (..),
+    readFileOrError,
   )
 import TOML
   ( DecodeTOML (..),
@@ -212,25 +209,22 @@ instance DecodeTOML RawOverride where
 -- | Read @katari.toml@ from disk, parse, and validate.
 loadKatariToml :: FilePath -> IO (Either ProjectError ProjectConfig)
 loadKatariToml path = do
-  contents <- try (TextIO.readFile path)
-  pure $ case contents of
-    Left readError -> Left (ConfigIOError FileErrorInfo {path = path, message = ioErrorMessage readError})
-    Right text -> parseKatariToml path text
+  contents <- readFileOrError ConfigIOError path
+  pure (contents >>= parseKatariToml path)
 
 -- | Parse the textual contents of @katari.toml@.
 parseKatariToml :: FilePath -> Text -> Either ProjectError ProjectConfig
 parseKatariToml path text = case decodeWith tomlDecoder text of
   Left tomlError ->
-    Left (ConfigParseError ParseErrorInfo {path = path, position = Nothing, message = renderTOMLError tomlError})
-  Right rawConfig -> validateConfig path rawConfig
+    Left (ConfigParseError FileErrorInfo {path = path, message = renderTOMLError tomlError})
+  Right (rawConfig :: RawConfig) -> validateConfig path rawConfig
 
--- | Apply the cross-field rules a 'Decoder' cannot express: each override is path XOR git, and every
--- override names a declared dependency.
+-- | Apply the cross-field rules a 'Decoder' cannot express, in one pass over the overrides: each
+-- override names a declared dependency and is path XOR git.
 validateConfig :: FilePath -> RawConfig -> Either ProjectError ProjectConfig
 validateConfig path rawConfig = do
-  let declared = rawConfig.dependencies.packages
-  validatedOverrides <- traverse (validateOverride path) (Map.toList rawConfig.overrides)
-  mapM_ (checkOverrideTarget path declared . fst) (Map.toList rawConfig.overrides)
+  validatedOverrides <-
+    traverse (validateOverride path rawConfig.dependencies.packages) (Map.toList rawConfig.overrides)
   pure
     ProjectConfig
       { package = rawConfig.package,
@@ -240,35 +234,22 @@ validateConfig path rawConfig = do
         overrides = Map.fromList validatedOverrides
       }
 
--- | Resolve one @[overrides.\<name>]@ entry into its 'OverrideSource', or report why it is malformed.
-validateOverride :: FilePath -> (Text, RawOverride) -> Either ProjectError (Text, OverrideSource)
-validateOverride path (name, rawOverride) = case (rawOverride.path, rawOverride.git) of
-  (Just _, Just _) -> validationError ("override '" <> name <> "' sets both path and git; choose one")
-  (Just pathValue, Nothing) -> case rawOverride.rev of
-    Just _ -> validationError ("override '" <> name <> "' sets rev, which is only valid with git")
-    Nothing -> Right (name, OverridePath PathOverride {path = Text.unpack pathValue})
-  (Nothing, Just gitValue) -> case rawOverride.rev of
-    Nothing -> validationError ("git override '" <> name <> "' requires a rev (full commit SHA)")
-    Just revValue -> Right (name, OverrideGit GitOverride {url = gitValue, rev = revValue})
-  (Nothing, Nothing) -> validationError ("override '" <> name <> "' must set either path or git")
+-- | Resolve one @[overrides.\<name>]@ entry into its 'OverrideSource', or report why it is malformed:
+-- it must target a declared dependency and set path XOR git (with rev only on git).
+validateOverride :: FilePath -> List Text -> (Text, RawOverride) -> Either ProjectError (Text, OverrideSource)
+validateOverride path declared (name, rawOverride)
+  | name `notElem` declared = validationError ("override '" <> name <> "' names no dependency in [dependencies].packages")
+  | otherwise = case (rawOverride.path, rawOverride.git) of
+      (Just _, Just _) -> validationError ("override '" <> name <> "' sets both path and git; choose one")
+      (Just pathValue, Nothing) -> case rawOverride.rev of
+        Just _ -> validationError ("override '" <> name <> "' sets rev, which is only valid with git")
+        Nothing -> Right (name, OverridePath PathOverride {path = Text.unpack pathValue})
+      (Nothing, Just gitValue) -> case rawOverride.rev of
+        Nothing -> validationError ("git override '" <> name <> "' requires a rev (full commit SHA)")
+        Just revValue -> Right (name, OverrideGit GitOverride {url = gitValue, rev = revValue})
+      (Nothing, Nothing) -> validationError ("override '" <> name <> "' must set either path or git")
   where
-    validationError message =
-      Left (ConfigValidationError ValidationErrorInfo {path = path, position = Nothing, message = message})
-
--- | An override must name a dependency that actually appears in @[dependencies].packages@; a stray
--- override is almost always a typo in the name.
-checkOverrideTarget :: FilePath -> List Text -> Text -> Either ProjectError ()
-checkOverrideTarget path declared name
-  | name `elem` declared = Right ()
-  | otherwise =
-      Left
-        ( ConfigValidationError
-            ValidationErrorInfo
-              { path = path,
-                position = Nothing,
-                message = "override '" <> name <> "' names no dependency in [dependencies].packages"
-              }
-        )
+    validationError message = Left (ConfigValidationError FileErrorInfo {path = path, message = message})
 
 -- | A package name is valid when it matches @[A-Za-z_][A-Za-z0-9_]*@ — i.e. it can appear as a
 -- Katari identifier, since it is the literal text a consumer types after @import@. (Reserved-name
@@ -281,7 +262,3 @@ isValidPackageName name = case Text.uncons name of
   where
     isIdentifierStart character = isAsciiLower character || isAsciiUpper character || character == '_'
     isIdentifierContinue character = isIdentifierStart character || isDigit character
-
--- | A short, human-readable rendering of an 'IOException' for a 'FileErrorInfo' message.
-ioErrorMessage :: IOException -> Text
-ioErrorMessage = Text.pack . show

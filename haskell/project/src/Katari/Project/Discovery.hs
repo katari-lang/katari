@@ -51,6 +51,10 @@ import System.FilePath
 configFilename :: FilePath
 configFilename = "katari.toml"
 
+-- | The extension (including the dot) of a Katari source file.
+ktrExtension :: FilePath
+ktrExtension = ".ktr"
+
 -- | One loaded source file. 'path' is the on-disk path (for diagnostics); 'text' is its contents.
 data SourceEntry = SourceEntry
   { path :: FilePath,
@@ -101,28 +105,25 @@ scanSourcesFromDir :: SourceOverlay -> FilePath -> IO (Either ProjectError (Map 
 scanSourcesFromDir overlay srcDir = do
   canonicalSrc <- canonicalizePath srcDir
   dirExists <- doesDirectoryExist canonicalSrc
+  -- 'collectKtrFiles' returns canonical paths, so the overlay (keyed by canonical path) can shadow a
+  -- disk file directly, and overlay-only files are exactly the overlay keys not already discovered.
   diskFiles <- if dirExists then collectKtrFiles canonicalSrc else pure []
-  -- Pair each on-disk file with its canonical path so the overlay (keyed by canonical path) can
-  -- shadow it, and so overlay-only files can be told apart from already-discovered ones.
-  diskFilesWithCanonical <- forM diskFiles (\filePath -> (,filePath) <$> canonicalizePath filePath)
-  let discoveredCanonical = Set.fromList (map fst diskFilesWithCanonical)
+  let discovered = Set.fromList diskFiles
       overlayOnlyPaths =
-        [ canonicalPath
-          | canonicalPath <- Map.keys overlay.files,
-            takeExtension canonicalPath == ".ktr",
-            isUnder canonicalSrc canonicalPath,
-            not (Set.member canonicalPath discoveredCanonical)
+        [ path
+          | path <- Map.keys overlay.files,
+            takeExtension path == ktrExtension,
+            isUnder canonicalSrc path,
+            not (Set.member path discovered)
         ]
-  diskEntries <- forM diskFilesWithCanonical $ \(canonicalPath, filePath) -> do
-    text <- maybe (TextIO.readFile filePath) pure (Map.lookup canonicalPath overlay.files)
-    pure (moduleNameForFile canonicalSrc filePath, SourceEntry {path = filePath, text = text})
+  diskEntries <- forM diskFiles $ \path -> do
+    text <- maybe (TextIO.readFile path) pure (Map.lookup path overlay.files)
+    pure (moduleNameForFile canonicalSrc path, SourceEntry {path = path, text = text})
   let overlayEntries =
-        [ ( moduleNameForFile canonicalSrc canonicalPath,
-            SourceEntry {path = canonicalPath, text = Map.findWithDefault "" canonicalPath overlay.files}
-          )
-          | canonicalPath <- overlayOnlyPaths
+        [ (moduleNameForFile canonicalSrc path, SourceEntry {path = path, text = Map.findWithDefault "" path overlay.files})
+          | path <- overlayOnlyPaths
         ]
-  pure (buildModuleMap (diskEntries ++ overlayEntries))
+  pure (buildModuleMap (diskEntries <> overlayEntries))
 
 -- | The module name a file contributes: its path relative to the source root, extension dropped, with
 -- directory separators becoming @.@ segments (@\<src>/foo/bar.ktr@ -> @foo.bar@).
@@ -156,7 +157,9 @@ buildModuleMap = foldM insertEntry Map.empty
       _ -> Right (Map.insert moduleName entry accumulated)
 
 -- | Recursively collect every @.ktr@ file under @dir@, guarding against symlink cycles by tracking
--- canonicalised paths already visited. The result is sorted for deterministic ordering.
+-- canonicalised directories already visited. Descends into each subdirectory by its /canonical/ path,
+-- so every returned file path is canonical (and overlay shadowing in 'scanSourcesFromDir' needs no
+-- further canonicalisation). The result is sorted for deterministic ordering.
 collectKtrFiles :: FilePath -> IO (List FilePath)
 collectKtrFiles dir = do
   exists <- doesDirectoryExist dir
@@ -178,9 +181,9 @@ collectKtrFiles dir = do
           if Set.member canonical visited
             then pure (visited, accumulated)
             else do
-              (visited', nested) <- walk (Set.insert canonical visited) fullPath
-              pure (visited', accumulated <> nested)
+              (visited', nested) <- walk (Set.insert canonical visited) canonical
+              pure (visited', nested <> accumulated)
         else
-          if takeExtension fullPath == ".ktr"
+          if takeExtension fullPath == ktrExtension
             then pure (visited, fullPath : accumulated)
             else pure (visited, accumulated)

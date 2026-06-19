@@ -28,6 +28,12 @@ import Data.Text qualified as Text
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
+-- | The cache root, relative to the project root, and its two subdirectories.
+cacheDirName, packagesDirName, snapshotsDirName :: FilePath
+cacheDirName = ".katari"
+packagesDirName = "packages"
+snapshotsDirName = "snapshots"
+
 -- | Resolved on-disk paths rooted at the project's @.katari/@ directory.
 data CachePaths = CachePaths
   { root :: FilePath,
@@ -41,17 +47,16 @@ projectCachePaths :: FilePath -> CachePaths
 projectCachePaths projectRoot =
   CachePaths
     { root = cacheRoot,
-      packages = cacheRoot </> "packages",
-      snapshots = cacheRoot </> "snapshots"
+      packages = cacheRoot </> packagesDirName,
+      snapshots = cacheRoot </> snapshotsDirName
     }
   where
-    cacheRoot = projectRoot </> ".katari"
+    cacheRoot = projectRoot </> cacheDirName
 
--- | Create every cache directory on demand. Safe to call repeatedly. @createDirectoryIfMissing True@
--- also makes @.katari/@ itself, so the three calls together cover the whole tree.
+-- | Create every cache directory on demand. @createDirectoryIfMissing True@ creates parents, so each
+-- subdirectory is made even on a first run with no @.katari/@ yet. Safe to call repeatedly.
 ensureCacheDirs :: CachePaths -> IO ()
 ensureCacheDirs paths = do
-  createDirectoryIfMissing True paths.root
   createDirectoryIfMissing True paths.packages
   createDirectoryIfMissing True paths.snapshots
 

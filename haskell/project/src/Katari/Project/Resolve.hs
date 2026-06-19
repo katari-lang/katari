@@ -10,18 +10,27 @@
 -- whose name is reserved by the compiler (the @primitive@ / stdlib namespace), so the failure is
 -- reported here rather than as a K2008 against the dependency's own source.
 --
--- Two entry points, by who is calling:
+-- Resolution is /root-authoritative/ (a package-set model, like Cargo @[patch]@ or npm @overrides@):
+-- the root project's @[overrides]@ and its single registry snapshot resolve the /entire/ transitive
+-- closure. A dependency's own @[overrides]@ / @[dependencies].registry@ are not consulted, so every
+-- reachable package — transitive included — must be resolvable from the root's snapshot or a root
+-- override; one that is not is a 'Katari.Project.Error.ResolveUnresolvedDependency'. This keeps the
+-- whole build on one coherent, conflict-free dependency set.
 --
---   * 'loadProjectOffline' — pure disk + cache, never the network. The lockfile must exist and every
---     non-path dependency it pins must already be in the cache; a missing one is
---     'Katari.Project.Error.ResolvePackageNotCached'. This is what the LSP and @katari build@ use, so
---     neither blocks an editor keystroke or an offline build on a network round-trip. It takes a
---     'SourceOverlay' that feeds the LSP's unsaved buffers into the root package.
+-- Two entry points, mirroring @npm install@ vs @npm ci@:
 --
---   * 'resolveProject' — network-capable, run by @katari apply@ / @katari resolve@. Fresh mode
---     resolves non-override deps through the registry snapshot and fetches their tarballs; the caller
---     owns the 'Manager'. The resulting 'ResolvedProject' records each dependency's provenance, so
---     'lockfileFromResolved' is a total projection.
+--   * 'resolveProject' — network-capable, run by @katari apply@ / @katari resolve@. Re-resolves from
+--     @katari.toml@ + the registry and writes a fresh lockfile (via 'lockfileFromResolved'); the
+--     caller owns the 'Manager'. An existing @katari.lock@ is consulted only as a cache hint, so an
+--     unchanged dependency is not re-downloaded.
+--
+--   * 'loadProjectOffline' — pure disk + cache, never the network. @katari.lock@ is authoritative:
+--     its packages are the full, already-flattened closure, so this neither re-walks the graph nor
+--     needs the registry. A declared dependency missing from the lock is
+--     'Katari.Project.Error.ResolveLockfileOutOfDate'; a locked package whose source tree is absent
+--     from the cache is 'Katari.Project.Error.ResolvePackageNotCached'. This is what the LSP and
+--     @katari build@ use, so neither blocks on the network. It takes a 'SourceOverlay' that feeds the
+--     LSP's unsaved buffers into the root package.
 module Katari.Project.Resolve
   ( ResolvedProject (..),
     ResolvedPackage (..),
@@ -35,9 +44,9 @@ module Katari.Project.Resolve
 where
 
 import Control.Monad (foldM, forM, forM_, unless, when)
-import Control.Monad.Except (ExceptT (..), MonadError (throwError), runExceptT)
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.State.Strict (StateT, get, modify', runStateT)
+import Control.Monad.State.Strict (StateT, evalStateT, get, modify')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -75,16 +84,15 @@ import Katari.Project.Error
   )
 import Katari.Project.Fetch (GitRef (..), fetchGitTarball)
 import Katari.Project.Lockfile
-  ( GitLock (..),
-    LockedPackage (..),
+  ( GitSource (..),
     LockedSource (..),
     Lockfile (..),
     PathLock (..),
-    SnapshotLock (..),
     loadLockfile,
     lockfileFilename,
+    lockfileFormatVersion,
   )
-import Katari.Project.Snapshot (Snapshot (..), SnapshotPackage (..), loadSnapshotFromUrl)
+import Katari.Project.Snapshot (Snapshot (..), loadSnapshotFromUrl)
 import Katari.Stdlib (isReservedModuleName)
 import Network.HTTP.Client (Manager)
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
@@ -119,95 +127,11 @@ newtype ProjectAssembly = ProjectAssembly
   deriving (Show)
 
 -- ===========================================================================
--- Offline load (disk + cache only)
+-- Resolution monad and shared package loaders
 -- ===========================================================================
 
--- | Load a project rooted at @rootDir@ from disk and cache only, using @katari.lock@; never touches
--- the network. The 'SourceOverlay' applies to the root package (the LSP's unsaved buffers).
---
--- The lockfile is the source of truth offline: its packages are the full (already flattened)
--- dependency closure, so this neither re-walks the graph nor needs the registry. A direct dependency
--- present in @katari.toml@ but absent from the lock is a 'ResolveLockfileOutOfDate'; a locked package
--- whose source tree is not on disk / in the cache is a 'ResolvePackageNotCached'.
-loadProjectOffline :: SourceOverlay -> FilePath -> IO (Either ProjectError ResolvedProject)
-loadProjectOffline overlay rootDir = runExceptT $ do
-  canonicalRoot <- liftIO (canonicalizePath rootDir)
-  rootConfig <- ExceptT (loadKatariToml (canonicalRoot </> configFilename))
-  rootSources <- ExceptT (scanSources overlay canonicalRoot rootConfig)
-  let cache = projectCachePaths canonicalRoot
-  lockfile <- loadLockfileOrEmpty (canonicalRoot </> lockfileFilename)
-  forM_ rootConfig.dependencies.packages $ \name ->
-    unless (Map.member name lockfile.packages) $
-      throwError (ResolveLockfileOutOfDate (DependencyInfo {dependency = name}))
-  dependencyPackages <- forM (Map.toList lockfile.packages) $ \(name, lockedPackage) ->
-    (name,) <$> loadLockedPackage canonicalRoot cache name lockedPackage
-  pure
-    ResolvedProject
-      { rootPackage =
-          ResolvedPackage
-            { root = canonicalRoot,
-              config = rootConfig,
-              sources = rootSources,
-              provenance = Nothing
-            },
-        depPackages = Map.fromList dependencyPackages
-      }
-
--- | Read @katari.lock@, or an empty lockfile when the file is absent (a project with no
--- dependencies needs no lock; the per-dependency check above turns a real omission into
--- 'ResolveLockfileOutOfDate').
-loadLockfileOrEmpty :: FilePath -> ExceptT ProjectError IO Lockfile
-loadLockfileOrEmpty path = do
-  exists <- liftIO (doesFileExist path)
-  if exists
-    then ExceptT (loadLockfile path)
-    else pure Lockfile {version = 1, snapshot = Nothing, packages = Map.empty}
-
--- | Load one locked dependency's package from where its 'LockedSource' says it lives.
-loadLockedPackage :: FilePath -> CachePaths -> Text -> LockedPackage -> ExceptT ProjectError IO ResolvedPackage
-loadLockedPackage rootDir cache name lockedPackage = case lockedPackage.source of
-  LockedPath lock -> do
-    let candidate = if isAbsolute lock.location then lock.location else rootDir </> lock.location
-    canonical <- liftIO (canonicalizePath candidate)
-    hasConfig <- liftIO (doesFileExist (canonical </> configFilename))
-    unless hasConfig $
-      throwError (ResolveMissingConfig (MissingConfigInfo {dependency = name, path = lock.location}))
-    loadPackageFrom canonical lockedPackage.source
-  LockedGit lock -> loadCachedPackage cache name lock.sha lockedPackage.source
-  LockedSnapshot lock -> loadCachedPackage cache name lock.sha lockedPackage.source
-
--- | Load a content-addressed dependency from @\<cache>/packages/\<name>-\<sha>@, failing with
--- 'ResolvePackageNotCached' when that directory is not present.
-loadCachedPackage :: CachePaths -> Text -> Text -> LockedSource -> ExceptT ProjectError IO ResolvedPackage
-loadCachedPackage cache name sha source = do
-  let directory = packageDir cache name sha
-  exists <- liftIO (doesDirectoryExist directory)
-  unless exists $
-    throwError (ResolvePackageNotCached (NotCachedInfo {dependency = name, expectedPath = directory}))
-  loadPackageFrom directory source
-
--- | Load a package's config + sources from an on-disk directory, tagging it with its provenance.
-loadPackageFrom :: FilePath -> LockedSource -> ExceptT ProjectError IO ResolvedPackage
-loadPackageFrom directory source = do
-  config <- ExceptT (loadKatariToml (directory </> configFilename))
-  sources <- ExceptT (scanSources emptyOverlay directory config)
-  pure ResolvedPackage {root = directory, config = config, sources = sources, provenance = Just source}
-
--- ===========================================================================
--- Network resolution
--- ===========================================================================
-
--- | The constant inputs of one resolution run: where the project is, its config (the single source
--- of overrides + registry/snapshot for the /whole/ closure), the HTTP manager, and the cache.
-data ResolveContext = ResolveContext
-  { rootDir :: FilePath,
-    rootConfig :: ProjectConfig,
-    manager :: Manager,
-    cache :: CachePaths
-  }
-
--- | Mutable resolution state: the flattened set of packages resolved so far (memoising diamonds), and
--- the registry snapshot once it has been loaded (loaded at most once, lazily on first need).
+-- | Mutable resolution state: the flattened set of packages resolved so far (memoising diamonds),
+-- and the registry snapshot once it has been loaded (loaded at most once, lazily on first need).
 data ResolveState = ResolveState
   { resolved :: Map Text ResolvedPackage,
     snapshotCache :: Maybe Snapshot
@@ -215,15 +139,60 @@ data ResolveState = ResolveState
 
 type ResolveM = ExceptT ProjectError (StateT ResolveState IO)
 
--- | Load a project rooted at @rootDir@ and recursively resolve every dependency (path overrides,
--- git overrides, and registry-snapshot pins), fetching as needed over @manager@. Used by
--- @katari apply@ / @katari resolve@ to (re)generate the lockfile.
+runResolveM :: ResolveM a -> IO (Either ProjectError a)
+runResolveM action = evalStateT (runExceptT action) ResolveState {resolved = Map.empty, snapshotCache = Nothing}
+
+-- | Run an @IO (Either ProjectError a)@ action inside 'ResolveM', short-circuiting on a 'Left'.
+liftE :: IO (Either ProjectError a) -> ResolveM a
+liftE action = liftIO action >>= either throwError pure
+
+-- | Load a dependency's config + sources from an on-disk directory, tagging it with its provenance.
+-- Dependencies never carry the LSP overlay (that is only the root, in 'loadProjectOffline').
+loadResolvedPackage :: FilePath -> LockedSource -> ResolveM ResolvedPackage
+loadResolvedPackage directory provenance = do
+  config <- liftE (loadKatariToml (directory </> configFilename))
+  sources <- liftE (scanSources emptyOverlay directory config)
+  pure ResolvedPackage {root = directory, config = config, sources = sources, provenance = Just provenance}
+
+-- | Load a path dependency: canonicalise the (possibly relative) location, require a @katari.toml@,
+-- and load it. The location is recorded verbatim so the lockfile stays portable.
+loadPathPackage :: FilePath -> Text -> FilePath -> ResolveM ResolvedPackage
+loadPathPackage baseDir name location = do
+  let candidate = if isAbsolute location then location else baseDir </> location
+  canonical <- liftIO (canonicalizePath candidate)
+  hasConfig <- liftIO (doesFileExist (canonical </> configFilename))
+  unless hasConfig $ throwError (ResolveMissingConfig MissingConfigInfo {dependency = name, path = location})
+  loadResolvedPackage canonical (LockedPath PathLock {location = location})
+
+-- | Fetch a git ref into the cache and load it. @cacheSha@ skips the download on a cache hit;
+-- @requiredSha@ (a snapshot pin) is verified against the fetched content.
+loadGitPackage :: ResolveContext -> Text -> GitRef -> Maybe Text -> Maybe Text -> ResolveM ResolvedPackage
+loadGitPackage context name ref cacheSha requiredSha = do
+  (directory, sha) <- liftE (fetchGitTarball context.manager context.cache name ref cacheSha)
+  forM_ requiredSha $ \expected ->
+    when (sha /= expected) $
+      throwError (ResolveShaMismatch ShaMismatchInfo {dependency = name, expected = expected, actual = sha})
+  loadResolvedPackage directory (LockedGit GitSource {url = ref.url, rev = ref.rev, sha = sha})
+
+-- ===========================================================================
+-- Network resolution (npm install)
+-- ===========================================================================
+
+-- | The constant inputs of one resolution run: where the project is, its config (the single source
+-- of overrides + registry/snapshot for the /whole/ closure), the HTTP manager, the cache, and the
+-- prior lockfile's pins (used purely as download-skipping cache hints).
+data ResolveContext = ResolveContext
+  { rootDir :: FilePath,
+    rootConfig :: ProjectConfig,
+    manager :: Manager,
+    cache :: CachePaths,
+    priorPins :: Map Text GitSource
+  }
+
+-- | Load a project rooted at @rootDir@ and recursively resolve every dependency, fetching as needed
+-- over @manager@. Used by @katari apply@ / @katari resolve@ to (re)generate the lockfile.
 resolveProject :: Manager -> FilePath -> IO (Either ProjectError ResolvedProject)
-resolveProject manager rootDir = do
-  (result, _) <- runStateT (runExceptT (resolveProjectM manager rootDir)) initialState
-  pure result
-  where
-    initialState = ResolveState {resolved = Map.empty, snapshotCache = Nothing}
+resolveProject manager rootDir = runResolveM (resolveProjectM manager rootDir)
 
 resolveProjectM :: Manager -> FilePath -> ResolveM ResolvedProject
 resolveProjectM manager rootDir = do
@@ -232,18 +201,20 @@ resolveProjectM manager rootDir = do
   rootSources <- liftE (scanSources emptyOverlay canonicalRoot rootConfig)
   let cache = projectCachePaths canonicalRoot
   liftIO (ensureCacheDirs cache)
-  let context = ResolveContext {rootDir = canonicalRoot, rootConfig = rootConfig, manager = manager, cache = cache}
+  priorPins <- liftIO (loadPriorPins (canonicalRoot </> lockfileFilename))
+  let context =
+        ResolveContext
+          { rootDir = canonicalRoot,
+            rootConfig = rootConfig,
+            manager = manager,
+            cache = cache,
+            priorPins = priorPins
+          }
   forM_ rootConfig.dependencies.packages (resolveDependency context [])
   finalState <- get
   pure
     ResolvedProject
-      { rootPackage =
-          ResolvedPackage
-            { root = canonicalRoot,
-              config = rootConfig,
-              sources = rootSources,
-              provenance = Nothing
-            },
+      { rootPackage = ResolvedPackage {root = canonicalRoot, config = rootConfig, sources = rootSources, provenance = Nothing},
         depPackages = finalState.resolved
       }
 
@@ -253,83 +224,40 @@ resolveProjectM manager rootDir = do
 resolveDependency :: ResolveContext -> List Text -> Text -> ResolveM ()
 resolveDependency context chain name = do
   when (name `elem` chain) $
-    throwError (ResolveCycle (DependencyCycleInfo {cycle = reverse (name : chain)}))
+    throwError (ResolveCycle DependencyCycleInfo {cycle = reverse (name : chain)})
   state <- get
   case Map.lookup name state.resolved of
     Just _ -> pure ()
     Nothing -> do
       package <- locateDependency context name
       modify' (\current -> current {resolved = Map.insert name package current.resolved})
-      -- A dependency's own dependencies resolve against the SAME root context (root overrides + the
-      -- one registry snapshot), so the whole closure shares a single, consistent resolution.
+      -- A dependency's own dependencies resolve against the SAME root context (root-authoritative).
       forM_ package.config.dependencies.packages (resolveDependency context (name : chain))
 
 -- | Decide where a single dependency comes from: a root path override, a root git override, or the
 -- registry snapshot pin.
 locateDependency :: ResolveContext -> Text -> ResolveM ResolvedPackage
 locateDependency context name = case Map.lookup name context.rootConfig.overrides of
-  Just (OverridePath override) -> resolvePathDependency context name override
-  Just (OverrideGit override) -> resolveGitDependency context name override
+  Just (OverridePath override) -> loadPathPackage context.rootDir name override.path
+  Just (OverrideGit override) ->
+    let ref = GitRef {url = override.url, rev = override.rev}
+     in loadGitPackage context name ref (cacheHint context name ref) Nothing
   Nothing -> resolveSnapshotDependency context name
 
-resolvePathDependency :: ResolveContext -> Text -> PathOverride -> ResolveM ResolvedPackage
-resolvePathDependency context name override = do
-  let candidate = if isAbsolute override.path then override.path else context.rootDir </> override.path
-  canonical <- liftIO (canonicalizePath candidate)
-  hasConfig <- liftIO (doesFileExist (canonical </> configFilename))
-  unless hasConfig $
-    throwError (ResolveMissingConfig (MissingConfigInfo {dependency = name, path = override.path}))
-  config <- liftE (loadKatariToml (canonical </> configFilename))
-  sources <- liftE (scanSources emptyOverlay canonical config)
-  -- The path is stored verbatim (as written, usually relative) so the lockfile stays portable.
-  pure
-    ResolvedPackage
-      { root = canonical,
-        config = config,
-        sources = sources,
-        provenance = Just (LockedPath PathLock {location = override.path})
-      }
-
-resolveGitDependency :: ResolveContext -> Text -> GitOverride -> ResolveM ResolvedPackage
-resolveGitDependency context name override = do
-  (directory, sha) <-
-    liftE (fetchGitTarball context.manager context.cache name GitRef {url = override.url, rev = override.rev})
-  config <- liftE (loadKatariToml (directory </> configFilename))
-  sources <- liftE (scanSources emptyOverlay directory config)
-  pure
-    ResolvedPackage
-      { root = directory,
-        config = config,
-        sources = sources,
-        provenance = Just (LockedGit GitLock {url = override.url, rev = override.rev, sha = sha})
-      }
+-- | A git override's content hash is unknown until fetched, but if the prior lockfile pinned the
+-- same @(url, rev)@ its sha lets the cache short-circuit the download.
+cacheHint :: ResolveContext -> Text -> GitRef -> Maybe Text
+cacheHint context name ref = case Map.lookup name context.priorPins of
+  Just pin | pin.url == ref.url && pin.rev == ref.rev -> Just pin.sha
+  _ -> Nothing
 
 resolveSnapshotDependency :: ResolveContext -> Text -> ResolveM ResolvedPackage
 resolveSnapshotDependency context name = do
   snapshot <- requireSnapshot context name
   case Map.lookup name snapshot.packages of
-    Nothing -> throwError (ResolveUnresolvedDependency (DependencyInfo {dependency = name}))
-    Just pin -> do
-      let cachedDir = packageDir context.cache name pin.sha
-      cached <- liftIO (doesDirectoryExist cachedDir)
-      directory <-
-        if cached
-          then pure cachedDir
-          else do
-            (fetchedDir, fetchedSha) <-
-              liftE (fetchGitTarball context.manager context.cache name GitRef {url = pin.url, rev = pin.rev})
-            when (fetchedSha /= pin.sha) $
-              throwError (ResolveShaMismatch (ShaMismatchInfo {dependency = name, expected = pin.sha, actual = fetchedSha}))
-            pure fetchedDir
-      config <- liftE (loadKatariToml (directory </> configFilename))
-      sources <- liftE (scanSources emptyOverlay directory config)
-      pure
-        ResolvedPackage
-          { root = directory,
-            config = config,
-            sources = sources,
-            provenance = Just (LockedSnapshot SnapshotLock {url = pin.url, rev = pin.rev, sha = pin.sha})
-          }
+    Nothing -> throwError (ResolveUnresolvedDependency DependencyInfo {dependency = name})
+    -- The pin's sha is both the cache hint (skip download if held) and the required hash (verify).
+    Just pin -> loadGitPackage context name GitRef {url = pin.url, rev = pin.rev} (Just pin.sha) (Just pin.sha)
 
 -- | The registry snapshot, loaded at most once. A dependency that needs the snapshot but has no
 -- @[dependencies].registry@ to load it from is simply unresolvable.
@@ -339,21 +267,80 @@ requireSnapshot context name = do
   case state.snapshotCache of
     Just snapshot -> pure snapshot
     Nothing -> case context.rootConfig.dependencies.registry of
-      Nothing -> throwError (ResolveUnresolvedDependency (DependencyInfo {dependency = name}))
+      Nothing -> throwError (ResolveUnresolvedDependency DependencyInfo {dependency = name})
       Just registry -> do
         snapshot <- liftE (loadSnapshotFromUrl context.manager registry context.rootConfig.dependencies.snapshot)
         modify' (\current -> current {snapshotCache = Just snapshot})
         pure snapshot
 
--- | Run an @IO (Either ProjectError a)@ action inside 'ResolveM', short-circuiting on a 'Left'.
-liftE :: IO (Either ProjectError a) -> ResolveM a
-liftE action = liftIO action >>= either throwError pure
+-- | The prior lockfile's git pins, keyed by dependency name, for cache reuse. Absent or unreadable
+-- lock → no hints (a regenerating @apply@ must not be blocked by a stale lock).
+loadPriorPins :: FilePath -> IO (Map Text GitSource)
+loadPriorPins path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure Map.empty
+    else do
+      result <- loadLockfile path
+      pure $ case result of
+        Left _ -> Map.empty
+        Right lockfile -> Map.mapMaybe gitSourceOf lockfile.packages
+  where
+    gitSourceOf lockedSource = case lockedSource of
+      LockedGit gitSource -> Just gitSource
+      LockedPath _ -> Nothing
+
+-- ===========================================================================
+-- Offline load (npm ci)
+-- ===========================================================================
+
+-- | Load a project rooted at @rootDir@ from disk and cache only, using @katari.lock@; never touches
+-- the network. The 'SourceOverlay' applies to the root package (the LSP's unsaved buffers).
+loadProjectOffline :: SourceOverlay -> FilePath -> IO (Either ProjectError ResolvedProject)
+loadProjectOffline overlay rootDir = runResolveM (loadProjectOfflineM overlay rootDir)
+
+loadProjectOfflineM :: SourceOverlay -> FilePath -> ResolveM ResolvedProject
+loadProjectOfflineM overlay rootDir = do
+  canonicalRoot <- liftIO (canonicalizePath rootDir)
+  rootConfig <- liftE (loadKatariToml (canonicalRoot </> configFilename))
+  rootSources <- liftE (scanSources overlay canonicalRoot rootConfig)
+  let cache = projectCachePaths canonicalRoot
+  lockfile <- loadLockfileOrEmpty (canonicalRoot </> lockfileFilename)
+  forM_ rootConfig.dependencies.packages $ \name ->
+    unless (Map.member name lockfile.packages) $
+      throwError (ResolveLockfileOutOfDate DependencyInfo {dependency = name})
+  dependencyPackages <- forM (Map.toList lockfile.packages) $ \(name, lockedSource) ->
+    (name,) <$> loadLockedPackage canonicalRoot cache name lockedSource
+  pure
+    ResolvedProject
+      { rootPackage = ResolvedPackage {root = canonicalRoot, config = rootConfig, sources = rootSources, provenance = Nothing},
+        depPackages = Map.fromList dependencyPackages
+      }
+
+-- | Read @katari.lock@, or an empty lockfile when the file is absent (a project with no dependencies
+-- needs no lock; the per-dependency check above turns a real omission into 'ResolveLockfileOutOfDate').
+loadLockfileOrEmpty :: FilePath -> ResolveM Lockfile
+loadLockfileOrEmpty path = do
+  exists <- liftIO (doesFileExist path)
+  if exists
+    then liftE (loadLockfile path)
+    else pure Lockfile {version = lockfileFormatVersion, snapshot = Nothing, packages = Map.empty}
+
+-- | Load one locked dependency from where its 'LockedSource' says it lives, all from disk/cache.
+loadLockedPackage :: FilePath -> CachePaths -> Text -> LockedSource -> ResolveM ResolvedPackage
+loadLockedPackage rootDir cache name lockedSource = case lockedSource of
+  LockedPath lock -> loadPathPackage rootDir name lock.location
+  LockedGit lock -> do
+    let directory = packageDir cache name lock.sha
+    exists <- liftIO (doesDirectoryExist directory)
+    unless exists $ throwError (ResolvePackageNotCached NotCachedInfo {dependency = name, expectedPath = directory})
+    loadResolvedPackage directory lockedSource
 
 -- ===========================================================================
 -- Assembly / projection
 -- ===========================================================================
 
--- | Flatten a 'ResolvedProject': validate that each package's dep key agrees with its
+-- | Flatten a 'ResolvedProject': validate that each dependency package's key agrees with its
 -- @[package].name@, that its name is not compiler-reserved, and that every module is inside the
 -- package's namespace, reject cross-package module collisions, then union the source maps.
 --
@@ -371,18 +358,15 @@ assembleProject project = do
 validateDependencyPackage :: (Text, ResolvedPackage) -> Either ProjectError (List (ModuleName, (Text, SourceEntry)))
 validateDependencyPackage (name, package) = do
   unless (isValidPackageName name) $
-    Left (ResolveInvalidPackageName (PackageNameInfo {name = name}))
+    Left (ResolveInvalidPackageName PackageNameInfo {name = name})
   when (isReservedModuleName (ModuleName name)) $
-    Left (ResolveReservedPackageName (PackageNameInfo {name = name}))
+    Left (ResolveReservedPackageName PackageNameInfo {name = name})
   unless (package.config.package.name == name) $
-    Left
-      ( ResolveDependencyNameMismatch
-          DependencyNameMismatchInfo {declaredKey = name, actualName = package.config.package.name}
-      )
+    Left (ResolveDependencyNameMismatch DependencyNameMismatchInfo {declaredKey = name, actualName = package.config.package.name})
   let namespaceRoot = ModuleName name
   forM_ (Map.keys package.sources) $ \moduleName ->
     unless (namespaceRoot `covers` moduleName) $
-      Left (ResolveOutOfNamespace (OutOfNamespaceInfo {package = name, moduleName = moduleName}))
+      Left (ResolveOutOfNamespace OutOfNamespaceInfo {package = name, moduleName = moduleName})
   pure [(moduleName, (name, entry)) | (moduleName, entry) <- Map.toList package.sources]
 
 -- | Insert one owned entry into the merged map, failing on a cross-package module-name collision.
@@ -392,24 +376,18 @@ mergeEntry ::
   Either ProjectError (Map ModuleName (Text, SourceEntry))
 mergeEntry accumulated (moduleName, owned@(owner, _)) = case Map.lookup moduleName accumulated of
   Just (existingOwner, _) ->
-    Left
-      ( ResolveModuleCollision
-          ModuleCollisionInfo {moduleName = moduleName, firstPackage = existingOwner, secondPackage = owner}
-      )
+    Left (ResolveModuleCollision ModuleCollisionInfo {moduleName = moduleName, firstPackage = existingOwner, secondPackage = owner})
   Nothing -> Right (Map.insert moduleName owned accumulated)
 
--- | Project a 'ResolvedProject' into its 'Lockfile'. Total: every dependency already carries its
+-- | Project a 'ResolvedProject' into its 'Lockfile'. Total: every dependency carries its
 -- 'LockedSource' provenance (the root, the only package with 'Nothing', is not a dependency).
 lockfileFromResolved :: ResolvedProject -> Lockfile
 lockfileFromResolved project =
   Lockfile
-    { version = 1,
+    { version = lockfileFormatVersion,
       snapshot = project.rootPackage.config.dependencies.snapshot,
-      packages = Map.mapMaybeWithKey toLockedPackage project.depPackages
+      packages = Map.mapMaybe (\package -> package.provenance) project.depPackages
     }
-  where
-    toLockedPackage name package =
-      fmap (\source -> LockedPackage {name = name, source = source}) package.provenance
 
 -- | The exact map @Katari.Compile.CompileInput@ keys on: module name → source text.
 compileInputSources :: ProjectAssembly -> Map ModuleName Text

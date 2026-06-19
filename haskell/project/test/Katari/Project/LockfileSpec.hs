@@ -2,19 +2,16 @@ module Katari.Project.LockfileSpec (spec) where
 
 import Data.Map.Strict qualified as Map
 import Katari.Project.Lockfile
-  ( GitLock (..),
-    LockedPackage (..),
+  ( GitSource (..),
     LockedSource (..),
     Lockfile (..),
     PathLock (..),
-    SnapshotLock (..),
     parseLockfile,
     renderLockfile,
   )
 import Test.Hspec
 
--- | A lockfile covering all three source variants, so the round-trip exercises every render/parse
--- branch.
+-- | A lockfile covering both source variants, so the round-trip exercises every render/parse branch.
 sampleLockfile :: Lockfile
 sampleLockfile =
   Lockfile
@@ -22,23 +19,9 @@ sampleLockfile =
       snapshot = Just "v0.1.0",
       packages =
         Map.fromList
-          [ ( "list_utils",
-              LockedPackage
-                { name = "list_utils",
-                  source =
-                    LockedSnapshot
-                      SnapshotLock {url = "https://github.com/katari-lang/list_utils", rev = "v0.2.1", sha = "abc123"}
-                }
-            ),
-            ( "local_fork",
-              LockedPackage {name = "local_fork", source = LockedPath PathLock {location = "../local_fork"}}
-            ),
-            ( "bleeding_edge",
-              LockedPackage
-                { name = "bleeding_edge",
-                  source = LockedGit GitLock {url = "https://github.com/foo/bar", rev = "deadbeef", sha = "def456"}
-                }
-            )
+          [ ("list_utils", LockedGit GitSource {url = "https://github.com/katari-lang/list_utils", rev = "v0.2.1", sha = "abc123"}),
+            ("local_fork", LockedPath PathLock {location = "../local_fork"}),
+            ("bleeding_edge", LockedGit GitSource {url = "https://github.com/foo/bar", rev = "deadbeef", sha = "def456"})
           ]
     }
 

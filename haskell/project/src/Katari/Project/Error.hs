@@ -1,28 +1,25 @@
 -- | Every failure mode of project loading, dependency resolution, and lockfile/snapshot handling,
 -- flattened into a single sum type. The whole package returns @'Either' 'ProjectError' a@, and the
--- CLI renders any failure through the one 'renderProjectError'. This replaces the per-module error
--- types of the prototype (each wrapping the others), which forced callers to thread several render
--- functions and left some variants rendered via 'show'.
+-- CLI renders any failure through the one 'renderProjectError'.
 --
--- Two design points the consumers (CLI + LSP) depend on:
+-- Following the compiler's "Katari.Error", each constructor carries one named @*Info@ record rather
+-- than inlining fields, since record syntax and @|@ sum syntax mix badly. Shapes that recur are
+-- shared by one record, and the constructor name carries the "which file / phase" distinction:
 --
---   * /Record per variant./ Following the compiler's "Katari.Error", each constructor carries one
---     named @*Info@ record rather than inlining fields, since record syntax and @|@ sum syntax mix
---     badly. Shapes that recur (a file + message, a parse position, an http failure) share one
---     record; the constructor name carries the "which file / phase" distinction.
+--   * 'FileErrorInfo' (a path + a message) covers every read / parse / validation failure of
+--     @katari.toml@ / @katari.lock@ / a snapshot file. Whether it was an IO, parse, or validation
+--     failure is the constructor, not the payload.
+--   * 'UrlErrorInfo' (a URL + a message) covers every network / archive failure.
+--   * 'UrlInfo' (a URL alone) covers the failures fully described by the offending URL.
 --
---   * /Source positions for the LSP./ Parse and validation failures of @katari.toml@ / @katari.lock@
---     carry a @'Maybe' 'Position'@, so the LSP can turn them into an inline diagnostic at the
---     offending line instead of a whole-file squiggle. 'Position' is reused verbatim from the
---     compiler ("Katari.Data.SourceSpan") so both layers speak the same coordinate system.
+-- 'readFileOrError' and 'formatException' live here too, so the one convention for turning an IO
+-- failure into a 'ProjectError' has a single home.
 module Katari.Project.Error
   ( ProjectError (..),
 
     -- * Shared payload records
     FileErrorInfo (..),
-    ParseErrorInfo (..),
-    ValidationErrorInfo (..),
-    HttpErrorInfo (..),
+    UrlErrorInfo (..),
     UrlInfo (..),
     DependencyInfo (..),
     PackageNameInfo (..),
@@ -33,22 +30,25 @@ module Katari.Project.Error
     OutOfNamespaceInfo (..),
     DependencyNameMismatchInfo (..),
     MissingConfigInfo (..),
-    AmbiguousDependencyInfo (..),
     ShaMismatchInfo (..),
     DependencyCycleInfo (..),
     NotCachedInfo (..),
-    TarballErrorInfo (..),
+
+    -- * IO helpers
+    readFileOrError,
+    formatException,
 
     -- * Rendering
     renderProjectError,
   )
 where
 
+import Control.Exception (Exception, IOException, displayException, try)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
-import Katari.Data.SourceSpan (Position (..))
 
 -- ===========================================================================
 -- The root sum
@@ -57,32 +57,30 @@ import Katari.Data.SourceSpan (Position (..))
 data ProjectError
   = -- Config (katari.toml) ----------------------------------------------------------------------
     ConfigIOError FileErrorInfo
-  | ConfigParseError ParseErrorInfo
-  | ConfigValidationError ValidationErrorInfo
+  | ConfigParseError FileErrorInfo
+  | ConfigValidationError FileErrorInfo
   | -- Discovery ---------------------------------------------------------------------------------
     DuplicateModule DuplicateModuleInfo
   | -- Lockfile (katari.lock) --------------------------------------------------------------------
     LockfileIOError FileErrorInfo
-  | LockfileParseError ParseErrorInfo
-  | LockfileValidationError ValidationErrorInfo
+  | LockfileParseError FileErrorInfo
+  | LockfileValidationError FileErrorInfo
   | -- Snapshot (registry package set) -----------------------------------------------------------
     SnapshotIOError FileErrorInfo
-  | SnapshotHttpError HttpErrorInfo
-  | SnapshotParseError ParseErrorInfo
-  | SnapshotValidationError ValidationErrorInfo
+  | SnapshotHttpError UrlErrorInfo
+  | SnapshotParseError FileErrorInfo
+  | SnapshotValidationError FileErrorInfo
   | -- | The registry URL scheme is unsupported (only @file://@ and @https://@ are allowed).
     SnapshotUnsupportedUrl UrlInfo
   | -- Fetch (git tarball) -----------------------------------------------------------------------
-    FetchHttpError HttpErrorInfo
-  | FetchTarballError TarballErrorInfo
+    FetchHttpError UrlErrorInfo
+  | FetchTarballError UrlErrorInfo
   | -- | The git URL is not a supported host (only GitHub archive URLs in v0.1).
     FetchInvalidHost UrlInfo
   | -- Resolve (dependency graph) ----------------------------------------------------------------
     ResolveCycle DependencyCycleInfo
   | -- | A path dependency points at a directory with no @katari.toml@.
     ResolveMissingConfig MissingConfigInfo
-  | -- | The same dep name resolved to two different package roots.
-    ResolveAmbiguousDependency AmbiguousDependencyInfo
   | -- | A package name is not a valid Katari identifier.
     ResolveInvalidPackageName PackageNameInfo
   | -- | A package name collides with the compiler-reserved @primitive@ / stdlib namespace, so the
@@ -95,7 +93,9 @@ data ProjectError
     ResolveOutOfNamespace OutOfNamespaceInfo
   | -- | A dep's @[package].name@ disagrees with the key it is declared under.
     ResolveDependencyNameMismatch DependencyNameMismatchInfo
-  | -- | A dep is in @[dependencies].packages@ but has neither an override nor a snapshot pin.
+  | -- | A dep is reachable but has neither an override nor a registry-snapshot pin. Since the root's
+    -- snapshot is authoritative for the whole closure, this also fires when a /transitive/ dep is
+    -- absent from that snapshot.
     ResolveUnresolvedDependency DependencyInfo
   | -- | A dep is in @katari.toml@ but missing from @katari.lock@; the lock must be refreshed.
     ResolveLockfileOutOfDate DependencyInfo
@@ -110,50 +110,34 @@ data ProjectError
 -- Shared payload records
 -- ===========================================================================
 
--- | A file could not be read or written.
+-- | A failure that concerns one file: an IO error, a parse error, or a validation error. The
+-- constructor wrapping it says which.
 data FileErrorInfo = FileErrorInfo
   { path :: FilePath,
     message :: Text
   }
   deriving (Show, Eq)
 
--- | A TOML decode failure. 'position' is filled when the parser pinpoints a location (the LSP
--- underlines it); 'Nothing' when the failure is document-wide.
-data ParseErrorInfo = ParseErrorInfo
-  { path :: FilePath,
-    position :: Maybe Position,
-    message :: Text
-  }
-  deriving (Show, Eq)
-
--- | A decoded document violated a cross-field / semantic rule (e.g. path XOR git on an override).
-data ValidationErrorInfo = ValidationErrorInfo
-  { path :: FilePath,
-    position :: Maybe Position,
-    message :: Text
-  }
-  deriving (Show, Eq)
-
--- | A network request failed. 'url' is the request target.
-data HttpErrorInfo = HttpErrorInfo
+-- | A network or archive failure, keyed by the URL it concerns.
+data UrlErrorInfo = UrlErrorInfo
   { url :: Text,
     message :: Text
   }
   deriving (Show, Eq)
 
--- | An error that is fully described by the offending URL (unsupported scheme, unsupported host).
+-- | A failure fully described by the offending URL (unsupported scheme, unsupported host).
 newtype UrlInfo = UrlInfo
   { url :: Text
   }
   deriving (Show, Eq)
 
--- | An error keyed by the dependency name it concerns.
+-- | A failure keyed by the dependency name it concerns.
 newtype DependencyInfo = DependencyInfo
   { dependency :: Text
   }
   deriving (Show, Eq)
 
--- | An error about a package name (invalid identifier, or reserved by the compiler).
+-- | A failure about a package name (invalid identifier, or reserved by the compiler).
 newtype PackageNameInfo = PackageNameInfo
   { name :: Text
   }
@@ -200,14 +184,6 @@ data MissingConfigInfo = MissingConfigInfo
   }
   deriving (Show, Eq)
 
--- | One dependency name resolved to two distinct package roots.
-data AmbiguousDependencyInfo = AmbiguousDependencyInfo
-  { dependency :: Text,
-    firstRoot :: FilePath,
-    secondRoot :: FilePath
-  }
-  deriving (Show, Eq)
-
 -- | A fetched tarball's content hash disagreed with the pin recorded for it.
 data ShaMismatchInfo = ShaMismatchInfo
   { dependency :: Text,
@@ -229,12 +205,23 @@ data NotCachedInfo = NotCachedInfo
   }
   deriving (Show, Eq)
 
--- | A downloaded tarball could not be extracted. 'url' is where it came from.
-data TarballErrorInfo = TarballErrorInfo
-  { url :: Text,
-    message :: Text
-  }
-  deriving (Show, Eq)
+-- ===========================================================================
+-- IO helpers
+-- ===========================================================================
+
+-- | Read a UTF-8 text file, turning an IO failure into a 'ProjectError' via the caller's wrapper.
+-- The single home of the "read a project file, or fail with a 'FileErrorInfo'" pattern shared by
+-- the config, lockfile, and snapshot loaders.
+readFileOrError :: (FileErrorInfo -> ProjectError) -> FilePath -> IO (Either ProjectError Text)
+readFileOrError toError path = do
+  result <- try (TextIO.readFile path)
+  pure $ case result of
+    Left ioException -> Left (toError FileErrorInfo {path = path, message = formatException (ioException :: IOException)})
+    Right text -> Right text
+
+-- | A human-readable one-line rendering of an exception, for an error message.
+formatException :: (Exception e) => e -> Text
+formatException = Text.pack . displayException
 
 -- ===========================================================================
 -- Rendering
@@ -245,8 +232,8 @@ renderProjectError :: ProjectError -> Text
 renderProjectError projectError = case projectError of
   -- Config (katari.toml) --------------------------------------------------------------------------
   ConfigIOError info -> "Cannot read katari.toml: " <> renderFileError info
-  ConfigParseError info -> "Invalid katari.toml: " <> renderParseError info
-  ConfigValidationError info -> "Invalid katari.toml: " <> renderValidationError info
+  ConfigParseError info -> "Invalid katari.toml: " <> renderFileError info
+  ConfigValidationError info -> "Invalid katari.toml: " <> renderFileError info
   -- Discovery -------------------------------------------------------------------------------------
   DuplicateModule info ->
     "Module "
@@ -257,40 +244,26 @@ renderProjectError projectError = case projectError of
       <> Text.pack info.secondPath
   -- Lockfile (katari.lock) ------------------------------------------------------------------------
   LockfileIOError info -> "Cannot read katari.lock: " <> renderFileError info
-  LockfileParseError info -> "Invalid katari.lock: " <> renderParseError info
-  LockfileValidationError info -> "Invalid katari.lock: " <> renderValidationError info
+  LockfileParseError info -> "Invalid katari.lock: " <> renderFileError info
+  LockfileValidationError info -> "Invalid katari.lock: " <> renderFileError info
   -- Snapshot (registry package set) ---------------------------------------------------------------
   SnapshotIOError info -> "Cannot read registry snapshot: " <> renderFileError info
-  SnapshotHttpError info -> "Cannot download registry snapshot: " <> renderHttpError info
-  SnapshotParseError info -> "Invalid registry snapshot: " <> renderParseError info
-  SnapshotValidationError info -> "Invalid registry snapshot: " <> renderValidationError info
+  SnapshotHttpError info -> "Cannot download registry snapshot: " <> renderUrlError info
+  SnapshotParseError info -> "Invalid registry snapshot: " <> renderFileError info
+  SnapshotValidationError info -> "Invalid registry snapshot: " <> renderFileError info
   SnapshotUnsupportedUrl info ->
     "Unsupported registry URL scheme (only file:// and https:// are allowed): " <> info.url
   -- Fetch (git tarball) ---------------------------------------------------------------------------
-  FetchHttpError info -> "Cannot download dependency: " <> renderHttpError info
-  FetchTarballError info ->
-    "Cannot extract dependency tarball from " <> info.url <> ": " <> info.message
+  FetchHttpError info -> "Cannot download dependency: " <> renderUrlError info
+  FetchTarballError info -> "Cannot extract dependency tarball: " <> renderUrlError info
   FetchInvalidHost info ->
     "Unsupported dependency host (only GitHub archive URLs are supported): " <> info.url
   -- Resolve (dependency graph) --------------------------------------------------------------------
-  ResolveCycle info ->
-    "Dependency cycle: " <> Text.intercalate " -> " info.cycle
+  ResolveCycle info -> "Dependency cycle: " <> Text.intercalate " -> " info.cycle
   ResolveMissingConfig info ->
-    "Path dependency "
-      <> info.dependency
-      <> " has no katari.toml at "
-      <> Text.pack info.path
-  ResolveAmbiguousDependency info ->
-    "Dependency "
-      <> info.dependency
-      <> " resolves to two different packages: "
-      <> Text.pack info.firstRoot
-      <> " and "
-      <> Text.pack info.secondRoot
+    "Path dependency " <> info.dependency <> " has no katari.toml at " <> Text.pack info.path
   ResolveInvalidPackageName info ->
-    "Package name "
-      <> info.name
-      <> " is not a valid Katari identifier ([A-Za-z_][A-Za-z0-9_]*)"
+    "Package name " <> info.name <> " is not a valid Katari identifier ([A-Za-z_][A-Za-z0-9_]*)"
   ResolveReservedPackageName info ->
     "Package name " <> info.name <> " is reserved by the compiler (the primitive/stdlib namespace)"
   ResolveModuleCollision info ->
@@ -309,14 +282,9 @@ renderProjectError projectError = case projectError of
       <> info.package
       <> " namespace"
   ResolveDependencyNameMismatch info ->
-    "Dependency declared as "
-      <> info.declaredKey
-      <> " but its [package].name is "
-      <> info.actualName
+    "Dependency declared as " <> info.declaredKey <> " but its [package].name is " <> info.actualName
   ResolveUnresolvedDependency info ->
-    "Dependency "
-      <> info.dependency
-      <> " has no override and no registry snapshot pin"
+    "Dependency " <> info.dependency <> " has no override and no registry snapshot pin"
   ResolveLockfileOutOfDate info ->
     "Dependency "
       <> info.dependency
@@ -335,25 +303,8 @@ renderProjectError projectError = case projectError of
       <> "\n  actual   "
       <> info.actual
 
--- | @path@, optionally suffixed with @:line:column@ when a 'Position' is known.
-renderLocation :: FilePath -> Maybe Position -> Text
-renderLocation path maybePosition = case maybePosition of
-  Nothing -> Text.pack path
-  Just position ->
-    Text.pack path
-      <> ":"
-      <> Text.pack (show position.line)
-      <> ":"
-      <> Text.pack (show position.column)
-
 renderFileError :: FileErrorInfo -> Text
 renderFileError info = Text.pack info.path <> ": " <> info.message
 
-renderParseError :: ParseErrorInfo -> Text
-renderParseError info = renderLocation info.path info.position <> ": " <> info.message
-
-renderValidationError :: ValidationErrorInfo -> Text
-renderValidationError info = renderLocation info.path info.position <> ": " <> info.message
-
-renderHttpError :: HttpErrorInfo -> Text
-renderHttpError info = info.url <> ": " <> info.message
+renderUrlError :: UrlErrorInfo -> Text
+renderUrlError info = info.url <> ": " <> info.message

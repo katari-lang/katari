@@ -5,9 +5,14 @@
 -- the tarball to a temp file, compute its SHA-256, and extract it to
 -- @\<cache>/packages/\<name>-\<sha256>/@.
 --
+-- The cache is content-addressed by the tarball's sha. When the caller already knows that sha — a
+-- registry-snapshot pin, or a prior lockfile entry whose @(url, rev)@ still matches — it passes it
+-- as the cache hint and an existing directory short-circuits the whole network round-trip. Without a
+-- hint (a fresh git override, whose content hash is unknown until downloaded) the tarball is
+-- downloaded and only the /extraction/ is skipped when its content already sits in the cache.
+--
 -- GitHub wraps the tree in an outer @REPO-\<short>@ directory; that wrapper is unwrapped so the
--- cache layout is always @\<name>-\<sha256>/{katari.toml, src/, ...}@. If that directory already
--- exists the network round-trip is skipped — the SHA already identifies a unique source tree.
+-- cache layout is always @\<name>-\<sha256>/{katari.toml, src/, ...}@.
 module Katari.Project.Fetch
   ( GitRef (..),
     fetchGitTarball,
@@ -27,10 +32,10 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Katari.Project.Cache (CachePaths, packageDir)
 import Katari.Project.Error
-  ( HttpErrorInfo (..),
-    ProjectError (..),
-    TarballErrorInfo (..),
+  ( ProjectError (..),
+    UrlErrorInfo (..),
     UrlInfo (..),
+    formatException,
   )
 import Network.HTTP.Client (Manager, httpLbs, parseRequest, responseBody, responseStatus)
 import Network.HTTP.Types.Status (statusCode)
@@ -45,44 +50,73 @@ import System.FilePath ((</>))
 
 -- | The git information the caller supplied. 'url' is the canonical repo URL (e.g.
 -- @https://github.com/user/repo@); 'rev' must be a full 40-char commit SHA for reproducibility.
--- Same field vocabulary as 'Katari.Project.Config.GitOverride'.
 data GitRef = GitRef
   { url :: Text,
     rev :: Text
   }
   deriving (Show, Eq)
 
+-- | Only GitHub archive URLs are supported in v0.1.
+githubPrefix, archiveInfix, tarballSuffix, stagingSuffix :: Text
+githubPrefix = "https://github.com/"
+archiveInfix = "/archive/"
+tarballSuffix = ".tar.gz"
+stagingSuffix = ".unpack"
+
 -- | Resolve a git dep into a local extracted source tree. Returns the absolute path of the extracted
--- directory AND the hex SHA-256 of the downloaded tarball (recorded in the lockfile).
-fetchGitTarball :: Manager -> CachePaths -> Text -> GitRef -> IO (Either ProjectError (FilePath, Text))
-fetchGitTarball manager cache name gitReference
-  | not ("https://github.com/" `Text.isPrefixOf` gitReference.url) =
+-- directory AND the hex SHA-256 of the downloaded tarball (recorded in the lockfile). @maybeCacheSha@
+-- is the expected content hash, when known, used to skip the download on a cache hit.
+fetchGitTarball :: Manager -> CachePaths -> Text -> GitRef -> Maybe Text -> IO (Either ProjectError (FilePath, Text))
+fetchGitTarball manager cache name gitReference maybeCacheSha
+  | not (githubPrefix `Text.isPrefixOf` gitReference.url) =
       pure (Left (FetchInvalidHost UrlInfo {url = gitReference.url}))
   | otherwise = do
+      hit <- cacheHit
+      case hit of
+        Just result -> pure (Right result)
+        Nothing -> downloadAndExtract
+  where
+    archiveUrl = Text.dropWhileEnd (== '/') gitReference.url <> archiveInfix <> gitReference.rev <> tarballSuffix
+
+    -- A known sha names a unique source tree, so an existing directory needs no network at all.
+    cacheHit :: IO (Maybe (FilePath, Text))
+    cacheHit = case maybeCacheSha of
+      Nothing -> pure Nothing
+      Just sha -> do
+        let directory = packageDir cache name sha
+        exists <- doesDirectoryExist directory
+        pure (if exists then Just (directory, sha) else Nothing)
+
+    downloadAndExtract :: IO (Either ProjectError (FilePath, Text))
+    downloadAndExtract = do
       downloadResult <- try $ do
         request <- parseRequest (Text.unpack archiveUrl)
         httpLbs request manager
       case downloadResult of
         Left exception ->
-          pure (Left (FetchHttpError HttpErrorInfo {url = archiveUrl, message = Text.pack (show (exception :: SomeException))}))
-        Right response ->
-          let status = statusCode (responseStatus response)
-           in if status /= 200
-                then pure (Left (FetchHttpError HttpErrorInfo {url = archiveUrl, message = "HTTP status " <> Text.pack (show status)}))
+          pure (Left (FetchHttpError UrlErrorInfo {url = archiveUrl, message = formatException (exception :: SomeException)}))
+        Right response
+          | statusCode (responseStatus response) /= 200 ->
+              pure
+                ( Left
+                    ( FetchHttpError
+                        UrlErrorInfo
+                          { url = archiveUrl,
+                            message = "HTTP status " <> Text.pack (show (statusCode (responseStatus response)))
+                          }
+                    )
+                )
+          | otherwise -> do
+              let body = responseBody response
+                  sha = sha256Hex body
+                  destination = packageDir cache name sha
+              -- The downloaded content may already be extracted (a hint-less fetch of cached content).
+              alreadyExtracted <- doesDirectoryExist destination
+              if alreadyExtracted
+                then pure (Right (destination, sha))
                 else do
-                  let body = responseBody response
-                      sha = sha256Hex body
-                      destination = packageDir cache name sha
-                  -- The SHA names a unique source tree, so an existing directory needs no re-extraction.
-                  alreadyCached <- doesDirectoryExist destination
-                  if alreadyCached
-                    then pure (Right (destination, sha))
-                    else do
-                      extractResult <- extractTarball archiveUrl body destination
-                      pure (fmap (const (destination, sha)) extractResult)
-  where
-    -- GitHub serves a repository tree as @\<repo>/archive/\<ref>.tar.gz@.
-    archiveUrl = Text.dropWhileEnd (== '/') gitReference.url <> "/archive/" <> gitReference.rev <> ".tar.gz"
+                  extractResult <- extractTarball archiveUrl body destination
+                  pure (fmap (const (destination, sha)) extractResult)
 
 -- | Decompress and unpack a GitHub archive into @destination@. GitHub wraps the tree in a single
 -- @REPO-\<ref>/@ directory; that wrapper is unwrapped by extracting into a sibling staging directory
@@ -105,13 +139,13 @@ extractTarball archiveUrl body destination = do
       -- Best-effort cleanup so a half-extracted staging directory does not poison a retry.
       leftover <- doesDirectoryExist staging
       when leftover (removeDirectoryRecursive staging)
-      pure (Left (FetchTarballError TarballErrorInfo {url = archiveUrl, message = Text.pack (show (exception :: SomeException))}))
+      pure (Left (FetchTarballError UrlErrorInfo {url = archiveUrl, message = formatException (exception :: SomeException)}))
     Right () -> pure (Right ())
   where
-    staging = destination <> ".unpack"
+    staging = destination <> Text.unpack stagingSuffix
 
 -- | Hex SHA-256 of a lazy byte string, matching the encoding used for module hashes
--- ('Katari.Project.Upload.hashModule').
+-- ("Katari.Project.Upload".@hashModule@).
 sha256Hex :: ByteStringLazy.ByteString -> Text
 sha256Hex lazyBytes =
   let digest = hashlazy lazyBytes :: Digest SHA256
