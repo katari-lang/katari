@@ -21,6 +21,7 @@ import Network.HTTP.Client (Manager)
 
 -- | The git information the caller supplied. 'url' is the canonical repo URL (e.g.
 -- @https://github.com/user/repo@); 'rev' must be a full 40-char commit SHA for reproducibility.
+-- Same field vocabulary as 'Katari.Project.Config.GitOverride'.
 data GitRef = GitRef
   { url :: Text,
     rev :: Text

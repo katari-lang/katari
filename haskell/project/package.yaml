@@ -10,6 +10,8 @@ dependencies:
   - text
   - bytestring
   - containers
+  # Canonical JSON serialisation of IRModule for the per-module upload hash (Katari.Project.Upload).
+  - aeson
   - mtl
   - transformers
   - filepath
@@ -53,6 +55,7 @@ library:
     - Katari.Project.Snapshot
     - Katari.Project.Lockfile
     - Katari.Project.Resolve
+    - Katari.Project.Upload
 
 tests:
   katari-project-test:

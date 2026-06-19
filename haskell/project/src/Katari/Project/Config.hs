@@ -25,11 +25,14 @@
 -- #
 -- # [overrides.upstream]
 -- # git = "https://..."
--- # ref = "abc1234567890abcdef1234567890abcdef12345"
+-- # rev = "abc1234567890abcdef1234567890abcdef12345"
 -- @
 --
--- Auth is intentionally NOT a TOML field — @katari.toml@ is commonly committed to VCS and the auth
--- value is a secret. CLI commands read @KATARI_API_KEY@ from the environment instead.
+-- Secrets are intentionally NOT TOML fields — @katari.toml@ is commonly committed to VCS. The CLI
+-- reads @KATARI_API_KEY@ straight from the environment. v0.1 deliberately omits @${VAR}@ text
+-- interpolation of the file: substituting into the raw byte stream before parsing is injection-prone
+-- (a value with a quote or newline rewrites the document), and with auth out of the file there is no
+-- remaining use for it. If a real need appears, interpolate post-decode over string values only.
 --
 -- Parsing uses @toml-reader@: the dynamic-key @[overrides.\<name>]@ tables decode straight into a
 -- 'Map', so there is no nested-table workaround. Cross-field rules (path XOR git; every override
@@ -41,9 +44,10 @@ module Katari.Project.Config
     RuntimeSection (..),
     DependenciesSection (..),
     OverrideSource (..),
+    PathOverride (..),
+    GitOverride (..),
     loadKatariToml,
     parseKatariToml,
-    interpolateEnv,
     isValidPackageName,
   )
 where
@@ -100,34 +104,44 @@ data DependenciesSection = DependenciesSection
   }
   deriving (Show, Eq)
 
--- | The local replacement / external source for one dependency named in 'packages'.
+-- | The local replacement / external source for one dependency named in 'packages'. Each variant
+-- carries its own record rather than inlining fields, so record and sum syntax do not mix.
 data OverrideSource
-  = -- | @path = "..."@ — relative or absolute filesystem path.
-    OverridePath FilePath
-  | -- | @git = "..." ref = "..."@ — full-SHA git ref.
-    OverrideGit
-      { url :: Text,
-        rev :: Text
-      }
+  = OverridePath PathOverride
+  | OverrideGit GitOverride
+  deriving (Show, Eq)
+
+-- | @path = "..."@ — relative or absolute filesystem path.
+newtype PathOverride = PathOverride
+  { path :: FilePath
+  }
+  deriving (Show, Eq)
+
+-- | @git = "..." rev = "..."@ — a git repo plus the ref to fetch. The vocabulary ('url', 'rev') is
+-- shared with 'Katari.Project.Fetch.GitRef', 'Katari.Project.Snapshot.SnapshotPackage', and the
+-- lockfile, so the same two concepts never go by two names.
+data GitOverride = GitOverride
+  { url :: Text,
+    -- | The git ref to fetch; must be a full 40-char commit SHA for reproducibility.
+    rev :: Text
+  }
   deriving (Show, Eq)
 
 -- ===========================================================================
 -- Loaders
 -- ===========================================================================
 
--- | Read @katari.toml@ from disk, interpolate @${VAR}@ env refs, parse, and validate.
+-- | Read @katari.toml@ from disk, parse, and validate.
 loadKatariToml :: FilePath -> IO (Either ProjectError ProjectConfig)
 loadKatariToml = error "TODO: Katari.Project.Config.loadKatariToml"
 
--- | Parse the textual contents of @katari.toml@ (already env-interpolated).
+-- | Parse the textual contents of @katari.toml@.
 parseKatariToml :: FilePath -> Text -> Either ProjectError ProjectConfig
 parseKatariToml = error "TODO: Katari.Project.Config.parseKatariToml"
 
--- | Expand @${VAR}@ env references (@\\${VAR}@ stays literal; unset vars become the empty string).
-interpolateEnv :: Text -> IO Text
-interpolateEnv = error "TODO: Katari.Project.Config.interpolateEnv"
-
 -- | A package name is valid when it matches @[A-Za-z_][A-Za-z0-9_]*@ — i.e. it can appear as a
--- Katari identifier, since it is the literal text a consumer types after @import@.
+-- Katari identifier, since it is the literal text a consumer types after @import@. (Reserved-name
+-- collisions with the compiler's @primitive@ / stdlib namespace are a separate check at resolve
+-- time, in 'Katari.Project.Resolve'.)
 isValidPackageName :: Text -> Bool
 isValidPackageName = error "TODO: Katari.Project.Config.isValidPackageName"

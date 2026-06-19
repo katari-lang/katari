@@ -1,14 +1,14 @@
--- | Registry snapshot files — the curated @(repo, ref, sha256)@ pins for each package in a set.
+-- | Registry snapshot files — the curated @(url, rev, sha256)@ pins for each package in a set.
 --
 -- Two concerns:
 --
 --   1. Parse a snapshot TOML file (one @package-sets/\<version>.toml@):
 --
 --      @
---      # katari_compiler = "0.1.0"   # optional
+--      # compiler = "0.1.0"   # optional
 --      [packages.list_utils]
---      repo   = "https://github.com/katari-lang/list_utils"
---      ref    = "v0.2.1"
+--      url    = "https://github.com/katari-lang/list_utils"
+--      rev    = "v0.2.1"
 --      sha256 = "abc..."
 --      @
 --
@@ -17,7 +17,7 @@
 --      version is the filename" convention (@\<root>/package-sets/\<version>.toml@).
 --
 -- Downstream ('Katari.Project.Resolve') looks up each dep, fetches the tarball at the pinned
--- @(repo, ref)@ via 'Katari.Project.Fetch', and verifies the download against the @sha256@ pin.
+-- @(url, rev)@ via 'Katari.Project.Fetch', and verifies the download against the @sha256@ pin.
 module Katari.Project.Snapshot
   ( Snapshot (..),
     SnapshotPackage (..),
@@ -37,9 +37,11 @@ data Snapshot = Snapshot
   }
   deriving (Show, Eq)
 
+-- | One pinned package. Field vocabulary ('url', 'rev', 'sha') is shared with the git override and
+-- the lockfile; here 'rev' is the curated tag/ref and 'sha' the verified tarball content hash.
 data SnapshotPackage = SnapshotPackage
-  { repo :: Text,
-    ref :: Text,
+  { url :: Text,
+    rev :: Text,
     sha :: Text
   }
   deriving (Show, Eq)
