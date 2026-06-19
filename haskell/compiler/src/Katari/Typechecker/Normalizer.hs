@@ -20,7 +20,7 @@
 -- denormalized at the report site; see the @tell*@ helpers.
 module Katari.Typechecker.Normalizer where
 
-import Control.Monad (foldM, unless, when)
+import Control.Monad (foldM, unless, when, zipWithM)
 import Control.Monad.RWS.CPS (RWS)
 import Control.Monad.RWS.Class (MonadWriter (..), asks, local)
 import Data.Map (Map)
@@ -136,6 +136,22 @@ checkRequestArity qualifiedName arguments = do
   requestInfo <- requestInfoFor qualifiedName
   checkGenericArity qualifiedName requestInfo.genericParameters.parameterInformation arguments
 
+-- | Check each generic argument of a data / request application against its parameter's declared
+-- @extends@ upper bound, with the application's own arguments substituted into the bound first (a
+-- bound may reference sibling parameters, e.g. @[a, b extends a]@). Runs at the semantic ->
+-- normalized boundary, so /every/ written application — in an annotation as much as at an explicit
+-- application site — is checked the same way.
+checkApplicationBounds :: GenericParameters -> Map Text NormalizedKindedType -> Normalizer ()
+checkApplicationBounds parameters arguments =
+  mapM_ checkOne (Map.toList parameters.parameterInformation)
+  where
+    substitution = genericSubstitution parameters arguments
+    checkOne (name, info) = case (info.upperBound, Map.lookup name arguments) of
+      (Just bound, Just argument) -> do
+        instantiatedBound <- substituteGenericArgument substitution bound
+        subtype argument instantiatedBound
+      _ -> pure ()
+
 ------------------------------------------------------------------------------------------------
 -- Error reporting
 -- Error payloads are user-facing 'SemanticGenericArgument's, so normalized nodes are denormalized
@@ -208,12 +224,21 @@ layeredAsType layer = NormalizedType {baseType = NormalizedBaseTypeLayered layer
 -- Normalization (semantic -> normalized)
 ------------------------------------------------------------------------------------------------
 
+-- | Normalize a data / request constructor, which is always an object (the env-build builds it from a
+-- record of fields). A non-object is a compiler-invariant violation, not a user error.
+normalizeConstructor :: SemanticType -> Normalizer NormalizedObject
+normalizeConstructor semantic = do
+  normalized <- normalizeType semantic
+  case normalized.baseType of
+    NormalizedBaseTypeLayered layer | Just object <- layer.objectLayer -> pure object
+    _ -> panic "normalizeConstructor: a constructor did not normalize to an object"
+
 normalizeType :: SemanticType -> Normalizer NormalizedType
 normalizeType semanticBaseType = case semanticBaseType of
   SemanticTypeNever -> pure bottomType
   SemanticTypeUnknown -> pure $ public NormalizedBaseTypeUnknown
   SemanticTypeNull -> pure $ layered neverLayer {nullLayer = True}
-  SemanticTypeBoolean -> pure $ layered neverLayer {booleanLayer = True}
+  SemanticTypeBoolean -> pure $ layered neverLayer {booleanLayer = Set.fromList [False, True]}
   SemanticTypeFile -> pure $ layered neverLayer {fileLayer = True}
   SemanticTypeInteger -> pure $ layered neverLayer {numberLayer = NumberSlotInteger}
   SemanticTypeNumber -> pure $ layered neverLayer {numberLayer = NumberSlotNumber}
@@ -226,20 +251,19 @@ normalizeType semanticBaseType = case semanticBaseType of
     pure $ layered neverLayer {functionLayer = Just NormalizedFunction {argumentType = normalizedArgument, returnType = normalizedReturnType, effect = normalizedEffect}}
   SemanticTypeArray itemType -> do
     normalizedItemType <- normalizeType itemType
-    -- NOTE: an array is a homogeneous sequence with no fixed prefix; every position reads as the
-    -- element type or @null@ (an out-of-range read is null), so the tail is @item | null@. That null
-    -- in the tail is exactly what makes @array[T] </: [T]@ — an array cannot stand in for a
-    -- fixed-length tuple, because its positions may be absent (@item | null </: item@).
-    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = [], rest = orNull normalizedItemType}}
+    -- An array is a homogeneous sequence with no fixed prefix: every further position is the element
+    -- type (@rest = T@). @rest = T@ against a tuple's @rest = never@ is what keeps @array[T] </: [T]@
+    -- (an array cannot stand in for a fixed-length tuple) while allowing @[T] <: array[T]@.
+    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = [], rest = normalizedItemType}}
   SemanticTypeTuple itemTypes -> do
     normalizedItemTypes <- mapM normalizeType itemTypes
-    -- NOTE: a tuple is fixed-length: there are no positions past its prefix, so the tail is @null@
-    -- (a read past the end is null). This @null@ tail (against an array's @item | null@) is what lets
-    -- a tuple stand in for an array (@[T] <: array[T]@) while keeping the unsound reverse out.
-    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = normalizedItemTypes, rest = publicNull}}
+    -- A tuple is fixed-length: there are no positions past its prefix, so the tail is @never@.
+    pure $ layered neverLayer {sequenceLayer = Just NormalizedSequence {items = normalizedItemTypes, rest = bottomType}}
   SemanticTypeData qualifiedName genericArguments -> do
     checkDataArity qualifiedName genericArguments
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
+    dataInfo <- dataInfoFor qualifiedName
+    checkApplicationBounds dataInfo.genericParameters normalizedGenericArguments
     pure $ layered neverLayer {dataLayer = Map.singleton qualifiedName normalizedGenericArguments}
   SemanticTypeObject fields -> do
     normalizedFields <- mapM normalizeFieldInformation fields
@@ -249,11 +273,10 @@ normalizeType semanticBaseType = case semanticBaseType of
     pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = normalizedFields, rest = publicUnknown}}
   SemanticTypeRecord recordType -> do
     normalizedRecordType <- normalizeType recordType
-    -- NOTE: a @record[T]@ is a homogeneous object with no fixed fields; reading any key gives
-    -- @T | null@ (an absent key is null), mirroring @array[T]@. A fixed object literal keeps its open
-    -- @unknown@ tail (width subtyping ignores undeclared keys); only the homogeneous record carries
-    -- the typed @T | null@ tail.
-    pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = mempty, rest = orNull normalizedRecordType}}
+    -- A @record[T]@ is a homogeneous object with no fixed fields; every key's value is @T@ (@rest =
+    -- T@), mirroring @array[T]@. A fixed object literal keeps its open @unknown@ tail (width subtyping
+    -- ignores undeclared keys); reading an absent key unions @null@ in at the read site, not here.
+    pure $ layered neverLayer {objectLayer = Just NormalizedObject {fields = mempty, rest = normalizedRecordType}}
   SemanticTypeUnion semanticTypes -> foldM union bottomType =<< mapM normalizeType semanticTypes
   SemanticTypeAttribute baseType attribute -> do
     normalized <- normalizeType baseType
@@ -266,12 +289,6 @@ normalizeType semanticBaseType = case semanticBaseType of
     public base = NormalizedType {baseType = base, generics = Set.empty, attribute = bottomAttribute}
     layered = public . NormalizedBaseTypeLayered
     publicUnknown = public NormalizedBaseTypeUnknown
-    publicNull = layered neverLayer {nullLayer = True}
-    -- A homogeneous container reads as @element | null@ (an out-of-range / absent read is null). On
-    -- @unknown@ (already the top, which subsumes null) this is the identity.
-    orNull normalizedType = case normalizedType.baseType of
-      NormalizedBaseTypeUnknown -> normalizedType
-      NormalizedBaseTypeLayered layer -> normalizedType {baseType = NormalizedBaseTypeLayered layer {nullLayer = True}}
 
 normalizeAttribute :: SemanticAttribute -> Normalizer NormalizedAttribute
 normalizeAttribute attribute = case attribute of
@@ -287,6 +304,8 @@ normalizeEffect effect = case effect of
   SemanticEffectRequest qualifiedName genericArguments -> do
     checkRequestArity qualifiedName genericArguments
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
+    requestInfo <- requestInfoFor qualifiedName
+    checkApplicationBounds requestInfo.genericParameters normalizedGenericArguments
     pure $ NormalizedEffectRow $ EffectRow {request = Map.singleton qualifiedName normalizedGenericArguments, tails = mempty}
   SemanticEffectGeneric genericArgumentName ->
     pure $ NormalizedEffectRow $ EffectRow {request = mempty, tails = Map.singleton genericArgumentName mempty}
@@ -298,6 +317,8 @@ normalizeEffect effect = case effect of
           ( \(qualifiedName, genericArguments) -> do
               checkRequestArity qualifiedName genericArguments
               normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
+              requestInfo <- requestInfoFor qualifiedName
+              checkApplicationBounds requestInfo.genericParameters normalizedGenericArguments
               pure (qualifiedName, normalizedGenericArguments)
           )
           overwrites
@@ -547,7 +568,7 @@ combineSlot direction combinePresent left right = case (left, right, direction) 
 combineLayers :: LatticeDirection -> LayeredType -> LayeredType -> Normalizer LayeredType
 combineLayers direction left right = do
   combinedFunctionLayer <- combineSlot direction combineFunction left.functionLayer right.functionLayer
-  combinedSequenceLayer <- combineSlot direction (mergeSequence (combine direction)) left.sequenceLayer right.sequenceLayer
+  combinedSequenceLayer <- combineSlot direction (combineSequence direction) left.sequenceLayer right.sequenceLayer
   combinedObjectLayer <- combineSlot direction (mergeObject (combine direction) (combineFlag direction)) left.objectLayer right.objectLayer
   -- NOTE: nominal data types combine as a set (join keeps either side, meet keeps shared names —
   -- distinct nominal types meet to never); the generic arguments combine per declared variance.
@@ -558,7 +579,8 @@ combineLayers direction left right = do
         -- NOTE: 'NumberSlot' is the chain Absent < Integer < Number, so join = max and meet = min
         numberLayer = (case direction of Join -> max; Meet -> min) left.numberLayer right.numberLayer,
         stringLayer = combineFlag direction left.stringLayer right.stringLayer,
-        booleanLayer = combineFlag direction left.booleanLayer right.booleanLayer,
+        -- NOTE: booleans are a set ({} < {b} < {False, True}), so join = union and meet = intersection
+        booleanLayer = combineSet direction left.booleanLayer right.booleanLayer,
         fileLayer = combineFlag direction left.fileLayer right.fileLayer,
         functionLayer = combinedFunctionLayer,
         sequenceLayer = combinedSequenceLayer,
@@ -644,19 +666,29 @@ mergeObject combineType combineOptional leftObject rightObject = do
   mergedRest <- combineType leftObject.rest rightObject.rest
   pure $ NormalizedObject {fields = mergedFields, rest = mergedRest}
 
--- | Merge two sequences position-by-position; a position present on only one side is combined with
--- the other side's tail ('rest'), which is @null@ for a tuple.
--- Ex) [number, string] | [boolean] ~> [number | boolean, string | null]
---     [number, string] & [boolean] ~> [number & boolean, string & null]
-mergeSequence ::
-  (NormalizedType -> NormalizedType -> Normalizer NormalizedType) ->
-  NormalizedSequence ->
-  NormalizedSequence ->
-  Normalizer NormalizedSequence
-mergeSequence combineType leftSequence rightSequence = do
-  mergedItems <- mapM (uncurry combineType) (alignSequenceItems leftSequence rightSequence)
-  mergedRest <- combineType leftSequence.rest rightSequence.rest
-  pure $ NormalizedSequence {items = mergedItems, rest = mergedRest}
+-- | Combine two sequences, asymmetrically by direction because 'rest' means "further positions, if
+-- present, are this type".
+--
+-- The join keeps only the common prefix as fixed positions; a position present on only the longer
+-- side may be absent in the union, so it collapses into 'rest' (it /might/ be there):
+--   Ex) [number, string] | [boolean] ~> [number | boolean], rest: string
+--
+-- The meet keeps every position (a value in the meet satisfies both, so it has the longer length);
+-- a one-sided position meets the other side's 'rest':
+--   Ex) [number, string] & [boolean], rest: T ~> [number & boolean, string & T]
+combineSequence :: LatticeDirection -> NormalizedSequence -> NormalizedSequence -> Normalizer NormalizedSequence
+combineSequence direction leftSequence rightSequence = case direction of
+  Meet -> do
+    mergedItems <- mapM (uncurry intersect) (alignSequenceItems leftSequence rightSequence)
+    mergedRest <- intersect leftSequence.rest rightSequence.rest
+    pure NormalizedSequence {items = mergedItems, rest = mergedRest}
+  Join -> do
+    let commonLength = min (length leftSequence.items) (length rightSequence.items)
+        (commonLeft, excessLeft) = splitAt commonLength leftSequence.items
+        (commonRight, excessRight) = splitAt commonLength rightSequence.items
+    mergedItems <- zipWithM union commonLeft commonRight
+    mergedRest <- foldM union leftSequence.rest (rightSequence.rest : excessLeft <> excessRight)
+    pure NormalizedSequence {items = mergedItems, rest = mergedRest}
 
 ------------------------------------------------------------------------------------------------
 -- Subtyping helpers (the entry points are the 'subtype' methods of 'TypeLattice')
@@ -672,7 +704,7 @@ subtypeLayers leftLayer rightLayer = do
   -- NOTE: 'NumberSlot' is the chain Absent < Integer < Number, so the ordering is 'Ord'
   unless (leftLayer.numberLayer <= rightLayer.numberLayer) $ mismatch "Number layers are incompatible"
   unless (leftLayer.stringLayer <= rightLayer.stringLayer) $ mismatch "String layers are incompatible"
-  unless (leftLayer.booleanLayer <= rightLayer.booleanLayer) $ mismatch "Boolean layers are incompatible"
+  unless (leftLayer.booleanLayer `Set.isSubsetOf` rightLayer.booleanLayer) $ mismatch "Boolean layers are incompatible"
   unless (leftLayer.fileLayer <= rightLayer.fileLayer) $ mismatch "File layers are incompatible"
   subtypeSlot (mismatch "Function layers are incompatible") subtypeFunction leftLayer.functionLayer rightLayer.functionLayer
   subtypeSlot (mismatch "Sequence layers are incompatible") subtypeSequence leftLayer.sequenceLayer rightLayer.sequenceLayer
@@ -745,8 +777,8 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
               right
             tell constructorErrors
     constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do
-      constructorInstance <- substituteType (genericSubstitution dataInfo.genericParameters leftArguments) dataInfo.constructor
-      subtype constructorInstance right
+      constructorInstance <- substituteObject (genericSubstitution dataInfo.genericParameters leftArguments) dataInfo.constructor
+      subtype (objectAsType constructorInstance) right
 
 -- | The generic-id substitution that instantiates a quantified body (a data constructor, a request,
 -- a value scheme) with arguments supplied by parameter /name/: each declared parameter's id mapped to
@@ -896,7 +928,7 @@ substituteType substitution normalizedType = do
     substituteLayered layered = do
       functionLayer <- traverse substituteFunction layered.functionLayer
       sequenceLayer <- traverse substituteSequence layered.sequenceLayer
-      objectLayer <- traverse substituteObject layered.objectLayer
+      objectLayer <- traverse (substituteObject substitution) layered.objectLayer
       dataLayer <- traverse (traverse (substituteGenericArgument substitution)) layered.dataLayer
       pure layered {functionLayer = functionLayer, sequenceLayer = sequenceLayer, objectLayer = objectLayer, dataLayer = dataLayer}
     substituteFunction function =
@@ -908,10 +940,20 @@ substituteType substitution normalizedType = do
       items <- mapM (substituteType substitution) normalizedSequence.items
       rest <- substituteType substitution normalizedSequence.rest
       pure NormalizedSequence {items = items, rest = rest}
-    substituteObject normalizedObject = do
-      fields <- mapM (\field -> (\substituted -> field {normalizedType = substituted}) <$> substituteType substitution field.normalizedType) normalizedObject.fields
-      rest <- substituteType substitution normalizedObject.rest
-      pure NormalizedObject {fields = fields, rest = rest}
+
+-- | Substitute generic ids throughout an object's fields and rest. Top-level (not local to
+-- 'substituteType') so a data constructor — stored as a 'NormalizedObject' — can be instantiated
+-- without round-tripping through a wrapped 'NormalizedType'.
+substituteObject :: Map GenericId NormalizedKindedType -> NormalizedObject -> Normalizer NormalizedObject
+substituteObject substitution normalizedObject = do
+  fields <- mapM (\field -> (\substituted -> field {normalizedType = substituted}) <$> substituteType substitution field.normalizedType) normalizedObject.fields
+  rest <- substituteType substitution normalizedObject.rest
+  pure NormalizedObject {fields = fields, rest = rest}
+
+-- | Wrap an object as a plain (public, generic-free) layered type — for a data constructor stored as
+-- a 'NormalizedObject' that a subtype check or an agent type needs as a 'NormalizedType'.
+objectAsType :: NormalizedObject -> NormalizedType
+objectAsType object = layeredAsType neverLayer {objectLayer = Just object}
 
 -- | As 'substituteType', for effects (effect-kind generic ids and the request arguments). A tail
 -- @(E, lacks)@ whose @E@ is substituted is replaced by its replacement restricted to lack those
@@ -981,19 +1023,6 @@ denormalizeBaseType baseType generics = case baseType of
       [single] -> single
       many -> SemanticTypeUnion many
 
--- | The element type a homogeneous @array[T]@ / @record[T]@ displays. Their normalized tail is
--- @T | null@ (every position / key read is out-of-range-nullable), so the surface form drops the
--- implicit @null@. When the tail is exactly @null@ the element type genuinely is @null@, so it is
--- kept — an @array[null]@ must not render as @array[never]@.
-displayElementType :: NormalizedType -> NormalizedType
-displayElementType rest = case rest.baseType of
-  NormalizedBaseTypeUnknown -> rest
-  NormalizedBaseTypeLayered layer ->
-    let stripped = rest {baseType = NormalizedBaseTypeLayered layer {nullLayer = False}}
-     in if stripped.baseType == NormalizedBaseTypeLayered neverLayer && Set.null stripped.generics
-          then rest
-          else stripped
-
 -- | One semantic type per active layer (in a fixed order); the caller unions them.
 denormalizeLayers :: LayeredType -> Normalizer (List SemanticType)
 denormalizeLayers layeredType = do
@@ -1003,7 +1032,9 @@ denormalizeLayers layeredType = do
         NumberSlotInteger -> [SemanticTypeInteger]
         NumberSlotNumber -> [SemanticTypeNumber]
       stringPart = [SemanticTypeString | layeredType.stringLayer]
-      booleanPart = [SemanticTypeBoolean | layeredType.booleanLayer]
+      -- A boolean singleton (@{True}@ / @{False}@) has no surface form, so any non-empty set renders
+      -- as @boolean@ (lossy, display-only).
+      booleanPart = [SemanticTypeBoolean | not (Set.null layeredType.booleanLayer)]
       filePart = [SemanticTypeFile | layeredType.fileLayer]
   functionPart <- case layeredType.functionLayer of
     Nothing -> pure []
@@ -1017,12 +1048,11 @@ denormalizeLayers layeredType = do
     Just normalizedSequence ->
       if null normalizedSequence.items
         then do
-          -- A homogeneous array's tail is @T | null@; the surface form is @array[T]@, so the implicit
-          -- out-of-range null is dropped for display ('displayElementType').
-          semanticItem <- denormalize (displayElementType normalizedSequence.rest)
+          -- A homogeneous array has no fixed prefix; its element type is the tail directly.
+          semanticItem <- denormalize normalizedSequence.rest
           pure [SemanticTypeArray semanticItem]
         else do
-          -- A tuple's @null@ tail is implicit (a fixed-length sequence), so only the prefix is shown.
+          -- A tuple's @never@ tail is implicit (a fixed-length sequence), so only the prefix is shown.
           semanticItems <- mapM denormalize normalizedSequence.items
           pure [SemanticTypeTuple semanticItems]
   objectPart <- case layeredType.objectLayer of
@@ -1030,7 +1060,7 @@ denormalizeLayers layeredType = do
     Just normalizedObject ->
       if Map.null normalizedObject.fields
         then do
-          semanticRecord <- denormalize (displayElementType normalizedObject.rest)
+          semanticRecord <- denormalize normalizedObject.rest
           pure [SemanticTypeRecord semanticRecord]
         else do
           semanticFields <- mapM denormalizeFieldInformation normalizedObject.fields

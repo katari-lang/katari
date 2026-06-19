@@ -327,13 +327,14 @@ environment =
               { parameterNames = ["T"],
                 parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, upperBound = Nothing}
               },
-          constructor = objectOf [("x", genericOf genericT)]
+          constructor = constructorObjectOf [("x", genericOf genericT)]
         }
     requestInfoOf qualifiedName =
       RequestInformation
         { name = qualifiedName,
           genericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty},
-          request = (bottomType, bottomType)
+          parameterType = bottomType,
+          returnType = bottomType
         }
 
 -- | A type-kind generic registered in 'environment' (in scope) with the upper bound @integer@.
@@ -388,6 +389,14 @@ invOf argument = layerType neverLayer {dataLayer = Map.singleton invName (Map.si
 
 objectOf :: List (Text, NormalizedType) -> NormalizedType
 objectOf fieldList = objectWith fieldList unknownType
+
+-- | A constructor object (a 'NormalizedObject', as 'DataInformation.constructor' now stores).
+constructorObjectOf :: List (Text, NormalizedType) -> NormalizedObject
+constructorObjectOf fieldList =
+  NormalizedObject
+    { fields = Map.fromList [(fieldName, NormalizedFieldInformation {normalizedType = fieldType, optional = False}) | (fieldName, fieldType) <- fieldList],
+      rest = unknownType
+    }
 
 objectWith :: List (Text, NormalizedType) -> NormalizedType -> NormalizedType
 objectWith fieldList restType =

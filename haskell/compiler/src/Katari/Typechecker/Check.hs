@@ -39,14 +39,14 @@ import Katari.Panic (panic)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
-    ForContext (..),
     HandleContext (..),
     JumpContexts (..),
     currentWorld,
     emitEffect,
     emitForBreakType,
     emitForNextType,
-    pushForContext,
+    emitReturnType,
+    enterForBody,
     pushHandleContext,
     runElaborator,
     runNormalizer,
@@ -55,12 +55,13 @@ import Katari.Typechecker.Context
     withGeneric,
     withLocal,
     withParameters,
+    withReturnInference,
     withReturnTarget,
     withWorld,
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Normalizer (boundedType, denormalize, denormalizeEffect, denormalizeGenericArgument, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, substituteGenericArgument, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (boundedType, denormalize, denormalizeEffect, denormalizeGenericArgument, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -103,11 +104,12 @@ checkExpression expression expected = do
 -- Blocks
 ------------------------------------------------------------------------------------------------
 
--- | A block's type is its return expression's type, or @null@ if absent. The typed block carries
--- the typed statements and the typed return expression.
+-- | A block's type is its trailing expression's type, or @null@ if absent — unless the block makes a
+-- global exit ('statementExits'), in which case its fall-through is unreachable and its type is
+-- @never@.
 synthBlock :: Block Identified -> Checker (Block Typed, NormalizedType)
 synthBlock block = do
-  ((typedReturn, returnType), typedStatements) <-
+  ((typedReturn, trailingType), typedStatements) <-
     walkStatements block.statements $ case block.returnExpression of
       Just expression -> do
         (typedExpr, nt) <- synthExpression expression
@@ -119,16 +121,21 @@ synthBlock block = do
           returnExpression = typedReturn,
           sourceSpan = block.sourceSpan
         },
-      returnType
+      if blockExits block then bottomType else trailingType
     )
 
 checkBlock :: Block Identified -> NormalizedType -> Checker (Block Typed)
 checkBlock block expected = do
+  let diverges = blockExits block
   (typedReturn, typedStatements) <-
     walkStatements block.statements $ case block.returnExpression of
-      Just expression -> Just <$> checkExpression expression expected
+      Just expression
+        -- A diverging block's tail is unreachable: synthesize it (for the typed AST) but do not
+        -- constrain it against the expectation.
+        | diverges -> Just . fst <$> synthExpression expression
+        | otherwise -> Just <$> checkExpression expression expected
       Nothing -> do
-        runNormalizer block.sourceSpan (subtype nullType expected)
+        unless diverges $ runNormalizer block.sourceSpan (subtype nullType expected)
         pure Nothing
   pure
     Block
@@ -136,6 +143,22 @@ checkBlock block expected = do
         returnExpression = typedReturn,
         sourceSpan = block.sourceSpan
       }
+
+-- | Whether a block makes a global exit, so control never reaches its tail. True once any statement
+-- transfers control out of the block: a @return@ / @break@ / @next@ jump, or a @use@ (which delegates
+-- the rest of the block to its continuation). Such a block's value type is @never@.
+blockExits :: Block phase -> Bool
+blockExits block = any statementExits block.statements
+
+statementExits :: Statement phase -> Bool
+statementExits = \case
+  StatementReturn _ -> True
+  StatementBreak _ -> True
+  StatementNext _ -> True
+  StatementForBreak _ -> True
+  StatementForNext _ -> True
+  StatementUse _ -> True
+  _ -> False
 
 ------------------------------------------------------------------------------------------------
 -- Statements
@@ -336,6 +359,16 @@ synthLiteralValue = \case
   LiteralValueBoolean _ -> booleanType
   LiteralValueNull -> nullType
 
+-- | The type a literal /pattern/ contributes to match exhaustiveness. @null@ and the two booleans are
+-- the only finitely-enumerable values, so they cover themselves (@{ true => …; false => … }@ is
+-- exhaustive); an integer / number / string literal has no singleton type, so it covers nothing —
+-- only a wildcard, variable, or type-filter pattern can cover those.
+literalPatternCover :: LiteralValue -> NormalizedType
+literalPatternCover = \case
+  LiteralValueBoolean value -> booleanSingleton value
+  LiteralValueNull -> nullType
+  _ -> bottomType
+
 synthVariableExpression :: VariableExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthVariableExpression expression = do
   scheme <- lookupScheme expression.variableReference.resolution
@@ -378,7 +411,7 @@ synthTupleExpression expression = do
       nt =
         layeredOf
           neverLayer
-            { sequenceLayer = Just NormalizedSequence {items = elementTypes, rest = nullType}
+            { sequenceLayer = Just NormalizedSequence {items = elementTypes, rest = bottomType}
             }
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -508,11 +541,12 @@ fieldOfLayer sourceSpan fieldName layer = do
   nominal <- traverse (dataFieldType sourceSpan fieldName) (Map.toList layer.dataLayer)
   foldM (\accumulated fieldType -> runNormalizer sourceSpan (union accumulated fieldType)) bottomType (structural <> nominal)
 
--- | A field's type in an object (its declared field, or the object's @rest@ for an undeclared key).
+-- | A field's type in an object: a declared field reads as its type; an undeclared key reads its
+-- @rest@ with @null@ unioned in, since it may be absent (the @rest@ stores "present then this type").
 objectFieldType :: NormalizedObject -> Text -> NormalizedType
 objectFieldType object fieldName = case Map.lookup fieldName object.fields of
   Just field -> field.normalizedType
-  Nothing -> object.rest
+  Nothing -> orNull object.rest
 
 -- | A field's type in a nominal data value: the data type's constructor object instantiated with the
 -- value's generic arguments, then read like any object.
@@ -521,12 +555,8 @@ dataFieldType sourceSpan fieldName (dataName, arguments) = do
   dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
   case Map.lookup dataName dataEnvironment of
     Just info -> do
-      constructorObject <- runNormalizer sourceSpan (substituteType (genericSubstitution info.genericParameters arguments) info.constructor)
-      -- A data constructor is normalized from a 'SemanticTypeObject', so it is always an object layer;
-      -- anything else is a compiler-invariant violation, not a user error.
-      case constructorObject.baseType of
-        NormalizedBaseTypeLayered constructorLayer | Just object <- constructorLayer.objectLayer -> pure (objectFieldType object fieldName)
-        _ -> panic ("dataFieldType: data constructor is not an object: " <> renderQualifiedName dataName)
+      constructorObject <- runNormalizer sourceSpan (substituteObject (genericSubstitution info.genericParameters arguments) info.constructor)
+      pure (objectFieldType constructorObject fieldName)
     Nothing -> panic ("dataFieldType: data type not registered: " <> renderQualifiedName dataName)
 
 synthTypeApplicationExpression ::
@@ -610,7 +640,8 @@ synthTemplateExpression expression = do
       TemplateElementString stringElement ->
         pure (TemplateElementString stringElement)
       TemplateElementExpression element -> do
-        (typedValue, _) <- synthExpression element.value
+        -- An interpolation must be a string; there is no implicit stringification.
+        typedValue <- checkExpression element.value stringType
         pure
           ( TemplateElementExpression
               TemplateExpressionElement
@@ -703,7 +734,7 @@ extractFunction sourceSpan normalizedType = do
       not layer.nullLayer
         && layer.numberLayer == NumberSlotAbsent
         && not layer.stringLayer
-        && not layer.booleanLayer
+        && Set.null layer.booleanLayer
         && not layer.fileLayer
         && layerSequenceEmpty layer
         && layerObjectEmpty layer
@@ -908,7 +939,12 @@ checkReturnStatement :: ReturnStatement Identified -> Checker (ReturnStatement T
 checkReturnStatement returnStmt = do
   contexts <- asks (.jumps)
   typedValue <- case contexts.returnTarget of
-    Just target -> checkExpression returnStmt.value target
+    Just target -> do
+      (typed, valueType) <- synthExpression returnStmt.value
+      runNormalizer (sourceSpanOf returnStmt.value) (subtype valueType target)
+      -- The value joins the agent's inferred return type (used when the return type is unannotated).
+      emitReturnType returnStmt.sourceSpan valueType
+      pure typed
     Nothing -> do
       reportMisplacedJump returnStmt.sourceSpan "return" "an agent body"
       (typed, _) <- synthExpression returnStmt.value
@@ -918,18 +954,19 @@ checkReturnStatement returnStmt = do
 checkForNextStatement :: ForNextStatement Identified -> Checker (ForNextStatement Typed)
 checkForNextStatement forNextStmt = do
   contexts <- asks (.jumps)
-  (typedValue, typedModifiers) <- case contexts.forContexts of
-    (_ : _) -> do
-      -- The element type is inferred: each `next` value joins the for-body accumulator.
-      (typedValue, valueType) <- synthExpression forNextStmt.value
-      emitForNextType forNextStmt.sourceSpan valueType
-      typedModifiers <- checkModifiers forNextStmt.modifiers
-      pure (typedValue, typedModifiers)
-    [] -> do
-      reportMisplacedJump forNextStmt.sourceSpan "next" "a `for` body"
-      (typed, _) <- synthExpression forNextStmt.value
-      typedModifiers <- traverse retagModifier forNextStmt.modifiers
-      pure (typed, typedModifiers)
+  (typedValue, typedModifiers) <-
+    if contexts.inForBody
+      then do
+        -- The element type is inferred: each `next` value joins the for-body accumulator.
+        (typedValue, valueType) <- synthExpression forNextStmt.value
+        emitForNextType forNextStmt.sourceSpan valueType
+        typedModifiers <- checkModifiers forNextStmt.modifiers
+        pure (typedValue, typedModifiers)
+      else do
+        reportMisplacedJump forNextStmt.sourceSpan "next" "a `for` body"
+        (typed, _) <- synthExpression forNextStmt.value
+        typedModifiers <- traverse retagModifier forNextStmt.modifiers
+        pure (typed, typedModifiers)
   pure
     ForNextStatement
       { value = typedValue,
@@ -940,17 +977,18 @@ checkForNextStatement forNextStmt = do
 checkForBreakStatement :: ForBreakStatement Identified -> Checker (ForBreakStatement Typed)
 checkForBreakStatement forBreakStmt = do
   contexts <- asks (.jumps)
-  typedValue <- case contexts.forContexts of
-    (_ : _) -> do
-      -- A `break` short-circuits the for with its value; that value joins the break accumulator, so
-      -- the for's result type includes it. It is not a `next` element.
-      (typed, valueType) <- synthExpression forBreakStmt.value
-      emitForBreakType forBreakStmt.sourceSpan valueType
-      pure typed
-    [] -> do
-      reportMisplacedJump forBreakStmt.sourceSpan "break" "a `for` body"
-      (typed, _) <- synthExpression forBreakStmt.value
-      pure typed
+  typedValue <-
+    if contexts.inForBody
+      then do
+        -- A `break` short-circuits the for with its value; that value joins the break accumulator, so
+        -- the for's result type includes it. It is not a `next` element.
+        (typed, valueType) <- synthExpression forBreakStmt.value
+        emitForBreakType forBreakStmt.sourceSpan valueType
+        pure typed
+      else do
+        reportMisplacedJump forBreakStmt.sourceSpan "break" "a `for` body"
+        (typed, _) <- synthExpression forBreakStmt.value
+        pure typed
   pure ForBreakStatement {value = typedValue, sourceSpan = forBreakStmt.sourceSpan}
 
 -- | Check @with x = e@ modifiers against the state variable's type. The identifier resolves every
@@ -1053,6 +1091,7 @@ checkPattern pattern scrutinee = case pattern of
       Just annotation -> do
         annotatedType <- elaborateAndNormalizeType annotation
         pure (annotatedType, annotatedType, Just (retagSyntacticTypeExpression annotation))
+    checkParameterDefault bindingType variablePattern.defaultValue
     semantic <- denormalizeAt variablePattern.sourceSpan bindingType
     pure
       ( PatternVariable
@@ -1068,8 +1107,9 @@ checkPattern pattern scrutinee = case pattern of
         bindingsFor maybeLocal bindingType
       )
   PatternLiteral literalPattern -> do
-    let nt = synthLiteralValue literalPattern.value
-    semantic <- denormalizeAt literalPattern.sourceSpan nt
+    -- The node's type is the literal's full type; its match /cover/ is narrower — only @null@ and the
+    -- two booleans are finitely enumerable, so an integer / string / number literal covers nothing.
+    semantic <- denormalizeAt literalPattern.sourceSpan (synthLiteralValue literalPattern.value)
     pure
       ( PatternLiteral
           LiteralPattern
@@ -1077,7 +1117,7 @@ checkPattern pattern scrutinee = case pattern of
               sourceSpan = literalPattern.sourceSpan,
               typeOf = semantic
             },
-        nt,
+        literalPatternCover literalPattern.value,
         []
       )
   PatternTypeFilter typeFilterPattern -> do
@@ -1110,7 +1150,7 @@ checkPattern pattern scrutinee = case pattern of
         cover =
           layeredOf
             neverLayer
-              { sequenceLayer = Just NormalizedSequence {items = elementCovers, rest = nullType}
+              { sequenceLayer = Just NormalizedSequence {items = elementCovers, rest = bottomType}
               }
     semantic <- denormalizeAt tuplePattern.sourceSpan cover
     pure
@@ -1160,7 +1200,7 @@ checkPattern pattern scrutinee = case pattern of
               dataInfo.genericParameters
               constructorPattern.genericArguments
           instantiatedConstructor <-
-            runNormalizer constructorPattern.sourceSpan (substituteType substitution dataInfo.constructor)
+            runNormalizer constructorPattern.sourceSpan (objectAsType <$> substituteObject substitution dataInfo.constructor)
           fieldResults <- traverse (checkFieldPattern instantiatedConstructor) constructorPattern.fields
           let typedFields = [tp | (_, _, _, tp) <- fieldResults]
               allBindings = concatMap (\(_, _, b, _) -> b) fieldResults
@@ -1283,20 +1323,18 @@ synthForExpression expression = do
     withVarBindingsTyped expression.varBindings $ do
       (inferredNextType, inferredBreakType, typedBody) <-
         withForInference $
-          pushForContext ForContext $
+          enterForBody $
             withParameters patternBindings $
               fst <$> synthBlock expression.body
-      let arrayType = arrayOf (orNullType inferredNextType)
+      -- A `for` maps to @array[nextType]@; a position the body did not emit is absent, not null, which
+      -- @array@'s "present then this type" tail already captures (no null is unioned in).
+      let arrayType = arrayOf inferredNextType
       -- The for's normal result is its array (or the then clause's value); a `break` short-circuits
       -- with its own value, so the result type also includes every break value.
       (typedThen, normalType) <- case expression.thenClause of
         Nothing -> pure (Nothing, arrayType)
         Just thenClause -> do
-          (typedBinder, thenBindings) <- case thenClause.binder of
-            Just binder -> do
-              (typedPat, _, bs) <- checkPattern binder arrayType
-              pure (Just typedPat, bs)
-            Nothing -> pure (Nothing, [])
+          (typedBinder, thenBindings) <- checkThenBinder arrayType thenClause.binder
           (typedThenBody, thenBodyType) <- withParameters thenBindings (synthBlock thenClause.body)
           let typedThen =
                 ThenClause
@@ -1327,14 +1365,16 @@ synthForExpression expression = do
       finalType
     )
 
+-- | The element type produced by iterating a sequence: the union of every fixed position and the
+-- @rest@. No @null@ is added — iteration visits the elements that exist, never an out-of-range slot —
+-- so @array[T]@ iterates as @T@ and the tuple @[A, B]@ as @A | B@.
 extractIterableElementType :: SourceSpan -> NormalizedType -> Checker NormalizedType
 extractIterableElementType sourceSpan source = do
   raised <- raiseToBounds sourceSpan source
   case raised.baseType of
-    NormalizedBaseTypeLayered layer | Just normalizedSequence <- layer.sequenceLayer ->
-      case normalizedSequence.items of
-        [] -> pure normalizedSequence.rest
-        (firstItem : restItems) -> foldM combineUnion firstItem restItems
+    NormalizedBaseTypeLayered layer
+      | Just normalizedSequence <- layer.sequenceLayer ->
+          foldM combineUnion bottomType (normalizedSequence.items <> [normalizedSequence.rest])
     _ -> do
       reportExpectedShape sourceSpan "a sequence (array or tuple)" source
       pure bottomType
@@ -1385,16 +1425,6 @@ arrayOf elementType =
   layeredOf
     neverLayer
       { sequenceLayer = Just NormalizedSequence {items = [], rest = elementType}
-      }
-
-orNullType :: NormalizedType -> NormalizedType
-orNullType normalizedType = case normalizedType.baseType of
-  NormalizedBaseTypeUnknown -> normalizedType
-  NormalizedBaseTypeLayered layer ->
-    NormalizedType
-      { baseType = NormalizedBaseTypeLayered layer {nullLayer = True},
-        generics = normalizedType.generics,
-        attribute = normalizedType.attribute
       }
 
 ------------------------------------------------------------------------------------------------
@@ -1454,8 +1484,8 @@ synthHandlerExpression expression = do
   effectSemantic <- runNormalizer expression.sourceSpan (denormalizeEffect residualEffect)
   let handlerInstantiation =
         Map.fromList
-          [ ("R", SemanticGenericArgumentType resultSemantic),
-            ("E", SemanticGenericArgumentEffect effectSemantic)
+          [ (handlerResultParameterName, SemanticGenericArgumentType resultSemantic),
+            (handlerEffectParameterName, SemanticGenericArgumentEffect effectSemantic)
           ]
   semantic <- denormalizeAt expression.sourceSpan handlerType
   pure
@@ -1476,6 +1506,18 @@ synthHandlerExpression expression = do
 -- | Walk a handler's @then@ finalizer: its binder matches the handler result @R@, its body type must
 -- be @<: R@, and its inferred effect is bounded by the residual effect @E@. Walked inside the handler's
 -- @var@ state scope (the finalizer reads the accumulated state).
+-- | Check a @then@ clause's optional binder against the type it matches — the @for@ result array, or
+-- a handler's result @R@ — yielding the typed binder and its bindings.
+checkThenBinder ::
+  NormalizedType ->
+  Maybe (Pattern Identified) ->
+  Checker (Maybe (Pattern Typed), List (LocalVariableId, Scheme))
+checkThenBinder matchedType = \case
+  Nothing -> pure (Nothing, [])
+  Just binder -> do
+    (typedPattern, _, bindings) <- checkPattern binder matchedType
+    pure (Just typedPattern, bindings)
+
 walkHandlerThenClause ::
   NormalizedType ->
   NormalizedEffect ->
@@ -1484,11 +1526,7 @@ walkHandlerThenClause ::
 walkHandlerThenClause resultType residualEffect = \case
   Nothing -> pure Nothing
   Just thenClause -> do
-    (typedBinder, thenBindings) <- case thenClause.binder of
-      Just binder -> do
-        (typedPat, _, bs) <- checkPattern binder resultType
-        pure (Just typedPat, bs)
-      Nothing -> pure (Nothing, [])
+    (typedBinder, thenBindings) <- checkThenBinder resultType thenClause.binder
     (thenEffect, typedBody) <-
       withEffectInference $
         withParameters thenBindings $ do
@@ -1532,9 +1570,8 @@ walkRequestHandler resultType handler = do
       (renderQualifiedName requestName)
       requestInfo.genericParameters
       handler.genericArguments
-  let (rawParam, rawReturn) = requestInfo.request
-  instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution rawParam)
-  instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution rawReturn)
+  instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.parameterType)
+  instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.returnType)
   (paramObject, paramBindings, typedParams) <- buildParameterScopeTyped handler.parameters
   runNormalizer handler.sourceSpan (subtype instantiatedParam paramObject)
   let context =
@@ -1738,8 +1775,9 @@ assembleTypedAgentDeclaration declaration typedParameters typedBody =
 synthAgent :: AgentDeclaration Identified -> Checker (AgentDeclaration Typed, Scheme)
 synthAgent declaration = do
   preparation <- prepareAgent declaration
-  (inferredEffect, (typedBody, bodyReturnType)) <-
-    withEffectInference
+  (collectedReturns, (inferredEffect, (typedBody, tailType))) <-
+    withReturnInference
+      $ withEffectInference
       $ withGenerics preparation.genericParameters
         . withWorld preparation.declaredAttribute
         . withParameters preparation.parameterBindings
@@ -1748,6 +1786,11 @@ synthAgent declaration = do
           typedB <- withReturnTarget expected (checkBlock declaration.body expected)
           pure (typedB, expected)
         Nothing -> withReturnTarget topType (synthBlock declaration.body)
+  -- An unannotated return type is the union of the body's tail and its @return@ values; an annotated
+  -- one is the annotation (each @return@ was already checked against it).
+  returnType <- case preparation.annotatedReturnType of
+    Just expected -> pure expected
+    Nothing -> runNormalizer declaration.sourceSpan (union tailType collectedReturns)
   finalEffect <- case preparation.annotatedEffect of
     Just declared -> do
       runNormalizer declaration.sourceSpan (subtype inferredEffect declared)
@@ -1757,7 +1800,7 @@ synthAgent declaration = do
     ( assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody,
       Scheme
         { genericParameters = preparation.genericParameters,
-          valueType = assembleAgent preparation.outerAttribute preparation.parameterObject bodyReturnType finalEffect
+          valueType = assembleAgent preparation.outerAttribute preparation.parameterObject returnType finalEffect
         }
     )
 
@@ -1793,8 +1836,11 @@ seedAgentType declaration preparation = do
 checkAgentBody :: AgentDeclaration Identified -> AgentPreparation -> Checker (AgentDeclaration Typed)
 checkAgentBody declaration preparation = do
   let (returnType, effect) = seedReturnEffect preparation
-  (inferredEffect, typedBody) <-
-    withEffectInference
+  -- The return type is annotated (recursive groups require it), so the collected returns are
+  -- discarded; 'withReturnInference' only scopes the accumulator so it does not leak across members.
+  (_, (inferredEffect, typedBody)) <-
+    withReturnInference
+      $ withEffectInference
       $ withGenerics preparation.genericParameters
         . withWorld preparation.declaredAttribute
         . withParameters preparation.parameterBindings
@@ -1821,7 +1867,14 @@ signatureValueScheme ::
 signatureValueScheme genericDeclarations parameters returnType effectExpression = do
   genericParameters <- boundedGenericParameters genericDeclarations
   withGenerics genericParameters $ do
-    fields <- traverse (\signature -> (,) signature.name <$> elaborateAndNormalizeType signature.parameterType) parameters
+    fields <-
+      traverse
+        ( \signature -> do
+            parameterType <- elaborateAndNormalizeType signature.parameterType
+            checkParameterDefault parameterType signature.defaultValue
+            pure (signature.name, parameterType)
+        )
+        parameters
     returnNormalized <- elaborateAndNormalizeType returnType
     effectNormalized <- maybe (pure bottomEffect) elaborateAndNormalizeEffect effectExpression
     pure
@@ -1832,30 +1885,49 @@ signatureValueScheme genericDeclarations parameters returnType effectExpression 
 
 -- | The value scheme of a data constructor: @agent(constructorObject) -> Data[generics]@ (pure),
 -- read from the already-normalized 'DataInformation'. The constructor's parameters are a required
--- field object; the return is the nominal data type applied to the data type's own generics.
-dataValueScheme :: SourceSpan -> QualifiedName -> Checker Scheme
-dataValueScheme sourceSpan qualifiedName = do
+-- field object; the return is the nominal data type applied to the data type's own generics. Each
+-- parameter's default is checked against its (already-normalized) field type.
+dataValueScheme :: SourceSpan -> QualifiedName -> List (ParameterSignature Identified) -> Checker Scheme
+dataValueScheme sourceSpan qualifiedName parameters = do
   dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
   case Map.lookup qualifiedName dataEnvironment of
     Just info -> do
+      let constructorType = objectAsType info.constructor
+      checkConstructorDefaults info.genericParameters constructorType parameters
       arguments <- ownGenericArguments sourceSpan info.genericParameters
       let returnType = layeredOf neverLayer {dataLayer = Map.singleton qualifiedName arguments}
-      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute info.constructor returnType bottomEffect}
+      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute constructorType returnType bottomEffect}
     Nothing -> panic ("dataValueScheme: data type not registered: " <> renderQualifiedName qualifiedName)
 
 -- | The value scheme of a request performed as a value: @agent(param) -> return with {request}@,
 -- read from the already-normalized 'RequestInformation'. The effect is the request applied to its
 -- own generics.
-requestValueScheme :: SourceSpan -> QualifiedName -> Checker Scheme
-requestValueScheme sourceSpan qualifiedName = do
+requestValueScheme :: SourceSpan -> QualifiedName -> List (ParameterSignature Identified) -> Checker Scheme
+requestValueScheme sourceSpan qualifiedName parameters = do
   requestEnvironment <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
   case Map.lookup qualifiedName requestEnvironment of
     Just info -> do
+      checkConstructorDefaults info.genericParameters info.parameterType parameters
       arguments <- ownGenericArguments sourceSpan info.genericParameters
-      let (parameterType, returnType) = info.request
-          effect = NormalizedEffectRow EffectRow {request = Map.singleton qualifiedName arguments, tails = mempty}
-      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute parameterType returnType effect}
+      let effect = NormalizedEffectRow EffectRow {request = Map.singleton qualifiedName arguments, tails = mempty}
+      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute info.parameterType info.returnType effect}
     Nothing -> panic ("requestValueScheme: request not registered: " <> renderQualifiedName qualifiedName)
+
+-- | Check each constructor / request parameter's default against its field type in the
+-- already-normalized parameter object, with the declaration's own generics in scope (a field type may
+-- mention them). Field types are read back from the normalized object so the default is checked
+-- against exactly the type the constructor exposes.
+checkConstructorDefaults :: GenericParameters -> NormalizedType -> List (ParameterSignature Identified) -> Checker ()
+checkConstructorDefaults genericParameters parameterObject parameters =
+  withGenerics genericParameters (mapM_ checkOne parameters)
+  where
+    checkOne signature = case (signature.defaultValue, fieldTypeOf signature.name) of
+      (Just parameterDefault, Just fieldType) ->
+        runNormalizer parameterDefault.sourceSpan (subtype (synthLiteralValue parameterDefault.value) fieldType)
+      _ -> pure ()
+    fieldTypeOf name = case parameterObject.baseType of
+      NormalizedBaseTypeLayered layer | Just object <- layer.objectLayer -> Just (objectFieldType object name)
+      _ -> Nothing
 
 -- | A nominal declaration applied to its own generic parameters as arguments (keyed by parameter
 -- name): the @[a, b]@ of a data type's @Data[a, b]@ return or a request's @{req[a, b]}@ effect.
@@ -1980,6 +2052,13 @@ elaborateAndNormalizeEffect expression = do
   semantic <- runElaborator (elaborateAsEffect expression)
   runNormalizer (sourceSpanOf expression) (normalizeEffect semantic)
 
+-- | Check a parameter / pattern default (always a literal) against the parameter's declared type.
+checkParameterDefault :: NormalizedType -> Maybe ParameterDefault -> Checker ()
+checkParameterDefault declaredType = \case
+  Nothing -> pure ()
+  Just parameterDefault ->
+    runNormalizer parameterDefault.sourceSpan (subtype (synthLiteralValue parameterDefault.value) declaredType)
+
 privateAttribute :: NormalizedAttribute
 privateAttribute = NormalizedAttribute {private = True, generic = mempty}
 
@@ -2070,7 +2149,12 @@ nullType :: NormalizedType
 nullType = layeredOf neverLayer {nullLayer = True}
 
 booleanType :: NormalizedType
-booleanType = layeredOf neverLayer {booleanLayer = True}
+booleanType = layeredOf neverLayer {booleanLayer = Set.fromList [False, True]}
+
+-- | A boolean singleton (@true@ / @false@): the type a boolean literal /pattern/ covers, so a
+-- @{ true => …; false => … }@ match is exhaustive while @{ 1 => … }@ on an integer is not.
+booleanSingleton :: Bool -> NormalizedType
+booleanSingleton value = layeredOf neverLayer {booleanLayer = Set.singleton value}
 
 stringType :: NormalizedType
 stringType = layeredOf neverLayer {stringLayer = True}

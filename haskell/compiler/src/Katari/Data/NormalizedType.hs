@@ -36,7 +36,11 @@ data LayeredType = LayeredType
   { nullLayer :: Bool,
     numberLayer :: NumberSlot,
     stringLayer :: Bool,
-    booleanLayer :: Bool,
+    -- | The boolean values this type admits. @boolean@ is @{False, True}@; a boolean literal is a
+    -- singleton, so @true@ / @false@ are distinguishable (their join is @boolean@). This is the only
+    -- finitely-enumerable primitive, which is why a @true@ / @false@ pattern can contribute to match
+    -- exhaustiveness while an @integer@ literal cannot.
+    booleanLayer :: Set Bool,
     fileLayer :: Bool,
     functionLayer :: Maybe NormalizedFunction,
     -- tuple, array
@@ -60,20 +64,23 @@ data NormalizedFunction = NormalizedFunction
   }
   deriving (Eq, Ord, Show)
 
--- | A sequence: a fixed positional prefix ('items') plus the type of every further position
--- ('rest'). A read past the prefix yields 'rest', and an out-of-range read is null, so a fixed-length
--- tuple has @rest = null@ while a homogeneous @array[T]@ has @items = []@ and @rest = T | null@. The
--- null in the array tail is what keeps @array[T] </: [T]@ (an array cannot be a fixed-length tuple)
--- while allowing @[T] <: array[T]@.
+-- | A sequence: a fixed positional prefix ('items') plus the type of every /further/ position
+-- ('rest'). 'rest' reads as "if a position past the prefix exists it has this type; it may also be
+-- absent" — absence is not null. A fixed-length tuple has @rest = never@ (no further positions); a
+-- homogeneous @array[T]@ has @items = []@ and @rest = T@. The @never@ vs @T@ in the tail is what keeps
+-- @array[T] </: [T]@ (an array cannot stand in for a fixed-length tuple) while allowing @[T] <:
+-- array[T]@. Reading a position is the caller's concern: iteration yields @⋃items ∪ rest@ (no null),
+-- while an out-of-range index would union @null@ in.
 data NormalizedSequence = NormalizedSequence
   { items :: List NormalizedType,
     rest :: NormalizedType
   }
   deriving (Eq, Ord, Show)
 
--- | An object: named 'fields' plus the type of every other key ('rest'). A fixed object literal keeps
--- @rest = unknown@ (open — width subtyping ignores undeclared keys); a homogeneous @record[T]@ has
--- @fields = {}@ and @rest = T | null@ (an absent key reads as null).
+-- | An object: named 'fields' plus the type of every other key ('rest'), with the same "present then
+-- this type, possibly absent" reading as a sequence's 'rest'. A fixed object literal keeps @rest =
+-- unknown@ (open — width subtyping ignores undeclared keys); a homogeneous @record[T]@ has @fields =
+-- {}@ and @rest = T@. Reading an undeclared key unions @null@ in (it may be absent).
 data NormalizedObject = NormalizedObject
   { fields :: Map Text NormalizedFieldInformation,
     rest :: NormalizedType
@@ -124,7 +131,7 @@ neverLayer =
     { nullLayer = False,
       numberLayer = NumberSlotAbsent,
       stringLayer = False,
-      booleanLayer = False,
+      booleanLayer = Set.empty,
       fileLayer = False,
       functionLayer = Nothing,
       sequenceLayer = Nothing,
@@ -134,6 +141,11 @@ neverLayer =
 
 bottomType :: NormalizedType
 bottomType = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.empty, attribute = bottomAttribute}
+
+-- | A placeholder constructor object (no fields), for a 'DataInformation' built before its real
+-- constructor is known — the env-build's intermediate environment, which consults only arity.
+placeholderConstructor :: NormalizedObject
+placeholderConstructor = NormalizedObject {fields = mempty, rest = bottomType}
 
 bottomAttribute :: NormalizedAttribute
 bottomAttribute = NormalizedAttribute {private = False, generic = Set.empty}
@@ -149,3 +161,12 @@ topAttribute = NormalizedAttribute {private = True, generic = Set.empty}
 
 topEffect :: NormalizedEffect
 topEffect = NormalizedEffectAny
+
+-- | Union @null@ into a type (set its null layer). On @unknown@ (already the top, which subsumes
+-- null) this is the identity. Used where a read may be absent — an undeclared object key, a future
+-- out-of-range index — so the surface @null@ is added at the read site, not baked into a container's
+-- element type.
+orNull :: NormalizedType -> NormalizedType
+orNull normalizedType = case normalizedType.baseType of
+  NormalizedBaseTypeUnknown -> normalizedType
+  NormalizedBaseTypeLayered layer -> normalizedType {baseType = NormalizedBaseTypeLayered layer {nullLayer = True}}

@@ -8,7 +8,7 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.GenericKind (GenericKind)
 import Katari.Data.Id (GenericId)
-import Katari.Data.NormalizedType (NormalizedKindedType, NormalizedType)
+import Katari.Data.NormalizedType (NormalizedKindedType, NormalizedObject, NormalizedType)
 import Katari.Data.QualifiedName (QualifiedName)
 import Katari.Data.Variance (Variance)
 
@@ -30,9 +30,13 @@ data GenericParameterInformation = GenericParameterInformation
   }
   deriving (Eq, Show)
 
+-- | A declaration's generic parameters. 'parameterInformation' (name -> info) is the essential
+-- representation — generics are keyed by name everywhere downstream (the normalized types, the IR).
+-- 'parameterNames' is only the declaration order, needed to bind /positional/ application arguments
+-- (@foo[int, string]@) to names at the AST boundary; nothing else should depend on it.
 data GenericParameters = GenericParameters
-  { parameterNames :: List Text, -- Index ~> parameter name
-    parameterInformation :: Map Text GenericParameterInformation -- Name ~> parameter info
+  { parameterNames :: List Text,
+    parameterInformation :: Map Text GenericParameterInformation
   }
   deriving (Eq, Show)
 
@@ -57,17 +61,17 @@ monoScheme bodyType = Scheme {genericParameters = emptyGenericParameters, valueT
 data DataInformation = DataInformation
   { name :: QualifiedName,
     genericParameters :: GenericParameters,
-    -- | The shape of constructor
-    -- Ex)
-    -- data foo(x: number) ~> {x: number}
-    constructor :: NormalizedType
+    -- | The constructor's read shape — always an object (@data foo(x: number)@ ~> @{x: number}@), so
+    -- a field read needs no shape check.
+    constructor :: NormalizedObject
   }
   deriving (Eq, Show)
 
 data RequestInformation = RequestInformation
   { name :: QualifiedName,
     genericParameters :: GenericParameters,
-    request :: (NormalizedType, NormalizedType) -- (request parameter, request return type)
+    parameterType :: NormalizedType,
+    returnType :: NormalizedType
   }
   deriving (Eq, Show)
 

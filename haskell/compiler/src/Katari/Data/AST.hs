@@ -44,6 +44,15 @@ type family GenericInstantiation (phase :: Phase) :: Type where
   GenericInstantiation Identified = ()
   GenericInstantiation Typed = Map Text SemanticGenericArgument
 
+-- | The two built-in generic parameter names of a @handler[R, E]@: its result type and its residual
+-- effect. The checker keys a handler's 'instantiation' by these; lowering reads them back by the same
+-- names, so they are defined here once for both producer and consumer to share.
+handlerResultParameterName :: Text
+handlerResultParameterName = "R"
+
+handlerEffectParameterName :: Text
+handlerEffectParameterName = "E"
+
 data Module (phase :: Phase) = Module
   { declarations :: List (Declaration phase),
     sourceSpan :: SourceSpan

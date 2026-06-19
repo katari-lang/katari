@@ -50,6 +50,24 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects an explicit type argument that violates the bound (K3001)" $
     typeErrorCodes [("test", "primitive agent num[a extends number](value: a) -> a\nagent run() -> string { num[string](value = \"x\") }")] `shouldContain` ["K3001"]
 
+  it "accepts a bounded data type applied in an annotation when the argument satisfies the bound" $
+    typeErrorCodes [("test", "data box[a extends number](value: a)\nagent run(b: box[integer]) -> integer { b.value }")] `shouldBe` []
+
+  it "rejects a bounded data type applied in an annotation when the argument violates the bound (K3001)" $
+    typeErrorCodes [("test", "data box[a extends number](value: a)\nagent run(b: box[string]) -> integer { 0 }")] `shouldContain` ["K3001"]
+
+  it "accepts a string interpolation in a template" $
+    typeErrorCodes [("test", "agent greet(name: string) -> string { f\"hi ${name}\" }")] `shouldBe` []
+
+  it "rejects a non-string interpolation in a template (K3001)" $
+    typeErrorCodes [("test", "agent greet(count: integer) -> string { f\"n=${count}\" }")] `shouldContain` ["K3001"]
+
+  it "accepts a parameter default that matches its type" $
+    typeErrorCodes [("test", "agent inc(x: number ?= 1) -> number { x }")] `shouldBe` []
+
+  it "rejects a parameter default that violates its type (K3001)" $
+    typeErrorCodes [("test", "agent inc(x: number ?= \"a\") -> number { x }")] `shouldContain` ["K3001"]
+
   it "a for `then` clause may read a `var` state variable" $
     typeErrorCodes [("test", "agent run() -> integer { for (x in [1], var total = 0) { next x with total = total + x } then (r) { total } }")] `shouldBe` []
 

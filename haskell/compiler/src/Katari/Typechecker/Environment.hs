@@ -28,7 +28,7 @@ import Katari.Data.AST
 import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), SynonymEnvironment, SynonymInformation (..))
 import Katari.Data.Id (GenericId, TypeResolution (..))
 import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.NormalizedType (NormalizedKindedType, bottomAttribute, bottomType)
+import Katari.Data.NormalizedType (NormalizedKindedType, bottomAttribute, bottomType, placeholderConstructor)
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
 import Katari.Data.SourceSpan (SourceSpan)
@@ -36,7 +36,7 @@ import Katari.Data.Variance (Variance (..), composeVariance, joinVariance)
 import Katari.Diagnostics (Diagnostics, diagnosticAt)
 import Katari.Error (CompilerError (..))
 import Katari.Typechecker.Elaborate (Elaborate, ElaborateContext, SynonymSignature (..), elaborate, elaborateAsType, emptyContext, runElaborate, withOwnGenerics)
-import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, SubtypingContext (..), normalizeGenericArgument, normalizeType)
+import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, SubtypingContext (..), normalizeConstructor, normalizeGenericArgument, normalizeType)
 
 -- | The read-only type-level environment the checker consults across the whole program:
 --
@@ -394,55 +394,76 @@ runNormalize environment sourceSpan action =
    in (result, foldMap (diagnosticAt sourceSpan . CompilerErrorType) errors)
 
 -- | Normalize every elaborated shape into its 'TypeEnvironment' entry. The variance is already
--- inferred; the bounds are normalized here and stamped onto each parameter's 'upperBound'.
+-- inferred; the bounds are normalized and stamped first, then each declaration's shape is normalized
+-- with the bounded environment in force, so a bounded application written in a field / return type is
+-- checked the same way as one in an agent annotation ('checkApplicationBounds').
 normalizeAll :: ElaborateContext -> Map GenericId Variance -> ElaboratedShapes -> (TypeEnvironment, Diagnostics)
-normalizeAll elaborateContext variances shapes = (environment, dataDiagnostics <> requestDiagnostics <> synonymDiagnostics)
+normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics <> dataDiagnostics <> requestDiagnostics <> synonymDiagnostics)
   where
     -- Stamp variance onto every declaration's parameters once, up front.
     stampedData = [(item, applyVariance variances item.genericParameters, semantic) | (item, semantic) <- shapes.dataShapes]
     stampedRequests = [(item, applyVariance variances item.genericParameters, payload) | (item, payload) <- shapes.requestShapes]
     stampedSynonyms = [(item, applyVariance variances item.genericParameters, body) | (item, body) <- shapes.synonymShapes]
 
-    -- The normalizer reads only the parameter lists (for arity / variance), never the constructor, so
-    -- a placeholder constructor / request shape is fine while the declarations normalize.
-    normalizerEnvironment =
+    -- An environment over the given data / request parameters (placeholder constructor / request
+    -- shapes — the normalizer reads only the parameter lists for arity / variance / bounds).
+    environmentOver dataParameters requestParameters =
       SubtypingContext
-        { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = bottomType}) | (item, parameters, _) <- stampedData],
-          requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, request = (bottomType, bottomType)}) | (item, parameters, _) <- stampedRequests],
-          -- Normalization never resolves a generic's bound (a subtyping-time concern), so no in-scope
-          -- generics are needed to normalize the declarations themselves.
+        { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = placeholderConstructor}) | (item, parameters) <- dataParameters],
+          requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = bottomType, returnType = bottomType}) | (item, parameters) <- requestParameters],
           genericsInScope = mempty,
           world = bottomAttribute
         }
 
+    -- The preliminary environment (variance only) suffices to normalize the bound expressions.
+    preliminaryEnvironment =
+      environmentOver
+        [(item, parameters) | (item, parameters, _) <- stampedData]
+        [(item, parameters) | (item, parameters, _) <- stampedRequests]
+
     -- Normalize a declaration's collected @extends@ bounds and stamp each onto its parameters'
-    -- 'upperBound' (the parameters already carry their inferred variance); an unbounded or
-    -- failed-to-elaborate parameter keeps 'Nothing'.
+    -- 'upperBound'; an unbounded or failed-to-elaborate parameter keeps 'Nothing'.
     stampBoundsFor qualifiedName sourceSpan parameters =
       let semanticBounds = Map.mapMaybe id (Map.findWithDefault mempty qualifiedName shapes.boundShapes)
-          (normalizedBounds, diagnostics) = runNormalize normalizerEnvironment sourceSpan (traverse normalizeGenericArgument semanticBounds)
+          (normalizedBounds, diagnostics) = runNormalize preliminaryEnvironment sourceSpan (traverse normalizeGenericArgument semanticBounds)
        in (parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}, diagnostics)
 
+    boundedData = [(item, semantic, stampBoundsFor item.qualifiedName item.sourceSpan parameters) | (item, parameters, semantic) <- stampedData]
+    boundedRequests = [(item, payload, stampBoundsFor item.qualifiedName item.sourceSpan parameters) | (item, parameters, payload) <- stampedRequests]
+    boundedSynonyms = [(item, body, stampBoundsFor item.qualifiedName item.sourceSpan parameters) | (item, parameters, body) <- stampedSynonyms]
+    boundDiagnostics =
+      foldMap (\(_, _, (_, diagnostics)) -> diagnostics) boundedData
+        <> foldMap (\(_, _, (_, diagnostics)) -> diagnostics) boundedRequests
+        <> foldMap (\(_, _, (_, diagnostics)) -> diagnostics) boundedSynonyms
+
+    -- The environment carrying the stamped bounds: normalizing a declaration's shape now checks every
+    -- bounded application it writes. Each declaration normalizes with its own generics in scope (with
+    -- their bounds), so a self- or sibling-reference like @data Foo[T extends number](next: Bar[T])@
+    -- resolves @T@ to its bound rather than spuriously failing the check.
+    boundedEnvironment =
+      environmentOver
+        [(item, parameters) | (item, _, (parameters, _)) <- boundedData]
+        [(item, parameters) | (item, _, (parameters, _)) <- boundedRequests]
+    inScope parameters = boundedEnvironment {genericsInScope = Map.fromList [(info.genericId, info) | info <- Map.elems parameters.parameterInformation]}
+
     normalizeData item parameters semantic =
-      let (constructor, constructorDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType semantic)
-          (boundedParameters, boundDiagnostics) = stampBoundsFor item.qualifiedName item.sourceSpan parameters
-       in (DataInformation {name = item.qualifiedName, genericParameters = boundedParameters, constructor = constructor}, constructorDiagnostics <> boundDiagnostics)
+      let (constructor, diagnostics) = runNormalize (inScope parameters) item.sourceSpan (normalizeConstructor semantic)
+       in (DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = constructor}, diagnostics)
 
     normalizeRequest item parameters (parameterObject, returnSemantic) =
-      let (parameterType, parameterDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType parameterObject)
-          (returnType, returnDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeType returnSemantic)
-          (boundedParameters, boundDiagnostics) = stampBoundsFor item.qualifiedName item.sourceSpan parameters
-       in (RequestInformation {name = item.qualifiedName, genericParameters = boundedParameters, request = (parameterType, returnType)}, parameterDiagnostics <> returnDiagnostics <> boundDiagnostics)
+      let scopedEnvironment = inScope parameters
+          (parameterType, parameterDiagnostics) = runNormalize scopedEnvironment item.sourceSpan (normalizeType parameterObject)
+          (returnType, returnDiagnostics) = runNormalize scopedEnvironment item.sourceSpan (normalizeType returnSemantic)
+       in (RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = parameterType, returnType = returnType}, parameterDiagnostics <> returnDiagnostics)
 
     normalizeSynonym item parameters maybeSemantic =
       let semantic = fromMaybe (SemanticGenericArgumentType SemanticTypeNever) maybeSemantic
-          (definition, definitionDiagnostics) = runNormalize normalizerEnvironment item.sourceSpan (normalizeGenericArgument semantic)
-          (boundedParameters, boundDiagnostics) = stampBoundsFor item.qualifiedName item.sourceSpan parameters
-       in (SynonymInformation {name = item.qualifiedName, genericParameters = boundedParameters, definition = definition}, definitionDiagnostics <> boundDiagnostics)
+          (definition, diagnostics) = runNormalize (inScope parameters) item.sourceSpan (normalizeGenericArgument semantic)
+       in (SynonymInformation {name = item.qualifiedName, genericParameters = parameters, definition = definition}, diagnostics)
 
-    (dataInfos, dataDiagnostics) = unzipDiagnostics [normalizeData item parameters semantic | (item, parameters, semantic) <- stampedData]
-    (requestInfos, requestDiagnostics) = unzipDiagnostics [normalizeRequest item parameters payload | (item, parameters, payload) <- stampedRequests]
-    (synonymInfos, synonymDiagnostics) = unzipDiagnostics [normalizeSynonym item parameters body | (item, parameters, body) <- stampedSynonyms]
+    (dataInfos, dataDiagnostics) = unzipDiagnostics [normalizeData item parameters semantic | (item, semantic, (parameters, _)) <- boundedData]
+    (requestInfos, requestDiagnostics) = unzipDiagnostics [normalizeRequest item parameters payload | (item, payload, (parameters, _)) <- boundedRequests]
+    (synonymInfos, synonymDiagnostics) = unzipDiagnostics [normalizeSynonym item parameters body | (item, body, (parameters, _)) <- boundedSynonyms]
 
     environment =
       TypeEnvironment

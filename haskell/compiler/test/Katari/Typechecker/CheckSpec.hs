@@ -20,10 +20,9 @@ import Katari.Typechecker.Check
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
-    ForContext (..),
     HandleContext (..),
+    enterForBody,
     initialCheckerEnvironment,
-    pushForContext,
     pushHandleContext,
     runChecker,
     runNormalizer,
@@ -60,7 +59,7 @@ spec = do
        in result `shouldBe` integerType
 
   describe "synthExpressionType (tuple / record)" $ do
-    it "tuple of [int, string] synthesizes to a sequence with two items and null tail" $
+    it "tuple of [int, string] synthesizes to a sequence with two items and a never tail" $
       synthAt (tupleExpression [integerLiteral 1, stringLiteral "a"])
         `shouldBe` tupleNormalized [integerType, stringType]
     it "record literal becomes an object with required fields and an unknown tail" $
@@ -146,7 +145,7 @@ spec = do
           (result, diagnostics) = runAt scrutineeLocal mempty (synthExpressionType matchExpr)
        in (result, toList diagnostics) `shouldBe` (integerType, [])
 
-    it "covers an integer scrutinee with literal cases (intentionally permissive)" $
+    it "rejects an integer scrutinee covered only by literal cases (integers have no singleton type)" $
       let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme integerType)
           subject = variableExpression (LocalVariableId 0)
           matchExpr =
@@ -155,8 +154,30 @@ spec = do
               [ (literalPattern (LiteralValueInteger 1), exprBlock (stringLiteral "one")),
                 (literalPattern (LiteralValueInteger 2), exprBlock (stringLiteral "two"))
               ]
-          (result, diagnostics) = runAt scrutineeLocal mempty (synthExpressionType matchExpr)
-       in (result, toList diagnostics) `shouldBe` (stringType, [])
+          (_, diagnostics) = runAt scrutineeLocal mempty (synthExpressionType matchExpr)
+       in hasErrorCode "K3001" diagnostics `shouldBe` True
+
+    it "accepts a boolean scrutinee covered by both `true` and `false` literal cases" $
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme booleanType)
+          subject = variableExpression (LocalVariableId 0)
+          matchExpr =
+            matchExpression
+              subject
+              [ (literalPattern (LiteralValueBoolean True), exprBlock (integerLiteral 1)),
+                (literalPattern (LiteralValueBoolean False), exprBlock (integerLiteral 0))
+              ]
+          (_, diagnostics) = runAt scrutineeLocal mempty (synthExpressionType matchExpr)
+       in toList diagnostics `shouldBe` []
+
+    it "rejects a boolean scrutinee covered by only `true`" $
+      let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme booleanType)
+          subject = variableExpression (LocalVariableId 0)
+          matchExpr =
+            matchExpression
+              subject
+              [(literalPattern (LiteralValueBoolean True), exprBlock (integerLiteral 1))]
+          (_, diagnostics) = runAt scrutineeLocal mempty (synthExpressionType matchExpr)
+       in hasErrorCode "K3001" diagnostics `shouldBe` True
 
     it "narrows the binder's type inside a TypeFilter pattern" $
       let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme unknownType)
@@ -308,6 +329,30 @@ spec = do
               (bodyOf [] (Just (variableExpression (LocalVariableId 1))))
           (_, diagnostics) = runAt mempty mempty (synthAgentType declaration)
        in hasErrorCode "K3001" diagnostics `shouldBe` True
+
+    it "a body ending in `return` typechecks against the annotated return type (the tail is unreachable)" $
+      let declaration =
+            agentDeclarationWith
+              [paramBindingFor "x" (LocalVariableId 1) integerAnnotation]
+              (Just integerAnnotation)
+              Nothing
+              False
+              (bodyOf [returnStatementBuilder (variableExpression (LocalVariableId 1))] Nothing)
+          expected = pureAgentType (paramObject [("x", integerType)]) integerType
+          (result, diagnostics) = runAt mempty mempty (synthAgentType declaration)
+       in (result, toList diagnostics) `shouldBe` (expected, [])
+
+    it "infers the return type from a `return` when the body has no trailing expression" $
+      let declaration =
+            agentDeclarationWith
+              []
+              Nothing
+              Nothing
+              False
+              (bodyOf [returnStatementBuilder (integerLiteral 5)] Nothing)
+          expected = pureAgentType (paramObject []) integerType
+          (result, diagnostics) = runAt mempty mempty (synthAgentType declaration)
+       in (result, toList diagnostics) `shouldBe` (expected, [])
 
     it "a `private agent` declaration carries the private outer attribute" $
       let declaration =
@@ -540,6 +585,15 @@ spec = do
           (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
        in toList diagnostics `shouldBe` []
 
+    it "accepts a request body that ends in `break` (it diverges, so the tail is never, not null)" $
+      let handlerExpr =
+            handlerExpressionBuilder
+              [integerAnnotation, allEffectAnnotation]
+              [requestHandlerForFake (bodyOf [breakStatementBuilder (integerLiteral 7)] Nothing)]
+              Nothing
+          (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
+       in toList diagnostics `shouldBe` []
+
     it "rejects a request body whose effect exceeds the handler's residual effect E" $
       -- handler[integer, req] { request req() { secondRequestCallable(); 0 } }: the body performs a
       -- different request than E permits.
@@ -563,7 +617,18 @@ spec = do
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
   describe "synthExpressionType (for)" $ do
-    it "synthesizes array[T | null] from a body whose `next` emits T" $
+    it "iterating an array binds the element at T (no null injected)" $
+      let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (arrayOf integerType))
+          forExpr =
+            forExpressionBuilder
+              (variablePatternForLocal (LocalVariableId 1))
+              (variableExpression (LocalVariableId 0))
+              (Block {statements = [forNextStatementBuilder (variableExpression (LocalVariableId 1))], returnExpression = Nothing, sourceSpan = testSpan})
+              Nothing
+          (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
+       in (result, toList diagnostics) `shouldBe` (arrayOf integerType, [])
+
+    it "synthesizes array[T] from a body whose `next` emits T" $
       let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType]))
           forExpr =
             forExpressionBuilder
@@ -572,7 +637,7 @@ spec = do
               (Block {statements = [forNextStatementBuilder (variableExpression (LocalVariableId 1))], returnExpression = Nothing, sourceSpan = testSpan})
               Nothing
           (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
-          expected = arrayOfNullable integerType
+          expected = arrayOf integerType
        in (result, toList diagnostics) `shouldBe` (expected, [])
 
     it "unions multiple `next` value types across the body" $
@@ -617,8 +682,8 @@ spec = do
               )
               Nothing
           (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
-          -- array[integer | null] (from `next`) unioned with the break value's type.
-          expected = unionOf (arrayOfNullable integerType) stringType
+          -- array[integer] (from `next`) unioned with the break value's type.
+          expected = unionOf (arrayOf integerType) stringType
        in (result, toList diagnostics) `shouldBe` (expected, [])
 
     it "reports K3014 when the source is not a sequence" $
@@ -648,12 +713,12 @@ spec = do
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`next` inside a for body is accepted (the element type is inferred)" $
-      let action = pushForContext ForContext (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
+      let action = enterForBody (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
     it "`break` inside a for body is accepted (it short-circuits with its value)" $
-      let action = pushForContext ForContext (walkStatements [forBreakStatementBuilder (stringLiteral "x")] (pure ()))
+      let action = enterForBody (walkStatements [forBreakStatementBuilder (stringLiteral "x")] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
@@ -811,7 +876,7 @@ hasErrorCode code diagnostics =
 
 tupleNormalized :: List NormalizedType -> NormalizedType
 tupleNormalized items =
-  layeredOf neverLayer {sequenceLayer = Just NormalizedSequence {items = items, rest = nullType}}
+  layeredOf neverLayer {sequenceLayer = Just NormalizedSequence {items = items, rest = bottomType}}
 
 recordNormalized :: List (Text, NormalizedType) -> NormalizedType
 recordNormalized fieldList =
@@ -1075,7 +1140,8 @@ typeEnvironmentWithFakeRequest =
           RequestInformation
             { name = fakeRequestName,
               genericParameters = emptyGenerics,
-              request = (recordNormalized [], nullType)
+              parameterType = recordNormalized [],
+              returnType = nullType
             },
       synonymEnvironment = mempty,
       elaborateContext = emptyContext mempty (Map.singleton fakeRequestName emptyGenerics) mempty
@@ -1368,24 +1434,6 @@ handlerExpressionBuilder genericArgs requestHandlers maybeThen =
         typeOf = ()
       }
 
--- | The expected result shape of a basic for over the given element type: @array[T | null]@.
-arrayOfNullable :: NormalizedType -> NormalizedType
-arrayOfNullable elementType =
-  layeredOf
-    neverLayer
-      { sequenceLayer =
-          Just NormalizedSequence {items = [], rest = withNull elementType}
-      }
-  where
-    withNull normalizedType = case normalizedType.baseType of
-      NormalizedBaseTypeUnknown -> normalizedType
-      NormalizedBaseTypeLayered layer ->
-        NormalizedType
-          { baseType = NormalizedBaseTypeLayered layer {nullLayer = True},
-            generics = normalizedType.generics,
-            attribute = normalizedType.attribute
-          }
-
 -- | Pull the function-layer effect out of an agent type. 'bottomEffect' for non-agents.
 extractAgentEffect :: NormalizedType -> NormalizedEffect
 extractAgentEffect normalizedType = case normalizedType.baseType of
@@ -1404,7 +1452,7 @@ extractSequenceElement normalizedType = case normalizedType.baseType of
 carriesIntegerAndString :: NormalizedType -> Bool
 carriesIntegerAndString normalizedType = case normalizedType.baseType of
   NormalizedBaseTypeLayered layer ->
-    layer.numberLayer == NumberSlotInteger && layer.stringLayer && layer.nullLayer
+    layer.numberLayer == NumberSlotInteger && layer.stringLayer
   _ -> False
 
 -- | Wrap a normalized type in @of private@: keep its base and generics, raise its outer attribute

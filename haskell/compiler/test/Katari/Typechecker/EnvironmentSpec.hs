@@ -5,7 +5,7 @@ import Data.Map qualified as Map
 import Data.Text (Text)
 import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), SynonymInformation (..))
 import Katari.Data.ModuleName (ModuleName (..))
-import Katari.Data.NormalizedType (NormalizedKindedType, NormalizedType)
+import Katari.Data.NormalizedType (NormalizedKindedType, NormalizedObject, NormalizedType)
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..))
 import Katari.Data.Variance (Variance (..))
@@ -137,7 +137,7 @@ codesOf = map (\Located {value = compilerError} -> compilerErrorCode compilerErr
 dataInfoOf :: TypeEnvironment -> Text -> Maybe DataInformation
 dataInfoOf environment name = Map.lookup (qualifiedNameOf name) environment.dataEnvironment
 
-constructorOf :: TypeEnvironment -> Text -> Maybe NormalizedType
+constructorOf :: TypeEnvironment -> Text -> Maybe NormalizedObject
 constructorOf environment name = (.constructor) <$> dataInfoOf environment name
 
 dataParameterNames :: TypeEnvironment -> Text -> Maybe [Text]

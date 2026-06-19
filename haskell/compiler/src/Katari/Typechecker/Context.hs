@@ -55,16 +55,18 @@ import Katari.Typechecker.Normalizer
 -- Jump contexts
 ------------------------------------------------------------------------------------------------
 
--- | The stack of jump targets in scope at one point of the walk: the enclosing agent's @return@,
--- and any number of nested @for@ / @handler@ frames. A jump statement consults the appropriate top
--- frame ('returnTarget' for @return@, head of 'forContexts' for @next@ / @break@ inside a @for@,
--- head of 'handleContexts' for @next@ / @break@ inside a request handler body).
+-- | The jump targets in scope at one point of the walk: the enclosing agent's @return@, whether the
+-- walk is inside a @for@ body, and the stack of enclosing @handler@ frames. A jump consults the
+-- relevant one ('returnTarget' for @return@, 'inForBody' for a @for@ @next@ / @break@, the head of
+-- 'handleContexts' for a handler @next@ / @break@).
 data JumpContexts = JumpContexts
   { -- | The current agent's return type. 'Nothing' at module top level — a stray @return@ is
     -- diagnosed by the checker.
     returnTarget :: Maybe NormalizedType,
-    -- | Enclosing @for@ bodies, innermost first.
-    forContexts :: List ForContext,
+    -- | Whether the walk is inside a @for@ body. A @for@'s element / break-result types are inferred
+    -- into 'CheckerState' (reset per innermost @for@), so a @next@ / @break@ needs only to know a @for@
+    -- encloses it — no per-frame data, hence a flag rather than a stack.
+    inForBody :: Bool,
     -- | Enclosing @handler@ bodies and the request handlers nested within, innermost first.
     handleContexts :: List HandleContext
   }
@@ -74,15 +76,9 @@ emptyJumpContexts :: JumpContexts
 emptyJumpContexts =
   JumpContexts
     { returnTarget = Nothing,
-      forContexts = [],
+      inForBody = False,
       handleContexts = []
     }
-
--- | A marker that the walk is inside a @for@ body, so a @next@ / @break@ knows it has a target. The
--- element type and the break-result type are inferred (accumulated in 'CheckerState'), not fixed up
--- front, so the frame carries no expected types.
-data ForContext = ForContext
-  deriving stock (Eq, Show)
 
 -- | What a @handler@'s request-handler bodies consult: the handler's overall result type @R@ (the
 -- target of a @break@) and the expected value type of a @next@ in the current request handler.
@@ -131,7 +127,11 @@ data CheckerState = CheckerState
     -- | The union of every effect contribution in the innermost effect-collection scope (a
     -- 'withEffectInference' run): non-pure calls and @use@ statements emit into it. Bottom (pure)
     -- outside such a scope.
-    effectAccumulator :: NormalizedEffect
+    effectAccumulator :: NormalizedEffect,
+    -- | The union of every @return@ value in the enclosing agent body (a 'withReturnInference' run),
+    -- so an unannotated agent's return type is inferred from its @return@s as well as its block tail.
+    -- Bottom outside an agent body.
+    returnAccumulator :: NormalizedType
   }
   deriving stock (Eq, Show)
 
@@ -150,7 +150,7 @@ emptyForAccumulator = ForAccumulator {nextElements = bottomType, breakResults = 
 -- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
 -- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
-initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect}
+initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect, returnAccumulator = bottomType}
 
 -- | The checker monad: read-only environment, 'Diagnostics' writer, 'CheckerState' state.
 type Checker a = RWS CheckerEnvironment Diagnostics CheckerState a
@@ -275,11 +275,11 @@ withReturnTarget :: NormalizedType -> Checker a -> Checker a
 withReturnTarget target =
   local (\environment -> environment {jumps = environment.jumps {returnTarget = Just target}})
 
--- | Push a @for@ frame for the sub-action; it is popped automatically when 'local' restores the
+-- | Mark the sub-action as being inside a @for@ body; the flag is restored when 'local' restores the
 -- outer environment.
-pushForContext :: ForContext -> Checker a -> Checker a
-pushForContext context =
-  local (\environment -> environment {jumps = environment.jumps {forContexts = context : environment.jumps.forContexts}})
+enterForBody :: Checker a -> Checker a
+enterForBody =
+  local (\environment -> environment {jumps = environment.jumps {inForBody = True}})
 
 -- | Push a @handler@ frame for the sub-action.
 pushHandleContext :: HandleContext -> Checker a -> Checker a
@@ -325,6 +325,12 @@ withForInference action = do
 withEffectInference :: Checker a -> Checker (NormalizedEffect, a)
 withEffectInference = collecting (.effectAccumulator) (\value state -> state {effectAccumulator = value}) bottomEffect
 
+-- | Run an agent body collecting the union of its @return@ values, so an unannotated agent's return
+-- type is inferred from its @return@s in addition to its block tail. Scopes the accumulator to the
+-- agent, so a nested agent's @return@s do not leak out.
+withReturnInference :: Checker a -> Checker (NormalizedType, a)
+withReturnInference = collecting (.returnAccumulator) (\value state -> state {returnAccumulator = value}) bottomType
+
 -- | A @for@ body's @next@ value joins the inferred element type.
 emitForNextType :: SourceSpan -> NormalizedType -> Checker ()
 emitForNextType = accumulateInto (\state -> state.forAccumulator.nextElements) (\value state -> state {forAccumulator = state.forAccumulator {nextElements = value}})
@@ -336,3 +342,7 @@ emitForBreakType = accumulateInto (\state -> state.forAccumulator.breakResults) 
 -- | An effect contribution (a non-pure call, a @use@) joins the enclosing scope's inferred effect.
 emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
 emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectAccumulator = value})
+
+-- | A @return@ value joins the enclosing agent's inferred return type.
+emitReturnType :: SourceSpan -> NormalizedType -> Checker ()
+emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {returnAccumulator = value})

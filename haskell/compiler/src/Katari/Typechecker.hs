@@ -96,12 +96,12 @@ checkAcyclic node = case node.declaration of
   ValueAgent declaration -> do
     (typedDeclaration, scheme) <- synthAgent declaration
     pure (Map.singleton node.qualifiedName scheme, Map.singleton node.qualifiedName typedDeclaration)
-  ValueData declaration -> signatureOnly (dataValueScheme declaration.sourceSpan node.qualifiedName)
+  ValueData declaration -> signatureOnly (dataValueScheme declaration.sourceSpan node.qualifiedName declaration.parameters)
   ValueExternal declaration ->
     signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects)
   ValuePrimitive declaration ->
     signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects)
-  ValueRequest declaration -> signatureOnly (requestValueScheme declaration.sourceSpan node.qualifiedName)
+  ValueRequest declaration -> signatureOnly (requestValueScheme declaration.sourceSpan node.qualifiedName declaration.parameters)
   where
     signatureOnly build = do
       scheme <- build
