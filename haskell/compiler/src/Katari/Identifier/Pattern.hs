@@ -69,7 +69,9 @@ resolvePatternList :: List (Pattern Parsed) -> Identifier (List (Pattern Identif
 resolvePatternList = resolveAll resolvePattern
 
 resolveFieldPatterns :: List (FieldPattern Parsed) -> Identifier (List (FieldPattern Identified), List Binding)
-resolveFieldPatterns = resolveAll resolveFieldPattern
+resolveFieldPatterns fields = do
+  reportDuplicateLabels [(field.name, field.sourceSpan) | field <- fields]
+  resolveAll resolveFieldPattern fields
 
 resolveFieldPattern :: FieldPattern Parsed -> Identifier (FieldPattern Identified, List Binding)
 resolveFieldPattern field = do

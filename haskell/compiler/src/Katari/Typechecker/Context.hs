@@ -12,15 +12,16 @@
 --
 --   * /Jump contexts/ — a stack of in-scope @return@ / @break@ / @next@ targets. A @return@
 --     statement reads the enclosing agent's return type; a @break@ / @next@ reads the innermost
---     enclosing @for@ or @handler@ frame's expected type. Frames are pushed by 'pushForContext' /
---     'pushHandleContext' and 'withReturnTarget' on the way down, popped (by 'local') on the way
---     back up.
+--     enclosing @for@ or @handler@ frame's expected type. Frames are pushed by 'withReturnTarget' /
+--     'enterForBody' / 'pushHandleContext' on the way down (all through 'pushJumpFrame'), popped (by
+--     'local') on the way back up.
 module Katari.Typechecker.Context where
 
 import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (MonadWriter (..), asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import GHC.List (List)
@@ -57,30 +58,25 @@ import Katari.Typechecker.Normalizer
 -- Jump contexts
 ------------------------------------------------------------------------------------------------
 
--- | The jump targets in scope at one point of the walk: the enclosing agent's @return@, whether the
--- walk is inside a @for@ body, and the stack of enclosing @handler@ frames. A jump consults the
--- relevant one ('returnTarget' for @return@, 'inForBody' for a @for@ @next@ / @break@, the head of
--- 'handleContexts' for a handler @next@ / @break@).
-data JumpContexts = JumpContexts
-  { -- | The current agent's return type. 'Nothing' at module top level — a stray @return@ is
-    -- diagnosed by the checker.
-    returnTarget :: Maybe NormalizedType,
-    -- | Whether the walk is inside a @for@ body. A @for@'s element / break-result types are inferred
-    -- into 'CheckerState' (reset per innermost @for@), so a @next@ / @break@ needs only to know a @for@
-    -- encloses it — no per-frame data, hence a flag rather than a stack.
-    inForBody :: Bool,
-    -- | Enclosing @handler@ bodies and the request handlers nested within, innermost first.
-    handleContexts :: List HandleContext
-  }
+-- | The stack of jump targets in scope at one point of the walk, innermost first. A jump consults the
+-- innermost frame of its own kind: a @return@ the innermost 'ReturnFrame' (the enclosing agent), a
+-- @for@ @next@ / @break@ the innermost 'ForFrame', a handler @next@ / @break@ the innermost
+-- 'HandlerFrame'. One uniform stack replaces three parallel fields; the accessors 'returnTarget',
+-- 'insideForBody' and 'innermostHandler' project the frame each jump needs.
+newtype JumpContexts = JumpContexts {frames :: List JumpFrame}
+  deriving stock (Eq, Show)
+
+-- | One enclosing jump target the walk has descended through. A 'ForFrame' carries no data: a @for@'s
+-- element / break-result types are inferred into 'CheckerState' (reset per innermost @for@), so a
+-- @next@ / @break@ needs only to know a @for@ encloses it.
+data JumpFrame
+  = ReturnFrame NormalizedType
+  | ForFrame
+  | HandlerFrame HandleContext
   deriving stock (Eq, Show)
 
 emptyJumpContexts :: JumpContexts
-emptyJumpContexts =
-  JumpContexts
-    { returnTarget = Nothing,
-      inForBody = False,
-      handleContexts = []
-    }
+emptyJumpContexts = JumpContexts {frames = []}
 
 -- | What a @handler@'s request-handler bodies consult: the handler's overall result type @R@ (the
 -- target of a @break@) and the expected value type of a @next@ in the current request handler.
@@ -94,6 +90,23 @@ data HandleContext = HandleContext
     currentRequestReturnType :: NormalizedType
   }
   deriving stock (Eq, Show)
+
+-- | The innermost enclosing agent's @return@ target, if any. 'Nothing' at module top level — a stray
+-- @return@ is diagnosed by the checker.
+returnTarget :: JumpContexts -> Maybe NormalizedType
+returnTarget contexts = listToMaybe [target | ReturnFrame target <- contexts.frames]
+
+-- | Whether the walk is inside a @for@ body (so a @for@ @next@ / @break@ has a frame to target).
+insideForBody :: JumpContexts -> Bool
+insideForBody contexts = any isForFrame contexts.frames
+  where
+    isForFrame = \case
+      ForFrame -> True
+      _ -> False
+
+-- | The innermost enclosing @handler@ frame, if any.
+innermostHandler :: JumpContexts -> Maybe HandleContext
+innermostHandler contexts = listToMaybe [context | HandlerFrame context <- contexts.frames]
 
 ------------------------------------------------------------------------------------------------
 -- The checker monad
@@ -285,22 +298,23 @@ withGeneric genericId info =
 -- Jump contexts
 ------------------------------------------------------------------------------------------------
 
--- | Replace any outer return target with @target@ for the sub-action. Used when entering an agent
--- body: an inner agent's @return@ targets its own body, not the enclosing one.
-withReturnTarget :: NormalizedType -> Checker a -> Checker a
-withReturnTarget target =
-  local (\environment -> environment {jumps = environment.jumps {returnTarget = Just target}})
+-- | Push a jump frame for the sub-action; 'local' pops it when the outer environment is restored.
+pushJumpFrame :: JumpFrame -> Checker a -> Checker a
+pushJumpFrame frame =
+  local (\environment -> environment {jumps = JumpContexts {frames = frame : environment.jumps.frames}})
 
--- | Mark the sub-action as being inside a @for@ body; the flag is restored when 'local' restores the
--- outer environment.
+-- | Enter an agent body: a @return@ inside now targets @target@ (the innermost 'ReturnFrame'), not the
+-- enclosing agent's.
+withReturnTarget :: NormalizedType -> Checker a -> Checker a
+withReturnTarget target = pushJumpFrame (ReturnFrame target)
+
+-- | Enter a @for@ body, so a @for@ @next@ / @break@ inside has a frame to target.
 enterForBody :: Checker a -> Checker a
-enterForBody =
-  local (\environment -> environment {jumps = environment.jumps {inForBody = True}})
+enterForBody = pushJumpFrame ForFrame
 
 -- | Push a @handler@ frame for the sub-action.
 pushHandleContext :: HandleContext -> Checker a -> Checker a
-pushHandleContext context =
-  local (\environment -> environment {jumps = environment.jumps {handleContexts = context : environment.jumps.handleContexts}})
+pushHandleContext context = pushJumpFrame (HandlerFrame context)
 
 ------------------------------------------------------------------------------------------------
 -- Inference scopes
@@ -368,27 +382,28 @@ emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {ret
 markJump :: JumpKind -> Checker ()
 markJump kind = modify (\state -> state {escapingJumps = Set.insert kind state.escapingJumps})
 
--- | Run the body of a construct that captures @captured@ jumps (a @for@ captures 'ForJump', a request
--- handler 'HandlerJump', an agent 'ReturnJump'): jumps of that kind raised inside it stop here, while
--- jumps of other kinds still escape to the enclosing scope. The dual of a value-inference scope, for
--- control flow.
-capturingJumps :: JumpKind -> Checker a -> Checker a
-capturingJumps captured action = do
+-- | Run @action@ with the escaping-jumps set reset to empty, then restore the outer set joined with
+-- @transform@ applied to whatever escaped inside, returning that inner set alongside the result. The
+-- shared core of the two jump scopes (the dual of a value-inference scope, for control flow).
+aroundJumps :: (Set JumpKind -> Set JumpKind) -> Checker a -> Checker (Set JumpKind, a)
+aroundJumps transform action = do
   outer <- gets (.escapingJumps)
   modify (\state -> state {escapingJumps = Set.empty})
   result <- action
   inner <- gets (.escapingJumps)
-  modify (\state -> state {escapingJumps = Set.union outer (Set.delete captured inner)})
-  pure result
+  modify (\state -> state {escapingJumps = Set.union outer (transform inner)})
+  pure (inner, result)
+
+-- | Run the body of a construct that captures @captured@ jumps (a @for@ captures 'ForJump', a request
+-- handler 'HandlerJump', an agent 'ReturnJump'): jumps of that kind raised inside it stop here, while
+-- jumps of other kinds still escape to the enclosing scope.
+capturingJumps :: JumpKind -> Checker a -> Checker a
+capturingJumps captured action = snd <$> aroundJumps (Set.delete captured) action
 
 -- | Run a control-flow branch (a match arm, an @if@ branch) and report whether any jump escaped it (so
 -- the caller can treat an escaping branch as non-pure). The escaped jumps still propagate outward (a
 -- @return@ in a match arm escapes the match too).
 collectingJumps :: Checker a -> Checker (Bool, a)
 collectingJumps action = do
-  outer <- gets (.escapingJumps)
-  modify (\state -> state {escapingJumps = Set.empty})
-  result <- action
-  inner <- gets (.escapingJumps)
-  modify (\state -> state {escapingJumps = Set.union outer inner})
+  (inner, result) <- aroundJumps id action
   pure (not (Set.null inner), result)

@@ -154,6 +154,31 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "accepts a private-scrutinee arm whose nested `for` jump is captured" $
     allErrorCodes [("test", "private agent sec() -> integer { 1 }\nagent f() -> array[integer] of private { match (sec()) { case _ -> for (x in [1, 2]) { next x } } }")] `shouldBe` []
 
+  -- An optional object field may be absent, so reading it yields @T | null@, not @T@.
+  it "rejects reading an optional object field as non-null (K3001)" $
+    typeErrorCodes [("test", "agent f(r: {x?: integer}) -> integer { r.x }")] `shouldContain` ["K3001"]
+
+  it "accepts reading an optional object field at a nullable type" $
+    typeErrorCodes [("test", "agent f(r: {x?: integer}) -> integer | null { r.x }")] `shouldBe` []
+
+  -- Duplicate field labels are rejected (K2003) like duplicate call-argument / parameter labels.
+  it "rejects a record literal with duplicate field labels (K2003)" $
+    allErrorCodes [("test", "agent f() -> integer { let r = {x = 1, x = 2}\n0 }")] `shouldContain` ["K2003"]
+
+  it "rejects an object type with duplicate field labels (K2003)" $
+    allErrorCodes [("test", "agent f(r: {x: integer, x: string}) -> integer { 0 }")] `shouldContain` ["K2003"]
+
+  it "rejects a record pattern with duplicate field labels (K2003)" $
+    allErrorCodes [("test", "agent f(r: {x: integer}) -> integer { match (r) { case {x => a, x => b} -> a } }")] `shouldContain` ["K2003"]
+
+  -- @lift@ considers covariant positions only: a value private only in a /contravariant/ data position
+  -- does not taint what a pure observation of it yields, but a /covariant/ one does.
+  it "accepts a pure call observing a value private in a contravariant data position" $
+    typeErrorCodes [("test", "data Sink[T](consume: agent(x: T) -> null)\nagent observe(s: Sink[integer of private]) -> integer { 0 }\nagent caller(s: Sink[integer of private]) -> integer { observe(s = s) }")] `shouldBe` []
+
+  it "rejects a pure call observing a value private in a covariant data position (K3001)" $
+    typeErrorCodes [("test", "data Box[T](value: T)\nagent observe(b: Box[integer of private]) -> integer { 0 }\nagent caller(b: Box[integer of private]) -> integer { observe(b = b) }")] `shouldContain` ["K3001"]
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

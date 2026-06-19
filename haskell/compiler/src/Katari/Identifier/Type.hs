@@ -42,6 +42,7 @@ resolveType = \case
     branches <- traverse resolveType node.branches
     pure (TypeUnion TypeUnionNode {branches = branches, sourceSpan = node.sourceSpan})
   TypeObject node -> do
+    reportDuplicateLabels [(field.name, field.sourceSpan) | field <- node.fields]
     fields <- traverse resolveObjectTypeField node.fields
     pure (TypeObject ObjectTypeNode {fields = fields, sourceSpan = node.sourceSpan})
   TypeAttributed node -> do

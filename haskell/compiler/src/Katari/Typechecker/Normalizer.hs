@@ -37,7 +37,7 @@ import Katari.Data.Id (GenericId)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
-import Katari.Data.Variance (Variance (..))
+import Katari.Data.Variance (Variance (..), composeVariance)
 import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..))
 import Katari.Panic (panic)
 
@@ -142,11 +142,20 @@ checkRequestArity qualifiedName arguments = do
 -- normalized boundary, so /every/ written application — in an annotation as much as at an explicit
 -- application site — is checked the same way.
 checkApplicationBounds :: GenericParameters -> Map Text NormalizedKindedType -> Normalizer ()
-checkApplicationBounds parameters arguments =
-  mapM_ checkOne (Map.toList parameters.parameterInformation)
+checkApplicationBounds parameters arguments = checkGenericBounds parameters (genericSubstitution parameters arguments)
+
+-- | Check each generic parameter's argument against its @extends@ upper bound, with the substitution
+-- applied to the bound first (a bound may reference other generics being applied, e.g.
+-- @[a, b extends a]@). The single bound check shared by the normalization boundary
+-- ('checkApplicationBounds', keyed by argument name) and explicit value / handler application
+-- ('Katari.Typechecker.Check', already holding the id-keyed substitution). A violation surfaces as a
+-- subtype error; type, effect, and attribute bounds are all handled by the kinded 'subtype' /
+-- 'substituteGenericArgument'.
+checkGenericBounds :: GenericParameters -> Map GenericId NormalizedKindedType -> Normalizer ()
+checkGenericBounds parameters substitution =
+  mapM_ checkOne (Map.elems parameters.parameterInformation)
   where
-    substitution = genericSubstitution parameters arguments
-    checkOne (name, info) = case (info.upperBound, Map.lookup name arguments) of
+    checkOne info = case (info.upperBound, Map.lookup info.genericId substitution) of
       (Just bound, Just argument) -> do
         instantiatedBound <- substituteGenericArgument substitution bound
         subtype argument instantiatedBound
@@ -405,8 +414,8 @@ instance TypeLattice NormalizedType where
     -- Resolve the left's generics to their upper bounds (transitively), treating the supertype's
     -- own generics as already covered (they cancel). The resulting generics field is then ignored:
     -- every remaining generic is either covered by the right or already expanded into the
-    -- base/attribute.
-    effectiveLeft <- boundedType right.generics left
+    -- base/attribute. The no-generics case (the overwhelmingly common one) skips the fixpoint entirely.
+    effectiveLeft <- if Set.null left.generics then pure left else boundedType right.generics left
     subtype effectiveLeft.attribute right.attribute
     -- The interior is observed through the supertype's attribute, so it joins the world below.
     withWorld right.attribute $ case (effectiveLeft.baseType, right.baseType) of
@@ -437,8 +446,9 @@ instance TypeLattice NormalizedAttribute where
     let worldedLeft = joinAttribute left world
         worldedRight = joinAttribute right world
     -- Resolve the left's attribute-generics to their upper bounds (transitively), treating the
-    -- supertype's own attribute-generics as already covered, then compare the private part.
-    effectiveLeft <- boundedAttribute worldedRight.generic worldedLeft
+    -- supertype's own attribute-generics as already covered, then compare the private part. The
+    -- no-generics case (the overwhelmingly common one) skips the fixpoint entirely.
+    effectiveLeft <- if Set.null worldedLeft.generic then pure worldedLeft else boundedAttribute worldedRight.generic worldedLeft
     when (effectiveLeft.private && not worldedRight.private) $
       tellAttributeMismatch "Private attribute cannot be a subtype of public attribute" effectiveLeft worldedRight
 
@@ -994,32 +1004,77 @@ substituteGenericArgument substitution genericArgument = case genericArgument of
 -- Observable attribute
 ------------------------------------------------------------------------------------------------
 
--- | Join every attribute observable through a value into one: the node's own attribute together with
--- those of every value it can yield. This is the comonadic "world" of the value — observing a @W a@
--- (a call argument, a match scrutinee) and producing a result must carry that world into the result,
--- so the checker folds it here once rather than re-deriving it per use site. A function contributes
--- only its result's attributes; its argument is contravariant (caller-supplied), so a private
--- parameter does not taint what a pure application of the function yields.
-foldAttribute :: NormalizedType -> NormalizedAttribute
-foldAttribute normalizedType = case normalizedType.baseType of
-  NormalizedBaseTypeUnknown -> normalizedType.attribute
-  NormalizedBaseTypeLayered layer -> joinAttribute normalizedType.attribute (foldLayerAttribute layer)
+-- | Join every attribute /observable/ through a value into one: the comonadic "world" of the value.
+-- Observing a value (a call argument, a match scrutinee) and producing a result must carry that world
+-- into the result, so the checker folds it here once (for the @lift@ that crosses worlds) rather than
+-- re-deriving it per use site.
+--
+-- Only /covariant/ positions are observable — a contravariant position (a function argument, a
+-- contravariant data parameter) is supplied by the observer, not yielded to it, so its attribute does
+-- not taint what observing the value produces. Unlike the subtyping /world/ (which applies to every
+-- position regardless of variance), @lift@ considers covariant positions only. Variance composes as
+-- the fold descends, so a doubly-contravariant position is net-covariant and does contribute.
+foldAttribute :: NormalizedType -> Normalizer NormalizedAttribute
+foldAttribute = foldAttributeAt Covariant
 
-foldLayerAttribute :: LayeredType -> NormalizedAttribute
-foldLayerAttribute layer =
-  foldr joinAttribute bottomAttribute $
-    concat
-      [ maybe [] (\function -> [foldAttribute function.returnType]) layer.functionLayer,
-        maybe [] (\sequence -> foldAttribute sequence.rest : fmap foldAttribute sequence.items) layer.sequenceLayer,
-        maybe [] (\object -> foldAttribute object.rest : fmap (foldAttribute . (.normalizedType)) (Map.elems object.fields)) layer.objectLayer,
-        [foldKindedAttribute argument | arguments <- Map.elems layer.dataLayer, argument <- Map.elems arguments]
-      ]
+-- | A position is observable (its handle attribute is yielded to whoever observes the enclosing value)
+-- exactly when its net variance is covariant or invariant; a contravariant or unused (bivariant)
+-- position yields nothing.
+observableVariance :: Variance -> Bool
+observableVariance = \case
+  Covariant -> True
+  Invariant -> True
+  Contravariant -> False
+  Bivariant -> False
 
-foldKindedAttribute :: NormalizedKindedType -> NormalizedAttribute
-foldKindedAttribute = \case
-  NormalizedKindedTypeType normalizedType -> foldAttribute normalizedType
-  NormalizedKindedTypeAttribute attribute -> attribute
-  NormalizedKindedTypeEffect _ -> bottomAttribute
+foldAttributeAt :: Variance -> NormalizedType -> Normalizer NormalizedAttribute
+foldAttributeAt variance normalizedType = do
+  let own = if observableVariance variance then normalizedType.attribute else bottomAttribute
+  case normalizedType.baseType of
+    NormalizedBaseTypeUnknown -> pure own
+    NormalizedBaseTypeLayered layer -> joinAttribute own <$> foldLayerAttributeAt variance layer
+
+foldLayerAttributeAt :: Variance -> LayeredType -> Normalizer NormalizedAttribute
+foldLayerAttributeAt variance layer = do
+  functionPart <- case layer.functionLayer of
+    Nothing -> pure bottomAttribute
+    -- The argument is contravariant (flip the polarity); the return is covariant.
+    Just function ->
+      joinAttribute
+        <$> foldAttributeAt (composeVariance variance Contravariant) function.argumentType
+        <*> foldAttributeAt variance function.returnType
+  sequencePart <- case layer.sequenceLayer of
+    Nothing -> pure bottomAttribute
+    Just sequenceValue -> foldJoin (foldAttributeAt variance) (sequenceValue.rest : sequenceValue.items)
+  objectPart <- case layer.objectLayer of
+    Nothing -> pure bottomAttribute
+    Just object -> foldJoin (foldAttributeAt variance) (object.rest : fmap (.normalizedType) (Map.elems object.fields))
+  dataPart <- foldJoin (foldDataAttribute variance) (Map.toList layer.dataLayer)
+  pure $ foldr joinAttribute bottomAttribute [functionPart, sequencePart, objectPart, dataPart]
+
+-- | Fold the observable attributes of one nominal data value's arguments, each at its declared
+-- variance composed with the enclosing polarity.
+foldDataAttribute :: Variance -> (QualifiedName, Map Text NormalizedKindedType) -> Normalizer NormalizedAttribute
+foldDataAttribute variance (qualifiedName, arguments) = do
+  dataInfo <- dataInfoFor qualifiedName
+  let variances = (.variance) <$> dataInfo.genericParameters.parameterInformation
+      argumentAt (name, argument) = foldKindedAttributeAt (composeVariance variance (parameterVariance variances name)) argument
+  foldJoin argumentAt (Map.toList arguments)
+
+-- | The variance of a named generic argument; an argument absent from the parameter map is treated as
+-- unused (bivariant), contributing nothing.
+parameterVariance :: Map Text Variance -> Text -> Variance
+parameterVariance variances name = Map.findWithDefault Bivariant name variances
+
+foldKindedAttributeAt :: Variance -> NormalizedKindedType -> Normalizer NormalizedAttribute
+foldKindedAttributeAt variance = \case
+  NormalizedKindedTypeType normalizedType -> foldAttributeAt variance normalizedType
+  NormalizedKindedTypeAttribute attribute -> pure (if observableVariance variance then attribute else bottomAttribute)
+  NormalizedKindedTypeEffect _ -> pure bottomAttribute
+
+-- | Join the attributes produced by a folder over a list (bottom on empty).
+foldJoin :: (a -> Normalizer NormalizedAttribute) -> List a -> Normalizer NormalizedAttribute
+foldJoin folder items = foldr joinAttribute bottomAttribute <$> traverse folder items
 
 ------------------------------------------------------------------------------------------------
 -- Denormalization (normalized -> display-oriented semantic)

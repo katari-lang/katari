@@ -49,6 +49,7 @@ resolveExpression = \case
     elements <- traverse resolveExpression node.elements
     pure (ExpressionTuple TupleExpression {parallel = node.parallel, elements = elements, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionRecord node -> do
+    reportDuplicateLabels [(entry.name, entry.sourceSpan) | entry <- node.entries]
     entries <- traverse resolveRecordEntry node.entries
     pure (ExpressionRecord RecordExpression {entries = entries, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionCall node -> do
