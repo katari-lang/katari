@@ -1,5 +1,5 @@
 {
-  "id": "ccf8f4c2-4e7e-43d8-b8ec-7d7b9104a505",
+  "id": "3bf97a3d-648d-4957-be65-fd41f7eebb6d",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -317,7 +317,16 @@
       },
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "threads_status_check": {
+          "name": "threads_status_check",
+          "value": "\"threads\".\"status\" in ('running', 'cancelling')"
+        },
+        "threads_kind_check": {
+          "name": "threads_kind_check",
+          "value": "\"threads\".\"kind\" in ('sequence', 'match', 'for', 'handle', 'parallel', 'delegate', 'external')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.delegations": {
@@ -424,7 +433,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "delegations_state_check": {
+          "name": "delegations_state_check",
+          "value": "\"delegations\".\"state\" in ('running', 'cancelling')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.escalations": {
@@ -508,7 +522,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "escalations_state_check": {
+          "name": "escalations_state_check",
+          "value": "\"escalations\".\"state\" in ('open')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.instances": {
@@ -634,7 +653,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "instances_status_check": {
+          "name": "instances_status_check",
+          "value": "\"instances\".\"status\" in ('running', 'cancelling')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.run_escalations_audit": {
@@ -840,7 +864,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "runs_state_check": {
+          "name": "runs_state_check",
+          "value": "\"runs\".\"state\" in ('running', 'cancelling', 'done', 'error')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.env_entries": {
@@ -1086,7 +1115,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "snapshots_project_id_idx": {
+          "name": "snapshots_project_id_idx",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "snapshots_project_id_projects_id_fk": {
           "name": "snapshots_project_id_projects_id_fk",

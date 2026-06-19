@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
+import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
 import { envKeyParamSchema, projectIdParamSchema, setEnvSchema } from "./env.schema.js";
 import { envService } from "./env.service.js";
@@ -16,6 +17,7 @@ export const envRoutes = new Hono<AppEnv>()
   })
   .put(
     "/projects/:projectId/env/:key",
+    requireJsonBody,
     zValidator("param", envKeyParamSchema),
     zValidator("json", setEnvSchema),
     async (c) => {

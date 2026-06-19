@@ -37,6 +37,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class UnsupportedMediaTypeError extends AppError {
+  constructor(message = "Unsupported Media Type", details?: unknown) {
+    super(415, "unsupported_media_type", message, details);
+  }
+}
+
 export class UnprocessableEntityError extends AppError {
   constructor(message = "Unprocessable Entity", details?: unknown) {
     super(422, "unprocessable_entity", message, details);

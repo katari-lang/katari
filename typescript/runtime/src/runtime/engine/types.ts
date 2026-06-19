@@ -3,8 +3,9 @@
 //
 // Persistence mirror: an `Instance`'s threads persist row-per-thread (`threads`, with the
 // variant-specific state in `payload`); scopes are CORE-global per project and persist row-per-scope
-// (`scopes`) with their variables row-per-variable (`scope_variables`). The per-thread execution
-// state below is the engine's working set; its exact fields will firm up in the engine phase.
+// (`scopes`), each scope's variables riding inline in its `scopes.values` JSON column (see the
+// `engine.ts` header for why they are not their own table). The per-thread execution state below is
+// the engine's working set; its exact fields will firm up in the engine phase.
 
 import type { BlockId } from "@katari-lang/types";
 import type { DelegateTarget } from "../event/types.js";

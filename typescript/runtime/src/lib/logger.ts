@@ -30,12 +30,14 @@ export function createLogger({ level, bindings = {} }: LoggerOptions): Logger {
 
   const emit = (logLevel: LogLevel, message: string, meta?: Record<string, unknown>): void => {
     if (LEVEL_ORDER[logLevel] < threshold) return;
+    // Reserved fields are spread LAST so a caller-supplied binding/meta key (e.g. `message` from
+    // `{ message: err.message }`) can never clobber the event's own level/time/message.
     const record = {
+      ...bindings,
+      ...meta,
       level: logLevel,
       time: new Date().toISOString(),
       message,
-      ...bindings,
-      ...meta,
     };
     const sink = logLevel === "error" || logLevel === "warn" ? console.error : console.log;
     sink(JSON.stringify(record));

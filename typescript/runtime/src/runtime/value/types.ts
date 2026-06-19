@@ -3,9 +3,9 @@
 // Callable values come in two shapes — a top-level named agent (`agent`) and a `closure`
 // (案2: a block + captured scope carried directly as a value, with no separate closure entity).
 //
-// This is also the JSON shape stored at rest: `scope_variables.value` holds a `Value`, a blob's
-// bytes live in the BlobStore (S3 object key `{projectId}/{blobId}`), and the ref keeps only the
-// handle + metadata.
+// This is also the JSON shape stored at rest: a scope's variables ride inline in its `scopes.values`
+// JSON column (each holding a `Value`), a blob's bytes live in the BlobStore (S3 object key
+// `{projectId}/{blobId}`), and the ref keeps only the handle + metadata.
 //
 // A `Value` carries an optional `private` flag (intersection on every variant). It is the single
 // source of truth for "treat this value as private" — used by persistence (encrypt-at-rest), by

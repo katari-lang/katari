@@ -19,7 +19,9 @@ export const snapshotService = {
    */
   async deploy(projectId: string, input: DeploySnapshotInput) {
     return db.transaction(async (tx) => {
-      const [project] = await snapshotRepository.findProject(tx, projectId);
+      // Lock the project row up front so concurrent deploys serialize and `head` advances in commit
+      // order rather than last-writer-wins.
+      const [project] = await snapshotRepository.findProjectForUpdate(tx, projectId);
       if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
 
       const held = await snapshotRepository.existingModuleHashes(tx, projectId);

@@ -7,7 +7,13 @@ import { projectIdParamSchema } from "../../lib/params.js";
 
 export { projectIdParamSchema };
 
-export const answerEscalationSchema = z.object({ value: z.custom<Json>() });
+// `z.custom<Json>()` with no predicate accepts anything — including a missing key (parsed as
+// `undefined`) — so an answer payload could silently arrive empty. Require the key to be present.
+export const answerEscalationSchema = z.object({
+  value: z.custom<Json>((value) => value !== undefined, {
+    message: "An answer value is required.",
+  }),
+});
 
 export const escalationParamSchema = projectIdParamSchema.extend({
   escalationId: z.uuid(),

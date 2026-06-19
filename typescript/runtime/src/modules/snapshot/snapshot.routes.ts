@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
+import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
+import { rejectReservedModuleNames } from "./snapshot.middleware.js";
 import {
   deploySnapshotSchema,
   projectIdParamSchema,
@@ -13,6 +15,8 @@ import { snapshotService } from "./snapshot.service.js";
 export const snapshotRoutes = new Hono<AppEnv>()
   .post(
     "/projects/:projectId/snapshots",
+    requireJsonBody,
+    rejectReservedModuleNames,
     zValidator("param", projectIdParamSchema),
     zValidator("json", deploySnapshotSchema),
     async (c) => {

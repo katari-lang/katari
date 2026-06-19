@@ -30,7 +30,9 @@ CREATE TABLE "threads" (
 	"block_id" integer NOT NULL,
 	"status" text NOT NULL,
 	"payload" jsonb NOT NULL,
-	CONSTRAINT "threads_project_id_instance_id_thread_id_pk" PRIMARY KEY("project_id","instance_id","thread_id")
+	CONSTRAINT "threads_project_id_instance_id_thread_id_pk" PRIMARY KEY("project_id","instance_id","thread_id"),
+	CONSTRAINT "threads_status_check" CHECK ("threads"."status" in ('running', 'cancelling')),
+	CONSTRAINT "threads_kind_check" CHECK ("threads"."kind" in ('sequence', 'match', 'for', 'handle', 'parallel', 'delegate', 'external'))
 );
 --> statement-breakpoint
 CREATE TABLE "delegations" (
@@ -41,7 +43,8 @@ CREATE TABLE "delegations" (
 	"argument" jsonb,
 	"state" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "delegations_state_check" CHECK ("delegations"."state" in ('running', 'cancelling'))
 );
 --> statement-breakpoint
 CREATE TABLE "escalations" (
@@ -51,7 +54,8 @@ CREATE TABLE "escalations" (
 	"request" text NOT NULL,
 	"argument" jsonb,
 	"state" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "escalations_state_check" CHECK ("escalations"."state" in ('open'))
 );
 --> statement-breakpoint
 CREATE TABLE "instances" (
@@ -63,7 +67,8 @@ CREATE TABLE "instances" (
 	"status" text NOT NULL,
 	"ambient_generics" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "instances_status_check" CHECK ("instances"."status" in ('running', 'cancelling'))
 );
 --> statement-breakpoint
 CREATE TABLE "run_escalations_audit" (
@@ -89,7 +94,8 @@ CREATE TABLE "runs" (
 	"cancel_reason" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"completed_at" timestamp with time zone
+	"completed_at" timestamp with time zone,
+	CONSTRAINT "runs_state_check" CHECK ("runs"."state" in ('running', 'cancelling', 'done', 'error'))
 );
 --> statement-breakpoint
 CREATE TABLE "env_entries" (
@@ -152,4 +158,5 @@ ALTER TABLE "snapshots" ADD CONSTRAINT "snapshots_project_id_projects_id_fk" FOR
 CREATE INDEX "blobs_owner_instance_id_idx" ON "blobs" USING btree ("owner_instance_id");--> statement-breakpoint
 CREATE INDEX "scopes_owner_instance_id_idx" ON "scopes" USING btree ("owner_instance_id");--> statement-breakpoint
 CREATE INDEX "delegations_caller_instance_id_idx" ON "delegations" USING btree ("caller_instance_id");--> statement-breakpoint
-CREATE INDEX "instances_project_id_idx" ON "instances" USING btree ("project_id");
+CREATE INDEX "instances_project_id_idx" ON "instances" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");

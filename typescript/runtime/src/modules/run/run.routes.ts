@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
+import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
 import {
   cancelRunSchema,
@@ -13,6 +14,7 @@ import { runService } from "./run.service.js";
 export const runRoutes = new Hono<AppEnv>()
   .post(
     "/projects/:projectId/runs",
+    requireJsonBody,
     zValidator("param", projectIdParamSchema),
     zValidator("json", startRunSchema),
     async (c) => {
@@ -32,6 +34,7 @@ export const runRoutes = new Hono<AppEnv>()
   })
   .post(
     "/projects/:projectId/runs/:runId/cancel",
+    requireJsonBody,
     zValidator("param", runParamSchema),
     zValidator("json", cancelRunSchema),
     async (c) => {

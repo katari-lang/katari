@@ -5,8 +5,8 @@ import * as schema from "./schema.js";
 
 /**
  * postgres.js connects lazily: constructing the pool does not require a
- * reachable database, so the server can boot and `/health` responds even when
- * Postgres is down. Queries surface a clear connection error until it is up.
+ * reachable database, so the server can boot and `/api/v1/health` responds even
+ * when Postgres is down. Queries surface a clear connection error until it is up.
  */
 const queryClient = postgres(config.databaseUrl, { max: 10 });
 

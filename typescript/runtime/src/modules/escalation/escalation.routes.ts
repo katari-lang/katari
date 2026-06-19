@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
+import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
 import {
   answerEscalationSchema,
@@ -16,6 +17,7 @@ export const escalationRoutes = new Hono<AppEnv>()
   })
   .post(
     "/projects/:projectId/escalations/:escalationId/answer",
+    requireJsonBody,
     zValidator("param", escalationParamSchema),
     zValidator("json", answerEscalationSchema),
     async (c) => {

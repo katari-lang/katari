@@ -18,9 +18,9 @@ try {
   process.exit(1);
 }
 
-const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   logger.info("katari-api-server started", {
-    url: `http://localhost:${info.port}`,
+    url: `http://${config.host}:${info.port}`,
     env: config.nodeEnv,
   });
 });

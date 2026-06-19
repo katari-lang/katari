@@ -7,15 +7,31 @@
 // row, not a column on the instance — a child carries only its `delegation_id` (which correlates its
 // `delegateAck`, e.g. when one parent runs several delegates in parallel), and the parent is recovered
 // through `delegations.caller_instance_id`. `target` holds the agent reference `(qname, snapshot) |
-// closure`; `snapshotId` is the version denormalised out of it for the FK / RESTRICT (a running version
-// cannot be deleted).
+// closure`; `snapshotId` is the version denormalised out of it for the FK (ON DELETE NO ACTION, so a
+// snapshot a running instance/run still references cannot be deleted).
 
+import { sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
-import { index, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  check,
+  index,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 import type { InstanceStatus } from "../../runtime/engine/types.js";
 import type { DelegateTarget } from "../../runtime/event/types.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
+
+// Persisted lifecycle states of the API's management records, enforced both at the type level
+// (`$type`) and by the DB CHECK constraints below so recovery can trust the stored value.
+export type DelegationState = "running" | "cancelling";
+export type EscalationState = "open";
+export type RunState = "running" | "cancelling" | "done" | "error";
 
 export const instances = pgTable(
   "instances",
@@ -32,7 +48,7 @@ export const instances = pgTable(
     }),
     /** What this instance runs: `(qname, snapshot)` or a closure reference. Snapshot is its property. */
     target: jsonb("target").$type<DelegateTarget>().notNull(),
-    /** Version denormalised from `target`, for the FK / RESTRICT (running versions are undeletable). */
+    /** Version denormalised from `target`, for the FK (NO ACTION; running versions are undeletable). */
     snapshotId: uuid("snapshot_id")
       .notNull()
       .references(() => snapshots.id),
@@ -42,9 +58,15 @@ export const instances = pgTable(
      *  Inner scopes inherit it implicitly; not stored on `scopes`. */
     ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
   },
-  (table) => [index("instances_project_id_idx").on(table.projectId)],
+  (table) => [
+    index("instances_project_id_idx").on(table.projectId),
+    check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
+  ],
 );
 
 /** The parent→child edge and recovery outbox: the issuer's durable record of a child it summoned, and
@@ -63,53 +85,73 @@ export const delegations = pgTable(
     target: jsonb("target").$type<DelegateTarget>().notNull(),
     argument: jsonb("argument").$type<Value | null>(),
     /** running | cancelling. */
-    state: text("state").notNull(),
+    state: text("state").$type<DelegationState>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
   },
-  (table) => [index("delegations_caller_instance_id_idx").on(table.callerInstanceId)],
+  (table) => [
+    index("delegations_caller_instance_id_idx").on(table.callerInstanceId),
+    check("delegations_state_check", sql`${table.state} in ('running', 'cancelling')`),
+  ],
 );
 
 /** A capability request raised by an instance; owned by (and cascades with) the raiser. State is `open` only. */
-export const escalations = pgTable("escalations", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  projectId: uuid("project_id")
-    .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
-  raiserInstanceId: uuid("raiser_instance_id")
-    .notNull()
-    .references(() => instances.id, { onDelete: "cascade" }),
-  /** The requested capability (the `request` qualified name). */
-  request: text("request").notNull(),
-  argument: jsonb("argument").$type<Value | null>(),
-  state: text("state").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const escalations = pgTable(
+  "escalations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    raiserInstanceId: uuid("raiser_instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    /** The requested capability (the `request` qualified name). */
+    request: text("request").notNull(),
+    argument: jsonb("argument").$type<Value | null>(),
+    /** open — live escalations are open-only; answered ones move to `run_escalations_audit`. */
+    state: text("state").$type<EscalationState>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [check("escalations_state_check", sql`${table.state} in ('open')`)],
+);
 
 /** The API module's per-run management record (1:1 with a run's instance). Reflects the run's outcome. */
-export const runs = pgTable("runs", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  projectId: uuid("project_id")
-    .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
-  /** The run's CORE instance; nullable + set-null because that instance self-deletes at its terminal
-   *  while this durable run record survives to hold the outcome. */
-  instanceId: uuid("instance_id").references(() => instances.id, { onDelete: "set null" }),
-  snapshotId: uuid("snapshot_id")
-    .notNull()
-    .references(() => snapshots.id),
-  name: text("name").notNull(),
-  qualifiedName: text("qualified_name").notNull(),
-  argument: jsonb("argument").$type<Value | null>(),
-  /** running | cancelling | done | error (reflects the run's CORE instance child). */
-  state: text("state").notNull(),
-  result: jsonb("result").$type<Value | null>(),
-  errorMessage: text("error_message"),
-  cancelReason: text("cancel_reason"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+export const runs = pgTable(
+  "runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** The run's CORE instance; nullable + set-null because that instance self-deletes at its terminal
+     *  while this durable run record survives to hold the outcome. */
+    instanceId: uuid("instance_id").references(() => instances.id, { onDelete: "set null" }),
+    snapshotId: uuid("snapshot_id")
+      .notNull()
+      .references(() => snapshots.id),
+    name: text("name").notNull(),
+    qualifiedName: text("qualified_name").notNull(),
+    argument: jsonb("argument").$type<Value | null>(),
+    /** running | cancelling | done | error (reflects the run's CORE instance child). */
+    state: text("state").$type<RunState>().notNull(),
+    result: jsonb("result").$type<Value | null>(),
+    errorMessage: text("error_message"),
+    cancelReason: text("cancel_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [
+    check("runs_state_check", sql`${table.state} in ('running', 'cancelling', 'done', 'error')`),
+  ],
+);
 
 /** History of a run's answered, user-facing escalations (live `escalations` are open-only, raiser-owned). */
 export const runEscalationsAudit = pgTable(

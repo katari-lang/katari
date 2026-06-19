@@ -2,7 +2,7 @@
 // Each takes an `Executor` so the deploy can run them all inside one transaction.
 
 import type { IRModule } from "@katari-lang/types";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { modules, projects, snapshots } from "../../db/tables/projects.js";
 import type { ModuleHash } from "../../runtime/ids.js";
@@ -10,6 +10,12 @@ import type { ModuleHash } from "../../runtime/ids.js";
 export const snapshotRepository = {
   findProject(executor: Executor, projectId: string) {
     return executor.select().from(projects).where(eq(projects.id, projectId));
+  },
+
+  /** Like `findProject`, but takes a row lock so concurrent deploys to the same project serialize on
+   *  it — without this the final `setHead` is an unordered last-writer-wins and head can flap. */
+  findProjectForUpdate(executor: Executor, projectId: string) {
+    return executor.select().from(projects).where(eq(projects.id, projectId)).for("update");
   },
 
   /** The hashes this project already holds in the module store, as plain strings for diffing. */
@@ -70,9 +76,13 @@ export const snapshotRepository = {
   },
 
   list(executor: Executor, projectId: string) {
-    return executor
-      .select({ id: snapshots.id, message: snapshots.message, createdAt: snapshots.createdAt })
-      .from(snapshots)
-      .where(eq(snapshots.projectId, projectId));
+    return (
+      executor
+        .select({ id: snapshots.id, message: snapshots.message, createdAt: snapshots.createdAt })
+        .from(snapshots)
+        .where(eq(snapshots.projectId, projectId))
+        // Newest deploy first; `id` breaks ties deterministically when two land in the same instant.
+        .orderBy(desc(snapshots.createdAt), desc(snapshots.id))
+    );
   },
 };

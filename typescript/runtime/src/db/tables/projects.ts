@@ -8,7 +8,16 @@
 
 import type { IRModule } from "@katari-lang/types";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
-import { boolean, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 import type { ModuleHash } from "../../runtime/ids.js";
 
 export const projects = pgTable("projects", {
@@ -45,19 +54,27 @@ export const modules = pgTable(
   (table) => [primaryKey({ columns: [table.projectId, table.hash] })],
 );
 
-export const snapshots = pgTable("snapshots", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  projectId: uuid("project_id")
-    .notNull()
-    .references(() => projects.id, { onDelete: "cascade" }),
-  /** This version's manifest: module name -> the `modules.hash` holding that module's IR. Resolved
-   *  through the module store at run time; the hashes are validated against `modules` on deploy. */
-  modules: jsonb("modules").$type<Record<string, ModuleHash>>().notNull(),
-  /** The bundled FFI/sidecar code for this version, if any. */
-  sidecarBundle: jsonb("sidecar_bundle"),
-  message: text("message").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const snapshots = pgTable(
+  "snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** This version's manifest: module name -> the `modules.hash` holding that module's IR. Resolved
+     *  through the module store at run time; the hashes are validated against `modules` on deploy. */
+    modules: jsonb("modules").$type<Record<string, ModuleHash>>().notNull(),
+    /** The bundled FFI/sidecar code for this version, if any. */
+    sidecarBundle: jsonb("sidecar_bundle"),
+    message: text("message").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Every read path (list / head / detail) filters by project; the PK is on `id` alone, so without
+    // this an unindexed `project_id` scan grows with every deploy across all projects.
+    index("snapshots_project_id_idx").on(table.projectId),
+  ],
+);
 
 export const envEntries = pgTable(
   "env_entries",
@@ -69,7 +86,10 @@ export const envEntries = pgTable(
     /** Plaintext, or AES-GCM ciphertext when `isSecret`. */
     value: text("value").notNull(),
     isSecret: boolean("is_secret").notNull().default(false),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
   },
   (table) => [primaryKey({ columns: [table.projectId, table.key] })],
 );

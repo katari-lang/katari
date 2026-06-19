@@ -11,8 +11,12 @@ export const config = {
   isProduction: env.NODE_ENV === "production",
   isDevelopment: env.NODE_ENV === "development",
   port: env.PORT,
+  host: env.HOST,
   logLevel: env.LOG_LEVEL,
   databaseUrl: env.DATABASE_URL,
+  // `*` for any origin, otherwise the parsed allowlist Hono's `cors` expects.
+  corsOrigin:
+    env.CORS_ORIGIN === "*" ? "*" : env.CORS_ORIGIN.split(",").map((origin) => origin.trim()),
 } as const;
 
 export type Config = typeof config;

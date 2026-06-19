@@ -3,6 +3,11 @@
 // engine-backed resources (run / escalation) compile against a fixed boundary; the bodies arrive with
 // the engine (implementation plan Phase 2+). Until then every call throws, so those resources return
 // a clean 501 instead of pretending to work.
+//
+// Boundary note: the wire carries raw `Json` (`argument` / `value`), but the engine and its persisted
+// columns speak the tagged `Value` model (e.g. `{ kind: "integer", value: 5 }`, not bare `5`). This
+// façade is where that `Json → Value` conversion (and `Value → Json` on the way out) must happen when
+// the engine lands; the raw `Json` must NOT be written straight into a `Value`-typed column.
 
 import type { Json } from "@katari-lang/types";
 import { NotImplementedError } from "../lib/errors.js";

@@ -11,8 +11,10 @@
 // map too). The other recursive leaf (a thread's variant state) likewise stays a typed JSON column.
 
 import type { Json } from "@katari-lang/types";
+import { sql } from "drizzle-orm";
 import {
   bigint,
+  check,
   index,
   integer,
   jsonb,
@@ -46,7 +48,14 @@ export const threads = pgTable(
     /** The kind-specific execution state (the `Thread` variant minus the columns above). */
     payload: jsonb("payload").$type<Json>().notNull(),
   },
-  (table) => [primaryKey({ columns: [table.projectId, table.instanceId, table.threadId] })],
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.instanceId, table.threadId] }),
+    check("threads_status_check", sql`${table.status} in ('running', 'cancelling')`),
+    check(
+      "threads_kind_check",
+      sql`${table.kind} in ('sequence', 'match', 'for', 'handle', 'parallel', 'delegate', 'external')`,
+    ),
+  ],
 );
 
 export const scopes = pgTable(

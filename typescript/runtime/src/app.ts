@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import { config } from "./config/index.js";
 import { success } from "./lib/response.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
@@ -19,7 +20,7 @@ export function createApp() {
   // Global middleware (order matters: context first so logging/ids are set).
   app.use("*", requestContext);
   app.use("*", secureHeaders());
-  app.use("*", cors());
+  app.use("*", cors({ origin: config.corsOrigin }));
 
   // Boundaries.
   app.onError(errorHandler);
