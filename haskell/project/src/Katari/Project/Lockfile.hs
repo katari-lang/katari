@@ -43,9 +43,30 @@ module Katari.Project.Lockfile
   )
 where
 
+import Control.Exception (IOException, try)
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import Katari.Project.Error (ProjectError)
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
+import GHC.List (List)
+import Katari.Project.Error
+  ( FileErrorInfo (..),
+    ParseErrorInfo (..),
+    ProjectError (..),
+    ValidationErrorInfo (..),
+  )
+import TOML
+  ( DecodeTOML (..),
+    decodeWith,
+    getField,
+    getFieldOpt,
+    getFields,
+    getFieldsOpt,
+    renderTOMLError,
+  )
 
 -- | Conventional filename, sibling to @katari.toml@.
 lockfileFilename :: FilePath
@@ -98,17 +119,136 @@ data SnapshotLock = SnapshotLock
   }
   deriving (Show, Eq)
 
+-- ===========================================================================
+-- Raw (pre-validation) decode target
+-- ===========================================================================
+
+-- | The @[packages.\<name>]@ table as decoded, before the per-@source@ field requirements are
+-- checked. Keeping the fields optional lets a missing @sha256@ on a git pin be reported as a
+-- 'LockfileValidationError' we phrase, not a generic decode error.
+data RawLockedPackage = RawLockedPackage
+  { source :: Text,
+    url :: Maybe Text,
+    rev :: Maybe Text,
+    sha256 :: Maybe Text,
+    path :: Maybe Text
+  }
+
+data RawLockfile = RawLockfile
+  { version :: Int,
+    snapshot :: Maybe Text,
+    packages :: Map Text RawLockedPackage
+  }
+
+instance DecodeTOML RawLockedPackage where
+  tomlDecoder =
+    RawLockedPackage
+      <$> getField "source"
+      <*> getFieldOpt "url"
+      <*> getFieldOpt "rev"
+      <*> getFieldOpt "sha256"
+      <*> getFieldOpt "path"
+
+instance DecodeTOML RawLockfile where
+  tomlDecoder =
+    RawLockfile
+      <$> getFields ["lock", "version"]
+      <*> getFieldsOpt ["lock", "snapshot"]
+      <*> (fromMaybe Map.empty <$> getFieldOpt "packages")
+
+-- ===========================================================================
+-- Parsing
+-- ===========================================================================
+
 -- | Parse the textual contents of @katari.lock@.
 parseLockfile :: FilePath -> Text -> Either ProjectError Lockfile
-parseLockfile = error "TODO: Katari.Project.Lockfile.parseLockfile"
+parseLockfile path text = case decodeWith tomlDecoder text of
+  Left tomlError ->
+    Left (LockfileParseError ParseErrorInfo {path = path, position = Nothing, message = renderTOMLError tomlError})
+  Right (raw :: RawLockfile) -> do
+    validatedPackages <- traverse (validateLockedPackage path) (Map.toList raw.packages)
+    pure Lockfile {version = raw.version, snapshot = raw.snapshot, packages = Map.fromList validatedPackages}
 
--- | Render a 'Lockfile' to deterministic, byte-stable TOML.
+-- | Turn one decoded @[packages.\<name>]@ table into a 'LockedPackage', enforcing the fields each
+-- @source@ variant requires.
+validateLockedPackage :: FilePath -> (Text, RawLockedPackage) -> Either ProjectError (Text, LockedPackage)
+validateLockedPackage path (name, raw) = do
+  source <- case raw.source of
+    "path" -> LockedPath . PathLock . Text.unpack <$> require name "path" raw.path
+    "git" -> LockedGit <$> (GitLock <$> require name "url" raw.url <*> require name "rev" raw.rev <*> require name "sha256" raw.sha256)
+    "snapshot" -> LockedSnapshot <$> (SnapshotLock <$> require name "url" raw.url <*> require name "rev" raw.rev <*> require name "sha256" raw.sha256)
+    other -> validationError ("package '" <> name <> "' has unknown source '" <> other <> "'")
+  pure (name, LockedPackage {name = name, source = source})
+  where
+    require packageName field =
+      maybe (validationError ("package '" <> packageName <> "' is missing required field '" <> field <> "'")) Right
+    validationError message =
+      Left (LockfileValidationError ValidationErrorInfo {path = path, position = Nothing, message = message})
+
+-- ===========================================================================
+-- Rendering
+-- ===========================================================================
+
+-- | Render a 'Lockfile' to deterministic, byte-stable TOML. Packages are emitted in ascending key
+-- order (@Map.toAscList@) so the same 'Lockfile' always produces identical bytes; the result
+-- round-trips through 'parseLockfile'.
 renderLockfile :: Lockfile -> Text
-renderLockfile = error "TODO: Katari.Project.Lockfile.renderLockfile"
+renderLockfile lockfile =
+  Text.unlines $
+    ["[lock]", "version = " <> Text.pack (show lockfile.version)]
+      <> maybe [] (\snapshotValue -> ["snapshot = " <> quote snapshotValue]) lockfile.snapshot
+      <> concatMap renderPackage (Map.toAscList lockfile.packages)
+
+renderPackage :: (Text, LockedPackage) -> List Text
+renderPackage (name, package) =
+  ["", "[packages." <> renderKey name <> "]"] <> renderSource package.source
+
+renderSource :: LockedSource -> List Text
+renderSource lockedSource = case lockedSource of
+  LockedPath lock ->
+    ["source = \"path\"", "path = " <> quote (Text.pack lock.location)]
+  LockedGit lock ->
+    ["source = \"git\"", "url = " <> quote lock.url, "rev = " <> quote lock.rev, "sha256 = " <> quote lock.sha]
+  LockedSnapshot lock ->
+    ["source = \"snapshot\"", "url = " <> quote lock.url, "rev = " <> quote lock.rev, "sha256 = " <> quote lock.sha]
+
+-- | A TOML key: a bare key when it is made of @[A-Za-z0-9_-]@, otherwise a quoted key.
+renderKey :: Text -> Text
+renderKey key
+  | not (Text.null key) && Text.all isBareKeyChar key = key
+  | otherwise = quote key
+  where
+    isBareKeyChar character =
+      isAsciiLower character
+        || isAsciiUpper character
+        || isDigit character
+        || character == '_'
+        || character == '-'
+
+-- | A TOML basic string literal: double-quoted, with backslash, quote, and control characters
+-- escaped.
+quote :: Text -> Text
+quote value = "\"" <> Text.concatMap escapeChar value <> "\""
+  where
+    escapeChar character = case character of
+      '\\' -> "\\\\"
+      '"' -> "\\\""
+      '\n' -> "\\n"
+      '\r' -> "\\r"
+      '\t' -> "\\t"
+      _ -> Text.singleton character
+
+-- ===========================================================================
+-- IO
+-- ===========================================================================
 
 loadLockfile :: FilePath -> IO (Either ProjectError Lockfile)
-loadLockfile = error "TODO: Katari.Project.Lockfile.loadLockfile"
+loadLockfile path = do
+  contents <- try (TextIO.readFile path)
+  pure $ case contents of
+    Left readError -> Left (LockfileIOError FileErrorInfo {path = path, message = Text.pack (show (readError :: IOException))})
+    Right text -> parseLockfile path text
 
 -- | Write a 'Lockfile' to @path@, overwriting any existing file.
 writeLockfile :: FilePath -> Lockfile -> IO ()
-writeLockfile = error "TODO: Katari.Project.Lockfile.writeLockfile"
+writeLockfile path lockfile = TextIO.writeFile path (renderLockfile lockfile)

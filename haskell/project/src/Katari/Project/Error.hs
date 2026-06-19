@@ -45,9 +45,10 @@ module Katari.Project.Error
 where
 
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.SourceSpan (Position)
+import Katari.Data.ModuleName (ModuleName, renderModuleName)
+import Katari.Data.SourceSpan (Position (..))
 
 -- ===========================================================================
 -- The root sum
@@ -241,4 +242,118 @@ data TarballErrorInfo = TarballErrorInfo
 
 -- | Render a 'ProjectError' as a single user-facing line (or a short block for sha mismatches).
 renderProjectError :: ProjectError -> Text
-renderProjectError = error "TODO: Katari.Project.Error.renderProjectError"
+renderProjectError projectError = case projectError of
+  -- Config (katari.toml) --------------------------------------------------------------------------
+  ConfigIOError info -> "Cannot read katari.toml: " <> renderFileError info
+  ConfigParseError info -> "Invalid katari.toml: " <> renderParseError info
+  ConfigValidationError info -> "Invalid katari.toml: " <> renderValidationError info
+  -- Discovery -------------------------------------------------------------------------------------
+  DuplicateModule info ->
+    "Module "
+      <> renderModuleName info.moduleName
+      <> " is defined by two files: "
+      <> Text.pack info.firstPath
+      <> " and "
+      <> Text.pack info.secondPath
+  -- Lockfile (katari.lock) ------------------------------------------------------------------------
+  LockfileIOError info -> "Cannot read katari.lock: " <> renderFileError info
+  LockfileParseError info -> "Invalid katari.lock: " <> renderParseError info
+  LockfileValidationError info -> "Invalid katari.lock: " <> renderValidationError info
+  -- Snapshot (registry package set) ---------------------------------------------------------------
+  SnapshotIOError info -> "Cannot read registry snapshot: " <> renderFileError info
+  SnapshotHttpError info -> "Cannot download registry snapshot: " <> renderHttpError info
+  SnapshotParseError info -> "Invalid registry snapshot: " <> renderParseError info
+  SnapshotValidationError info -> "Invalid registry snapshot: " <> renderValidationError info
+  SnapshotUnsupportedUrl info ->
+    "Unsupported registry URL scheme (only file:// and https:// are allowed): " <> info.url
+  -- Fetch (git tarball) ---------------------------------------------------------------------------
+  FetchHttpError info -> "Cannot download dependency: " <> renderHttpError info
+  FetchTarballError info ->
+    "Cannot extract dependency tarball from " <> info.url <> ": " <> info.message
+  FetchInvalidHost info ->
+    "Unsupported dependency host (only GitHub archive URLs are supported): " <> info.url
+  -- Resolve (dependency graph) --------------------------------------------------------------------
+  ResolveCycle info ->
+    "Dependency cycle: " <> Text.intercalate " -> " info.cycle
+  ResolveMissingConfig info ->
+    "Path dependency "
+      <> info.dependency
+      <> " has no katari.toml at "
+      <> Text.pack info.path
+  ResolveAmbiguousDependency info ->
+    "Dependency "
+      <> info.dependency
+      <> " resolves to two different packages: "
+      <> Text.pack info.firstRoot
+      <> " and "
+      <> Text.pack info.secondRoot
+  ResolveInvalidPackageName info ->
+    "Package name "
+      <> info.name
+      <> " is not a valid Katari identifier ([A-Za-z_][A-Za-z0-9_]*)"
+  ResolveReservedPackageName info ->
+    "Package name " <> info.name <> " is reserved by the compiler (the primitive/stdlib namespace)"
+  ResolveModuleCollision info ->
+    "Module "
+      <> renderModuleName info.moduleName
+      <> " is provided by two packages: "
+      <> info.firstPackage
+      <> " and "
+      <> info.secondPackage
+  ResolveOutOfNamespace info ->
+    "Package "
+      <> info.package
+      <> " provides module "
+      <> renderModuleName info.moduleName
+      <> ", which is outside its "
+      <> info.package
+      <> " namespace"
+  ResolveDependencyNameMismatch info ->
+    "Dependency declared as "
+      <> info.declaredKey
+      <> " but its [package].name is "
+      <> info.actualName
+  ResolveUnresolvedDependency info ->
+    "Dependency "
+      <> info.dependency
+      <> " has no override and no registry snapshot pin"
+  ResolveLockfileOutOfDate info ->
+    "Dependency "
+      <> info.dependency
+      <> " is in katari.toml but missing from katari.lock; run `katari apply`"
+  ResolvePackageNotCached info ->
+    "Dependency "
+      <> info.dependency
+      <> " is not in the cache ("
+      <> Text.pack info.expectedPath
+      <> "); run `katari apply`"
+  ResolveShaMismatch info ->
+    "Dependency "
+      <> info.dependency
+      <> " failed its content-hash check:\n  expected "
+      <> info.expected
+      <> "\n  actual   "
+      <> info.actual
+
+-- | @path@, optionally suffixed with @:line:column@ when a 'Position' is known.
+renderLocation :: FilePath -> Maybe Position -> Text
+renderLocation path maybePosition = case maybePosition of
+  Nothing -> Text.pack path
+  Just position ->
+    Text.pack path
+      <> ":"
+      <> Text.pack (show position.line)
+      <> ":"
+      <> Text.pack (show position.column)
+
+renderFileError :: FileErrorInfo -> Text
+renderFileError info = Text.pack info.path <> ": " <> info.message
+
+renderParseError :: ParseErrorInfo -> Text
+renderParseError info = renderLocation info.path info.position <> ": " <> info.message
+
+renderValidationError :: ValidationErrorInfo -> Text
+renderValidationError info = renderLocation info.path info.position <> ": " <> info.message
+
+renderHttpError :: HttpErrorInfo -> Text
+renderHttpError info = info.url <> ": " <> info.message

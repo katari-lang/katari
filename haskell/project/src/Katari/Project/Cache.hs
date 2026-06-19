@@ -24,6 +24,9 @@ module Katari.Project.Cache
 where
 
 import Data.Text (Text)
+import Data.Text qualified as Text
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
 
 -- | Resolved on-disk paths rooted at the project's @.katari/@ directory.
 data CachePaths = CachePaths
@@ -35,13 +38,24 @@ data CachePaths = CachePaths
 
 -- | Build 'CachePaths' for a given project root directory.
 projectCachePaths :: FilePath -> CachePaths
-projectCachePaths = error "TODO: Katari.Project.Cache.projectCachePaths"
+projectCachePaths projectRoot =
+  CachePaths
+    { root = cacheRoot,
+      packages = cacheRoot </> "packages",
+      snapshots = cacheRoot </> "snapshots"
+    }
+  where
+    cacheRoot = projectRoot </> ".katari"
 
--- | Create every cache directory on demand. Safe to call repeatedly.
+-- | Create every cache directory on demand. Safe to call repeatedly. @createDirectoryIfMissing True@
+-- also makes @.katari/@ itself, so the three calls together cover the whole tree.
 ensureCacheDirs :: CachePaths -> IO ()
-ensureCacheDirs = error "TODO: Katari.Project.Cache.ensureCacheDirs"
+ensureCacheDirs paths = do
+  createDirectoryIfMissing True paths.root
+  createDirectoryIfMissing True paths.packages
+  createDirectoryIfMissing True paths.snapshots
 
 -- | Package source directory: @\<packages>/\<name>-\<sha256>@. The @name@ is the dependency name and
 -- @sha@ the hex content hash that uniquely identifies the source tree.
 packageDir :: CachePaths -> Text -> Text -> FilePath
-packageDir = error "TODO: Katari.Project.Cache.packageDir"
+packageDir paths name sha = paths.packages </> Text.unpack (name <> "-" <> sha)
