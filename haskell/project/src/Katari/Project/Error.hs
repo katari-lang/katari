@@ -36,7 +36,11 @@ module Katari.Project.Error
 
     -- * IO helpers
     readFileOrError,
+    loadAndParse,
     formatException,
+
+    -- * Validation
+    validationError,
 
     -- * Rendering
     renderProjectError,
@@ -81,8 +85,6 @@ data ProjectError
     ResolveCycle DependencyCycleInfo
   | -- | A path dependency points at a directory with no @katari.toml@.
     ResolveMissingConfig MissingConfigInfo
-  | -- | A package name is not a valid Katari identifier.
-    ResolveInvalidPackageName PackageNameInfo
   | -- | A package name collides with the compiler-reserved @primitive@ / stdlib namespace, so the
     -- compiler would reject its modules with K2008. Caught here, where the user can act on it,
     -- rather than surfacing as a confusing error against the dependency's own source.
@@ -219,9 +221,33 @@ readFileOrError toError path = do
     Left ioException -> Left (toError FileErrorInfo {path = path, message = formatException (ioException :: IOException)})
     Right text -> Right text
 
+-- | Read a project file and parse it, threading the failure of either step into a 'ProjectError'.
+-- @toIOError@ names the read failure (e.g. 'ConfigIOError'); @parse@ does the rest. This is the one
+-- home of the "load @katari.toml@ / @katari.lock@ / a snapshot from disk" pattern, so the config,
+-- lockfile, and snapshot loaders share a single shape and cannot drift.
+loadAndParse ::
+  (FileErrorInfo -> ProjectError) ->
+  (FilePath -> Text -> Either ProjectError a) ->
+  FilePath ->
+  IO (Either ProjectError a)
+loadAndParse toIOError parse path = do
+  contents <- readFileOrError toIOError path
+  pure (contents >>= parse path)
+
 -- | A human-readable one-line rendering of an exception, for an error message.
 formatException :: (Exception e) => e -> Text
 formatException = Text.pack . displayException
+
+-- ===========================================================================
+-- Validation
+-- ===========================================================================
+
+-- | Report a cross-field validation failure of a file, phrasing it as the caller's own
+-- @*ValidationError@ (the same constructor-injection trick 'readFileOrError' uses). One home for the
+-- "this file decoded but breaks a rule we enforce" shape shared by the config, lockfile, and snapshot
+-- validators.
+validationError :: (FileErrorInfo -> ProjectError) -> FilePath -> Text -> Either ProjectError a
+validationError toError path message = Left (toError FileErrorInfo {path = path, message = message})
 
 -- ===========================================================================
 -- Rendering
@@ -262,8 +288,6 @@ renderProjectError projectError = case projectError of
   ResolveCycle info -> "Dependency cycle: " <> Text.intercalate " -> " info.cycle
   ResolveMissingConfig info ->
     "Path dependency " <> info.dependency <> " has no katari.toml at " <> Text.pack info.path
-  ResolveInvalidPackageName info ->
-    "Package name " <> info.name <> " is not a valid Katari identifier ([A-Za-z_][A-Za-z0-9_]*)"
   ResolveReservedPackageName info ->
     "Package name " <> info.name <> " is reserved by the compiler (the primitive/stdlib namespace)"
   ResolveModuleCollision info ->

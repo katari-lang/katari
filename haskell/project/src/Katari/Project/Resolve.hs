@@ -61,7 +61,6 @@ import Katari.Project.Config
     PackageSection (..),
     PathOverride (..),
     ProjectConfig (..),
-    isValidPackageName,
     loadKatariToml,
   )
 import Katari.Project.Discovery
@@ -372,11 +371,12 @@ assembleProject project = do
   merged <- foldM mergeEntry Map.empty (rootEntries <> concat dependencyEntryGroups)
   pure (ProjectAssembly {sources = Map.map snd merged})
 
--- | Validate one dependency package and return its (module, (owner, entry)) contributions.
+-- | Validate one dependency package and return its (module, (owner, entry)) contributions. The
+-- dependency name is already a valid identifier by construction (every key reaching here came through
+-- 'Katari.Project.Config.requireValidPackageName' or the lockfile's own name validation), so the only
+-- name check left is the one the parsers cannot make: collision with the compiler-reserved namespace.
 validateDependencyPackage :: (Text, ResolvedPackage) -> Either ProjectError (List (ModuleName, (Text, SourceEntry)))
 validateDependencyPackage (name, package) = do
-  unless (isValidPackageName name) $
-    Left (ResolveInvalidPackageName PackageNameInfo {name = name})
   when (isReservedModuleName (ModuleName name)) $
     Left (ResolveReservedPackageName PackageNameInfo {name = name})
   unless (package.config.package.name == name) $

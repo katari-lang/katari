@@ -32,6 +32,7 @@ module Katari.Project.Lockfile
     lockfileFilename,
     lockfileFormatVersion,
     isSha256Hex,
+    requireSha256Hex,
     parseLockfile,
     renderLockfile,
     loadLockfile,
@@ -48,11 +49,12 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
-import Katari.Project.Config (isValidPackageName)
+import Katari.Project.Config (requireValidPackageName)
 import Katari.Project.Error
-  ( FileErrorInfo (..),
+  ( FileErrorInfo,
     ProjectError (..),
-    readFileOrError,
+    loadAndParse,
+    validationError,
   )
 import TOML
   ( DecodeTOML (..),
@@ -169,23 +171,19 @@ instance DecodeTOML RawLockfile where
 -- | Parse the textual contents of @katari.lock@.
 parseLockfile :: FilePath -> Text -> Either ProjectError Lockfile
 parseLockfile path text = case decodeWith tomlDecoder text of
-  Left tomlError ->
-    Left (LockfileParseError FileErrorInfo {path = path, message = renderTOMLError tomlError})
+  Left tomlError -> validationError LockfileParseError path (renderTOMLError tomlError)
   Right (raw :: RawLockfile) -> do
     -- The version exists to gate incompatible format changes; an unrecognised one must fail loudly
     -- rather than be misread as v1 (which would silently ignore any newer fields).
     unless (raw.version == lockfileFormatVersion) $
-      Left
-        ( LockfileValidationError
-            FileErrorInfo
-              { path = path,
-                message =
-                  "unsupported lockfile version "
-                    <> Text.pack (show raw.version)
-                    <> " (this tool understands version "
-                    <> Text.pack (show lockfileFormatVersion)
-                    <> "); regenerate with `katari apply`"
-              }
+      validationError
+        LockfileValidationError
+        path
+        ( "unsupported lockfile version "
+            <> Text.pack (show raw.version)
+            <> " (this tool understands version "
+            <> Text.pack (show lockfileFormatVersion)
+            <> "); regenerate with `katari apply`"
         )
     validatedPackages <- traverse (validateLockedPackage path) (Map.toList raw.packages)
     pure Lockfile {version = raw.version, snapshot = raw.snapshot, packages = Map.fromList validatedPackages}
@@ -194,27 +192,38 @@ parseLockfile path text = case decodeWith tomlDecoder text of
 -- @source@ variant requires. The name is validated first (it becomes a cache-directory path), and a
 -- git pin's @sha256@ must be a well-formed hash (it likewise keys the content-addressed cache).
 validateLockedPackage :: FilePath -> (Text, RawLockedPackage) -> Either ProjectError (Text, LockedSource)
-validateLockedPackage path (name, raw)
-  | not (isValidPackageName name) =
-      validationError ("package name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")
-  | raw.source == tagPath = do
-      location <- require keyPath raw.path
-      pure (name, LockedPath PathLock {location = Text.unpack location})
-  | raw.source == tagGit = do
-      gitSource <- GitSource <$> require keyUrl raw.url <*> require keyRev raw.rev <*> require keySha256 raw.sha256
-      unless (isSha256Hex gitSource.sha) $
-        validationError ("package '" <> name <> "' has a malformed sha256 (expected 64 hex characters): " <> gitSource.sha)
-      pure (name, LockedGit gitSource)
-  | otherwise = validationError ("package '" <> name <> "' has unknown source '" <> raw.source <> "'")
+validateLockedPackage path (name, raw) = do
+  requireValidPackageName LockfileValidationError path name
+  source <- decodeSource
+  pure (name, source)
   where
+    decodeSource
+      | raw.source == tagPath = LockedPath . PathLock . Text.unpack <$> require keyPath raw.path
+      | raw.source == tagGit = do
+          url <- require keyUrl raw.url
+          rev <- require keyRev raw.rev
+          sha <- requireSha256Hex LockfileValidationError path name =<< require keySha256 raw.sha256
+          pure (LockedGit GitSource {url = url, rev = rev, sha = sha})
+      | otherwise = invalid ("package '" <> name <> "' has unknown source '" <> raw.source <> "'")
     require field =
-      maybe (validationError ("package '" <> name <> "' is missing required field '" <> field <> "'")) Right
-    validationError message = Left (LockfileValidationError FileErrorInfo {path = path, message = message})
+      maybe (invalid ("package '" <> name <> "' is missing required field '" <> field <> "'")) Right
+    invalid = validationError LockfileValidationError path
 
 -- | A SHA-256 content hash as the lockfile and snapshot store it: exactly 64 hex digits. Shared with
 -- "Katari.Project.Snapshot", which records the same hashes, so the two parsers agree on the format.
 isSha256Hex :: Text -> Bool
 isSha256Hex value = Text.length value == 64 && Text.all isHexDigit value
+
+-- | Validate a sha256 hex string and return its canonical /lowercase/ form. External hashes (a
+-- snapshot file, a hand-edited lock) may arrive uppercase, but 'Katari.Project.Hash.sha256Hex' only
+-- ever emits lowercase; normalising on the way in is what lets 'Katari.Project.Resolve.checkPinnedSha'
+-- compare a pin against a freshly computed hash, and keeps the content-addressed cache directory name
+-- ('Katari.Project.Cache.packageDir') stable regardless of how the hash was written down.
+requireSha256Hex :: (FileErrorInfo -> ProjectError) -> FilePath -> Text -> Text -> Either ProjectError Text
+requireSha256Hex toError path name value
+  | isSha256Hex value = Right (Text.toLower value)
+  | otherwise =
+      validationError toError path ("package '" <> name <> "' has a malformed sha256 (expected 64 hex characters): " <> value)
 
 -- ===========================================================================
 -- Rendering
@@ -284,9 +293,7 @@ quote value = "\"" <> Text.concatMap escapeChar value <> "\""
 -- ===========================================================================
 
 loadLockfile :: FilePath -> IO (Either ProjectError Lockfile)
-loadLockfile path = do
-  contents <- readFileOrError LockfileIOError path
-  pure (contents >>= parseLockfile path)
+loadLockfile = loadAndParse LockfileIOError parseLockfile
 
 -- | Write a 'Lockfile' to @path@, overwriting any existing file.
 writeLockfile :: FilePath -> Lockfile -> IO ()

@@ -156,34 +156,44 @@ buildModuleMap = foldM insertEntry Map.empty
               )
       _ -> Right (Map.insert moduleName entry accumulated)
 
--- | Recursively collect every @.ktr@ file under @dir@, guarding against symlink cycles by tracking
--- canonicalised directories already visited. Descends into each subdirectory by its /canonical/ path,
--- so every returned file path is canonical (and overlay shadowing in 'scanSourcesFromDir' needs no
--- further canonicalisation). The result is sorted for deterministic ordering.
+-- | Recursively collect every @.ktr@ file under @dir@, guarding against symlink cycles (tracking the
+-- canonical directories already visited) and against symlinks that escape @dir@ (a directory or file
+-- is kept only when its /canonical/ path stays under the root). This is what makes 'validateSourceDir'
+-- a real guarantee: a @src/@ symlink pointing at @/etc@ cannot pull foreign @.ktr@ files into the
+-- package. Returns canonical paths, sorted for deterministic ordering, so overlay shadowing in
+-- 'scanSourcesFromDir' needs no further canonicalisation.
 collectKtrFiles :: FilePath -> IO (List FilePath)
 collectKtrFiles dir = do
   exists <- doesDirectoryExist dir
   if not exists
     then pure []
     else do
-      canonical <- canonicalizePath dir
-      sort . snd <$> walk (Set.singleton canonical) canonical
+      root <- canonicalizePath dir
+      sort . snd <$> walk root (Set.singleton root) root
   where
-    walk visited current = do
+    walk root visited current = do
       names <- listDirectory current
-      foldM (step current) (visited, []) names
-    step current (visited, accumulated) name = do
+      foldM (step root current) (visited, []) names
+    step root current (visited, accumulated) name = do
       let fullPath = current </> name
       isDirectory <- doesDirectoryExist fullPath
       if isDirectory
         then do
           canonical <- canonicalizePath fullPath
-          if Set.member canonical visited
+          -- Skip a directory already visited (symlink cycle) or one whose real location escapes the
+          -- root (a symlink out of the tree).
+          if Set.member canonical visited || not (isUnder root canonical)
             then pure (visited, accumulated)
             else do
-              (visited', nested) <- walk (Set.insert canonical visited) canonical
+              (visited', nested) <- walk root (Set.insert canonical visited) canonical
               pure (visited', nested <> accumulated)
         else
           if takeExtension fullPath == ktrExtension
-            then pure (visited, fullPath : accumulated)
+            then do
+              -- Resolve the file too, so a symlinked @.ktr@ pointing outside the root is dropped
+              -- rather than read.
+              canonical <- canonicalizePath fullPath
+              if isUnder root canonical
+                then pure (visited, canonical : accumulated)
+                else pure (visited, accumulated)
             else pure (visited, accumulated)

@@ -49,6 +49,7 @@ module Katari.Project.Config
     loadKatariToml,
     parseKatariToml,
     isValidPackageName,
+    requireValidPackageName,
   )
 where
 
@@ -61,9 +62,10 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Project.Error
-  ( FileErrorInfo (..),
+  ( FileErrorInfo,
     ProjectError (..),
-    readFileOrError,
+    loadAndParse,
+    validationError,
   )
 import System.FilePath (isAbsolute, splitDirectories)
 import TOML
@@ -210,15 +212,12 @@ instance DecodeTOML RawOverride where
 
 -- | Read @katari.toml@ from disk, parse, and validate.
 loadKatariToml :: FilePath -> IO (Either ProjectError ProjectConfig)
-loadKatariToml path = do
-  contents <- readFileOrError ConfigIOError path
-  pure (contents >>= parseKatariToml path)
+loadKatariToml = loadAndParse ConfigIOError parseKatariToml
 
 -- | Parse the textual contents of @katari.toml@.
 parseKatariToml :: FilePath -> Text -> Either ProjectError ProjectConfig
 parseKatariToml path text = case decodeWith tomlDecoder text of
-  Left tomlError ->
-    Left (ConfigParseError FileErrorInfo {path = path, message = renderTOMLError tomlError})
+  Left tomlError -> validationError ConfigParseError path (renderTOMLError tomlError)
   Right (rawConfig :: RawConfig) -> validateConfig path rawConfig
 
 -- | Apply the cross-field rules a 'Decoder' cannot express: the source dir stays inside the project,
@@ -227,7 +226,7 @@ parseKatariToml path text = case decodeWith tomlDecoder text of
 validateConfig :: FilePath -> RawConfig -> Either ProjectError ProjectConfig
 validateConfig path rawConfig = do
   validateSourceDir path rawConfig.package.src
-  mapM_ (validatePackageName path) rawConfig.dependencies.packages
+  mapM_ (requireValidPackageName ConfigValidationError path) rawConfig.dependencies.packages
   validatedOverrides <-
     traverse (validateOverride path rawConfig.dependencies.packages) (Map.toList rawConfig.overrides)
   pure
@@ -245,35 +244,37 @@ validateConfig path rawConfig = do
 validateSourceDir :: FilePath -> FilePath -> Either ProjectError ()
 validateSourceDir path src =
   when (isAbsolute src || ".." `elem` splitDirectories src) $
-    Left (ConfigValidationError FileErrorInfo {path = path, message = "[package].src must be a relative path inside the project (got " <> Text.pack src <> ")"})
+    validationError ConfigValidationError path ("[package].src must be a relative path inside the project (got " <> Text.pack src <> ")")
 
--- | Reject a declared dependency name that is not a valid identifier. Validating it here, where it
--- enters from the file, keeps an unsanitised name from ever reaching 'Katari.Project.Cache.packageDir'
--- (which interpolates it into a filesystem path) or a network fetch.
-validatePackageName :: FilePath -> Text -> Either ProjectError ()
-validatePackageName path name =
+-- | Require a name to be a valid package identifier, phrasing the failure as the caller's own
+-- validation error. Shared by the config, lockfile, and snapshot validators: each gates a name that
+-- becomes a 'Katari.Project.Cache.packageDir' path segment and the literal an @import@ resolves to,
+-- so an unsanitised name must never reach a filesystem path or a network fetch.
+requireValidPackageName :: (FileErrorInfo -> ProjectError) -> FilePath -> Text -> Either ProjectError ()
+requireValidPackageName toError path name =
   unless (isValidPackageName name) $
-    Left (ConfigValidationError FileErrorInfo {path = path, message = "dependency name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)"})
+    validationError toError path ("package name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")
 
 -- | Resolve one @[overrides.\<name>]@ entry into its 'OverrideSource', or report why it is malformed:
 -- it must target a declared dependency and set path XOR git (with rev only on git).
 validateOverride :: FilePath -> List Text -> (Text, RawOverride) -> Either ProjectError (Text, OverrideSource)
 validateOverride path declared (name, rawOverride)
-  | name `notElem` declared = validationError ("override '" <> name <> "' names no dependency in [dependencies].packages")
+  | name `notElem` declared = invalid ("override '" <> name <> "' names no dependency in [dependencies].packages")
   | otherwise = case (rawOverride.path, rawOverride.git) of
-      (Just _, Just _) -> validationError ("override '" <> name <> "' sets both path and git; choose one")
+      (Just _, Just _) -> invalid ("override '" <> name <> "' sets both path and git; choose one")
       (Just pathValue, Nothing) -> case rawOverride.rev of
-        Just _ -> validationError ("override '" <> name <> "' sets rev, which is only valid with git")
+        Just _ -> invalid ("override '" <> name <> "' sets rev, which is only valid with git")
         Nothing -> Right (name, OverridePath PathOverride {path = Text.unpack pathValue})
       (Nothing, Just gitValue) -> case rawOverride.rev of
-        Nothing -> validationError ("git override '" <> name <> "' requires a rev (full commit SHA)")
+        Nothing -> invalid ("git override '" <> name <> "' requires a rev (full commit SHA)")
         Just revValue
           | not (isCommitSha revValue) ->
-              validationError ("git override '" <> name <> "' rev must be a full 40-char commit SHA, not '" <> revValue <> "'")
-          | otherwise -> Right (name, OverrideGit GitOverride {url = gitValue, rev = revValue})
-      (Nothing, Nothing) -> validationError ("override '" <> name <> "' must set either path or git")
+              invalid ("git override '" <> name <> "' rev must be a full 40-char commit SHA, not '" <> revValue <> "'")
+          -- Stored lowercased so the cache hint (matched on rev) and the archive URL stay canonical.
+          | otherwise -> Right (name, OverrideGit GitOverride {url = gitValue, rev = Text.toLower revValue})
+      (Nothing, Nothing) -> invalid ("override '" <> name <> "' must set either path or git")
   where
-    validationError message = Left (ConfigValidationError FileErrorInfo {path = path, message = message})
+    invalid = validationError ConfigValidationError path
 
 -- | A full git commit SHA: exactly 40 hex digits. A git override carries no separate content hash, so
 -- its 'rev' is the only thing pinning reproducibility — a mutable tag or branch here would silently
