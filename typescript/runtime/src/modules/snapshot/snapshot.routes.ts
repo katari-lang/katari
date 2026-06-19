@@ -1,14 +1,11 @@
 import { Hono } from "hono";
+import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
-import { rejectReservedModuleNames } from "./snapshot.middleware.js";
-import {
-  deploySnapshotSchema,
-  projectIdParamSchema,
-  snapshotParamSchema,
-} from "./snapshot.schema.js";
+import { screenRawDeployBody } from "./snapshot.middleware.js";
+import { deploySnapshotSchema, snapshotParamSchema } from "./snapshot.schema.js";
 import { snapshotService } from "./snapshot.service.js";
 
 // `/snapshots/head` is registered before `/snapshots/:snapshotId` so the literal segment wins.
@@ -16,7 +13,7 @@ export const snapshotRoutes = new Hono<AppEnv>()
   .post(
     "/projects/:projectId/snapshots",
     requireJsonBody,
-    rejectReservedModuleNames,
+    screenRawDeployBody,
     zValidator("param", projectIdParamSchema),
     zValidator("json", deploySnapshotSchema),
     async (c) => {

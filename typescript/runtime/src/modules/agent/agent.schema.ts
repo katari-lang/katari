@@ -4,10 +4,9 @@
 import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
-export { projectIdParamSchema };
-
-export const listAgentsQuerySchema = z.object({
-  /** Which snapshot's agents to list; defaults to the project head when omitted. */
+// Shared by both reads (list agents and fetch one): which snapshot to read from, defaulting to the
+// project head when omitted, so the two endpoints are scoped identically.
+export const agentSnapshotQuerySchema = z.object({
   snapshotId: z.uuid().optional(),
 });
 

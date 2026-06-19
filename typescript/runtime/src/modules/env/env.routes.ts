@@ -1,9 +1,10 @@
 import { Hono } from "hono";
+import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
-import { envKeyParamSchema, projectIdParamSchema, setEnvSchema } from "./env.schema.js";
+import { envKeyParamSchema, setEnvSchema } from "./env.schema.js";
 import { envService } from "./env.service.js";
 
 export const envRoutes = new Hono<AppEnv>()

@@ -4,8 +4,6 @@
 import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
-export { projectIdParamSchema };
-
 export const setEnvSchema = z.object({
   value: z.string(),
   isSecret: z.boolean().optional(),

@@ -4,6 +4,4 @@
 import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
-export { projectIdParamSchema };
-
 export const fileParamSchema = projectIdParamSchema.extend({ fileId: z.uuid() });

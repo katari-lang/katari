@@ -5,8 +5,6 @@ import type { Json } from "@katari-lang/types";
 import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
-export { projectIdParamSchema };
-
 // `z.custom<Json>()` with no predicate accepts anything — including a missing key (parsed as
 // `undefined`) — so an answer payload could silently arrive empty. Require the key to be present.
 export const answerEscalationSchema = z.object({

@@ -1,8 +1,9 @@
 import { Hono } from "hono";
+import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import type { AppEnv } from "../../types/app-env.js";
-import { fileParamSchema, projectIdParamSchema } from "./file.schema.js";
+import { fileParamSchema } from "./file.schema.js";
 import { fileService } from "./file.service.js";
 
 export const fileRoutes = new Hono<AppEnv>()

@@ -5,8 +5,6 @@ import type { Json } from "@katari-lang/types";
 import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
-export { projectIdParamSchema };
-
 export const startRunSchema = z.object({
   qualifiedName: z.string().min(1),
   name: z.string().optional(),

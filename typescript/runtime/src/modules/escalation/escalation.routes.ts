@@ -1,13 +1,10 @@
 import { Hono } from "hono";
+import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
-import {
-  answerEscalationSchema,
-  escalationParamSchema,
-  projectIdParamSchema,
-} from "./escalation.schema.js";
+import { answerEscalationSchema, escalationParamSchema } from "./escalation.schema.js";
 import { escalationService } from "./escalation.service.js";
 
 export const escalationRoutes = new Hono<AppEnv>()

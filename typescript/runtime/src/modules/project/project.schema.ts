@@ -2,8 +2,6 @@
 
 import { z } from "zod";
 
-export { projectIdParamSchema } from "../../lib/params.js";
-
 export const createProjectSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),

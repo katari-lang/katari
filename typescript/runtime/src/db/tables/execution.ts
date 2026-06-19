@@ -7,8 +7,12 @@
 // row, not a column on the instance — a child carries only its `delegation_id` (which correlates its
 // `delegateAck`, e.g. when one parent runs several delegates in parallel), and the parent is recovered
 // through `delegations.caller_instance_id`. `target` holds the agent reference `(qname, snapshot) |
-// closure`; `snapshotId` is the version denormalised out of it for the FK (ON DELETE NO ACTION, so a
-// snapshot a running instance/run still references cannot be deleted).
+// closure`; `snapshotId` is the version denormalised out of it for the FK.
+//
+// Snapshot retention: a *running* version is pinned by `instances.snapshotId` (ON DELETE NO ACTION) —
+// that, plus `projects.head_snapshot_id`, is what keeps a live snapshot undeletable. A finished run's
+// `runs.snapshotId` is only audit, so it is ON DELETE SET NULL: it must NOT keep every version a run
+// ever touched alive forever, or future snapshot GC could never reclaim anything.
 
 import { sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -65,6 +69,8 @@ export const instances = pgTable(
   },
   (table) => [
     index("instances_project_id_idx").on(table.projectId),
+    // `set null` on delegation delete must find the referencing instances without scanning the table.
+    index("instances_delegation_id_idx").on(table.delegationId),
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
   ],
 );
@@ -116,7 +122,14 @@ export const escalations = pgTable(
     state: text("state").$type<EscalationState>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [check("escalations_state_check", sql`${table.state} in ('open')`)],
+  (table) => [
+    // `GET /projects/:projectId/escalations` lists open escalations by project.
+    index("escalations_project_id_idx").on(table.projectId),
+    // Cascade on raiser delete must find these rows by owner without a table scan (parity with
+    // `scopes`/`blobs`, which index `owner_instance_id` for the same reason).
+    index("escalations_raiser_instance_id_idx").on(table.raiserInstanceId),
+    check("escalations_state_check", sql`${table.state} in ('open')`),
+  ],
 );
 
 /** The API module's per-run management record (1:1 with a run's instance). Reflects the run's outcome. */
@@ -130,9 +143,9 @@ export const runs = pgTable(
     /** The run's CORE instance; nullable + set-null because that instance self-deletes at its terminal
      *  while this durable run record survives to hold the outcome. */
     instanceId: uuid("instance_id").references(() => instances.id, { onDelete: "set null" }),
-    snapshotId: uuid("snapshot_id")
-      .notNull()
-      .references(() => snapshots.id),
+    /** The version this run executed. Audit-only and nullable: a running run is pinned via its
+     *  `instances.snapshotId`, so once it finishes this reference may go null if the snapshot is GC'd. */
+    snapshotId: uuid("snapshot_id").references(() => snapshots.id, { onDelete: "set null" }),
     name: text("name").notNull(),
     qualifiedName: text("qualified_name").notNull(),
     argument: jsonb("argument").$type<Value | null>(),
@@ -149,6 +162,8 @@ export const runs = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
   },
   (table) => [
+    // `GET /projects/:projectId/runs` lists runs by project.
+    index("runs_project_id_idx").on(table.projectId),
     check("runs_state_check", sql`${table.state} in ('running', 'cancelling', 'done', 'error')`),
   ],
 );

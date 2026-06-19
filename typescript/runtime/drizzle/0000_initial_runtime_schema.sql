@@ -84,7 +84,7 @@ CREATE TABLE "runs" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"project_id" uuid NOT NULL,
 	"instance_id" uuid,
-	"snapshot_id" uuid NOT NULL,
+	"snapshot_id" uuid,
 	"name" text NOT NULL,
 	"qualified_name" text NOT NULL,
 	"argument" jsonb,
@@ -150,7 +150,7 @@ ALTER TABLE "instances" ADD CONSTRAINT "instances_snapshot_id_snapshots_id_fk" F
 ALTER TABLE "run_escalations_audit" ADD CONSTRAINT "run_escalations_audit_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_instance_id_instances_id_fk" FOREIGN KEY ("instance_id") REFERENCES "public"."instances"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "runs" ADD CONSTRAINT "runs_snapshot_id_snapshots_id_fk" FOREIGN KEY ("snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_snapshot_id_snapshots_id_fk" FOREIGN KEY ("snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "env_entries" ADD CONSTRAINT "env_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "modules" ADD CONSTRAINT "modules_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "projects" ADD CONSTRAINT "projects_head_snapshot_id_snapshots_id_fk" FOREIGN KEY ("head_snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
@@ -158,5 +158,9 @@ ALTER TABLE "snapshots" ADD CONSTRAINT "snapshots_project_id_projects_id_fk" FOR
 CREATE INDEX "blobs_owner_instance_id_idx" ON "blobs" USING btree ("owner_instance_id");--> statement-breakpoint
 CREATE INDEX "scopes_owner_instance_id_idx" ON "scopes" USING btree ("owner_instance_id");--> statement-breakpoint
 CREATE INDEX "delegations_caller_instance_id_idx" ON "delegations" USING btree ("caller_instance_id");--> statement-breakpoint
+CREATE INDEX "escalations_project_id_idx" ON "escalations" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "escalations_raiser_instance_id_idx" ON "escalations" USING btree ("raiser_instance_id");--> statement-breakpoint
 CREATE INDEX "instances_project_id_idx" ON "instances" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "instances_delegation_id_idx" ON "instances" USING btree ("delegation_id");--> statement-breakpoint
+CREATE INDEX "runs_project_id_idx" ON "runs" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");

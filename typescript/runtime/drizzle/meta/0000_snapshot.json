@@ -1,5 +1,5 @@
 {
-  "id": "3bf97a3d-648d-4957-be65-fd41f7eebb6d",
+  "id": "5bf46746-d884-4e96-9918-e76538b4202c",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -490,7 +490,38 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "escalations_project_id_idx": {
+          "name": "escalations_project_id_idx",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "escalations_raiser_instance_id_idx": {
+          "name": "escalations_raiser_instance_id_idx",
+          "columns": [
+            {
+              "expression": "raiser_instance_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "escalations_project_id_projects_id_fk": {
           "name": "escalations_project_id_projects_id_fk",
@@ -598,6 +629,21 @@
           "columns": [
             {
               "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "instances_delegation_id_idx": {
+          "name": "instances_delegation_id_idx",
+          "columns": [
+            {
+              "expression": "delegation_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -754,7 +800,7 @@
           "name": "snapshot_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "name": {
           "name": "name",
@@ -819,7 +865,23 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "runs_project_id_idx": {
+          "name": "runs_project_id_idx",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "runs_project_id_projects_id_fk": {
           "name": "runs_project_id_projects_id_fk",
@@ -857,7 +919,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
