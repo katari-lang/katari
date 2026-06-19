@@ -991,6 +991,37 @@ substituteGenericArgument substitution genericArgument = case genericArgument of
   NormalizedKindedTypeAttribute attribute -> NormalizedKindedTypeAttribute <$> substituteAttribute substitution attribute
 
 ------------------------------------------------------------------------------------------------
+-- Observable attribute
+------------------------------------------------------------------------------------------------
+
+-- | Join every attribute observable through a value into one: the node's own attribute together with
+-- those of every value it can yield. This is the comonadic "world" of the value — observing a @W a@
+-- (a call argument, a match scrutinee) and producing a result must carry that world into the result,
+-- so the checker folds it here once rather than re-deriving it per use site. A function contributes
+-- only its result's attributes; its argument is contravariant (caller-supplied), so a private
+-- parameter does not taint what a pure application of the function yields.
+foldAttribute :: NormalizedType -> NormalizedAttribute
+foldAttribute normalizedType = case normalizedType.baseType of
+  NormalizedBaseTypeUnknown -> normalizedType.attribute
+  NormalizedBaseTypeLayered layer -> joinAttribute normalizedType.attribute (foldLayerAttribute layer)
+
+foldLayerAttribute :: LayeredType -> NormalizedAttribute
+foldLayerAttribute layer =
+  foldr joinAttribute bottomAttribute $
+    concat
+      [ maybe [] (\function -> [foldAttribute function.returnType]) layer.functionLayer,
+        maybe [] (\sequence -> foldAttribute sequence.rest : fmap foldAttribute sequence.items) layer.sequenceLayer,
+        maybe [] (\object -> foldAttribute object.rest : fmap (foldAttribute . (.normalizedType)) (Map.elems object.fields)) layer.objectLayer,
+        [foldKindedAttribute argument | arguments <- Map.elems layer.dataLayer, argument <- Map.elems arguments]
+      ]
+
+foldKindedAttribute :: NormalizedKindedType -> NormalizedAttribute
+foldKindedAttribute = \case
+  NormalizedKindedTypeType normalizedType -> foldAttribute normalizedType
+  NormalizedKindedTypeAttribute attribute -> attribute
+  NormalizedKindedTypeEffect _ -> bottomAttribute
+
+------------------------------------------------------------------------------------------------
 -- Denormalization (normalized -> display-oriented semantic)
 ------------------------------------------------------------------------------------------------
 

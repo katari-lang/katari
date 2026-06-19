@@ -61,7 +61,7 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Normalizer (boundedType, denormalize, denormalizeEffect, denormalizeGenericArgument, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (boundedType, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -528,8 +528,12 @@ maybeReadField sourceSpan fieldName valueType = do
   raised <- raiseToBounds sourceSpan valueType
   case raised.baseType of
     NormalizedBaseTypeLayered layer
-      | isJust layer.objectLayer || not (Map.null layer.dataLayer) ->
-          Just <$> fieldOfLayer sourceSpan fieldName layer
+      | isJust layer.objectLayer || not (Map.null layer.dataLayer) -> do
+          fieldType <- fieldOfLayer sourceSpan fieldName layer
+          -- A field is observed through its container, so the container's own attribute joins the
+          -- field's: reading @.x@ off a value private at the handle yields a private field (no
+          -- laundering). Nested reads compose — each step lifts by the immediate container's attribute.
+          pure (Just (liftByAttribute raised.attribute fieldType))
     _ -> pure Nothing
 
 -- | The type of a field read from a value's layer: the union over its structural object (if any) and
@@ -674,8 +678,15 @@ synthCallExpression expression = do
           bottomType
         )
     Just (functionAttribute, function) -> do
-      (typedArgs, argumentType, liftAttribute) <- synthCallArguments expression.arguments
+      (typedArgs, argumentType, argumentAttribute) <- synthCallArguments expression.arguments
       let pureCall = isPureEffect function.effect
+          -- A pure call may cross attribute worlds by lifting: the function value's own attribute and
+          -- every argument's attribute join into the world the result is observed through, so both the
+          -- expected parameter and the result are lifted by it. Thus a pure private agent called in a
+          -- public context yields a private result, and a private argument is accepted by an otherwise
+          -- public pure parameter. A non-pure (monadic) call cannot be lifted across worlds, so its
+          -- types are used as-is and the function must already be callable in the current world.
+          liftAttribute = joinAttribute functionAttribute argumentAttribute
           (effectiveParameter, effectiveReturn) =
             if pureCall
               then
@@ -770,7 +781,7 @@ synthCallArguments arguments = do
         foldr
           joinAttribute
           bottomAttribute
-          [collectAttributeUnion normalizedType | (_, _, normalizedType) <- entries]
+          [foldAttribute normalizedType | (_, _, normalizedType) <- entries]
   pure (typedArguments, object, liftAmount)
   where
     synthEntry argument = do
@@ -783,53 +794,6 @@ synthCallArguments arguments = do
                 sourceSpan = argument.sourceSpan
               }
       pure (typedArg, argument.name, normalizedType)
-
-collectAttributeUnion :: NormalizedType -> NormalizedAttribute
-collectAttributeUnion normalizedType = case normalizedType.baseType of
-  NormalizedBaseTypeUnknown -> normalizedType.attribute
-  NormalizedBaseTypeLayered layer ->
-    joinAttribute normalizedType.attribute (collectLayerAttributes layer)
-
-collectLayerAttributes :: LayeredType -> NormalizedAttribute
-collectLayerAttributes layer =
-  foldr
-    joinAttribute
-    bottomAttribute
-    [ maybe bottomAttribute collectFunctionAttributes layer.functionLayer,
-      maybe bottomAttribute collectSequenceAttributes layer.sequenceLayer,
-      maybe bottomAttribute collectObjectAttributes layer.objectLayer,
-      collectDataAttributes layer.dataLayer
-    ]
-
--- | A function value's observable privacy flows only from what it can produce — its result. The
--- argument is contravariant (the caller supplies it), so a private parameter does not make a pure
--- call's result private and must not be collected.
-collectFunctionAttributes :: NormalizedFunction -> NormalizedAttribute
-collectFunctionAttributes function = collectAttributeUnion function.returnType
-
-collectSequenceAttributes :: NormalizedSequence -> NormalizedAttribute
-collectSequenceAttributes normalizedSequence =
-  joinAttribute
-    (foldr (joinAttribute . collectAttributeUnion) bottomAttribute normalizedSequence.items)
-    (collectAttributeUnion normalizedSequence.rest)
-
-collectObjectAttributes :: NormalizedObject -> NormalizedAttribute
-collectObjectAttributes normalizedObject =
-  joinAttribute
-    (foldr joinAttribute bottomAttribute [collectAttributeUnion field.normalizedType | field <- Map.elems normalizedObject.fields])
-    (collectAttributeUnion normalizedObject.rest)
-
-collectDataAttributes :: Map QualifiedName (Map Text NormalizedKindedType) -> NormalizedAttribute
-collectDataAttributes =
-  foldr joinAttribute bottomAttribute
-    . concatMap (fmap collectKindedAttribute . Map.elems)
-    . Map.elems
-
-collectKindedAttribute :: NormalizedKindedType -> NormalizedAttribute
-collectKindedAttribute = \case
-  NormalizedKindedTypeType normalizedType -> collectAttributeUnion normalizedType
-  NormalizedKindedTypeAttribute attribute -> attribute
-  NormalizedKindedTypeEffect _ -> bottomAttribute
 
 isPureEffect :: NormalizedEffect -> Bool
 isPureEffect = \case
@@ -1086,11 +1050,16 @@ checkPattern pattern scrutinee = case pattern of
     let maybeLocal = case variablePattern.variableReference.resolution of
           Just (VariableResolutionLocalVariable localId) -> Just localId
           _ -> Nothing
-    (coverType, bindingType, retaggedAnnotation) <- case variablePattern.typeAnnotation of
-      Nothing -> pure (topType, scrutinee, Nothing)
+    (bindingType, retaggedAnnotation) <- case variablePattern.typeAnnotation of
+      Nothing -> pure (scrutinee, Nothing)
       Just annotation -> do
         annotatedType <- elaborateAndNormalizeType annotation
-        pure (annotatedType, annotatedType, Just (retagSyntacticTypeExpression annotation))
+        -- A variable pattern always matches, so its declared type must accept every value the scrutinee
+        -- can take: @scrutinee <: annotation@ (an @(x: integer)@ arm over a @number@ scrutinee is
+        -- rejected). The annotation does not narrow the match — the cover stays @top@ (below), leaving
+        -- @never@ for later arms; only a type-filter @T(x)@ refutably narrows.
+        runNormalizer variablePattern.sourceSpan (subtype scrutinee annotatedType)
+        pure (annotatedType, Just (retagSyntacticTypeExpression annotation))
     checkParameterDefault bindingType variablePattern.defaultValue
     semantic <- denormalizeAt variablePattern.sourceSpan bindingType
     pure
@@ -1103,7 +1072,7 @@ checkPattern pattern scrutinee = case pattern of
               sourceSpan = variablePattern.sourceSpan,
               typeOf = semantic
             },
-        coverType,
+        topType,
         bindingsFor maybeLocal bindingType
       )
   PatternLiteral literalPattern -> do
@@ -1247,7 +1216,9 @@ extractTupleElementTypes sourceSpan scrutinee count = do
   pure $ case raised.baseType of
     NormalizedBaseTypeLayered layer
       | Just normalizedSequence <- layer.sequenceLayer ->
-          take count (normalizedSequence.items <> repeat normalizedSequence.rest)
+          -- The fixed prefix positions are present; a position past it may be absent at runtime, so it
+          -- reads as @rest | null@ (an array's tail is @T@ ~> @T | null@, a tuple's is @never@ ~> @null@).
+          take count (normalizedSequence.items <> repeat (orNull normalizedSequence.rest))
     _ -> replicate count topType
 
 checkFieldPattern ::
@@ -1298,14 +1269,28 @@ synthMatchExpression expression = do
   where
     processCase scrutType arm = do
       (typedPattern, cover, bindings) <- checkPattern arm.pattern scrutType
-      (typedBody, bodyType) <- withParameters bindings (synthBlock arm.body)
+      (armEffect, (typedBody, bodyType)) <-
+        withEffectInference (withParameters bindings (synthBlock arm.body))
+      -- Branching observes the scrutinee, so its world flows like a pure call's: a pure arm carries the
+      -- scrutinee's attribute into its result (matching a private value in a pure arm yields a private
+      -- result), while a non-pure arm cannot be lifted across worlds — the scrutinee must already be
+      -- observable in the current world (its attribute <: world) — and its effect is re-emitted into
+      -- the enclosing scope.
+      let scrutineeAttribute = foldAttribute scrutType
+      resultType <-
+        if isPureEffect armEffect
+          then pure (liftByAttribute scrutineeAttribute bodyType)
+          else do
+            runNormalizer arm.sourceSpan (subtype scrutineeAttribute bottomAttribute)
+            emitEffect arm.sourceSpan armEffect
+            pure bodyType
       let typedArm =
             CaseArm
               { pattern = typedPattern,
                 body = typedBody,
                 sourceSpan = arm.sourceSpan
               }
-      pure (cover, bodyType, typedArm)
+      pure (cover, resultType, typedArm)
     combineUnion accumulator next = runNormalizer expression.sourceSpan (union accumulator next)
 
 ------------------------------------------------------------------------------------------------
@@ -1503,9 +1488,6 @@ synthHandlerExpression expression = do
       handlerType
     )
 
--- | Walk a handler's @then@ finalizer: its binder matches the handler result @R@, its body type must
--- be @<: R@, and its inferred effect is bounded by the residual effect @E@. Walked inside the handler's
--- @var@ state scope (the finalizer reads the accumulated state).
 -- | Check a @then@ clause's optional binder against the type it matches — the @for@ result array, or
 -- a handler's result @R@ — yielding the typed binder and its bindings.
 checkThenBinder ::
@@ -1518,6 +1500,9 @@ checkThenBinder matchedType = \case
     (typedPattern, _, bindings) <- checkPattern binder matchedType
     pure (Just typedPattern, bindings)
 
+-- | Walk a handler's @then@ finalizer: its binder matches the handler result @R@, its body type must
+-- be @<: R@, and its inferred effect is bounded by the residual effect @E@. Walked inside the handler's
+-- @var@ state scope (the finalizer reads the accumulated state).
 walkHandlerThenClause ::
   NormalizedType ->
   NormalizedEffect ->
@@ -1808,12 +1793,21 @@ synthAgent declaration = do
 synthAgentType :: AgentDeclaration Identified -> Checker NormalizedType
 synthAgentType = fmap ((.valueType) . snd) . synthAgent
 
--- | A recursive-group member's seed return type and effect: its required annotations, an absent one
--- defaulting to bottom (the missing-annotation diagnostic is raised in 'seedAgentType'). Shared by the
--- seed scheme and the body check so the two agree by construction.
-seedReturnEffect :: AgentPreparation -> (NormalizedType, NormalizedEffect)
+-- | A recursive-group member's seed return type and effect, used both to build its seed scheme and to
+-- check its body so the two agree by construction.
+data SeededSignature = SeededSignature
+  { returnType :: NormalizedType,
+    effect :: NormalizedEffect
+  }
+
+-- | The seed return type and effect of a recursive-group member: its required annotations, an absent
+-- one defaulting to bottom (the missing-annotation diagnostic is raised in 'seedAgentType').
+seedReturnEffect :: AgentPreparation -> SeededSignature
 seedReturnEffect preparation =
-  (fromMaybe bottomType preparation.annotatedReturnType, fromMaybe bottomEffect preparation.annotatedEffect)
+  SeededSignature
+    { returnType = fromMaybe bottomType preparation.annotatedReturnType,
+      effect = fromMaybe bottomEffect preparation.annotatedEffect
+    }
 
 -- | The seed scheme of one member of a recursive group, from its (required) return / effect
 -- annotations. Takes the member's 'prepareAgent' result so the parameters are not elaborated twice
@@ -1824,18 +1818,18 @@ seedAgentType declaration preparation = do
     reportMissingAnnotation declaration.sourceSpan ("agent `" <> declaration.name <> "` in a recursive group requires an explicit return type")
   when (isNothing declaration.effects) $
     reportMissingAnnotation declaration.sourceSpan ("agent `" <> declaration.name <> "` in a recursive group requires an explicit effect annotation")
-  let (returnType, effect) = seedReturnEffect preparation
+  let seeded = seedReturnEffect preparation
   pure
     Scheme
       { genericParameters = preparation.genericParameters,
-        valueType = assembleAgent preparation.outerAttribute preparation.parameterObject returnType effect
+        valueType = assembleAgent preparation.outerAttribute preparation.parameterObject seeded.returnType seeded.effect
       }
 
 -- | Check one recursive-group member's body against its seed return type / effect (the same the seed
 -- scheme is built from, via 'seedReturnEffect'), reusing its 'prepareAgent' result.
 checkAgentBody :: AgentDeclaration Identified -> AgentPreparation -> Checker (AgentDeclaration Typed)
 checkAgentBody declaration preparation = do
-  let (returnType, effect) = seedReturnEffect preparation
+  let seeded = seedReturnEffect preparation
   -- The return type is annotated (recursive groups require it), so the collected returns are
   -- discarded; 'withReturnInference' only scopes the accumulator so it does not leak across members.
   (_, (inferredEffect, typedBody)) <-
@@ -1844,9 +1838,9 @@ checkAgentBody declaration preparation = do
       $ withGenerics preparation.genericParameters
         . withWorld preparation.declaredAttribute
         . withParameters preparation.parameterBindings
-        . withReturnTarget returnType
-      $ checkBlock declaration.body returnType
-  runNormalizer declaration.sourceSpan (subtype inferredEffect effect)
+        . withReturnTarget seeded.returnType
+      $ checkBlock declaration.body seeded.returnType
+  runNormalizer declaration.sourceSpan (subtype inferredEffect seeded.effect)
   pure (assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody)
 
 ------------------------------------------------------------------------------------------------
@@ -1921,10 +1915,9 @@ checkConstructorDefaults :: GenericParameters -> NormalizedType -> List (Paramet
 checkConstructorDefaults genericParameters parameterObject parameters =
   withGenerics genericParameters (mapM_ checkOne parameters)
   where
-    checkOne signature = case (signature.defaultValue, fieldTypeOf signature.name) of
-      (Just parameterDefault, Just fieldType) ->
-        runNormalizer parameterDefault.sourceSpan (subtype (synthLiteralValue parameterDefault.value) fieldType)
-      _ -> pure ()
+    checkOne signature = case fieldTypeOf signature.name of
+      Just fieldType -> checkParameterDefault fieldType signature.defaultValue
+      Nothing -> pure ()
     fieldTypeOf name = case parameterObject.baseType of
       NormalizedBaseTypeLayered layer | Just object <- layer.objectLayer -> Just (objectFieldType object name)
       _ -> Nothing
@@ -1981,19 +1974,24 @@ patternTypeAnnotation = \case
   PatternTypeFilter typeFilterPattern -> Just typeFilterPattern.matchedType
   _ -> Nothing
 
--- | Check a binding-site pattern that must declare its own type. 'checkPattern' against 'topType'
--- both produces the typed pattern + bindings (destructuring included) and computes the pattern's
--- cover, which — because the pattern pins its type via an annotation — is exactly the declared type.
--- A missing annotation is reported and the cover degrades to 'topType'.
+-- | Check a binding-site pattern that must declare its own type (an agent parameter, a @use@ binder).
+-- The declared type is the pattern's annotation, and it is also the scrutinee the pattern is checked
+-- against: a variable binder's "must accept every value" obligation then holds trivially, while a
+-- type-filter binder still narrows its inner pattern. A missing annotation is reported and the type
+-- degrades to the pattern's cover (itself 'topType' for a bare binder).
 checkAnnotatedBinder ::
   Text ->
   Pattern Identified ->
   Checker (NormalizedType, Pattern Typed, List (LocalVariableId, Scheme))
-checkAnnotatedBinder reason pattern = do
-  when (isNothing (patternTypeAnnotation pattern)) $
+checkAnnotatedBinder reason pattern = case patternTypeAnnotation pattern of
+  Nothing -> do
     reportMissingAnnotation (sourceSpanOf pattern) reason
-  (typedPattern, declaredType, bindings) <- checkPattern pattern topType
-  pure (declaredType, typedPattern, bindings)
+    (typedPattern, cover, bindings) <- checkPattern pattern topType
+    pure (cover, typedPattern, bindings)
+  Just annotation -> do
+    declaredType <- elaborateAndNormalizeType annotation
+    (typedPattern, _, bindings) <- checkPattern pattern declaredType
+    pure (declaredType, typedPattern, bindings)
 
 -- | Build the parameter object type, per-parameter bindings, and per-parameter Typed nodes. Each
 -- parameter's @label => pattern@ is checked as an annotated binder, so destructuring parameters are

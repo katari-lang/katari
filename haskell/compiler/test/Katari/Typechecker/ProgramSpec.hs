@@ -83,6 +83,54 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "a generic's own `extends` bound does not resolve to itself (K2001)" $
     allErrorCodes [("test", "agent foo[a extends a](x: a) -> a { x }")] `shouldContain` ["K2001"]
 
+  -- Attribute soundness: a pure private agent is callable in a public context, but its result is
+  -- private, so it cannot be laundered back to public.
+  it "rejects returning a pure private agent's result as public (K3001)" $
+    typeErrorCodes [("test", "private agent secret() -> integer { 1 }\nagent leak() -> integer { secret() }")] `shouldContain` ["K3001"]
+
+  it "accepts a pure private agent's result inside a private agent" $
+    typeErrorCodes [("test", "private agent secret() -> integer { 1 }\nprivate agent ok() -> integer { secret() }")] `shouldBe` []
+
+  -- A field read is observed through its container, so a field of a private value is itself private.
+  it "rejects using a field read off a private value as public (K3001)" $
+    typeErrorCodes [("test", "data point(x: integer)\nprivate agent make() -> point { point(x = 1) }\nagent f() -> integer { make().x }")] `shouldContain` ["K3001"]
+
+  it "accepts a field read off a private value inside a private agent" $
+    typeErrorCodes [("test", "data point(x: integer)\nprivate agent make() -> point { point(x = 1) }\nprivate agent f() -> integer { make().x }")] `shouldBe` []
+
+  -- A variable pattern always matches; its annotation must be a supertype of the scrutinee, and it
+  -- does not narrow the match (a wildcard fallback cannot rescue a too-narrow binder).
+  it "rejects a variable pattern whose annotation is narrower than the scrutinee (K3001)" $
+    typeErrorCodes [("test", "agent f(e: number) -> integer { match (e) { case x: integer -> 0 } }")] `shouldContain` ["K3001"]
+
+  it "rejects the narrow variable pattern even with a wildcard fallback (K3001)" $
+    typeErrorCodes [("test", "agent f(e: number) -> integer { match (e) { case x: integer -> 0\ncase _ -> 1 } }")] `shouldContain` ["K3001"]
+
+  it "accepts a variable pattern whose annotation is a supertype of the scrutinee" $
+    typeErrorCodes [("test", "agent f(e: integer) -> integer { match (e) { case x: number -> 0 } }")] `shouldBe` []
+
+  -- A match observes its scrutinee: a pure arm carries the scrutinee's privacy into the result.
+  it "rejects a match whose pure arm launders a private scrutinee to public (K3001)" $
+    typeErrorCodes [("test", "private agent sec() -> integer { 1 }\nagent f() -> integer { match (sec()) { case _ -> 0 } }")] `shouldContain` ["K3001"]
+
+  it "accepts a private match result inside a private agent" $
+    typeErrorCodes [("test", "private agent sec() -> integer { 1 }\nprivate agent f() -> integer { match (sec()) { case _ -> 0 } }")] `shouldBe` []
+
+  -- A non-pure arm cannot be lifted across worlds, so a private scrutinee requires a private world.
+  it "rejects a non-pure arm matching a private scrutinee in a public world (K3001)" $
+    typeErrorCodes [("test", "request tick() -> integer\nprivate agent sec() -> integer { 1 }\nagent f() -> integer { match (sec()) { case _ -> tick() } }")] `shouldContain` ["K3001"]
+
+  it "accepts a non-pure arm matching a private scrutinee inside a private agent" $
+    typeErrorCodes [("test", "request tick() -> integer\nprivate agent sec() -> integer { 1 }\nprivate agent f() -> integer { match (sec()) { case _ -> tick() } }")] `shouldBe` []
+
+  -- Destructuring positions past the fixed prefix may be absent, so they read as @T | null@.
+  it "rejects using an out-of-range tuple-pattern position as non-null (K3001)" $
+    typeErrorCodes [("test", "agent f(arr: array[number]) -> number { match (arr) { case [a, b, c] -> c\ncase _ -> 0 } }")] `shouldContain` ["K3001"]
+
+  -- A bounded application written inside another declaration's `extends` bound is itself checked.
+  it "rejects a bound violation written inside another type's extends bound (K3001)" $
+    typeErrorCodes [("test", "data B[U extends number](u: U)\ndata A[T extends B[string]](t: T)")] `shouldContain` ["K3001"]
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

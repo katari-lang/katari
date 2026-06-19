@@ -394,9 +394,10 @@ runNormalize environment sourceSpan action =
    in (result, foldMap (diagnosticAt sourceSpan . CompilerErrorType) errors)
 
 -- | Normalize every elaborated shape into its 'TypeEnvironment' entry. The variance is already
--- inferred; the bounds are normalized and stamped first, then each declaration's shape is normalized
--- with the bounded environment in force, so a bounded application written in a field / return type is
--- checked the same way as one in an agent annotation ('checkApplicationBounds').
+-- inferred; the bounds are normalized and stamped first, then re-checked and each declaration's shape
+-- normalized with the bounded environment in force, so a bounded application is checked the same way
+-- wherever it is written — in a field / return type, an agent annotation, or another @extends@ bound
+-- ('checkApplicationBounds').
 normalizeAll :: ElaborateContext -> Map GenericId Variance -> ElaboratedShapes -> (TypeEnvironment, Diagnostics)
 normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics <> dataDiagnostics <> requestDiagnostics <> synonymDiagnostics)
   where
@@ -421,30 +422,39 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
         [(item, parameters) | (item, parameters, _) <- stampedData]
         [(item, parameters) | (item, parameters, _) <- stampedRequests]
 
-    -- Normalize a declaration's collected @extends@ bounds and stamp each onto its parameters'
-    -- 'upperBound'; an unbounded or failed-to-elaborate parameter keeps 'Nothing'.
-    stampBoundsFor qualifiedName sourceSpan parameters =
+    -- Normalize a declaration's collected @extends@ bounds in @environment@ and stamp each onto its
+    -- parameters' 'upperBound'; an unbounded or failed-to-elaborate parameter keeps 'Nothing'.
+    stampBoundsIn environment qualifiedName sourceSpan parameters =
       let semanticBounds = Map.mapMaybe id (Map.findWithDefault mempty qualifiedName shapes.boundShapes)
-          (normalizedBounds, diagnostics) = runNormalize preliminaryEnvironment sourceSpan (traverse normalizeGenericArgument semanticBounds)
+          (normalizedBounds, diagnostics) = runNormalize environment sourceSpan (traverse normalizeGenericArgument semanticBounds)
        in (parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}, diagnostics)
 
-    boundedData = [(item, semantic, stampBoundsFor item.qualifiedName item.sourceSpan parameters) | (item, parameters, semantic) <- stampedData]
-    boundedRequests = [(item, payload, stampBoundsFor item.qualifiedName item.sourceSpan parameters) | (item, parameters, payload) <- stampedRequests]
-    boundedSynonyms = [(item, body, stampBoundsFor item.qualifiedName item.sourceSpan parameters) | (item, parameters, body) <- stampedSynonyms]
-    boundDiagnostics =
-      foldMap (\(_, _, (_, diagnostics)) -> diagnostics) boundedData
-        <> foldMap (\(_, _, (_, diagnostics)) -> diagnostics) boundedRequests
-        <> foldMap (\(_, _, (_, diagnostics)) -> diagnostics) boundedSynonyms
+    -- First pass: stamp bounds against the variance-only environment. A bound's normalized /value/ does
+    -- not depend on any declaration's bounds (only its bound /checks/ do), so these stamped parameters
+    -- are final; their diagnostics are incomplete — a bounded application written inside a bound is not
+    -- yet checked — and are discarded.
+    preStampedData = [(item, fst (stampBoundsIn preliminaryEnvironment item.qualifiedName item.sourceSpan parameters), semantic) | (item, parameters, semantic) <- stampedData]
+    preStampedRequests = [(item, fst (stampBoundsIn preliminaryEnvironment item.qualifiedName item.sourceSpan parameters), payload) | (item, parameters, payload) <- stampedRequests]
+    preStampedSynonyms = [(item, fst (stampBoundsIn preliminaryEnvironment item.qualifiedName item.sourceSpan parameters), body) | (item, parameters, body) <- stampedSynonyms]
 
-    -- The environment carrying the stamped bounds: normalizing a declaration's shape now checks every
-    -- bounded application it writes. Each declaration normalizes with its own generics in scope (with
-    -- their bounds), so a self- or sibling-reference like @data Foo[T extends number](next: Bar[T])@
-    -- resolves @T@ to its bound rather than spuriously failing the check.
+    -- The environment carrying every declaration's stamped bounds: normalizing a declaration's shape now
+    -- checks every bounded application it writes. Each declaration normalizes with its own generics in
+    -- scope (with their bounds), so a self- or sibling-reference like @data Foo[T extends number](next:
+    -- Bar[T])@ resolves @T@ to its bound rather than spuriously failing the check.
     boundedEnvironment =
       environmentOver
-        [(item, parameters) | (item, _, (parameters, _)) <- boundedData]
-        [(item, parameters) | (item, _, (parameters, _)) <- boundedRequests]
+        [(item, parameters) | (item, parameters, _) <- preStampedData]
+        [(item, parameters) | (item, parameters, _) <- preStampedRequests]
     inScope parameters = boundedEnvironment {genericsInScope = Map.fromList [(info.genericId, info) | info <- Map.elems parameters.parameterInformation]}
+
+    -- Second pass: re-normalize each declaration's bounds with the bounded environment (its own generics
+    -- in scope), so a bounded application written /inside/ an @extends@ bound is itself bound-checked
+    -- ('checkApplicationBounds'). The stamped values are unchanged from the first pass; only these
+    -- now-complete diagnostics are kept.
+    boundDiagnostics =
+      foldMap (\(item, parameters, _) -> snd (stampBoundsIn (inScope parameters) item.qualifiedName item.sourceSpan parameters)) preStampedData
+        <> foldMap (\(item, parameters, _) -> snd (stampBoundsIn (inScope parameters) item.qualifiedName item.sourceSpan parameters)) preStampedRequests
+        <> foldMap (\(item, parameters, _) -> snd (stampBoundsIn (inScope parameters) item.qualifiedName item.sourceSpan parameters)) preStampedSynonyms
 
     normalizeData item parameters semantic =
       let (constructor, diagnostics) = runNormalize (inScope parameters) item.sourceSpan (normalizeConstructor semantic)
@@ -461,9 +471,9 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
           (definition, diagnostics) = runNormalize (inScope parameters) item.sourceSpan (normalizeGenericArgument semantic)
        in (SynonymInformation {name = item.qualifiedName, genericParameters = parameters, definition = definition}, diagnostics)
 
-    (dataInfos, dataDiagnostics) = unzipDiagnostics [normalizeData item parameters semantic | (item, semantic, (parameters, _)) <- boundedData]
-    (requestInfos, requestDiagnostics) = unzipDiagnostics [normalizeRequest item parameters payload | (item, payload, (parameters, _)) <- boundedRequests]
-    (synonymInfos, synonymDiagnostics) = unzipDiagnostics [normalizeSynonym item parameters body | (item, body, (parameters, _)) <- boundedSynonyms]
+    (dataInfos, dataDiagnostics) = unzipDiagnostics [normalizeData item parameters semantic | (item, parameters, semantic) <- preStampedData]
+    (requestInfos, requestDiagnostics) = unzipDiagnostics [normalizeRequest item parameters payload | (item, parameters, payload) <- preStampedRequests]
+    (synonymInfos, synonymDiagnostics) = unzipDiagnostics [normalizeSynonym item parameters body | (item, parameters, body) <- preStampedSynonyms]
 
     environment =
       TypeEnvironment
