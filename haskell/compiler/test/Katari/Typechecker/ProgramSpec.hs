@@ -179,6 +179,37 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects a pure call observing a value private in a covariant data position (K3001)" $
     typeErrorCodes [("test", "data Box[T](value: T)\nagent observe(b: Box[integer of private]) -> integer { 0 }\nagent caller(b: Box[integer of private]) -> integer { observe(b = b) }")] `shouldContain` ["K3001"]
 
+  -- A shape inspector (field read / iteration / destructure) requires the value to be /solely/ the
+  -- shape it reads: a @... | null@ (or otherwise mixed) union is rejected (K3014), so the dropped
+  -- member can no longer surface as a non-null result. A call already demanded a lone function.
+  it "rejects reading a field off a nullable object union (K3014)" $
+    typeErrorCodes [("test", "agent f(r: {x: integer} | null) -> integer { r.x }")] `shouldContain` ["K3014"]
+
+  it "accepts reading a field shared by every member of an object union" $
+    typeErrorCodes [("test", "agent f(r: {x: integer} | {x: integer, y: integer}) -> integer { r.x }")] `shouldBe` []
+
+  it "rejects iterating a nullable array union (K3014)" $
+    typeErrorCodes [("test", "agent f(xs: array[integer] | null) -> array[integer] { for (x in xs) { next x } }")] `shouldContain` ["K3014"]
+
+  -- Exhaustiveness is base-type coverage, not observation, so an exhaustive non-wildcard match over a
+  -- private scrutinee is accepted (the public covers are compared ignoring attributes).
+  it "accepts an exhaustive match over a private scrutinee" $
+    typeErrorCodes [("test", "private agent sec() -> boolean { true }\nagent f() -> boolean of private { match (sec()) { case true -> true\ncase false -> false } }")] `shouldBe` []
+
+  it "still rejects a non-exhaustive match (K3001)" $
+    typeErrorCodes [("test", "agent f(b: boolean) -> integer { match (b) { case true -> 1 } }")] `shouldContain` ["K3001"]
+
+  -- A handler request body is deferred, and a @then@ finalizer runs once after its construct, so
+  -- neither may @return@ to the enclosing agent: such a jump is misplaced (K3012).
+  it "rejects a `return` inside a handler request body (K3012)" $
+    typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { let h = handler[integer, all] { request tick() -> integer { return 5 } }\nreturn 0 }")] `shouldContain` ["K3012"]
+
+  it "rejects a `return` inside a `for` then clause (K3012)" $
+    typeErrorCodes [("test", "agent f() -> integer { for (x in [1]) { next x } then (r) { return 0 } }")] `shouldContain` ["K3012"]
+
+  it "rejects a `return` inside a handler then clause (K3012)" $
+    typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } } then (r) { return r }\nreturn 0 }")] `shouldContain` ["K3012"]
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

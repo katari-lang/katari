@@ -64,6 +64,7 @@ import Katari.Typechecker.Context
     withReturnInference,
     withReturnTarget,
     withWorld,
+    withoutJumpTargets,
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
@@ -454,7 +455,10 @@ synthFieldAccessExpression expression = do
 -- shape to read from. Shared by field-access expressions and record-pattern field scrutinees.
 maybeReadField :: SourceSpan -> Text -> NormalizedType -> Checker (Maybe NormalizedType)
 maybeReadField sourceSpan fieldName valueType = do
-  raised <- raisedLayer sourceSpan valueType
+  -- A field read requires the value to be solely object / data shaped: a @{x: T} | null@ (or
+  -- @… | number@) value is not read through, so the dropped @null@ can no longer surface as a
+  -- non-null field type.
+  raised <- soleLayer sourceSpan (Set.fromList [ObjectKind, DataKind]) valueType
   case raised of
     Just (attribute, layer)
       | isJust layer.objectLayer || not (Map.null layer.dataLayer) -> do
@@ -641,28 +645,58 @@ raisedLayer sourceSpan normalizedType = do
     NormalizedBaseTypeLayered layer -> Just (raised.attribute, layer)
     NormalizedBaseTypeUnknown -> Nothing
 
--- | View a value as a callable function, raising its generics to their bounds first. The raised type
--- is callable exactly when its base is a lone function layer (every bound has been folded into the
--- base, so the residual generics set is ignored).
-extractFunction :: SourceSpan -> NormalizedType -> Checker (Maybe (NormalizedAttribute, NormalizedFunction))
-extractFunction sourceSpan normalizedType = do
+-- | The structural shapes a layered type inhabits. A shape inspector requires a value to be /only/
+-- the shape it reads, so a value also carrying @null@ (or another union member outside the expected
+-- shape — a @... | null@ union) is rejected rather than silently read through.
+data LayerKind
+  = NullKind
+  | NumberKind
+  | StringKind
+  | BooleanKind
+  | FileKind
+  | FunctionKind
+  | SequenceKind
+  | ObjectKind
+  | DataKind
+  deriving (Eq, Ord, Show)
+
+-- | Every shape the layered type actually inhabits.
+inhabitedKinds :: LayeredType -> Set.Set LayerKind
+inhabitedKinds layer =
+  Set.fromList $
+    concat
+      [ [NullKind | layer.nullLayer],
+        [NumberKind | layer.numberLayer /= NumberSlotAbsent],
+        [StringKind | layer.stringLayer],
+        [BooleanKind | not (Set.null layer.booleanLayer)],
+        [FileKind | layer.fileLayer],
+        [FunctionKind | isJust layer.functionLayer],
+        [SequenceKind | isJust layer.sequenceLayer],
+        [ObjectKind | isJust layer.objectLayer],
+        [DataKind | not (Map.null layer.dataLayer)]
+      ]
+
+-- | Like 'raisedLayer', but yields the layer only when every shape the value inhabits is among
+-- @allowed@ — so a value that is also @null@ (or any union member outside the expected shape) yields
+-- 'Nothing' instead of being read through. The single home of the "this value is solely the shape I
+-- inspect" rule every shape inspector ('extractFunction', 'maybeReadField', 'extractIterableElementType',
+-- 'extractTupleElementTypes') shares, so none of them can forget it and unsoundly drop a @null@.
+soleLayer :: SourceSpan -> Set.Set LayerKind -> NormalizedType -> Checker (Maybe (NormalizedAttribute, LayeredType))
+soleLayer sourceSpan allowed normalizedType = do
   raised <- raisedLayer sourceSpan normalizedType
   pure $ case raised of
-    Just (attribute, layer)
-      | Just function <- layer.functionLayer,
-        isLoneFunctionLayer layer ->
-          Just (attribute, function)
+    Just (attribute, layer) | inhabitedKinds layer `Set.isSubsetOf` allowed -> Just (attribute, layer)
     _ -> Nothing
-  where
-    isLoneFunctionLayer layer =
-      not layer.nullLayer
-        && layer.numberLayer == NumberSlotAbsent
-        && not layer.stringLayer
-        && Set.null layer.booleanLayer
-        && not layer.fileLayer
-        && isNothing layer.sequenceLayer
-        && isNothing layer.objectLayer
-        && Map.null layer.dataLayer
+
+-- | View a value as a callable function, raising its generics to their bounds first. Callable exactly
+-- when its raised base is solely a function layer ('soleLayer' rejects a value mixed with @null@ or any
+-- other shape); every bound has been folded into the base, so the residual generics set is ignored.
+extractFunction :: SourceSpan -> NormalizedType -> Checker (Maybe (NormalizedAttribute, NormalizedFunction))
+extractFunction sourceSpan normalizedType = do
+  raised <- soleLayer sourceSpan (Set.singleton FunctionKind) normalizedType
+  pure $ case raised of
+    Just (attribute, layer) | Just function <- layer.functionLayer -> Just (attribute, function)
+    _ -> Nothing
 
 synthCallArguments ::
   SourceSpan ->
@@ -1125,7 +1159,10 @@ checkPattern pattern scrutinee = case pattern of
 
 extractTupleElementTypes :: SourceSpan -> NormalizedType -> Int -> Checker (List NormalizedType)
 extractTupleElementTypes sourceSpan scrutinee count = do
-  raised <- raisedLayer sourceSpan scrutinee
+  -- Destructuring requires the scrutinee to be solely a sequence: a @[A, B] | null@ scrutinee yields
+  -- no element types (each position degrades to top), so a possibly-null value is not read through as
+  -- its element types.
+  raised <- soleLayer sourceSpan (Set.singleton SequenceKind) scrutinee
   pure $ case raised >>= (.sequenceLayer) . snd of
     Just normalizedSequence ->
       -- The fixed prefix positions are present; a position past it may be absent at runtime, so it
@@ -1166,7 +1203,11 @@ synthMatchExpression expression = do
   -- fail this check for any inhabited scrutinee, with no special case.
   unionCover <- foldM combineUnion bottomType [cover | (cover, _, _) <- results]
   nt <- foldM combineUnion bottomType [body | (_, body, _) <- results]
-  runNormalizer expression.sourceSpan (subtype scrutineeType unionCover)
+  -- Exhaustiveness is about base-type coverage, not observation: the covers are built public, so
+  -- compare under a private world (where every attribute comparison collapses) to avoid spuriously
+  -- rejecting a private — or otherwise attributed — scrutinee. The observation rules still apply to the
+  -- arm bodies (via 'processObserved'), so ignoring attributes here is sound.
+  withWorld topAttribute $ runNormalizer expression.sourceSpan (subtype scrutineeType unionCover)
   let typedCases = [arm | (_, _, arm) <- results]
   typedExpression expression.sourceSpan nt $ \semantic ->
     ExpressionMatch
@@ -1237,7 +1278,9 @@ synthForExpression expression = do
         Nothing -> pure (Nothing, arrayType)
         Just thenClause -> do
           (typedBinder, thenBindings) <- checkThenBinder arrayType thenClause.binder
-          (typedThenBody, thenBodyType) <- withParameters thenBindings (synthBlock thenClause.body)
+          -- The `then` finalizer runs once after the loop and permits no jumps: a `break` / `next` /
+          -- `return` inside it has no target here (in particular it cannot leak into an enclosing `for`).
+          (typedThenBody, thenBodyType) <- withParameters thenBindings (withoutJumpTargets (synthBlock thenClause.body))
           let typedThen =
                 ThenClause
                   { binder = typedBinder,
@@ -1269,7 +1312,9 @@ synthForExpression expression = do
 -- so @array[T]@ iterates as @T@ and the tuple @[A, B]@ as @A | B@.
 extractIterableElementType :: SourceSpan -> NormalizedType -> Checker NormalizedType
 extractIterableElementType sourceSpan source = do
-  raised <- raisedLayer sourceSpan source
+  -- Iterating requires the source to be solely a sequence: a @array[T] | null@ source is rejected, so
+  -- the null possibility is no longer silently dropped from the element type.
+  raised <- soleLayer sourceSpan (Set.singleton SequenceKind) source
   case raised >>= (.sequenceLayer) . snd of
     Just normalizedSequence ->
       foldM combineUnion bottomType (normalizedSequence.items <> [normalizedSequence.rest])
@@ -1400,10 +1445,13 @@ walkHandlerThenClause resultType residualEffect = \case
     (typedBinder, thenBindings) <- checkThenBinder resultType thenClause.binder
     (thenEffect, typedBody) <-
       withEffectInference $
-        withParameters thenBindings $ do
-          (tb, nt) <- synthBlock thenClause.body
-          runNormalizer thenClause.sourceSpan (subtype nt resultType)
-          pure tb
+        withParameters thenBindings $
+          -- The `then` finalizer runs once after the handler and permits no jumps: a `break` / `next` /
+          -- `return` inside it has no target here and is reported misplaced.
+          withoutJumpTargets $ do
+            (tb, nt) <- synthBlock thenClause.body
+            runNormalizer thenClause.sourceSpan (subtype nt resultType)
+            pure tb
     runNormalizer thenClause.sourceSpan (subtype thenEffect residualEffect)
     pure (Just ThenClause {binder = typedBinder, body = typedBody, sourceSpan = thenClause.sourceSpan})
 
@@ -1451,10 +1499,14 @@ walkRequestHandler resultType handler = do
             currentRequestReturnType = instantiatedReturn
           }
   (typedBlock, bodyType) <-
-    pushHandleContext context $
-      withParameters paramBindings $
-        -- The request handler captures its own `next` / `break`, so they do not escape an enclosing branch.
-        capturingJumps HandlerJump (synthBlock handler.body)
+    -- A request handler body is deferred — it runs when the handler is invoked, not where it is
+    -- written — so it sees none of the enclosing agent's / `for`'s jump targets: a `return` inside is
+    -- misplaced, and only the handler's own `break` / `next` (the pushed 'HandleContext') are in scope.
+    withoutJumpTargets $
+      pushHandleContext context $
+        withParameters paramBindings $
+          -- The request handler captures its own `next` / `break`, so they do not escape an enclosing branch.
+          capturingJumps HandlerJump (synthBlock handler.body)
   runNormalizer handler.sourceSpan (subtype bodyType resultType)
   instantiation <- instantiationOf handler.sourceSpan requestInfo.genericParameters substitution
   let typedHandler =

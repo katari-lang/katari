@@ -316,6 +316,14 @@ enterForBody = pushJumpFrame ForFrame
 pushHandleContext :: HandleContext -> Checker a -> Checker a
 pushHandleContext context = pushJumpFrame (HandlerFrame context)
 
+-- | Run a sub-action with no jump targets in scope, so a @return@ / @break@ / @next@ inside is
+-- reported misplaced. A /deferred/ or /finalizer/ body uses this: a handler request body runs when the
+-- handler is invoked, not where it is written, so it must not @return@ to the enclosing agent (it then
+-- pushes only its own 'HandlerFrame' for its @break@ / @next@); a @then@ finalizer runs once after its
+-- construct and permits no jumps at all.
+withoutJumpTargets :: Checker a -> Checker a
+withoutJumpTargets = local (\environment -> environment {jumps = emptyJumpContexts})
+
 ------------------------------------------------------------------------------------------------
 -- Inference scopes
 --
