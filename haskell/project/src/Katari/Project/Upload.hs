@@ -19,13 +19,10 @@ module Katari.Project.Upload
   )
 where
 
-import Crypto.Hash (Digest, SHA256, hashlazy)
 import Data.Aeson (Value (..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
-import Data.ByteString (ByteString)
 import Data.ByteString.Builder qualified as Builder
 import Data.Foldable (toList)
 import Data.List (intersperse, sortOn)
@@ -34,9 +31,9 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text.Encoding qualified as TextEncoding
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName)
+import Katari.Project.Hash (sha256Hex)
 
 -- | A stable content hash of a module's IR (hex SHA-256 of its canonical serialisation). Equal
 -- hashes mean the runtime already holds an identical module, so the upload can be skipped.
@@ -59,10 +56,7 @@ data UploadPlan = UploadPlan
 -- hash regardless of 'Map' / aeson 'KeyMap' iteration order.
 hashModule :: IRModule -> ModuleHash
 hashModule irModule =
-  let canonicalBytes = Builder.toLazyByteString (canonicalize (Aeson.toJSON irModule))
-      digest = hashlazy canonicalBytes :: Digest SHA256
-      hex = convertToBase Base16 digest :: ByteString
-   in ModuleHash (TextEncoding.decodeUtf8 hex)
+  ModuleHash (sha256Hex (Builder.toLazyByteString (canonicalize (Aeson.toJSON irModule))))
 
 -- | Serialise an aeson 'Value' to a deterministic byte string: object keys are sorted so the result
 -- is independent of 'Map' / aeson 'KeyMap' iteration order, while arrays keep their order and

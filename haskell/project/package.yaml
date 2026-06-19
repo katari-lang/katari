@@ -48,6 +48,8 @@ library:
   source-dirs: src
   exposed-modules:
     - Katari.Project.Error
+    - Katari.Project.Hash
+    - Katari.Project.Http
     - Katari.Project.Config
     - Katari.Project.Discovery
     - Katari.Project.Cache

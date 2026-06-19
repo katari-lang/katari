@@ -28,7 +28,6 @@ module Katari.Project.Snapshot
   )
 where
 
-import Control.Exception (SomeException, try)
 import Data.ByteString.Lazy qualified as ByteStringLazy
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -36,17 +35,16 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import Katari.Project.Config (isValidPackageName)
 import Katari.Project.Error
   ( FileErrorInfo (..),
     ProjectError (..),
-    UrlErrorInfo (..),
     UrlInfo (..),
-    formatException,
     readFileOrError,
   )
-import Katari.Project.Lockfile (GitSource (..))
-import Network.HTTP.Client (Manager, httpLbs, parseRequest, responseBody, responseStatus)
-import Network.HTTP.Types.Status (statusCode)
+import Katari.Project.Http (httpGetBytes)
+import Katari.Project.Lockfile (GitSource (..), isSha256Hex)
+import Network.HTTP.Client (Manager)
 import TOML
   ( DecodeTOML (..),
     decodeWith,
@@ -103,10 +101,22 @@ parseSnapshot :: FilePath -> Text -> Either ProjectError Snapshot
 parseSnapshot path text = case decodeWith tomlDecoder text of
   Left tomlError ->
     Left (SnapshotParseError FileErrorInfo {path = path, message = renderTOMLError tomlError})
-  Right (raw :: RawSnapshot) ->
-    Right Snapshot {compilerVersion = raw.compiler, packages = Map.map toGitSource raw.packages}
+  Right (raw :: RawSnapshot) -> do
+    validatedPackages <- traverse (validateSnapshotPackage path) (Map.toList raw.packages)
+    pure Snapshot {compilerVersion = raw.compiler, packages = Map.fromList validatedPackages}
+
+-- | Map one decoded snapshot entry to a 'GitSource', rejecting a name that is not a valid identifier
+-- (it becomes a cache-directory path) or a malformed @sha256@ (it keys the content-addressed cache and
+-- is the only thing pinning a snapshot's reproducibility, since the @rev@ may be a tag).
+validateSnapshotPackage :: FilePath -> (Text, RawGitSource) -> Either ProjectError (Text, GitSource)
+validateSnapshotPackage path (name, rawSource)
+  | not (isValidPackageName name) =
+      validationError ("package name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")
+  | not (isSha256Hex rawSource.sha256) =
+      validationError ("package '" <> name <> "' has a malformed sha256 (expected 64 hex characters): " <> rawSource.sha256)
+  | otherwise = Right (name, GitSource {url = rawSource.url, rev = rawSource.rev, sha = rawSource.sha256})
   where
-    toGitSource rawSource = GitSource {url = rawSource.url, rev = rawSource.rev, sha = rawSource.sha256}
+    validationError message = Left (SnapshotValidationError FileErrorInfo {path = path, message = message})
 
 -- ===========================================================================
 -- Loading
@@ -148,17 +158,8 @@ loadSnapshotFromUrl manager baseUrl maybeVersion = case snapshotUrl of
 
     loadFromHttps :: Text -> IO (Either ProjectError Snapshot)
     loadFromHttps url = do
-      result <- try $ do
-        request <- parseRequest (Text.unpack url)
-        httpLbs request manager
-      pure $ case result of
-        Left exception ->
-          Left (SnapshotHttpError UrlErrorInfo {url = url, message = formatException (exception :: SomeException)})
-        Right response ->
-          let status = statusCode (responseStatus response)
-           in if status == 200
-                then parseSnapshot (Text.unpack url) (decodeBody (responseBody response))
-                else Left (SnapshotHttpError UrlErrorInfo {url = url, message = "HTTP status " <> Text.pack (show status)})
+      result <- httpGetBytes manager url SnapshotHttpError
+      pure (result >>= \body -> parseSnapshot (Text.unpack url) (decodeBody body))
 
     decodeBody = TextEncoding.decodeUtf8Lenient . ByteStringLazy.toStrict
 

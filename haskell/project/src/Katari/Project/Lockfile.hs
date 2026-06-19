@@ -8,8 +8,8 @@
 -- [packages.list_utils]
 -- source = "git"
 -- url    = "https://github.com/.../list_utils"
--- rev    = "v0.2.1"               # resolved full SHA
--- sha256 = "abc..."               # verified tarball content hash
+-- rev    = "1f2e..."              # the fetched ref (a commit SHA for overrides; possibly a tag for snapshot pins)
+-- sha256 = "abc..."               # verified tarball content hash (64 hex chars)
 --
 -- [packages.local_fork]
 -- source = "path"
@@ -31,6 +31,7 @@ module Katari.Project.Lockfile
     GitSource (..),
     lockfileFilename,
     lockfileFormatVersion,
+    isSha256Hex,
     parseLockfile,
     renderLockfile,
     loadLockfile,
@@ -38,7 +39,8 @@ module Katari.Project.Lockfile
   )
 where
 
-import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
+import Control.Monad (unless)
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit, isHexDigit)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -46,6 +48,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
+import Katari.Project.Config (isValidPackageName)
 import Katari.Project.Error
   ( FileErrorInfo (..),
     ProjectError (..),
@@ -169,24 +172,49 @@ parseLockfile path text = case decodeWith tomlDecoder text of
   Left tomlError ->
     Left (LockfileParseError FileErrorInfo {path = path, message = renderTOMLError tomlError})
   Right (raw :: RawLockfile) -> do
+    -- The version exists to gate incompatible format changes; an unrecognised one must fail loudly
+    -- rather than be misread as v1 (which would silently ignore any newer fields).
+    unless (raw.version == lockfileFormatVersion) $
+      Left
+        ( LockfileValidationError
+            FileErrorInfo
+              { path = path,
+                message =
+                  "unsupported lockfile version "
+                    <> Text.pack (show raw.version)
+                    <> " (this tool understands version "
+                    <> Text.pack (show lockfileFormatVersion)
+                    <> "); regenerate with `katari apply`"
+              }
+        )
     validatedPackages <- traverse (validateLockedPackage path) (Map.toList raw.packages)
     pure Lockfile {version = raw.version, snapshot = raw.snapshot, packages = Map.fromList validatedPackages}
 
 -- | Turn one decoded @[packages.\<name>]@ table into a 'LockedSource', enforcing the fields each
--- @source@ variant requires.
+-- @source@ variant requires. The name is validated first (it becomes a cache-directory path), and a
+-- git pin's @sha256@ must be a well-formed hash (it likewise keys the content-addressed cache).
 validateLockedPackage :: FilePath -> (Text, RawLockedPackage) -> Either ProjectError (Text, LockedSource)
 validateLockedPackage path (name, raw)
+  | not (isValidPackageName name) =
+      validationError ("package name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")
   | raw.source == tagPath = do
       location <- require keyPath raw.path
       pure (name, LockedPath PathLock {location = Text.unpack location})
   | raw.source == tagGit = do
       gitSource <- GitSource <$> require keyUrl raw.url <*> require keyRev raw.rev <*> require keySha256 raw.sha256
+      unless (isSha256Hex gitSource.sha) $
+        validationError ("package '" <> name <> "' has a malformed sha256 (expected 64 hex characters): " <> gitSource.sha)
       pure (name, LockedGit gitSource)
   | otherwise = validationError ("package '" <> name <> "' has unknown source '" <> raw.source <> "'")
   where
     require field =
       maybe (validationError ("package '" <> name <> "' is missing required field '" <> field <> "'")) Right
     validationError message = Left (LockfileValidationError FileErrorInfo {path = path, message = message})
+
+-- | A SHA-256 content hash as the lockfile and snapshot store it: exactly 64 hex digits. Shared with
+-- "Katari.Project.Snapshot", which records the same hashes, so the two parsers agree on the format.
+isSha256Hex :: Text -> Bool
+isSha256Hex value = Text.length value == 64 && Text.all isHexDigit value
 
 -- ===========================================================================
 -- Rendering

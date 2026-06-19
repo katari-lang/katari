@@ -52,7 +52,8 @@ module Katari.Project.Config
   )
 where
 
-import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
+import Control.Monad (unless, when)
+import Data.Char (isAsciiLower, isAsciiUpper, isDigit, isHexDigit)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -64,6 +65,7 @@ import Katari.Project.Error
     ProjectError (..),
     readFileOrError,
   )
+import System.FilePath (isAbsolute, splitDirectories)
 import TOML
   ( DecodeTOML (..),
     decodeWith,
@@ -219,10 +221,13 @@ parseKatariToml path text = case decodeWith tomlDecoder text of
     Left (ConfigParseError FileErrorInfo {path = path, message = renderTOMLError tomlError})
   Right (rawConfig :: RawConfig) -> validateConfig path rawConfig
 
--- | Apply the cross-field rules a 'Decoder' cannot express, in one pass over the overrides: each
--- override names a declared dependency and is path XOR git.
+-- | Apply the cross-field rules a 'Decoder' cannot express: the source dir stays inside the project,
+-- every declared dependency name is a valid identifier (so it is safe to use as a cache-directory and
+-- import name), and each override names a declared dependency and is path XOR git.
 validateConfig :: FilePath -> RawConfig -> Either ProjectError ProjectConfig
 validateConfig path rawConfig = do
+  validateSourceDir path rawConfig.package.src
+  mapM_ (validatePackageName path) rawConfig.dependencies.packages
   validatedOverrides <-
     traverse (validateOverride path rawConfig.dependencies.packages) (Map.toList rawConfig.overrides)
   pure
@@ -233,6 +238,22 @@ validateConfig path rawConfig = do
         dependencies = rawConfig.dependencies,
         overrides = Map.fromList validatedOverrides
       }
+
+-- | Reject a @[package].src@ that is absolute or escapes the project via a @..@ segment. 'scanSources'
+-- joins this onto the project root, so an unconstrained value would let a package pull in @.ktr@ files
+-- from anywhere on disk; the assembly's namespace check validates module /names/, not file origins.
+validateSourceDir :: FilePath -> FilePath -> Either ProjectError ()
+validateSourceDir path src =
+  when (isAbsolute src || ".." `elem` splitDirectories src) $
+    Left (ConfigValidationError FileErrorInfo {path = path, message = "[package].src must be a relative path inside the project (got " <> Text.pack src <> ")"})
+
+-- | Reject a declared dependency name that is not a valid identifier. Validating it here, where it
+-- enters from the file, keeps an unsanitised name from ever reaching 'Katari.Project.Cache.packageDir'
+-- (which interpolates it into a filesystem path) or a network fetch.
+validatePackageName :: FilePath -> Text -> Either ProjectError ()
+validatePackageName path name =
+  unless (isValidPackageName name) $
+    Left (ConfigValidationError FileErrorInfo {path = path, message = "dependency name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)"})
 
 -- | Resolve one @[overrides.\<name>]@ entry into its 'OverrideSource', or report why it is malformed:
 -- it must target a declared dependency and set path XOR git (with rev only on git).
@@ -246,10 +267,19 @@ validateOverride path declared (name, rawOverride)
         Nothing -> Right (name, OverridePath PathOverride {path = Text.unpack pathValue})
       (Nothing, Just gitValue) -> case rawOverride.rev of
         Nothing -> validationError ("git override '" <> name <> "' requires a rev (full commit SHA)")
-        Just revValue -> Right (name, OverrideGit GitOverride {url = gitValue, rev = revValue})
+        Just revValue
+          | not (isCommitSha revValue) ->
+              validationError ("git override '" <> name <> "' rev must be a full 40-char commit SHA, not '" <> revValue <> "'")
+          | otherwise -> Right (name, OverrideGit GitOverride {url = gitValue, rev = revValue})
       (Nothing, Nothing) -> validationError ("override '" <> name <> "' must set either path or git")
   where
     validationError message = Left (ConfigValidationError FileErrorInfo {path = path, message = message})
+
+-- | A full git commit SHA: exactly 40 hex digits. A git override carries no separate content hash, so
+-- its 'rev' is the only thing pinning reproducibility — a mutable tag or branch here would silently
+-- un-pin the dependency. (A registry snapshot may pin a tag, because it also carries a @sha256@.)
+isCommitSha :: Text -> Bool
+isCommitSha value = Text.length value == 40 && Text.all isHexDigit value
 
 -- | A package name is valid when it matches @[A-Za-z_][A-Za-z0-9_]*@ — i.e. it can appear as a
 -- Katari identifier, since it is the literal text a consumer types after @import@. (Reserved-name

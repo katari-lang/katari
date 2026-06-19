@@ -23,13 +23,9 @@ import Codec.Archive.Tar qualified as Tar
 import Codec.Compression.GZip qualified as GZip
 import Control.Exception (SomeException, try)
 import Control.Monad (when)
-import Crypto.Hash (Digest, SHA256, hashlazy)
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
-import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as ByteStringLazy
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as TextEncoding
 import Katari.Project.Cache (CachePaths, packageDir)
 import Katari.Project.Error
   ( ProjectError (..),
@@ -37,8 +33,9 @@ import Katari.Project.Error
     UrlInfo (..),
     formatException,
   )
-import Network.HTTP.Client (Manager, httpLbs, parseRequest, responseBody, responseStatus)
-import Network.HTTP.Types.Status (statusCode)
+import Katari.Project.Hash (sha256Hex)
+import Katari.Project.Http (httpGetBytes)
+import Network.HTTP.Client (Manager)
 import System.Directory
   ( createDirectoryIfMissing,
     doesDirectoryExist,
@@ -49,7 +46,9 @@ import System.Directory
 import System.FilePath ((</>))
 
 -- | The git information the caller supplied. 'url' is the canonical repo URL (e.g.
--- @https://github.com/user/repo@); 'rev' must be a full 40-char commit SHA for reproducibility.
+-- @https://github.com/user/repo@); 'rev' is the ref to fetch — a full commit SHA for a git override
+-- (enforced at config decode), or a snapshot pin's ref (which may be a tag, since a snapshot also
+-- carries the @sha256@ that pins reproducibility).
 data GitRef = GitRef
   { url :: Text,
     rev :: Text
@@ -89,34 +88,19 @@ fetchGitTarball manager cache name gitReference maybeCacheSha
 
     downloadAndExtract :: IO (Either ProjectError (FilePath, Text))
     downloadAndExtract = do
-      downloadResult <- try $ do
-        request <- parseRequest (Text.unpack archiveUrl)
-        httpLbs request manager
+      downloadResult <- httpGetBytes manager archiveUrl FetchHttpError
       case downloadResult of
-        Left exception ->
-          pure (Left (FetchHttpError UrlErrorInfo {url = archiveUrl, message = formatException (exception :: SomeException)}))
-        Right response
-          | statusCode (responseStatus response) /= 200 ->
-              pure
-                ( Left
-                    ( FetchHttpError
-                        UrlErrorInfo
-                          { url = archiveUrl,
-                            message = "HTTP status " <> Text.pack (show (statusCode (responseStatus response)))
-                          }
-                    )
-                )
-          | otherwise -> do
-              let body = responseBody response
-                  sha = sha256Hex body
-                  destination = packageDir cache name sha
-              -- The downloaded content may already be extracted (a hint-less fetch of cached content).
-              alreadyExtracted <- doesDirectoryExist destination
-              if alreadyExtracted
-                then pure (Right (destination, sha))
-                else do
-                  extractResult <- extractTarball archiveUrl body destination
-                  pure (fmap (const (destination, sha)) extractResult)
+        Left projectError -> pure (Left projectError)
+        Right body -> do
+          let sha = sha256Hex body
+              destination = packageDir cache name sha
+          -- The downloaded content may already be extracted (a hint-less fetch of cached content).
+          alreadyExtracted <- doesDirectoryExist destination
+          if alreadyExtracted
+            then pure (Right (destination, sha))
+            else do
+              extractResult <- extractTarball archiveUrl body destination
+              pure (fmap (const (destination, sha)) extractResult)
 
 -- | Decompress and unpack a GitHub archive into @destination@. GitHub wraps the tree in a single
 -- @REPO-\<ref>/@ directory; that wrapper is unwrapped by extracting into a sibling staging directory
@@ -143,11 +127,3 @@ extractTarball archiveUrl body destination = do
     Right () -> pure (Right ())
   where
     staging = destination <> Text.unpack stagingSuffix
-
--- | Hex SHA-256 of a lazy byte string, matching the encoding used for module hashes
--- ("Katari.Project.Upload".@hashModule@).
-sha256Hex :: ByteStringLazy.ByteString -> Text
-sha256Hex lazyBytes =
-  let digest = hashlazy lazyBytes :: Digest SHA256
-      hex = convertToBase Base16 digest :: ByteString
-   in TextEncoding.decodeUtf8 hex

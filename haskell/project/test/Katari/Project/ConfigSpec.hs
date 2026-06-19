@@ -5,6 +5,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Project.Config
   ( DependenciesSection (..),
+    GitOverride (..),
     OverrideSource (..),
     PackageSection (..),
     PathOverride (..),
@@ -85,6 +86,66 @@ spec = do
                 "packages = [\"dep\"]",
                 "[overrides.dep]",
                 "git = \"https://github.com/a/b\""
+              ]
+      parseKatariToml "katari.toml" toml `shouldSatisfy` either isConfigValidationError (const False)
+
+    it "accepts a git override pinned to a full commit SHA" $ do
+      let commitSha = Text.replicate 40 "a"
+          toml =
+            Text.unlines
+              [ "[package]",
+                "name = \"hello\"",
+                "[runtime]",
+                "url = \"http://x\"",
+                "[dependencies]",
+                "packages = [\"dep\"]",
+                "[overrides.dep]",
+                "git = \"https://github.com/a/b\"",
+                "rev = \"" <> commitSha <> "\""
+              ]
+      case parseKatariToml "katari.toml" toml of
+        Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+        Right config ->
+          Map.lookup "dep" config.overrides
+            `shouldBe` Just (OverrideGit GitOverride {url = "https://github.com/a/b", rev = commitSha})
+
+    it "rejects a git override whose rev is a mutable ref, not a commit SHA" $ do
+      let toml =
+            Text.unlines
+              [ "[package]",
+                "name = \"hello\"",
+                "[runtime]",
+                "url = \"http://x\"",
+                "[dependencies]",
+                "packages = [\"dep\"]",
+                "[overrides.dep]",
+                "git = \"https://github.com/a/b\"",
+                "rev = \"v0.2.1\""
+              ]
+      parseKatariToml "katari.toml" toml `shouldSatisfy` either isConfigValidationError (const False)
+
+    it "rejects a declared dependency name that is not an identifier" $ do
+      let toml =
+            Text.unlines
+              [ "[package]",
+                "name = \"hello\"",
+                "[runtime]",
+                "url = \"http://x\"",
+                "[dependencies]",
+                "packages = [\"../escape\"]"
+              ]
+      parseKatariToml "katari.toml" toml `shouldSatisfy` either isConfigValidationError (const False)
+
+    it "rejects a [package].src that escapes the project root" $ do
+      let toml =
+            Text.unlines
+              [ "[package]",
+                "name = \"hello\"",
+                "src = \"../outside\"",
+                "[runtime]",
+                "url = \"http://x\"",
+                "[dependencies]",
+                "packages = []"
               ]
       parseKatariToml "katari.toml" toml `shouldSatisfy` either isConfigValidationError (const False)
 

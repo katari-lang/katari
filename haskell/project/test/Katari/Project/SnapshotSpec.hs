@@ -12,6 +12,10 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
+-- | A well-formed (64 hex char) content hash; the parser now rejects malformed ones.
+sampleSha :: Text
+sampleSha = Text.replicate 64 "a"
+
 sampleSnapshot :: Text
 sampleSnapshot =
   Text.unlines
@@ -20,7 +24,7 @@ sampleSnapshot =
       "[packages.list_utils]",
       "url = \"https://github.com/katari-lang/list_utils\"",
       "rev = \"v0.2.1\"",
-      "sha256 = \"abc123\""
+      "sha256 = \"" <> sampleSha <> "\""
     ]
 
 spec :: Spec
@@ -36,8 +40,18 @@ spec = do
               GitSource
                 { url = "https://github.com/katari-lang/list_utils",
                   rev = "v0.2.1",
-                  sha = "abc123"
+                  sha = sampleSha
                 }
+
+    it "rejects a package whose sha256 is not 64 hex characters" $ do
+      let malformed =
+            Text.unlines
+              [ "[packages.list_utils]",
+                "url = \"https://github.com/katari-lang/list_utils\"",
+                "rev = \"v0.2.1\"",
+                "sha256 = \"abc123\""
+              ]
+      parseSnapshot "snapshot.toml" malformed `shouldSatisfy` either (const True) (const False)
 
     it "treats a missing compiler field and empty package set as valid" $
       case parseSnapshot "snapshot.toml" "" of

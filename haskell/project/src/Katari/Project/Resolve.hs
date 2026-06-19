@@ -40,6 +40,7 @@ module Katari.Project.Resolve
     assembleProject,
     lockfileFromResolved,
     compileInputSources,
+    checkPinnedSha,
   )
 where
 
@@ -169,10 +170,18 @@ loadPathPackage baseDir name location = do
 loadGitPackage :: ResolveContext -> Text -> GitRef -> Maybe Text -> Maybe Text -> ResolveM ResolvedPackage
 loadGitPackage context name ref cacheSha requiredSha = do
   (directory, sha) <- liftE (fetchGitTarball context.manager context.cache name ref cacheSha)
-  forM_ requiredSha $ \expected ->
-    when (sha /= expected) $
-      throwError (ResolveShaMismatch ShaMismatchInfo {dependency = name, expected = expected, actual = sha})
+  either throwError pure (checkPinnedSha name requiredSha sha)
   loadResolvedPackage directory (LockedGit GitSource {url = ref.url, rev = ref.rev, sha = sha})
+
+-- | Verify a fetched tarball's content hash against the pin that required it (a registry snapshot's
+-- @sha256@). 'Nothing' means no pin to check against (a git override, trusted on first use). Pure, so
+-- this supply-chain guard is testable without performing a real fetch.
+checkPinnedSha :: Text -> Maybe Text -> Text -> Either ProjectError ()
+checkPinnedSha name requiredSha actualSha = case requiredSha of
+  Just expected
+    | actualSha /= expected ->
+        Left (ResolveShaMismatch ShaMismatchInfo {dependency = name, expected = expected, actual = actualSha})
+  _ -> Right ()
 
 -- ===========================================================================
 -- Network resolution (npm install)
@@ -306,16 +315,25 @@ loadProjectOfflineM overlay rootDir = do
   rootSources <- liftE (scanSources overlay canonicalRoot rootConfig)
   let cache = projectCachePaths canonicalRoot
   lockfile <- loadLockfileOrEmpty (canonicalRoot </> lockfileFilename)
-  forM_ rootConfig.dependencies.packages $ \name ->
-    unless (Map.member name lockfile.packages) $
-      throwError (ResolveLockfileOutOfDate DependencyInfo {dependency = name})
+  -- A root-declared dependency missing from the lock means the lock is stale; check before loading so
+  -- the remedy is reported against the lock rather than as a downstream cache miss.
+  forM_ rootConfig.dependencies.packages (requireLocked lockfile)
   dependencyPackages <- forM (Map.toList lockfile.packages) $ \(name, lockedSource) ->
     (name,) <$> loadLockedPackage canonicalRoot cache name lockedSource
+  -- The lock must be the full, already-flattened closure: any dependency a locked package itself
+  -- declares must also be locked, or assembly would later see a dangling import for a silently
+  -- dropped transitive package.
+  forM_ dependencyPackages $ \(_, package) ->
+    forM_ package.config.dependencies.packages (requireLocked lockfile)
   pure
     ResolvedProject
       { rootPackage = ResolvedPackage {root = canonicalRoot, config = rootConfig, sources = rootSources, provenance = Nothing},
         depPackages = Map.fromList dependencyPackages
       }
+  where
+    requireLocked lockfile name =
+      unless (Map.member name lockfile.packages) $
+        throwError (ResolveLockfileOutOfDate DependencyInfo {dependency = name})
 
 -- | Read @katari.lock@, or an empty lockfile when the file is absent (a project with no dependencies
 -- needs no lock; the per-dependency check above turns a real omission into 'ResolveLockfileOutOfDate').

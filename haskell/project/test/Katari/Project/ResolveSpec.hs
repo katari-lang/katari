@@ -4,6 +4,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Project.Config
@@ -12,17 +13,24 @@ import Katari.Project.Config
     ProjectConfig (..),
     RuntimeSection (..),
   )
-import Katari.Project.Discovery (SourceEntry (..))
+import Katari.Project.Discovery (SourceEntry (..), emptyOverlay)
 import Katari.Project.Error (ProjectError (..))
-import Katari.Project.Lockfile (LockedSource (..), Lockfile (..), PathLock (..))
+import Katari.Project.Lockfile (GitSource (..), LockedSource (..), Lockfile (..), PathLock (..))
 import Katari.Project.Resolve
   ( ProjectAssembly (..),
     ResolvedPackage (..),
     ResolvedProject (..),
     assembleProject,
+    checkPinnedSha,
     compileInputSources,
+    loadProjectOffline,
     lockfileFromResolved,
+    resolveProject,
   )
+import Network.HTTP.Client (defaultManagerSettings, newManager)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 -- | A minimal config carrying just the package name; the assembly logic reads only @package.name@,
@@ -88,6 +96,37 @@ isReservedName projectError = case projectError of
   ResolveReservedPackageName _ -> True
   _ -> False
 
+isCycle :: ProjectError -> Bool
+isCycle projectError = case projectError of
+  ResolveCycle _ -> True
+  _ -> False
+
+isShaMismatch :: ProjectError -> Bool
+isShaMismatch projectError = case projectError of
+  ResolveShaMismatch _ -> True
+  _ -> False
+
+isLockfileOutOfDate :: ProjectError -> Bool
+isLockfileOutOfDate projectError = case projectError of
+  ResolveLockfileOutOfDate _ -> True
+  _ -> False
+
+-- | A minimal @katari.toml@ for an on-disk fixture: a package name, its declared dependencies, and
+-- path overrides for them.
+projectToml :: Text -> List Text -> List (Text, Text) -> Text
+projectToml name deps overrides =
+  Text.unlines $
+    [ "[package]",
+      "name = \"" <> name <> "\"",
+      "[runtime]",
+      "url = \"http://localhost\"",
+      "[dependencies]",
+      "packages = [" <> Text.intercalate ", " [quote dep | dep <- deps] <> "]"
+    ]
+      <> concat [["[overrides." <> depName <> "]", "path = " <> quote path] | (depName, path) <- overrides]
+  where
+    quote value = "\"" <> value <> "\""
+
 spec :: Spec
 spec = do
   describe "assembleProject" $ do
@@ -127,7 +166,7 @@ spec = do
           compileInputSources assembly
             `shouldBe` Map.fromList [(ModuleName "main", "source of main"), (ModuleName "lib", "source of lib")]
 
-  describe "lockfileFromResolved" $
+  describe "lockfileFromResolved" $ do
     it "projects dependency provenance into the lockfile" $ do
       let provenance = LockedPath PathLock {location = "../lib"}
           project = projectWith (rootPackageWith ["main"]) [("lib", dependencyPackage "lib" ["lib"] (Just provenance))]
@@ -135,3 +174,53 @@ spec = do
       lockfile.version `shouldBe` 1
       lockfile.snapshot `shouldBe` Nothing
       Map.lookup "lib" lockfile.packages `shouldBe` Just provenance
+
+    it "preserves a git pin and propagates the snapshot id" $ do
+      let provenance = LockedGit GitSource {url = "https://github.com/x/y", rev = "deadbeef", sha = Text.replicate 64 "a"}
+          rootConfig = (configNamed "app") {dependencies = DependenciesSection {registry = Nothing, snapshot = Just "v0.1.0", packages = ["lib"]}}
+          rootPackage = ResolvedPackage {root = "/app", config = rootConfig, sources = sourcesFor ["main"], provenance = Nothing}
+          project = projectWith rootPackage [("lib", dependencyPackage "lib" ["lib"] (Just provenance))]
+          lockfile = lockfileFromResolved project
+      lockfile.snapshot `shouldBe` Just "v0.1.0"
+      Map.lookup "lib" lockfile.packages `shouldBe` Just provenance
+
+  describe "checkPinnedSha" $ do
+    it "accepts a fetched hash that matches its pin" $
+      checkPinnedSha "lib" (Just "deadbeef") "deadbeef" `shouldBe` Right ()
+
+    it "rejects a fetched hash that disagrees with its pin (tampered content)" $
+      checkPinnedSha "lib" (Just "deadbeef") "0badf00d" `shouldSatisfy` either isShaMismatch (const False)
+
+    it "accepts when there is no pin to verify against (git override, trust on first use)" $
+      checkPinnedSha "lib" Nothing "anything" `shouldBe` Right ()
+
+  describe "resolveProject" $
+    it "rejects a dependency cycle" $
+      withSystemTempDirectory "katari-resolve" $ \tmp -> do
+        let writeProject dir name deps overrides = do
+              createDirectoryIfMissing True dir
+              TextIO.writeFile (dir </> "katari.toml") (projectToml name deps overrides)
+        -- Resolution is root-authoritative, so the root declares and overrides every package in the
+        -- a <-> b cycle; the cycle is closed by a depending on b and b back on a.
+        writeProject (tmp </> "app") "app" ["a", "b"] [("a", "../a"), ("b", "../b")]
+        writeProject (tmp </> "a") "a" ["b"] []
+        writeProject (tmp </> "b") "b" ["a"] []
+        manager <- newManager defaultManagerSettings
+        result <- resolveProject manager (tmp </> "app")
+        result `shouldSatisfy` either isCycle (const False)
+
+  describe "loadProjectOffline" $
+    it "reports a lock that omits a transitive dependency as out of date" $
+      withSystemTempDirectory "katari-offline" $ \tmp -> do
+        let writeProject dir name deps = do
+              createDirectoryIfMissing True dir
+              TextIO.writeFile (dir </> "katari.toml") (projectToml name deps [])
+        -- The root locks its path dependency 'a' (offline load reads the lock, not overrides), but
+        -- 'a' itself declares 'b', which the lock omits — so the lock is an incomplete closure.
+        writeProject (tmp </> "app") "app" ["a"]
+        writeProject (tmp </> "a") "a" ["b"]
+        TextIO.writeFile
+          (tmp </> "app" </> "katari.lock")
+          (Text.unlines ["[lock]", "version = 1", "", "[packages.a]", "source = \"path\"", "path = \"../a\""])
+        result <- loadProjectOffline emptyOverlay (tmp </> "app")
+        result `shouldSatisfy` either isLockfileOutOfDate (const False)
