@@ -21,6 +21,8 @@ import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (MonadWriter (..), asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import GHC.List (List)
 import Katari.Data.Environment
   ( GenericParameterInformation,
@@ -118,6 +120,15 @@ data CheckerEnvironment = CheckerEnvironment
     jumps :: JumpContexts
   }
 
+-- | A control transfer out of the current expression, classified by the construct that captures it: a
+-- @return@ ('ReturnJump', captured by the enclosing agent), a @for@ @next@ / @break@ ('ForJump',
+-- captured by the enclosing @for@), or a handler @next@ / @break@ ('HandlerJump', captured by the
+-- enclosing request handler). A @use@ is not here — it already contributes an effect. Used to decide
+-- whether a control-flow branch (a match arm, an @if@ branch) is /pure/: a branch that escapes via a
+-- jump carries its value out bypassing the branch's value, so it is treated like an effect.
+data JumpKind = ReturnJump | ForJump | HandlerJump
+  deriving stock (Eq, Ord, Show)
+
 -- | Per-walk mutable state: the accumulators an /inference scope/ collects into. Each sits at its
 -- bottom outside its scope and is meaningful only inside the matching @with*Inference@ run, which
 -- 'collecting' snapshots / resets / restores so a nested scope sees only its own contributions.
@@ -131,7 +142,12 @@ data CheckerState = CheckerState
     -- | The union of every @return@ value in the enclosing agent body (a 'withReturnInference' run),
     -- so an unannotated agent's return type is inferred from its @return@s as well as its block tail.
     -- Bottom outside an agent body.
-    returnAccumulator :: NormalizedType
+    returnAccumulator :: NormalizedType,
+    -- | The kinds of jump that have escaped the current capture region (the dual of the value
+    -- accumulators, for control flow). A jump statement adds its kind ('markJump'); a capturing
+    -- construct removes the kind it consumes ('capturingJumps'); a branch reads what is left to decide
+    -- its purity ('collectingJumps').
+    escapingJumps :: Set JumpKind
   }
   deriving stock (Eq, Show)
 
@@ -150,7 +166,7 @@ emptyForAccumulator = ForAccumulator {nextElements = bottomType, breakResults = 
 -- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
 -- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
-initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect, returnAccumulator = bottomType}
+initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect, returnAccumulator = bottomType, escapingJumps = Set.empty}
 
 -- | The checker monad: read-only environment, 'Diagnostics' writer, 'CheckerState' state.
 type Checker a = RWS CheckerEnvironment Diagnostics CheckerState a
@@ -346,3 +362,33 @@ emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectA
 -- | A @return@ value joins the enclosing agent's inferred return type.
 emitReturnType :: SourceSpan -> NormalizedType -> Checker ()
 emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {returnAccumulator = value})
+
+-- | Record that a jump of this kind has fired, so an enclosing branch that does not capture it sees
+-- the branch as escaping (hence non-pure).
+markJump :: JumpKind -> Checker ()
+markJump kind = modify (\state -> state {escapingJumps = Set.insert kind state.escapingJumps})
+
+-- | Run the body of a construct that captures @captured@ jumps (a @for@ captures 'ForJump', a request
+-- handler 'HandlerJump', an agent 'ReturnJump'): jumps of that kind raised inside it stop here, while
+-- jumps of other kinds still escape to the enclosing scope. The dual of a value-inference scope, for
+-- control flow.
+capturingJumps :: JumpKind -> Checker a -> Checker a
+capturingJumps captured action = do
+  outer <- gets (.escapingJumps)
+  modify (\state -> state {escapingJumps = Set.empty})
+  result <- action
+  inner <- gets (.escapingJumps)
+  modify (\state -> state {escapingJumps = Set.union outer (Set.delete captured inner)})
+  pure result
+
+-- | Run a control-flow branch (a match arm, an @if@ branch) and report whether any jump escaped it (so
+-- the caller can treat an escaping branch as non-pure). The escaped jumps still propagate outward (a
+-- @return@ in a match arm escapes the match too).
+collectingJumps :: Checker a -> Checker (Bool, a)
+collectingJumps action = do
+  outer <- gets (.escapingJumps)
+  modify (\state -> state {escapingJumps = Set.empty})
+  result <- action
+  inner <- gets (.escapingJumps)
+  modify (\state -> state {escapingJumps = Set.union outer inner})
+  pure (not (Set.null inner), result)

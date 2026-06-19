@@ -131,6 +131,29 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects a bound violation written inside another type's extends bound (K3001)" $
     typeErrorCodes [("test", "data B[U extends number](u: U)\ndata A[T extends B[string]](t: T)")] `shouldContain` ["K3001"]
 
+  -- `if` observes its condition just like `match` observes its scrutinee.
+  it "rejects an `if` whose pure branches launder a private condition to public (K3001)" $
+    typeErrorCodes [("test", "private agent flag() -> boolean { true }\nagent f() -> integer { if (flag()) { 1 } else { 0 } }")] `shouldContain` ["K3001"]
+
+  it "accepts a private `if` result inside a private agent" $
+    typeErrorCodes [("test", "private agent flag() -> boolean { true }\nprivate agent f() -> integer { if (flag()) { 1 } else { 0 } }")] `shouldBe` []
+
+  -- A `return` / `break` / `next` escaping an arm or branch makes it non-pure, so a private value
+  -- cannot drive an escaping jump in a public world.
+  it "rejects a match arm that returns on a private scrutinee in a public world (K3001)" $
+    typeErrorCodes [("test", "private agent sec() -> integer { 1 }\nagent f() -> integer { match (sec()) { case _ -> { return 0 } } }")] `shouldContain` ["K3001"]
+
+  it "accepts a match arm that returns on a private scrutinee inside a private agent" $
+    typeErrorCodes [("test", "private agent sec() -> integer { 1 }\nprivate agent f() -> integer { match (sec()) { case _ -> { return 0 } } }")] `shouldBe` []
+
+  it "rejects an `if` branch that returns on a private condition in a public world (K3001)" $
+    typeErrorCodes [("test", "private agent flag() -> boolean { true }\nagent f() -> integer { if (flag()) { return 0 } else { 1 } }")] `shouldContain` ["K3001"]
+
+  -- A jump captured by a nested `for` does not escape the arm, so the arm stays pure (no over-rejection).
+  -- 'allErrorCodes' (all phases) guards against a silent parse/identify failure masking a spurious pass.
+  it "accepts a private-scrutinee arm whose nested `for` jump is captured" $
+    allErrorCodes [("test", "private agent sec() -> integer { 1 }\nagent f() -> array[integer] of private { match (sec()) { case _ -> for (x in [1, 2]) { next x } } }")] `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

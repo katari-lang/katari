@@ -41,12 +41,16 @@ import Katari.Typechecker.Context
     CheckerEnvironment (..),
     HandleContext (..),
     JumpContexts (..),
+    JumpKind (..),
+    capturingJumps,
+    collectingJumps,
     currentWorld,
     emitEffect,
     emitForBreakType,
     emitForNextType,
     emitReturnType,
     enterForBody,
+    markJump,
     pushHandleContext,
     runElaborator,
     runNormalizer,
@@ -461,13 +465,20 @@ synthRecordExpression expression = do
 
 synthIfExpression :: IfExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthIfExpression expression = do
-  typedCondition <- checkExpression expression.condition booleanType
-  (typedThen, thenType) <- synthBlock expression.thenBlock
+  (typedCondition, conditionType) <- synthExpression expression.condition
+  -- The condition must be a boolean; like a match scrutinee its attribute is observed, so it is checked
+  -- as @boolean of <its attribute>@ rather than forced public (a private condition is allowed, and
+  -- carries its world into a pure branch's result below).
+  let conditionAttribute = foldAttribute conditionType
+  runNormalizer (sourceSpanOf expression.condition) (subtype conditionType (liftByAttribute conditionAttribute booleanType))
+  (typedThen, thenType) <- processObserved expression.sourceSpan conditionAttribute (synthBlock expression.thenBlock)
   (typedElse, elseType) <- case expression.elseBlock of
     Just block -> do
-      (b, t) <- synthBlock block
+      (b, t) <- processObserved expression.sourceSpan conditionAttribute (synthBlock block)
       pure (Just b, t)
-    Nothing -> pure (Nothing, nullType)
+    -- A missing else yields @null@ when the condition is false; that branch is pure, so it too carries
+    -- the condition's world.
+    Nothing -> pure (Nothing, liftByAttribute conditionAttribute nullType)
   nt <- runNormalizer expression.sourceSpan (union thenType elseType)
   semantic <- denormalizeAt expression.sourceSpan nt
   pure
@@ -908,6 +919,7 @@ checkReturnStatement returnStmt = do
       runNormalizer (sourceSpanOf returnStmt.value) (subtype valueType target)
       -- The value joins the agent's inferred return type (used when the return type is unannotated).
       emitReturnType returnStmt.sourceSpan valueType
+      markJump ReturnJump
       pure typed
     Nothing -> do
       reportMisplacedJump returnStmt.sourceSpan "return" "an agent body"
@@ -924,6 +936,7 @@ checkForNextStatement forNextStmt = do
         -- The element type is inferred: each `next` value joins the for-body accumulator.
         (typedValue, valueType) <- synthExpression forNextStmt.value
         emitForNextType forNextStmt.sourceSpan valueType
+        markJump ForJump
         typedModifiers <- checkModifiers forNextStmt.modifiers
         pure (typedValue, typedModifiers)
       else do
@@ -948,6 +961,7 @@ checkForBreakStatement forBreakStmt = do
         -- the for's result type includes it. It is not a `next` element.
         (typed, valueType) <- synthExpression forBreakStmt.value
         emitForBreakType forBreakStmt.sourceSpan valueType
+        markJump ForJump
         pure typed
       else do
         reportMisplacedJump forBreakStmt.sourceSpan "break" "a `for` body"
@@ -993,7 +1007,10 @@ checkBreakStatement :: BreakStatement Identified -> Checker (BreakStatement Type
 checkBreakStatement breakStmt = do
   contexts <- asks (.jumps)
   typedValue <- case contexts.handleContexts of
-    (frame : _) -> checkExpression breakStmt.value frame.handlerResultType
+    (frame : _) -> do
+      typed <- checkExpression breakStmt.value frame.handlerResultType
+      markJump HandlerJump
+      pure typed
     [] -> do
       reportMisplacedJump breakStmt.sourceSpan "break" "a request handler body"
       (typed, _) <- synthExpression breakStmt.value
@@ -1006,6 +1023,7 @@ checkNextStatement nextStmt = do
   (typedValue, typedModifiers) <- case contexts.handleContexts of
     (frame : _) -> do
       typedValue <- checkExpression nextStmt.value frame.currentRequestReturnType
+      markJump HandlerJump
       typedModifiers <- checkModifiers nextStmt.modifiers
       pure (typedValue, typedModifiers)
     [] -> do
@@ -1269,21 +1287,8 @@ synthMatchExpression expression = do
   where
     processCase scrutType arm = do
       (typedPattern, cover, bindings) <- checkPattern arm.pattern scrutType
-      (armEffect, (typedBody, bodyType)) <-
-        withEffectInference (withParameters bindings (synthBlock arm.body))
-      -- Branching observes the scrutinee, so its world flows like a pure call's: a pure arm carries the
-      -- scrutinee's attribute into its result (matching a private value in a pure arm yields a private
-      -- result), while a non-pure arm cannot be lifted across worlds — the scrutinee must already be
-      -- observable in the current world (its attribute <: world) — and its effect is re-emitted into
-      -- the enclosing scope.
-      let scrutineeAttribute = foldAttribute scrutType
-      resultType <-
-        if isPureEffect armEffect
-          then pure (liftByAttribute scrutineeAttribute bodyType)
-          else do
-            runNormalizer arm.sourceSpan (subtype scrutineeAttribute bottomAttribute)
-            emitEffect arm.sourceSpan armEffect
-            pure bodyType
+      (typedBody, resultType) <-
+        processObserved arm.sourceSpan (foldAttribute scrutType) (withParameters bindings (synthBlock arm.body))
       let typedArm =
             CaseArm
               { pattern = typedPattern,
@@ -1292,6 +1297,25 @@ synthMatchExpression expression = do
               }
       pure (cover, resultType, typedArm)
     combineUnion accumulator next = runNormalizer expression.sourceSpan (union accumulator next)
+
+-- | Apply an observed value's world to a control-flow branch (a match arm body, an @if@ branch). The
+-- branch was reached by observing the value (a match scrutinee, an @if@ condition), so its world flows
+-- like a pure call's. A /pure/ branch — no effect and no escaping @return@ / @break@ / @next@ — carries
+-- the observed attribute into its result (matching a private value in a pure arm yields a private
+-- result). A branch that performs an effect or escapes via a jump cannot be lifted across worlds, so
+-- the observed value must be allowed in the current world (its attribute <: world) and its effect is
+-- re-emitted into the enclosing scope.
+processObserved :: SourceSpan -> NormalizedAttribute -> Checker (node, NormalizedType) -> Checker (node, NormalizedType)
+processObserved sourceSpan observedAttribute walk = do
+  (branchEffect, (escaped, (node, bodyType))) <- withEffectInference (collectingJumps walk)
+  resultType <-
+    if isPureEffect branchEffect && not escaped
+      then pure (liftByAttribute observedAttribute bodyType)
+      else do
+        runNormalizer sourceSpan (subtype observedAttribute bottomAttribute)
+        emitEffect sourceSpan branchEffect
+        pure bodyType
+  pure (node, resultType)
 
 ------------------------------------------------------------------------------------------------
 -- For expressions
@@ -1310,7 +1334,8 @@ synthForExpression expression = do
         withForInference $
           enterForBody $
             withParameters patternBindings $
-              fst <$> synthBlock expression.body
+              -- The `for` captures its own `next` / `break`, so they do not escape an enclosing branch.
+              capturingJumps ForJump (fst <$> synthBlock expression.body)
       -- A `for` maps to @array[nextType]@; a position the body did not emit is absent, not null, which
       -- @array@'s "present then this type" tail already captures (no null is unioned in).
       let arrayType = arrayOf inferredNextType
@@ -1567,7 +1592,8 @@ walkRequestHandler resultType handler = do
   (typedBlock, bodyType) <-
     pushHandleContext context $
       withParameters paramBindings $
-        synthBlock handler.body
+        -- The request handler captures its own `next` / `break`, so they do not escape an enclosing branch.
+        capturingJumps HandlerJump (synthBlock handler.body)
   runNormalizer handler.sourceSpan (subtype bodyType resultType)
   instantiation <- instantiationOf handler.sourceSpan requestInfo.genericParameters substitution
   let typedHandler =
@@ -1766,6 +1792,8 @@ synthAgent declaration = do
       $ withGenerics preparation.genericParameters
         . withWorld preparation.declaredAttribute
         . withParameters preparation.parameterBindings
+        -- The agent captures its own @return@, so a local agent's @return@ does not escape an enclosing branch.
+        . capturingJumps ReturnJump
       $ case preparation.annotatedReturnType of
         Just expected -> do
           typedB <- withReturnTarget expected (checkBlock declaration.body expected)
@@ -1839,6 +1867,7 @@ checkAgentBody declaration preparation = do
         . withWorld preparation.declaredAttribute
         . withParameters preparation.parameterBindings
         . withReturnTarget seeded.returnType
+        . capturingJumps ReturnJump
       $ checkBlock declaration.body seeded.returnType
   runNormalizer declaration.sourceSpan (subtype inferredEffect seeded.effect)
   pure (assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody)
