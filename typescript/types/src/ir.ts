@@ -1,7 +1,9 @@
 // The IR contract between the Katari compiler and the runtime — the TypeScript mirror of the
 // Haskell `Katari.Data.IR` (one `IRModule` per source module). This file fixes the JSON wire
 // encoding the compiler must emit (its `ToJSON` instances are derived against these shapes); the
-// runtime stores an `IRModule` verbatim as one structured blob (`snapshots.modules`) and reads it.
+// runtime stores each `IRModule` verbatim in a content-addressed module store keyed by its content
+// hash, and a snapshot references modules by hash through a name->hash manifest (see
+// docs/2026-06-19-per-module-snapshot.md).
 //
 // Encoding conventions (co-designed with the runtime):
 //   - Sum types are tagged with a `kind` discriminator.

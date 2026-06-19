@@ -26,6 +26,15 @@ export const snapshotRepository = {
     return executor.insert(modules).values({ projectId, hash, ir }).onConflictDoNothing();
   },
 
+  /** The IR already stored under a held hash. Used to verify an inlined upload of an already-held
+   *  hash matches the stored bytes (the hash must address its content). */
+  findModuleIr(executor: Executor, projectId: string, hash: ModuleHash) {
+    return executor
+      .select({ ir: modules.ir })
+      .from(modules)
+      .where(and(eq(modules.projectId, projectId), eq(modules.hash, hash)));
+  },
+
   insertSnapshot(
     executor: Executor,
     projectId: string,
@@ -46,9 +55,16 @@ export const snapshotRepository = {
       .where(eq(projects.id, projectId));
   },
 
+  // Projects only the columns the read endpoints expose: the (potentially large) `sidecarBundle` and
+  // the redundant `projectId` are deliberately left out so a metadata fetch stays small.
   findSnapshot(executor: Executor, projectId: string, snapshotId: string) {
     return executor
-      .select()
+      .select({
+        id: snapshots.id,
+        message: snapshots.message,
+        modules: snapshots.modules,
+        createdAt: snapshots.createdAt,
+      })
       .from(snapshots)
       .where(and(eq(snapshots.projectId, projectId), eq(snapshots.id, snapshotId)));
   },

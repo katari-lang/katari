@@ -2,11 +2,11 @@
 
 import { z } from "zod";
 
+export { projectIdParamSchema } from "../../lib/params.js";
+
 export const createProjectSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   readme: z.string().optional(),
 });
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
-
-export const projectIdParamSchema = z.object({ projectId: z.uuid() });

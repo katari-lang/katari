@@ -17,7 +17,9 @@ export const runRoutes = new Hono<AppEnv>()
     zValidator("json", startRunSchema),
     async (c) => {
       const { projectId } = c.req.valid("param");
-      return c.json(success(await runService.start(projectId, c.req.valid("json"))), 201);
+      // Surface the run id as `id`, matching every other resource's create/identity envelope.
+      const { runId } = await runService.start(projectId, c.req.valid("json"));
+      return c.json(success({ id: runId }), 201);
     },
   )
   .get("/projects/:projectId/runs", zValidator("param", projectIdParamSchema), async (c) => {

@@ -3,11 +3,12 @@
 
 import type { Json } from "@katari-lang/types";
 import { z } from "zod";
+import { projectIdParamSchema } from "../../lib/params.js";
+
+export { projectIdParamSchema };
 
 export const answerEscalationSchema = z.object({ value: z.custom<Json>() });
 
-export const projectIdParamSchema = z.object({ projectId: z.uuid() });
-export const escalationParamSchema = z.object({
-  projectId: z.uuid(),
+export const escalationParamSchema = projectIdParamSchema.extend({
   escalationId: z.uuid(),
 });

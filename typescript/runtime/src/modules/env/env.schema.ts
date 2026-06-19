@@ -2,6 +2,9 @@
 // (secret values need AES-GCM encryption); the contract is frozen here.
 
 import { z } from "zod";
+import { projectIdParamSchema } from "../../lib/params.js";
+
+export { projectIdParamSchema };
 
 export const setEnvSchema = z.object({
   value: z.string(),
@@ -9,5 +12,4 @@ export const setEnvSchema = z.object({
 });
 export type SetEnvBody = z.infer<typeof setEnvSchema>;
 
-export const projectIdParamSchema = z.object({ projectId: z.uuid() });
-export const envKeyParamSchema = z.object({ projectId: z.uuid(), key: z.string().min(1) });
+export const envKeyParamSchema = projectIdParamSchema.extend({ key: z.string().min(1) });

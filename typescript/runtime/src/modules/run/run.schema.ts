@@ -3,6 +3,9 @@
 
 import type { Json } from "@katari-lang/types";
 import { z } from "zod";
+import { projectIdParamSchema } from "../../lib/params.js";
+
+export { projectIdParamSchema };
 
 export const startRunSchema = z.object({
   qualifiedName: z.string().min(1),
@@ -15,5 +18,4 @@ export type StartRunBody = z.infer<typeof startRunSchema>;
 
 export const cancelRunSchema = z.object({ reason: z.string().optional() });
 
-export const projectIdParamSchema = z.object({ projectId: z.uuid() });
-export const runParamSchema = z.object({ projectId: z.uuid(), runId: z.uuid() });
+export const runParamSchema = projectIdParamSchema.extend({ runId: z.uuid() });
