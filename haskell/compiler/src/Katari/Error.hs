@@ -111,6 +111,7 @@ renderTypeError typeError =
         <> "] from this application; supply them explicitly (value["
         <> Text.intercalate ", " info.parameters
         <> "])"
+    TypeErrorWrongReferenceKind info -> "`" <> info.name <> "` is not " <> info.expected
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -143,6 +144,11 @@ data TypeError where
   -- | A generic application's type arguments could not be inferred from the call (a parameter has no
   -- argument constraining it). The user must supply the named arguments explicitly (@value[T, ...]@).
   TypeErrorCannotInferGeneric :: CannotInferGenericErrorInfo -> TypeError
+  -- | A name resolved by the identifier phase, but to the wrong kind of entity for its position — a
+  -- request handler whose name is a data type / synonym / generic, or a constructor pattern whose name
+  -- is an agent / request / local rather than a data type. (Namespaces overlap, so resolution alone
+  -- cannot rule this out; the checker reports it instead of crashing.)
+  TypeErrorWrongReferenceKind :: WrongReferenceKindErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -160,6 +166,7 @@ typeErrorCode = \case
   TypeErrorExpectedShape _ -> "K3014"
   TypeErrorGenericNotApplied _ -> "K3015"
   TypeErrorCannotInferGeneric _ -> "K3016"
+  TypeErrorWrongReferenceKind _ -> "K3017"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -178,6 +185,7 @@ typeErrorSeverity = \case
   TypeErrorExpectedShape _ -> SeverityError
   TypeErrorGenericNotApplied _ -> SeverityError
   TypeErrorCannotInferGeneric _ -> SeverityError
+  TypeErrorWrongReferenceKind _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -266,6 +274,14 @@ newtype GenericNotAppliedErrorInfo = GenericNotAppliedErrorInfo
 -- constrain, so they could not be inferred and must be supplied explicitly.
 newtype CannotInferGenericErrorInfo = CannotInferGenericErrorInfo
   { parameters :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @name@ is the (surface) name as written; @expected@ names the kind the position requires (e.g.
+-- "a request", "a constructor (data type)").
+data WrongReferenceKindErrorInfo = WrongReferenceKindErrorInfo
+  { name :: Text,
+    expected :: Text
   }
   deriving (Eq, Ord, Show)
 

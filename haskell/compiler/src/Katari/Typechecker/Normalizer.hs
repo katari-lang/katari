@@ -31,7 +31,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Common (intersectWithKeyM, unionWithKeyM)
-import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..))
+import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId)
 import Katari.Data.NormalizedType
@@ -142,7 +142,7 @@ checkRequestArity qualifiedName arguments = do
 -- normalized boundary, so /every/ written application — in an annotation as much as at an explicit
 -- application site — is checked the same way.
 checkApplicationBounds :: GenericParameters -> Map Text NormalizedKindedType -> Normalizer ()
-checkApplicationBounds parameters arguments = checkGenericBounds parameters (genericSubstitution parameters arguments)
+checkApplicationBounds parameters arguments = checkGenericBounds parameters (reKeyByGenericId parameters arguments)
 
 -- | Check each generic parameter's argument against its @extends@ upper bound, with the substitution
 -- applied to the bound first (a bound may reference other generics being applied, e.g.
@@ -153,9 +153,18 @@ checkApplicationBounds parameters arguments = checkGenericBounds parameters (gen
 -- 'substituteGenericArgument'.
 checkGenericBounds :: GenericParameters -> Map GenericId NormalizedKindedType -> Normalizer ()
 checkGenericBounds parameters substitution =
-  mapM_ checkOne (Map.elems parameters.parameterInformation)
+  checkBounds substitution [(info.genericId, info.upperBound) | info <- Map.elems parameters.parameterInformation]
+
+-- | The shared dispose-time bound check: for each @(id, bound)@ whose @id@ the substitution resolves
+-- to an argument, instantiate the bound with the (full) substitution and check @argument <: bound@ with
+-- the trusted 'subtype'. The single loop behind both the by-name application bound check
+-- ('checkGenericBounds') and the inferred-argument bound check
+-- ('Katari.Typechecker.Check.checkInferredBounds'); they differ only in where the @(id, bound)@ pairs
+-- and the substitution come from (declared parameters vs. a metavariable registry).
+checkBounds :: Map GenericId NormalizedKindedType -> List (GenericId, Maybe NormalizedKindedType) -> Normalizer ()
+checkBounds substitution = mapM_ checkOne
   where
-    checkOne info = case (info.upperBound, Map.lookup info.genericId substitution) of
+    checkOne (genericId, maybeBound) = case (maybeBound, Map.lookup genericId substitution) of
       (Just bound, Just argument) -> do
         instantiatedBound <- substituteGenericArgument substitution bound
         subtype argument instantiatedBound
@@ -624,9 +633,16 @@ combineArgumentMap direction variances = unionWithKeyM combineNamedArgument
       Just Covariant -> combine direction leftArgument rightArgument
       Just Contravariant -> combine (dualDirection direction) leftArgument rightArgument
       Just Bivariant -> combine direction leftArgument rightArgument
-      Just Invariant
-        | leftArgument == rightArgument -> pure leftArgument
-        | otherwise -> do
+      Just Invariant -> do
+        -- Invariance requires the two instantiations to be the same type. Test that with the trusted
+        -- (bidirectional) 'subtype' — the same notion 'subtypeArgumentsWith' uses for invariant
+        -- arguments — rather than structural '==', so two equal-but-differently-spelled types combine
+        -- instead of spuriously reporting a mismatch. The probe errors are captured, not emitted.
+        (_, mismatchErrors) <-
+          captureErrors (subtype leftArgument rightArgument >> subtype rightArgument leftArgument)
+        if null mismatchErrors
+          then pure leftArgument
+          else do
             tellInvariantMismatch direction leftArgument rightArgument
             pure leftArgument -- NOTE: either side works; the pair is not combinable anyway
 
@@ -736,11 +752,21 @@ subtypeFunction leftFunction rightFunction = do
   subtype leftFunction.effect rightFunction.effect
 
 -- | Sequences are covariant: every position's element type must be a subtype, including the tail
--- (rest). A position present on only one side is compared against the other side's rest.
+-- (rest). A position is exactly present or absent — an absent position is /not/ @null@ — so the left
+-- must provide every fixed position the right requires: its fixed prefix must be at least as long as
+-- the right's (@[number] </: [number, string]@: a 1-tuple has no position 1). A /longer/ left is
+-- fine; its extra positions are compared against the right's @rest@ ('alignSequenceItems'), and the
+-- rests themselves are compared covariantly.
 subtypeSequence :: NormalizedSequence -> NormalizedSequence -> Normalizer ()
-subtypeSequence leftSequence rightSequence = do
-  mapM_ (uncurry subtype) (alignSequenceItems leftSequence rightSequence)
-  subtype leftSequence.rest rightSequence.rest
+subtypeSequence leftSequence rightSequence
+  | length leftSequence.items < length rightSequence.items =
+      tellSubtypeMismatch
+        "Sequence is shorter than the expected fixed length"
+        (layeredAsType neverLayer {sequenceLayer = Just leftSequence})
+        (layeredAsType neverLayer {sequenceLayer = Just rightSequence})
+  | otherwise = do
+      mapM_ (uncurry subtype) (alignSequenceItems leftSequence rightSequence)
+      subtype leftSequence.rest rightSequence.rest
 
 -- | Object field types are covariant. A field present on only one side is compared against the
 -- other side's rest (treated as optional). A required field on the right must be required on the
@@ -787,27 +813,24 @@ subtypeData leftAttribute leftDataLayer right rightLayer = mapM_ checkData (Map.
               right
             tell constructorErrors
     constructorCheck dataInfo leftArguments = captureErrors $ withWorld leftAttribute $ do
-      constructorInstance <- substituteObject (genericSubstitution dataInfo.genericParameters leftArguments) dataInfo.constructor
+      constructorInstance <- substituteObject (reKeyByGenericId dataInfo.genericParameters leftArguments) dataInfo.constructor
       subtype (objectAsType constructorInstance) right
 
--- | The generic-id substitution that instantiates a quantified body (a data constructor, a request,
--- a value scheme) with arguments supplied by parameter /name/: each declared parameter's id mapped to
--- its argument. The single name->id bridge every name-keyed instantiation site shares.
-genericSubstitution :: GenericParameters -> Map Text NormalizedKindedType -> Map GenericId NormalizedKindedType
-genericSubstitution parameters arguments =
-  Map.fromList
-    [ (info.genericId, argument)
-      | (name, info) <- Map.toList parameters.parameterInformation,
-        Just argument <- [Map.lookup name arguments]
-    ]
+-- | Apply a covariant relation according to a position's declared variance, the single statement of the
+-- variance discipline: covariant as written, contravariant with the operands flipped, invariant in both
+-- directions (results combined), bivariant not at all. Shared by the subtype check
+-- ('subtypeArgumentsWith') and the inference proposal ('Katari.Typechecker.Inference.collectConstraints')
+-- so the two cannot drift — a missed flip in either is an unsoundness, so it is written once.
+relateAtVariance :: (Monad f, Monoid m) => (a -> a -> f m) -> Variance -> a -> a -> f m
+relateAtVariance relate = \case
+  Covariant -> relate
+  Contravariant -> flip relate
+  Invariant -> \left right -> (<>) <$> relate left right <*> relate right left
+  Bivariant -> \_ _ -> pure mempty
 
--- | Compare the named generic arguments of one data type or request pointwise, each according to
--- its declared variance. Argument maps are complete by construction ('checkGenericArity' runs at
--- normalization), so the shared key set is the full declared set:
---   covariant     -> left <: right
---   contravariant -> right <: left
---   invariant     -> both directions
---   bivariant     -> no constraint
+-- | Compare the named generic arguments of one data type or request pointwise, each according to its
+-- declared variance ('relateAtVariance' over 'subtype'). Argument maps are complete by construction
+-- ('checkGenericArity' runs at normalization), so the shared key set is the full declared set.
 subtypeArgumentsWith :: Map Text Variance -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer ()
 subtypeArgumentsWith variances leftArguments rightArguments =
   mapM_ checkNamedArgument (Map.toList (Map.intersectionWith (,) leftArguments rightArguments))
@@ -815,12 +838,7 @@ subtypeArgumentsWith variances leftArguments rightArguments =
     checkNamedArgument (genericArgumentName, (leftArgument, rightArgument)) =
       case Map.lookup genericArgumentName variances of
         Nothing -> panicUnknownGeneric genericArgumentName
-        Just Covariant -> subtype leftArgument rightArgument
-        Just Contravariant -> subtype rightArgument leftArgument
-        Just Invariant -> do
-          subtype leftArgument rightArgument
-          subtype rightArgument leftArgument
-        Just Bivariant -> pure ()
+        Just variance -> relateAtVariance subtype variance leftArgument rightArgument
 
 ------------------------------------------------------------------------------------------------
 -- Generic upper bounds
@@ -831,25 +849,27 @@ subtypeArgumentsWith variances leftArguments rightArguments =
 boundArgumentFor :: GenericId -> Normalizer (Maybe NormalizedKindedType)
 boundArgumentFor genericId = asks (\environment -> Map.lookup genericId environment.genericsInScope >>= (.upperBound))
 
--- | Iterate a value's generics to a fixpoint: resolve every not-yet-covered generic with @absorb@,
--- repeating because a bound may introduce further generics. @coveredGenerics@ are left untouched
--- (the supertype's own generics during a subtype check cancel rather than expand); generics nested
--- in inner layers are resolved when the comparison recurses into them, not here.
-resolveGenerics :: (a -> Set GenericId) -> (a -> GenericId -> Normalizer a) -> Set GenericId -> a -> Normalizer a
-resolveGenerics genericsOf absorb coveredGenerics = resolve Set.empty
+-- | Iterate a value's generics to a fixpoint: resolve every not-yet-covered generic with @absorbRound@
+-- (which raises the value by /all/ the round's generics at once), repeating because a bound may
+-- introduce further generics. @coveredGenerics@ are left untouched (the supertype's own generics
+-- during a subtype check cancel rather than expand); generics nested in inner layers are resolved
+-- when the comparison recurses into them, not here. This is the single fixpoint driver shared by the
+-- type, attribute, and effect bound expansions; each supplies its own @genericsOf@ / @absorbRound@.
+resolveGenerics :: (a -> Set GenericId) -> (Set GenericId -> a -> Normalizer a) -> Set GenericId -> a -> Normalizer a
+resolveGenerics genericsOf absorbRound coveredGenerics = resolve Set.empty
   where
     resolve resolvedGenerics current = do
       let genericsToResolve = Set.difference (genericsOf current) (Set.union coveredGenerics resolvedGenerics)
       if Set.null genericsToResolve
         then pure current
         else do
-          raised <- foldM absorb current (Set.toList genericsToResolve)
+          raised <- absorbRound genericsToResolve current
           resolve (Set.union resolvedGenerics genericsToResolve) raised
 
 -- | Raise a type to the upper bounds of its own generics, joining ('union') each bound in; an
 -- unregistered generic extends the type top.
 boundedType :: Set GenericId -> NormalizedType -> Normalizer NormalizedType
-boundedType = resolveGenerics (\normalizedType -> normalizedType.generics) absorbBound
+boundedType = resolveGenerics (\normalizedType -> normalizedType.generics) (\generics current -> foldM absorbBound current (Set.toList generics))
   where
     absorbBound accumulated genericId = do
       maybeArgument <- boundArgumentFor genericId
@@ -861,7 +881,7 @@ boundedType = resolveGenerics (\normalizedType -> normalizedType.generics) absor
 -- | Raise an attribute to the upper bounds of its own generics; as 'boundedType', for the attribute
 -- lattice.
 boundedAttribute :: Set GenericId -> NormalizedAttribute -> Normalizer NormalizedAttribute
-boundedAttribute = resolveGenerics (\attribute -> attribute.generic) absorbBound
+boundedAttribute = resolveGenerics (\attribute -> attribute.generic) (\generics current -> foldM absorbBound current (Set.toList generics))
   where
     absorbBound accumulated genericId = do
       maybeArgument <- boundArgumentFor genericId
@@ -897,19 +917,21 @@ effectBoundFor genericId = do
 -- | Expand an effect's tails to their upper bounds, transitively: each tail @(E, lacks)@ becomes
 -- @E@'s bound restricted to lack those names ('restrictEffect'), joined in. Tails in @coveredTails@
 -- are left in place (the supertype's own tails during a subtype check cancel rather than expand).
+-- Rides the shared 'resolveGenerics' fixpoint: @genericsOf@ is the tail-key set and the per-round
+-- @absorb@ replaces each round's tails by their (restricted) bounds. @any@ has no tails, so it is a
+-- fixpoint immediately.
 boundedEffect :: Map GenericId (Set QualifiedName) -> NormalizedEffect -> Normalizer NormalizedEffect
-boundedEffect coveredTails = resolve Set.empty
+boundedEffect coveredTails = resolveGenerics genericsOf absorbRound (Map.keysSet coveredTails)
   where
-    resolve resolvedTails = \case
+    genericsOf = \case
+      NormalizedEffectAny -> Set.empty
+      NormalizedEffectRow effectRow -> Map.keysSet effectRow.tails
+    absorbRound tailsToExpand = \case
       NormalizedEffectAny -> pure NormalizedEffectAny
       NormalizedEffectRow effectRow -> do
-        let tailsToExpand = Map.withoutKeys effectRow.tails (Set.union (Map.keysSet coveredTails) resolvedTails)
-        if Map.null tailsToExpand
-          then pure (NormalizedEffectRow effectRow)
-          else do
-            expansions <- mapM (\(genericId, lacks) -> restrictEffect lacks <$> effectBoundFor genericId) (Map.toList tailsToExpand)
-            raised <- foldM union (NormalizedEffectRow effectRow {tails = Map.withoutKeys effectRow.tails (Map.keysSet tailsToExpand)}) expansions
-            resolve (Set.union resolvedTails (Map.keysSet tailsToExpand)) raised
+        let expanding = Map.restrictKeys effectRow.tails tailsToExpand
+        expansions <- mapM (\(genericId, lacks) -> restrictEffect lacks <$> effectBoundFor genericId) (Map.toList expanding)
+        foldM union (NormalizedEffectRow effectRow {tails = Map.withoutKeys effectRow.tails tailsToExpand}) expansions
 
 ------------------------------------------------------------------------------------------------
 -- Generic substitution

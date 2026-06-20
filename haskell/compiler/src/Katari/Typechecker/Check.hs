@@ -18,7 +18,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), monoScheme)
+import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), instantiationByName, monoScheme, reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
 import Katari.Data.NormalizedType
@@ -36,6 +36,7 @@ import Katari.Error
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     TypeError (..),
+    WrongReferenceKindErrorInfo (..),
   )
 import Katari.Panic (panic)
 import Katari.Typechecker.Context
@@ -74,8 +75,8 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), checkSolvedBounds, collectConstraints, metavarKinded, solveConstraints)
-import Katari.Typechecker.Normalizer (boundedType, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), collectConstraints, metavarKinded, solveConstraints)
+import Katari.Typechecker.Normalizer (boundedType, checkBounds, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -502,7 +503,7 @@ dataFieldType sourceSpan fieldName (dataName, arguments) = do
   dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
   case Map.lookup dataName dataEnvironment of
     Just info -> do
-      constructorObject <- runNormalizer sourceSpan (substituteObject (genericSubstitution info.genericParameters arguments) info.constructor)
+      constructorObject <- runNormalizer sourceSpan (substituteObject (reKeyByGenericId info.genericParameters arguments) info.constructor)
       pure (objectFieldType constructorObject fieldName)
     Nothing -> panic ("dataFieldType: data type not registered: " <> renderQualifiedName dataName)
 
@@ -834,7 +835,7 @@ applyGenericValue sourceSpan scheme argumentObject argumentAttribute = do
       -- Dispose: substitute the solution into the original scheme and check it with the trusted
       -- relation (argument compatibility via 'applyAgent', plus the declared @extends@ bounds).
       solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
-      runNormalizer sourceSpan (checkSolvedBounds registry solveResult)
+      checkInferredBounds sourceSpan registry solveResult
       maybeFunction <- extractFunction sourceSpan solvedType
       case maybeFunction of
         Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
@@ -856,6 +857,19 @@ reportUninferredGenerics sourceSpan registry uninferred =
   case [info.name | metavar <- uninferred, Just info <- [Map.lookup metavar registry]] of
     [] -> pure ()
     names -> reportType sourceSpan (TypeErrorCannotInferGeneric CannotInferGenericErrorInfo {parameters = names})
+
+-- | The checker's dispose step for inferred generic arguments: check each genuinely-inferred
+-- metavariable's solution against its declared @extends@ bound with the trusted (shared) 'checkBounds'
+-- — so an inferred @T = integer | string@ for @add[T extends number]@ fails here as a real K3001, the
+-- same outcome the explicit application path gets via 'checkGenericBounds'. Un-inferrable metavariables
+-- are skipped (already reported K3016; their recovery value would spuriously fail). This is the single
+-- bound check both the generic-call and request-handler inference sites share.
+checkInferredBounds :: SourceSpan -> Registry -> SolveResult -> Checker ()
+checkInferredBounds sourceSpan registry solveResult =
+  runNormalizer sourceSpan (checkBounds solveResult.substitution boundPairs)
+  where
+    uninferred = Set.fromList solveResult.uninferred
+    boundPairs = [(metavar, info.bound) | (metavar, info) <- Map.toList registry, not (Set.member metavar uninferred)]
 
 ------------------------------------------------------------------------------------------------
 -- Jump statements
@@ -1163,10 +1177,11 @@ checkPattern pattern scrutinee = case pattern of
               cover,
               allBindings
             )
-        -- The identifier resolved this constructor and the env-build registered every data type, so
-        -- a resolved constructor name absent from the data environment is a compiler bug.
-        Nothing -> panic ("checkPattern: data type not registered: " <> renderQualifiedName qualifiedName)
-    _ -> panic "checkPattern: constructor pattern is not resolved to a data type"
+        -- The name resolved, but not to a data type (the variable namespace is shared with agents /
+        -- requests / locals), so this is a user error, not a compiler bug.
+        Nothing -> recoverConstructorPattern constructorPattern
+    -- Resolved to a local / non-data value used in constructor-pattern position — likewise a user error.
+    _ -> recoverConstructorPattern constructorPattern
   where
     bindingsFor maybeLocal bindingType = case maybeLocal of
       Just localId -> [(localId, monoScheme bindingType)]
@@ -1178,12 +1193,47 @@ extractTupleElementTypes sourceSpan scrutinee count = do
   -- no element types (each position degrades to top), so a possibly-null value is not read through as
   -- its element types.
   raised <- soleLayer sourceSpan (Set.singleton SequenceKind) scrutinee
-  pure $ case raised >>= (.sequenceLayer) . snd of
-    Just normalizedSequence ->
-      -- The fixed prefix positions are present; a position past it may be absent at runtime, so it
-      -- reads as @rest | null@ (an array's tail is @T@ ~> @T | null@, a tuple's is @never@ ~> @null@).
-      take count (normalizedSequence.items <> repeat (orNull normalizedSequence.rest))
-    Nothing -> replicate count topType
+  pure $ case raised of
+    Just (attribute, layer)
+      | Just normalizedSequence <- layer.sequenceLayer ->
+          -- Destructuring observes each element through the container's handle, so each binder is the
+          -- element type lifted by that handle attribute ('liftByAttribute'): a private tuple
+          -- distributes its privacy to its components, the same as a @match@ scrutinee. The fixed
+          -- prefix positions are present; a position past it may be absent at runtime, so it reads as
+          -- @rest | null@ (an array's tail @T@ ~> @T | null@, a tuple's @never@ ~> @null@).
+          liftByAttribute attribute <$> take count (normalizedSequence.items <> repeat (orNull normalizedSequence.rest))
+    _ -> replicate count topType
+
+-- | Recover from a constructor pattern whose name does not denote a data type (a user error, since the
+-- variable namespace is shared with agents / requests / locals): report it, then bind the field
+-- patterns against 'topType' so the arm body's references still resolve, with a 'topType' cover so
+-- exhaustiveness does not cascade a second diagnostic.
+recoverConstructorPattern ::
+  ConstructorPattern Identified ->
+  Checker (Pattern Typed, NormalizedType, List (LocalVariableId, Scheme))
+recoverConstructorPattern constructorPattern = do
+  reportType
+    constructorPattern.sourceSpan
+    (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = constructorPattern.name, expected = "a constructor (data type)"}))
+  fieldResults <- traverse (checkFieldPattern topType) constructorPattern.fields
+  let recoveredFields = [typed | (_, _, _, typed) <- fieldResults]
+      recoveredBindings = concatMap (\(_, _, bindings, _) -> bindings) fieldResults
+  recoveredSemantic <- denormalizeAt constructorPattern.sourceSpan topType
+  pure
+    ( PatternConstructor
+        ConstructorPattern
+          { moduleQualifier = retagModuleQualifier <$> constructorPattern.moduleQualifier,
+            name = constructorPattern.name,
+            constructorReference = retagReference constructorPattern.constructorReference,
+            genericArguments = retagSyntacticTypeExpression <$> constructorPattern.genericArguments,
+            instantiation = mempty,
+            fields = recoveredFields,
+            sourceSpan = constructorPattern.sourceSpan,
+            typeOf = recoveredSemantic
+          },
+      topType,
+      recoveredBindings
+    )
 
 checkFieldPattern ::
   NormalizedType ->
@@ -1272,39 +1322,45 @@ processObserved sourceSpan observedAttribute walk = do
 synthForExpression :: ForExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthForExpression expression = do
   (typedSource, sourceType) <- synthExpression expression.inBinding.source
+  -- A `for` is a control construct: like `if` / `match`, it observes its source, so the source's
+  -- attribute carries into the result. 'processObserved' over the whole body + then clause enforces
+  -- that — a pure loop over a private source yields a private result, and a loop with effects /
+  -- escaping jumps over a private source is rejected (its attribute must fit the world).
+  sourceAttribute <- runNormalizer (sourceSpanOf expression.inBinding.source) (foldAttribute sourceType)
   elementType <- extractIterableElementType (sourceSpanOf expression.inBinding.source) sourceType
   (typedPattern, _, patternBindings) <- checkPattern expression.inBinding.pattern elementType
   -- The `var` state scopes over the body /and/ the then clause; the loop pattern and the for-inference
   -- (next / break accumulators) scope over the body alone.
-  (typedVarBindings, (typedBody, typedThen, finalType)) <-
-    withVarBindingsTyped expression.varBindings $ do
-      (inferredNextType, inferredBreakType, typedBody) <-
-        withForInference $
-          enterForBody $
-            withParameters patternBindings $
-              -- The `for` captures its own `next` / `break`, so they do not escape an enclosing branch.
-              capturingJumps ForJump (fst <$> synthBlock expression.body)
-      -- A `for` maps to @array[nextType]@; a position the body did not emit is absent, not null, which
-      -- @array@'s "present then this type" tail already captures (no null is unioned in).
-      let arrayType = arrayOf inferredNextType
-      -- The for's normal result is its array (or the then clause's value); a `break` short-circuits
-      -- with its own value, so the result type also includes every break value.
-      (typedThen, normalType) <- case expression.thenClause of
-        Nothing -> pure (Nothing, arrayType)
-        Just thenClause -> do
-          (typedBinder, thenBindings) <- checkThenBinder arrayType thenClause.binder
-          -- The `then` finalizer runs once after the loop and permits no jumps: a `break` / `next` /
-          -- `return` inside it has no target here (in particular it cannot leak into an enclosing `for`).
-          (typedThenBody, thenBodyType) <- withParameters thenBindings (withoutJumpTargets (synthBlock thenClause.body))
-          let typedThen =
-                ThenClause
-                  { binder = typedBinder,
-                    body = typedThenBody,
-                    sourceSpan = thenClause.sourceSpan
-                  }
-          pure (Just typedThen, thenBodyType)
-      finalType <- runNormalizer expression.sourceSpan (union normalType inferredBreakType)
-      pure (typedBody, typedThen, finalType)
+  (typedVarBindings, ((typedBody, typedThen), finalType)) <-
+    withVarBindingsTyped expression.varBindings $
+      processObserved expression.sourceSpan sourceAttribute $ do
+        (inferredNextType, inferredBreakType, typedBody) <-
+          withForInference $
+            enterForBody $
+              withParameters patternBindings $
+                -- The `for` captures its own `next` / `break`, so they do not escape an enclosing branch.
+                capturingJumps ForJump (fst <$> synthBlock expression.body)
+        -- A `for` maps to @array[nextType]@; a position the body did not emit is absent, not null, which
+        -- @array@'s "present then this type" tail already captures (no null is unioned in).
+        let arrayType = arrayOf inferredNextType
+        -- The for's normal result is its array (or the then clause's value); a `break` short-circuits
+        -- with its own value, so the result type also includes every break value.
+        (typedThen, normalType) <- case expression.thenClause of
+          Nothing -> pure (Nothing, arrayType)
+          Just thenClause -> do
+            (typedBinder, thenBindings) <- checkThenBinder arrayType thenClause.binder
+            -- The `then` finalizer runs once after the loop and permits no jumps: a `break` / `next` /
+            -- `return` inside it has no target here (in particular it cannot leak into an enclosing `for`).
+            (typedThenBody, thenBodyType) <- withParameters thenBindings (withoutJumpTargets (synthBlock thenClause.body))
+            let typedThen =
+                  ThenClause
+                    { binder = typedBinder,
+                      body = typedThenBody,
+                      sourceSpan = thenClause.sourceSpan
+                    }
+            pure (Just typedThen, thenBodyType)
+        finalType <- runNormalizer expression.sourceSpan (union normalType inferredBreakType)
+        pure ((typedBody, typedThen), finalType)
   typedExpression expression.sourceSpan finalType $ \semantic ->
     ExpressionFor
       ForExpression
@@ -1330,10 +1386,14 @@ extractIterableElementType sourceSpan source = do
   -- Iterating requires the source to be solely a sequence: a @array[T] | null@ source is rejected, so
   -- the null possibility is no longer silently dropped from the element type.
   raised <- soleLayer sourceSpan (Set.singleton SequenceKind) source
-  case raised >>= (.sequenceLayer) . snd of
-    Just normalizedSequence ->
-      foldM combineUnion bottomType (normalizedSequence.items <> [normalizedSequence.rest])
-    Nothing -> do
+  case raised of
+    Just (attribute, layer)
+      | Just normalizedSequence <- layer.sequenceLayer ->
+          -- Iterating observes each element through the container's handle, so the element type is
+          -- lifted by that handle attribute: a private array yields private elements (the leak when this
+          -- was dropped). No @null@ is added — iteration visits the elements that exist.
+          liftByAttribute attribute <$> foldM combineUnion bottomType (normalizedSequence.items <> [normalizedSequence.rest])
+    _ -> do
       reportExpectedShape sourceSpan "a sequence (array or tuple)" source
       pure bottomType
   where
@@ -1431,7 +1491,7 @@ checkHandlerScheme expression = do
         (tailResults, breakResults, (handlerBodyEffect, results)) <-
           withHandlerResultInference $
             withEffectInference $
-              traverse walkRequestHandler expression.handlers
+              catMaybes <$> traverse walkRequestHandler expression.handlers
         -- Both the body tails and the explicit breaks are values the handler returns without resuming,
         -- so they bypass @then@ and union directly into the result.
         breakUnion <- runNormalizer expression.sourceSpan (union tailResults breakResults)
@@ -1544,17 +1604,31 @@ walkHandlerThenClause binderType = \case
 -- resuming — so it joins the break union (the handler's result @R@ is the continuation's result, not a
 -- body tail). Returns the handled request name, its inferred generic arguments (for the continuation's
 -- overwrite effect), and the typed node.
+-- | The handled name resolves in the /type/ namespace (shared with data types, synonyms and in-scope
+-- generics), so a handler may name a non-request. That is a user error, not a compiler invariant, so it
+-- is reported and the handler is skipped ('Nothing'); a resolved request that is somehow absent from
+-- the environment would be a genuine compiler bug, but the same report keeps the checker total.
 walkRequestHandler ::
   RequestHandler Identified ->
-  Checker (QualifiedName, Map Text NormalizedKindedType, RequestHandler Typed)
+  Checker (Maybe (QualifiedName, Map Text NormalizedKindedType, RequestHandler Typed))
 walkRequestHandler handler = do
-  requestName <- case handler.typeReference.resolution of
-    Just (TypeResolutionQualifiedName name) -> pure name
-    _ -> panic "walkRequestHandler: request handler is not resolved to a request"
   requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
-  requestInfo <- case Map.lookup requestName requestEnv of
-    Just info -> pure info
-    Nothing -> panic ("walkRequestHandler: request not registered: " <> renderQualifiedName requestName)
+  let resolvedRequest = case handler.typeReference.resolution of
+        Just (TypeResolutionQualifiedName name) -> (,) name <$> Map.lookup name requestEnv
+        _ -> Nothing
+  case resolvedRequest of
+    Nothing -> do
+      reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a request"}))
+      pure Nothing
+    Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
+
+-- | Walk a request handler whose handled request has been resolved (see 'walkRequestHandler').
+walkResolvedRequestHandler ::
+  RequestHandler Identified ->
+  QualifiedName ->
+  RequestInformation ->
+  Checker (QualifiedName, Map Text NormalizedKindedType, RequestHandler Typed)
+walkResolvedRequestHandler handler requestName requestInfo = do
   -- The handler's parameters are built first: when the request's generics are not written explicitly,
   -- they are derived from the parameter annotations (a @request foo(x : int)@ handler of @foo[a](x: a)@
   -- infers @a = int@), exactly the single-site inference a generic call uses.
@@ -1580,12 +1654,7 @@ walkRequestHandler handler = do
   emitHandlerTailType handler.sourceSpan bodyType
   instantiation <- instantiationOf handler.sourceSpan requestInfo.genericParameters substitution
   -- The request's generic arguments by name, for the continuation's overwrite effect @{...E, req[..]}@.
-  let requestArguments =
-        Map.fromList
-          [ (parameterName, argument)
-            | (parameterName, info) <- Map.toList requestInfo.genericParameters.parameterInformation,
-              Just argument <- [Map.lookup info.genericId substitution]
-          ]
+  let requestArguments = instantiationByName requestInfo.genericParameters substitution
       typedHandler =
         RequestHandler
           { moduleQualifier = retagModuleQualifier <$> handler.moduleQualifier,
@@ -1620,10 +1689,10 @@ constructorPatternSubstitution sourceSpan qualifiedName dataInfo scrutinee = \ca
     case raised.baseType of
       NormalizedBaseTypeLayered layer
         | Just arguments <- Map.lookup qualifiedName layer.dataLayer ->
-            pure (genericSubstitution dataInfo.genericParameters arguments)
+            pure (reKeyByGenericId dataInfo.genericParameters arguments)
       _ -> do
         ownArguments <- ownGenericArguments sourceSpan dataInfo.genericParameters
-        pure (genericSubstitution dataInfo.genericParameters ownArguments)
+        pure (reKeyByGenericId dataInfo.genericParameters ownArguments)
   genericArguments ->
     buildGenericSubstitution sourceSpan (renderQualifiedName qualifiedName) dataInfo.genericParameters genericArguments
 
@@ -1642,6 +1711,9 @@ inferRequestHandlerSubstitution sourceSpan requestInfo paramObject = do
   constraints <- runNormalizer sourceSpan (collectConstraints (Map.keysSet registry) paramObject openParam)
   solveResult <- runNormalizer sourceSpan (solveConstraints registry constraints)
   reportUninferredGenerics sourceSpan registry solveResult.uninferred
+  -- Dispose against the declared @extends@ bounds, the same as every other application site, so an
+  -- inferred argument out of its bound is rejected (it was silently accepted before this check).
+  checkInferredBounds sourceSpan registry solveResult
   traverse (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution) toMetavar
 
 buildGenericSubstitution ::
@@ -1683,13 +1755,7 @@ instantiationOf ::
   Map GenericId NormalizedKindedType ->
   Checker (Map Text SemanticGenericArgument)
 instantiationOf sourceSpan parameters substitution =
-  Map.fromList . catMaybes <$> traverse build (Map.toList parameters.parameterInformation)
-  where
-    build (name, info) = case Map.lookup info.genericId substitution of
-      Nothing -> pure Nothing
-      Just kinded -> do
-        semantic <- runNormalizer sourceSpan (denormalizeGenericArgument kinded)
-        pure (Just (name, semantic))
+  traverse (runNormalizer sourceSpan . denormalizeGenericArgument) (instantiationByName parameters substitution)
 
 namedObjectType :: List (Text, NormalizedType) -> NormalizedType
 namedObjectType fieldList =

@@ -25,7 +25,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (GenericParameterInformation (..), GenericParameters (..))
+import Katari.Data.Environment (GenericParameterInformation (..), GenericParameters (..), reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId, TypeResolution (..))
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
@@ -326,12 +326,7 @@ elaborateSynonym qualifiedName synonym arguments applicationSpan = do
       case maybeArguments of
         Nothing -> pure Nothing
         Just elaborated -> do
-          let binding =
-                Map.fromList
-                  [ (info.genericId, argument)
-                    | (name, info) <- Map.toList synonym.genericParameters.parameterInformation,
-                      Just argument <- [Map.lookup name elaborated]
-                  ]
+          let binding = reKeyByGenericId synonym.genericParameters elaborated
           local
             ( \context ->
                 context

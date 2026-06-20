@@ -76,10 +76,20 @@ spec = do
       genericOf unboundedGeneric `shouldBeSubtypeOf` genericOf unboundedGeneric
 
   describe "subtype (sequences)" $ do
-    -- A tuple is fixed-length (tail @null@); an array is homogeneous (tail @element | null@). So a
-    -- tuple stands in for an array, but never the reverse — an array's positions may be absent.
+    -- A tuple is fixed-length (tail @never@: no further positions); an array is homogeneous (tail =
+    -- element). A position is exactly present or absent — an absent position is /not/ @null@ — so a
+    -- tuple stands in for an array (its fixed positions satisfy the element type), but never the
+    -- reverse, and a tuple is never a subtype of a /longer/ tuple (it lacks the required positions).
     it "accepts a tuple as an array" $
       semanticSubtypeErrors (SemanticTypeTuple [SemanticTypeInteger]) (SemanticTypeArray SemanticTypeInteger) `shouldBe` []
+    it "rejects a shorter tuple as a longer tuple (an absent position is not null)" $
+      semanticSubtypeErrors (SemanticTypeTuple [SemanticTypeInteger]) (SemanticTypeTuple [SemanticTypeInteger, SemanticTypeString]) `shouldSatisfy` (not . null)
+    it "rejects a shorter tuple even when the missing position admits null (absent /= null)" $
+      semanticSubtypeErrors (SemanticTypeTuple [SemanticTypeInteger]) (SemanticTypeTuple [SemanticTypeInteger, SemanticTypeNull]) `shouldSatisfy` (not . null)
+    it "rejects the empty tuple as a non-empty tuple" $
+      semanticSubtypeErrors (SemanticTypeTuple []) (SemanticTypeTuple [SemanticTypeInteger]) `shouldSatisfy` (not . null)
+    it "accepts equal-length tuples compared elementwise" $
+      semanticSubtypeErrors (SemanticTypeTuple [SemanticTypeInteger]) (SemanticTypeTuple [SemanticTypeNumber]) `shouldBe` []
     it "accepts an empty tuple as an array" $
       semanticSubtypeErrors (SemanticTypeTuple []) (SemanticTypeArray SemanticTypeInteger) `shouldBe` []
     it "accepts a multi-element tuple as an array of the element union" $

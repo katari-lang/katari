@@ -4,6 +4,7 @@
 module Katari.Data.Environment where
 
 import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.GenericKind (GenericKind)
@@ -42,6 +43,30 @@ data GenericParameters = GenericParameters
 
 emptyGenericParameters :: GenericParameters
 emptyGenericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty}
+
+-- | Re-key a by-name argument map to a by-id map through the parameter name↔id correspondence: each
+-- declared parameter's id mapped to the argument supplied under its name (a name with no argument is
+-- dropped). The single name→id bridge every instantiation site shares — a data / request application, a
+-- synonym expansion, a value scheme.
+reKeyByGenericId :: GenericParameters -> Map Text a -> Map GenericId a
+reKeyByGenericId parameters arguments =
+  Map.fromList
+    [ (info.genericId, argument)
+      | (name, info) <- Map.toList parameters.parameterInformation,
+        Just argument <- [Map.lookup name arguments]
+    ]
+
+-- | The inverse of 'reKeyByGenericId': re-key a by-id substitution back to a by-name map (each declared
+-- parameter's name mapped to the argument its id resolves to; an unresolved id is dropped). Shared by
+-- the sites that present an inferred / explicit substitution by name — a handler's request arguments and
+-- the Typed-AST instantiation record.
+instantiationByName :: GenericParameters -> Map GenericId a -> Map Text a
+instantiationByName parameters substitution =
+  Map.fromList
+    [ (name, argument)
+      | (name, info) <- Map.toList parameters.parameterInformation,
+        Just argument <- [Map.lookup info.genericId substitution]
+    ]
 
 -- | A value's type as carried in every environment (top-level values and locals alike): its
 -- quantified generic parameters plus the type body, which references those generics by 'GenericId'.

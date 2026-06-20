@@ -102,6 +102,12 @@ spec = do
       codesFor "request a() -> integer\nrequest b() -> integer\nagent run() -> integer { use handler { request a() -> integer { break true } request b() -> integer { 5 } } then (r) { \"x\" }\n0 }" `shouldBe` []
     it "rejects a then binder whose annotation does not accept R (K3001)" $
       codesFor (tickDecl <> "agent run() -> integer { use handler { request tick() -> integer { 5 } } then (r : string) { r }\n0 }") `shouldContain` ["K3001"]
+    -- The inferred request-handler path now disposes against the declared `extends` bound, like the
+    -- explicit path: inferring `a = string` for `num[a extends number]` is rejected.
+    it "rejects an inferred request-handler generic that violates its bound (K3001)" $
+      codesFor (boundedRequestDecl <> "agent run() -> integer { use handler { request num(value : string) { next value } }\n0 }") `shouldContain` ["K3001"]
+    it "accepts an inferred request-handler generic that satisfies its bound" $
+      codesFor (boundedRequestDecl <> "agent run() -> integer { use handler { request num(value : integer) { next value } }\n0 }") `shouldBe` []
     it "infers the residual effect E from the continuation: the handled request is dropped" $
       -- The continuation performs foo (caught) and bar (residual), so E = {bar}; an agent declaring
       -- `with bar` is accepted.
@@ -280,6 +286,9 @@ phantomDecl = "primitive agent phantom[a, b](value: a) -> a\n"
 
 tickDecl :: Text
 tickDecl = "request tick() -> integer\n"
+
+boundedRequestDecl :: Text
+boundedRequestDecl = "request num[a extends number](value: a) -> a\n"
 
 -- | A @use@ provider generic in its continuation's result @R@ — the shape the continuation-driven
 -- inference targets.

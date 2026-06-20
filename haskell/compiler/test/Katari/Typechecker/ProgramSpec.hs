@@ -210,6 +210,34 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects a `return` inside a handler then clause (K3012)" $
     typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } } then (r) { return r }\nreturn 0 }")] `shouldContain` ["K3012"]
 
+  -- The handled name resolves in the type namespace (shared with data types / synonyms / generics), and
+  -- a constructor-pattern name in the variable namespace (shared with agents / requests / locals): a
+  -- wrong-kind name is a user error (K3017), reported rather than crashing the checker.
+  it "reports a handler whose name is a data type, not a request (K3017)" $
+    typeErrorCodes [("test", "data box(x: integer)\nagent f() -> integer { use handler { request box(x: integer) -> integer { break 0 } }\n0 }")] `shouldContain` ["K3017"]
+
+  it "reports a handler whose name is an in-scope generic, not a request (K3017)" $
+    typeErrorCodes [("test", "agent f[E]() -> integer { use handler { request E() -> integer { break 0 } }\n0 }")] `shouldContain` ["K3017"]
+
+  it "reports a constructor pattern whose name is a request, not a data type (K3017)" $
+    typeErrorCodes [("test", "request ask(q: string) -> string\nagent f(v: integer) -> integer { match (v) { case ask(q => a) -> 1 } }")] `shouldContain` ["K3017"]
+
+  it "does not flag a handler on a genuine request" $
+    typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { use handler { request tick() -> integer { break 0 } }\n0 }")] `shouldBe` []
+
+  -- Destructuring distributes the container's privacy to its components (like a `match` scrutinee), so a
+  -- private value's elements may not escape to a public context.
+  it "a let-destructured element of a private value is itself private (K3001 on public escape)" $
+    typeErrorCodes [("test", "private agent sec() -> [integer, integer] { [1, 2] }\nagent leak() -> integer { let [a, b] = sec()\n a }")] `shouldContain` ["K3001"]
+
+  -- `for` is a control construct: iterating a private source with effects leaks its shape, so the body
+  -- must be pure (its observed attribute must fit the world).
+  it "rejects a `for` with effects over a private source (K3001)" $
+    typeErrorCodes [("test", "private agent sec() -> array[integer] { [1] }\nrequest ping() -> null\nagent f() -> array[integer] with ping { for (x in sec()) { ping()\nnext 0 } }")] `shouldContain` ["K3001"]
+
+  it "accepts a `for` with effects over a public source" $
+    typeErrorCodes [("test", "request ping() -> null\nagent f() -> array[integer] with ping { for (x in [1]) { ping()\nnext 0 } }")] `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

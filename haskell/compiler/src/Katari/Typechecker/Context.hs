@@ -309,22 +309,17 @@ withParameters bindings continuation = foldr applyOne continuation bindings
   where
     applyOne (localId, scheme) = withLocal localId scheme
 
--- | Bring a top-level (qualified) value into scope. The SCC driver uses this to grow the value
--- environment as each component is checked.
-withValue :: QualifiedName -> Scheme -> Checker a -> Checker a
-withValue qualifiedName scheme =
-  local (\environment -> environment {valueEnvironment = Map.insert qualifiedName scheme environment.valueEnvironment})
-
--- | Permanently register a top-level value in the checker environment from this point onward.
--- 'withValue' scopes the registration to a sub-action; 'extendValueEnvironment' is the variant
--- used when iterating SCCs at the driver level (the registration must persist for the rest of the
--- walk, not just one sub-action).
+-- | Permanently register top-level values in the checker environment from this point onward, as the
+-- driver iterates the value SCCs (the registration must persist for the rest of the walk). Each
+-- callee component is registered before any caller component is walked.
 extendValueEnvironment :: Map QualifiedName Scheme -> CheckerEnvironment -> CheckerEnvironment
 extendValueEnvironment additions environment =
   environment {valueEnvironment = environment.valueEnvironment <> additions}
 
 -- | The accumulated value environment of a checker environment. The driver reads it back after the
 -- whole-program walk to hand every top-level callable's scheme to lowering (for schema building).
+-- A projection (not a bare field access) because the field selector is not exported across the module
+-- boundary under @NoFieldSelectors@.
 checkerValueEnvironment :: CheckerEnvironment -> ValueEnvironment
 checkerValueEnvironment environment = environment.valueEnvironment
 

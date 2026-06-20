@@ -36,11 +36,11 @@ import Katari.Typechecker.Normalizer
     alignObjectFields,
     alignSequenceItems,
     dataInfoFor,
+    relateAtVariance,
     restrictEffect,
     substituteEffect,
     substituteGenericArgument,
     substituteType,
-    subtype,
     union,
   )
 
@@ -256,12 +256,10 @@ collectConstraints flexible = goType
             <$> traverse
               (perArgument variances)
               (Map.toList (Map.intersectionWith (,) actualArguments parameterArguments))
+        -- The same variance discipline the subtype check uses ('relateAtVariance'), so propose and
+        -- dispose agree on direction; an unmatched name is treated as unused (bivariant).
         perArgument variances (argumentName, (actualArgument, parameterArgument)) =
-          case Map.lookup argumentName variances of
-            Just Covariant -> goKinded actualArgument parameterArgument
-            Just Contravariant -> goKinded parameterArgument actualArgument
-            Just Invariant -> (<>) <$> goKinded actualArgument parameterArgument <*> goKinded parameterArgument actualArgument
-            _ -> pure mempty
+          relateAtVariance goKinded (Map.findWithDefault Bivariant argumentName variances) actualArgument parameterArgument
     goKinded (NormalizedKindedTypeType actual) (NormalizedKindedTypeType parameter) = goType actual parameter
     goKinded _ _ = pure mempty
 
@@ -379,23 +377,8 @@ solveConstraints registry constraints = do
       GenericKindEffect -> NormalizedKindedTypeEffect topEffect
       GenericKindAttribute -> NormalizedKindedTypeAttribute topAttribute
 
-------------------------------------------------------------------------------------------------
--- Dispose: bound checking on the solution
-------------------------------------------------------------------------------------------------
-
--- | Check each genuinely-inferred metavariable's solution against its declared @extends@ bound, using
--- the ordinary (trusted) kinded 'subtype' so a violation surfaces as a real K3001 at the concrete
--- type — e.g. inferring @T = integer | string@ for @add[T extends number]@ fails here. Un-inferrable
--- metavariables are skipped (already reported; their recovery value would spuriously fail).
-checkSolvedBounds :: Registry -> SolveResult -> Normalizer ()
-checkSolvedBounds registry solveResult =
-  mapM_ check (Map.toList registry)
-  where
-    uninferredSet = Set.fromList solveResult.uninferred
-    check (metavar, info)
-      | metavar `Set.member` uninferredSet = pure ()
-      | otherwise = case (info.bound, Map.lookup metavar solveResult.substitution) of
-          (Just bound, Just argument) -> do
-            substitutedBound <- substituteGenericArgument solveResult.substitution bound
-            subtype argument substitutedBound
-          _ -> pure ()
+-- NOTE: "inference proposes, checking disposes" — this module stops at the proposal ('solveConstraints').
+-- The dispose step (checking the solution against each generic's declared @extends@ bound with the
+-- trusted 'subtype') belongs to the checker, which runs it uniformly for inferred and explicit
+-- application: see 'Katari.Typechecker.Check.checkInferredBounds' over the shared
+-- 'Katari.Typechecker.Normalizer.checkBounds' loop.
