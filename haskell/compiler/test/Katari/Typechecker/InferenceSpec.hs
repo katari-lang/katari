@@ -18,6 +18,7 @@ import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId (..))
 import Katari.Data.ModuleName (ModuleName (..))
@@ -107,6 +108,12 @@ spec = do
       codesFor "request foo() -> integer\nrequest bar() -> integer\nagent f() -> integer with bar {\n  use handler { request foo() -> integer { 5 } }\n  let x = foo()\n  let y = bar()\n  x + y\n}" `shouldBe` []
     it "rejects an agent effect that excludes the inferred residual (K3001)" $
       codesFor "request foo() -> integer\nrequest bar() -> integer\nagent f() -> integer with foo {\n  use handler { request foo() -> integer { 5 } }\n  let x = foo()\n  let y = bar()\n  x + y\n}" `shouldContain` ["K3001"]
+    it "applies a handler carrying var state" $
+      codesFor (tickDecl <> "agent run() -> integer { use handler (var counter = 0) { request tick() -> integer { next counter } }\n0 }") `shouldBe` []
+    it "applies a handler with several request handlers" $
+      codesFor "request a() -> integer\nrequest b() -> integer\nagent run() -> integer { use handler { request a() -> integer { 1 } request b() -> integer { 2 } }\nlet x = a()\nlet y = b()\n0 }" `shouldBe` []
+    it "still accepts an explicit handler[R, E] bound to a local" $
+      codesFor (tickDecl <> "agent run() -> integer { let h = handler[integer, all] (var counter = 0) { request tick() -> integer { next counter } }\n0 }") `shouldBe` []
 
   describe "use-provider inference (continuation-driven)" $ do
     it "infers a provider's result type R from the continuation's return type" $
@@ -134,6 +141,22 @@ spec = do
     it "infers a pure residual from a pure argument" $
       codesFor "external agent pureAct() -> integer\nprimitive agent runWith[effect E](action: agent() -> integer with E) -> integer with E\nagent f() -> integer { runWith(action = pureAct) }" `shouldBe` []
 
+  describe "attribute-generic inference (a generic value quantified over an attribute)" $ do
+    it "infers a private attribute from the argument, so leaking it to public is rejected (K3001)" $
+      codesFor (observeDecl <> "agent f() -> integer { observe(value = secret()) }") `shouldContain` ["K3001"]
+    it "accepts the inferred private result inside a private agent" $
+      codesFor (observeDecl <> "private agent f() -> integer { observe(value = secret()) }") `shouldBe` []
+    it "infers a public attribute from a public argument" $
+      codesFor (observeDecl <> "agent f() -> integer { observe(value = 1) }") `shouldBe` []
+
+  describe "compositional inference" $ do
+    it "infers through a nested generic call" $
+      codesFor (identityDecl <> "agent f() -> integer { identity(value = identity(value = 1)) }") `shouldBe` []
+    it "feeds a generic call's result into a generic constructor" $
+      codesFor (boxDecl <> identityDecl <> "agent f() -> box[integer] { box(value = identity(value = 1)) }") `shouldBe` []
+    it "infers the element type from an array of inferred values" $
+      codesFor (identityDecl <> firstDecl <> "agent f() -> integer { first(items = [identity(value = 1), 2]) }") `shouldBe` []
+
   describe "constructor pattern inference (scrutinee-driven)" $ do
     it "binds a field at the scrutinee's instantiation (box[integer] binds v : integer)" $
       codesFor (boxDecl <> "agent f(b: box[integer]) -> integer { match (b) { case box(value => v) -> v } }") `shouldBe` []
@@ -143,6 +166,20 @@ spec = do
       codesFor (boxDecl <> "agent f(b: box[string]) -> integer { match (b) { case box(value => v) -> v + 1 } }") `shouldContain` ["K3001"]
     it "an explicit pattern signature still works" $
       codesFor (boxDecl <> "agent f(b: box[integer]) -> integer { match (b) { case box[integer](value => v) -> v } }") `shouldBe` []
+
+  describe "end-to-end to IR (the whole pipeline, lowering included)" $ do
+    it "lowers an operator program (inferred primitive call)" $
+      compileResult "agent f() -> number { 1 + 1.0 }" `shouldBe` ([], True)
+    it "lowers an inferred generic call" $
+      compileResult (identityDecl <> "agent run() -> integer { identity(value = 1) }") `shouldBe` ([], True)
+    it "lowers an explicit handler" $
+      compileResult (tickDecl <> "agent run() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } }\n0 }") `shouldBe` ([], True)
+    it "lowers a use-applied (inferred) handler" $
+      compileResult (tickDecl <> "agent run() -> integer { use handler { request tick() -> integer { next 5 } }\n0 }") `shouldBe` ([], True)
+    it "lowers a constructor-pattern match" $
+      compileResult (boxDecl <> "agent f(b: box[integer]) -> integer { match (b) { case box(value => v) -> v } }") `shouldBe` ([], True)
+    it "lowers a param-derived request handler" $
+      compileResult "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo(x : integer) { next x } }\n0 }" `shouldBe` ([], True)
 
   describe "collectConstraints (propose, white-box)" $ do
     it "records a lower bound for a bare metavariable in covariant position" $
@@ -206,11 +243,24 @@ codesFor source =
     (typeEnvironment, envDiagnostics) = buildEnvironment modules
     (_, _, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs modules) modules
 
+-- | Compile a single-module program through the /whole/ pipeline (the real driver, lowering included)
+-- and return @(diagnostic codes, did it lower to IR?)@. Used to confirm the inferred programs survive
+-- all the way to IR, not just type-checking.
+compileResult :: Text -> ([Text], Bool)
+compileResult source =
+  let result = compile CompileInput {sources = Map.singleton (ModuleName "test") source}
+   in ([compilerErrorCode located.value | located <- toList result.diagnostics], not (Map.null result.loweredModules))
+
 identityDecl :: Text
 identityDecl = "primitive agent identity[a](value: a) -> a\n"
 
 boxDecl :: Text
 boxDecl = "data box[a](value: a)\n"
+
+-- | A value generic over an /attribute/: @observe[attribute A]@ preserves its argument's attribute, so
+-- @A@ is inferred from whether the argument is private.
+observeDecl :: Text
+observeDecl = "primitive agent observe[attribute A](value: integer of A) -> integer of A\nprivate agent secret() -> integer { 1 }\n"
 
 -- | A value generic over an /effect/: @runWith[effect E]@ takes a thunk performing @E@ and runs it,
 -- so @E@ is inferred from the argument's effect.
