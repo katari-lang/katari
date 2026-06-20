@@ -1075,19 +1075,21 @@ checkPattern pattern scrutinee = case pattern of
         []
       )
   PatternTypeFilter typeFilterPattern -> do
-    matchedType <- elaborateAndNormalizeType typeFilterPattern.matchedType
-    (typedInner, innerCover, innerBindings) <- checkPattern typeFilterPattern.inner matchedType
-    -- The cover (what this arm matches) is @matchedType ∧ innerCover@. 'intersect' under-approximates
-    -- the meet on generics, which is exactly the sound direction here: covers are used only for the
-    -- exhaustiveness lower bound @scrutinee <: ⋃ covers@, never to narrow a bound variable (the inner
-    -- pattern is checked against @matchedType@ directly above), so the Normalizer's narrowing caveat
-    -- does not apply.
-    cover <- runNormalizer (sourceSpanOf typeFilterPattern) (intersect matchedType innerCover)
+    -- The inner pattern sees the value /extracted from the scrutinee/ at this tag (a private scrutinee's
+    -- nested value stays private), so a nested pattern destructures the scrutinee's actual array / record
+    -- / agent type — not a generic top.
+    narrowed <- narrowToFilter typeFilterPattern.sourceSpan typeFilterPattern.matchedType scrutinee
+    (typedInner, innerCover, innerBindings) <- checkPattern typeFilterPattern.inner narrowed
+    -- The cover (what this arm matches) is @filterShape ∧ innerCover@: this tag matches /any/ value of
+    -- its runtime shape. 'intersect' under-approximates generics, which is the sound direction here —
+    -- the cover feeds only the exhaustiveness lower bound @scrutinee <: ⋃ covers@, never a bound
+    -- variable (the inner pattern is narrowed from the scrutinee above).
+    cover <- runNormalizer (sourceSpanOf typeFilterPattern) (intersect (filterShape typeFilterPattern.matchedType) innerCover)
     semantic <- denormalizeAt typeFilterPattern.sourceSpan cover
     pure
       ( PatternTypeFilter
           TypeFilterPattern
-            { matchedType = retagSyntacticTypeExpression typeFilterPattern.matchedType,
+            { matchedType = typeFilterPattern.matchedType,
               inner = typedInner,
               sourceSpan = typeFilterPattern.sourceSpan,
               typeOf = semantic
@@ -1254,6 +1256,40 @@ checkFieldPattern scrutinee fieldPattern = do
             sourceSpan = fieldPattern.sourceSpan
           }
   pure (fieldName, cover, bindings, typedFieldPattern)
+
+-- | The most-general type of a type-filter tag — the cover for @tag(p)@ (it matches /any/ value of that
+-- runtime shape): a primitive's own type, @array[unknown]@, @record[unknown]@, or the top agent.
+filterShape :: TypeFilter -> NormalizedType
+filterShape = \case
+  FilterNull -> nullType
+  FilterBoolean -> booleanType
+  FilterInteger -> integerType
+  FilterNumber -> numberType
+  FilterString -> stringType
+  FilterFile -> fileType
+  FilterArray -> arrayOf unknownType
+  FilterRecord -> recordOf unknownType
+  FilterAgent -> topAgentType
+
+-- | The type the inner pattern of @tag(inner)@ matches against: the value /extracted from the scrutinee/
+-- at this tag (so a nested pattern sees the scrutinee's actual array / record / agent type), lifted by
+-- the scrutinee's handle attribute. A primitive carries no nested type, so it is just the primitive's
+-- type; an @unknown@ scrutinee (no layer) falls back to the tag's most-general shape.
+narrowToFilter :: SourceSpan -> TypeFilter -> NormalizedType -> Checker NormalizedType
+narrowToFilter sourceSpan tag scrutinee = do
+  maybeRaised <- raisedLayer sourceSpan scrutinee
+  pure $ case maybeRaised of
+    Nothing -> filterShape tag
+    Just (attribute, layer) -> liftByAttribute attribute (filterSlot tag layer)
+
+-- | The scrutinee layer's component for a tag (carrying its nested types), or the tag's most-general
+-- shape when that slot is absent (a refuted arm — its binders still type, but the arm never fires).
+filterSlot :: TypeFilter -> LayeredType -> NormalizedType
+filterSlot tag layer = case tag of
+  FilterArray -> maybe (filterShape FilterArray) (\sequence' -> layeredOf neverLayer {sequenceLayer = Just sequence'}) layer.sequenceLayer
+  FilterRecord -> maybe (filterShape FilterRecord) (\object -> layeredOf neverLayer {objectLayer = Just object}) layer.objectLayer
+  FilterAgent -> maybe (filterShape FilterAgent) (\function -> layeredOf neverLayer {functionLayer = Just function}) layer.functionLayer
+  _ -> filterShape tag
 
 ------------------------------------------------------------------------------------------------
 -- Match expressions
@@ -1445,6 +1481,19 @@ arrayOf elementType =
     neverLayer
       { sequenceLayer = Just NormalizedSequence {items = [], rest = elementType}
       }
+
+-- | A homogeneous @record[T]@: an object with no fixed fields whose every key reads as @T@.
+recordOf :: NormalizedType -> NormalizedType
+recordOf valueType =
+  layeredOf
+    neverLayer
+      { objectLayer = Just NormalizedObject {fields = mempty, rest = valueType}
+      }
+
+-- | The top agent type — every agent is a subtype of it (contravariant @never@ argument, @unknown@
+-- return, @all@ effect) — used as the @agent(p)@ filter's most-general shape.
+topAgentType :: NormalizedType
+topAgentType = assembleAgent bottomAttribute bottomType unknownType topEffect
 
 ------------------------------------------------------------------------------------------------
 -- Handler expressions
@@ -2115,14 +2164,13 @@ assembleAgent agentOuterAttribute parameterObject returnType effect =
     }
 
 -- | The declared type of a binding-site pattern (an agent parameter, a @use@ binder): a variable /
--- wildcard pattern's annotation, or a type filter's matched type. Other shapes (a bare tuple /
--- record destructuring) carry no annotation of their own, so the binder must wrap them in a type
--- filter — @label => ((x, y) : T)@.
+-- wildcard pattern's annotation. Other shapes (a bare tuple / record destructuring, or a /refutable/
+-- type filter — which may not occur in a non-refutable binding position) carry no annotation of their
+-- own, so the binder must declare one (@label : T@).
 patternTypeAnnotation :: Pattern Identified -> Maybe (SyntacticTypeExpression Identified)
 patternTypeAnnotation = \case
   PatternVariable variablePattern -> variablePattern.typeAnnotation
   PatternWildcard wildcardPattern -> wildcardPattern.typeAnnotation
-  PatternTypeFilter typeFilterPattern -> Just typeFilterPattern.matchedType
   _ -> Nothing
 
 -- | Check a binding-site pattern that must declare its own type (an agent parameter, a @use@ binder).
@@ -2328,3 +2376,6 @@ integerType = layeredOf neverLayer {numberLayer = NumberSlotInteger}
 
 numberType :: NormalizedType
 numberType = layeredOf neverLayer {numberLayer = NumberSlotNumber}
+
+fileType :: NormalizedType
+fileType = layeredOf neverLayer {fileLayer = True}

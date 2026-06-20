@@ -39,9 +39,9 @@ resolvePattern = \case
     (elements, bindings) <- resolvePatternList node.elements
     pure (PatternTuple TuplePattern {elements = elements, sourceSpan = node.sourceSpan, typeOf = ()}, bindings)
   PatternTypeFilter node -> do
-    matchedType <- resolveType node.matchedType
+    -- The matched type is a fixed runtime tag ('TypeFilter'), not a name, so there is nothing to resolve.
     (inner, bindings) <- resolvePattern node.inner
-    pure (PatternTypeFilter TypeFilterPattern {matchedType = matchedType, inner = inner, sourceSpan = node.sourceSpan, typeOf = ()}, bindings)
+    pure (PatternTypeFilter TypeFilterPattern {matchedType = node.matchedType, inner = inner, sourceSpan = node.sourceSpan, typeOf = ()}, bindings)
   PatternRecord node -> do
     (fields, bindings) <- resolveFieldPatterns node.fields
     pure (PatternRecord RecordPattern {fields = fields, sourceSpan = node.sourceSpan, typeOf = ()}, bindings)

@@ -160,7 +160,7 @@ spec = do
     it "narrows the binder's type inside a TypeFilter pattern" $
       let scrutineeLocal = Map.singleton (LocalVariableId 0) (monoScheme unknownType)
           subject = variableExpression (LocalVariableId 0)
-          narrowed = typeFilterPattern integerAnnotation (variablePatternForLocal (LocalVariableId 1))
+          narrowed = typeFilterPattern FilterInteger (variablePatternForLocal (LocalVariableId 1))
           matchExpr =
             matchExpression
               subject
@@ -1267,7 +1267,7 @@ literalPattern v =
   PatternLiteral
     LiteralPattern {value = v, sourceSpan = testSpan, typeOf = ()}
 
-typeFilterPattern :: SyntacticTypeExpression Identified -> Pattern Identified -> Pattern Identified
+typeFilterPattern :: TypeFilter -> Pattern Identified -> Pattern Identified
 typeFilterPattern matchedType inner =
   PatternTypeFilter
     TypeFilterPattern

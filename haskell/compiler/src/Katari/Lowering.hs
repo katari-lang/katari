@@ -49,7 +49,7 @@ import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
 import Katari.Primitive (primitiveModuleName)
 import Katari.Schema qualified as Schema
-import Katari.Typechecker.Elaborate (ElaborateContext, elaborateAsType, runElaborate)
+import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
 import Katari.Typechecker.Normalizer (Normalizer, NormalizerEnvironment, SubtypingContext (..), denormalize, objectAsType)
 
@@ -1066,38 +1066,23 @@ lowerPattern = \case
     pure (PatternConstructor qualifiedName (map fst results), concatMap snd results)
   AST.PatternTypeFilter typeFilterPattern -> do
     (innerPattern, locals) <- lowerPattern typeFilterPattern.inner
-    tag <- typeTagOf typeFilterPattern.matchedType
-    pure (PatternTypeGuard tag innerPattern, locals)
+    pure (PatternTypeGuard (filterTypeTag typeFilterPattern.matchedType) innerPattern, locals)
 
 lowerFieldPattern :: AST.FieldPattern AST.Typed -> Lower ((Text, Pattern), List (LocalVariableId, VariableId))
 lowerFieldPattern fieldPattern = do
   (subPattern, locals) <- lowerPattern fieldPattern.bindPattern
   pure ((fieldPattern.name, subPattern), locals)
 
--- | The runtime tag a @T(pattern)@ type filter narrows on, derived from the matched type's runtime shape.
--- A @data@ value is a tagged record, so it narrows on the record tag; the inner pattern (a constructor
--- pattern, typically) discriminates further, and the checker's typing keeps that sound.
-typeTagOf :: AST.SyntacticTypeExpression AST.Typed -> Lower TypeTag
-typeTagOf matchedType = do
-  elaborateContext <- asks (.context.elaborateContext)
-  let (semantic, _) = runElaborate elaborateContext (elaborateAsType (AST.retagSyntacticTypeExpression matchedType))
-  pure (typeTagOfSemantic semantic)
-
-typeTagOfSemantic :: SemanticType -> TypeTag
-typeTagOfSemantic = \case
-  SemanticTypeNull -> TagNull
-  SemanticTypeBoolean -> TagBoolean
-  SemanticTypeInteger -> TagInteger
-  SemanticTypeNumber -> TagNumber
-  SemanticTypeString -> TagString
-  SemanticTypeFile -> TagFile
-  SemanticTypeArray _ -> TagArray
-  SemanticTypeTuple _ -> TagArray
-  SemanticTypeObject _ -> TagRecord
-  SemanticTypeRecord _ -> TagRecord
-  SemanticTypeData _ _ -> TagRecord
-  SemanticTypeAgent {} -> TagAgent
-  SemanticTypeAttribute baseType _ -> typeTagOfSemantic baseType
-  -- never / unknown / union / generic have no single runtime tag; a type filter is written on a
-  -- concrete runtime type, so these do not arise in practice.
-  _ -> TagRecord
+-- | The runtime tag a @tag(pattern)@ type filter narrows on — a direct mapping of the (already
+-- runtime-shaped) 'AST.TypeFilter'. @array@ covers tuples, @record@ covers objects / records / data.
+filterTypeTag :: AST.TypeFilter -> TypeTag
+filterTypeTag = \case
+  AST.FilterNull -> TagNull
+  AST.FilterBoolean -> TagBoolean
+  AST.FilterInteger -> TagInteger
+  AST.FilterNumber -> TagNumber
+  AST.FilterString -> TagString
+  AST.FilterFile -> TagFile
+  AST.FilterArray -> TagArray
+  AST.FilterRecord -> TagRecord
+  AST.FilterAgent -> TagAgent

@@ -611,9 +611,24 @@ data LiteralPattern (phase :: Phase) = LiteralPattern
 instance HasSourceSpan (LiteralPattern phase) where
   sourceSpanOf pattern' = pattern'.sourceSpan
 
+-- | The runtime-discriminable type a type-filter pattern @T(p)@ matches on: a fixed enumeration (not an
+-- arbitrary type expression), because matching is by runtime tag — a primitive, or any array / record /
+-- agent. The inner pattern is then matched against the value /extracted from the scrutinee/ at that tag.
+data TypeFilter
+  = FilterNull
+  | FilterBoolean
+  | FilterInteger
+  | FilterNumber
+  | FilterString
+  | FilterFile
+  | FilterArray
+  | FilterRecord
+  | FilterAgent
+  deriving stock (Eq, Show)
+
 -- | @T(pattern)@ — a runtime type filter that narrows the subject to @T@
 data TypeFilterPattern (phase :: Phase) = TypeFilterPattern
-  { matchedType :: SyntacticTypeExpression phase,
+  { matchedType :: TypeFilter,
     inner :: Pattern phase,
     sourceSpan :: SourceSpan,
     typeOf :: PatternType phase

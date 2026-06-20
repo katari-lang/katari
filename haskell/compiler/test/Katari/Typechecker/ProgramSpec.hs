@@ -238,6 +238,25 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "accepts a `for` with effects over a public source" $
     typeErrorCodes [("test", "request ping() -> null\nagent f() -> array[integer] with ping { for (x in [1]) { ping()\nnext 0 } }")] `shouldBe` []
 
+  -- Bare constructor fields: `point(x)` binds the field `x` (= `point(x => x)`). No longer ambiguous
+  -- with a type filter, which is now its own keyword form.
+  it "binds a bare constructor-pattern field to the label-named variable" $
+    typeErrorCodes [("test", "data point(x: integer)\nagent f(p: point) -> integer { match (p) { case point(x) -> x } }")] `shouldBe` []
+
+  -- Type filters are the fixed runtime tags; `agent`, `array`, `record` match any such value, and the
+  -- inner pattern sees the type extracted from the scrutinee.
+  it "matches an agent value with an `agent` type filter" $
+    typeErrorCodes [("test", "agent f(g: agent(integer) -> integer) -> integer { match (g) { case agent(h) -> 0 } }")] `shouldBe` []
+
+  it "an `array` filter extracts the scrutinee's element type for the inner pattern" $
+    typeErrorCodes [("test", "agent f(xs: array[integer]) -> array[integer] { match (xs) { case array(ys) -> ys } }")] `shouldBe` []
+
+  it "rejects using the extracted element type at a wrong type (K3001)" $
+    typeErrorCodes [("test", "agent f(xs: array[integer]) -> array[string] { match (xs) { case array(ys) -> ys } }")] `shouldContain` ["K3001"]
+
+  it "narrows with a primitive type filter (integer)" $
+    typeErrorCodes [("test", "agent f(v: integer | string) -> integer { match (v) { case integer(n) -> n\ncase string(s) -> 0 } }")] `shouldBe` []
+
   -- A defaulted constructor / request parameter is optional at the call site (the caller may omit it),
   -- while a constructed value's field still reads as its (non-null) declared type.
   it "lets a caller omit a defaulted data-constructor argument" $

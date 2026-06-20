@@ -28,8 +28,11 @@ pattern' =
       [ wildcardPattern,
         recordPattern,
         tuplePattern,
+        -- Before 'literalPattern' so @null(x)@ is a type filter (not the @null@ literal plus leftover),
+        -- and before 'constructorOrVariablePattern'; 'try' lets a bare tag word fall through.
+        try typeFilterPattern,
         literalPattern,
-        constructorFilterOrVariablePattern
+        constructorOrVariablePattern
       ]
 
 -- | @_ [: T]@ — matches anything, optionally narrowing.
@@ -55,7 +58,7 @@ literalPattern = do
 -- | @{ label => pattern, ... }@ — a subset match against a record value.
 recordPattern :: Parser PatternP
 recordPattern = do
-  (fields, sourceSpan) <- bracesMultiline (commaSeparated recordField)
+  (fields, sourceSpan) <- bracesMultiline (commaSeparated fieldPattern)
   pure (PatternRecord RecordPattern {fields = fields, sourceSpan = sourceSpan, typeOf = ()})
 
 -- | @[p1, p2, ...]@ — a tuple pattern of any arity, including the empty @[]@ and the single @[p]@.
@@ -66,21 +69,15 @@ tuplePattern = do
   (elements, sourceSpan) <- brackets (commaSeparated pattern')
   pure (PatternTuple TuplePattern {elements = elements, sourceSpan = sourceSpan, typeOf = ()})
 
--- | A record-pattern field: @label => pattern@, or the bare @label@ sugar, which binds the field's
--- value to a variable named after the label (@{ x }@ ~> @{ x => x }@). The bare form is offered only
--- in record patterns (@{...}@), where it is unambiguous; in a constructor's @T(...)@ parentheses a bare
--- inner pattern already means a type filter (@integer(n)@), so 'constructorField' there requires @=>@.
-recordField :: Parser (FieldPattern Parsed)
-recordField = do
+-- | A constructor- / record-pattern field: @label => pattern@ (destructure) or the bare @label@ sugar,
+-- which binds the field's value to a variable named after the label (@{ x }@ ~> @{ x => x }@). The bare
+-- form is unambiguous: a constructor head is always a (data-type) name (@point(x)@), while a type filter's
+-- head is always a primitive (@integer(n)@) — the two are split on the head in
+-- 'constructorFilterOrVariablePattern'.
+fieldPattern :: Parser (FieldPattern Parsed)
+fieldPattern = do
   name <- identifier
   bindPattern <- (symbol "=>" *> pattern') <|> pure (bareFieldVariable name)
-  pure (fieldPatternNode name bindPattern)
-
--- | A constructor-pattern field: @label => pattern@ (no bare sugar — see 'recordField').
-constructorField :: Parser (FieldPattern Parsed)
-constructorField = do
-  name <- identifier
-  bindPattern <- symbol "=>" *> pattern'
   pure (fieldPatternNode name bindPattern)
 
 fieldPatternNode :: Located Text -> PatternP -> FieldPattern Parsed
@@ -104,36 +101,59 @@ bareFieldVariable name =
         typeOf = ()
       }
 
--- | The contents between a head's parentheses: constructor fields (each @label => pattern@) or a
--- single bare inner pattern (a type filter).
-data PatternArguments where
-  ConstructorFields :: List (FieldPattern Parsed) -> PatternArguments
-  FilterInner :: PatternP -> PatternArguments
-
-patternArguments :: Parser PatternArguments
-patternArguments =
-  try (ConstructorFields <$> commaSeparated constructorField)
-    <|> (FilterInner <$> pattern')
-
--- | A head (parsed as a type) optionally followed by parentheses. With fields it is a constructor
--- pattern, with a bare inner pattern a type filter, and with no parentheses a variable binding.
-constructorFilterOrVariablePattern :: Parser PatternP
-constructorFilterOrVariablePattern = do
+-- | A head (parsed as a type) and what follows it, split on the /head/ — which removes the constructor
+-- vs. type-filter ambiguity:
+--
+--   * a primitive head (@integer@, @string@, ...) is a type filter @T(inner)@ (the only type-filter
+--     form — type filters are primitive-only);
+--   * a (possibly applied) name head is a data constructor, whose parentheses hold its fields (bare
+--     @label@ or @label => pattern@); with no parentheses it is a plain variable binding.
+-- (A type filter @tag(inner)@ is parsed separately by 'typeFilterPattern', which is tried first.)
+constructorOrVariablePattern :: Parser PatternP
+constructorOrVariablePattern = do
   head' <- applicationType
-  arguments <- optional (parens patternArguments)
-  case arguments of
-    Just (ConstructorFields fields, parenSpan) -> constructorPattern head' fields parenSpan
-    Just (FilterInner inner, parenSpan) ->
-      pure
-        ( PatternTypeFilter
-            TypeFilterPattern
-              { matchedType = head',
-                inner = inner,
-                sourceSpan = mergeSpans (sourceSpanOf head') parenSpan,
-                typeOf = ()
-              }
-        )
+  case constructorHead head' of
+    Just _ -> do
+      maybeFields <- optional (parens (commaSeparated fieldPattern))
+      case maybeFields of
+        Just (fields, parenSpan) -> constructorPattern head' fields parenSpan
+        Nothing -> variablePatternFromHead head'
     Nothing -> variablePatternFromHead head'
+
+-- | A type filter @tag(inner)@ on one of the fixed runtime tags (primitive, @array@, @record@,
+-- @agent@). Parsed by its own fixed keywords (not the general type parser), so @agent(f)@ does not
+-- collide with the @agent(T) -> R@ type syntax, and @point(x)@ stays a constructor. Tried with
+-- backtracking, so a bare tag word with no parentheses (e.g. the @null@ literal) falls through.
+typeFilterPattern :: Parser PatternP
+typeFilterPattern = do
+  (tag, tagSpan) <- filterTag
+  (inner, parenSpan) <- parens pattern'
+  pure
+    ( PatternTypeFilter
+        TypeFilterPattern
+          { matchedType = tag,
+            inner = inner,
+            sourceSpan = mergeSpans tagSpan parenSpan,
+            typeOf = ()
+          }
+    )
+
+-- | The fixed type-filter tag keywords and their 'TypeFilter', with the keyword's span.
+filterTag :: Parser (TypeFilter, SourceSpan)
+filterTag =
+  choice
+    [ tagged FilterNull "null",
+      tagged FilterBoolean "boolean",
+      tagged FilterInteger "integer",
+      tagged FilterNumber "number",
+      tagged FilterString "string",
+      tagged FilterFile "file",
+      tagged FilterArray "array",
+      tagged FilterRecord "record",
+      tagged FilterAgent "agent"
+    ]
+  where
+    tagged filter' word = (,) filter' <$> keyword word
 
 constructorPattern :: SyntacticTypeExpression Parsed -> List (FieldPattern Parsed) -> SourceSpan -> Parser PatternP
 constructorPattern head' fields parenSpan =
