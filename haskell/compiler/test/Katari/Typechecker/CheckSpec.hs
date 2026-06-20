@@ -77,31 +77,9 @@ spec = do
       let (_, diagnostics) = runAt mempty mempty (synthExpressionType (ifExpression (integerLiteral 1) [nullLiteral] Nothing))
        in hasErrorCode "K3001" diagnostics `shouldBe` True
 
-  describe "synthExpressionType (binary operators)" $ do
-    it "integer + integer is integer" $
-      synthAt (binaryExpression BinaryOperatorAdd (integerLiteral 1) (integerLiteral 2)) `shouldBe` integerType
-    it "integer + number widens to number" $
-      synthAt (binaryExpression BinaryOperatorAdd (integerLiteral 1) (numberLiteral 2.0)) `shouldBe` numberType
-    it "divide returns number even for integer inputs" $
-      synthAt (binaryExpression BinaryOperatorDivide (integerLiteral 4) (integerLiteral 2)) `shouldBe` numberType
-    it "equality returns boolean for any pair (no constraint)" $
-      synthAt (binaryExpression BinaryOperatorEqual (integerLiteral 1) (stringLiteral "x")) `shouldBe` booleanType
-    it "less-than rejects a string operand" $
-      let (_, diagnostics) = runAt mempty mempty (synthExpressionType (binaryExpression BinaryOperatorLessThan (integerLiteral 1) (stringLiteral "x")))
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
-    it "and returns boolean for boolean pair" $
-      synthAt (binaryExpression BinaryOperatorAnd (booleanLiteral True) (booleanLiteral False)) `shouldBe` booleanType
-    it "concat returns string for string pair" $
-      synthAt (binaryExpression BinaryOperatorConcat (stringLiteral "a") (stringLiteral "b")) `shouldBe` stringType
-
-  describe "synthExpressionType (unary operators)" $ do
-    it "not on a boolean returns boolean" $
-      synthAt (unaryExpression UnaryOperatorNot (booleanLiteral True)) `shouldBe` booleanType
-    it "negate on an integer returns integer" $
-      synthAt (unaryExpression UnaryOperatorNegate (integerLiteral 1)) `shouldBe` integerType
-    it "negate on a string is rejected" $
-      let (_, diagnostics) = runAt mempty mempty (synthExpressionType (unaryExpression UnaryOperatorNegate (stringLiteral "x")))
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
+  -- Operators desugar (in the identifier pass) to generic `primitive.*` calls, so their typing —
+  -- including inferring the operand type parameter — is exercised end-to-end in
+  -- "Katari.Typechecker.InferenceSpec", not as direct-AST unit tests here.
 
   describe "synthExpressionType (let / block)" $ do
     it "let x = e brings x into scope for the return expression" $
@@ -543,38 +521,70 @@ spec = do
        in (result, toList diagnostics) `shouldBe` (expected, [])
 
     it "handler with the wrong number of generic arguments is K3009" $
-      let handlerExpr = handlerExpressionBuilder [] [] Nothing
+      -- One bracket argument is neither the explicit @[R, E]@ pair nor the omitted (inferred) form.
+      let handlerExpr = handlerExpressionBuilder [integerAnnotation] [] Nothing
           (_, diagnostics) = runAt mempty mempty (synthExpressionType handlerExpr)
        in hasErrorCode "K3009" diagnostics `shouldBe` True
 
-    it "with a then clause whose body produces R, the handler still has R as its result" $
-      let handlerExpr =
-            handlerExpressionBuilder
-              [integerAnnotation, allEffectAnnotation]
-              []
-              (Just (Nothing, exprBlock (integerLiteral 42)))
+    it "a bare handler (no generic arguments) is an unapplied generic value (K3015)" $
+      -- A handler is a generic value over R / E; without an application (a `use` / call) there is no
+      -- continuation to infer them from, so a bare `handler { ... }` must be applied or written
+      -- `handler[R, E]` — exactly like any unapplied generic.
+      let handlerExpr = handlerExpressionBuilder [] [] Nothing
           (_, diagnostics) = runAt mempty mempty (synthExpressionType handlerExpr)
-       in toList diagnostics `shouldBe` []
+       in hasErrorCode "K3015" diagnostics `shouldBe` True
 
-    it "then clause body mismatched against R is K3001" $
+    it "a then clause makes the handler result the then body type R' (transforming R), not R itself" $
+      -- handler[integer, all] {} then (r) { "done" }: R = integer (the then binder / continuation
+      -- result), but the then body is a string, so the handler's result type is string (R'), not R. The
+      -- then body is no longer constrained @<: R@ — it freely produces the transformed result.
       let handlerExpr =
             handlerExpressionBuilder
               [integerAnnotation, allEffectAnnotation]
               []
-              (Just (Nothing, exprBlock (stringLiteral "no")))
-          (_, diagnostics) = runAt mempty mempty (synthExpressionType handlerExpr)
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
+              (Just (Nothing, exprBlock (stringLiteral "done")))
+          (result, diagnostics) = runAt mempty mempty (synthExpressionType handlerExpr)
+          continuationAgent =
+            layeredOf
+              neverLayer
+                { functionLayer =
+                    Just
+                      NormalizedFunction
+                        { argumentType = recordNormalized [("value", nullType)],
+                          returnType = integerType,
+                          effect = NormalizedEffectAny
+                        }
+                }
+          expected =
+            NormalizedType
+              { baseType =
+                  NormalizedBaseTypeLayered
+                    neverLayer
+                      { functionLayer =
+                          Just
+                            NormalizedFunction
+                              { argumentType = recordNormalized [("continuation", continuationAgent)],
+                                returnType = stringType,
+                                effect = NormalizedEffectAny
+                              }
+                      },
+                generics = mempty,
+                attribute = bottomAttribute
+              }
+       in (result, toList diagnostics) `shouldBe` (expected, [])
 
   describe "request handler body" $ do
-    it "rejects a request body whose tail type is not the handler result R" $
-      -- handler[integer, all] { request req() { "no" } } — the body's implicit break yields a string.
+    it "a request body tail joins the result as an implicit break (it is not checked against R)" $
+      -- handler[integer, all] { request req() { "no" } }: the body's tail is an implicit break, so its
+      -- string value joins the handler's result (which becomes string | integer) rather than being
+      -- rejected against R = integer. R is the continuation's result, not a body tail.
       let handlerExpr =
             handlerExpressionBuilder
               [integerAnnotation, allEffectAnnotation]
               [requestHandlerForFake (exprBlock (stringLiteral "no"))]
               Nothing
           (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
+       in toList diagnostics `shouldBe` []
 
     it "accepts a request body whose tail type is the handler result R" $
       let handlerExpr =
@@ -594,9 +604,11 @@ spec = do
           (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
        in toList diagnostics `shouldBe` []
 
-    it "rejects a request body whose effect exceeds the handler's residual effect E" $
+    it "a request body's effect joins the handler's effect (E | bodyEffect), so it is not restricted by E" $
       -- handler[integer, req] { request req() { secondRequestCallable(); 0 } }: the body performs a
-      -- different request than E permits.
+      -- second request; under the generic-value handler its effect joins the handler's effect (E is the
+      -- residual the continuation passes through, unioned with the body's own effects), so it is not
+      -- rejected.
       let callable =
             agentNormalized
               bottomAttribute
@@ -614,7 +626,7 @@ spec = do
               { locals = Map.singleton (LocalVariableId 9) (monoScheme callable)
               }
           (_, diagnostics) = runChecker environment (synthExpressionType handlerExpr)
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
+       in toList diagnostics `shouldBe` []
 
   describe "synthExpressionType (for)" $ do
     it "iterating an array binds the element at T (no null injected)" $
@@ -726,12 +738,8 @@ spec = do
       let (_, diagnostics) = runAt mempty mempty (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
-    it "`break` inside a handler frame matches the frame's handlerResultType" $
-      let frame =
-            HandleContext
-              { handlerResultType = integerType,
-                currentRequestReturnType = topType
-              }
+    it "`break` inside a handler frame is accepted (collected into the result, not checked against R)" $
+      let frame = HandleContext {currentRequestReturnType = topType}
           action = pushHandleContext frame (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
@@ -958,22 +966,6 @@ recordExpression entries =
         sourceSpan = testSpan,
         typeOf = ()
       }
-
-binaryExpression :: BinaryOperator -> Expression Identified -> Expression Identified -> Expression Identified
-binaryExpression operator left right =
-  ExpressionBinaryOperator
-    BinaryOperatorExpression
-      { operator = operator,
-        left = left,
-        right = right,
-        sourceSpan = testSpan,
-        typeOf = ()
-      }
-
-unaryExpression :: UnaryOperator -> Expression Identified -> Expression Identified
-unaryExpression operator operand =
-  ExpressionUnaryOperator
-    UnaryOperatorExpression {operator = operator, operand = operand, sourceSpan = testSpan, typeOf = ()}
 
 ifExpression :: Expression Identified -> List (Expression Identified) -> Maybe (List (Expression Identified)) -> Expression Identified
 ifExpression condition thenStatements maybeElseStatements =

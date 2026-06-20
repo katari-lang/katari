@@ -25,9 +25,11 @@ import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
+import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (diagnosticAt)
 import Katari.Error
   ( ApplicationArityErrorInfo (..),
+    CannotInferGenericErrorInfo (..),
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
     GenericNotAppliedErrorInfo (..),
@@ -47,8 +49,11 @@ import Katari.Typechecker.Context
     emitEffect,
     emitForBreakType,
     emitForNextType,
+    emitHandlerBreakType,
+    emitHandlerTailType,
     emitReturnType,
     enterForBody,
+    freshGenericId,
     innermostHandler,
     insideForBody,
     markJump,
@@ -59,6 +64,7 @@ import Katari.Typechecker.Context
     withEffectInference,
     withForInference,
     withGeneric,
+    withHandlerResultInference,
     withLocal,
     withParameters,
     withReturnInference,
@@ -68,7 +74,8 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Normalizer (boundedType, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), checkSolvedBounds, collectConstraints, metavarKinded, solveConstraints)
+import Katari.Typechecker.Normalizer (boundedType, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, genericSubstitution, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -85,8 +92,11 @@ synthExpression = \case
   ExpressionTuple expression -> synthTupleExpression expression
   ExpressionRecord expression -> synthRecordExpression expression
   ExpressionCall expression -> synthCallExpression expression
-  ExpressionBinaryOperator expression -> synthBinaryExpression expression
-  ExpressionUnaryOperator expression -> synthUnaryExpression expression
+  -- Operators are desugared into generic @primitive.*@ calls by the identifier, so they never reach
+  -- the checker; their typing (including generic inference of the operand type) goes through
+  -- 'synthCallExpression' like any other call.
+  ExpressionBinaryOperator _ -> panic "synthExpression: binary operator survived past the identifier desugar"
+  ExpressionUnaryOperator _ -> panic "synthExpression: unary operator survived past the identifier desugar"
   ExpressionIf expression -> synthIfExpression expression
   ExpressionMatch expression -> synthMatchExpression expression
   ExpressionFor expression -> synthForExpression expression
@@ -276,16 +286,13 @@ handleUseStatement useStmt = do
         . withReturnTarget resultType
       $ checkBlock useStmt.body resultType
   let providerExpectedArgument = continuationExpectedArgument bindingType resultType inferredContinuationEffect
-  (typedProvider, providerType) <- synthExpression useStmt.provider
-  maybeFunction <- extractFunction useStmt.sourceSpan providerType
-  case maybeFunction of
-    -- Apply the provider to the continuation argument through the shared agent-application rule, so a
-    -- @use@ provider is held to the same world / effect discipline as a direct call.
-    Just (functionAttribute, function) -> do
-      argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
-      _ <- applyAgent useStmt.sourceSpan functionAttribute function providerExpectedArgument argumentAttribute
-      pure ()
-    Nothing -> reportExpectedShape useStmt.sourceSpan "a callable agent" providerType
+  -- Apply the provider to the continuation argument through the shared callee-application rule, so a
+  -- @use@ provider is held to the same world / effect discipline as a direct call AND gets the same
+  -- generic-argument inference: a provider generic in its continuation result @R@ has @R@ inferred from
+  -- this continuation argument (whose return type is the enclosing @return@ target).
+  (typedProvider, scheme) <- synthApplicationCallee useStmt.provider
+  argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
+  _ <- applyCallee useStmt.sourceSpan scheme providerExpectedArgument argumentAttribute
   pure
     UseStatement
       { binder = typedBinder,
@@ -554,6 +561,14 @@ synthApplicationCallee = \case
             },
         scheme
       )
+  -- A handler is a generic value over its result @R@ and effect @E@ (see 'checkHandlerScheme'); in
+  -- application position its scheme is handed up so the continuation argument infers @R@ / @E@, exactly
+  -- as for any generic callee. The node keeps the (uninstantiated) scheme type; the application records
+  -- the inferred arguments.
+  ExpressionHandler expression -> do
+    (components, scheme) <- checkHandlerScheme expression
+    node <- assembleHandlerNode components (ownHandlerInstantiation scheme) scheme.valueType
+    pure (node, scheme)
   other -> do
     (typedCallee, calleeType) <- synthExpression other
     pure (typedCallee, monoScheme calleeType)
@@ -589,43 +604,43 @@ synthTemplateExpression expression = do
 
 synthCallExpression :: CallExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthCallExpression expression = do
-  (typedCallee, calleeType) <- synthExpression expression.callee
-  maybeFunction <- extractFunction expression.sourceSpan calleeType
-  case maybeFunction of
-    Nothing -> do
-      reportExpectedShape expression.sourceSpan "a callable agent" calleeType
-      typedArgs <- traverse retagCallArgument expression.arguments
-      typedExpression expression.sourceSpan bottomType $ \semantic ->
-        ExpressionCall
-          CallExpression
-            { callee = typedCallee,
-              arguments = typedArgs,
-              sourceSpan = expression.sourceSpan,
-              typeOf = semantic
-            }
-    Just (functionAttribute, function) -> do
-      (typedArgs, argumentType, argumentAttribute) <- synthCallArguments expression.sourceSpan expression.arguments
-      effectiveReturn <- applyAgent expression.sourceSpan functionAttribute function argumentType argumentAttribute
-      typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
-        ExpressionCall
-          CallExpression
-            { callee = typedCallee,
-              arguments = typedArgs,
-              sourceSpan = expression.sourceSpan,
-              typeOf = semantic
-            }
+  -- Take the callee's full 'Scheme' (not a bare-instantiated type): a generic callee keeps its
+  -- quantified parameters here so they can be inferred from the arguments below, rather than being
+  -- rejected as an unapplied generic.
+  (typedCallee, scheme) <- synthApplicationCallee expression.callee
+  (typedArgs, argumentObject, argumentAttribute) <- synthCallArguments expression.sourceSpan expression.arguments
+  effectiveReturn <- applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
+  typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
+    ExpressionCall
+      CallExpression
+        { callee = typedCallee,
+          arguments = typedArgs,
+          sourceSpan = expression.sourceSpan,
+          typeOf = semantic
+        }
 
--- | Retag a call argument when no typing is performed (the non-callable callee fallback).
-retagCallArgument :: CallArgument Identified -> Checker (CallArgument Typed)
-retagCallArgument argument = do
-  (typedValue, _) <- synthExpression argument.value
-  pure
-    CallArgument
-      { name = argument.name,
-        labelReference = retagReference argument.labelReference,
-        value = typedValue,
-        sourceSpan = argument.sourceSpan
-      }
+-- | Apply a callee (a direct call's callee, or a @use@ provider) to its argument object, dispatching on
+-- whether the callee is generic: a non-generic callee must already be callable; a generic one has its
+-- type arguments inferred from the argument ('applyGenericValue'). Shared by 'synthCallExpression' and
+-- 'handleUseStatement', so a @use@ provider gets the same inference as a direct call — in particular a
+-- provider generic in its continuation's result @R@ (e.g. @foo[R](continuation: agent(value: A) -> R)
+-- -> R@) infers @R@ from the continuation argument's return type.
+applyCallee :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+applyCallee sourceSpan scheme argumentObject argumentAttribute =
+  if null scheme.genericParameters.parameterNames
+    then applyMonomorphicCallee sourceSpan scheme.valueType argumentObject argumentAttribute
+    else applyGenericValue sourceSpan scheme argumentObject argumentAttribute
+
+-- | Apply a non-generic callee: it must already be a callable agent (no inference). A non-callable
+-- callee is reported and degrades to bottom.
+applyMonomorphicCallee :: SourceSpan -> NormalizedType -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+applyMonomorphicCallee sourceSpan calleeType argumentObject argumentAttribute = do
+  maybeFunction <- extractFunction sourceSpan calleeType
+  case maybeFunction of
+    Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+    Nothing -> do
+      reportExpectedShape sourceSpan "a callable agent" calleeType
+      pure bottomType
 
 -- | Raise a type's generics to their declared upper bounds before its shape is inspected, so a value
 -- typed as a bounded generic (@F extends agent(...)@, @S extends array[T]@) is usable at its bound.
@@ -766,85 +781,81 @@ continuationExpectedArgument valueType resultType effect =
   namedObjectType [("continuation", assembleAgent bottomAttribute (namedObjectType [("value", valueType)]) resultType effect)]
 
 ------------------------------------------------------------------------------------------------
--- Operators
+-- Generic-argument inference at call sites
+--
+-- A generic callee keeps its quantified parameters; this is where they are inferred. The flow is the
+-- "propose / dispose" split (see "Katari.Typechecker.Inference"): instantiate the parameters to fresh
+-- metavariables, PROPOSE candidate bounds by matching the arguments against the (open) parameter type
+-- (a separate, error-free pass that never touches the trusted 'subtype'), SOLVE, substitute the
+-- solution into the original scheme, then DISPOSE by running the ordinary 'subtype' / bound checks on
+-- the now-concrete types.
 ------------------------------------------------------------------------------------------------
 
-synthBinaryExpression ::
-  BinaryOperatorExpression Identified ->
-  Checker (Expression Typed, NormalizedType)
-synthBinaryExpression expression = do
-  (typedLeft, typedRight, nt) <- case expression.operator of
-    BinaryOperatorAdd -> arithmetic
-    BinaryOperatorSubtract -> arithmetic
-    BinaryOperatorMultiply -> arithmetic
-    BinaryOperatorDivide -> arithmeticReturningNumber
-    BinaryOperatorModulo -> arithmeticReturningNumber
-    BinaryOperatorEqual -> booleanResultAnyPair
-    BinaryOperatorNotEqual -> booleanResultAnyPair
-    BinaryOperatorLessThan -> booleanResultNumericPair
-    BinaryOperatorLessOrEqual -> booleanResultNumericPair
-    BinaryOperatorGreaterThan -> booleanResultNumericPair
-    BinaryOperatorGreaterOrEqual -> booleanResultNumericPair
-    BinaryOperatorAnd -> booleanResultBooleanPair
-    BinaryOperatorOr -> booleanResultBooleanPair
-    BinaryOperatorConcat -> do
-      l <- checkExpression expression.left stringType
-      r <- checkExpression expression.right stringType
-      pure (l, r, stringType)
-  typedExpression expression.sourceSpan nt $ \semantic ->
-    ExpressionBinaryOperator
-      BinaryOperatorExpression
-        { operator = expression.operator,
-          left = typedLeft,
-          right = typedRight,
-          sourceSpan = expression.sourceSpan,
-          typeOf = semantic
-        }
+-- | Instantiate a scheme's generic parameters as fresh inference variables: a substitution from each
+-- declared parameter id to its metavariable (used to open the scheme body), plus the registry of
+-- metavariables (their declared name / kind / @extends@ bound, the bound rewritten into metavariable
+-- terms so it can be checked against the solution).
+instantiateToMetavars :: SourceSpan -> GenericParameters -> Checker (Map GenericId NormalizedKindedType, Registry)
+instantiateToMetavars sourceSpan parameters = do
+  allocated <- traverse allocate (Map.toList parameters.parameterInformation)
+  let substitution = Map.fromList [(info.genericId, metavarKinded info.kind metavar) | (_, info, metavar) <- allocated]
+  registry <-
+    Map.fromList
+      <$> traverse
+        ( \(parameterName, info, metavar) -> do
+            boundInMetavarTerms <- traverse (runNormalizer sourceSpan . substituteGenericArgument substitution) info.upperBound
+            pure (metavar, Metavar {name = parameterName, kind = info.kind, bound = boundInMetavarTerms})
+        )
+        allocated
+  pure (substitution, registry)
   where
-    arithmetic = do
-      (typedLeft, leftType) <- synthExpression expression.left
-      runNormalizer (sourceSpanOf expression.left) (subtype leftType numberType)
-      (typedRight, rightType) <- synthExpression expression.right
-      runNormalizer (sourceSpanOf expression.right) (subtype rightType numberType)
-      joined <- runNormalizer expression.sourceSpan (union leftType rightType)
-      pure (typedLeft, typedRight, joined)
-    arithmeticReturningNumber = do
-      l <- checkExpression expression.left numberType
-      r <- checkExpression expression.right numberType
-      pure (l, r, numberType)
-    booleanResultAnyPair = do
-      (l, _) <- synthExpression expression.left
-      (r, _) <- synthExpression expression.right
-      pure (l, r, booleanType)
-    booleanResultNumericPair = do
-      l <- checkExpression expression.left numberType
-      r <- checkExpression expression.right numberType
-      pure (l, r, booleanType)
-    booleanResultBooleanPair = do
-      l <- checkExpression expression.left booleanType
-      r <- checkExpression expression.right booleanType
-      pure (l, r, booleanType)
+    allocate (parameterName, info) = do
+      metavar <- freshGenericId
+      pure (parameterName, info, metavar)
 
-synthUnaryExpression ::
-  UnaryOperatorExpression Identified ->
-  Checker (Expression Typed, NormalizedType)
-synthUnaryExpression expression = do
-  (typedOperand, nt) <- case expression.operator of
-    UnaryOperatorNegate -> do
-      (typed, operandType) <- synthExpression expression.operand
-      runNormalizer (sourceSpanOf expression.operand) (subtype operandType numberType)
-      pure (typed, operandType)
-    UnaryOperatorNot -> do
-      typed <- checkExpression expression.operand booleanType
-      pure (typed, booleanType)
-  typedExpression expression.sourceSpan nt $ \semantic ->
-    ExpressionUnaryOperator
-      UnaryOperatorExpression
-        { operator = expression.operator,
-          operand = typedOperand,
-          sourceSpan = expression.sourceSpan,
-          typeOf = semantic
-        }
+-- | Apply a generic callee by inferring its type arguments from the argument object. Falls back to
+-- 'bottomType' (after a diagnostic) when the scheme is not a callable agent or a type argument cannot
+-- be inferred.
+applyGenericValue :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+applyGenericValue sourceSpan scheme argumentObject argumentAttribute = do
+  (substitution, registry) <- instantiateToMetavars sourceSpan scheme.genericParameters
+  openType <- runNormalizer sourceSpan (substituteType substitution scheme.valueType)
+  case openFunctionLayer openType of
+    Nothing -> do
+      reportExpectedShape sourceSpan "a callable agent" scheme.valueType
+      pure bottomType
+    Just openFunction -> do
+      let flexible = Map.keysSet registry
+      -- Propose: match the arguments against the open parameter type, collecting bounds. This is a
+      -- separate function from 'subtype' and emits no diagnostics.
+      constraints <- runNormalizer sourceSpan (collectConstraints flexible argumentObject openFunction.argumentType)
+      solveResult <- runNormalizer sourceSpan (solveConstraints registry constraints)
+      reportUninferredGenerics sourceSpan registry solveResult.uninferred
+      -- Dispose: substitute the solution into the original scheme and check it with the trusted
+      -- relation (argument compatibility via 'applyAgent', plus the declared @extends@ bounds).
+      solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
+      runNormalizer sourceSpan (checkSolvedBounds registry solveResult)
+      maybeFunction <- extractFunction sourceSpan solvedType
+      case maybeFunction of
+        Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+        Nothing -> do
+          reportExpectedShape sourceSpan "a callable agent" solvedType
+          pure bottomType
+
+-- | The function layer of a type whose base is exactly a function (a scheme body opened to
+-- metavariables), without any bound raising — the open callee is a plain agent type, not a bounded
+-- generic.
+openFunctionLayer :: NormalizedType -> Maybe NormalizedFunction
+openFunctionLayer normalizedType = case normalizedType.baseType of
+  NormalizedBaseTypeLayered layer -> layer.functionLayer
+  NormalizedBaseTypeUnknown -> Nothing
+
+-- | Report the declared parameter names whose type arguments the application did not constrain (K3016).
+reportUninferredGenerics :: SourceSpan -> Registry -> List GenericId -> Checker ()
+reportUninferredGenerics sourceSpan registry uninferred =
+  case [info.name | metavar <- uninferred, Just info <- [Map.lookup metavar registry]] of
+    [] -> pure ()
+    names -> reportType sourceSpan (TypeErrorCannotInferGeneric CannotInferGenericErrorInfo {parameters = names})
 
 ------------------------------------------------------------------------------------------------
 -- Jump statements
@@ -955,8 +966,11 @@ checkBreakStatement :: BreakStatement Identified -> Checker (BreakStatement Type
 checkBreakStatement breakStmt = do
   contexts <- asks (.jumps)
   (typedValue, _) <-
-    checkJump (innermostHandler contexts) breakStmt.sourceSpan "break" "a request handler body" breakStmt.value [] $ \frame -> do
-      typed <- checkExpression breakStmt.value frame.handlerResultType
+    checkJump (innermostHandler contexts) breakStmt.sourceSpan "break" "a request handler body" breakStmt.value [] $ \_frame -> do
+      -- A @break@ short-circuits the handler, bypassing its @then@ clause: its value is not checked
+      -- against the result @R@ (the @then@ input), but unioned straight into the handler's result type.
+      (typed, valueType) <- synthExpression breakStmt.value
+      emitHandlerBreakType breakStmt.sourceSpan valueType
       markJump HandlerJump
       pure typed
   pure BreakStatement {value = typedValue, sourceSpan = breakStmt.sourceSpan}
@@ -1110,10 +1124,11 @@ checkPattern pattern scrutinee = case pattern of
       case Map.lookup qualifiedName dataEnvironment of
         Just dataInfo -> do
           substitution <-
-            buildGenericSubstitution
+            constructorPatternSubstitution
               constructorPattern.sourceSpan
-              (renderQualifiedName qualifiedName)
-              dataInfo.genericParameters
+              qualifiedName
+              dataInfo
+              scrutinee
               constructorPattern.genericArguments
           instantiatedConstructor <-
             runNormalizer constructorPattern.sourceSpan (objectAsType <$> substituteObject substitution dataInfo.constructor)
@@ -1374,50 +1389,121 @@ arrayOf elementType =
 -- Handler expressions
 ------------------------------------------------------------------------------------------------
 
-synthHandlerExpression ::
-  HandlerExpression Identified ->
-  Checker (Expression Typed, NormalizedType)
-synthHandlerExpression expression = do
-  (resultType, residualEffect) <- elaborateHandlerGenerics expression
-  -- The `var` state scopes over the request handler bodies /and/ the then clause (the finalizer), so
-  -- both are walked inside the state scope.
-  (typedVarBindings, (handledNames, typedHandlers, typedThen)) <-
-    withVarBindingsTyped expression.stateVariables $ do
-      (handlerBodyEffect, results) <-
-        withEffectInference $
-          traverse (walkRequestHandler resultType) expression.handlers
-      -- Every request body runs inside the handler, so the effects it performs must lie within the
-      -- handler's declared residual effect E.
-      runNormalizer expression.sourceSpan (subtype handlerBodyEffect residualEffect)
-      typedThen <- walkHandlerThenClause resultType residualEffect expression.thenClause
-      pure (fst <$> results, snd <$> results, typedThen)
-  continuationEffect <-
-    foldM (joinRequestIntoEffect expression.sourceSpan) residualEffect handledNames
-  -- A handler's continuation receives @null@ (it resumes the handled request, not a @use@ binder), and
-  -- the handler itself is the outer agent taking that @{continuation: ...}@ and producing @R with E@.
-  let outerParameter = continuationExpectedArgument nullType resultType continuationEffect
-      handlerType = assembleAgent bottomAttribute outerParameter resultType residualEffect
-  -- The handler's two built-in generic positions are the continuation result @R@ and residual effect
-  -- @E@; record them by those conventional names so lowering need not re-derive them.
-  resultSemantic <- denormalizeAt expression.sourceSpan resultType
-  effectSemantic <- runNormalizer expression.sourceSpan (denormalizeEffect residualEffect)
-  let handlerInstantiation =
-        Map.fromList
-          [ (handlerResultParameterName, SemanticGenericArgumentType resultSemantic),
-            (handlerEffectParameterName, SemanticGenericArgumentEffect effectSemantic)
-          ]
-  typedExpression expression.sourceSpan handlerType $ \semantic ->
+-- | The typed sub-parts of a handler, assembled into the typed node once its (possibly instantiated)
+-- type and generic arguments are known.
+data HandlerComponents = HandlerComponents
+  { parallel :: Bool,
+    genericArguments :: List (SyntacticTypeExpression Typed),
+    stateVariables :: List (VariableBinding Typed),
+    handlers :: List (RequestHandler Typed),
+    thenClause :: Maybe (ThenClause Typed),
+    sourceSpan :: SourceSpan
+  }
+
+-- | Build a handler value's generic scheme. A handler is a generic value over its result type @R@ (the
+-- continuation's result) and residual effect @E@:
+--
+-- @∀R E. agent({continuation: agent({value: null}) -> R with {...E, req1[..], ...}})
+--        -> (break-union | then(R)) with (E | bodyEffect)@
+--
+-- The request bodies are checked with @R@ / @E@ as rigid generics: their tails / breaks form the
+-- (concrete) break union and their effects the (concrete) body effect, while @R@ appears only as the
+-- @then@ binder's type and @E@ only in the effect rows — so the body never compares a concrete value
+-- against a rigid @R@ / @E@. The continuation effect is the /overwrite/ @{...E, req[..]}@: @E@ lacks
+-- every handled request, which appears as a concrete override (its generic arguments resolved per
+-- request handler). At a call / @use@ the standard generic-argument inference solves @R@ from the
+-- continuation's return and @E@ from its effect (the handled requests dropped).
+checkHandlerScheme :: HandlerExpression Identified -> Checker (HandlerComponents, Scheme)
+checkHandlerScheme expression = do
+  resultId <- freshGenericId
+  effectId <- freshGenericId
+  let resultVariable = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton resultId, attribute = bottomAttribute}
+      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, upperBound = Nothing}
+      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, upperBound = Nothing}
+      handlerGenerics =
+        GenericParameters
+          { parameterNames = [handlerResultParameterName, handlerEffectParameterName],
+            parameterInformation = Map.fromList [(handlerResultParameterName, resultInfo), (handlerEffectParameterName, effectInfo)]
+          }
+  (typedVarBindings, (handled, typedHandlers, typedThen, breakUnion, bodyEffect, thenResult)) <-
+    withVarBindingsTyped expression.stateVariables $
+      withGenerics handlerGenerics $ do
+        (tailResults, breakResults, (handlerBodyEffect, results)) <-
+          withHandlerResultInference $
+            withEffectInference $
+              traverse walkRequestHandler expression.handlers
+        -- Both the body tails and the explicit breaks are values the handler returns without resuming,
+        -- so they bypass @then@ and union directly into the result.
+        breakUnion <- runNormalizer expression.sourceSpan (union tailResults breakResults)
+        (thenEffect, maybeThenResult, typedThen) <- walkHandlerThenClause resultVariable expression.thenClause
+        totalBodyEffect <- runNormalizer expression.sourceSpan (union handlerBodyEffect thenEffect)
+        pure
+          ( [(name, requestArguments) | (name, requestArguments, _) <- results],
+            [node | (_, _, node) <- results],
+            typedThen,
+            breakUnion,
+            totalBodyEffect,
+            fromMaybe resultVariable maybeThenResult
+          )
+  let handledRequests = Map.fromList handled
+      continuationEffect =
+        NormalizedEffectRow EffectRow {request = handledRequests, tails = Map.singleton effectId (Map.keysSet handledRequests)}
+      effectVariable = NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton effectId mempty}
+  handlerEffect <- runNormalizer expression.sourceSpan (union effectVariable bodyEffect)
+  handlerResult <- runNormalizer expression.sourceSpan (union breakUnion thenResult)
+  let outerParameter = continuationExpectedArgument nullType resultVariable continuationEffect
+      handlerType = assembleAgent bottomAttribute outerParameter handlerResult handlerEffect
+      components =
+        HandlerComponents
+          { parallel = expression.parallel,
+            genericArguments = retagSyntacticTypeExpression <$> expression.genericArguments,
+            stateVariables = typedVarBindings,
+            handlers = typedHandlers,
+            thenClause = typedThen,
+            sourceSpan = expression.sourceSpan
+          }
+  pure (components, Scheme {genericParameters = handlerGenerics, valueType = handlerType})
+
+-- | A handler scheme's own generic parameters as the instantiation arguments (each parameter to its
+-- own scheme variable), for a handler node whose @R@ / @E@ are not yet substituted.
+ownHandlerInstantiation :: Scheme -> Map Text SemanticGenericArgument
+ownHandlerInstantiation scheme =
+  Map.fromList [(name, schemeVariableFor info.kind info.genericId) | (name, info) <- Map.toList scheme.genericParameters.parameterInformation]
+
+assembleHandlerNode :: HandlerComponents -> Map Text SemanticGenericArgument -> NormalizedType -> Checker (Expression Typed)
+assembleHandlerNode components instantiation handlerType = do
+  semantic <- denormalizeAt components.sourceSpan handlerType
+  pure $
     ExpressionHandler
       HandlerExpression
-        { parallel = expression.parallel,
-          genericArguments = retagSyntacticTypeExpression <$> expression.genericArguments,
-          instantiation = handlerInstantiation,
-          stateVariables = typedVarBindings,
-          handlers = typedHandlers,
-          thenClause = typedThen,
-          sourceSpan = expression.sourceSpan,
+        { parallel = components.parallel,
+          genericArguments = components.genericArguments,
+          instantiation = instantiation,
+          stateVariables = components.stateVariables,
+          handlers = components.handlers,
+          thenClause = components.thenClause,
+          sourceSpan = components.sourceSpan,
           typeOf = semantic
         }
+
+-- | Synthesize a bare handler expression (one not in call position). An explicit @handler[R, E]@ is the
+-- scheme applied to its arguments; a bare @handler { ... }@ is a generic value used without application,
+-- whose @R@ / @E@ cannot be inferred (there is no continuation), so it is reported (K3015) like any
+-- unapplied generic — write @handler[R, E]@ or apply it (@use handler { ... }@).
+synthHandlerExpression :: HandlerExpression Identified -> Checker (Expression Typed, NormalizedType)
+synthHandlerExpression expression = do
+  (components, scheme) <- checkHandlerScheme expression
+  case expression.genericArguments of
+    [] -> do
+      instantiated <- instantiateBare expression.sourceSpan scheme
+      node <- assembleHandlerNode components (ownHandlerInstantiation scheme) instantiated
+      pure (node, instantiated)
+    genericArguments -> do
+      substitution <- buildGenericSubstitution expression.sourceSpan "handler" scheme.genericParameters genericArguments
+      instantiated <- runNormalizer expression.sourceSpan (substituteType substitution scheme.valueType)
+      instantiation <- instantiationOf expression.sourceSpan scheme.genericParameters substitution
+      node <- assembleHandlerNode components instantiation instantiated
+      pure (node, instantiated)
 
 -- | Check a @then@ clause's optional binder against the type it matches — the @for@ result array, or
 -- a handler's result @R@ — yielding the typed binder and its bindings.
@@ -1431,51 +1517,37 @@ checkThenBinder matchedType = \case
     (typedPattern, _, bindings) <- checkPattern binder matchedType
     pure (Just typedPattern, bindings)
 
--- | Walk a handler's @then@ finalizer: its binder matches the handler result @R@, its body type must
--- be @<: R@, and its inferred effect is bounded by the residual effect @E@. Walked inside the handler's
--- @var@ state scope (the finalizer reads the accumulated state).
+-- | Walk a handler's @then@ finalizer: its binder matches the handler's normal result @R@ (the value
+-- the loop produces), and its body freely synthesizes the transformed result @R'@. Returns the body's
+-- inferred effect (the caller bounds it by @E@ for an explicit handler, or unions it into the inferred
+-- @E@), the synthesized @R'@ (so the caller can make it the handler's result), and the typed clause.
+-- Walked inside the handler's @var@ state scope (the finalizer reads the accumulated state).
 walkHandlerThenClause ::
   NormalizedType ->
-  NormalizedEffect ->
   Maybe (ThenClause Identified) ->
-  Checker (Maybe (ThenClause Typed))
-walkHandlerThenClause resultType residualEffect = \case
-  Nothing -> pure Nothing
+  Checker (NormalizedEffect, Maybe NormalizedType, Maybe (ThenClause Typed))
+walkHandlerThenClause binderType = \case
+  Nothing -> pure (bottomEffect, Nothing, Nothing)
   Just thenClause -> do
-    (typedBinder, thenBindings) <- checkThenBinder resultType thenClause.binder
-    (thenEffect, typedBody) <-
+    (typedBinder, thenBindings) <- checkThenBinder binderType thenClause.binder
+    (thenEffect, (typedBody, thenResult)) <-
       withEffectInference $
         withParameters thenBindings $
           -- The `then` finalizer runs once after the handler and permits no jumps: a `break` / `next` /
           -- `return` inside it has no target here and is reported misplaced.
-          withoutJumpTargets $ do
-            (tb, nt) <- synthBlock thenClause.body
-            runNormalizer thenClause.sourceSpan (subtype nt resultType)
-            pure tb
-    runNormalizer thenClause.sourceSpan (subtype thenEffect residualEffect)
-    pure (Just ThenClause {binder = typedBinder, body = typedBody, sourceSpan = thenClause.sourceSpan})
+          withoutJumpTargets (synthBlock thenClause.body)
+    pure (thenEffect, Just thenResult, Just ThenClause {binder = typedBinder, body = typedBody, sourceSpan = thenClause.sourceSpan})
 
-elaborateHandlerGenerics ::
-  HandlerExpression Identified ->
-  Checker (NormalizedType, NormalizedEffect)
-elaborateHandlerGenerics expression = case expression.genericArguments of
-  [resultArgument, effectArgument] -> do
-    resolvedResult <- elaborateAndNormalizeType resultArgument
-    resolvedEffect <- elaborateAndNormalizeEffect effectArgument
-    pure (resolvedResult, resolvedEffect)
-  _ -> do
-    reportApplicationArity expression.sourceSpan "handler" 2 (length expression.genericArguments)
-    pure (bottomType, bottomEffect)
-
--- | Walk one request handler: instantiate the request's parameter / return type with the handler's
--- generic arguments, check the handler's parameters accept the request's argument object, then walk
--- the body. The body's tail is an implicit @break@ to the handler result @R@, so its type must be a
--- subtype of @R@. Returns the handled request name (for the continuation effect) and the typed node.
+-- | Walk one request handler: resolve the handled request's generic arguments (explicit, or derived
+-- from the handler's parameters), check the handler's parameters accept the request's argument object,
+-- then walk the body. The body's tail is an implicit @break@ — a value the handler returns without
+-- resuming — so it joins the break union (the handler's result @R@ is the continuation's result, not a
+-- body tail). Returns the handled request name, its inferred generic arguments (for the continuation's
+-- overwrite effect), and the typed node.
 walkRequestHandler ::
-  NormalizedType ->
   RequestHandler Identified ->
-  Checker (QualifiedName, RequestHandler Typed)
-walkRequestHandler resultType handler = do
+  Checker (QualifiedName, Map Text NormalizedKindedType, RequestHandler Typed)
+walkRequestHandler handler = do
   requestName <- case handler.typeReference.resolution of
     Just (TypeResolutionQualifiedName name) -> pure name
     _ -> panic "walkRequestHandler: request handler is not resolved to a request"
@@ -1483,21 +1555,17 @@ walkRequestHandler resultType handler = do
   requestInfo <- case Map.lookup requestName requestEnv of
     Just info -> pure info
     Nothing -> panic ("walkRequestHandler: request not registered: " <> renderQualifiedName requestName)
-  substitution <-
-    buildGenericSubstitution
-      handler.sourceSpan
-      (renderQualifiedName requestName)
-      requestInfo.genericParameters
-      handler.genericArguments
+  -- The handler's parameters are built first: when the request's generics are not written explicitly,
+  -- they are derived from the parameter annotations (a @request foo(x : int)@ handler of @foo[a](x: a)@
+  -- infers @a = int@), exactly the single-site inference a generic call uses.
+  (paramObject, paramBindings, typedParams) <- buildParameterScopeTyped handler.parameters
+  substitution <- case handler.genericArguments of
+    [] -> inferRequestHandlerSubstitution handler.sourceSpan requestInfo paramObject
+    genericArguments -> buildGenericSubstitution handler.sourceSpan (renderQualifiedName requestName) requestInfo.genericParameters genericArguments
   instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.parameterType)
   instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.returnType)
-  (paramObject, paramBindings, typedParams) <- buildParameterScopeTyped handler.parameters
   runNormalizer handler.sourceSpan (subtype instantiatedParam paramObject)
-  let context =
-        HandleContext
-          { handlerResultType = resultType,
-            currentRequestReturnType = instantiatedReturn
-          }
+  let context = HandleContext {currentRequestReturnType = instantiatedReturn}
   (typedBlock, bodyType) <-
     -- A request handler body is deferred — it runs when the handler is invoked, not where it is
     -- written — so it sees none of the enclosing agent's / `for`'s jump targets: a `return` inside is
@@ -1507,9 +1575,18 @@ walkRequestHandler resultType handler = do
         withParameters paramBindings $
           -- The request handler captures its own `next` / `break`, so they do not escape an enclosing branch.
           capturingJumps HandlerJump (synthBlock handler.body)
-  runNormalizer handler.sourceSpan (subtype bodyType resultType)
+  -- The body tail is an implicit @break@ (the handler returns it without resuming), so it bypasses
+  -- @then@ and joins the break union; @R@ (the continuation's result) is a separate generic.
+  emitHandlerTailType handler.sourceSpan bodyType
   instantiation <- instantiationOf handler.sourceSpan requestInfo.genericParameters substitution
-  let typedHandler =
+  -- The request's generic arguments by name, for the continuation's overwrite effect @{...E, req[..]}@.
+  let requestArguments =
+        Map.fromList
+          [ (parameterName, argument)
+            | (parameterName, info) <- Map.toList requestInfo.genericParameters.parameterInformation,
+              Just argument <- [Map.lookup info.genericId substitution]
+          ]
+      typedHandler =
         RequestHandler
           { moduleQualifier = retagModuleQualifier <$> handler.moduleQualifier,
             name = handler.name,
@@ -1521,7 +1598,51 @@ walkRequestHandler resultType handler = do
             body = typedBlock,
             sourceSpan = handler.sourceSpan
           }
-  pure (requestName, typedHandler)
+  pure (requestName, requestArguments, typedHandler)
+
+-- | The generic substitution for a constructor pattern. Explicit @[...]@ arguments are elaborated as
+-- usual (the pattern's signature is written). With none, the data type's generic arguments are
+-- /derived from the scrutinee/ so a binder reads at the scrutinee's instantiation — a @box(value = v)@
+-- pattern over a @box[integer]@ scrutinee binds @v : integer@, not an unconstrained @never@. The
+-- pattern's signature is then exactly the scrutinee's (which trivially covers it); explicit arguments
+-- can widen it. When the scrutinee does not carry this constructor (a refuted arm), the data type's own
+-- generic variables are used so the binders read at the generics' bounds rather than at @never@.
+constructorPatternSubstitution ::
+  SourceSpan ->
+  QualifiedName ->
+  DataInformation ->
+  NormalizedType ->
+  List (SyntacticTypeExpression Identified) ->
+  Checker (Map GenericId NormalizedKindedType)
+constructorPatternSubstitution sourceSpan qualifiedName dataInfo scrutinee = \case
+  [] -> do
+    raised <- raiseToBounds sourceSpan scrutinee
+    case raised.baseType of
+      NormalizedBaseTypeLayered layer
+        | Just arguments <- Map.lookup qualifiedName layer.dataLayer ->
+            pure (genericSubstitution dataInfo.genericParameters arguments)
+      _ -> do
+        ownArguments <- ownGenericArguments sourceSpan dataInfo.genericParameters
+        pure (genericSubstitution dataInfo.genericParameters ownArguments)
+  genericArguments ->
+    buildGenericSubstitution sourceSpan (renderQualifiedName qualifiedName) dataInfo.genericParameters genericArguments
+
+-- | Infer a request's generic arguments for a request handler written without an explicit @[...]@: the
+-- request's generics are instantiated to metavariables, the request's (open) parameter type is matched
+-- against the handler's declared parameter object, and the solution is read back. A generic the
+-- parameters do not constrain (e.g. one appearing only in the request's return) is reported
+-- un-inferrable (K3016) and the user must write it explicitly. Returns the substitution from each
+-- request generic id to its concrete argument.
+inferRequestHandlerSubstitution :: SourceSpan -> RequestInformation -> NormalizedType -> Checker (Map GenericId NormalizedKindedType)
+inferRequestHandlerSubstitution sourceSpan requestInfo paramObject = do
+  (toMetavar, registry) <- instantiateToMetavars sourceSpan requestInfo.genericParameters
+  openParam <- runNormalizer sourceSpan (substituteType toMetavar requestInfo.parameterType)
+  -- The request's parameter values must be accepted by the handler's parameters; matching the handler
+  -- parameter object against the open request parameter gives each request generic a lower bound.
+  constraints <- runNormalizer sourceSpan (collectConstraints (Map.keysSet registry) paramObject openParam)
+  solveResult <- runNormalizer sourceSpan (solveConstraints registry constraints)
+  reportUninferredGenerics sourceSpan registry solveResult.uninferred
+  traverse (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution) toMetavar
 
 buildGenericSubstitution ::
   SourceSpan ->
@@ -1569,17 +1690,6 @@ instantiationOf sourceSpan parameters substitution =
       Just kinded -> do
         semantic <- runNormalizer sourceSpan (denormalizeGenericArgument kinded)
         pure (Just (name, semantic))
-
-joinRequestIntoEffect ::
-  SourceSpan ->
-  NormalizedEffect ->
-  QualifiedName ->
-  Checker NormalizedEffect
-joinRequestIntoEffect sourceSpan baseEffect requestName = do
-  let addition =
-        NormalizedEffectRow
-          EffectRow {request = Map.singleton requestName mempty, tails = mempty}
-  runNormalizer sourceSpan (union baseEffect addition)
 
 namedObjectType :: List (Text, NormalizedType) -> NormalizedType
 namedObjectType fieldList =

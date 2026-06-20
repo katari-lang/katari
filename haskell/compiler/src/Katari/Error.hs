@@ -101,9 +101,16 @@ renderTypeError typeError =
     TypeErrorExpectedShape info ->
       "Expected " <> info.expected <> ", but the expression has type " <> renderSemanticType info.actual
     TypeErrorGenericNotApplied info ->
-      "This generic value must be applied to explicit type arguments ["
+      "This generic value is used without type arguments and is not in a call (type arguments are"
+        <> " inferred only at call sites); apply it explicitly to ["
         <> Text.intercalate ", " info.parameters
-        <> "] (generic inference is not supported)"
+        <> "]"
+    TypeErrorCannotInferGeneric info ->
+      "Could not infer the type argument(s) ["
+        <> Text.intercalate ", " info.parameters
+        <> "] from this application; supply them explicitly (value["
+        <> Text.intercalate ", " info.parameters
+        <> "])"
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -133,6 +140,9 @@ data TypeError where
   -- | A generic value is referenced without explicit type arguments. Generic inference is not
   -- supported, so a generic value must be applied (@value[T, ...]@) at every use site.
   TypeErrorGenericNotApplied :: GenericNotAppliedErrorInfo -> TypeError
+  -- | A generic application's type arguments could not be inferred from the call (a parameter has no
+  -- argument constraining it). The user must supply the named arguments explicitly (@value[T, ...]@).
+  TypeErrorCannotInferGeneric :: CannotInferGenericErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -149,6 +159,7 @@ typeErrorCode = \case
   TypeErrorMissingAnnotation _ -> "K3013"
   TypeErrorExpectedShape _ -> "K3014"
   TypeErrorGenericNotApplied _ -> "K3015"
+  TypeErrorCannotInferGeneric _ -> "K3016"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -166,6 +177,7 @@ typeErrorSeverity = \case
   TypeErrorMissingAnnotation _ -> SeverityError
   TypeErrorExpectedShape _ -> SeverityError
   TypeErrorGenericNotApplied _ -> SeverityError
+  TypeErrorCannotInferGeneric _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -246,6 +258,13 @@ data ExpectedShapeErrorInfo = ExpectedShapeErrorInfo
 
 -- | @parameters@ are the declared generic parameter names the value still needs explicit arguments for.
 newtype GenericNotAppliedErrorInfo = GenericNotAppliedErrorInfo
+  { parameters :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @parameters@ are the declared generic parameter names whose arguments the application did not
+-- constrain, so they could not be inferred and must be supplied explicitly.
+newtype CannotInferGenericErrorInfo = CannotInferGenericErrorInfo
   { parameters :: List Text
   }
   deriving (Eq, Ord, Show)

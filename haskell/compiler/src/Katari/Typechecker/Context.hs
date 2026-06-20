@@ -30,7 +30,7 @@ import Katari.Data.Environment
     Scheme,
     ValueEnvironment,
   )
-import Katari.Data.Id (GenericId, LocalVariableId)
+import Katari.Data.Id (GenericId (..), LocalVariableId, inferenceModuleName)
 import Katari.Data.NormalizedType
   ( NormalizedAttribute,
     NormalizedEffect,
@@ -80,13 +80,15 @@ emptyJumpContexts = JumpContexts {frames = []}
 
 -- | What a @handler@'s request-handler bodies consult: the handler's overall result type @R@ (the
 -- target of a @break@) and the expected value type of a @next@ in the current request handler.
-data HandleContext = HandleContext
-  { -- | The handler's overall result type @R@. A @break@ inside a request handler body yields @R@;
-    -- so does the @then@ clause's body type.
-    handlerResultType :: NormalizedType,
-    -- | The expected type of @next e@ inside the current request handler body — the intercepted
+newtype HandleContext = HandleContext
+  { -- | The expected type of @next e@ inside the current request handler body — the intercepted
     -- request's return type with the handler's generic arguments substituted in. One frame is
     -- pushed per request handler walk, so the innermost frame always carries the right value.
+    --
+    -- The handler's result @R@ is /not/ carried here: a @break@ does not check against @R@ (it
+    -- short-circuits past @then@ and is collected into the handler's result via 'emitHandlerBreakType'),
+    -- and a body tail is handled where the request handler is walked. So a frame only needs to answer
+    -- "what does @next@ expect" and "is a @break@ / @next@ in scope at all".
     currentRequestReturnType :: NormalizedType
   }
   deriving stock (Eq, Show)
@@ -156,11 +158,19 @@ data CheckerState = CheckerState
     -- so an unannotated agent's return type is inferred from its @return@s as well as its block tail.
     -- Bottom outside an agent body.
     returnAccumulator :: NormalizedType,
+    -- | What the innermost @handler@ body has produced toward its result (see 'HandlerAccumulator'):
+    -- the union of request-body tails (the inferred @R@) and the union of explicit @break@ values
+    -- (which bypass @then@). Bottom outside a 'withHandlerResultInference' scope.
+    handlerAccumulator :: HandlerAccumulator,
     -- | The kinds of jump that have escaped the current capture region (the dual of the value
     -- accumulators, for control flow). A jump statement adds its kind ('markJump'); a capturing
     -- construct removes the kind it consumes ('capturingJumps'); a branch reads what is left to decide
     -- its purity ('collectingJumps').
-    escapingJumps :: Set JumpKind
+    escapingJumps :: Set JumpKind,
+    -- | A monotonically increasing counter for minting fresh inference variables (metavariables)
+    -- during generic-argument inference ('freshGenericId'). Threaded through the whole walk so two
+    -- instantiations in one expression never collide.
+    metavarCounter :: Int
   }
   deriving stock (Eq, Show)
 
@@ -176,10 +186,35 @@ data ForAccumulator = ForAccumulator
 emptyForAccumulator :: ForAccumulator
 emptyForAccumulator = ForAccumulator {nextElements = bottomType, breakResults = bottomType}
 
+-- | What a @handler@ body produces toward its result, while @R@ is being inferred. Mirrors
+-- 'ForAccumulator': a request body's implicit-break /tail/ is the handler's normal result @R@ (the
+-- value the @then@ clause transforms and the continuation resumes to), while an explicit @break@
+-- short-circuits past @then@ and is unioned straight into the result. Keeping them apart is what lets
+-- @break@ bypass @then@ (the same way a @for@'s @break@ bypasses its @then@).
+data HandlerAccumulator = HandlerAccumulator
+  { tailResults :: NormalizedType,
+    -- | The union of explicit @break@ values. Named distinctly from 'ForAccumulator.breakResults' so a
+    -- record update is unambiguous under @DuplicateRecordFields@.
+    escapeResults :: NormalizedType
+  }
+  deriving stock (Eq, Show)
+
+emptyHandlerAccumulator :: HandlerAccumulator
+emptyHandlerAccumulator = HandlerAccumulator {tailResults = bottomType, escapeResults = bottomType}
+
 -- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
 -- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
-initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect, returnAccumulator = bottomType, escapingJumps = Set.empty}
+initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect, returnAccumulator = bottomType, handlerAccumulator = emptyHandlerAccumulator, escapingJumps = Set.empty, metavarCounter = 0}
+
+-- | Mint a fresh inference variable id under the reserved 'inferenceModuleName', advancing the
+-- per-walk counter. Used by generic-argument inference to instantiate a scheme's parameters as
+-- metavariables; the result is always substituted away before it leaves the inference site.
+freshGenericId :: Checker GenericId
+freshGenericId = do
+  next <- gets (.metavarCounter)
+  modify (\state -> state {metavarCounter = next + 1})
+  pure (GenericId inferenceModuleName next)
 
 -- | The checker monad: read-only environment, 'Diagnostics' writer, 'CheckerState' state.
 type Checker a = RWS CheckerEnvironment Diagnostics CheckerState a
@@ -374,6 +409,15 @@ withEffectInference = collecting (.effectAccumulator) (\value state -> state {ef
 withReturnInference :: Checker a -> Checker (NormalizedType, a)
 withReturnInference = collecting (.returnAccumulator) (\value state -> state {returnAccumulator = value}) bottomType
 
+-- | Run a @handler@'s request bodies collecting what flows to its result: the union of body tails (the
+-- inferred @R@) and the union of explicit @break@ values (which bypass @then@). Scopes the accumulator
+-- to this handler, so a nested handler's results do not leak out. Returns @(tailResults, breakResults,
+-- result)@.
+withHandlerResultInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
+withHandlerResultInference action = do
+  (accumulator, result) <- collecting (.handlerAccumulator) (\value state -> state {handlerAccumulator = value}) emptyHandlerAccumulator action
+  pure (accumulator.tailResults, accumulator.escapeResults, result)
+
 -- | A @for@ body's @next@ value joins the inferred element type.
 emitForNextType :: SourceSpan -> NormalizedType -> Checker ()
 emitForNextType = accumulateInto (\state -> state.forAccumulator.nextElements) (\value state -> state {forAccumulator = state.forAccumulator {nextElements = value}})
@@ -389,6 +433,16 @@ emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectA
 -- | A @return@ value joins the enclosing agent's inferred return type.
 emitReturnType :: SourceSpan -> NormalizedType -> Checker ()
 emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {returnAccumulator = value})
+
+-- | A request body's implicit-break tail joins the inferred @handler@ result @R@ (the value @then@
+-- transforms).
+emitHandlerTailType :: SourceSpan -> NormalizedType -> Checker ()
+emitHandlerTailType = accumulateInto (\state -> state.handlerAccumulator.tailResults) (\value state -> state {handlerAccumulator = state.handlerAccumulator {tailResults = value}})
+
+-- | An explicit @break@ value joins the @handler@'s short-circuit results (these bypass @then@ and are
+-- unioned straight into the handler's result type).
+emitHandlerBreakType :: SourceSpan -> NormalizedType -> Checker ()
+emitHandlerBreakType = accumulateInto (\state -> state.handlerAccumulator.escapeResults) (\value state -> state {handlerAccumulator = state.handlerAccumulator {escapeResults = value}})
 
 -- | Record that a jump of this kind has fired, so an enclosing branch that does not capture it sees
 -- the branch as escaping (hence non-pure).

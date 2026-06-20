@@ -70,6 +70,7 @@ library:
     - Katari.Identifier.Expression
     - Katari.Typechecker
     - Katari.Typechecker.Normalizer
+    - Katari.Typechecker.Inference
     - Katari.Typechecker.Elaborate
     - Katari.Typechecker.Environment
     - Katari.Typechecker.ValueGraph

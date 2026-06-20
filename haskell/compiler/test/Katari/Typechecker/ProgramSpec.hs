@@ -38,8 +38,8 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "instantiates a generic primitive applied explicitly" $
     typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity[integer](value = 1) }")] `shouldBe` []
 
-  it "rejects a generic primitive referenced without explicit application (K3015)" $
-    typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity(value = 1) }")] `shouldContain` ["K3015"]
+  it "infers a generic primitive's type argument from the call (no explicit application needed)" $
+    typeErrorCodes [("test", "primitive agent identity[a](value: a) -> a\nagent run() -> integer { identity(value = 1) }")] `shouldBe` []
 
   it "uses a generic's bound when checking the body (a `T extends number` is a number)" $
     typeErrorCodes [("test", "agent widen[T extends number](x: T) -> number { x }")] `shouldBe` []
