@@ -721,7 +721,10 @@ synthCallArguments ::
 synthCallArguments sourceSpan arguments = do
   entries <- traverse synthEntry arguments
   let typedArguments = [typedArg | (typedArg, _, _) <- entries]
-      object = namedObjectType [(name, normalizedType) | (_, name, normalizedType) <- entries]
+      -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
+      -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
+      -- parameter match (against a required parameter it still fails the optional<:required check).
+      object = namedObjectTypeWithRest bottomType [(name, normalizedType) | (_, name, normalizedType) <- entries]
   liftAmount <-
     runNormalizer sourceSpan $
       foldr joinAttribute bottomAttribute <$> traverse foldAttribute [normalizedType | (_, _, normalizedType) <- entries]
@@ -1757,8 +1760,12 @@ instantiationOf ::
 instantiationOf sourceSpan parameters substitution =
   traverse (runNormalizer sourceSpan . denormalizeGenericArgument) (instantiationByName parameters substitution)
 
-namedObjectType :: List (Text, NormalizedType) -> NormalizedType
-namedObjectType fieldList =
+-- | An object type from named required fields with the given @rest@ (the type of every other key).
+-- An /open/ rest ('unknownType') ignores undeclared keys (width subtyping); a /closed/ rest
+-- ('bottomType') admits no other key, so an omitted field is genuinely absent — what a call-argument
+-- object needs for an omitted optional (defaulted) parameter to match.
+namedObjectTypeWithRest :: NormalizedType -> List (Text, NormalizedType) -> NormalizedType
+namedObjectTypeWithRest restType fieldList =
   layeredOf
     neverLayer
       { objectLayer =
@@ -1769,9 +1776,33 @@ namedObjectType fieldList =
                     [ (fieldName, NormalizedFieldInformation {normalizedType = fieldType, optional = False})
                       | (fieldName, fieldType) <- fieldList
                     ],
-                rest = unknownType
+                rest = restType
               }
       }
+
+-- | An /open/ named object (undeclared keys allowed): the default for parameter / continuation shapes.
+namedObjectType :: List (Text, NormalizedType) -> NormalizedType
+namedObjectType = namedObjectTypeWithRest unknownType
+
+-- | The call (argument) shape of a constructor / request: its read shape with each defaulted parameter's
+-- field made /optional/, so a caller may omit it (the runtime fills the default before constructing /
+-- escalating). The read shape itself — field access, constructor patterns, @data <: object@ — keeps
+-- every field required, so a constructed value's field never reads as nullable.
+callShape :: List (ParameterSignature Identified) -> NormalizedType -> NormalizedType
+callShape parameters readShape =
+  let defaulted = Set.fromList [signature.name | signature <- parameters, isJust signature.defaultValue]
+   in case readShape.baseType of
+        NormalizedBaseTypeLayered layer
+          | Just object <- layer.objectLayer ->
+              layeredOf layer {objectLayer = Just (markDefaultedOptional defaulted object)}
+        _ -> readShape
+  where
+    markDefaultedOptional :: Set.Set Text -> NormalizedObject -> NormalizedObject
+    markDefaultedOptional defaulted object =
+      NormalizedObject {fields = Map.mapWithKey reField object.fields, rest = object.rest}
+      where
+        reField name field =
+          NormalizedFieldInformation {normalizedType = field.normalizedType, optional = field.optional || Set.member name defaulted}
 
 ------------------------------------------------------------------------------------------------
 -- Agent declarations
@@ -2003,11 +2034,13 @@ dataValueScheme sourceSpan qualifiedName parameters = do
   dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
   case Map.lookup qualifiedName dataEnvironment of
     Just info -> do
-      let constructorType = objectAsType info.constructor
-      checkConstructorDefaults info.genericParameters constructorType parameters
+      let readShape = objectAsType info.constructor
+      checkConstructorDefaults info.genericParameters readShape parameters
       arguments <- ownGenericArguments sourceSpan info.genericParameters
       let returnType = layeredOf neverLayer {dataLayer = Map.singleton qualifiedName arguments}
-      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute constructorType returnType bottomEffect}
+      -- The constructor agent accepts the /call/ shape (defaulted parameters optional); the value it
+      -- produces is the nominal type, whose fields are read through the (required) read shape.
+      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute (callShape parameters readShape) returnType bottomEffect}
     Nothing -> panic ("dataValueScheme: data type not registered: " <> renderQualifiedName qualifiedName)
 
 -- | The value scheme of a request performed as a value: @agent(param) -> return with {request}@,
@@ -2021,7 +2054,9 @@ requestValueScheme sourceSpan qualifiedName parameters = do
       checkConstructorDefaults info.genericParameters info.parameterType parameters
       arguments <- ownGenericArguments sourceSpan info.genericParameters
       let effect = NormalizedEffectRow EffectRow {request = Map.singleton qualifiedName arguments, tails = mempty}
-      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute info.parameterType info.returnType effect}
+      -- Performing the request accepts the /call/ shape (defaulted parameters optional); the handler
+      -- still receives the (required) read shape, the runtime having filled the defaults.
+      pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute (callShape parameters info.parameterType) info.returnType effect}
     Nothing -> panic ("requestValueScheme: request not registered: " <> renderQualifiedName qualifiedName)
 
 -- | Check each constructor / request parameter's default against its field type in the

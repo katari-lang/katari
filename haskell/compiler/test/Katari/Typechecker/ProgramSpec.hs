@@ -238,6 +238,20 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "accepts a `for` with effects over a public source" $
     typeErrorCodes [("test", "request ping() -> null\nagent f() -> array[integer] with ping { for (x in [1]) { ping()\nnext 0 } }")] `shouldBe` []
 
+  -- A defaulted constructor / request parameter is optional at the call site (the caller may omit it),
+  -- while a constructed value's field still reads as its (non-null) declared type.
+  it "lets a caller omit a defaulted data-constructor argument" $
+    typeErrorCodes [("test", "data point(x: integer, y: integer ?= 0)\nagent make() -> point { point(x = 1) }")] `shouldBe` []
+
+  it "still reads a defaulted field as non-null (the read shape keeps it required)" $
+    typeErrorCodes [("test", "data point(x: integer, y: integer ?= 0)\nagent getY(p: point) -> integer { p.y }")] `shouldBe` []
+
+  it "still rejects omitting a required (non-defaulted) data argument (K3001)" $
+    typeErrorCodes [("test", "data point(x: integer, y: integer)\nagent make() -> point { point(x = 1) }")] `shouldContain` ["K3001"]
+
+  it "lets a caller omit a defaulted request argument" $
+    typeErrorCodes [("test", "request log(line: string, level: integer ?= 0) -> null\nagent run() -> null with log { log(line = \"hi\") }")] `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------
