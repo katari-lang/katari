@@ -1,0 +1,66 @@
+name: katari-cli
+version: 0.1.0.0
+license: MIT
+author: "yukikurage"
+
+language: GHC2021
+
+dependencies:
+  - base >= 4.7 && < 5
+  - text
+  - bytestring
+  - containers
+  - aeson
+  - aeson-pretty
+  - optparse-applicative
+  - directory
+  - filepath
+  # Talking to the Katari runtime over HTTP (apply).
+  - http-client
+  - http-client-tls
+  - http-types
+  # The compiler driver and the IR / module-name / diagnostics types it produces.
+  - katari-compiler
+  # Project discovery, dependency resolution, the lockfile, and the per-module upload plan.
+  - katari-project
+
+# NOTE: -Wmissing-export-lists is intentionally absent: modules export everything while the
+# scrap-and-build is in motion.
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wmissing-home-modules
+  - -Wpartial-fields
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.Cli.Api
+    - Katari.Cli.Common
+    - Katari.Cli.Build
+    - Katari.Cli.Apply
+
+executables:
+  katari:
+    main: Main.hs
+    source-dirs: app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-cli
+
+default-extensions:
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - RecordWildCards
+  - DerivingStrategies
+  - StrictData
