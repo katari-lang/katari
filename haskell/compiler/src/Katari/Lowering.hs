@@ -22,7 +22,7 @@ import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (isNothing, mapMaybe)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -441,33 +441,33 @@ lowerDeclaration = \case
       declaration.parameters
       declaration.body
   AST.DeclarationData declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input defaults ->
-      BlockConstruct Construct {name = resolvedQualifiedName declaration.variableReference, input = input, defaults = defaults}
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
+      BlockConstruct Construct {name = resolvedQualifiedName declaration.variableReference, input = input}
   AST.DeclarationRequest declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input defaults ->
-      BlockRequest Request {name = resolvedQualifiedName declaration.variableReference, input = input, defaults = defaults}
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
+      BlockRequest Request {name = resolvedQualifiedName declaration.variableReference, input = input}
   AST.DeclarationExternalAgent declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input defaults ->
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
       -- The declaration name is the external's sole handle; its rendered qualified name is the opaque
       -- dispatch key the runtime's external handler interprets.
-      BlockExternal External {key = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input, defaults = defaults}
+      BlockExternal External {key = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input}
   AST.DeclarationPrimitiveAgent declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input defaults ->
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
       -- A primitive's registry key is its fully-qualified name (e.g. @primitive.add@).
-      BlockPrimitive Primitive {name = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input, defaults = defaults}
+      BlockPrimitive Primitive {name = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input}
   AST.DeclarationImport _ -> pure ()
   AST.DeclarationTypeSynonym _ -> pure ()
   AST.DeclarationError _ -> pure ()
 
 -- | Lower one of the four signature-determined callables (data constructor / request / external /
 -- primitive): a 'BlockAgent' wrapper whose body is the leaf block @makeLeaf@ builds. The leaf reads the
--- whole incoming argument record as its @input@ (seeded under @parameter@) and fills any omitted
--- defaulted parameter before dispatching.
+-- whole incoming argument record as its @input@ (seeded under @parameter@); the wrapping agent carries
+-- the defaults the runtime fills before the leaf runs ('Agent.defaults').
 lowerSignatureCallable ::
   AST.Reference AST.Typed AST.VariableReference ->
   Text ->
   List (AST.ParameterSignature AST.Typed) ->
-  (VariableId -> Map Text Literal -> Block) ->
+  (VariableId -> Block) ->
   Lower ()
 lowerSignatureCallable reference name parameters makeLeaf = do
   let qualifiedName = resolvedQualifiedName reference
@@ -478,9 +478,9 @@ lowerSignatureCallable reference name parameters makeLeaf = do
         Map.fromList
           [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, Just parameterDefault <- [parameter.defaultValue]]
   leafBlock <- freshBlockId
-  recordBlock leafBlock (makeLeaf inputVariable defaults) (Map.singleton "parameter" inputVariable) (Just (name <> ".leaf"))
+  recordBlock leafBlock (makeLeaf inputVariable) (Map.singleton "parameter" inputVariable) (Just (name <> ".leaf"))
   context <- asks (.context)
-  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = callableSchema context qualifiedName}) mempty (Just name)
+  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = callableSchema context qualifiedName, defaults = defaults}) mempty (Just name)
 
 ---------------------------------------------------------------------------------------------------
 -- Agents
@@ -512,20 +512,23 @@ buildAgent catchesReturn agentBlock name genericBindings functionType parameters
     (Map.singleton "parameter" argumentVariable)
     (Just (name <> ".body"))
   context <- asks (.context)
-  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context genericBindings functionType}) mempty (Just name)
+  -- Defaulted parameters are filled by the runtime from 'Agent.defaults' before the body runs, the same
+  -- mechanism the signature callables use — so the body simply binds each parameter.
+  let defaults =
+        Map.fromList
+          [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, AST.BindVariable _ _ (Just parameterDefault) <- [parameter.binder]]
+  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context genericBindings functionType, defaults = defaults}) mempty (Just name)
 
--- | Read one declared parameter out of the incoming argument record and bind its pattern, returning the
--- locals it introduces. A plain variable parameter binds the field variable directly; any other pattern
--- (or a defaulted parameter, whose default substitutes when the field is absent) is destructured.
+-- | Read one declared parameter out of the incoming argument record and bind it, returning the locals
+-- it introduces. A plain variable parameter binds the field variable directly; a destructuring
+-- parameter is taken apart. Defaults are handled by the runtime via 'Agent.defaults', not here.
 bindAgentParameter :: VariableId -> AST.ParameterBinding AST.Typed -> Lower (List (LocalVariableId, VariableId))
 bindAgentParameter argumentVariable parameter = do
   fieldVariable <- freshVariableId
   emit (OperationGetField GetFieldOperation {source = argumentVariable, field = parameter.name, output = fieldVariable})
-  case parameter.bindPattern of
-    AST.PatternVariable variablePattern
-      | isNothing variablePattern.defaultValue ->
-          pure [(resolvedLocalVariableId variablePattern.variableReference, fieldVariable)]
-    pattern -> destructurePattern fieldVariable pattern
+  case parameter.binder of
+    AST.BindVariable variableReference _ _ -> pure [(resolvedLocalVariableId variableReference, fieldVariable)]
+    AST.BindDestructure pattern -> destructurePattern fieldVariable pattern
 
 ---------------------------------------------------------------------------------------------------
 -- Blocks, statements
@@ -952,7 +955,7 @@ lowerHandlerExpression handlerExpression = do
     (Map.singleton "parameter" continuationVariable)
     (Just "handler.body")
   context <- asks (.context)
-  recordBlock providerBlock (BlockAgent Agent {body = providerBodyBlock, schema = providerSchema context handlerExpression.typeOf}) mempty (Just "handler")
+  recordBlock providerBlock (BlockAgent Agent {body = providerBodyBlock, schema = providerSchema context handlerExpression.typeOf, defaults = mempty}) mempty (Just "handler")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = providerBlock})
   pure closureVariable
@@ -1021,7 +1024,7 @@ lowerUse useStatement = do
     (BlockSequence Sequence {operations = operations, result = completionResult completion})
     (Map.singleton "parameter" argumentVariable)
     (Just "use.continuation.body")
-  recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema}) mempty (Just "use.continuation")
+  recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema, defaults = mempty}) mempty (Just "use.continuation")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = continuationBlock})
   provider <- lowerExpression useStatement.provider
@@ -1048,11 +1051,7 @@ lowerPattern = \case
   AST.PatternVariable variablePattern -> do
     let localId = resolvedLocalVariableId variablePattern.variableReference
     variable <- freshVariableId
-    let basePattern = PatternVariable variable
-        finalPattern = case variablePattern.defaultValue of
-          Just parameterDefault -> PatternDefault (lowerLiteralValue parameterDefault.value) basePattern
-          Nothing -> basePattern
-    pure (finalPattern, [(localId, variable)])
+    pure (PatternVariable variable, [(localId, variable)])
   AST.PatternWildcard _ -> pure (PatternAny, [])
   AST.PatternLiteral literalPattern -> pure (PatternLiteral (lowerLiteralValue literalPattern.value), [])
   AST.PatternTuple tuplePattern -> do

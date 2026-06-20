@@ -55,7 +55,7 @@ literalPattern = do
 -- | @{ label => pattern, ... }@ — a subset match against a record value.
 recordPattern :: Parser PatternP
 recordPattern = do
-  (fields, sourceSpan) <- bracesMultiline (commaSeparated fieldPattern)
+  (fields, sourceSpan) <- bracesMultiline (commaSeparated recordField)
   pure (PatternRecord RecordPattern {fields = fields, sourceSpan = sourceSpan, typeOf = ()})
 
 -- | @[p1, p2, ...]@ — a tuple pattern of any arity, including the empty @[]@ and the single @[p]@.
@@ -66,18 +66,42 @@ tuplePattern = do
   (elements, sourceSpan) <- brackets (commaSeparated pattern')
   pure (PatternTuple TuplePattern {elements = elements, sourceSpan = sourceSpan, typeOf = ()})
 
--- | @label => pattern@ — one field of a constructor / record pattern.
-fieldPattern :: Parser (FieldPattern Parsed)
-fieldPattern = do
+-- | A record-pattern field: @label => pattern@, or the bare @label@ sugar, which binds the field's
+-- value to a variable named after the label (@{ x }@ ~> @{ x => x }@). The bare form is offered only
+-- in record patterns (@{...}@), where it is unambiguous; in a constructor's @T(...)@ parentheses a bare
+-- inner pattern already means a type filter (@integer(n)@), so 'constructorField' there requires @=>@.
+recordField :: Parser (FieldPattern Parsed)
+recordField = do
   name <- identifier
-  _ <- symbol "=>"
-  bindPattern <- pattern'
-  pure
-    FieldPattern
+  bindPattern <- (symbol "=>" *> pattern') <|> pure (bareFieldVariable name)
+  pure (fieldPatternNode name bindPattern)
+
+-- | A constructor-pattern field: @label => pattern@ (no bare sugar — see 'recordField').
+constructorField :: Parser (FieldPattern Parsed)
+constructorField = do
+  name <- identifier
+  bindPattern <- symbol "=>" *> pattern'
+  pure (fieldPatternNode name bindPattern)
+
+fieldPatternNode :: Located Text -> PatternP -> FieldPattern Parsed
+fieldPatternNode name bindPattern =
+  FieldPattern
+    { name = name.value,
+      labelReference = parsedReference name.sourceSpan,
+      bindPattern = bindPattern,
+      sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf bindPattern)
+    }
+
+-- | The variable pattern a bare field @{ x }@ desugars to: bind the field value to @x@.
+bareFieldVariable :: Located Text -> PatternP
+bareFieldVariable name =
+  PatternVariable
+    VariablePattern
       { name = name.value,
-        labelReference = parsedReference name.sourceSpan,
-        bindPattern = bindPattern,
-        sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf bindPattern)
+        variableReference = parsedReference name.sourceSpan,
+        typeAnnotation = Nothing,
+        sourceSpan = name.sourceSpan,
+        typeOf = ()
       }
 
 -- | The contents between a head's parentheses: constructor fields (each @label => pattern@) or a
@@ -88,7 +112,7 @@ data PatternArguments where
 
 patternArguments :: Parser PatternArguments
 patternArguments =
-  try (ConstructorFields <$> commaSeparated fieldPattern)
+  try (ConstructorFields <$> commaSeparated constructorField)
     <|> (FilterInner <$> pattern')
 
 -- | A head (parsed as a type) optionally followed by parentheses. With fields it is a constructor
@@ -136,15 +160,13 @@ variablePatternFromHead :: SyntacticTypeExpression Parsed -> Parser PatternP
 variablePatternFromHead = \case
   TypeName node | Nothing <- node.moduleQualifier -> do
     annotation <- optional (symbol ":" *> typeExpression)
-    defaultValue <- optional parameterDefault
     pure
       ( PatternVariable
           VariablePattern
             { name = node.name,
               variableReference = parsedReference node.sourceSpan,
               typeAnnotation = annotation,
-              defaultValue = defaultValue,
-              sourceSpan = variableSpan node.sourceSpan annotation defaultValue,
+              sourceSpan = variableSpan node.sourceSpan annotation Nothing,
               typeOf = ()
             }
       )
@@ -178,36 +200,33 @@ constructorHead = \case
 -- Parameter bindings (agent / request-handler formal parameters)
 ---------------------------------------------------------------------------------------------------
 
--- | @label => pattern@, or the sugar @label : T@ / @label@ (a variable bind on @label@).
+-- | @label => pattern@ (destructure), or the sugar @label@ / @label : T@ / @label [: T] ?= default@
+-- (bind the label-named variable, optionally with a default). Destructure and default are mutually
+-- exclusive.
 parameterBinding :: Parser (ParameterBinding Parsed)
 parameterBinding = do
   annotation <- optional docAnnotation
   bindingLabel <- identifier
-  bindPattern <- (symbol "=>" *> pattern') <|> sugarBindPattern bindingLabel
+  binder <- (BindDestructure <$> (symbol "=>" *> pattern')) <|> sugarBinder bindingLabel
   let startSpan = maybe bindingLabel.sourceSpan (.sourceSpan) annotation
   pure
     ParameterBinding
       { annotation = (.value) <$> annotation,
         name = bindingLabel.value,
         labelReference = parsedReference bindingLabel.sourceSpan,
-        bindPattern = bindPattern,
-        sourceSpan = mergeSpans startSpan (sourceSpanOf bindPattern)
+        binder = binder,
+        sourceSpan = mergeSpans startSpan (binderEndSpan bindingLabel binder)
       }
 
--- | The desugaring of a bare / annotated parameter @label [: T] [?= default]@ into a variable
--- pattern bound to @label@.
-sugarBindPattern :: Located Text -> Parser PatternP
-sugarBindPattern bindingLabel = do
+-- | The span end of a binder, for the enclosing 'ParameterBinding' span.
+binderEndSpan :: Located Text -> Binder Parsed -> SourceSpan
+binderEndSpan bindingLabel = \case
+  BindDestructure pattern' -> sourceSpanOf pattern'
+  BindVariable _ typeAnnotation defaultValue -> variableSpan bindingLabel.sourceSpan typeAnnotation defaultValue
+
+-- | The sugar @label [: T] [?= default]@ as a variable binder on @label@.
+sugarBinder :: Located Text -> Parser (Binder Parsed)
+sugarBinder bindingLabel = do
   annotation <- optional (symbol ":" *> typeExpression)
   defaultValue <- optional parameterDefault
-  pure
-    ( PatternVariable
-        VariablePattern
-          { name = bindingLabel.value,
-            variableReference = parsedReference bindingLabel.sourceSpan,
-            typeAnnotation = annotation,
-            defaultValue = defaultValue,
-            sourceSpan = variableSpan bindingLabel.sourceSpan annotation defaultValue,
-            typeOf = ()
-          }
-    )
+  pure (BindVariable (parsedReference bindingLabel.sourceSpan) annotation defaultValue)

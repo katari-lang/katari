@@ -123,12 +123,23 @@ data ParameterBinding (phase :: Phase) = ParameterBinding
   { annotation :: Maybe Text,
     name :: Text,
     labelReference :: Reference phase LabelReference,
-    bindPattern :: Pattern phase,
+    binder :: Binder phase,
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (ParameterBinding phase) where
   sourceSpanOf binding = binding.sourceSpan
+
+-- | What a parameter label binds its argument to. Default and destructure are mutually exclusive by
+-- construction — there is no "default + rename" form; 'BindVariable' always binds the /label/-named
+-- variable. Fields are positional (not a record) to avoid partial field selectors.
+data Binder (phase :: Phase)
+  = -- | @x@ / @x : T@ / @x ?= v@ — bind the argument to the label-named variable (its reference and
+    -- optional type annotation), with the default value substituted when the argument is omitted. A
+    -- defaulted parameter is optional at the call site (the runtime fills the default).
+    BindVariable (Reference phase VariableReference) (Maybe (SyntacticTypeExpression phase)) (Maybe ParameterDefault)
+  | -- | @x => pattern@ — destructure the argument with a pattern (no default).
+    BindDestructure (Pattern phase)
 
 -- | @label : type ?= default@ — a formal parameter of a request / external /
 -- primitive / data declaration. No pattern, type required.
@@ -539,8 +550,6 @@ data VariablePattern (phase :: Phase) = VariablePattern
   { name :: Text,
     variableReference :: Reference phase VariableReference,
     typeAnnotation :: Maybe (SyntacticTypeExpression phase),
-    -- | Only meaningful in parameter position
-    defaultValue :: Maybe ParameterDefault,
     sourceSpan :: SourceSpan,
     typeOf :: PatternType phase
   }
@@ -1452,6 +1461,10 @@ deriving stock instance (ShowPhase phase) => Show (GenericParameter phase)
 deriving stock instance (EqPhase phase) => Eq (ParameterBinding phase)
 
 deriving stock instance (ShowPhase phase) => Show (ParameterBinding phase)
+
+deriving stock instance (EqPhase phase) => Eq (Binder phase)
+
+deriving stock instance (ShowPhase phase) => Show (Binder phase)
 
 deriving stock instance (EqPhase phase) => Eq (ParameterSignature phase)
 

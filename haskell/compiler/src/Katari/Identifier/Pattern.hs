@@ -25,7 +25,6 @@ resolvePattern = \case
             { name = node.name,
               variableReference = identifiedReference node.variableReference.sourceSpan (Just resolution),
               typeAnnotation = typeAnnotation,
-              defaultValue = node.defaultValue,
               sourceSpan = node.sourceSpan,
               typeOf = ()
             },
@@ -94,17 +93,29 @@ resolveConstructorReference = resolveQualifiedReference resolveVariableReference
 -- Parameter bindings (agent / request-handler formal parameters)
 ---------------------------------------------------------------------------------------------------
 
--- | Resolve a @label => pattern@ parameter, returning the variables its pattern binds (the label
--- itself is not a name reference).
+-- | Resolve a parameter binder, returning the variables it introduces (the label itself is not a name
+-- reference). A 'BindVariable' introduces the label-named variable (a fresh local); a 'BindDestructure'
+-- delegates to its pattern.
 resolveParameterBinding :: ParameterBinding Parsed -> Identifier (ParameterBinding Identified, List Binding)
 resolveParameterBinding binding = do
-  (bindPattern, bindings) <- resolvePattern binding.bindPattern
+  (resolvedBinder, bindings) <- case binding.binder of
+    BindVariable variableReference typeAnnotation defaultValue -> do
+      localVariableId <- freshLocalVariableId
+      resolvedAnnotation <- traverse resolveType typeAnnotation
+      let resolution = VariableResolutionLocalVariable localVariableId
+      pure
+        ( BindVariable (identifiedReference variableReference.sourceSpan (Just resolution)) resolvedAnnotation defaultValue,
+          [variableBinding binding.name variableReference.sourceSpan resolution]
+        )
+    BindDestructure pattern -> do
+      (resolvedPattern, bindings) <- resolvePattern pattern
+      pure (BindDestructure resolvedPattern, bindings)
   pure
     ( ParameterBinding
         { annotation = binding.annotation,
           name = binding.name,
           labelReference = retagReference binding.labelReference,
-          bindPattern = bindPattern,
+          binder = resolvedBinder,
           sourceSpan = binding.sourceSpan
         },
       bindings

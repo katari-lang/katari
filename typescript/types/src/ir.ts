@@ -89,11 +89,17 @@ export type Block =
 /**
  * The single value-addressable callable. The argument binds via the body's `BlockInformation.parameters`
  * (`parameter`). Whether a call commits is the body's property (derived at run time), not stored here.
+ *
+ * `defaults` are the values for omittable (optional) parameters, keyed by parameter name: before running
+ * the body, the runtime fills any parameter absent from the argument record with its default. This is the
+ * single defaults mechanism for every callable — user agents, data constructors, requests, externals and
+ * primitives all carry their defaults here (the leaf bodies no longer do).
  */
 export type AgentBlock = {
   kind: "agent";
   body: BlockId;
   schema: SchemaInfo;
+  defaults: Record<string, Literal>;
 };
 
 /** An agent / structural body: a list of operations plus the variable holding its value (if any). */
@@ -106,29 +112,26 @@ export type SequenceBlock = {
 /**
  * Leaf body — a built-in primitive (resolved against the runtime's prim registry by `name`).
  * `input` is the in-scope variable holding the argument (seeded by the wrapping agent via
- * `BlockInformation.parameters`). `defaults` fills `null` entries before invoking the prim.
+ * `BlockInformation.parameters`); the wrapping `AgentBlock.defaults` are already filled.
  */
 export type PrimitiveBlock = {
   kind: "primitive";
   name: string;
   input: VariableId;
-  defaults: Record<string, Literal>;
 };
 
-/** Leaf body — a data constructor: build the tagged value of `name` from `input`, after filling `defaults`. */
+/** Leaf body — a data constructor: build the tagged value of `name` from `input`. */
 export type ConstructBlock = {
   kind: "construct";
   name: QualifiedName;
   input: VariableId;
-  defaults: Record<string, Literal>;
 };
 
-/** Leaf body — a request: raise `name` as an escalation, carrying `input` (after filling `defaults`). */
+/** Leaf body — a request: raise `name` as an escalation, carrying `input`. */
 export type RequestBlock = {
   kind: "request";
   name: QualifiedName;
   input: VariableId;
-  defaults: Record<string, Literal>;
 };
 
 /** Leaf body — an external agent dispatched by the external handler via `key`, with `input` as the argument. */
@@ -136,7 +139,6 @@ export type ExternalBlock = {
   kind: "external";
   key: string;
   input: VariableId;
-  defaults: Record<string, Literal>;
 };
 
 /** `match subject { ... }`: try `arms` in order, run the first match's body (or `fallback`). */
@@ -305,9 +307,7 @@ export type Pattern =
   | { kind: "constructor"; name: QualifiedName; fields: Array<[string, Pattern]> }
   | { kind: "tuple"; elements: Pattern[] }
   | { kind: "record"; fields: Array<[string, Pattern]> }
-  | { kind: "typeGuard"; tag: TypeTag; pattern: Pattern }
-  /** A `?=` default: when the matched value is absent/null, substitute `value`, then match `pattern`. */
-  | { kind: "default"; value: Literal; pattern: Pattern };
+  | { kind: "typeGuard"; tag: TypeTag; pattern: Pattern };
 
 /** The runtime-checkable tag a `T(pattern)` type filter narrows on. */
 export type TypeTag =

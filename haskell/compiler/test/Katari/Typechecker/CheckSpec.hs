@@ -1008,7 +1008,6 @@ letStatement localId value =
           variableReference =
             Reference {sourceSpan = testSpan, resolution = Just (VariableResolutionLocalVariable localId)},
           typeAnnotation = Nothing,
-          defaultValue = Nothing,
           sourceSpan = testSpan,
           typeOf = ()
         }
@@ -1206,17 +1205,11 @@ paramBindingFor paramName localId annotation =
     { annotation = Nothing,
       name = paramName,
       labelReference = Reference {sourceSpan = testSpan, resolution = ()},
-      bindPattern =
-        PatternVariable
-          VariablePattern
-            { name = paramName,
-              variableReference =
-                Reference {sourceSpan = testSpan, resolution = Just (VariableResolutionLocalVariable localId)},
-              typeAnnotation = Just annotation,
-              defaultValue = Nothing,
-              sourceSpan = testSpan,
-              typeOf = ()
-            },
+      binder =
+        BindVariable
+          (Reference {sourceSpan = testSpan, resolution = Just (VariableResolutionLocalVariable localId)})
+          (Just annotation)
+          Nothing,
       sourceSpan = testSpan
     }
 
@@ -1265,7 +1258,6 @@ variablePatternForLocal localId =
         variableReference =
           Reference {sourceSpan = testSpan, resolution = Just (VariableResolutionLocalVariable localId)},
         typeAnnotation = Nothing,
-        defaultValue = Nothing,
         sourceSpan = testSpan,
         typeOf = ()
       }
@@ -1305,7 +1297,6 @@ letStatementAnnotated localId annotation value =
                 variableReference =
                   Reference {sourceSpan = testSpan, resolution = Just (VariableResolutionLocalVariable localId)},
                 typeAnnotation = Just annotation,
-                defaultValue = Nothing,
                 sourceSpan = testSpan,
                 typeOf = ()
               },
@@ -1365,7 +1356,6 @@ useStatementBuilder maybeBinder provider body =
             variableReference =
               Reference {sourceSpan = testSpan, resolution = Just (VariableResolutionLocalVariable localId)},
             typeAnnotation = Just annotation,
-            defaultValue = Nothing,
             sourceSpan = testSpan,
             typeOf = ()
           }

@@ -111,46 +111,43 @@ data Block where
 -- request declaration, and every closure, lowers to one of these.
 data Agent = Agent
   { body :: BlockId,
-    schema :: SchemaInformation
+    schema :: SchemaInformation,
+    -- | Default values for omittable (optional) parameters, keyed by parameter name. Before running
+    -- the body, the runtime fills any parameter absent from the argument record with its default. This
+    -- is the single defaults mechanism for every callable — user agents, data constructors, requests,
+    -- externals and primitives all carry their defaults here (the leaf blocks no longer do).
+    defaults :: Map Text Literal
   }
   deriving stock (Eq, Show)
 
 -- | A built-in primitive leaf: reads its argument from 'input' (seeded into the inherited scope by the
 -- wrapping agent) and is resolved against the runtime's prim registry by 'name'.
--- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before invoking the prim.
 data Primitive = Primitive
   { name :: Text,
-    input :: VariableId,
-    defaults :: Map Text Literal
+    input :: VariableId
   }
   deriving stock (Eq, Show)
 
 -- | A data-constructor leaf: build the tagged value of 'name' from the wrapping 'Agent'\'s argument.
--- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before constructing the value.
 data Construct = Construct
   { name :: QualifiedName,
-    input :: VariableId,
-    defaults :: Map Text Literal
+    input :: VariableId
   }
   deriving stock (Eq, Show)
 
 -- | A request leaf: raise 'name' as an escalation to the enclosing handler, carrying the wrapping
 -- 'Agent'\'s argument.
--- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before raising the request.
 data Request = Request
   { name :: QualifiedName,
-    input :: VariableId,
-    defaults :: Map Text Literal
+    input :: VariableId
   }
   deriving stock (Eq, Show)
 
 -- | An external-agent leaf: the external handler dispatches it. 'key' is the opaque dispatch key the
 -- handler interprets.
--- Runtime will fill in null values with the 'defaults' map (e.g. for optional parameters) before dispatching the external.
 data External = External
   { key :: Text,
-    input :: VariableId,
-    defaults :: Map Text Literal
+    input :: VariableId
   }
   deriving stock (Eq, Show)
 
@@ -392,10 +389,6 @@ data Pattern where
   -- | A runtime type guard (@T(pattern)@): matches when the value's runtime tag is 'TypeTag', then
   -- matches the inner pattern against it.
   PatternTypeGuard :: TypeTag -> Pattern -> Pattern
-  -- | A @?=@ default: when the matched value is absent / null, substitute the 'Literal' and match the
-  -- inner pattern against it; otherwise match the inner pattern directly. The destructuring
-  -- counterpart of 'GetFieldOperation.defaultValue', usable in any @let@ / @match@ pattern position.
-  PatternDefault :: Literal -> Pattern -> Pattern
   deriving stock (Eq, Show)
 
 -- | The runtime-checkable tag a @T(pattern)@ type filter narrows on.
@@ -482,17 +475,17 @@ instance ToJSON BlockInformation where
 instance ToJSON Block where
   toJSON block = case block of
     BlockAgent agent ->
-      taggedObject "agent" ["body" .= agent.body, "schema" .= agent.schema]
+      taggedObject "agent" ["body" .= agent.body, "schema" .= agent.schema, "defaults" .= agent.defaults]
     BlockSequence body ->
       taggedObject "sequence" ["operations" .= body.operations, "result" .= body.result]
     BlockPrimitive primitive ->
-      taggedObject "primitive" ["name" .= primitive.name, "input" .= primitive.input, "defaults" .= primitive.defaults]
+      taggedObject "primitive" ["name" .= primitive.name, "input" .= primitive.input]
     BlockConstruct construct ->
-      taggedObject "construct" ["name" .= construct.name, "input" .= construct.input, "defaults" .= construct.defaults]
+      taggedObject "construct" ["name" .= construct.name, "input" .= construct.input]
     BlockRequest request ->
-      taggedObject "request" ["name" .= request.name, "input" .= request.input, "defaults" .= request.defaults]
+      taggedObject "request" ["name" .= request.name, "input" .= request.input]
     BlockExternal external ->
-      taggedObject "external" ["key" .= external.key, "input" .= external.input, "defaults" .= external.defaults]
+      taggedObject "external" ["key" .= external.key, "input" .= external.input]
     BlockMatch match ->
       taggedObject "match" ["subject" .= match.subject, "arms" .= match.arms, "fallback" .= match.fallback]
     BlockFor for ->
@@ -565,7 +558,6 @@ instance ToJSON Pattern where
     PatternTuple elements -> taggedObject "tuple" ["elements" .= elements]
     PatternRecord fields -> taggedObject "record" ["fields" .= fields]
     PatternTypeGuard tag inner -> taggedObject "typeGuard" ["tag" .= tag, "pattern" .= inner]
-    PatternDefault value inner -> taggedObject "default" ["value" .= value, "pattern" .= inner]
 
 instance ToJSON TypeTag where
   toJSON tag = case tag of

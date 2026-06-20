@@ -252,6 +252,12 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "lets a caller omit a defaulted request argument" $
     typeErrorCodes [("test", "request log(line: string, level: integer ?= 0) -> null\nagent run() -> null with log { log(line = \"hi\") }")] `shouldBe` []
 
+  it "lets a caller omit a defaulted agent parameter" $
+    typeErrorCodes [("test", "agent inc(x: integer ?= 1) -> integer { x }\nagent run() -> integer { inc() }")] `shouldBe` []
+
+  it "still rejects omitting a required agent parameter (K3001)" $
+    typeErrorCodes [("test", "agent inc(x: integer) -> integer { x }\nagent run() -> integer { inc() }")] `shouldContain` ["K3001"]
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

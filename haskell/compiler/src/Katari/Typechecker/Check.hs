@@ -1047,7 +1047,6 @@ checkPattern pattern scrutinee = case pattern of
         -- @never@ for later arms; only a type-filter @T(x)@ refutably narrows.
         runNormalizer variablePattern.sourceSpan (subtype scrutinee annotatedType)
         pure (annotatedType, Just (retagSyntacticTypeExpression annotation))
-    checkParameterDefault bindingType variablePattern.defaultValue
     semantic <- denormalizeAt variablePattern.sourceSpan bindingType
     pure
       ( PatternVariable
@@ -1055,7 +1054,6 @@ checkPattern pattern scrutinee = case pattern of
             { name = variablePattern.name,
               variableReference = retagReference variablePattern.variableReference,
               typeAnnotation = retaggedAnnotation,
-              defaultValue = variablePattern.defaultValue,
               sourceSpan = variablePattern.sourceSpan,
               typeOf = semantic
             },
@@ -1784,25 +1782,26 @@ namedObjectTypeWithRest restType fieldList =
 namedObjectType :: List (Text, NormalizedType) -> NormalizedType
 namedObjectType = namedObjectTypeWithRest unknownType
 
--- | The call (argument) shape of a constructor / request: its read shape with each defaulted parameter's
--- field made /optional/, so a caller may omit it (the runtime fills the default before constructing /
--- escalating). The read shape itself — field access, constructor patterns, @data <: object@ — keeps
--- every field required, so a constructed value's field never reads as nullable.
-callShape :: List (ParameterSignature Identified) -> NormalizedType -> NormalizedType
-callShape parameters readShape =
-  let defaulted = Set.fromList [signature.name | signature <- parameters, isJust signature.defaultValue]
-   in case readShape.baseType of
-        NormalizedBaseTypeLayered layer
-          | Just object <- layer.objectLayer ->
-              layeredOf layer {objectLayer = Just (markDefaultedOptional defaulted object)}
-        _ -> readShape
+-- | Mark the named fields of an object type /optional/ (a defaulted parameter is omittable at the call
+-- site; the runtime fills the default). A non-object type is returned unchanged. Shared by the
+-- constructor/request 'callShape' and the agent parameter object.
+markFieldsOptional :: Set.Set Text -> NormalizedType -> NormalizedType
+markFieldsOptional names objectType = case objectType.baseType of
+  NormalizedBaseTypeLayered layer
+    | Just object <- layer.objectLayer ->
+        layeredOf layer {objectLayer = Just (NormalizedObject {fields = Map.mapWithKey reField object.fields, rest = object.rest})}
+  _ -> objectType
   where
-    markDefaultedOptional :: Set.Set Text -> NormalizedObject -> NormalizedObject
-    markDefaultedOptional defaulted object =
-      NormalizedObject {fields = Map.mapWithKey reField object.fields, rest = object.rest}
-      where
-        reField name field =
-          NormalizedFieldInformation {normalizedType = field.normalizedType, optional = field.optional || Set.member name defaulted}
+    reField :: Text -> NormalizedFieldInformation -> NormalizedFieldInformation
+    reField name field =
+      NormalizedFieldInformation {normalizedType = field.normalizedType, optional = field.optional || Set.member name names}
+
+-- | The call (argument) shape of a constructor / request: its read shape with each defaulted parameter's
+-- field made optional, so a caller may omit it. The read shape itself — field access, constructor
+-- patterns, @data <: object@ — keeps every field required, so a constructed value's field never reads as
+-- nullable.
+callShape :: List (ParameterSignature Identified) -> NormalizedType -> NormalizedType
+callShape parameters = markFieldsOptional (Set.fromList [signature.name | signature <- parameters, isJust signature.defaultValue])
 
 ------------------------------------------------------------------------------------------------
 -- Agent declarations
@@ -2157,23 +2156,42 @@ buildParameterScopeTyped ::
     )
 buildParameterScopeTyped parameters = do
   entries <- traverse buildOne parameters
-  let parameterObject = namedObjectType [(name, parameterType) | (name, parameterType, _, _) <- entries]
-      bindings = concat [bs | (_, _, bs, _) <- entries]
-      typedParameters = [tp | (_, _, _, tp) <- entries]
+  let defaultedNames = Set.fromList [name | (name, _, optional, _, _) <- entries, optional]
+      -- The agent's parameter object: defaulted parameters are optional (the caller may omit them);
+      -- the binders still see the (non-null) declared type.
+      parameterObject = markFieldsOptional defaultedNames (namedObjectType [(name, parameterType) | (name, parameterType, _, _, _) <- entries])
+      bindings = concat [bs | (_, _, _, bs, _) <- entries]
+      typedParameters = [tp | (_, _, _, _, tp) <- entries]
   pure (parameterObject, bindings, typedParameters)
   where
-    buildOne parameter = do
-      (parameterType, typedPattern, bindings) <-
-        checkAnnotatedBinder ("agent parameter `" <> parameter.name <> "` requires a type annotation") parameter.bindPattern
-      let typedBinding =
-            ParameterBinding
-              { annotation = parameter.annotation,
-                name = parameter.name,
-                labelReference = retagReference parameter.labelReference,
-                bindPattern = typedPattern,
-                sourceSpan = parameter.sourceSpan
-              }
-      pure (parameter.name, parameterType, bindings, typedBinding)
+    buildOne parameter = case parameter.binder of
+      BindVariable variableReference typeAnnotation defaultValue -> do
+        (parameterType, retaggedAnnotation) <- case typeAnnotation of
+          Just annotation -> do
+            normalized <- elaborateAndNormalizeType annotation
+            pure (normalized, Just (retagSyntacticTypeExpression annotation))
+          Nothing -> do
+            reportMissingAnnotation parameter.sourceSpan ("agent parameter `" <> parameter.name <> "` requires a type annotation")
+            pure (topType, Nothing)
+        checkParameterDefault parameterType defaultValue
+        let maybeLocal = case variableReference.resolution of
+              Just (VariableResolutionLocalVariable localId) -> Just localId
+              _ -> Nothing
+            bindings = maybe [] (\localId -> [(localId, monoScheme parameterType)]) maybeLocal
+            typedBinder = BindVariable (retagReference variableReference) retaggedAnnotation defaultValue
+        pure (parameter.name, parameterType, isJust defaultValue, bindings, typedBinding parameter typedBinder)
+      BindDestructure pattern -> do
+        (parameterType, typedPattern, bindings) <-
+          checkAnnotatedBinder ("agent parameter `" <> parameter.name <> "` requires a type annotation") pattern
+        pure (parameter.name, parameterType, False, bindings, typedBinding parameter (BindDestructure typedPattern))
+    typedBinding parameter binder =
+      ParameterBinding
+        { annotation = parameter.annotation,
+          name = parameter.name,
+          labelReference = retagReference parameter.labelReference,
+          binder = binder,
+          sourceSpan = parameter.sourceSpan
+        }
 
 ------------------------------------------------------------------------------------------------
 -- Annotation elaboration

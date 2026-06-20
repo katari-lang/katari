@@ -66,9 +66,9 @@ spec = do
         [DeclarationAgent agent] -> case agent.parameters of
           [binding] -> do
             binding.name `shouldBe` "p"
-            case binding.bindPattern of
-              PatternVariable variable -> variable.name `shouldBe` "pt"
-              _ -> expectationFailure "expected a variable bind pattern"
+            case binding.binder of
+              BindDestructure (PatternVariable variable) -> variable.name `shouldBe` "pt"
+              _ -> expectationFailure "expected a destructure-to-variable binder"
           _ -> expectationFailure "expected one parameter"
         _ -> expectationFailure "expected one agent"
 
@@ -178,6 +178,14 @@ spec = do
           >>= soleAgentBody
       case body.returnExpression of
         Just (ExpressionMatch node) -> length node.cases `shouldBe` 4
+        _ -> expectationFailure "expected a match"
+
+    it "parses a bare record-pattern field as a variable bind on the label" $ do
+      body <-
+        parseClean "agent describe(value: unknown) -> string {\n  match (value) {\n    case { name } -> name\n    case _ -> \"other\"\n  }\n}"
+          >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionMatch node) -> length node.cases `shouldBe` 2
         _ -> expectationFailure "expected a match"
 
     it "parses a narrowing annotated variable pattern" $ do
