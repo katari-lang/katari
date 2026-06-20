@@ -205,6 +205,7 @@ export type Operation =
   | CallOperation
   | DelegateOperation
   | LoadLiteralOperation
+  | LoadAgentOperation
   | MakeClosureOperation
   | MakeRecordOperation
   | MakeTupleOperation
@@ -230,6 +231,13 @@ export type DelegateOperation = {
 };
 
 export type LoadLiteralOperation = { kind: "loadLiteral"; output: VariableId; value: Literal };
+
+/**
+ * Materialize a top-level callable as a first-class agent value by `QualifiedName` (resolved via
+ * `entries`). The counterpart of `makeClosure` for a named top-level agent / data-constructor /
+ * request / external / primitive used as a value; `makeClosure` stays for a local agent (closure).
+ */
+export type LoadAgentOperation = { kind: "loadAgent"; output: VariableId; name: QualifiedName };
 
 /** Make a closure value capturing the current scope; it resolves to the given agent block. */
 export type MakeClosureOperation = { kind: "makeClosure"; output: VariableId; agent: BlockId };

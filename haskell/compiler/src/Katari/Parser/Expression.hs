@@ -529,6 +529,7 @@ agentDeclarationWith annotation = do
         returnType = returnType,
         effects = effects,
         body = body,
+        typeOf = (),
         sourceSpan = mergeSpans startSpan (sourceSpanOf body)
       }
 

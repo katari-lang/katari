@@ -126,7 +126,7 @@ compile input =
     -- Check (whole-program, in value-dependency order). An agent may infer its return / effect from
     -- agents it calls — across modules and through mutual recursion — so the checker walks the value
     -- SCCs ('valueSCCs') to grow the value environment dependency-first; it cannot run per module.
-    (typedModules, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs identifiedAsts) identifiedAsts
+    (typedModules, valueEnvironment, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs identifiedAsts) identifiedAsts
 
     -- Everything emitted before lowering; lowering (and its diagnostics) is skipped when this has any
     -- error, so a failed compile yields no IR rather than IR built from an ill-typed AST.
@@ -135,8 +135,11 @@ compile input =
     lowerable = not (hasErrors preLoweringDiagnostics)
 
     -- Lower (per module). No link step — modules are uploaded individually; schemas travel in the IR.
+    -- The global type environment (for the @data@ schema expansions) and value environment (for each
+    -- top-level callable's scheme) are shared across modules; lowering reads them but is otherwise
+    -- per-module, with module-local 'BlockId' / 'VariableId' spaces.
     lowered :: Map ModuleName (IRModule, Diagnostics)
-    lowered = Map.mapWithKey lowerModule typedModules
+    lowered = Map.mapWithKey (lowerModule typeEnvironment valueEnvironment) typedModules
     lowerDiagnostics = if lowerable then foldMap snd lowered else mempty
 
 -- | An empty span at the start of a module's file (line 1, column 1). The file path matches the one

@@ -178,6 +178,10 @@ data AgentDeclaration (phase :: Phase) = AgentDeclaration
     returnType :: Maybe (SyntacticTypeExpression phase), -- Nothing ~> infer
     effects :: Maybe (SyntacticTypeExpression phase), -- Nothing ~> infer
     body :: Block phase,
+    -- | The agent's resolved function type (@agent param -> return with effect@), filled by the checker
+    -- at 'Typed' for both top-level and local agents — the single source lowering reads to build the
+    -- callable's schema, without re-deriving the inferred return / effect. '()' before typing.
+    typeOf :: ExpressionType phase,
     sourceSpan :: SourceSpan
   }
 

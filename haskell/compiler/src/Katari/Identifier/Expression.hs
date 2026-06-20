@@ -458,6 +458,7 @@ resolveAgentDeclaration ownResolution declaration =
           returnType = returnType,
           effects = effects,
           body = body,
+          typeOf = (),
           sourceSpan = declaration.sourceSpan
         }
 

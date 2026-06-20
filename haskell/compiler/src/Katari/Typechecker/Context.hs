@@ -288,6 +288,11 @@ extendValueEnvironment :: Map QualifiedName Scheme -> CheckerEnvironment -> Chec
 extendValueEnvironment additions environment =
   environment {valueEnvironment = environment.valueEnvironment <> additions}
 
+-- | The accumulated value environment of a checker environment. The driver reads it back after the
+-- whole-program walk to hand every top-level callable's scheme to lowering (for schema building).
+checkerValueEnvironment :: CheckerEnvironment -> ValueEnvironment
+checkerValueEnvironment environment = environment.valueEnvironment
+
 -- | Bring an in-scope generic parameter into scope for the sub-action (used while checking an
 -- agent / handler with declared generics; the parameter's bound is consulted by 'subtype').
 withGeneric :: GenericId -> GenericParameterInformation -> Checker a -> Checker a

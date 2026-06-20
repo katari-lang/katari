@@ -1204,6 +1204,7 @@ agentDeclarationWith parameters returnType effects isPrivate body =
       returnType = returnType,
       effects = effects,
       body = body,
+      typeOf = (),
       sourceSpan = testSpan
     }
 

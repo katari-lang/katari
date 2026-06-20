@@ -23,7 +23,7 @@ import Data.Map (Map)
 import Data.Map qualified as Map
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (Scheme)
+import Katari.Data.Environment (Scheme, ValueEnvironment)
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Diagnostics (Diagnostics)
@@ -32,6 +32,7 @@ import Katari.Typechecker.Check (checkAgentBody, dataValueScheme, prepareAgent, 
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment,
+    checkerValueEnvironment,
     extendValueEnvironment,
     initialCheckerEnvironment,
     initialCheckerState,
@@ -52,11 +53,15 @@ checkProgram ::
   TypeEnvironment ->
   List (SCC ValueNode) ->
   Map ModuleName (Module Identified) ->
-  (Map ModuleName (Module Typed), Diagnostics)
+  (Map ModuleName (Module Typed), ValueEnvironment, Diagnostics)
 checkProgram typeEnv valueOrder modules =
-  let (typedAgents, _finalEnvironment, diagnostics) =
+  let (typedAgents, finalEnvironment, diagnostics) =
         runRWS (walkSCCs valueOrder) () (initialCheckerEnvironment typeEnv)
-   in (buildTypedModule typedAgents <$> modules, diagnostics)
+   in -- The accumulated value environment carries every top-level callable's scheme (its full function
+      -- type, including the inferred return / effect), which lowering consumes to build each callable's
+      -- schema. Agents also stamp their type on the typed declaration, but the four signature-determined
+      -- kinds (data / request / external / primitive) are read back from here.
+      (buildTypedModule typedAgents <$> modules, checkerValueEnvironment finalEnvironment, diagnostics)
 
 -- | The driver is a state pass over 'CheckerEnvironment' that also accumulates a map from each
 -- agent's resolved identity to its 'Typed' declaration; each component checks in the current

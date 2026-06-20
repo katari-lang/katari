@@ -1658,14 +1658,17 @@ prepareAgent declaration = do
           annotatedEffect = annotatedEffect
         }
 
--- | Build the 'Typed' agent declaration; every field but the parameters and body is a mechanical
--- retag of the identified declaration.
+-- | Build the 'Typed' agent declaration; every field but the parameters, body and stamped function
+-- type ('typeOf') is a mechanical retag of the identified declaration. 'functionType' is the agent's
+-- resolved @agent param -> return with effect@ type (denormalized), which lowering reads to build the
+-- callable's schema for both top-level and local agents.
 assembleTypedAgentDeclaration ::
   AgentDeclaration Identified ->
   List (ParameterBinding Typed) ->
   Block Typed ->
+  SemanticType ->
   AgentDeclaration Typed
-assembleTypedAgentDeclaration declaration typedParameters typedBody =
+assembleTypedAgentDeclaration declaration typedParameters typedBody functionType =
   AgentDeclaration
     { annotation = declaration.annotation,
       private = declaration.private,
@@ -1676,6 +1679,7 @@ assembleTypedAgentDeclaration declaration typedParameters typedBody =
       returnType = retagSyntacticTypeExpression <$> declaration.returnType,
       effects = retagSyntacticTypeExpression <$> declaration.effects,
       body = typedBody,
+      typeOf = functionType,
       sourceSpan = declaration.sourceSpan
     }
 
@@ -1720,12 +1724,11 @@ synthAgent declaration = do
       runNormalizer declaration.sourceSpan (subtype inferredEffect declared)
       pure declared
     Nothing -> pure inferredEffect
+  let functionType = assembleAgent preparation.outerAttribute preparation.parameterObject returnType finalEffect
+  functionSemantic <- denormalizeAt declaration.sourceSpan functionType
   pure
-    ( assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody,
-      Scheme
-        { genericParameters = preparation.genericParameters,
-          valueType = assembleAgent preparation.outerAttribute preparation.parameterObject returnType finalEffect
-        }
+    ( assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody functionSemantic,
+      Scheme {genericParameters = preparation.genericParameters, valueType = functionType}
     )
 
 -- | The function type of an acyclic agent, for tests that only need the synthesized type.
@@ -1775,7 +1778,11 @@ checkAgentBody declaration preparation = do
     walkAgentBody preparation $
       withReturnTarget seeded.returnType (checkBlock declaration.body seeded.returnType)
   runNormalizer declaration.sourceSpan (subtype inferredEffect seeded.effect)
-  pure (assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody)
+  -- The stamped function type uses the seed's (annotated) return / effect, identical to this member's
+  -- seed scheme ('seedAgentType'), so the typed declaration and the value environment agree.
+  functionSemantic <-
+    denormalizeAt declaration.sourceSpan (assembleAgent preparation.outerAttribute preparation.parameterObject seeded.returnType seeded.effect)
+  pure (assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody functionSemantic)
 
 ------------------------------------------------------------------------------------------------
 -- Signature-determined value schemes (data constructor / external / primitive / request)

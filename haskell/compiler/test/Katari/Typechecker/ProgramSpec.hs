@@ -240,4 +240,4 @@ runProgramDiagnostics sources =
     modules = Map.fromList [(moduleName, (fst result).identifiedAst) | (moduleName, result) <- identifiedResults]
     identifyDiagnostics = foldMap (snd . snd) identifiedResults
     (typeEnvironment, envDiagnostics) = buildEnvironment modules
-    (_, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs modules) modules
+    (_, _, checkDiagnostics) = checkProgram typeEnvironment (valueSCCs modules) modules

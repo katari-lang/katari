@@ -246,6 +246,12 @@ data Operation where
   -- closure). The commit boundary, if any, is the agent body's property (see 'Agent').
   OperationDelegate :: DelegateOperation -> Operation
   OperationLoadLiteral :: LoadLiteralOperation -> Operation
+  -- | Materialize a top-level callable as a first-class agent value, by 'QualifiedName' (resolved via
+  -- 'IRModule.entries' at run time, cross-module-safe). The counterpart of 'OperationMakeClosure' for a
+  -- named top-level agent / data-constructor / request / external / primitive used as a value (passed to
+  -- a higher-order callable, bound to a @let@, …); 'OperationMakeClosure' stays for a /local/ agent,
+  -- which captures the enclosing scope.
+  OperationLoadAgent :: LoadAgentOperation -> Operation
   -- | Make a closure value capturing the current scope; it resolves to the given 'BlockAgent'.
   OperationMakeClosure :: MakeClosureOperation -> Operation
   -- | Build a record value from in-scope vars (a named-args record / a record literal).
@@ -281,6 +287,13 @@ data DelegateOperation = DelegateOperation
 data LoadLiteralOperation = LoadLiteralOperation
   { output :: VariableId,
     value :: Literal
+  }
+  deriving stock (Eq, Show)
+
+data LoadAgentOperation = LoadAgentOperation
+  { output :: VariableId,
+    -- | The top-level callable to load, resolved against 'IRModule.entries' at run time.
+    name :: QualifiedName
   }
   deriving stock (Eq, Show)
 
@@ -517,6 +530,7 @@ instance ToJSON Operation where
     OperationDelegate op ->
       taggedObject "delegate" ["target" .= op.target, "argument" .= op.argument, "output" .= op.output]
     OperationLoadLiteral op -> taggedObject "loadLiteral" ["output" .= op.output, "value" .= op.value]
+    OperationLoadAgent op -> taggedObject "loadAgent" ["output" .= op.output, "name" .= op.name]
     OperationMakeClosure op -> taggedObject "makeClosure" ["output" .= op.output, "agent" .= op.agent]
     OperationMakeRecord op -> taggedObject "makeRecord" ["entries" .= op.entries, "output" .= op.output]
     OperationMakeTuple op -> taggedObject "makeTuple" ["elements" .= op.elements, "output" .= op.output]
