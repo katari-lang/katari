@@ -7,9 +7,17 @@
 // `engine.ts` header for why they are not their own table). The per-thread execution state below is
 // the engine's working set; its exact fields will firm up in the engine phase.
 
-import type { BlockId } from "@katari-lang/types";
+import type { BlockId, QualifiedName } from "@katari-lang/types";
 import type { DelegateTarget } from "../event/types.js";
-import type { CallId, DelegationId, EscalationId, InstanceId, ScopeId, ThreadId } from "../ids.js";
+import type {
+  AskId,
+  CallId,
+  DelegationId,
+  EscalationId,
+  InstanceId,
+  ScopeId,
+  ThreadId,
+} from "../ids.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 
 // ─── Scope ──────────────────────────────────────────────────────────────────────────────────────
@@ -50,14 +58,48 @@ type ThreadBase = {
 /** Tracks one outstanding child a thread spawned and is awaiting (callAck) and where to bind its value. */
 export type PendingCall = { callId: CallId; output: number | null };
 
+/**
+ * The uniform invocation model (the user chose this over collapsing leaves): EVERY `OperationDelegate`
+ * — to a user agent, a closure, a primitive, a data constructor, a request, OR an external (FFI) agent
+ * — summons a child instance. The child instance's root thread is always an `AgentThread` (the wrapping
+ * `BlockAgent` that lowering puts over every callable); it applies `defaults`, spawns the body block as
+ * its single child, and on the body's completion (or a `return` ask) emits the `delegateAck`. The body
+ * thread's kind mirrors the body block:
+ *
+ *   sequence (user code) | primitive | construct | request | external (FFI)
+ *
+ * Only `OperationCall` (the structural nodes match / for / handle / parallel) spawns an in-instance
+ * thread. `DelegateThread` is the sole non-block thread: the sender-side proxy a caller keeps for each
+ * outbound delegate (it owns the cross-instance delegate/escalate plumbing for that one child).
+ */
 export type Thread =
+  | AgentThread
   | SequenceThread
+  | PrimitiveThread
+  | ConstructThread
+  | RequestThread
   | MatchThread
   | ForThread
   | HandleThread
   | ParallelThread
   | DelegateThread
   | ExternalThread;
+
+/**
+ * The instance root: one `BlockAgent` activation. On entry it applies the agent's `defaults` to the
+ * incoming argument, seeds the body block's `parameter`, and spawns the body as its single child. It is
+ * the instance's control boundary in two ways:
+ *   - it catches the `return` ask (which lexically targets this agent block) and completes the instance
+ *     with that value;
+ *   - it is the escalation boundary — any other ask that bubbles up to it (a `request`, or a control
+ *     ask targeting a lexical ancestor in a *parent* instance) escapes as an outbound `escalate`.
+ * On the body's completion (callAck) or a caught `return`, it emits the instance's `delegateAck`.
+ */
+export type AgentThread = ThreadBase & {
+  kind: "agent";
+  /** The body call in flight (the agent body always runs as exactly one child). */
+  pending: PendingCall | null;
+};
 
 /** Runs a `sequence` block's operations one at a time, awaiting any spawning op before advancing. */
 export type SequenceThread = ThreadBase & {
@@ -66,6 +108,39 @@ export type SequenceThread = ThreadBase & {
   cursor: number;
   /** The child currently awaited (a `call` into a structural node), or `null` if none in flight. */
   pending: PendingCall | null;
+};
+
+/**
+ * A primitive leaf body: runs the named prim against its `input` variable and acks the value. The run
+ * may be async (a bounded env / blob fetch), which the internal consumer awaits inline within the turn;
+ * the prim has no children, so it completes within its instance's turn.
+ */
+export type PrimitiveThread = ThreadBase & {
+  kind: "primitive";
+  /** The prim registry key (e.g. `primitive.add`); kept on the thread so a recovered turn can re-run it. */
+  name: string;
+  /** The in-scope variable holding the argument (seeded as `parameter` by the wrapping `AgentThread`). */
+  input: number;
+};
+
+/** A data-constructor leaf body: builds the tagged value of `name` from `input` and acks it (synchronous). */
+export type ConstructThread = ThreadBase & {
+  kind: "construct";
+  name: QualifiedName;
+  input: number;
+};
+
+/**
+ * A request leaf body: raises `name` as a `request` ask carrying `input`. Its instance has no handler of
+ * its own, so the ask immediately escapes (via the root `AgentThread`) as an outbound `escalate`; the
+ * thread suspends until the matching `escalateAck` resumes it, then acks the answered value.
+ */
+export type RequestThread = ThreadBase & {
+  kind: "request";
+  name: QualifiedName;
+  input: number;
+  /** The ask id this request raised, awaiting its answer (`askAck`); `null` before it has run. */
+  askId: AskId | null;
 };
 
 /** Runs the arm body chosen by matching `subject`; forwards the arm's value as its own result. */
@@ -118,8 +193,6 @@ export type DelegateThread = ThreadBase & {
   delegationId: DelegationId;
   /** Where to bind the result when the `delegateAck` lands. */
   output: number | null;
-  /** Outbound escalations awaiting an `escalateAck`, to route the reply back to the callee. */
-  inboundEscalations: Record<string, EscalationId>;
 };
 
 /**
@@ -135,6 +208,22 @@ export type ExternalThread = ThreadBase & {
   /** open | done — the lifecycle of this external dispatch (acknowledgement still pending vs landed). */
   externalState: "open" | "done";
 };
+
+// ─── Ask / escalation routing ─────────────────────────────────────────────────────────────────
+
+/**
+ * What to do when a *resuming* ask is answered — either its internal `askAck`, or the `escalateAck` of
+ * the outbound escalation it became. This is the single mechanism behind request and `next` routing,
+ * both as it bubbles up the thread tree (each proxying thread records one) and as it crosses instance
+ * boundaries (the root `AgentThread` records one when it escalates; a `DelegateThread` records one when
+ * it relays a child's escalation inward). Unwinding asks (`return` / `break`) carry no continuation —
+ * they terminate their asker rather than resume it.
+ */
+export type AnswerContinuation =
+  /** Resume an internal asker: emit `askAck(thread, askId, value)`. */
+  | { kind: "resumeThread"; thread: ThreadId; askId: AskId }
+  /** Relay the answer back out to a child instance: emit `escalateAck(escalation, value)`. */
+  | { kind: "relayEscalateAck"; escalation: EscalationId };
 
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 
@@ -166,8 +255,11 @@ export type Instance = {
   threads: Record<number, Thread>;
   /** Outbound delegate -> the DelegateThread awaiting its ack (sender side). */
   pendingDelegations: Record<DelegationId, ThreadId>;
-  /** Outbound escalate -> the thread that issued it, for O(1) `escalateAck` routing. */
-  escalationOwners: Record<EscalationId, ThreadId>;
+  /** A pending ask's id -> what to do when its `askAck` lands (resume an asker / relay an escalateAck). */
+  askRoutes: Record<AskId, AnswerContinuation>;
+  /** An outbound escalation's id -> what to do when its `escalateAck` lands. Replaces a bare owner map:
+   *  routing the answer needs the full continuation, not just the issuing thread. */
+  escalationContinuations: Record<EscalationId, AnswerContinuation>;
   // Instance-local id counters.
   nextThreadId: number;
   nextCallId: number;
