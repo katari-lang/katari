@@ -306,6 +306,157 @@ describe("in-memory core", () => {
     });
   });
 
+  test("dispatches a request to a handler and resumes via next", async () => {
+    // agent main() { handle { ask_value({ value: 7 }) } with ask_value(p) => { next 100 } }
+    // The body raises ask_value (a request, summoned as a child instance); it escalates out of that
+    // instance, the handle catches it, the handler `next`s 100, which resumes the request -> 100.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "call", target: 2, output: 10 },
+              { kind: "exit", target: 0, value: 10 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        2: {
+          block: {
+            kind: "handle",
+            parallel: false,
+            initialStates: [],
+            body: 3,
+            handlers: [{ request: createAgentName("ask_value"), body: 4 }],
+            thenClause: null,
+          },
+          parameters: {},
+        },
+        // handle body: ask_value({ value: 7 })  (its result is the request's answer)
+        3: {
+          block: {
+            kind: "sequence",
+            result: 22,
+            operations: [
+              { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 7 } },
+              { kind: "makeRecord", entries: [["value", 20]], output: 21 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("ask_value") },
+                argument: 21,
+                output: 22,
+              },
+            ],
+          },
+          parameters: {},
+        },
+        // handler body: next 100
+        4: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 40, value: { kind: "integer", value: 100 } },
+              { kind: "continue", target: 2, value: 40, modifiers: [] },
+            ],
+          },
+          parameters: { parameter: 41 },
+        },
+        // ask_value request agent + its request leaf
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("ask_value")]: 5,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 100 });
+  });
+
+  test("breaks out of a handle, terminating the suspended request's instance", async () => {
+    // agent main() { handle { ask_value({}) } with ask_value(p) => { break 99 } }
+    // The handler `break`s instead of `next`ing: the handle exits with 99 and the request's still-
+    // suspended child instance is terminated by the cancel cascade.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "call", target: 2, output: 10 },
+              { kind: "exit", target: 0, value: 10 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        2: {
+          block: {
+            kind: "handle",
+            parallel: false,
+            initialStates: [],
+            body: 3,
+            handlers: [{ request: createAgentName("ask_value"), body: 4 }],
+            thenClause: null,
+          },
+          parameters: {},
+        },
+        3: {
+          block: {
+            kind: "sequence",
+            result: 22,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 21 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("ask_value") },
+                argument: 21,
+                output: 22,
+              },
+            ],
+          },
+          parameters: {},
+        },
+        // handler body: break 99  (exit targeting the handle block)
+        4: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 40, value: { kind: "integer", value: 99 } },
+              { kind: "exit", target: 2, value: 40 },
+            ],
+          },
+          parameters: { parameter: 41 },
+        },
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("ask_value")]: 5,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 99 });
+  });
+
   test("runs through the RuntimeHost composition root", async () => {
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },

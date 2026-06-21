@@ -7,7 +7,7 @@
 // `engine.ts` header for why they are not their own table). The per-thread execution state below is
 // the engine's working set; its exact fields will firm up in the engine phase.
 
-import type { BlockId } from "@katari-lang/types";
+import type { BlockId, QualifiedName } from "@katari-lang/types";
 import type { DelegateTarget } from "../event/types.js";
 import type {
   AskId,
@@ -156,14 +156,35 @@ export type ForThread = ThreadBase & {
   thenPending: CallId | null;
 };
 
-/** Runs a `handle` body, dispatching escalations to its handlers and resuming via `next`. */
+/**
+ * Runs a `handle` body, dispatching the requests it owns to handlers and resuming the asker via `next`
+ * (or exiting via `break`). A handler that falls through implicitly breaks (the compiler enforces an
+ * exit). Sequential mode runs one handler / then-clause at a time (others queue in `pendingRequests`);
+ * parallel mode runs them concurrently. States are seeded into each child's `state_N` and updated by a
+ * `next … with (…)`.
+ */
 export type HandleThread = ThreadBase & {
   kind: "handle";
   parallel: boolean;
-  /** Current state values: index N -> the current value of `state_N`. */
+  /** Current state values, keyed by each state's body variable id (re-seeded into `state_N` per child,
+   *  updated by a `with` modifier). */
   states: Record<number, Value>;
-  /** The body / a handler body currently in flight. */
-  pending: PendingCall | null;
+  /** The protected body's call (the handled block / the `k()` continuation). */
+  bodyCall: CallId | null;
+  /** Handler invocations in flight, keyed by their call -> the request ask each answers on `next`. One at
+   *  a time in sequential mode, possibly many in parallel mode. */
+  handlers: Record<number, { answerThread: ThreadId; answerAskId: AskId }>;
+  /** Requests that arrived while busy (sequential mode FIFO). */
+  pendingRequests: Array<{
+    from: ThreadId;
+    askId: AskId;
+    request: QualifiedName;
+    argument: Value | null;
+  }>;
+  /** A handler body's call -> the request answer to fire once its targeted `next`-cancel completes. */
+  postCancelActions: Record<number, { answerThread: ThreadId; answerAskId: AskId; value: Value }>;
+  /** The then-clause's call (run after the body completes); its value is the handle's value. */
+  thenPending: CallId | null;
 };
 
 /** Runs `par [...]` elements concurrently, collecting results by element index. */
@@ -215,6 +236,24 @@ export type AnswerContinuation =
   /** Relay the answer back out to a child instance: emit `escalateAck(escalation, value)`. */
   | { kind: "relayEscalateAck"; escalation: EscalationId };
 
+/**
+ * What a thread does once its cancel cascade clears (its whole subtree — across instance boundaries via
+ * terminate — has confirmed teardown). This is the graceful-barrier post-action: an unwinding `return` /
+ * `break` performs its exit only after the cancelled subtree is gone, never before. A plain cascade
+ * member just acks its parent.
+ */
+export type CancelExit =
+  /** A cascade member: emit `cancelAck` to its parent (then retire). */
+  | { kind: "ackParent" }
+  /** An agent's `return`: emit the instance's `delegateAck` with `value` and retire the instance. */
+  | { kind: "returnInstance"; value: Value }
+  /** An agent being terminated: emit `terminateAck` and retire the instance (no delegateAck). */
+  | { kind: "terminateInstance" }
+  /** A handle's `break`: complete the handle (ack its parent) with the break `value`. */
+  | { kind: "completeWith"; value: Value }
+  /** A for-loop's `break-for`: stop iterating and finish (build the mapping + run the then-clause). */
+  | { kind: "finishFor" };
+
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 
 export type InstanceStatus = "running" | "cancelling";
@@ -253,6 +292,8 @@ export type Instance = {
   /** An outbound escalation's id -> what to do when its `escalateAck` lands. Replaces a bare owner map:
    *  routing the answer needs the full continuation, not just the issuing thread. */
   escalationContinuations: Record<EscalationId, AnswerContinuation>;
+  /** A cancelling thread's id -> the exit it performs once its subtree's teardown is confirmed. */
+  cancelExits: Record<number, CancelExit>;
   // Instance-local id counters.
   nextThreadId: number;
   nextCallId: number;

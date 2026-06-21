@@ -1,28 +1,40 @@
 // Per-thread-kind handlers for the six internal events (create / callAck / cancel / cancelAck / ask /
-// askAck), dispatched by `thread.kind`. This is the intra-instance core: structural nodes (match / for /
-// parallel), the agent root, leaf bodies (primitive / construct), and the delegate proxy's in-instance
-// side. The cross-instance halves — the agent's escalation of an escaping ask, the handle's request
-// dispatch, the delegate proxy's escalate relay and terminate, and the external (FFI) leaf — are wired
-// in the instance / FFI layers; here they raise a clear "not in this layer yet" error.
+// askAck), dispatched by `thread.kind`, plus the graceful cancel cascade. This is the whole intra-
+// instance engine: the agent root (incl. its return / escalation boundary), leaf bodies (primitive /
+// construct / request / external), structural nodes (match / for / handle / parallel), and the delegate
+// proxy's in-instance side. The cross-instance plumbing (routing escalate / escalateAck / terminate /
+// terminateAck, FFI completions) is the actor's; here we emit the outbound events and resume on the
+// inbound ones via the actor.
 
 import type { Block } from "@katari-lang/types";
 import type { AskKind } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import type { Value } from "../value/types.js";
-import { childrenOf, completeThread, dropDescendants, proxyAsk, removeThread } from "./common.js";
+import {
+  childrenOf,
+  completeInstance,
+  completeThread,
+  escapeAsk,
+  proxyAsk,
+  removeThread,
+  terminateInstance,
+} from "./common.js";
 import type { StepContext } from "./context.js";
 import { runSequence } from "./operations.js";
 import { matchPattern } from "./pattern.js";
 import { readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
-import { allocateCallId } from "./store.js";
+import { allocateAskId, allocateCallId } from "./store.js";
 import type {
   AgentThread,
+  CancelExit,
   ExternalThread,
   ForThread,
+  HandleThread,
   MatchThread,
   ParallelThread,
+  RequestThread,
   SequenceThread,
   Thread,
 } from "./types.js";
@@ -46,6 +58,9 @@ export async function dispatchCreate(ctx: StepContext, thread: Thread): Promise<
     case "construct":
       createConstruct(ctx, thread);
       return;
+    case "request":
+      createRequest(ctx, thread);
+      return;
     case "match":
       createMatch(ctx, thread);
       return;
@@ -55,15 +70,15 @@ export async function dispatchCreate(ctx: StepContext, thread: Thread): Promise<
     case "for":
       createFor(ctx, thread);
       return;
+    case "handle":
+      createHandle(ctx, thread);
+      return;
     case "external":
       createExternal(ctx, thread);
       return;
     case "delegate":
       // The outbound delegate was emitted by the spawning op; the proxy just waits for its delegateAck.
       return;
-    case "handle":
-    case "request":
-      throw notInThisLayer(thread.kind);
   }
 }
 
@@ -75,9 +90,14 @@ export function dispatchCallAck(
   callId: CallId,
   value: Value,
 ): void {
+  if (thread.status === "cancelling") {
+    // A child completed normally during teardown; it removed itself, so just note the progress.
+    noteChildGone(ctx, thread.id);
+    return;
+  }
   switch (thread.kind) {
     case "agent":
-      completeInstance(ctx, value);
+      completeInstance(ctx, value); // the body completed normally (no explicit return)
       return;
     case "sequence":
       resumeSequence(ctx, thread, callId, value);
@@ -90,16 +110,12 @@ export function dispatchCallAck(
       collectParallel(ctx, thread, callId, value);
       return;
     case "for":
-      if (thread.thenPending !== null && thread.thenPending === callId) {
-        // The then-clause finished; its value is the loop's value.
-        completeThread(ctx, thread, value);
-        return;
-      }
-      // A body iteration fell through (implicit `next` with its result value); no state change.
-      collectIteration(ctx, thread, callId, value, undefined);
+      handleForCallAck(ctx, thread, callId, value);
+      return;
+    case "handle":
+      handleHandleCallAck(ctx, thread, callId, value);
       return;
     case "delegate":
-    case "handle":
     case "primitive":
     case "construct":
     case "request":
@@ -117,12 +133,16 @@ export function dispatchAsk(
   askId: AskId,
   ask: AskKind,
 ): void {
+  if (thread.status === "cancelling") return; // ignore asks from a subtree being torn down
   switch (thread.kind) {
     case "agent":
       agentAsk(ctx, thread, from, askId, ask);
       return;
     case "for":
       forAsk(ctx, thread, from, askId, ask);
+      return;
+    case "handle":
+      handleAsk(ctx, thread, from, askId, ask);
       return;
     case "sequence":
     case "match":
@@ -131,50 +151,132 @@ export function dispatchAsk(
       // None of these is a control target or a request handler: bubble every ask up unchanged.
       proxyAsk(ctx, thread, ask, from, askId);
       return;
-    case "handle":
     case "primitive":
     case "construct":
     case "request":
     case "external":
-      throw notInThisLayer(thread.kind);
+      throw new Error(`leaf thread "${thread.kind}" does not receive asks`);
   }
 }
 
 // ─── askAck (an answered ask resumes its asker) ─────────────────────────────────────────────────
 
-// In this layer no thread is a genuine `request` asker (request leaves are wired with the effect system),
-// so a direct askAck — one not consumed by a proxy continuation in the drive loop — is always a bug here.
-export function dispatchAskAck(
-  _ctx: StepContext,
-  thread: Thread,
-  askId: AskId,
-  _value: Value,
-): void {
+// The only genuine `request` asker is a request leaf (a proxy/relay continuation in the drive loop
+// handles every intermediate hop). Its answer completes it; anything else is a routing bug.
+export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, value: Value): void {
+  if (thread.status === "cancelling") return; // a late answer for a thread being torn down
+  if (thread.kind === "request") {
+    completeThread(ctx, thread, value);
+    return;
+  }
   throw new Error(`thread kind "${thread.kind}" did not expect a direct askAck (askId ${askId})`);
 }
 
-// ─── cancel / cancelAck (subtree teardown) ──────────────────────────────────────────────────────
+// ─── graceful cancel cascade ────────────────────────────────────────────────────────────────────
 
-export function dispatchCancel(ctx: StepContext, thread: Thread): void {
-  // A delegate child owns a live child instance; tearing it down is the instance layer's terminate.
-  if (thread.kind === "delegate") {
-    throw notInThisLayer(thread.kind);
+/**
+ * Begin cancelling a thread's subtree; once it has fully torn down, perform `exit`. With no in-flight
+ * children the exit is immediate; otherwise every child is sent a `cancel` (a delegate child a
+ * `terminate`, an external call an abort — see `dispatchCancel`) and the exit waits for their acks.
+ */
+function beginCancel(ctx: StepContext, thread: Thread, exit: CancelExit): void {
+  thread.status = "cancelling";
+  ctx.instance.cancelExits[thread.id] = exit;
+  const children = childrenOf(ctx, thread.id);
+  if (children.length === 0) {
+    finishCancel(ctx, thread);
+    return;
   }
-  if (thread.kind === "external") {
-    // Abandon the in-flight FFI call; its result, if it still arrives, finds no thread and is dropped.
-    ctx.external.cancel(ctx.instance.id, thread.id);
+  for (const child of children) {
+    ctx.enqueue({ kind: "cancel", target: child.id });
   }
-  dropDescendants(ctx, thread.id);
-  if (thread.parent !== null && thread.parentCallId !== null) {
-    ctx.enqueue({ kind: "cancelAck", target: thread.parent, callId: thread.parentCallId });
-  }
-  removeThread(ctx, thread.id);
 }
 
-export function dispatchCancelAck(_ctx: StepContext, thread: Thread, callId: CallId): void {
-  // The synchronous subtree drop above does not await child acks yet; the async cancel/terminate
-  // protocol (needed once delegate children must terminate) lands with the instance layer.
-  throw new Error(`unexpected cancelAck for thread ${thread.id} (callId ${callId})`);
+/** Perform a cancelled thread's `CancelExit` now that its subtree is gone, then retire / resume it. */
+function finishCancel(ctx: StepContext, thread: Thread): void {
+  const exit = ctx.instance.cancelExits[thread.id] ?? { kind: "ackParent" };
+  delete ctx.instance.cancelExits[thread.id];
+  switch (exit.kind) {
+    case "ackParent":
+      if (thread.parent !== null && thread.parentCallId !== null) {
+        ctx.enqueue({ kind: "cancelAck", target: thread.parent, callId: thread.parentCallId });
+      }
+      removeThread(ctx, thread.id);
+      return;
+    case "returnInstance":
+      completeInstance(ctx, exit.value);
+      return;
+    case "terminateInstance":
+      terminateInstance(ctx);
+      return;
+    case "completeWith":
+      completeThread(ctx, thread, exit.value);
+      return;
+    case "finishFor":
+      if (thread.kind === "for") {
+        thread.status = "running"; // resumes normal completion (the then-clause)
+        finishFor(ctx, thread, forBlock(ctx, thread).thenClause);
+      }
+      return;
+  }
+}
+
+/** A child of `parentId` is gone (cancelAck, or an out-of-band completion during teardown): if the
+ *  parent is cancelling and now childless, finish its cancel. */
+function noteChildGone(ctx: StepContext, parentId: ThreadId): void {
+  const parent = ctx.instance.threads[parentId];
+  if (
+    parent !== undefined &&
+    parent.status === "cancelling" &&
+    childrenOf(ctx, parentId).length === 0
+  ) {
+    finishCancel(ctx, parent);
+  }
+}
+
+export function dispatchCancel(ctx: StepContext, thread: Thread): void {
+  switch (thread.kind) {
+    case "agent":
+      // The instance is being terminated: tear down the body, then terminateAck.
+      beginCancel(ctx, thread, { kind: "terminateInstance" });
+      return;
+    case "delegate":
+      // Terminate the child instance; its terminateAck becomes this proxy's cancelAck (via the actor).
+      thread.status = "cancelling";
+      ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
+      ctx.emit({ kind: "terminate", delegation: thread.delegationId });
+      return;
+    case "external":
+      ctx.external.cancel(ctx.instance.id, thread.id);
+      thread.status = "cancelling";
+      ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
+      finishCancel(ctx, thread);
+      return;
+    case "primitive":
+    case "construct":
+    case "request":
+      // Leaves have no children (a suspended request abandons its escalation as its instance retires).
+      thread.status = "cancelling";
+      ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
+      finishCancel(ctx, thread);
+      return;
+    case "sequence":
+    case "match":
+    case "for":
+    case "parallel":
+    case "handle":
+      beginCancel(ctx, thread, { kind: "ackParent" });
+      return;
+  }
+}
+
+export function dispatchCancelAck(ctx: StepContext, thread: Thread, callId: CallId): void {
+  if (thread.kind === "handle" && thread.postCancelActions[callId] !== undefined) {
+    // A targeted `next`-cancel of a handler body finished: answer the request it was handling.
+    fireHandlerAnswer(ctx, thread, callId);
+    return;
+  }
+  noteChildGone(ctx, thread.id);
 }
 
 // ─── agent root ─────────────────────────────────────────────────────────────────────────────────
@@ -200,28 +302,17 @@ function createAgent(ctx: StepContext, thread: AgentThread): void {
 function agentAsk(
   ctx: StepContext,
   thread: AgentThread,
-  _from: ThreadId,
-  _askId: AskId,
+  from: ThreadId,
+  askId: AskId,
   ask: AskKind,
 ): void {
   if (ask.kind === "return" && ask.target === thread.blockId) {
-    // The body returned: unwind it and complete the instance with the returned value.
-    completeInstance(ctx, ask.value);
+    // The body returned: unwind the body subtree, then complete the instance with the value.
+    beginCancel(ctx, thread, { kind: "returnInstance", value: ask.value });
     return;
   }
-  // A request, or a control ask targeting a lexical ancestor in a parent instance, escapes here as an
-  // outbound escalate — wired in the instance layer.
-  throw notInThisLayer("agent (escalation)");
-}
-
-/** Complete the running instance with `value`: tear down its threads and emit the delegateAck. The full
- *  instance teardown (scopes, ascent, self-delete) lands with the instance layer; here we ack the caller. */
-function completeInstance(ctx: StepContext, value: Value): void {
-  const delegationId = ctx.instance.delegationId;
-  if (delegationId !== null) {
-    ctx.emit({ kind: "delegateAck", delegation: delegationId, value });
-  }
-  ctx.instance.threads = {};
+  // A request, or a control ask targeting a lexical ancestor instance: escape as an outbound escalate.
+  escapeAsk(ctx, from, askId, ask);
 }
 
 /** Fill omitted optional parameters on the argument record from the agent block's `defaults`. */
@@ -261,7 +352,7 @@ function resumeSequence(
   runSequence(ctx, thread);
 }
 
-// ─── primitive / construct leaves ───────────────────────────────────────────────────────────────
+// ─── leaf bodies (primitive / construct / request / external) ────────────────────────────────────
 
 async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> {
   const block = getBlock(ctx, thread.blockId);
@@ -279,11 +370,25 @@ function createConstruct(ctx: StepContext, thread: Thread): void {
   completeThread(ctx, thread, { kind: "record", fields, ctor: block.name });
 }
 
-// ─── external (FFI) leaf ──────────────────────────────────────────────────────────────────────
+/** A request leaf raises its request as an ask to its parent (the instance root agent), which has no
+ *  handler of its own, so it escapes as an outbound escalate. The thread suspends until its askAck. */
+function createRequest(ctx: StepContext, thread: RequestThread): void {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "request") throw new Error(`thread ${thread.id} is not a request block`);
+  if (thread.parent === null) throw new Error(`request thread ${thread.id} has no parent`);
+  const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
+  const askId = allocateAskId(ctx.instance);
+  ctx.enqueue({
+    kind: "ask",
+    target: thread.parent,
+    from: thread.id,
+    askId,
+    ask: { kind: "request", request: block.name, argument },
+  });
+}
 
 /** Dispatch the external call through the single FFI abstraction and suspend. The thread stays `open`
- *  (the durable in-flight record); its completion re-enters via the actor as an `ffiResult` that resumes
- *  it (the actor acks this thread's parent with the result — see `ProjectActor`). */
+ *  (the durable in-flight record); its completion re-enters via the actor as an `ffiResult`. */
 function createExternal(ctx: StepContext, thread: ExternalThread): void {
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "external") throw new Error(`thread ${thread.id} is not an external block`);
@@ -367,22 +472,17 @@ function collectParallel(
 // ─── for (mapping loop) ─────────────────────────────────────────────────────────────────────────
 
 function createFor(ctx: StepContext, thread: ForThread): void {
-  const block = getBlock(ctx, thread.blockId);
-  if (block.kind !== "for") throw new Error(`thread ${thread.id} is not a for block`);
+  const block = forBlock(ctx, thread);
   const source = readVariable(ctx.store, thread.scopeId, block.source) ?? NULL_VALUE;
   const elements = source.kind === "array" ? source.elements : [];
   // Seed the loop state keyed by each state's body variable (so a `with` modifier updates it directly).
-  const body = getBlock(ctx, block.body);
   const bodyParameters = ctx.ir.block(block.body).parameters;
-  if (body.kind === "sequence") {
-    block.initialStates.forEach((initial, index) => {
-      const stateVariable = bodyParameters[`state_${index}`];
-      if (stateVariable !== undefined) {
-        thread.states[stateVariable] =
-          readVariable(ctx.store, thread.scopeId, initial) ?? NULL_VALUE;
-      }
-    });
-  }
+  block.initialStates.forEach((initial, index) => {
+    const stateVariable = bodyParameters[`state_${index}`];
+    if (stateVariable !== undefined) {
+      thread.states[stateVariable] = readVariable(ctx.store, thread.scopeId, initial) ?? NULL_VALUE;
+    }
+  });
   if (elements.length === 0) {
     finishFor(ctx, thread, block.thenClause);
     return;
@@ -397,6 +497,15 @@ function createFor(ctx: StepContext, thread: ForThread): void {
   }
 }
 
+function handleForCallAck(ctx: StepContext, thread: ForThread, callId: CallId, value: Value): void {
+  if (thread.thenPending !== null && thread.thenPending === callId) {
+    completeThread(ctx, thread, value); // the then-clause finished; its value is the loop's value
+    return;
+  }
+  // A body iteration fell through (implicit `next` with its result value); no state change.
+  collectIteration(ctx, thread, callId, value, undefined);
+}
+
 /** Spawn one for-body iteration, seeded with the element under `iterator` and the current `state_N`s. */
 function startIteration(
   ctx: StepContext,
@@ -405,14 +514,10 @@ function startIteration(
   index: number,
   element: Value,
 ): void {
-  const parameters: Record<string, Value> = { iterator: element };
-  const bodyParameters = ctx.ir.block(bodyBlock).parameters;
-  for (const [name, variable] of Object.entries(bodyParameters)) {
-    const stateValue = thread.states[variable];
-    if (name.startsWith("state_") && stateValue !== undefined) {
-      parameters[name] = stateValue;
-    }
-  }
+  const parameters: Record<string, Value> = {
+    iterator: element,
+    ...stateParameters(ctx, thread, bodyBlock),
+  };
   const callId = allocateCallId(ctx.instance);
   thread.pending[index] = callId;
   spawnThread(ctx, {
@@ -440,8 +545,7 @@ function collectIteration(
       thread.states[Number(variable)] = modifierValue;
     }
   }
-  const block = getBlock(ctx, thread.blockId);
-  if (block.kind !== "for") throw new Error(`thread ${thread.id} is not a for block`);
+  const block = forBlock(ctx, thread);
   if (thread.parallel) {
     if (Object.keys(thread.pending).length === 0) finishFor(ctx, thread, block.thenClause);
     return;
@@ -466,23 +570,17 @@ function forAsk(
   ask: AskKind,
 ): void {
   if (ask.kind === "next-for" && ask.target === thread.blockId) {
+    // A body explicitly nexted: it has no in-flight children (next is its last op), so drop it directly.
     const child = ctx.instance.threads[from];
     const callId = child?.parentCallId ?? null;
     if (callId === null) throw new Error(`next-for from ${from} has no iteration call`);
-    dropDescendants(ctx, from);
     removeThread(ctx, from);
     collectIteration(ctx, thread, callId, ask.value, ask.modifiers);
     return;
   }
   if (ask.kind === "break-for" && ask.target === thread.blockId) {
-    // Early exit: stop iterating and complete with the mapping collected so far (then-clause applies).
-    for (const child of childrenOf(ctx, thread.id)) {
-      dropDescendants(ctx, child.id);
-      removeThread(ctx, child.id);
-    }
-    const block = getBlock(ctx, thread.blockId);
-    if (block.kind !== "for") throw new Error(`thread ${thread.id} is not a for block`);
-    finishFor(ctx, thread, block.thenClause);
+    // Early exit: cancel the in-flight iterations, then finish with the mapping collected so far.
+    beginCancel(ctx, thread, { kind: "finishFor" });
     return;
   }
   // return / break to an ancestor, or a request: bubble up.
@@ -496,14 +594,10 @@ function finishFor(ctx: StepContext, thread: ForThread, thenClause: { body: numb
     completeThread(ctx, thread, mapping);
     return;
   }
-  const parameters: Record<string, Value> = { result: mapping };
-  const thenParameters = ctx.ir.block(thenClause.body).parameters;
-  for (const [name, variable] of Object.entries(thenParameters)) {
-    const stateValue = thread.states[variable];
-    if (name.startsWith("state_") && stateValue !== undefined) {
-      parameters[name] = stateValue;
-    }
-  }
+  const parameters: Record<string, Value> = {
+    result: mapping,
+    ...stateParameters(ctx, thread, thenClause.body),
+  };
   const callId = allocateCallId(ctx.instance);
   thread.thenPending = callId;
   spawnThread(ctx, {
@@ -515,7 +609,206 @@ function finishFor(ctx: StepContext, thread: ForThread, thenClause: { body: numb
   });
 }
 
+// ─── handle (effect handler) ─────────────────────────────────────────────────────────────────────
+
+function createHandle(ctx: StepContext, thread: HandleThread): void {
+  const block = handleBlock(ctx, thread);
+  // Seed states (keyed by the shared body variable id) from the caller scope.
+  const bodyParameters = ctx.ir.block(block.body).parameters;
+  block.initialStates.forEach((initial, index) => {
+    const stateVariable = bodyParameters[`state_${index}`];
+    if (stateVariable !== undefined) {
+      thread.states[stateVariable] = readVariable(ctx.store, thread.scopeId, initial) ?? NULL_VALUE;
+    }
+  });
+  // Spawn the protected body, seeded with the current state_N.
+  const callId = allocateCallId(ctx.instance);
+  thread.bodyCall = callId;
+  spawnThread(ctx, {
+    parent: thread.id,
+    parentCallId: callId,
+    parentScopeId: thread.scopeId,
+    blockId: block.body,
+    parameters: stateParameters(ctx, thread, block.body),
+  });
+}
+
+function handleHandleCallAck(
+  ctx: StepContext,
+  thread: HandleThread,
+  callId: CallId,
+  value: Value,
+): void {
+  if (callId === thread.thenPending) {
+    completeThread(ctx, thread, value); // the then-clause's value is the handle's value
+    return;
+  }
+  if (callId === thread.bodyCall) {
+    // The protected body completed normally: run the then-clause (or yield its value).
+    thread.bodyCall = null;
+    const block = handleBlock(ctx, thread);
+    if (block.thenClause === null) {
+      completeThread(ctx, thread, value);
+      return;
+    }
+    const parameters: Record<string, Value> = {
+      result: value,
+      ...stateParameters(ctx, thread, block.thenClause.body),
+    };
+    const thenCallId = allocateCallId(ctx.instance);
+    thread.thenPending = thenCallId;
+    spawnThread(ctx, {
+      parent: thread.id,
+      parentCallId: thenCallId,
+      parentScopeId: thread.scopeId,
+      blockId: block.thenClause.body,
+      parameters,
+    });
+    return;
+  }
+  throw new Error(
+    `handle ${thread.id} got a callAck from a handler body (must exit via break/next)`,
+  );
+}
+
+function handleAsk(
+  ctx: StepContext,
+  thread: HandleThread,
+  from: ThreadId,
+  askId: AskId,
+  ask: AskKind,
+): void {
+  const block = handleBlock(ctx, thread);
+  if (ask.kind === "request") {
+    const handler = block.handlers.find((entry) => entry.request === ask.request);
+    if (handler === undefined) {
+      proxyAsk(ctx, thread, ask, from, askId); // not ours
+      return;
+    }
+    const request = { from, askId, request: ask.request, argument: ask.argument };
+    if (thread.parallel || !handleBusy(thread)) {
+      dispatchHandler(ctx, thread, handler.body, request);
+    } else {
+      thread.pendingRequests.push(request);
+    }
+    return;
+  }
+  if (ask.kind === "next" && ask.target === thread.blockId) {
+    handleNext(ctx, thread, from, ask.value, ask.modifiers);
+    return;
+  }
+  if (ask.kind === "break" && ask.target === thread.blockId) {
+    // Exit the handle with the value: cancel the body + any handlers, then complete.
+    thread.pendingRequests = [];
+    beginCancel(ctx, thread, { kind: "completeWith", value: ask.value });
+    return;
+  }
+  // A control ask for an ancestor, or a request not ours: bubble up.
+  proxyAsk(ctx, thread, ask, from, askId);
+}
+
+/** Spawn a handler body for a caught request, seeded with the request argument + current states, and
+ *  record the ask it will answer on `next`. */
+function dispatchHandler(
+  ctx: StepContext,
+  thread: HandleThread,
+  body: number,
+  request: { from: ThreadId; askId: AskId; argument: Value | null },
+): void {
+  const callId = allocateCallId(ctx.instance);
+  thread.handlers[callId] = { answerThread: request.from, answerAskId: request.askId };
+  spawnThread(ctx, {
+    parent: thread.id,
+    parentCallId: callId,
+    parentScopeId: thread.scopeId,
+    blockId: body,
+    parameters: {
+      parameter: request.argument ?? NULL_VALUE,
+      ...stateParameters(ctx, thread, body),
+    },
+  });
+}
+
+/** A handler resumed the asker via `next`: apply state modifiers, then targeted-cancel the handler body
+ *  and (on its teardown) fire the request's answer. */
+function handleNext(
+  ctx: StepContext,
+  thread: HandleThread,
+  from: ThreadId,
+  value: Value,
+  modifiers: Record<number, Value>,
+): void {
+  const handlerThread = ctx.instance.threads[from];
+  const handlerCall = handlerThread?.parentCallId ?? null;
+  if (handlerThread === undefined || handlerCall === null) {
+    throw new Error(`next from ${from} is not a handler body of handle ${thread.id}`);
+  }
+  const answer = thread.handlers[handlerCall];
+  if (answer === undefined) {
+    throw new Error(`next from ${from} has no outstanding request on handle ${thread.id}`);
+  }
+  for (const [variable, modifierValue] of Object.entries(modifiers)) {
+    thread.states[Number(variable)] = modifierValue;
+  }
+  thread.postCancelActions[handlerCall] = { ...answer, value };
+  delete thread.handlers[handlerCall];
+  beginCancel(ctx, handlerThread, { kind: "ackParent" });
+}
+
+/** Once a `next`-cancelled handler body is gone, resume the request asker and dispatch any queued request. */
+function fireHandlerAnswer(ctx: StepContext, thread: HandleThread, handlerCall: CallId): void {
+  const action = thread.postCancelActions[handlerCall];
+  delete thread.postCancelActions[handlerCall];
+  if (action !== undefined) {
+    ctx.enqueue({
+      kind: "askAck",
+      target: action.answerThread,
+      askId: action.answerAskId,
+      value: action.value,
+    });
+  }
+  if (thread.parallel || handleBusy(thread)) return;
+  const next = thread.pendingRequests.shift();
+  if (next === undefined) return;
+  const block = handleBlock(ctx, thread);
+  const handler = block.handlers.find((entry) => entry.request === next.request);
+  if (handler !== undefined) dispatchHandler(ctx, thread, handler.body, next);
+}
+
+/** A handler body or then-clause is in flight (the sequential gate). The protected body does not count. */
+function handleBusy(thread: HandleThread): boolean {
+  return Object.keys(thread.handlers).length > 0 || thread.thenPending !== null;
+}
+
 // ─── shared ──────────────────────────────────────────────────────────────────────────────────────
+
+/** Build the `state_N` parameter values for a block (body / handler / then-clause) from current states. */
+function stateParameters(
+  ctx: StepContext,
+  thread: ForThread | HandleThread,
+  blockId: number,
+): Record<string, Value> {
+  const parameters: Record<string, Value> = {};
+  for (const [name, variable] of Object.entries(ctx.ir.block(blockId).parameters)) {
+    const value = thread.states[variable];
+    if (name.startsWith("state_") && value !== undefined) {
+      parameters[name] = value;
+    }
+  }
+  return parameters;
+}
+
+function forBlock(ctx: StepContext, thread: ForThread): Extract<Block, { kind: "for" }> {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "for") throw new Error(`thread ${thread.id} is not a for block`);
+  return block;
+}
+
+function handleBlock(ctx: StepContext, thread: HandleThread): Extract<Block, { kind: "handle" }> {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "handle") throw new Error(`thread ${thread.id} is not a handle block`);
+  return block;
+}
 
 /** Find the index whose pending call matches `callId` (parallel / for children keyed by index). */
 function indexOfCall(pending: Record<number, CallId>, callId: CallId): number {
@@ -531,8 +824,4 @@ function materializeOrdered(collected: Record<number, Value>): Value {
     .map(Number)
     .sort((left, right) => left - right);
   return { kind: "array", elements: indices.map((index) => collected[index] ?? NULL_VALUE) };
-}
-
-function notInThisLayer(what: string): Error {
-  return new Error(`thread kind "${what}" is wired in a later layer (effect system / FFI)`);
 }

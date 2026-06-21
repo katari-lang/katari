@@ -86,7 +86,17 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
         thenPending: null,
       };
     case "handle":
-      return { ...base, kind: "handle", parallel: block.parallel, states: {}, pending: null };
+      return {
+        ...base,
+        kind: "handle",
+        parallel: block.parallel,
+        states: {},
+        bodyCall: null,
+        handlers: {},
+        pendingRequests: [],
+        postCancelActions: {},
+        thenPending: null,
+      };
     case "parallel":
       return { ...base, kind: "parallel", pending: {}, collected: {} };
     case "agent":

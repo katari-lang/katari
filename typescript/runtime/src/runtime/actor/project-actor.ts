@@ -7,7 +7,8 @@
 // halves arrive through the same mailbox and are handled in their respective (later) layers.
 
 import type { QualifiedName } from "@katari-lang/types";
-import { makeStepContext, type PrimRunner } from "../engine/context.js";
+import { relayEscalate } from "../engine/common.js";
+import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { createProjectStore } from "../engine/store.js";
@@ -23,6 +24,7 @@ import { isFfiResult } from "../event/types.js";
 import type { ExternalRunner } from "../external/runner.js";
 import {
   type DelegationId,
+  type EscalationId,
   type InstanceId,
   newDelegationId,
   type ProjectId,
@@ -55,11 +57,17 @@ export class ProjectActor {
   private readonly mailbox: ActorMessage[] = [];
   private pumping = false;
 
-  /** A pending delegate's caller instance, for routing its delegateAck home (the `delegations` row's
-   *  caller). Absent for a run-root delegate, whose ack resolves the run instead (see `runResolvers`). */
+  /** A pending delegate's caller instance, for routing its delegateAck / escalate home (the `delegations`
+   *  row's caller). Absent for a run-root delegate, whose ack resolves the run instead (`runResolvers`). */
   private readonly delegationCaller: Record<DelegationId, InstanceId> = {};
-  /** Resolvers for run-root delegations: the run's delegateAck settles the caller's `startRun` promise. */
+  /** A delegation's spawned child instance, for routing a `terminate` to it. */
+  private readonly delegationChild: Record<DelegationId, InstanceId> = {};
+  /** An outbound escalation's raiser instance, for routing its `escalateAck` back to it. */
+  private readonly escalationRaiser: Record<EscalationId, InstanceId> = {};
+  /** Settle / reject a run-root delegation: its delegateAck resolves the `startRun` promise; an
+   *  unhandled escalation (e.g. a panic) at the run root rejects it. */
   private readonly runResolvers: Record<DelegationId, (value: Value) => void> = {};
+  private readonly runRejecters: Record<DelegationId, (error: Error) => void> = {};
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
@@ -79,8 +87,9 @@ export class ProjectActor {
     argument: Value | null,
   ): Promise<Value> {
     const delegation = newDelegationId();
-    const result = new Promise<Value>((resolve) => {
+    const result = new Promise<Value>((resolve, reject) => {
       this.runResolvers[delegation] = resolve;
+      this.runRejecters[delegation] = reject;
     });
     this.feed({
       kind: "delegate",
@@ -89,6 +98,16 @@ export class ProjectActor {
       argument,
     });
     return result;
+  }
+
+  /** Settle a run-root delegation either way and drop both handlers. */
+  private settleRun(delegation: DelegationId, outcome: { value: Value } | { error: Error }): void {
+    const resolver = this.runResolvers[delegation];
+    const rejecter = this.runRejecters[delegation];
+    delete this.runResolvers[delegation];
+    delete this.runRejecters[delegation];
+    if ("value" in outcome) resolver?.(outcome.value);
+    else rejecter?.(outcome.error);
   }
 
   /** Enqueue an external message and ensure the serial loop is running. */
@@ -126,10 +145,17 @@ export class ProjectActor {
         await this.onDelegateAck(message);
         return;
       case "escalate":
+        await this.onEscalate(message);
+        return;
       case "escalateAck":
+        await this.onEscalateAck(message);
+        return;
       case "terminate":
+        await this.onTerminate(message);
+        return;
       case "terminateAck":
-        throw new Error(`external event "${message.kind}" is wired in the effect-system layer`);
+        await this.onTerminateAck(message);
+        return;
     }
   }
 
@@ -146,20 +172,17 @@ export class ProjectActor {
       snapshotId: resolved.snapshot,
       ...(event.generics !== undefined ? { ambientGenerics: event.generics } : {}),
     });
+    this.delegationChild[event.delegation] = instance.id;
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
   }
 
   private async onDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
   ): Promise<void> {
+    delete this.delegationChild[event.delegation];
     const callerId = this.delegationCaller[event.delegation];
     if (callerId === undefined) {
-      // A run-root delegateAck: settle the run promise.
-      const resolver = this.runResolvers[event.delegation];
-      if (resolver !== undefined) {
-        delete this.runResolvers[event.delegation];
-        resolver(event.value);
-      }
+      this.settleRun(event.delegation, { value: event.value }); // a run-root delegateAck
       return;
     }
     delete this.delegationCaller[event.delegation];
@@ -172,6 +195,82 @@ export class ProjectActor {
     delete instance.threads[proxy.id];
     await this.runTurn(instance, [
       { kind: "callAck", target: proxy.parent, callId: proxy.parentCallId, value: event.value },
+    ]);
+  }
+
+  // ─── escalate / escalateAck (a request / control ask crossing the instance boundary) ────────────
+
+  private async onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): Promise<void> {
+    const callerId = this.delegationCaller[event.delegation];
+    if (callerId === undefined) {
+      // The escalation reached the run root with no handler. A panic fails the run; any other unhandled
+      // request is, for now, also surfaced as a run error (user-facing escalation answering is Phase C).
+      this.settleRun(event.delegation, {
+        error: new Error(escalationErrorMessage(event)),
+      });
+      return;
+    }
+    const instance = this.store.instances[callerId];
+    if (instance === undefined) return;
+    const proxyId = instance.pendingDelegations[event.delegation];
+    if (proxyId === undefined) return;
+    // Re-raise the ask inside the caller from the proxy's position; it bubbles toward a handle.
+    await this.runTurnWith(instance, (ctx) => {
+      relayEscalate(ctx, proxyId, event.escalation, event.ask);
+    });
+  }
+
+  private async onEscalateAck(
+    event: Extract<ExternalEvent, { kind: "escalateAck" }>,
+  ): Promise<void> {
+    const raiserId = this.escalationRaiser[event.escalation];
+    delete this.escalationRaiser[event.escalation];
+    if (raiserId === undefined) return;
+    const instance = this.store.instances[raiserId];
+    if (instance === undefined) return;
+    const continuation = instance.escalationContinuations[event.escalation];
+    delete instance.escalationContinuations[event.escalation];
+    if (continuation === undefined || continuation.kind !== "resumeThread") return;
+    await this.runTurn(instance, [
+      {
+        kind: "askAck",
+        target: continuation.thread,
+        askId: continuation.askId,
+        value: event.value,
+      },
+    ]);
+  }
+
+  // ─── terminate / terminateAck (graceful cross-instance cancel) ──────────────────────────────────
+
+  private async onTerminate(event: Extract<ExternalEvent, { kind: "terminate" }>): Promise<void> {
+    const childId = this.delegationChild[event.delegation];
+    if (childId === undefined) return;
+    const instance = this.store.instances[childId];
+    if (instance === undefined) return;
+    instance.status = "cancelling";
+    // Cancel the root; once its subtree is torn down it emits terminateAck and retires the instance.
+    await this.runTurn(instance, [{ kind: "cancel", target: instance.rootThreadId }]);
+  }
+
+  private async onTerminateAck(
+    event: Extract<ExternalEvent, { kind: "terminateAck" }>,
+  ): Promise<void> {
+    delete this.delegationChild[event.delegation];
+    const callerId = this.delegationCaller[event.delegation];
+    delete this.delegationCaller[event.delegation];
+    if (callerId === undefined) return; // a run-root terminate (cancelled run) — nothing to resume
+    const instance = this.store.instances[callerId];
+    if (instance === undefined) return;
+    const proxyId = instance.pendingDelegations[event.delegation];
+    delete instance.pendingDelegations[event.delegation];
+    const proxy = proxyId !== undefined ? instance.threads[proxyId] : undefined;
+    if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) return;
+    // The child confirmed teardown: retire the proxy and cancelAck its parent (the cancel cascade continues).
+    delete instance.threads[proxy.id];
+    delete instance.cancelExits[proxy.id];
+    await this.runTurn(instance, [
+      { kind: "cancelAck", target: proxy.parent, callId: proxy.parentCallId },
     ]);
   }
 
@@ -196,7 +295,15 @@ export class ProjectActor {
 
   // ─── one instance turn ────────────────────────────────────────────────────────────────────────
 
-  private async runTurn(instance: Instance, initial: InternalEvent[]): Promise<void> {
+  private runTurn(instance: Instance, initial: InternalEvent[]): Promise<void> {
+    return this.runTurnWith(instance, (ctx) => {
+      ctx.buffers.internalQueue.push(...initial);
+    });
+  }
+
+  /** Drive one instance's turn after `seed` queues its initial internal events (directly, or via a
+   *  helper that needs the StepContext such as `relayEscalate`); then persist and flush. */
+  private async runTurnWith(instance: Instance, seed: (ctx: StepContext) => void): Promise<void> {
     const ctx = makeStepContext({
       projectId: this.projectId,
       store: this.store,
@@ -206,7 +313,7 @@ export class ProjectActor {
       blobs: this.blobs,
       external: this.external,
     });
-    ctx.buffers.internalQueue.push(...initial);
+    seed(ctx);
     await drive(ctx);
     // DB reflection happens once the internal queue is empty (the turn boundary).
     await this.persistence.persistTurn(this.projectId, this.store);
@@ -218,11 +325,13 @@ export class ProjectActor {
     }
   }
 
-  /** Send a turn's outbound external event onward: a delegate records its caller for ack routing, then
-   *  every event re-enters the serial mailbox (looping back to its target instance, or the run resolver). */
+  /** Send a turn's outbound external event onward: a delegate records its caller for ack routing and an
+   *  escalate its raiser for escalateAck routing; then every event re-enters the serial mailbox. */
   private routeOutbound(fromInstanceId: InstanceId, event: ExternalEvent): void {
     if (event.kind === "delegate") {
       this.delegationCaller[event.delegation] = fromInstanceId;
+    } else if (event.kind === "escalate") {
+      this.escalationRaiser[event.escalation] = fromInstanceId;
     }
     this.mailbox.push(event);
   }
@@ -245,4 +354,20 @@ export class ProjectActor {
       snapshot: target.snapshot,
     };
   }
+}
+
+/** A human message for an escalation that reached the run root unhandled (it fails the run). Panic
+ *  carries its message; a plain unhandled request / control escape reports its name. */
+function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate" }>): string {
+  if (event.ask.kind !== "request") {
+    return `unhandled "${event.ask.kind}" reached the run root`;
+  }
+  const argument = event.ask.argument;
+  const message =
+    argument?.kind === "record" && argument.fields.msg?.kind === "string"
+      ? argument.fields.msg.value
+      : null;
+  return message !== null
+    ? `panic: ${message}`
+    : `unhandled request "${event.ask.request}" reached the run root`;
 }

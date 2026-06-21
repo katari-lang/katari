@@ -42,9 +42,6 @@ export type AskKind =
   | { kind: "break"; value: Value; target: BlockId }
   | { kind: "break-for"; value: Value; target: BlockId };
 
-/** The control-flow asks (everything except `request`), routed by lexical `target` block. */
-export type ControlAskKind = Exclude<AskKind, { kind: "request" }>;
-
 export type InternalEvent =
   // Run a freshly-spawned thread's `create` step. The parent already built the thread object and seeded
   // its scope; this just schedules the first step (kept an event so the queue, not the stack, drives it).
@@ -80,13 +77,13 @@ export type ExternalEvent =
   | { kind: "terminateAck"; delegation: DelegationId }
   | {
       kind: "escalate";
+      /** The escalating child's delegation (so the parent finds the DelegateThread proxying it). */
       delegation: DelegationId;
+      /** This escalation's id, correlating the `escalateAck` (only a `request` ask is answered). */
       escalation: EscalationId;
-      request: QualifiedName;
-      argument: Value | null;
-      /** Present when this escalate is a control-flow unwind crossing the instance boundary toward a
-       *  lexical ancestor, rather than a capability request (no escalateAck round-trip then). */
-      control?: ControlAskKind;
+      /** The ask that escaped the child instance: a `request` (capability), or a control-flow unwind
+       *  (`break` / `next` / `return`) crossing the boundary toward a lexical ancestor (via a closure). */
+      ask: AskKind;
     }
   | { kind: "escalateAck"; escalation: EscalationId; value: Value };
 

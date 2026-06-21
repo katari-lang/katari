@@ -48,6 +48,7 @@ export function createInstance(
     pendingDelegations: {},
     askRoutes: {},
     escalationContinuations: {},
+    cancelExits: {},
     nextThreadId: 0,
     nextCallId: 0,
     nextAskId: 0,
