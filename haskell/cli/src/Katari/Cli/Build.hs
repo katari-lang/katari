@@ -14,7 +14,7 @@ where
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict qualified as Map
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, writeOrExit)
 import Katari.Data.ModuleName (renderModuleName)
 import Katari.Project.Discovery (emptyOverlay)
 import Katari.Project.Error (renderProjectError)
@@ -63,6 +63,7 @@ run options = do
       outputPath = case options.output of
         Just path -> path
         Nothing -> root </> ".katari" </> "dist" </> "ir.json"
-  createDirectoryIfMissing True (takeDirectory outputPath)
-  LazyByteString.writeFile outputPath (encodePretty irByName)
+  writeOrExit "build" "could not write IR output" $ do
+    createDirectoryIfMissing True (takeDirectory outputPath)
+    LazyByteString.writeFile outputPath (encodePretty irByName)
   putStrLn ("Wrote " <> show (Map.size loweredModules) <> " module(s) to " <> outputPath)

@@ -12,9 +12,11 @@ module Katari.Cli.Common
     resolveProjectRoot,
     assembleSourcesOrExit,
     compileSourcesOrExit,
+    writeOrExit,
   )
 where
 
+import Control.Exception (IOException, catch)
 import Control.Monad (unless, when)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
@@ -61,6 +63,15 @@ assembleSourcesOrExit :: Text -> ResolvedProject -> IO (Map ModuleName Text)
 assembleSourcesOrExit subcommand resolved = case assembleProject resolved of
   Left projectError -> dieIn subcommand (renderProjectError projectError)
   Right assembly -> pure (compileInputSources assembly)
+
+-- | Run a disk write, turning an 'IOException' (permission denied, read-only filesystem, disk full,
+-- …) into a clean exit-2 (setup) error. Without this the failure escapes as an uncaught exception,
+-- which exits with code 1 — the code reserved for compile errors — so a wrapper / CI would
+-- misclassify a disk problem as "the program failed to compile".
+writeOrExit :: Text -> Text -> IO () -> IO ()
+writeOrExit subcommand description action =
+  action `catch` \(ioException :: IOException) ->
+    dieIn subcommand (description <> ": " <> Text.pack (show ioException))
 
 -- | Compile the assembled sources, print any diagnostics to stderr, and either exit with code 1 (on
 -- an error-severity diagnostic) or return the lowered IR per module. Warnings are printed but do not

@@ -34,7 +34,7 @@ import Katari.Cli.Api
     newRuntimeClient,
     runtimeAuthFromEnvironment,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, writeOrExit)
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..))
@@ -99,7 +99,8 @@ run options = do
     resolveProject manager root >>= \case
       Left projectError -> dieIn "apply" (renderProjectError projectError)
       Right resolved -> pure resolved
-  writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
+  writeOrExit "apply" "could not write lockfile" $
+    writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
 
   -- 2. Compile.
   sources <- assembleSourcesOrExit "apply" resolved
@@ -110,7 +111,8 @@ run options = do
   let config = resolved.rootPackage.config :: ProjectConfig
   url <- resolveRuntimeUrl options.runtimeUrl config.runtime.url
   token <- runtimeAuthFromEnvironment
-  client <- newRuntimeClient url token
+  -- Reuse the resolution manager so a single apply opens one TLS connection pool, not two.
+  let client = newRuntimeClient manager url token
   let name = fromMaybe config.package.name options.projectName
   projects <- listProjects client
   projectId <- case filter (\project -> project.name == name) projects of

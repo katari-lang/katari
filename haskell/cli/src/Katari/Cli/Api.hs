@@ -51,7 +51,6 @@ import Network.HTTP.Client
     responseStatus,
   )
 import Network.HTTP.Client qualified as HttpClient
-import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types.Status (statusCode)
 import System.Environment (lookupEnv)
 
@@ -91,12 +90,12 @@ renderRuntimeError = \case
 apiPrefix :: Text
 apiPrefix = "/api/v1"
 
--- | Build a 'RuntimeClient' with a fresh TLS-capable manager. The trailing slash (if any) is dropped
--- so paths join cleanly.
-newRuntimeClient :: Text -> Maybe Text -> IO RuntimeClient
-newRuntimeClient base token = do
-  manager <- newTlsManager
-  pure RuntimeClient {baseUrl = stripTrailingSlash base, authToken = token, manager = manager}
+-- | Build a 'RuntimeClient' over a caller-supplied connection 'Manager' (shared with dependency
+-- resolution so a single @apply@ does not spin up two TLS pools). The trailing slash (if any) is
+-- dropped so paths join cleanly.
+newRuntimeClient :: Manager -> Text -> Maybe Text -> RuntimeClient
+newRuntimeClient manager base token =
+  RuntimeClient {baseUrl = stripTrailingSlash base, authToken = token, manager = manager}
   where
     stripTrailingSlash text = case Text.unsnoc text of
       Just (rest, '/') -> rest
@@ -210,8 +209,11 @@ deploySnapshot client projectId message modules = do
 -- 'RuntimeError'.
 requestJson :: (FromJSON a) => RuntimeClient -> Text -> Text -> Maybe LazyByteString.ByteString -> IO a
 requestJson client httpMethod path body = do
-  request <- buildRequest client httpMethod path body
-  result <- try (httpLbs request client.manager)
+  -- 'buildRequest' runs inside the 'try': 'parseRequest' throws an 'HttpException' (InvalidUrlException)
+  -- on a malformed URL, and we want that surfaced as a 'RuntimeError' too — not as an uncaught crash.
+  result <- try $ do
+    request <- buildRequest client httpMethod path body
+    httpLbs request client.manager
   response <- case result of
     Left exception -> throwIO (RuntimeNetworkError (formatHttpException exception))
     Right response -> pure response
@@ -263,4 +265,4 @@ formatHttpException :: HttpException -> Text
 formatHttpException = \case
   HttpExceptionRequest request content ->
     Text.pack ("request to " <> show (HttpClient.host request) <> " failed: " <> show content)
-  exception@(InvalidUrlException _ _) -> Text.pack (show exception)
+  InvalidUrlException url reason -> Text.pack ("invalid URL " <> show url <> ": " <> reason)
