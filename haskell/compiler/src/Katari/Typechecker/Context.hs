@@ -148,8 +148,9 @@ data JumpKind = ReturnJump | ForJump | HandlerJump
 -- bottom outside its scope and is meaningful only inside the matching @with*Inference@ run, which
 -- 'collecting' snapshots / resets / restores so a nested scope sees only its own contributions.
 data CheckerState = CheckerState
-  { -- | What the innermost @for@ body has produced so far; bottom outside a @for@.
-    forAccumulator :: ForAccumulator,
+  { -- | The innermost @for@ body's result channels (its @next@ elements and @break@ values); bottom
+    -- outside a @for@.
+    forAccumulator :: ResultChannels,
     -- | The union of every effect contribution in the innermost effect-collection scope (a
     -- 'withEffectInference' run): non-pure calls and @use@ statements emit into it. Bottom (pure)
     -- outside such a scope.
@@ -158,10 +159,9 @@ data CheckerState = CheckerState
     -- so an unannotated agent's return type is inferred from its @return@s as well as its block tail.
     -- Bottom outside an agent body.
     returnAccumulator :: NormalizedType,
-    -- | What the innermost @handler@ body has produced toward its result (see 'HandlerAccumulator'):
-    -- the union of request-body tails (the inferred @R@) and the union of explicit @break@ values
-    -- (which bypass @then@). Bottom outside a 'withHandlerResultInference' scope.
-    handlerAccumulator :: HandlerAccumulator,
+    -- | The innermost @handler@ body's result channels (its request-body tails — the inferred @R@ — and
+    -- explicit @break@ values that bypass @then@); bottom outside a 'withHandlerResultInference' scope.
+    handlerAccumulator :: ResultChannels,
     -- | The kinds of jump that have escaped the current capture region (the dual of the value
     -- accumulators, for control flow). A jump statement adds its kind ('markJump'); a capturing
     -- construct removes the kind it consumes ('capturingJumps'); a branch reads what is left to decide
@@ -174,38 +174,25 @@ data CheckerState = CheckerState
   }
   deriving stock (Eq, Show)
 
--- | What a @for@ body produces, accumulated as the body is walked: the union of every @next@ value
--- (the inferred element type) and every @break@ value (the short-circuit results the @for@ may yield
--- in addition to its normal array / then result).
-data ForAccumulator = ForAccumulator
-  { nextElements :: NormalizedType,
-    breakResults :: NormalizedType
+-- | The two result channels a @for@ / @handler@ body accumulates, while its result type is inferred. A
+-- construct produces @(then-transformed normal channel) ∪ (raw escape channel)@: the /normal/ channel is
+-- the value @then@ transforms — a @for@'s @next@ elements (its array), a @handler@'s request-body tails
+-- (its @R@) — and the /escape/ channel is the explicit @break@ values, which bypass @then@ and union
+-- straight into the result. Keeping the two apart is exactly what lets @break@ bypass @then@; the same
+-- structure serves both constructs.
+data ResultChannels = ResultChannels
+  { normalChannel :: NormalizedType,
+    escapeChannel :: NormalizedType
   }
   deriving stock (Eq, Show)
 
-emptyForAccumulator :: ForAccumulator
-emptyForAccumulator = ForAccumulator {nextElements = bottomType, breakResults = bottomType}
-
--- | What a @handler@ body produces toward its result, while @R@ is being inferred. Mirrors
--- 'ForAccumulator': a request body's implicit-break /tail/ is the handler's normal result @R@ (the
--- value the @then@ clause transforms and the continuation resumes to), while an explicit @break@
--- short-circuits past @then@ and is unioned straight into the result. Keeping them apart is what lets
--- @break@ bypass @then@ (the same way a @for@'s @break@ bypasses its @then@).
-data HandlerAccumulator = HandlerAccumulator
-  { tailResults :: NormalizedType,
-    -- | The union of explicit @break@ values. Named distinctly from 'ForAccumulator.breakResults' so a
-    -- record update is unambiguous under @DuplicateRecordFields@.
-    escapeResults :: NormalizedType
-  }
-  deriving stock (Eq, Show)
-
-emptyHandlerAccumulator :: HandlerAccumulator
-emptyHandlerAccumulator = HandlerAccumulator {tailResults = bottomType, escapeResults = bottomType}
+emptyResultChannels :: ResultChannels
+emptyResultChannels = ResultChannels {normalChannel = bottomType, escapeChannel = bottomType}
 
 -- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
 -- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
-initialCheckerState = CheckerState {forAccumulator = emptyForAccumulator, effectAccumulator = bottomEffect, returnAccumulator = bottomType, handlerAccumulator = emptyHandlerAccumulator, escapingJumps = Set.empty, metavarCounter = 0}
+initialCheckerState = CheckerState {forAccumulator = emptyResultChannels, effectAccumulator = bottomEffect, returnAccumulator = bottomType, handlerAccumulator = emptyResultChannels, escapingJumps = Set.empty, metavarCounter = 0}
 
 -- | Mint a fresh inference variable id under the reserved 'inferenceModuleName', advancing the
 -- per-walk counter. Used by generic-argument inference to instantiate a scheme's parameters as
@@ -386,12 +373,12 @@ accumulateInto get put sourceSpan addition = do
   joined <- runNormalizer sourceSpan (union current addition)
   modify (put joined)
 
--- | Run a @for@ body collecting its inferred next-element and break-result types (see
--- 'ForAccumulator'); the effect accumulator is left untouched (a different scope axis).
+-- | Run a @for@ body collecting its 'ResultChannels' — the inferred next-element (normal) and
+-- break-result (escape) types; the effect accumulator is left untouched (a different scope axis).
 withForInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
 withForInference action = do
-  (accumulator, result) <- collecting (.forAccumulator) (\value state -> state {forAccumulator = value}) emptyForAccumulator action
-  pure (accumulator.nextElements, accumulator.breakResults, result)
+  (accumulator, result) <- collecting (.forAccumulator) (\value state -> state {forAccumulator = value}) emptyResultChannels action
+  pure (accumulator.normalChannel, accumulator.escapeChannel, result)
 
 -- | Run an effect-collection scope (a handler request body, a @use@ continuation) returning its
 -- inferred residual effect; the effects performed inside do not leak to the enclosing scope.
@@ -404,22 +391,22 @@ withEffectInference = collecting (.effectAccumulator) (\value state -> state {ef
 withReturnInference :: Checker a -> Checker (NormalizedType, a)
 withReturnInference = collecting (.returnAccumulator) (\value state -> state {returnAccumulator = value}) bottomType
 
--- | Run a @handler@'s request bodies collecting what flows to its result: the union of body tails (the
--- inferred @R@) and the union of explicit @break@ values (which bypass @then@). Scopes the accumulator
--- to this handler, so a nested handler's results do not leak out. Returns @(tailResults, breakResults,
--- result)@.
+-- | Run a @handler@'s request bodies collecting its 'ResultChannels' — the body tails (normal channel,
+-- the inferred @R@) and the explicit @break@ values (escape channel, which bypass @then@). Scopes the
+-- accumulator to this handler, so a nested handler's results do not leak out. Returns
+-- @(normalChannel, escapeChannel, result)@.
 withHandlerResultInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
 withHandlerResultInference action = do
-  (accumulator, result) <- collecting (.handlerAccumulator) (\value state -> state {handlerAccumulator = value}) emptyHandlerAccumulator action
-  pure (accumulator.tailResults, accumulator.escapeResults, result)
+  (accumulator, result) <- collecting (.handlerAccumulator) (\value state -> state {handlerAccumulator = value}) emptyResultChannels action
+  pure (accumulator.normalChannel, accumulator.escapeChannel, result)
 
--- | A @for@ body's @next@ value joins the inferred element type.
+-- | A @for@ body's @next@ value joins the inferred element type (its normal channel).
 emitForNextType :: SourceSpan -> NormalizedType -> Checker ()
-emitForNextType = accumulateInto (\state -> state.forAccumulator.nextElements) (\value state -> state {forAccumulator = state.forAccumulator {nextElements = value}})
+emitForNextType = accumulateInto (\state -> state.forAccumulator.normalChannel) (\value state -> state {forAccumulator = state.forAccumulator {normalChannel = value}})
 
--- | A @for@ body's @break@ value joins the short-circuit results.
+-- | A @for@ body's @break@ value joins the short-circuit results (its escape channel).
 emitForBreakType :: SourceSpan -> NormalizedType -> Checker ()
-emitForBreakType = accumulateInto (\state -> state.forAccumulator.breakResults) (\value state -> state {forAccumulator = state.forAccumulator {breakResults = value}})
+emitForBreakType = accumulateInto (\state -> state.forAccumulator.escapeChannel) (\value state -> state {forAccumulator = state.forAccumulator {escapeChannel = value}})
 
 -- | An effect contribution (a non-pure call, a @use@) joins the enclosing scope's inferred effect.
 emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
@@ -429,15 +416,15 @@ emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectA
 emitReturnType :: SourceSpan -> NormalizedType -> Checker ()
 emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {returnAccumulator = value})
 
--- | A request body's implicit-break tail joins the inferred @handler@ result @R@ (the value @then@
--- transforms).
+-- | A request body's implicit-break tail joins the inferred @handler@ result @R@ — the value @then@
+-- transforms (its normal channel).
 emitHandlerTailType :: SourceSpan -> NormalizedType -> Checker ()
-emitHandlerTailType = accumulateInto (\state -> state.handlerAccumulator.tailResults) (\value state -> state {handlerAccumulator = state.handlerAccumulator {tailResults = value}})
+emitHandlerTailType = accumulateInto (\state -> state.handlerAccumulator.normalChannel) (\value state -> state {handlerAccumulator = state.handlerAccumulator {normalChannel = value}})
 
--- | An explicit @break@ value joins the @handler@'s short-circuit results (these bypass @then@ and are
--- unioned straight into the handler's result type).
+-- | An explicit @break@ value joins the @handler@'s short-circuit results (its escape channel — these
+-- bypass @then@ and union straight into the handler's result type).
 emitHandlerBreakType :: SourceSpan -> NormalizedType -> Checker ()
-emitHandlerBreakType = accumulateInto (\state -> state.handlerAccumulator.escapeResults) (\value state -> state {handlerAccumulator = state.handlerAccumulator {escapeResults = value}})
+emitHandlerBreakType = accumulateInto (\state -> state.handlerAccumulator.escapeChannel) (\value state -> state {handlerAccumulator = state.handlerAccumulator {escapeChannel = value}})
 
 -- | Record that a jump of this kind has fired, so an enclosing branch that does not capture it sees
 -- the branch as escaping (hence non-pure).

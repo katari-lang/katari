@@ -31,9 +31,10 @@ import Katari.Parser (parseModule)
 import Katari.Stdlib qualified as Stdlib
 import Katari.Typechecker (checkProgram)
 import Katari.Typechecker.Check (arrayOf, integerType, namedObjectType, numberType, stringType)
+import Katari.Typechecker.Elaborate (schemeVariableFor)
 import Katari.Typechecker.Environment (buildEnvironment)
 import Katari.Typechecker.Inference
-import Katari.Typechecker.Normalizer (Normalizer, SubtypingContext (..))
+import Katari.Typechecker.Normalizer (Normalizer, SubtypingContext (..), normalizeGenericArgument)
 import Katari.Typechecker.ValueGraph (valueSCCs)
 import Test.Hspec
 
@@ -221,6 +222,18 @@ spec = do
       Set.member metaA (deepGenerics (namedObjectType [("x", typeVar metaA)])) `shouldBe` True
     it "reports no generics for a closed type" $
       deepGenerics integerType `shouldBe` Set.empty
+
+  -- 'metavarKinded' builds the bare metavariable directly (the Inference module stays elaborator-free),
+  -- but the 'asTypeMetavar' / 'asEffectMetavar' / 'asAttributeMetavar' recognisers — and inference as a
+  -- whole — only work if it equals the normalised scheme variable the elaborator emits. Pin that here so
+  -- the two encodings cannot drift apart silently.
+  describe "metavarKinded matches the elaborator's scheme variable (no drift)" $ do
+    it "type" $
+      metavarKinded GenericKindType metaA `shouldBe` runN (normalizeGenericArgument (schemeVariableFor GenericKindType metaA))
+    it "effect" $
+      metavarKinded GenericKindEffect metaA `shouldBe` runN (normalizeGenericArgument (schemeVariableFor GenericKindEffect metaA))
+    it "attribute" $
+      metavarKinded GenericKindAttribute metaA `shouldBe` runN (normalizeGenericArgument (schemeVariableFor GenericKindAttribute metaA))
 
 ------------------------------------------------------------------------------------------------
 -- End-to-end driver (stdlib spliced)
