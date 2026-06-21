@@ -310,3 +310,21 @@ export type ProjectStore = {
   scopes: Record<number, Scope>;
   nextScopeId: number;
 };
+
+/**
+ * The instance bookkeeping that has no dedicated `instances` column — persisted as the row's
+ * `engine_state` JSON (its threads ride in the `threads` table). On load the actor's routing maps are
+ * rebuilt from these: a `pendingDelegations` key names the caller of a delegation, `delegationId` names
+ * its child, an `escalationContinuations` key names an escalation's raiser — so no separate
+ * delegation/escalation rows are needed for engine recovery.
+ */
+export type EngineState = {
+  rootThreadId: ThreadId;
+  pendingDelegations: Record<DelegationId, ThreadId>;
+  askRoutes: Record<AskId, AnswerContinuation>;
+  escalationContinuations: Record<EscalationId, AnswerContinuation>;
+  cancelExits: Record<number, CancelExit>;
+  nextThreadId: number;
+  nextCallId: number;
+  nextAskId: number;
+};

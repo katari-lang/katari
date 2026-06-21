@@ -26,7 +26,7 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { InstanceStatus } from "../../runtime/engine/types.js";
+import type { EngineState, InstanceStatus } from "../../runtime/engine/types.js";
 import type { DelegateTarget } from "../../runtime/event/types.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
@@ -61,6 +61,9 @@ export const instances = pgTable(
     /** The generic substitution this activation was summoned with (from the spawning `delegate.generics`).
      *  Inner scopes inherit it implicitly; not stored on `scopes`. */
     ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
+    /** The engine bookkeeping with no dedicated column (routing maps, cancel exits, id counters); its
+     *  threads ride in `threads`. The actor's routing maps are rebuilt from these on load. */
+    engineState: jsonb("engine_state").$type<EngineState>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()

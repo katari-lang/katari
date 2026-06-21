@@ -56,6 +56,8 @@ export class ProjectActor {
   private readonly store: ProjectStore = createProjectStore();
   private readonly mailbox: ActorMessage[] = [];
   private pumping = false;
+  /** Whether the project's persisted state has been reloaded into the warm store (lazy, on first use). */
+  private loaded = false;
 
   /** A pending delegate's caller instance, for routing its delegateAck / escalate home (the `delegations`
    *  row's caller). Absent for a run-root delegate, whose ack resolves the run instead (`runResolvers`). */
@@ -122,6 +124,7 @@ export class ProjectActor {
     if (this.pumping) return;
     this.pumping = true;
     try {
+      if (!this.loaded) await this.reactivate();
       while (this.mailbox.length > 0) {
         const message = this.mailbox.shift();
         if (message === undefined) break;
@@ -130,6 +133,28 @@ export class ProjectActor {
     } finally {
       this.pumping = false;
     }
+  }
+
+  /** Lazily reload the project's persisted engine state on first use, rebuilding the routing maps from
+   *  the instances (a pending delegation's key names its caller; an instance's `delegationId` its child;
+   *  an escalation continuation's key its raiser). The warm store is then the truth until eviction. */
+  private async reactivate(): Promise<void> {
+    const snapshot = await this.persistence.loadProject(this.projectId);
+    this.store.instances = snapshot.instances;
+    this.store.scopes = snapshot.scopes;
+    this.store.nextScopeId = snapshot.nextScopeId;
+    for (const instance of Object.values(this.store.instances)) {
+      if (instance.delegationId !== null) {
+        this.delegationChild[instance.delegationId] = instance.id;
+      }
+      for (const delegation of Object.keys(instance.pendingDelegations)) {
+        this.delegationCaller[delegation as DelegationId] = instance.id;
+      }
+      for (const escalation of Object.keys(instance.escalationContinuations)) {
+        this.escalationRaiser[escalation as EscalationId] = instance.id;
+      }
+    }
+    this.loaded = true;
   }
 
   private async handle(message: ActorMessage): Promise<void> {
@@ -317,10 +342,16 @@ export class ProjectActor {
     });
     seed(ctx);
     await drive(ctx);
-    // DB reflection happens once the internal queue is empty (the turn boundary).
-    await this.persistence.persistTurn(this.projectId, this.store);
+    // DB reflection happens once the internal queue is empty (the turn boundary): a completed instance
+    // is dropped (cascade), a still-running one is written through with its owned scopes.
     if (isInstanceComplete(instance)) {
       teardownInstance(this.store, instance.id);
+      await this.persistence.dropInstance(this.projectId, instance.id);
+    } else {
+      const ownedScopes = Object.values(this.store.scopes).filter(
+        (scope) => scope.owner === instance.id,
+      );
+      await this.persistence.persistInstance(this.projectId, instance, ownedScopes);
     }
     for (const event of ctx.buffers.outbound) {
       this.routeOutbound(instance.id, event);

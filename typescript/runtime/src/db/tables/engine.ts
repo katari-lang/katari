@@ -10,7 +10,6 @@
 // structure — the whole variable map rides inline in `scopes.values` (the engine holds it as one inline
 // map too). The other recursive leaf (a thread's variant state) likewise stays a typed JSON column.
 
-import type { Json } from "@katari-lang/types";
 import { sql } from "drizzle-orm";
 import {
   bigint,
@@ -45,8 +44,9 @@ export const threads = pgTable(
     scopeId: integer("scope_id").notNull(),
     blockId: integer("block_id").notNull(),
     status: text("status").$type<ThreadStatus>().notNull(),
-    /** The kind-specific execution state (the `Thread` variant minus the columns above). */
-    payload: jsonb("payload").$type<Json>().notNull(),
+    /** The whole `Thread` (a JSON leaf graph); the columns above are denormalised from it for recovery
+     *  queries (e.g. `kind = 'external'` for in-flight FFI calls). */
+    payload: jsonb("payload").$type<Thread>().notNull(),
   },
   (table) => [
     primaryKey({ columns: [table.projectId, table.instanceId, table.threadId] }),
