@@ -7,7 +7,7 @@
 // halves arrive through the same mailbox and are handled in their respective (later) layers.
 
 import type { QualifiedName } from "@katari-lang/types";
-import { relayEscalate } from "../engine/common.js";
+import { PANIC_REQUEST, raisePanic, relayEscalate } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
@@ -283,13 +283,15 @@ export class ProjectActor {
     if (instance === undefined) return; // its instance was torn down (cancelled) — drop the late result
     const thread = instance.threads[result.thread];
     if (thread === undefined || thread.kind !== "external") return;
+    if (result.kind === "ffiError") {
+      // An FFI failure is a panic raised from the external leaf (it bubbles to a handler / fails the run).
+      await this.runTurnWith(instance, (ctx) => raisePanic(ctx, thread, result.message));
+      return;
+    }
     if (thread.parent === null || thread.parentCallId === null) return;
     delete instance.threads[thread.id];
-    // Error propagation (an FFI failure reaching the run as an error / escalation) is future work; for
-    // now a failed call resolves to null so the actor stays live rather than dropping the run.
-    const value: Value = result.kind === "ffiResult" ? result.value : { kind: "null" };
     await this.runTurn(instance, [
-      { kind: "callAck", target: thread.parent, callId: thread.parentCallId, value },
+      { kind: "callAck", target: thread.parent, callId: thread.parentCallId, value: result.value },
     ]);
   }
 
@@ -356,18 +358,19 @@ export class ProjectActor {
   }
 }
 
-/** A human message for an escalation that reached the run root unhandled (it fails the run). Panic
- *  carries its message; a plain unhandled request / control escape reports its name. */
+/** A human message for an escalation that reached the run root unhandled (it fails the run). A panic
+ *  reports its `{ msg }`; any other unhandled request / control escape reports its name. */
 function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate" }>): string {
   if (event.ask.kind !== "request") {
     return `unhandled "${event.ask.kind}" reached the run root`;
   }
-  const argument = event.ask.argument;
-  const message =
-    argument?.kind === "record" && argument.fields.msg?.kind === "string"
-      ? argument.fields.msg.value
-      : null;
-  return message !== null
-    ? `panic: ${message}`
-    : `unhandled request "${event.ask.request}" reached the run root`;
+  if (event.ask.request === PANIC_REQUEST) {
+    const argument = event.ask.argument;
+    const message =
+      argument?.kind === "record" && argument.fields.msg?.kind === "string"
+        ? argument.fields.msg.value
+        : "(no message)";
+    return `panic: ${message}`;
+  }
+  return `unhandled request "${event.ask.request}" reached the run root`;
 }

@@ -57,9 +57,9 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
     value: !valueEquals(field(argument, "left"), field(argument, "right")),
   }),
   "primitive.less_than": comparison((left, right) => left < right),
-  "primitive.less_equal": comparison((left, right) => left <= right),
+  "primitive.less_or_equal": comparison((left, right) => left <= right),
   "primitive.greater_than": comparison((left, right) => left > right),
-  "primitive.greater_equal": comparison((left, right) => left >= right),
+  "primitive.greater_or_equal": comparison((left, right) => left >= right),
   "primitive.and": (argument) => ({
     kind: "boolean",
     value: boolOf(field(argument, "left")) && boolOf(field(argument, "right")),

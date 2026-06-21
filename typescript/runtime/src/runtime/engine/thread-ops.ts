@@ -17,6 +17,7 @@ import {
   completeThread,
   escapeAsk,
   proxyAsk,
+  raisePanic,
   removeThread,
   terminateInstance,
 } from "./common.js";
@@ -161,11 +162,12 @@ export function dispatchAsk(
 
 // ─── askAck (an answered ask resumes its asker) ─────────────────────────────────────────────────
 
-// The only genuine `request` asker is a request leaf (a proxy/relay continuation in the drive loop
-// handles every intermediate hop). Its answer completes it; anything else is a routing bug.
+// The genuine askers are the request leaf and an external leaf that raised a `panic` on an FFI error;
+// either completes with the answered value. A proxy/relay continuation in the drive loop handles every
+// intermediate hop, so any other direct askAck is a routing bug.
 export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, value: Value): void {
   if (thread.status === "cancelling") return; // a late answer for a thread being torn down
-  if (thread.kind === "request") {
+  if (thread.kind === "request" || thread.kind === "external") {
     completeThread(ctx, thread, value);
     return;
   }
@@ -358,7 +360,14 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "primitive") throw new Error(`thread ${thread.id} is not a primitive block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
-  const value = await ctx.prims.run(block.name, argument);
+  // A prim failure (e.g. division by zero) is a `panic`, not a crash — it bubbles to a handler / the run.
+  let value: Value;
+  try {
+    value = await ctx.prims.run(block.name, argument);
+  } catch (error) {
+    raisePanic(ctx, thread, error instanceof Error ? error.message : String(error));
+    return;
+  }
   completeThread(ctx, thread, value);
 }
 
@@ -418,7 +427,8 @@ function createMatch(ctx: StepContext, thread: MatchThread): void {
     enterArm(ctx, thread, block.fallback);
     return;
   }
-  throw new Error(`non-exhaustive match in thread ${thread.id}`);
+  // The checker guarantees exhaustiveness; reaching here is a runtime panic, not a crash.
+  raisePanic(ctx, thread, "non-exhaustive match");
 }
 
 function enterArm(ctx: StepContext, thread: MatchThread, body: number): void {

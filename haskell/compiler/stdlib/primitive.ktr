@@ -47,3 +47,10 @@ primitive agent not(value: boolean) -> boolean
 
 @"Concatenate two strings."
 primitive agent concat(left: string, right: string) -> string
+
+// Errors -----------------------------------------------------------------------------------------
+
+@"Raise a runtime error. A `panic` is a request, so a `handle ... with panic(e) => ...` can recover
+from it (by `break`ing out of the handle); an unhandled panic fails the run. The runtime raises this
+same request on a primitive failure, a non-exhaustive match, or an external (FFI) error."
+request panic(msg: string) -> never

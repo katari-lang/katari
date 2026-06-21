@@ -12,12 +12,39 @@
 // unwinding return / break, complete the instance / handle). An unwinding exit never runs before the
 // cancelled subtree is gone.
 
+import type { QualifiedName } from "@katari-lang/types";
 import type { AskKind } from "../event/types.js";
 import { type AskId, type EscalationId, newEscalationId, type ThreadId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateAskId } from "./store.js";
 import type { Thread } from "./types.js";
+
+/** The built-in request a runtime error becomes (a prim failure, a non-exhaustive match, an FFI error).
+ *  Errors are modelled as this `panic` request rather than a thrown effect: it bubbles like any request,
+ *  so a `handle … with panic(e) => …` can catch it, and an unhandled one fails the run with its message.
+ *  Matches the stdlib `primitive.panic` declaration. */
+export const PANIC_REQUEST = "primitive.panic" as QualifiedName;
+
+/** Raise a `panic` from a failing thread: an ask carrying `{ msg }` to its parent, escalating outward
+ *  toward the nearest `panic` handler (or the run root). */
+export function raisePanic(ctx: StepContext, thread: Thread, message: string): void {
+  if (thread.parent === null) {
+    throw new Error(`panic at the instance root: ${message}`);
+  }
+  const askId = allocateAskId(ctx.instance);
+  ctx.enqueue({
+    kind: "ask",
+    target: thread.parent,
+    from: thread.id,
+    askId,
+    ask: {
+      kind: "request",
+      request: PANIC_REQUEST,
+      argument: { kind: "record", fields: { msg: { kind: "string", value: message } } },
+    },
+  });
+}
 
 /** Whether an ask is answered back to its asker (only `request`) — i.e. whether proxies must record a
  *  continuation so the eventual `askAck` finds its way home. */

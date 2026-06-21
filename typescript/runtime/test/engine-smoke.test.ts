@@ -457,6 +457,128 @@ describe("in-memory core", () => {
     await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 99 });
   });
 
+  test("fails the run with a panic when a primitive errors unhandled", async () => {
+    // agent main() { add({ left: 1, right: "x" }) }  — the add prim panics (string is not a number),
+    // and with no handler the panic reaches the run root and rejects it.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 2, value: { kind: "integer", value: 1 } },
+              { kind: "loadLiteral", output: 3, value: { kind: "string", value: "x" } },
+              {
+                kind: "makeRecord",
+                entries: [
+                  ["left", 2],
+                  ["right", 3],
+                ],
+                output: 4,
+              },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("primitive.add") },
+                argument: 4,
+                output: 5,
+              },
+              { kind: "exit", target: 0, value: 5 },
+            ],
+          },
+          parameters: { parameter: 1 },
+        },
+        ...primitiveWrapper(6, 7, 8, "primitive.add"),
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("primitive.add")]: 6,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).rejects.toThrow(/panic.*number/);
+  });
+
+  test("catches a panic with a handler", async () => {
+    // agent main() { handle { add({ left: 1, right: "x" }) } with panic(e) => break -1 }
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "call", target: 2, output: 10 },
+              { kind: "exit", target: 0, value: 10 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        2: {
+          block: {
+            kind: "handle",
+            parallel: false,
+            initialStates: [],
+            body: 3,
+            handlers: [{ request: createAgentName("primitive.panic"), body: 4 }],
+            thenClause: null,
+          },
+          parameters: {},
+        },
+        3: {
+          block: {
+            kind: "sequence",
+            result: 23,
+            operations: [
+              { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 1 } },
+              { kind: "loadLiteral", output: 21, value: { kind: "string", value: "x" } },
+              {
+                kind: "makeRecord",
+                entries: [
+                  ["left", 20],
+                  ["right", 21],
+                ],
+                output: 22,
+              },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("primitive.add") },
+                argument: 22,
+                output: 23,
+              },
+            ],
+          },
+          parameters: {},
+        },
+        // handler body: break -1
+        4: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 40, value: { kind: "integer", value: -1 } },
+              { kind: "exit", target: 2, value: 40 },
+            ],
+          },
+          parameters: { parameter: 41 },
+        },
+        ...primitiveWrapper(6, 7, 8, "primitive.add"),
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("primitive.add")]: 6,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: -1 });
+  });
+
   test("runs through the RuntimeHost composition root", async () => {
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
