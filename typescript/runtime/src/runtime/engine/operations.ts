@@ -58,15 +58,13 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
     case "loadLiteral":
       writeVariable(ctx.store, scope, operation.output, literalToValue(operation.value));
       return true;
-    case "loadAgent": {
-      const resolved = ctx.ir.resolveName(operation.name);
+    case "loadAgent":
       writeVariable(ctx.store, scope, operation.output, {
         kind: "agent",
         name: operation.name,
-        snapshot: resolved.snapshot,
+        snapshot: ctx.ir.snapshot,
       });
       return true;
-    }
     case "makeClosure":
       // Capture the current scope by id; resolving the closure spawns its block with this as parent.
       writeVariable(ctx.store, scope, operation.output, {
@@ -74,6 +72,7 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
         blockId: operation.agent,
         scopeId: scope,
         snapshot: ctx.ir.snapshot,
+        module: ctx.ir.module,
       });
       return true;
     case "makeRecord": {
@@ -190,11 +189,7 @@ function resolveCallee(
   const argument = requireVariable(ctx, scope, argumentVariable);
   if (callee.kind === "name") {
     return {
-      target: {
-        kind: "named",
-        name: callee.name,
-        snapshot: ctx.ir.resolveName(callee.name).snapshot,
-      },
+      target: { kind: "named", name: callee.name, snapshot: ctx.ir.snapshot },
       argument,
     };
   }
@@ -213,6 +208,7 @@ function resolveCallee(
         blockId: value.blockId,
         scopeId: value.scopeId,
         snapshot: value.snapshot,
+        module: value.module,
       },
       argument,
       ...(value.generics !== undefined ? { generics: value.generics } : {}),

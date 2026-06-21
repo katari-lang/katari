@@ -68,6 +68,8 @@ export type ClosureValue = {
   scopeId: ScopeId;
   /** The snapshot whose IR `blockId` lives in (so the closure resolves even if it escapes). */
   snapshot: SnapshotId;
+  /** The module `blockId` is local to (block ids are module-local; needed to resolve an escaped closure). */
+  module: string;
   generics?: GenericSubstitution;
 };
 

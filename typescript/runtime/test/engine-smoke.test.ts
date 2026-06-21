@@ -2,7 +2,7 @@
 // compiler and no DB. Exercises the uniform delegate model (every primitive is a child instance), the
 // internal turn loop, structural nodes (for / match), control flow (return), and the value model.
 
-import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
+import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
@@ -14,7 +14,7 @@ import {
 } from "../src/runtime/external/runner.js";
 import { RuntimeHost } from "../src/runtime/host.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
-import { SnapshotRegistry } from "../src/runtime/ir.js";
+import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
 
@@ -36,6 +36,14 @@ function primitiveWrapper(agentId: number, leafId: number, inputVar: number, nam
   } as const;
 }
 
+/** Register one hand-built IRModule under every module its entries name (so a cross-module name like
+ *  `primitive.add` resolves to module `primitive`, `main` to the empty user module — both point here). */
+function registerModules(registry: SnapshotRegistry, ir: IRModule): void {
+  for (const name of Object.keys(ir.entries)) {
+    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
+  }
+}
+
 function run(
   ir: IRModule,
   entry: string,
@@ -43,10 +51,10 @@ function run(
   external: ExternalRunner = new StubExternalRunner(),
 ): Promise<Value> {
   const registry = new SnapshotRegistry();
-  registry.set(SNAPSHOT, ir);
+  registerModules(registry, ir);
   const actor = new ProjectActor({
     projectId: PROJECT,
-    registry,
+    ir: registry,
     prims: new PrimRegistry(),
     blobs: new InMemoryBlobStore(),
     external,
@@ -598,7 +606,7 @@ describe("in-memory core", () => {
     };
 
     const host = new RuntimeHost();
-    host.registerSnapshot(SNAPSHOT, ir);
+    host.registerModule(SNAPSHOT, "", ir); // the `answer` agent lives in the empty (user) module
     await expect(host.startRun(PROJECT, createAgentName("answer"), SNAPSHOT, null)).resolves.toEqual({
       kind: "integer",
       value: 42,

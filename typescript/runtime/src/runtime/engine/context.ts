@@ -6,7 +6,7 @@
 // persist). Nothing here touches the DB — persistence is the actor's, applied once the internal queue
 // drains (domain-model §5: "DB reflection after the internal queue is empty").
 
-import type { BlockId, BlockInformation, QualifiedName } from "@katari-lang/types";
+import type { BlockId, BlockInformation } from "@katari-lang/types";
 import type { ExternalEvent, InternalEvent } from "../event/types.js";
 import type { ExternalRunner } from "../external/runner.js";
 import type { ProjectId, SnapshotId } from "../ids.js";
@@ -14,14 +14,19 @@ import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
 import type { Instance, ProjectStore } from "./types.js";
 
-/** Read access to the IR the running instance needs, already bound to that instance's snapshot. */
+/**
+ * Read access to the IR the running instance needs, bound to that instance's (snapshot, module). Block
+ * ids are module-local, so `block` reads this module's blocks; a cross-module callable is reached by a
+ * named delegate whose target the actor resolves against the snapshot (the named callable's snapshot is
+ * always this `snapshot`, so the engine reads it directly rather than re-resolving).
+ */
 export interface IrAccess {
   /** The snapshot this access reads (the running instance's version). */
   readonly snapshot: SnapshotId;
-  /** Resolve a block by id within this snapshot (with the parameter map its scope is seeded from). */
+  /** The module this access reads (the running instance's agent's module). */
+  readonly module: string;
+  /** Resolve a block by id within this module (with the parameter map its scope is seeded from). */
   block(blockId: BlockId): BlockInformation;
-  /** Resolve a top-level callable name to its agent block and the snapshot it lives in (cross-module-safe). */
-  resolveName(name: QualifiedName): { blockId: BlockId; snapshot: SnapshotId };
 }
 
 /**

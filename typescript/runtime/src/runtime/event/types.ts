@@ -60,7 +60,7 @@ export type InternalEvent =
 /** What a `delegate` summons: a top-level named agent, or a closure (block + captured scope). */
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
-  | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId };
+  | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string };
 
 export type ExternalEvent =
   | {

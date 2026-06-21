@@ -31,14 +31,14 @@ import {
   type ScopeId,
   type SnapshotId,
 } from "../ids.js";
-import type { SnapshotRegistry } from "../ir.js";
+import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
 import type { Persistence } from "./persistence.js";
 
 export interface ProjectActorDependencies {
   projectId: ProjectId;
-  registry: SnapshotRegistry;
+  ir: IrSource;
   prims: PrimRunner;
   blobs: BlobStore;
   external: ExternalRunner;
@@ -47,7 +47,7 @@ export interface ProjectActorDependencies {
 
 export class ProjectActor {
   private readonly projectId: ProjectId;
-  private readonly registry: SnapshotRegistry;
+  private readonly ir: IrSource;
   private readonly prims: PrimRunner;
   private readonly blobs: BlobStore;
   private readonly external: ExternalRunner;
@@ -73,7 +73,7 @@ export class ProjectActor {
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
-    this.registry = dependencies.registry;
+    this.ir = dependencies.ir;
     this.prims = dependencies.prims;
     this.blobs = dependencies.blobs;
     this.external = dependencies.external;
@@ -187,6 +187,7 @@ export class ProjectActor {
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
   private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
+    await this.ir.preload(event.target.snapshot);
     const resolved = this.resolveTarget(event.target);
     const instance = createInstance(this.store, {
       delegationId: event.delegation,
@@ -331,11 +332,13 @@ export class ProjectActor {
   /** Drive one instance's turn after `seed` queues its initial internal events (directly, or via a
    *  helper that needs the StepContext such as `relayEscalate`); then persist and flush. */
   private async runTurnWith(instance: Instance, seed: (ctx: StepContext) => void): Promise<void> {
+    const snapshot = instance.target.snapshot;
+    await this.ir.preload(snapshot);
     const ctx = makeStepContext({
       projectId: this.projectId,
       store: this.store,
       instance,
-      ir: this.registry.access(instance.target.snapshot),
+      ir: this.ir.access(snapshot, moduleOf(instance.target)),
       prims: this.prims,
       blobs: this.blobs,
       external: this.external,
@@ -376,7 +379,7 @@ export class ProjectActor {
   } {
     if (target.kind === "named") {
       return {
-        agentBlockId: this.registry.access(target.snapshot).resolveName(target.name).blockId,
+        agentBlockId: this.ir.locate(target.snapshot, target.name).blockId,
         capturedScopeId: null,
         snapshot: target.snapshot,
       };
@@ -387,6 +390,11 @@ export class ProjectActor {
       snapshot: target.snapshot,
     };
   }
+}
+
+/** The module a delegate target's agent lives in (block ids are module-local). */
+function moduleOf(target: DelegateTarget): string {
+  return target.kind === "named" ? moduleOfName(target.name) : target.module;
 }
 
 /** A human message for an escalation that reached the run root unhandled (it fails the run). A panic

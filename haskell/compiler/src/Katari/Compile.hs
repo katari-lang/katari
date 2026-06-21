@@ -42,8 +42,9 @@ newtype CompileInput = CompileInput
 
 -- | The product of a compile: each module's lowered IR (uploaded individually; schemas travel inside
 -- it), the LSP symbol table and typed AST per module (for query / hover), and every diagnostic
--- emitted along the way. These maps are keyed by the /user's/ modules only — the spliced-in stdlib is
--- an implementation detail of resolution / typing and is not handed back.
+-- emitted along the way. 'loweredModules' includes the spliced-in stdlib (the @primitive@ module), since
+-- the runtime has no built-in stdlib and must receive it in the snapshot; 'symbolTables' / 'typedModules'
+-- are keyed by the /user's/ modules only (the stdlib is an implementation detail for LSP purposes).
 data CompileResult = CompileResult
   { loweredModules :: Map ModuleName IRModule,
     symbolTables :: Map ModuleName SymbolTable,
@@ -71,10 +72,13 @@ compile :: CompileInput -> CompileResult
 compile input =
   CompileResult
     { -- Lowering is gated on the program being error-free: never emit IR for code that failed to
-      -- parse / resolve / type-check (a warning does not block it).
+      -- parse / resolve / type-check (a warning does not block it). Both the user's modules AND the
+      -- spliced-in stdlib (the @primitive@ module) are emitted: the runtime has no built-in stdlib, so
+      -- @primitive.*@ callables — and the @panic@ request — must travel in the snapshot like any module.
+      -- Content-hash dedup means the unchanged stdlib is one shared row across every snapshot.
       loweredModules =
         if lowerable
-          then Map.restrictKeys (fst <$> lowered) userKeys
+          then fst <$> lowered
           else mempty,
       symbolTables = Map.restrictKeys ((\identifiedModule -> identifiedModule.symbolTable) <$> identifiedModules) userKeys,
       typedModules = Map.restrictKeys typedModules userKeys,

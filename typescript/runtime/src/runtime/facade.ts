@@ -1,16 +1,22 @@
 // Engine façade: the single entry from the stateless HTTP services into the stateful, per-project
-// engine/actor (see docs/2026-06-15-runtime-domain-model.md §5). v0.1 freezes the signatures so the
-// engine-backed resources (run / escalation) compile against a fixed boundary; the bodies arrive with
-// the engine (implementation plan Phase 2+). Until then every call throws, so those resources return
-// a clean 501 instead of pretending to work.
-//
-// Boundary note: the wire carries raw `Json` (`argument` / `value`), but the engine and its persisted
-// columns speak the tagged `Value` model (e.g. `{ kind: "integer", value: 5 }`, not bare `5`). This
-// façade is where that `Json → Value` conversion (and `Value → Json` on the way out) must happen when
-// the engine lands; the raw `Json` must NOT be written straight into a `Value`-typed column.
+// engine. It owns the warm `RuntimeHost` (module scope, so a project's actor stays warm across requests),
+// converts the wire's raw `Json` to/from the engine's tagged `Value`, and orchestrates the run lifecycle:
+// resolve the snapshot, open a `runs` row, kick the run off on the host, and settle the row when it
+// completes (done / error) in the background — the HTTP call returns the run id immediately.
 
-import type { Json } from "@katari-lang/types";
-import { NotImplementedError } from "../lib/errors.js";
+import { createAgentName, type Json } from "@katari-lang/types";
+import { eq } from "drizzle-orm";
+import { db } from "../db/client.js";
+import { projects } from "../db/tables/projects.js";
+import { NotFoundError, NotImplementedError } from "../lib/errors.js";
+import { runRepository } from "../modules/run/run.repository.js";
+import { DbIrSource } from "./actor/db-ir-source.js";
+import { DbPersistence } from "./actor/db-persistence.js";
+import { PrimRegistry } from "./engine/prims.js";
+import { StubExternalRunner } from "./external/runner.js";
+import { RuntimeHost } from "./host.js";
+import type { ProjectId, SnapshotId } from "./ids.js";
+import { jsonToValue } from "./value/codec.js";
 
 export interface StartRunInput {
   projectId: string;
@@ -45,14 +51,67 @@ export interface RuntimeFacade {
   answerEscalation(input: AnswerEscalationInput): Promise<void>;
 }
 
+// The warm host: one per process, backed by the DB (IR module store + engine-graph persistence). A
+// project's actor is created lazily and kept warm. FFI / env are not wired yet (stub runner, pure prims).
+const host = new RuntimeHost({
+  ir: new DbIrSource(db),
+  persistence: new DbPersistence(db),
+  prims: new PrimRegistry(),
+  externalFactory: () => new StubExternalRunner(),
+});
+
+/** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
+async function resolveSnapshot(projectId: string, snapshotId?: string): Promise<string> {
+  if (snapshotId !== undefined) return snapshotId;
+  const [project] = await db
+    .select({ head: projects.headSnapshotId })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  if (project?.head == null) {
+    throw new NotFoundError("project has no live snapshot to run; deploy one or pass snapshotId");
+  }
+  return project.head;
+}
+
 export const facade: RuntimeFacade = {
-  startRun() {
-    throw new NotImplementedError("Run execution is not implemented yet (engine pending).");
+  async startRun(input) {
+    const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
+    const argument = input.argument !== undefined ? jsonToValue(input.argument) : null;
+    const run = await runRepository.start(db, {
+      projectId: input.projectId,
+      name: input.name ?? input.qualifiedName,
+      qualifiedName: input.qualifiedName,
+      snapshotId,
+      argument,
+    });
+    // Execute on the host and settle the run row when it finishes; the HTTP call does not wait.
+    void host
+      .startRun(
+        input.projectId as ProjectId,
+        createAgentName(input.qualifiedName),
+        snapshotId as SnapshotId,
+        argument,
+      )
+      .then((result) => runRepository.settle(db, run.id, { state: "done", result }))
+      .catch((error: unknown) =>
+        runRepository.settle(db, run.id, {
+          state: "error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    return { runId: run.id };
   },
+
   cancel() {
-    throw new NotImplementedError("Run cancellation is not implemented yet (engine pending).");
+    // Cancellation routes a `terminate` to the run's root instance; the host does not yet expose a run
+    // handle for it (the run delegation is internal). Wired with run-handle support.
+    throw new NotImplementedError("Run cancellation is not wired yet.");
   },
+
   answerEscalation() {
-    throw new NotImplementedError("Escalation answering is not implemented yet (engine pending).");
+    // Answering routes an `escalateAck` to the run's suspended escalation; this needs the engine to keep
+    // an unhandled run-root request open (rather than failing the run) — a follow-up.
+    throw new NotImplementedError("Escalation answering is not wired yet.");
   },
 };

@@ -12,11 +12,13 @@ import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { type ExternalRunner, StubExternalRunner } from "./external/runner.js";
 import type { ProjectId, SnapshotId } from "./ids.js";
-import { SnapshotRegistry } from "./ir.js";
+import { type IrSource, SnapshotRegistry } from "./ir.js";
 import { type BlobStore, InMemoryBlobStore } from "./value/blob-store.js";
 import type { Value } from "./value/types.js";
 
 export interface RuntimeHostDependencies {
+  /** The IR source (a DB-backed `DbIrSource` in the API; defaults to an in-memory registry for tests). */
+  ir?: IrSource;
   /** The blob byte store (project-keyed). Defaults to in-memory. */
   blobs?: BlobStore;
   /** Persistence at the turn boundary. Defaults to the in-memory no-op seam. */
@@ -29,7 +31,7 @@ export interface RuntimeHostDependencies {
 }
 
 export class RuntimeHost {
-  private readonly registry = new SnapshotRegistry();
+  private readonly ir: IrSource;
   private readonly actors = new Map<ProjectId, ProjectActor>();
 
   private readonly blobs: BlobStore;
@@ -38,15 +40,20 @@ export class RuntimeHost {
   private readonly externalFactory: () => ExternalRunner;
 
   constructor(dependencies: RuntimeHostDependencies = {}) {
+    this.ir = dependencies.ir ?? new SnapshotRegistry();
     this.blobs = dependencies.blobs ?? new InMemoryBlobStore();
     this.persistence = dependencies.persistence ?? new InMemoryPersistence();
     this.prims = dependencies.prims ?? new PrimRegistry();
     this.externalFactory = dependencies.externalFactory ?? (() => new StubExternalRunner());
   }
 
-  /** Register the IR a snapshot pins (deploy's hook; the engine resolves blocks / names through it). */
-  registerSnapshot(snapshot: SnapshotId, ir: IRModule): void {
-    this.registry.set(snapshot, ir);
+  /** Register one module's IR within a snapshot — only on the default in-memory source (tests); the
+   *  DB-backed source loads modules itself. */
+  registerModule(snapshot: SnapshotId, module: string, ir: IRModule): void {
+    if (!(this.ir instanceof SnapshotRegistry)) {
+      throw new Error("registerModule is only available on the in-memory IR source");
+    }
+    this.ir.set(snapshot, module, ir);
   }
 
   /** Start a run on a project and resolve with its result value. */
@@ -65,7 +72,7 @@ export class RuntimeHost {
     if (existing !== undefined) return existing;
     const actor = new ProjectActor({
       projectId,
-      registry: this.registry,
+      ir: this.ir,
       prims: this.prims,
       blobs: this.blobs,
       external: this.externalFactory(),
