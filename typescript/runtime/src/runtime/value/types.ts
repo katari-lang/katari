@@ -25,7 +25,13 @@ export type Value = (
   | { kind: "number"; value: number }
   /** An inline (small) string. Large strings are promoted to a blob `ref` at persist (R5/CORE promotion). */
   | { kind: "string"; value: string }
-  | { kind: "record"; fields: Record<string, Value> }
+  /**
+   * A record value. A bare object literal carries no `ctor`; a `data` value carries its constructor's
+   * qualified name there (a tagged value). At the JSON boundary the tag rides under the reserved
+   * `$constructor` discriminator key (compiler `Katari.Schema.constructorDiscriminatorKey`); internally
+   * it is kept out-of-band so `obj.field` and width subtyping (`data <: object`) ignore it.
+   */
+  | { kind: "record"; fields: Record<string, Value>; ctor?: QualifiedName }
   | { kind: "array"; elements: Value[] }
   | BlobRefValue
   | ClosureValue

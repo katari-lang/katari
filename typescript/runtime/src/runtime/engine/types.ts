@@ -7,7 +7,7 @@
 // `engine.ts` header for why they are not their own table). The per-thread execution state below is
 // the engine's working set; its exact fields will firm up in the engine phase.
 
-import type { BlockId, QualifiedName } from "@katari-lang/types";
+import type { BlockId } from "@katari-lang/types";
 import type { DelegateTarget } from "../event/types.js";
 import type {
   AskId,
@@ -42,7 +42,7 @@ export type Scope = {
 export type ThreadStatus = "running" | "cancelling";
 
 /** Fields every thread carries regardless of which block it runs. */
-type ThreadBase = {
+export type ThreadBase = {
   id: ThreadId;
   /** Parent thread within this instance (`null` for the instance root). */
   parent: ThreadId | null;
@@ -110,38 +110,27 @@ export type SequenceThread = ThreadBase & {
   pending: PendingCall | null;
 };
 
-/**
- * A primitive leaf body: runs the named prim against its `input` variable and acks the value. The run
- * may be async (a bounded env / blob fetch), which the internal consumer awaits inline within the turn;
- * the prim has no children, so it completes within its instance's turn.
- */
-export type PrimitiveThread = ThreadBase & {
-  kind: "primitive";
-  /** The prim registry key (e.g. `primitive.add`); kept on the thread so a recovered turn can re-run it. */
-  name: string;
-  /** The in-scope variable holding the argument (seeded as `parameter` by the wrapping `AgentThread`). */
-  input: number;
-};
-
-/** A data-constructor leaf body: builds the tagged value of `name` from `input` and acks it (synchronous). */
-export type ConstructThread = ThreadBase & {
-  kind: "construct";
-  name: QualifiedName;
-  input: number;
-};
+// The leaf bodies (primitive / construct / request) carry no extra state: their name / input variable
+// live on the block (resolved from `blockId`), and they hold at most one outstanding interaction, so the
+// answering event identifies it without a stored handle. The external (FFI) leaf is the exception — it
+// tracks its dispatch lifecycle (below).
 
 /**
- * A request leaf body: raises `name` as a `request` ask carrying `input`. Its instance has no handler of
- * its own, so the ask immediately escapes (via the root `AgentThread`) as an outbound `escalate`; the
- * thread suspends until the matching `escalateAck` resumes it, then acks the answered value.
+ * A primitive leaf body: runs the prim named on its block against its `input` variable and acks the
+ * value. The run may be async (a bounded env / blob fetch), awaited inline within the turn; the prim has
+ * no children, so it completes within its instance's turn.
  */
-export type RequestThread = ThreadBase & {
-  kind: "request";
-  name: QualifiedName;
-  input: number;
-  /** The ask id this request raised, awaiting its answer (`askAck`); `null` before it has run. */
-  askId: AskId | null;
-};
+export type PrimitiveThread = ThreadBase & { kind: "primitive" };
+
+/** A data-constructor leaf body: builds the tagged value of its constructor from `input` and acks it. */
+export type ConstructThread = ThreadBase & { kind: "construct" };
+
+/**
+ * A request leaf body: raises its request as an ask carrying `input`. Its instance has no handler of its
+ * own, so the ask immediately escapes (via the root `AgentThread`) as an outbound `escalate`; the thread
+ * suspends until the matching `escalateAck` (relayed back as its `askAck`) resumes it, then acks the value.
+ */
+export type RequestThread = ThreadBase & { kind: "request" };
 
 /** Runs the arm body chosen by matching `subject`; forwards the arm's value as its own result. */
 export type MatchThread = ThreadBase & {
@@ -158,10 +147,13 @@ export type ForThread = ThreadBase & {
   /** Mapped next-values by iteration index (sparse until all land, in the parallel case); the dense
    *  source-ordered array is materialised at completion. Mirrors `ParallelThread.collected`. */
   collected: Record<number, Value>;
-  /** Current state values (sequential `var s = ...`): index N -> the current value of `state_N`. */
+  /** Current state values, keyed by each state's body variable id (so a `with (s = …)` modifier — which
+   *  names that variable — updates it directly). Re-seeded into the body's `state_N` each iteration. */
   states: Record<number, Value>;
   /** Iteration index -> the child call running it (one for sequential, many concurrent for parallel). */
   pending: Record<number, CallId>;
+  /** Once the source is exhausted, the then-clause's call (if any): its value is the loop's value. */
+  thenPending: CallId | null;
 };
 
 /** Runs a `handle` body, dispatching escalations to its handlers and resuming via `next`. */
@@ -190,9 +182,10 @@ export type ParallelThread = ThreadBase & {
  */
 export type DelegateThread = ThreadBase & {
   kind: "delegate";
+  /** The cross-instance child this proxies; both the `delegateAck` correlation and (with the
+   *  `delegations` row) the recovery handle. The result binds via the spawning thread's pending slot,
+   *  so no separate output is kept here; `target` / `argument` live in the `delegations` row. */
   delegationId: DelegationId;
-  /** Where to bind the result when the `delegateAck` lands. */
-  output: number | null;
 };
 
 /**
@@ -201,11 +194,8 @@ export type DelegateThread = ThreadBase & {
  */
 export type ExternalThread = ThreadBase & {
   kind: "external";
-  /** The dispatch key the handler interprets. */
-  key: string;
-  /** The argument value passed to the handler (after `defaults` were applied). */
-  argument: Value | null;
-  /** open | done — the lifecycle of this external dispatch (acknowledgement still pending vs landed). */
+  /** open while the FFI dispatch is in flight, done once its result has landed. The dispatch key and
+   *  argument are re-derived from the block + scope, so a recovered turn can re-dispatch an open call. */
   externalState: "open" | "done";
 };
 
@@ -247,6 +237,9 @@ export type Instance = {
   /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here, not as a
    *  standalone instance attribute. */
   target: DelegateTarget;
+  /** The argument this activation was summoned with (the spawning `delegate.argument`). The root
+   *  `AgentThread` reads it, applies the agent's `defaults`, and seeds the body's `parameter`. */
+  argument: Value | null;
   status: InstanceStatus;
   /** The ambient generic substitution for this activation (from the spawning `delegate.generics`). */
   ambientGenerics?: GenericSubstitution;

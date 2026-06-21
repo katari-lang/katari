@@ -9,8 +9,16 @@
 // this heuristic only ever applies to values entering from outside (a run argument, an answered
 // escalation), never to values already in flight.
 
-import type { Json, Literal, TypeTag } from "@katari-lang/types";
-import type { Value } from "./types.js";
+import type { Json, Literal, QualifiedName, TypeTag } from "@katari-lang/types";
+import type { BlobId } from "../ids.js";
+import type { SemanticKind, Value } from "./types.js";
+
+// The reserved `$`-prefixed discriminator keys the compiler emits in a value's JSON schema (mirrors
+// `Katari.Schema`): a `data` value's constructor, a callable reference, a file/blob handle. The engine's
+// tagged `Value` keeps these out-of-band; the codec bridges to/from the keyed JSON form at the boundary.
+const CONSTRUCTOR_KEY = "$constructor";
+const AGENT_KEY = "$agent";
+const FILE_KEY = "$ref";
 
 /** Lift an IR literal (the payload of `loadLiteral` / a `PatternLiteral`) into a runtime value. */
 export function literalToValue(literal: Literal): Value {
@@ -44,11 +52,36 @@ export function jsonToValue(json: Json): Value {
   if (Array.isArray(json)) {
     return { kind: "array", elements: json.map(jsonToValue) };
   }
+  // A file handle reconstructs the blob ref it names; a callable cannot be built from JSON (the AI never
+  // constructs one). Everything else is an object, tagged (a `data` value) or bare.
+  if (FILE_KEY in json) {
+    return fileFromJson(json);
+  }
+  if (AGENT_KEY in json) {
+    throw new Error("a callable value cannot be constructed from JSON input");
+  }
+  const constructorTag = json[CONSTRUCTOR_KEY];
   const fields: Record<string, Value> = {};
   for (const [key, child] of Object.entries(json)) {
+    if (key === CONSTRUCTOR_KEY) continue;
     fields[key] = jsonToValue(child);
   }
-  return { kind: "record", fields };
+  return typeof constructorTag === "string"
+    ? { kind: "record", fields, ctor: constructorTag as QualifiedName }
+    : { kind: "record", fields };
+}
+
+/** Reconstruct a blob `ref` from a `{ "$ref": blobId, size, hash, semanticKind?, contentType? }` handle. */
+function fileFromJson(json: { [key: string]: Json }): Value {
+  const blobId = json[FILE_KEY];
+  const size = json.size;
+  const hash = json.hash;
+  if (typeof blobId !== "string" || typeof size !== "number" || typeof hash !== "string") {
+    throw new Error("a file handle must carry a string $ref, a numeric size, and a string hash");
+  }
+  const semanticKind: SemanticKind = json.semanticKind === "string" ? "string" : "file";
+  const ref: Value = { kind: "ref", semanticKind, blobId: blobId as BlobId, hash, size };
+  return typeof json.contentType === "string" ? { ...ref, contentType: json.contentType } : ref;
 }
 
 /**
@@ -69,6 +102,10 @@ export function valueToJson(value: Value): Json {
       return value.elements.map(valueToJson);
     case "record": {
       const out: { [key: string]: Json } = {};
+      // A tagged `data` value re-acquires its `$constructor` discriminator; a bare record has none.
+      if (value.ctor !== undefined) {
+        out[CONSTRUCTOR_KEY] = value.ctor;
+      }
       for (const [key, child] of Object.entries(value.fields)) {
         out[key] = valueToJson(child);
       }
@@ -78,14 +115,18 @@ export function valueToJson(value: Value): Json {
       // A file/blob handle: expose the addressable metadata, not the bytes (fetch is a separate, async
       // download path). A semantic string blob would be materialised before reaching here.
       return {
-        kind: "ref",
+        [FILE_KEY]: value.blobId,
         semanticKind: value.semanticKind,
-        blobId: value.blobId,
         size: value.size,
+        hash: value.hash,
       };
     case "closure":
+      // A closure's captured scope id is meaningless outside the engine — it cannot leave as JSON data.
+      throw new Error(
+        "a closure value cannot cross the JSON boundary (it captures engine-local scope)",
+      );
     case "agent":
-      throw new Error(`a ${value.kind} value cannot cross the JSON boundary (it is not data)`);
+      return { [AGENT_KEY]: value.name };
   }
 }
 
@@ -122,7 +163,7 @@ export function valueEquals(left: Value, right: Value): boolean {
       return true;
     }
     case "record": {
-      if (right.kind !== "record") return false;
+      if (right.kind !== "record" || left.ctor !== right.ctor) return false;
       const leftEntries = Object.entries(left.fields);
       if (leftEntries.length !== Object.keys(right.fields).length) return false;
       for (const [key, leftValue] of leftEntries) {
@@ -139,27 +180,30 @@ export function valueEquals(left: Value, right: Value): boolean {
   }
 }
 
-/** The runtime-checkable tag a `T(pattern)` type filter narrows on (mirrors IR `TypeTag`). */
-export function valueTag(value: Value): TypeTag {
-  switch (value.kind) {
+/**
+ * Whether a value satisfies a `T(pattern)` type-filter tag (mirrors IR `TypeTag`). Subtyping is folded
+ * in: `number` accepts an `integer`; `string` accepts both an inline string and a semantic-string blob;
+ * `agent` accepts a closure or an agent reference.
+ */
+export function valueMatchesTag(value: Value, tag: TypeTag): boolean {
+  switch (tag) {
     case "null":
-      return "null";
+      return value.kind === "null";
     case "boolean":
-      return "boolean";
+      return value.kind === "boolean";
     case "integer":
-      return "integer";
+      return value.kind === "integer";
     case "number":
-      return "number";
+      return value.kind === "number" || value.kind === "integer";
     case "string":
-      return "string";
+      return value.kind === "string" || (value.kind === "ref" && value.semanticKind === "string");
+    case "file":
+      return value.kind === "ref" && value.semanticKind === "file";
     case "array":
-      return "array";
+      return value.kind === "array";
     case "record":
-      return "record";
-    case "ref":
-      return value.semanticKind === "file" ? "file" : "string";
-    case "closure":
+      return value.kind === "record";
     case "agent":
-      return "agent";
+      return value.kind === "closure" || value.kind === "agent";
   }
 }

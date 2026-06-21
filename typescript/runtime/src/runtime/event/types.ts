@@ -46,19 +46,16 @@ export type AskKind =
 export type ControlAskKind = Exclude<AskKind, { kind: "request" }>;
 
 export type InternalEvent =
-  | {
-      kind: "call";
-      callId: CallId;
-      blockId: BlockId;
-      scopeId: ScopeId;
-      parameters: Record<string, Value>;
-    }
-  // A child finished; deliver its value to the parent's `callId` slot (was `done`).
+  // Run a freshly-spawned thread's `create` step. The parent already built the thread object and seeded
+  // its scope; this just schedules the first step (kept an event so the queue, not the stack, drives it).
+  | { kind: "create"; thread: ThreadId }
+  // A child finished; deliver its value to the parent's `callId` slot.
   | { kind: "callAck"; target: ThreadId; callId: CallId; value: Value }
   | { kind: "cancel"; target: ThreadId }
   | { kind: "cancelAck"; target: ThreadId; callId: CallId }
-  // An ask bubbling up to the asker's immediate parent. `childCallId` identifies the originating child.
-  | { kind: "ask"; target: ThreadId; askId: AskId; ask: AskKind; childCallId: CallId }
+  // An ask bubbling up to its parent. `from` is the immediate sender (the asker, or a proxy re-raising
+  // a child's ask): it routes the eventual `askAck` back down, and names the child a handle/for unwinds.
+  | { kind: "ask"; target: ThreadId; from: ThreadId; askId: AskId; ask: AskKind }
   | { kind: "askAck"; target: ThreadId; askId: AskId; value: Value };
 
 // ─── External (inter-instance) ──────────────────────────────────────────────────────────────────
@@ -125,7 +122,7 @@ export function isFfiResult(message: ActorMessage): message is FfiResult {
 /** Type guard: is this an engine-internal event (vs an inter-instance one)? */
 export function isInternalEvent(event: EngineEvent): event is InternalEvent {
   switch (event.kind) {
-    case "call":
+    case "create":
     case "callAck":
     case "cancel":
     case "cancelAck":
