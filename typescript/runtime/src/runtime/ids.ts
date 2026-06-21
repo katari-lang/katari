@@ -25,6 +25,14 @@ export type EscalationId = Brand<string, "EscalationId">;
 export type RunId = Brand<string, "RunId">;
 export type BlobId = Brand<string, "BlobId">;
 
+/** Mint a fresh persistent UUID. The branded wrappers below keep the families distinct at the call site. */
+const newUuid = (): string => crypto.randomUUID();
+
+export const newInstanceId = (): InstanceId => newUuid() as InstanceId;
+export const newDelegationId = (): DelegationId => newUuid() as DelegationId;
+export const newEscalationId = (): EscalationId => newUuid() as EscalationId;
+export const newBlobId = (): BlobId => newUuid() as BlobId;
+
 /** Unique within one instance's thread tree. */
 export type ThreadId = Brand<number, "ThreadId">;
 /** Unique within a project's CORE-global scope store (scopes outlive any single instance). */
@@ -33,3 +41,10 @@ export type ScopeId = Brand<number, "ScopeId">;
 export type CallId = Brand<number, "CallId">;
 /** A child's handle on one outstanding upward ask, unique within an instance. */
 export type AskId = Brand<number, "AskId">;
+
+// Brand a monotonic counter value into its engine-local integer id. The counters live on the instance
+// (thread / call / ask) and the per-project store (scope); these are the single boundary casts.
+export const toThreadId = (value: number): ThreadId => value as ThreadId;
+export const toScopeId = (value: number): ScopeId => value as ScopeId;
+export const toCallId = (value: number): CallId => value as CallId;
+export const toAskId = (value: number): AskId => value as AskId;
