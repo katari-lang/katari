@@ -4,9 +4,15 @@
 
 import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
-import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
+import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import {
+  type ExternalRunner,
+  InProcessExternalRunner,
+  StubExternalRunner,
+} from "../src/runtime/external/runner.js";
+import { RuntimeHost } from "../src/runtime/host.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
@@ -30,7 +36,12 @@ function primitiveWrapper(agentId: number, leafId: number, inputVar: number, nam
   } as const;
 }
 
-function run(ir: IRModule, entry: string, argument: Value | null): Promise<Value> {
+function run(
+  ir: IRModule,
+  entry: string,
+  argument: Value | null,
+  external: ExternalRunner = new StubExternalRunner(),
+): Promise<Value> {
   const registry = new SnapshotRegistry();
   registry.set(SNAPSHOT, ir);
   const actor = new ProjectActor({
@@ -38,6 +49,7 @@ function run(ir: IRModule, entry: string, argument: Value | null): Promise<Value
     registry,
     prims: new PrimRegistry(),
     blobs: new InMemoryBlobStore(),
+    external,
     persistence: new InMemoryPersistence(),
   });
   return actor.startRun(createAgentName(entry), SNAPSHOT, argument);
@@ -237,5 +249,86 @@ describe("in-memory core", () => {
     await expect(
       run(ir, "classify", { kind: "record", fields: { n: { kind: "integer", value: 7 } } }),
     ).resolves.toEqual({ kind: "string", value: "other" });
+  });
+
+  test("suspends on an external (FFI) leaf and resumes from its completion", async () => {
+    // agent main() { return greet({ name: "world" }) }   (greet is an external agent — a child instance
+    // whose body is an ExternalThread that dispatches through the single ExternalRunner and suspends)
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 2, value: { kind: "string", value: "world" } },
+              { kind: "makeRecord", entries: [["name", 2]], output: 3 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("greet") },
+                argument: 3,
+                output: 4,
+              },
+              { kind: "exit", target: 0, value: 4 },
+            ],
+          },
+          parameters: { parameter: 1 },
+        },
+        // greet external agent + its external leaf body
+        6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        7: {
+          block: { kind: "external", key: "greet", input: 8 },
+          parameters: { parameter: 8 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("greet")]: 6,
+      },
+      names: {},
+    };
+
+    const external = new InProcessExternalRunner({
+      greet: (argument) => {
+        const name =
+          argument?.kind === "record" && argument.fields.name?.kind === "string"
+            ? argument.fields.name.value
+            : "stranger";
+        return { kind: "string", value: `Hello, ${name}` };
+      },
+    });
+
+    await expect(run(ir, "main", null, external)).resolves.toEqual({
+      kind: "string",
+      value: "Hello, world",
+    });
+  });
+
+  test("runs through the RuntimeHost composition root", async () => {
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: 2,
+            operations: [{ kind: "loadLiteral", output: 2, value: { kind: "integer", value: 42 } }],
+          },
+          parameters: { parameter: 1 },
+        },
+      },
+      entries: { [createAgentName("answer")]: 0 },
+      names: {},
+    };
+
+    const host = new RuntimeHost();
+    host.registerSnapshot(SNAPSHOT, ir);
+    await expect(host.startRun(PROJECT, createAgentName("answer"), SNAPSHOT, null)).resolves.toEqual({
+      kind: "integer",
+      value: 42,
+    });
   });
 });

@@ -12,8 +12,15 @@ import { drive } from "../engine/drive.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { createProjectStore } from "../engine/store.js";
 import type { Instance, ProjectStore } from "../engine/types.js";
-import type { ActorMessage, DelegateTarget, ExternalEvent, InternalEvent } from "../event/types.js";
+import type {
+  ActorMessage,
+  DelegateTarget,
+  ExternalEvent,
+  FfiResult,
+  InternalEvent,
+} from "../event/types.js";
 import { isFfiResult } from "../event/types.js";
+import type { ExternalRunner } from "../external/runner.js";
 import {
   type DelegationId,
   type InstanceId,
@@ -32,6 +39,7 @@ export interface ProjectActorDependencies {
   registry: SnapshotRegistry;
   prims: PrimRunner;
   blobs: BlobStore;
+  external: ExternalRunner;
   persistence: Persistence;
 }
 
@@ -40,6 +48,7 @@ export class ProjectActor {
   private readonly registry: SnapshotRegistry;
   private readonly prims: PrimRunner;
   private readonly blobs: BlobStore;
+  private readonly external: ExternalRunner;
   private readonly persistence: Persistence;
 
   private readonly store: ProjectStore = createProjectStore();
@@ -57,7 +66,10 @@ export class ProjectActor {
     this.registry = dependencies.registry;
     this.prims = dependencies.prims;
     this.blobs = dependencies.blobs;
+    this.external = dependencies.external;
     this.persistence = dependencies.persistence;
+    // FFI completions re-enter through the same serial mailbox as every other external message.
+    this.external.onResult((result) => this.feed(result));
   }
 
   /** Start a run: summon a root instance for `qualifiedName@snapshot` and resolve with its result. */
@@ -103,7 +115,8 @@ export class ProjectActor {
 
   private async handle(message: ActorMessage): Promise<void> {
     if (isFfiResult(message)) {
-      throw new Error("FFI completions are wired in the external (FFI) layer");
+      await this.onFfiResult(message);
+      return;
     }
     switch (message.kind) {
       case "delegate":
@@ -162,6 +175,25 @@ export class ProjectActor {
     ]);
   }
 
+  // ─── FFI completion ──────────────────────────────────────────────────────────────────────────
+
+  /** Resume the suspended `ExternalThread` an FFI call belongs to by acking its parent (the external
+   *  agent's AgentThread) with the result, which completes the call's instance and emits its delegateAck. */
+  private async onFfiResult(result: FfiResult): Promise<void> {
+    const instance = this.store.instances[result.instance];
+    if (instance === undefined) return; // its instance was torn down (cancelled) — drop the late result
+    const thread = instance.threads[result.thread];
+    if (thread === undefined || thread.kind !== "external") return;
+    if (thread.parent === null || thread.parentCallId === null) return;
+    delete instance.threads[thread.id];
+    // Error propagation (an FFI failure reaching the run as an error / escalation) is future work; for
+    // now a failed call resolves to null so the actor stays live rather than dropping the run.
+    const value: Value = result.kind === "ffiResult" ? result.value : { kind: "null" };
+    await this.runTurn(instance, [
+      { kind: "callAck", target: thread.parent, callId: thread.parentCallId, value },
+    ]);
+  }
+
   // ─── one instance turn ────────────────────────────────────────────────────────────────────────
 
   private async runTurn(instance: Instance, initial: InternalEvent[]): Promise<void> {
@@ -172,6 +204,7 @@ export class ProjectActor {
       ir: this.registry.access(instance.target.snapshot),
       prims: this.prims,
       blobs: this.blobs,
+      external: this.external,
     });
     ctx.buffers.internalQueue.push(...initial);
     await drive(ctx);

@@ -19,6 +19,7 @@ import { getBlock, spawnThread } from "./spawn.js";
 import { allocateCallId } from "./store.js";
 import type {
   AgentThread,
+  ExternalThread,
   ForThread,
   MatchThread,
   ParallelThread,
@@ -54,12 +55,14 @@ export async function dispatchCreate(ctx: StepContext, thread: Thread): Promise<
     case "for":
       createFor(ctx, thread);
       return;
+    case "external":
+      createExternal(ctx, thread);
+      return;
     case "delegate":
       // The outbound delegate was emitted by the spawning op; the proxy just waits for its delegateAck.
       return;
     case "handle":
     case "request":
-    case "external":
       throw notInThisLayer(thread.kind);
   }
 }
@@ -154,8 +157,12 @@ export function dispatchAskAck(
 
 export function dispatchCancel(ctx: StepContext, thread: Thread): void {
   // A delegate child owns a live child instance; tearing it down is the instance layer's terminate.
-  if (thread.kind === "delegate" || thread.kind === "external") {
+  if (thread.kind === "delegate") {
     throw notInThisLayer(thread.kind);
+  }
+  if (thread.kind === "external") {
+    // Abandon the in-flight FFI call; its result, if it still arrives, finds no thread and is dropped.
+    ctx.external.cancel(ctx.instance.id, thread.id);
   }
   dropDescendants(ctx, thread.id);
   if (thread.parent !== null && thread.parentCallId !== null) {
@@ -270,6 +277,24 @@ function createConstruct(ctx: StepContext, thread: Thread): void {
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
   const fields = argument.kind === "record" ? argument.fields : {};
   completeThread(ctx, thread, { kind: "record", fields, ctor: block.name });
+}
+
+// ─── external (FFI) leaf ──────────────────────────────────────────────────────────────────────
+
+/** Dispatch the external call through the single FFI abstraction and suspend. The thread stays `open`
+ *  (the durable in-flight record); its completion re-enters via the actor as an `ffiResult` that resumes
+ *  it (the actor acks this thread's parent with the result — see `ProjectActor`). */
+function createExternal(ctx: StepContext, thread: ExternalThread): void {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "external") throw new Error(`thread ${thread.id} is not an external block`);
+  const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? null;
+  ctx.external.dispatch({
+    projectId: ctx.projectId,
+    instance: ctx.instance.id,
+    thread: thread.id,
+    key: block.key,
+    argument,
+  });
 }
 
 // ─── match ──────────────────────────────────────────────────────────────────────────────────────
