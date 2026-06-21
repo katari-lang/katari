@@ -130,8 +130,8 @@ synthBlock block = do
   ((typedReturn, trailingType), typedStatements) <-
     walkStatements block.statements $ case block.returnExpression of
       Just expression -> do
-        (typedExpr, nt) <- synthExpression expression
-        pure (Just typedExpr, nt)
+        (typedValue, resultType) <- synthExpression expression
+        pure (Just typedValue, resultType)
       Nothing -> pure (Nothing, nullType)
   pure
     ( Block
@@ -190,27 +190,28 @@ walkStatements ::
   List (Statement Identified) ->
   Checker a ->
   Checker (a, List (Statement Typed))
-walkStatements [] continuation = do
-  result <- continuation
-  pure (result, [])
-walkStatements (statement : rest) continuation = case statement of
-  -- @let@ and a local @agent@ extend the scope of the remaining statements, so they own the recursion;
-  -- every other statement is a pass-through that types itself and cons-es onto the walked rest.
-  StatementLet letStmt -> runLetStatement letStmt rest continuation
-  StatementAgent agentDeclaration -> runLocalAgentStatement agentDeclaration rest continuation
-  StatementExpression expression -> passThrough (StatementExpression . fst <$> synthExpression expression)
-  StatementUse useStmt -> passThrough (StatementUse <$> handleUseStatement useStmt)
-  StatementReturn returnStmt -> passThrough (StatementReturn <$> checkReturnStatement returnStmt)
-  StatementForNext forNextStmt -> passThrough (StatementForNext <$> checkForNextStatement forNextStmt)
-  StatementForBreak forBreakStmt -> passThrough (StatementForBreak <$> checkForBreakStatement forBreakStmt)
-  StatementBreak breakStmt -> passThrough (StatementBreak <$> checkBreakStatement breakStmt)
-  StatementNext nextStmt -> passThrough (StatementNext <$> checkNextStatement nextStmt)
-  StatementError s -> passThrough (pure (StatementError s))
-  where
-    passThrough makeTyped = do
-      typedStatement <- makeTyped
-      (result, restTyped) <- walkStatements rest continuation
-      pure (result, typedStatement : restTyped)
+walkStatements statements continuation = case statements of
+  [] -> do
+    result <- continuation
+    pure (result, [])
+  statement : rest ->
+    -- @let@ and a local @agent@ extend the scope of the remaining statements, so they own the recursion;
+    -- every other statement is a pass-through that types itself and cons-es onto the walked rest.
+    let passThrough makeTyped = do
+          typedStatement <- makeTyped
+          (result, restTyped) <- walkStatements rest continuation
+          pure (result, typedStatement : restTyped)
+     in case statement of
+          StatementLet letStmt -> runLetStatement letStmt rest continuation
+          StatementAgent agentDeclaration -> runLocalAgentStatement agentDeclaration rest continuation
+          StatementExpression expression -> passThrough (StatementExpression . fst <$> synthExpression expression)
+          StatementUse useStmt -> passThrough (StatementUse <$> handleUseStatement useStmt)
+          StatementReturn returnStmt -> passThrough (StatementReturn <$> checkReturnStatement returnStmt)
+          StatementForNext forNextStmt -> passThrough (StatementForNext <$> checkForNextStatement forNextStmt)
+          StatementForBreak forBreakStmt -> passThrough (StatementForBreak <$> checkForBreakStatement forBreakStmt)
+          StatementBreak breakStmt -> passThrough (StatementBreak <$> checkBreakStatement breakStmt)
+          StatementNext nextStmt -> passThrough (StatementNext <$> checkNextStatement nextStmt)
+          StatementError s -> passThrough (pure (StatementError s))
 
 -- | A @let@ binding: compute the value's type (against an annotation if present), bind, walk the
 -- rest in the extended scope, and produce the typed let statement.
@@ -337,8 +338,8 @@ literalPatternCover = \case
 synthVariableExpression :: VariableExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthVariableExpression expression = do
   scheme <- lookupScheme expression.variableReference.resolution
-  nt <- instantiateBare expression.sourceSpan scheme
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  resultType <- instantiateBare expression.sourceSpan scheme
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionVariable
       VariableExpression
         { name = expression.name,
@@ -352,8 +353,8 @@ synthQualifiedReferenceExpression ::
   Checker (Expression Typed, NormalizedType)
 synthQualifiedReferenceExpression expression = do
   scheme <- lookupScheme expression.variableReference.resolution
-  nt <- instantiateBare expression.sourceSpan scheme
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  resultType <- instantiateBare expression.sourceSpan scheme
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionQualifiedReference
       QualifiedReferenceExpression
         { moduleQualifier = retagModuleQualifier expression.moduleQualifier,
@@ -367,12 +368,12 @@ synthTupleExpression :: TupleExpression Identified -> Checker (Expression Typed,
 synthTupleExpression expression = do
   results <- traverse synthExpression expression.elements
   let (typedElements, elementTypes) = unzip results
-      nt =
+      resultType =
         layeredOf
           neverLayer
             { sequenceLayer = Just NormalizedSequence {items = elementTypes, rest = bottomType}
             }
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionTuple
       TupleExpression
         { parallel = expression.parallel,
@@ -386,8 +387,8 @@ synthRecordExpression expression = do
   -- Duplicate field labels are rejected in the identifier phase (K2003), so keying the field map by
   -- name here drops nothing.
   entries <- traverse synthEntry expression.entries
-  let nt = namedObjectType [(name, fieldType) | (_, name, fieldType) <- entries]
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  let resultType = namedObjectType [(name, fieldType) | (_, name, fieldType) <- entries]
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionRecord
       RecordExpression
         { entries = [typedEntry | (typedEntry, _, _) <- entries],
@@ -410,13 +411,13 @@ synthIfExpression expression = do
   (typedThen, thenType) <- processObserved expression.sourceSpan conditionAttribute (synthBlock expression.thenBlock)
   (typedElse, elseType) <- case expression.elseBlock of
     Just block -> do
-      (b, t) <- processObserved expression.sourceSpan conditionAttribute (synthBlock block)
-      pure (Just b, t)
+      (typedBlock, blockType) <- processObserved expression.sourceSpan conditionAttribute (synthBlock block)
+      pure (Just typedBlock, blockType)
     -- A missing else yields @null@ when the condition is false; that branch is pure, so it too carries
     -- the condition's world.
     Nothing -> pure (Nothing, liftByAttribute conditionAttribute nullType)
-  nt <- runNormalizer expression.sourceSpan (union thenType elseType)
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  resultType <- runNormalizer expression.sourceSpan (union thenType elseType)
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionIf
       IfExpression
         { condition = typedCondition,
@@ -428,8 +429,8 @@ synthIfExpression expression = do
 
 synthBlockExpression :: BlockExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthBlockExpression expression = do
-  (typedBlock, nt) <- synthBlock expression.block
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  (typedBlock, resultType) <- synthBlock expression.block
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionBlock
       BlockExpression
         { block = typedBlock,
@@ -443,12 +444,12 @@ synthFieldAccessExpression ::
 synthFieldAccessExpression expression = do
   (typedObject, objectType) <- synthExpression expression.object
   maybeField <- maybeReadField expression.sourceSpan expression.fieldName objectType
-  nt <- case maybeField of
+  resultType <- case maybeField of
     Just fieldType -> pure fieldType
     Nothing -> do
       reportExpectedShape expression.sourceSpan "an object" objectType
       pure bottomType
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionFieldAccess
       FieldAccessExpression
         { object = typedObject,
@@ -462,20 +463,14 @@ synthFieldAccessExpression expression = do
 -- bounded generic reads at the bound). Yields 'Nothing' when the raised value has no object / data
 -- shape to read from. Shared by field-access expressions and record-pattern field scrutinees.
 maybeReadField :: SourceSpan -> Text -> NormalizedType -> Checker (Maybe NormalizedType)
-maybeReadField sourceSpan fieldName valueType = do
+maybeReadField sourceSpan fieldName valueType =
   -- A field read requires the value to be solely object / data shaped: a @{x: T} | null@ (or
   -- @… | number@) value is not read through, so the dropped @null@ can no longer surface as a
-  -- non-null field type.
-  raised <- soleLayer sourceSpan (Set.fromList [ObjectKind, DataKind]) valueType
-  case raised of
-    Just (attribute, layer)
-      | isJust layer.objectLayer || not (Map.null layer.dataLayer) -> do
-          fieldType <- fieldOfLayer sourceSpan fieldName layer
-          -- A field is observed through its container, so the container's own attribute joins the
-          -- field's: reading @.x@ off a value private at the handle yields a private field (no
-          -- laundering). Nested reads compose — each step lifts by the immediate container's attribute.
-          pure (Just (liftByAttribute attribute fieldType))
-    _ -> pure Nothing
+  -- non-null field type. The field type is lifted by the container's handle attribute in 'withSoleLayer'.
+  withSoleLayer sourceSpan (Set.fromList [ObjectKind, DataKind]) valueType $ \layer ->
+    if isJust layer.objectLayer || not (Map.null layer.dataLayer)
+      then Just <$> fieldOfLayer sourceSpan fieldName layer
+      else pure Nothing
 
 -- | The type of a field read from a value's layer: the union over its structural object (if any) and
 -- every nominal data type it may be (each data type's constructor object, instantiated). Subtyping
@@ -710,6 +705,27 @@ soleLayer sourceSpan allowed normalizedType = do
     Just (attribute, layer) | inhabitedKinds layer `Set.isSubsetOf` allowed -> Just (attribute, layer)
     _ -> Nothing
 
+-- | Read a single interior out of a value through exactly one structural shape, /lifting/ the projected
+-- interior by the value's handle attribute. The single home of the "observe an interior through its
+-- container" lift, so a strict single-value read cannot forget it: a field / element read off a value
+-- private at the handle yields a private interior (no laundering), and nested reads compose because each
+-- step lifts by the immediate container's attribute. The value must be solely one of @allowed@
+-- ('soleLayer'); @project@ then reads the matched layer, returning 'Nothing' when the layer does not
+-- carry what it needs. The two readers that do not go through here are deliberate: 'extractFunction'
+-- hands the raw handle attribute to 'applyAgent' (which decides cross-world lifting itself), and
+-- 'extractTupleElementTypes' lifts per element (a list, not a single value).
+withSoleLayer ::
+  SourceSpan ->
+  Set.Set LayerKind ->
+  NormalizedType ->
+  (LayeredType -> Checker (Maybe NormalizedType)) ->
+  Checker (Maybe NormalizedType)
+withSoleLayer sourceSpan allowed value project = do
+  raised <- soleLayer sourceSpan allowed value
+  case raised of
+    Just (attribute, layer) -> fmap (liftByAttribute attribute) <$> project layer
+    Nothing -> pure Nothing
+
 -- | View a value as a callable function, raising its generics to their bounds first. Callable exactly
 -- when its raised base is solely a function layer ('soleLayer' rejects a value mixed with @null@ or any
 -- other shape); every bound has been folded into the base, so the residual generics set is ignored.
@@ -835,22 +851,32 @@ applyGenericValue sourceSpan scheme argumentObject argumentAttribute = do
       reportExpectedShape sourceSpan "a callable agent" scheme.valueType
       pure bottomType
     Just openFunction -> do
-      let flexible = Map.keysSet registry
-      -- Propose: match the arguments against the open parameter type, collecting bounds. This is a
-      -- separate function from 'subtype' and emits no diagnostics.
-      constraints <- runNormalizer sourceSpan (collectConstraints flexible argumentObject openFunction.argumentType)
-      solveResult <- runNormalizer sourceSpan (solveConstraints registry constraints)
-      reportUninferredGenerics sourceSpan registry solveResult.uninferred
-      -- Dispose: substitute the solution into the original scheme and check it with the trusted
-      -- relation (argument compatibility via 'applyAgent', plus the declared @extends@ bounds).
+      -- Infer the type arguments from the argument against the open parameter, then substitute the
+      -- solution into the open scheme and dispose by applying it through the trusted 'applyAgent'.
+      solveResult <- inferGenericArguments sourceSpan registry argumentObject openFunction.argumentType
       solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
-      checkInferredBounds sourceSpan registry solveResult
       maybeFunction <- extractFunction sourceSpan solvedType
       case maybeFunction of
         Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
         Nothing -> do
           reportExpectedShape sourceSpan "a callable agent" solvedType
           pure bottomType
+
+-- | The propose / solve / dispose core of generic-argument inference, shared by a generic call
+-- ('applyGenericValue') and a request handler ('inferRequestHandlerSubstitution'). Given the
+-- metavariable @registry@ for an already-instantiated scheme and the open parameter type the argument
+-- must satisfy, it PROPOSES candidate lower bounds by matching @argumentObject@ against
+-- @openParameterType@ (the error-free 'collectConstraints' pass, never the trusted 'subtype'), SOLVES,
+-- reports any un-inferrable parameter (K3016), and DISPOSES the solution against each parameter's
+-- declared @extends@ bound (K3001) via the shared 'checkInferredBounds'. The caller substitutes
+-- 'solveResult.substitution' wherever it needs the concrete result.
+inferGenericArguments :: SourceSpan -> Registry -> NormalizedType -> NormalizedType -> Checker SolveResult
+inferGenericArguments sourceSpan registry argumentObject openParameterType = do
+  constraints <- runNormalizer sourceSpan (collectConstraints (Map.keysSet registry) argumentObject openParameterType)
+  solveResult <- runNormalizer sourceSpan (solveConstraints registry constraints)
+  reportUninferredGenerics sourceSpan registry solveResult.uninferred
+  checkInferredBounds sourceSpan registry solveResult
+  pure solveResult
 
 -- | The function layer of a type whose base is exactly a function (a scheme body opened to
 -- metavariables), without any bound raising — the open callee is a plain agent type, not a bounded
@@ -1299,10 +1325,8 @@ narrowToFilter sourceSpan tag scrutinee = do
 -- not @unknown@.
 filterSlot :: SourceSpan -> TypeFilter -> LayeredType -> Checker NormalizedType
 filterSlot sourceSpan tag layer = case tag of
-  FilterArray ->
-    pure (maybe (filterShape FilterArray) (\sequence' -> layeredOf neverLayer {sequenceLayer = Just sequence'}) layer.sequenceLayer)
-  FilterAgent ->
-    pure (maybe (filterShape FilterAgent) (\function -> layeredOf neverLayer {functionLayer = Just function}) layer.functionLayer)
+  FilterArray -> pure (projectSlot FilterArray layer.sequenceLayer (\sequence' -> neverLayer {sequenceLayer = Just sequence'}))
+  FilterAgent -> pure (projectSlot FilterAgent layer.functionLayer (\function -> neverLayer {functionLayer = Just function}))
   FilterRecord -> do
     -- The record view of the value: its structural object, plus each nominal data type's read shape.
     dataViews <- traverse (fmap objectAsType . dataConstructorObject sourceSpan) (Map.toList layer.dataLayer)
@@ -1310,6 +1334,10 @@ filterSlot sourceSpan tag layer = case tag of
       [] -> pure (filterShape FilterRecord)
       views -> foldM (\accumulated view -> runNormalizer sourceSpan (union accumulated view)) bottomType views
   _ -> pure (filterShape tag)
+  where
+    -- A structural tag projects the scrutinee onto only its matching slot (keeping the nested types); a
+    -- slot the scrutinee lacks — a refuted arm — falls back to the tag's most-general shape ('filterShape').
+    projectSlot missingTag slot build = maybe (filterShape missingTag) (layeredOf . build) slot
 
 ------------------------------------------------------------------------------------------------
 -- Match expressions
@@ -1324,14 +1352,14 @@ synthMatchExpression expression = do
   -- @scrutinee <: ⋃ covers@. Folding from 'bottomType' makes an empty match (covers union to never)
   -- fail this check for any inhabited scrutinee, with no special case.
   unionCover <- foldM combineUnion bottomType [cover | (cover, _, _) <- results]
-  nt <- foldM combineUnion bottomType [body | (_, body, _) <- results]
+  resultType <- foldM combineUnion bottomType [body | (_, body, _) <- results]
   -- Exhaustiveness is about base-type coverage, not observation: the covers are built public, so
   -- compare under a private world (where every attribute comparison collapses) to avoid spuriously
   -- rejecting a private — or otherwise attributed — scrutinee. The observation rules still apply to the
   -- arm bodies (via 'processObserved'), so ignoring attributes here is sound.
   withWorld topAttribute $ runNormalizer expression.sourceSpan (subtype scrutineeType unionCover)
   let typedCases = [arm | (_, _, arm) <- results]
-  typedExpression expression.sourceSpan nt $ \semantic ->
+  typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionMatch
       MatchExpression
         { subject = typedSubject,
@@ -1401,21 +1429,12 @@ synthForExpression expression = do
         -- @array@'s "present then this type" tail already captures (no null is unioned in).
         let arrayType = arrayOf inferredNextType
         -- The for's normal result is its array (or the then clause's value); a `break` short-circuits
-        -- with its own value, so the result type also includes every break value.
-        (typedThen, normalType) <- case expression.thenClause of
-          Nothing -> pure (Nothing, arrayType)
-          Just thenClause -> do
-            (typedBinder, thenBindings) <- checkThenBinder arrayType thenClause.binder
-            -- The `then` finalizer runs once after the loop and permits no jumps: a `break` / `next` /
-            -- `return` inside it has no target here (in particular it cannot leak into an enclosing `for`).
-            (typedThenBody, thenBodyType) <- withParameters thenBindings (withoutJumpTargets (synthBlock thenClause.body))
-            let typedThen =
-                  ThenClause
-                    { binder = typedBinder,
-                      body = typedThenBody,
-                      sourceSpan = thenClause.sourceSpan
-                    }
-            pure (Just typedThen, thenBodyType)
+        -- with its own value, so the result type also includes every break value. The then finalizer is
+        -- walked by the shared 'walkThenClause'; its effect is re-emitted into the loop's observed scope
+        -- (where every other loop effect lands), keeping for / handler then-handling on one path.
+        (thenEffect, maybeThenResult, typedThen) <- walkThenClause arrayType expression.thenClause
+        emitEffect expression.sourceSpan thenEffect
+        let normalType = fromMaybe arrayType maybeThenResult
         finalType <- runNormalizer expression.sourceSpan (union normalType inferredBreakType)
         pure ((typedBody, typedThen), finalType)
   typedExpression expression.sourceSpan finalType $ \semantic ->
@@ -1441,16 +1460,17 @@ synthForExpression expression = do
 extractIterableElementType :: SourceSpan -> NormalizedType -> Checker NormalizedType
 extractIterableElementType sourceSpan source = do
   -- Iterating requires the source to be solely a sequence: a @array[T] | null@ source is rejected, so
-  -- the null possibility is no longer silently dropped from the element type.
-  raised <- soleLayer sourceSpan (Set.singleton SequenceKind) source
-  case raised of
-    Just (attribute, layer)
-      | Just normalizedSequence <- layer.sequenceLayer ->
-          -- Iterating observes each element through the container's handle, so the element type is
-          -- lifted by that handle attribute: a private array yields private elements (the leak when this
-          -- was dropped). No @null@ is added — iteration visits the elements that exist.
-          liftByAttribute attribute <$> foldM combineUnion bottomType (normalizedSequence.items <> [normalizedSequence.rest])
-    _ -> do
+  -- the null possibility is no longer silently dropped from the element type. The element type is lifted
+  -- by the container's handle attribute in 'withSoleLayer' (a private array yields private elements); no
+  -- @null@ is added — iteration visits the elements that exist.
+  maybeElement <-
+    withSoleLayer sourceSpan (Set.singleton SequenceKind) source $ \layer ->
+      traverse
+        (\normalizedSequence -> foldM combineUnion bottomType (normalizedSequence.items <> [normalizedSequence.rest]))
+        layer.sequenceLayer
+  case maybeElement of
+    Just element -> pure element
+    Nothing -> do
       reportExpectedShape sourceSpan "a sequence (array or tuple)" source
       pure bottomType
   where
@@ -1464,10 +1484,11 @@ withVarBindingsTyped ::
   Checker (List (VariableBinding Typed), a)
 withVarBindingsTyped bindings action = go bindings []
   where
-    go [] acc = do
-      result <- action
-      pure (reverse acc, result)
-    go (b : rest) acc = withVarBindingTyped b $ \typedB -> go rest (typedB : acc)
+    go remaining accumulated = case remaining of
+      [] -> do
+        result <- action
+        pure (reverse accumulated, result)
+      binding : rest -> withVarBindingTyped binding $ \typedBinding -> go rest (typedBinding : accumulated)
 
 withVarBindingTyped ::
   VariableBinding Identified ->
@@ -1574,7 +1595,7 @@ checkHandlerScheme expression = do
         -- Both the body tails and the explicit breaks are values the handler returns without resuming,
         -- so they bypass @then@ and union directly into the result.
         breakUnion <- runNormalizer expression.sourceSpan (union tailResults breakResults)
-        (thenEffect, maybeThenResult, typedThen) <- walkHandlerThenClause resultVariable expression.thenClause
+        (thenEffect, maybeThenResult, typedThen) <- walkThenClause resultVariable expression.thenClause
         totalBodyEffect <- runNormalizer expression.sourceSpan (union handlerBodyEffect thenEffect)
         pure
           ( [(name, requestArguments) | (name, requestArguments, _) <- results],
@@ -1656,24 +1677,25 @@ checkThenBinder matchedType = \case
     (typedPattern, _, bindings) <- checkPattern binder matchedType
     pure (Just typedPattern, bindings)
 
--- | Walk a handler's @then@ finalizer: its binder matches the handler's normal result @R@ (the value
--- the loop produces), and its body freely synthesizes the transformed result @R'@. Returns the body's
--- inferred effect (the caller bounds it by @E@ for an explicit handler, or unions it into the inferred
--- @E@), the synthesized @R'@ (so the caller can make it the handler's result), and the typed clause.
--- Walked inside the handler's @var@ state scope (the finalizer reads the accumulated state).
-walkHandlerThenClause ::
+-- | Walk a @then@ finalizer — a @for@'s or a @handler@'s, the single home of the rule. Its binder
+-- matches @matchedType@ (the value the construct produces before @then@: a @for@'s result array, a
+-- handler's result @R@), and its body freely synthesizes the transformed result. Returns the body's
+-- inferred effect (the caller folds it into the construct's effect — a handler unions it into @E@, a
+-- @for@ re-emits it into its enclosing observed scope), the synthesized result (so the caller can make
+-- it the construct's result), and the typed clause. The body is walked jumpless: the finalizer runs once
+-- after the construct, so a @break@ / @next@ / @return@ inside has no target and is reported misplaced.
+-- Walked inside the construct's @var@ state scope (the finalizer reads the accumulated state).
+walkThenClause ::
   NormalizedType ->
   Maybe (ThenClause Identified) ->
   Checker (NormalizedEffect, Maybe NormalizedType, Maybe (ThenClause Typed))
-walkHandlerThenClause binderType = \case
+walkThenClause matchedType = \case
   Nothing -> pure (bottomEffect, Nothing, Nothing)
   Just thenClause -> do
-    (typedBinder, thenBindings) <- checkThenBinder binderType thenClause.binder
+    (typedBinder, thenBindings) <- checkThenBinder matchedType thenClause.binder
     (thenEffect, (typedBody, thenResult)) <-
       withEffectInference $
         withParameters thenBindings $
-          -- The `then` finalizer runs once after the handler and permits no jumps: a `break` / `next` /
-          -- `return` inside it has no target here and is reported misplaced.
           withoutJumpTargets (synthBlock thenClause.body)
     pure (thenEffect, Just thenResult, Just ThenClause {binder = typedBinder, body = typedBody, sourceSpan = thenClause.sourceSpan})
 
@@ -1786,13 +1808,9 @@ inferRequestHandlerSubstitution sourceSpan requestInfo paramObject = do
   (toMetavar, registry) <- instantiateToMetavars sourceSpan requestInfo.genericParameters
   openParam <- runNormalizer sourceSpan (substituteType toMetavar requestInfo.parameterType)
   -- The request's parameter values must be accepted by the handler's parameters; matching the handler
-  -- parameter object against the open request parameter gives each request generic a lower bound.
-  constraints <- runNormalizer sourceSpan (collectConstraints (Map.keysSet registry) paramObject openParam)
-  solveResult <- runNormalizer sourceSpan (solveConstraints registry constraints)
-  reportUninferredGenerics sourceSpan registry solveResult.uninferred
-  -- Dispose against the declared @extends@ bounds, the same as every other application site, so an
-  -- inferred argument out of its bound is rejected (it was silently accepted before this check).
-  checkInferredBounds sourceSpan registry solveResult
+  -- parameter object against the open request parameter gives each request generic a lower bound (the
+  -- same propose / solve / dispose a generic call runs).
+  solveResult <- inferGenericArguments sourceSpan registry paramObject openParam
   traverse (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution) toMetavar
 
 buildGenericSubstitution ::

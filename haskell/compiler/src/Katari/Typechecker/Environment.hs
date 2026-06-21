@@ -424,9 +424,9 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
 
     -- Normalize a declaration's collected @extends@ bounds in @environment@ and stamp each onto its
     -- parameters' 'upperBound'; an unbounded or failed-to-elaborate parameter keeps 'Nothing'.
-    stampBoundsIn environment qualifiedName sourceSpan parameters =
+    stampBoundsIn environment' qualifiedName sourceSpan parameters =
       let semanticBounds = Map.mapMaybe id (Map.findWithDefault mempty qualifiedName shapes.boundShapes)
-          (normalizedBounds, diagnostics) = runNormalize environment sourceSpan (traverse normalizeGenericArgument semanticBounds)
+          (normalizedBounds, diagnostics) = runNormalize environment' sourceSpan (traverse normalizeGenericArgument semanticBounds)
        in (parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}, diagnostics)
 
     -- First pass: stamp bounds against the variance-only environment. A bound's normalized /value/ does

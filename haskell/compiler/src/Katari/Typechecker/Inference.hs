@@ -81,32 +81,16 @@ metavarKinded kind metavar = case kind of
 -- Constraints
 ------------------------------------------------------------------------------------------------
 
--- | The lower and upper bounds collected for one metavariable. A lower bound comes from a value
--- flowing INTO the variable (the variable appears as a supertype: @actual <: M@); an upper bound from
--- the variable flowing into something (@M <: expected@). The covariant solution is the join of the
--- lowers.
---
--- NOTE: 'uppers' is collected (a metavariable reached through a contravariant position takes an upper
--- bound) but not yet consumed by 'solveConstraints', which solves every variable from its lowers. It is
--- kept for a future solver that bounds a contravariantly-occurring variable from above; until then such
--- a variable is reported un-inferrable (K3016) and the user supplies it explicitly.
-data BoundSet a = BoundSet
-  { lowers :: List a,
-    uppers :: List a
-  }
-  deriving (Eq, Show)
-
-instance Semigroup (BoundSet a) where
-  left <> right = BoundSet {lowers = left.lowers <> right.lowers, uppers = left.uppers <> right.uppers}
-
-instance Monoid (BoundSet a) where
-  mempty = BoundSet {lowers = [], uppers = []}
-
--- | All bounds collected during one /propose/ pass, per kind. v1 populates only 'typeBounds'.
+-- | The lower bounds collected for the metavariables of each kind. A lower bound comes from a value
+-- flowing INTO a variable (the variable appears as a supertype: @actual <: M@); the covariant solution
+-- is the join of the lowers. Only lowers are collected: a variable reached solely through a
+-- contravariant position has none and is reported un-inferrable (K3016) for the user to supply
+-- explicitly — the v1 inference is from the structural match of an argument against a parameter, which
+-- only ever bounds a variable from below.
 data Constraints = Constraints
-  { typeBounds :: Map GenericId (BoundSet NormalizedType),
-    effectBounds :: Map GenericId (BoundSet NormalizedEffect),
-    attributeBounds :: Map GenericId (BoundSet NormalizedAttribute)
+  { typeBounds :: Map GenericId (List NormalizedType),
+    effectBounds :: Map GenericId (List NormalizedEffect),
+    attributeBounds :: Map GenericId (List NormalizedAttribute)
   }
   deriving (Eq, Show)
 
@@ -122,22 +106,13 @@ instance Monoid Constraints where
   mempty = Constraints {typeBounds = mempty, effectBounds = mempty, attributeBounds = mempty}
 
 lowerType :: GenericId -> NormalizedType -> Constraints
-lowerType metavar normalizedType = mempty {typeBounds = Map.singleton metavar BoundSet {lowers = [normalizedType], uppers = []}}
-
-upperType :: GenericId -> NormalizedType -> Constraints
-upperType metavar normalizedType = mempty {typeBounds = Map.singleton metavar BoundSet {lowers = [], uppers = [normalizedType]}}
+lowerType metavar normalizedType = mempty {typeBounds = Map.singleton metavar [normalizedType]}
 
 lowerEffect :: GenericId -> NormalizedEffect -> Constraints
-lowerEffect metavar effect = mempty {effectBounds = Map.singleton metavar BoundSet {lowers = [effect], uppers = []}}
-
-upperEffect :: GenericId -> NormalizedEffect -> Constraints
-upperEffect metavar effect = mempty {effectBounds = Map.singleton metavar BoundSet {lowers = [], uppers = [effect]}}
+lowerEffect metavar effect = mempty {effectBounds = Map.singleton metavar [effect]}
 
 lowerAttribute :: GenericId -> NormalizedAttribute -> Constraints
-lowerAttribute metavar attribute = mempty {attributeBounds = Map.singleton metavar BoundSet {lowers = [attribute], uppers = []}}
-
-upperAttribute :: GenericId -> NormalizedAttribute -> Constraints
-upperAttribute metavar attribute = mempty {attributeBounds = Map.singleton metavar BoundSet {lowers = [], uppers = [attribute]}}
+lowerAttribute metavar attribute = mempty {attributeBounds = Map.singleton metavar [attribute]}
 
 ------------------------------------------------------------------------------------------------
 -- Propose: collect constraints by a variance-directed structural match
@@ -188,7 +163,6 @@ asAttributeMetavar flexible attribute
 collectEffectConstraints :: Set GenericId -> NormalizedEffect -> NormalizedEffect -> Constraints
 collectEffectConstraints flexible actual parameter
   | Just metavar <- asEffectMetavar flexible parameter = lowerEffect metavar actual
-  | Just metavar <- asEffectMetavar flexible actual = upperEffect metavar parameter
   | otherwise = case parameter of
       NormalizedEffectRow parameterRow ->
         let concreteKeys = Map.keysSet parameterRow.request
@@ -201,7 +175,6 @@ collectEffectConstraints flexible actual parameter
 collectAttributeConstraints :: Set GenericId -> NormalizedAttribute -> NormalizedAttribute -> Constraints
 collectAttributeConstraints flexible actual parameter
   | Just metavar <- asAttributeMetavar flexible parameter = lowerAttribute metavar actual
-  | Just metavar <- asAttributeMetavar flexible actual = upperAttribute metavar parameter
   | otherwise = mempty
 
 -- | Collect the constraints under which @actual <: parameter@ could hold, recording a bound for every
@@ -214,7 +187,6 @@ collectConstraints flexible = goType
   where
     goType actual parameter
       | Just metavar <- asTypeMetavar flexible parameter = pure (lowerType metavar actual)
-      | Just metavar <- asTypeMetavar flexible actual = pure (upperType metavar parameter)
       | otherwise = do
           -- A node also carries an attribute; collect any attribute-metavariable bound there too.
           let attributeConstraints = collectAttributeConstraints flexible actual.attribute parameter.attribute
@@ -321,15 +293,14 @@ deepGenerics normalizedType =
 -- in a cycle) are reported un-inferrable and given a recovery value.
 solveConstraints :: Registry -> Constraints -> Normalizer SolveResult
 solveConstraints registry constraints = do
-  let typeMetavars = [metavar | (metavar, info) <- Map.toList registry, info.kind == GenericKindType]
-      effectMetavars = [metavar | (metavar, info) <- Map.toList registry, info.kind == GenericKindEffect]
-      attributeMetavars = [metavar | (metavar, info) <- Map.toList registry, info.kind == GenericKindAttribute]
-      flexible = Map.keysSet registry
-      lowersOf metavar = maybe [] (.lowers) (Map.lookup metavar constraints.typeBounds)
-  solvedTypes <- fixpoint flexible (length typeMetavars) lowersOf typeMetavars Map.empty
+  let metavarsOfKind kind = [metavar | (metavar, info) <- Map.toList registry, info.kind == kind]
+      typeMetavars = metavarsOfKind GenericKindType
+      typeMetavarSet = Set.fromList typeMetavars
+      typeLowersOf metavar = Map.findWithDefault [] metavar constraints.typeBounds
+  solvedTypes <- fixpoint typeMetavarSet (length typeMetavars) typeLowersOf typeMetavars Map.empty
   let typeSubstitution = Map.map NormalizedKindedTypeType solvedTypes
-  solvedEffects <- foldM (solveEffect typeSubstitution) Map.empty effectMetavars
-  solvedAttributes <- foldM solveAttribute Map.empty attributeMetavars
+  solvedEffects <- foldM (solveEffect typeSubstitution) Map.empty (metavarsOfKind GenericKindEffect)
+  solvedAttributes <- foldM solveAttribute Map.empty (metavarsOfKind GenericKindAttribute)
   let solvedSubstitution = typeSubstitution <> solvedEffects <> solvedAttributes
       unresolved = [metavar | metavar <- Map.keys registry, not (Map.member metavar solvedSubstitution)]
   recoveries <- traverse (\metavar -> (,) metavar <$> recover solvedSubstitution metavar) unresolved
@@ -340,33 +311,35 @@ solveConstraints registry constraints = do
       }
   where
     solveEffect typeSubstitution solved metavar =
-      case maybe [] (.lowers) (Map.lookup metavar constraints.effectBounds) of
+      case Map.findWithDefault [] metavar constraints.effectBounds of
         [] -> pure solved
         lowers -> do
           substituted <- traverse (substituteEffect typeSubstitution) lowers
           joined <- foldM union bottomEffect substituted
           pure (Map.insert metavar (NormalizedKindedTypeEffect joined) solved)
     solveAttribute solved metavar =
-      case maybe [] (.lowers) (Map.lookup metavar constraints.attributeBounds) of
+      case Map.findWithDefault [] metavar constraints.attributeBounds of
         [] -> pure solved
         lowers -> do
           joined <- foldM union bottomAttribute lowers
           pure (Map.insert metavar (NormalizedKindedTypeAttribute joined) solved)
-    -- One round substitutes the already-solved metavariables into each unsolved variable's lower
-    -- bounds; a variable whose substituted lowers are free of flexible metavariables is solved to
-    -- their join. Repeats while progress is made, bounded by the variable count (no cycle loops).
-    fixpoint flexible fuel lowersOf metavars solved
+    -- One round substitutes the already-solved type metavariables into each unsolved variable's lower
+    -- bounds; a variable whose substituted lowers no longer mention an unsolved type metavariable is
+    -- solved to their join. Repeats while progress is made, bounded by the variable count (no cycle
+    -- loops). Only an unsolved /type/ metavariable blocks a solution — an effect / attribute
+    -- metavariable is solved in its own later pass, so it must not hold a type variable back here.
+    fixpoint typeMetavarSet fuel lowersOf metavars solved
       | fuel <= 0 = pure solved
       | otherwise = do
-          (solved', changed) <- foldM (tryOne flexible lowersOf) (solved, False) metavars
-          if changed then fixpoint flexible (fuel - 1) lowersOf metavars solved' else pure solved
-    tryOne flexible lowersOf (solved, changed) metavar
+          (solved', changed) <- foldM (tryOne typeMetavarSet lowersOf) (solved, False) metavars
+          if changed then fixpoint typeMetavarSet (fuel - 1) lowersOf metavars solved' else pure solved
+    tryOne typeMetavarSet lowersOf (solved, changed) metavar
       | Map.member metavar solved = pure (solved, changed)
       | otherwise = case lowersOf metavar of
           [] -> pure (solved, changed)
           lowers -> do
             substituted <- traverse (substituteType (Map.map NormalizedKindedTypeType solved)) lowers
-            let residual = Set.intersection flexible (Set.unions (map deepGenerics substituted))
+            let residual = Set.intersection typeMetavarSet (Set.unions (map deepGenerics substituted))
             if Set.null residual
               then do
                 joined <- foldM union bottomType substituted

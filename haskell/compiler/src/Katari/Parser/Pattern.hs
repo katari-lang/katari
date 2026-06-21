@@ -241,7 +241,7 @@ parameterBinding = do
 -- | The span end of a binder, for the enclosing 'ParameterBinding' span.
 binderEndSpan :: Located Text -> Binder Parsed -> SourceSpan
 binderEndSpan bindingLabel = \case
-  BindDestructure pattern' -> sourceSpanOf pattern'
+  BindDestructure parsedPattern -> sourceSpanOf parsedPattern
   BindVariable _ typeAnnotation defaultValue -> variableSpan bindingLabel.sourceSpan typeAnnotation defaultValue
 
 -- | The sugar @label [: T] [?= default]@ as a variable binder on @label@.

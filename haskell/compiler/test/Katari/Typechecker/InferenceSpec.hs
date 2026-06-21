@@ -345,7 +345,7 @@ registry :: [(GenericId, Text, Maybe NormalizedKindedType)] -> Registry
 registry entries = Map.fromList [(metavar, Metavar {name = name, kind = GenericKindType, bound = bound}) | (metavar, name, bound) <- entries]
 
 typeLowersOf :: GenericId -> Constraints -> [NormalizedType]
-typeLowersOf metavar constraints = maybe [] (.lowers) (Map.lookup metavar constraints.typeBounds)
+typeLowersOf metavar constraints = Map.findWithDefault [] metavar constraints.typeBounds
 
 solvedType :: GenericId -> SolveResult -> Maybe NormalizedType
 solvedType metavar solveResult = case Map.lookup metavar solveResult.substitution of

@@ -117,6 +117,9 @@ identifySpec = do
     it "reports a duplicate call-argument label (K2003)" $
       codesOf (identify emptyContext "agent target(value: integer) -> integer { value }\nagent caller() -> integer { target(value = 1, value = 2) }") `shouldBe` ["K2003"]
 
+    it "reports a request handled twice in one handler (K2003)" $
+      codesOf (identify emptyContext duplicateHandlerProgram) `shouldBe` ["K2003"]
+
   describe "identifyModule (with modifiers)" $ do
     it "reports a with-modifier targeting a non-state variable (K2007)" $
       codesOf (identify emptyContext modifierNonStateProgram) `shouldBe` ["K2007"]
@@ -283,6 +286,19 @@ handlerProgram =
   \agent main() -> integer {\n\
   \  use handler (var counter = 1) {\n\
   \    request tick() { next counter with { counter = counter + 1 } }\n\
+  \  }\n\
+  \  tick()\n\
+  \}\n"
+
+-- | One @handler@ that handles the same request twice: the second @request tick@ is K2003, the same
+-- duplicate-name rule object fields and parameters follow.
+duplicateHandlerProgram :: Text
+duplicateHandlerProgram =
+  "request tick() -> integer\n\
+  \agent main() -> integer {\n\
+  \  use handler (var counter = 1) {\n\
+  \    request tick() { next counter }\n\
+  \    request tick() { next counter }\n\
   \  }\n\
   \  tick()\n\
   \}\n"

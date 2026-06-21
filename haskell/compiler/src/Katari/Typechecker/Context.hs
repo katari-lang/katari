@@ -209,15 +209,15 @@ type Checker a = RWS CheckerEnvironment Diagnostics CheckerState a
 -- | A fresh checker environment over the given type environment, with nothing else in scope. The
 -- elaborate context the checker uses comes from 'typeEnvironment' ('TypeEnvironment.elaborateContext').
 initialCheckerEnvironment :: TypeEnvironment -> CheckerEnvironment
-initialCheckerEnvironment typeEnv =
+initialCheckerEnvironment typeEnvironment =
   CheckerEnvironment
-    { typeEnvironment = typeEnv,
+    { typeEnvironment = typeEnvironment,
       valueEnvironment = mempty,
       locals = mempty,
       subtyping =
         SubtypingContext
-          { dataEnvironment = typeEnv.dataEnvironment,
-            requestEnvironment = typeEnv.requestEnvironment,
+          { dataEnvironment = typeEnvironment.dataEnvironment,
+            requestEnvironment = typeEnvironment.requestEnvironment,
             genericsInScope = mempty,
             world = bottomAttribute
           },
@@ -303,13 +303,6 @@ extendValueEnvironment :: Map QualifiedName Scheme -> CheckerEnvironment -> Chec
 extendValueEnvironment additions environment =
   environment {valueEnvironment = environment.valueEnvironment <> additions}
 
--- | The accumulated value environment of a checker environment. The driver reads it back after the
--- whole-program walk to hand every top-level callable's scheme to lowering (for schema building).
--- A projection (not a bare field access) because the field selector is not exported across the module
--- boundary under @NoFieldSelectors@.
-checkerValueEnvironment :: CheckerEnvironment -> ValueEnvironment
-checkerValueEnvironment environment = environment.valueEnvironment
-
 -- | Bring an in-scope generic parameter into scope for the sub-action (used while checking an
 -- agent / handler with declared generics; the parameter's bound is consulted by 'subtype').
 withGeneric :: GenericId -> GenericParameterInformation -> Checker a -> Checker a
@@ -373,12 +366,49 @@ accumulateInto get put sourceSpan addition = do
   joined <- runNormalizer sourceSpan (union current addition)
   modify (put joined)
 
--- | Run a @for@ body collecting its 'ResultChannels' — the inferred next-element (normal) and
--- break-result (escape) types; the effect accumulator is left untouched (a different scope axis).
-withForInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
-withForInference action = do
-  (accumulator, result) <- collecting (.forAccumulator) (\value state -> state {forAccumulator = value}) emptyResultChannels action
+-- | A 'ResultChannels' accumulator slot in 'CheckerState' — a @for@ body's or a @handler@ body's. One
+-- value identifies which accumulator the channel combinators ('withResultChannels', 'emitNormalChannel',
+-- 'emitEscapeChannel') act on, so the two constructs share one implementation instead of a 2×2 of
+-- copy-pasted lenses (which is exactly where a @for@-@break@ emitted into the normal channel would hide).
+data ChannelSlot = ChannelSlot
+  { getChannels :: CheckerState -> ResultChannels,
+    setChannels :: ResultChannels -> CheckerState -> CheckerState
+  }
+
+forChannels :: ChannelSlot
+forChannels = ChannelSlot {getChannels = (.forAccumulator), setChannels = \value state -> state {forAccumulator = value}}
+
+handlerChannels :: ChannelSlot
+handlerChannels = ChannelSlot {getChannels = (.handlerAccumulator), setChannels = \value state -> state {handlerAccumulator = value}}
+
+-- | Run a body collecting the given accumulator's 'ResultChannels' — the @then@-transformed normal
+-- channel and the raw escape channel — scoping it to this body. Returns @(normalChannel, escapeChannel,
+-- result)@. The effect accumulator is left untouched (a different scope axis).
+withResultChannels :: ChannelSlot -> Checker a -> Checker (NormalizedType, NormalizedType, a)
+withResultChannels slot action = do
+  (accumulator, result) <- collecting slot.getChannels slot.setChannels emptyResultChannels action
   pure (accumulator.normalChannel, accumulator.escapeChannel, result)
+
+-- | Join a value into the accumulator's /normal/ channel (a @for@'s @next@ elements, a @handler@'s
+-- request-body tails — the value @then@ transforms).
+emitNormalChannel :: ChannelSlot -> SourceSpan -> NormalizedType -> Checker ()
+emitNormalChannel slot =
+  accumulateInto
+    (\state -> (slot.getChannels state).normalChannel)
+    (\value state -> slot.setChannels ((slot.getChannels state) {normalChannel = value}) state)
+
+-- | Join a value into the accumulator's /escape/ channel (explicit @break@ values, which bypass @then@
+-- and union straight into the result).
+emitEscapeChannel :: ChannelSlot -> SourceSpan -> NormalizedType -> Checker ()
+emitEscapeChannel slot =
+  accumulateInto
+    (\state -> (slot.getChannels state).escapeChannel)
+    (\value state -> slot.setChannels ((slot.getChannels state) {escapeChannel = value}) state)
+
+-- | Run a @for@ body collecting its 'ResultChannels' — the inferred next-element (normal) and
+-- break-result (escape) types.
+withForInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
+withForInference = withResultChannels forChannels
 
 -- | Run an effect-collection scope (a handler request body, a @use@ continuation) returning its
 -- inferred residual effect; the effects performed inside do not leak to the enclosing scope.
@@ -396,17 +426,15 @@ withReturnInference = collecting (.returnAccumulator) (\value state -> state {re
 -- accumulator to this handler, so a nested handler's results do not leak out. Returns
 -- @(normalChannel, escapeChannel, result)@.
 withHandlerResultInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
-withHandlerResultInference action = do
-  (accumulator, result) <- collecting (.handlerAccumulator) (\value state -> state {handlerAccumulator = value}) emptyResultChannels action
-  pure (accumulator.normalChannel, accumulator.escapeChannel, result)
+withHandlerResultInference = withResultChannels handlerChannels
 
 -- | A @for@ body's @next@ value joins the inferred element type (its normal channel).
 emitForNextType :: SourceSpan -> NormalizedType -> Checker ()
-emitForNextType = accumulateInto (\state -> state.forAccumulator.normalChannel) (\value state -> state {forAccumulator = state.forAccumulator {normalChannel = value}})
+emitForNextType = emitNormalChannel forChannels
 
 -- | A @for@ body's @break@ value joins the short-circuit results (its escape channel).
 emitForBreakType :: SourceSpan -> NormalizedType -> Checker ()
-emitForBreakType = accumulateInto (\state -> state.forAccumulator.escapeChannel) (\value state -> state {forAccumulator = state.forAccumulator {escapeChannel = value}})
+emitForBreakType = emitEscapeChannel forChannels
 
 -- | An effect contribution (a non-pure call, a @use@) joins the enclosing scope's inferred effect.
 emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
@@ -419,12 +447,12 @@ emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {ret
 -- | A request body's implicit-break tail joins the inferred @handler@ result @R@ — the value @then@
 -- transforms (its normal channel).
 emitHandlerTailType :: SourceSpan -> NormalizedType -> Checker ()
-emitHandlerTailType = accumulateInto (\state -> state.handlerAccumulator.normalChannel) (\value state -> state {handlerAccumulator = state.handlerAccumulator {normalChannel = value}})
+emitHandlerTailType = emitNormalChannel handlerChannels
 
 -- | An explicit @break@ value joins the @handler@'s short-circuit results (its escape channel — these
 -- bypass @then@ and union straight into the handler's result type).
 emitHandlerBreakType :: SourceSpan -> NormalizedType -> Checker ()
-emitHandlerBreakType = accumulateInto (\state -> state.handlerAccumulator.escapeChannel) (\value state -> state {handlerAccumulator = state.handlerAccumulator {escapeChannel = value}})
+emitHandlerBreakType = emitEscapeChannel handlerChannels
 
 -- | Record that a jump of this kind has fired, so an enclosing branch that does not capture it sees
 -- the branch as escaping (hence non-pure).

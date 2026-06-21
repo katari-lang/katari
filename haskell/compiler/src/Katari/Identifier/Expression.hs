@@ -18,8 +18,9 @@ module Katari.Identifier.Expression where
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Id (VariableResolution (..))
+import Katari.Data.Id (TypeResolution (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
+import Katari.Data.QualifiedName (renderQualifiedName)
 import Katari.Data.SourceSpan (SourceSpan (..))
 import Katari.Identifier.Monad
 import Katari.Identifier.Pattern (resolveParameterBinding, resolvePattern)
@@ -285,6 +286,14 @@ resolveHandler node = do
   genericArguments <- traverse resolveType node.genericArguments
   (stateVariables, stateScope) <- resolveVariableBindings node.stateVariables
   handlers <- traverse (resolveRequestHandler stateScope) node.handlers
+  -- A request may be handled at most once per @handler@: a second handler for the same (resolved)
+  -- request is K2003, the same duplicate-name rule object fields / parameters follow. Unresolved
+  -- references are skipped here; the checker reports them as not-a-request instead.
+  reportDuplicateLabels
+    [ (renderQualifiedName name, handler.sourceSpan)
+      | handler <- handlers,
+        Just (TypeResolutionQualifiedName name) <- [handler.typeReference.resolution]
+    ]
   thenClause <- traverse (resolveThenClause stateScope) node.thenClause
   pure
     ( ExpressionHandler
