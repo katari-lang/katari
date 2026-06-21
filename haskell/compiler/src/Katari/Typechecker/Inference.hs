@@ -85,6 +85,11 @@ metavarKinded kind metavar = case kind of
 -- flowing INTO the variable (the variable appears as a supertype: @actual <: M@); an upper bound from
 -- the variable flowing into something (@M <: expected@). The covariant solution is the join of the
 -- lowers.
+--
+-- NOTE: 'uppers' is collected (a metavariable reached through a contravariant position takes an upper
+-- bound) but not yet consumed by 'solveConstraints', which solves every variable from its lowers. It is
+-- kept for a future solver that bounds a contravariantly-occurring variable from above; until then such
+-- a variable is reported un-inferrable (K3016) and the user supplies it explicitly.
 data BoundSet a = BoundSet
   { lowers :: List a,
     uppers :: List a

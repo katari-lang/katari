@@ -251,6 +251,40 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "an `array` filter extracts the scrutinee's element type for the inner pattern" $
     typeErrorCodes [("test", "agent f(xs: array[integer]) -> array[integer] { match (xs) { case array(ys) -> ys } }")] `shouldBe` []
 
+  -- A `record` filter reads a nominal data value's read shape, so a nested record pattern sees the
+  -- data's actual field type, not `unknown`.
+  it "a `record` filter over a data value extracts its constructor field type" $
+    typeErrorCodes [("test", "data box(value: integer)\nagent f(b: box) -> integer { match (b) { case record({value => v}) -> v } }")] `shouldBe` []
+
+  it "rejects using a `record`-extracted data field at a wrong type (K3001)" $
+    typeErrorCodes [("test", "data box(value: integer)\nagent f(b: box) -> string { match (b) { case record({value => v}) -> v } }")] `shouldContain` ["K3001"]
+
+  -- A type filter over an `unknown`-base scrutinee still carries the scrutinee's handle attribute onto
+  -- the binder (the `narrowToFilter` fallback lifts it), so a private value's destructured element may
+  -- not escape to a public context — the same rule as a layered scrutinee.
+  it "a type-filter binder over a private unknown value is itself private (K3001 on public escape)" $
+    typeErrorCodes [("test", "private agent sec(x: unknown) -> unknown { x }\nagent leak() -> array[unknown] { let array(a) = sec(x = 1)\n a }")] `shouldContain` ["K3001"]
+
+  -- An agent parameter pattern declares its type by /reverse inference/ from the pattern: a type filter
+  -- `number(y)` declares the parameter `number` and binds `y : number`; a record / nested filter works
+  -- the same way.
+  it "reverse-infers an agent parameter's type from a type-filter pattern" $
+    typeErrorCodes [("test", "agent f(p => number(y)) -> number { y }")] `shouldBe` []
+
+  it "reverse-infers an agent parameter's type from a record pattern with a filtered field" $
+    typeErrorCodes [("test", "agent f(label => number(y)) -> number { y }")] `shouldBe` []
+
+  it "constrains a caller by the reverse-inferred parameter type (K3001 on a wrong argument)" $
+    typeErrorCodes [("test", "agent f(p => number(y)) -> number { y }\nagent run() -> number { f(p = \"x\") }")] `shouldContain` ["K3001"]
+
+  -- A binder's inner annotation must accept every value the filter admits: `number(y : integer)` is an
+  -- error because `number </: integer`.
+  it "rejects a type-filter binder whose inner annotation is narrower than the filter (K3001)" $
+    typeErrorCodes [("test", "agent f(p => number(y : integer)) -> number { y }")] `shouldContain` ["K3001"]
+
+  it "still requires an annotation on a bare-variable agent parameter pattern (K3013)" $
+    typeErrorCodes [("test", "agent f(p => x) -> integer { x }")] `shouldContain` ["K3013"]
+
   it "rejects using the extracted element type at a wrong type (K3001)" $
     typeErrorCodes [("test", "agent f(xs: array[integer]) -> array[string] { match (xs) { case array(ys) -> ys } }")] `shouldContain` ["K3001"]
 
@@ -276,6 +310,23 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
 
   it "still rejects omitting a required agent parameter (K3001)" $
     typeErrorCodes [("test", "agent inc(x: integer) -> integer { x }\nagent run() -> integer { inc() }")] `shouldContain` ["K3001"]
+
+  -- Every signature-determined callable (data / request / external / primitive) shares the one
+  -- 'callShape' rule, so a defaulted parameter is omittable on an external / primitive agent too.
+  it "lets a caller omit a defaulted external-agent parameter" $
+    typeErrorCodes [("test", "external agent ext(value: integer, flag: integer ?= 0) -> integer\nagent run() -> integer { ext(value = 1) }")] `shouldBe` []
+
+  it "lets a caller omit a defaulted primitive-agent parameter" $
+    typeErrorCodes [("test", "primitive agent prim(value: integer, flag: integer ?= 0) -> integer\nagent run() -> integer { prim(value = 1) }")] `shouldBe` []
+
+  it "still rejects omitting a required external-agent parameter (K3001)" $
+    typeErrorCodes [("test", "external agent ext(value: integer, flag: integer) -> integer\nagent run() -> integer { ext(value = 1) }")] `shouldContain` ["K3001"]
+
+  -- An undeclared named argument is currently accepted (the callee's parameter object is open at
+  -- @rest = unknown@): the runtime ignores the extra key. Pinned so the behaviour is intentional, not
+  -- an accident, and a future tightening to reject unexpected arguments is a deliberate change.
+  it "currently accepts an undeclared named call argument" $
+    typeErrorCodes [("test", "data point(x: integer, y: integer)\nagent make() -> point { point(x = 1, y = 2, bogus = 9) }")] `shouldBe` []
 
 ------------------------------------------------------------------------------------------------
 -- Driver

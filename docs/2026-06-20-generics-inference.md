@@ -177,26 +177,34 @@ metavar の解は **暫定 (候補)** にすぎず、正しさは「解を代入
 
 ### 6.2 handler[R, E] — `synthHandlerExpression`（accumulator 方式 + then 変換）
 
-handler の結果は metavar ではなく **accumulator** で解く（`for` と同型）。`HandlerAccumulator
-{ tailResults, escapeResults }` を持ち:
+`R` / `E` は handler の **generics**（外から与えられる）。`R` は **handle 対象（継続）の計算結果**であり、
+handler の body とは独立 — call/use 時に継続の戻り型から推論される（`⋃ body tail` と等しいとは限らない）。
+handler の結果に流れ込むチャネルは `ResultChannels { normalChannel, escapeChannel }`（`for` と共有）で集める:
 
-- **body tail（暗黙 break）** → `tailResults`。これが正常結果 **R**（`then` の入力 / continuation の戻り型）。
-- **明示 `break e`** → `escapeResults`。`then` を**飛ばして**結果に直接 union（`for` の break と一貫）。`break` は
-  もう `R` と照合しない（`HandleContext` から `handlerResultType` を撤去、break は `emitHandlerBreakType` のみ）。
-- **`then(r){...}`** : binder `r : R`、body は自由に synth → **R'**（変形後の結果）。`then` body の `<: R` 強制は撤廃。
+- **body tail（暗黙 break）** → `normalChannel`。handler が resume せず返す値なので、明示 break と同様に **`then` を
+  飛ばして**結果へ直接 union する。`R` とは照合しない（`emitHandlerTailType` で集約するだけ）。
+- **明示 `break e`** → `escapeChannel`。同じく `then` を**飛ばして**結果へ直接 union（`for` の break と一貫）。
+  `break` は `R` と照合しない（`HandleContext` に `handlerResultType` は無い、`emitHandlerBreakType` のみ）。
+- **`then(r){...}`** : binder `r : R`（継続結果）、body は自由に synth → **R'**。`then` body の `<: R` 強制は無く、
+  `then` は継続結果 `R` のみを変形する（body tail / break は経由しない）。
 
-戻り値の式（ユーザ確定 = Option A）:
+戻り値の式:
 
 ```
-handler 結果 = (⋃ break) | (then ? then body(R') : R)      R = ⋃ body tail
+handler 結果 = (⋃ break) | (⋃ body tail) | (then ? then body(R') : R)
 continuation 戻り型 = R
 handler 型 = agent({continuation: agent({value:null}) -> R with E∪handled}) -> 上記結果 with E
 ```
 
-- 明示 `handler[R, E]`: `R` は tail/continuation 型（body tail を `<: R` で検査）、`break` union は別途推論、
-  結果は `(⋃ break) | (then ? R' : R)`。`E` は明示（body 効果・then 効果を `<: E` で検査）。
-- 省略 `handler { ... }`: `R = tailResults`、`E = body 効果 ∪ then 効果`。
-- 縁ケース: body が全て break/発散で tail 無し → `R = never`（健全・最も許容的）。
+- 明示 `handler[R, E]`: `R` は継続結果として固定、`break` / body tail の union は別途集約、結果は
+  `(⋃ break) | (⋃ body tail) | (then ? R' : R)`。`E` は明示（body 効果・then 効果を `<: E` で検査）。
+- 省略 `handler { ... }`: `R` / `E` は rigid generic として body を検査し、call/use 時に継続から推論。
+- 縁ケース: body が全て break/発散で tail 無し → `normalChannel = never`（健全・最も許容的）。
+
+> NOTE（IR/lowering 整合）: `then` は **handle body の正常完了（= `k()` の戻り = R）のみ**を変形する。body tail /
+> 明示 break は `OperationExit{target=handle}` で handle を脱出し、`then` を経由せず結果になる。runtime は handle への
+> exit に `thenClause` を適用してはならない（適用すると Model A になり checker と矛盾）。`IR.hs` の「then は handle
+> target の結果を受け取る」は「handle body の正常完了 R」の意であり、break 値ではない。
 
 ### 6.3 演算子
 

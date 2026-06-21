@@ -499,13 +499,19 @@ objectFieldType object fieldName = case Map.lookup fieldName object.fields of
 -- | A field's type in a nominal data value: the data type's constructor object instantiated with the
 -- value's generic arguments, then read like any object.
 dataFieldType :: SourceSpan -> Text -> (QualifiedName, Map Text NormalizedKindedType) -> Checker NormalizedType
-dataFieldType sourceSpan fieldName (dataName, arguments) = do
+dataFieldType sourceSpan fieldName entry = do
+  constructorObject <- dataConstructorObject sourceSpan entry
+  pure (objectFieldType constructorObject fieldName)
+
+-- | A nominal data value's constructor object instantiated with the value's generic arguments — its
+-- /read shape/ (every field required). The single home of "instantiate a data type's constructor",
+-- shared by field reads ('dataFieldType') and the @record@ type filter ('filterSlot').
+dataConstructorObject :: SourceSpan -> (QualifiedName, Map Text NormalizedKindedType) -> Checker NormalizedObject
+dataConstructorObject sourceSpan (dataName, arguments) = do
   dataEnvironment <- asks (\environment -> environment.typeEnvironment.dataEnvironment)
   case Map.lookup dataName dataEnvironment of
-    Just info -> do
-      constructorObject <- runNormalizer sourceSpan (substituteObject (reKeyByGenericId info.genericParameters arguments) info.constructor)
-      pure (objectFieldType constructorObject fieldName)
-    Nothing -> panic ("dataFieldType: data type not registered: " <> renderQualifiedName dataName)
+    Just info -> runNormalizer sourceSpan (substituteObject (reKeyByGenericId info.genericParameters arguments) info.constructor)
+    Nothing -> panic ("dataConstructorObject: data type not registered: " <> renderQualifiedName dataName)
 
 synthTypeApplicationExpression ::
   TypeApplicationExpression Identified ->
@@ -1273,23 +1279,37 @@ filterShape = \case
 
 -- | The type the inner pattern of @tag(inner)@ matches against: the value /extracted from the scrutinee/
 -- at this tag (so a nested pattern sees the scrutinee's actual array / record / agent type), lifted by
--- the scrutinee's handle attribute. A primitive carries no nested type, so it is just the primitive's
--- type; an @unknown@ scrutinee (no layer) falls back to the tag's most-general shape.
+-- the scrutinee's (raised) handle attribute. The lift is applied in /both/ the layered and the @unknown@
+-- (no layer) case, so a private scrutinee's nested value stays private — this is the path-accumulated
+-- privacy a @let@ binder needs (it composes with the per-container lift of field / element reads) and the
+-- world a @match@ arm observes. A primitive carries no nested type (just its own type); an @unknown@
+-- scrutinee falls back to the tag's most-general shape.
 narrowToFilter :: SourceSpan -> TypeFilter -> NormalizedType -> Checker NormalizedType
 narrowToFilter sourceSpan tag scrutinee = do
-  maybeRaised <- raisedLayer sourceSpan scrutinee
-  pure $ case maybeRaised of
-    Nothing -> filterShape tag
-    Just (attribute, layer) -> liftByAttribute attribute (filterSlot tag layer)
+  raised <- raiseToBounds sourceSpan scrutinee
+  slot <- case raised.baseType of
+    NormalizedBaseTypeUnknown -> pure (filterShape tag)
+    NormalizedBaseTypeLayered layer -> filterSlot sourceSpan tag layer
+  pure (liftByAttribute raised.attribute slot)
 
 -- | The scrutinee layer's component for a tag (carrying its nested types), or the tag's most-general
--- shape when that slot is absent (a refuted arm — its binders still type, but the arm never fires).
-filterSlot :: TypeFilter -> LayeredType -> NormalizedType
-filterSlot tag layer = case tag of
-  FilterArray -> maybe (filterShape FilterArray) (\sequence' -> layeredOf neverLayer {sequenceLayer = Just sequence'}) layer.sequenceLayer
-  FilterRecord -> maybe (filterShape FilterRecord) (\object -> layeredOf neverLayer {objectLayer = Just object}) layer.objectLayer
-  FilterAgent -> maybe (filterShape FilterAgent) (\function -> layeredOf neverLayer {functionLayer = Just function}) layer.functionLayer
-  _ -> filterShape tag
+-- shape when that slot is absent (a refuted arm — its binders still type, but the arm never fires). A
+-- @record@ reads the structural object /and/ every nominal data type's (instantiated) constructor
+-- object, so @record(value => v)@ over a @box[integer]@ binds @v@ at the data's read shape (@integer@),
+-- not @unknown@.
+filterSlot :: SourceSpan -> TypeFilter -> LayeredType -> Checker NormalizedType
+filterSlot sourceSpan tag layer = case tag of
+  FilterArray ->
+    pure (maybe (filterShape FilterArray) (\sequence' -> layeredOf neverLayer {sequenceLayer = Just sequence'}) layer.sequenceLayer)
+  FilterAgent ->
+    pure (maybe (filterShape FilterAgent) (\function -> layeredOf neverLayer {functionLayer = Just function}) layer.functionLayer)
+  FilterRecord -> do
+    -- The record view of the value: its structural object, plus each nominal data type's read shape.
+    dataViews <- traverse (fmap objectAsType . dataConstructorObject sourceSpan) (Map.toList layer.dataLayer)
+    case maybe [] (\object -> [objectAsType object]) layer.objectLayer <> dataViews of
+      [] -> pure (filterShape FilterRecord)
+      views -> foldM (\accumulated view -> runNormalizer sourceSpan (union accumulated view)) bottomType views
+  _ -> pure (filterShape tag)
 
 ------------------------------------------------------------------------------------------------
 -- Match expressions
@@ -1480,6 +1500,15 @@ arrayOf elementType =
   layeredOf
     neverLayer
       { sequenceLayer = Just NormalizedSequence {items = [], rest = elementType}
+      }
+
+-- | A fixed-length tuple type from its positional element types (the @rest@ is @never@: no further
+-- positions). The dual of 'arrayOf' (homogeneous tail) for a fixed prefix.
+tupleOf :: List NormalizedType -> NormalizedType
+tupleOf elementTypes =
+  layeredOf
+    neverLayer
+      { sequenceLayer = Just NormalizedSequence {items = elementTypes, rest = bottomType}
       }
 
 -- | A homogeneous @record[T]@: an object with no fixed fields whose every key reads as @T@.
@@ -2070,7 +2099,10 @@ signatureValueScheme genericDeclarations parameters returnType effectExpression 
     pure
       Scheme
         { genericParameters = genericParameters,
-          valueType = assembleAgent bottomAttribute (namedObjectType fields) returnNormalized effectNormalized
+          -- The call shape makes each defaulted parameter omittable at the call site (the runtime fills
+          -- the default), exactly as for data constructors and requests — every signature-determined
+          -- callable shares the one 'callShape' rule.
+          valueType = assembleAgent bottomAttribute (callShape parameters (namedObjectType fields)) returnNormalized effectNormalized
         }
 
 -- | The value scheme of a data constructor: @agent(constructorObject) -> Data[generics]@ (pure),
@@ -2163,34 +2195,48 @@ assembleAgent agentOuterAttribute parameterObject returnType effect =
       attribute = agentOuterAttribute
     }
 
--- | The declared type of a binding-site pattern (an agent parameter, a @use@ binder): a variable /
--- wildcard pattern's annotation. Other shapes (a bare tuple / record destructuring, or a /refutable/
--- type filter — which may not occur in a non-refutable binding position) carry no annotation of their
--- own, so the binder must declare one (@label : T@).
-patternTypeAnnotation :: Pattern Identified -> Maybe (SyntacticTypeExpression Identified)
-patternTypeAnnotation = \case
-  PatternVariable variablePattern -> variablePattern.typeAnnotation
-  PatternWildcard wildcardPattern -> wildcardPattern.typeAnnotation
-  _ -> Nothing
+-- | Synthesize the declared type of a binding-site pattern (an agent parameter, a @use@ binder) from
+-- its structure — /reverse inference/, the dual of 'checkPattern': a type filter declares its shape
+-- (@number(y)@ ~> @number@), a record / tuple declares a record / tuple of its children's synthesized
+-- types (@{label => number(y)}@ ~> @{label: number}@), an annotated variable / wildcard declares its
+-- annotation. The synthesized type makes the pattern non-refutable by construction (a @number(y)@
+-- parameter is declared @number@, so it always matches). A bare variable / wildcard (no annotation), or
+-- a shape that cannot be made total here (a constructor / literal pattern), has nothing to synthesize
+-- from, so it is reported as needing an annotation and degrades to 'topType'.
+--
+-- The inner patterns are bound by the caller re-running 'checkPattern' against this type, which narrows
+-- them and enforces the supertype-annotation rule — so @number(y : integer)@ fails (@number </:
+-- integer@), the binder's annotation having to accept every value the filter admits.
+synthBinderPatternType :: Text -> Pattern Identified -> Checker NormalizedType
+synthBinderPatternType reason = \case
+  PatternVariable variablePattern -> annotationOr variablePattern.sourceSpan variablePattern.typeAnnotation
+  PatternWildcard wildcardPattern -> annotationOr wildcardPattern.sourceSpan wildcardPattern.typeAnnotation
+  PatternTypeFilter typeFilterPattern -> pure (filterShape typeFilterPattern.matchedType)
+  PatternTuple tuplePattern -> tupleOf <$> traverse (synthBinderPatternType reason) tuplePattern.elements
+  PatternRecord recordPattern ->
+    namedObjectType <$> traverse (\field -> (,) field.name <$> synthBinderPatternType reason field.bindPattern) recordPattern.fields
+  PatternConstructor constructorPattern -> missing constructorPattern.sourceSpan
+  PatternLiteral literalPattern -> missing literalPattern.sourceSpan
+  where
+    annotationOr sourceSpan = \case
+      Just annotation -> elaborateAndNormalizeType annotation
+      Nothing -> missing sourceSpan
+    missing sourceSpan = do
+      reportMissingAnnotation sourceSpan reason
+      pure topType
 
--- | Check a binding-site pattern that must declare its own type (an agent parameter, a @use@ binder).
--- The declared type is the pattern's annotation, and it is also the scrutinee the pattern is checked
--- against: a variable binder's "must accept every value" obligation then holds trivially, while a
--- type-filter binder still narrows its inner pattern. A missing annotation is reported and the type
--- degrades to the pattern's cover (itself 'topType' for a bare binder).
+-- | Check a binding-site pattern that declares its own type (an agent parameter, a @use@ binder). The
+-- declared type is synthesized from the pattern ('synthBinderPatternType'), then the pattern is checked
+-- against it — so the binder is non-refutable by construction, a variable binder's "must accept every
+-- value" obligation holds trivially, and a type-filter / nested binder still narrows.
 checkAnnotatedBinder ::
   Text ->
   Pattern Identified ->
   Checker (NormalizedType, Pattern Typed, List (LocalVariableId, Scheme))
-checkAnnotatedBinder reason pattern = case patternTypeAnnotation pattern of
-  Nothing -> do
-    reportMissingAnnotation (sourceSpanOf pattern) reason
-    (typedPattern, cover, bindings) <- checkPattern pattern topType
-    pure (cover, typedPattern, bindings)
-  Just annotation -> do
-    declaredType <- elaborateAndNormalizeType annotation
-    (typedPattern, _, bindings) <- checkPattern pattern declaredType
-    pure (declaredType, typedPattern, bindings)
+checkAnnotatedBinder reason pattern = do
+  declaredType <- synthBinderPatternType reason pattern
+  (typedPattern, _, bindings) <- checkPattern pattern declaredType
+  pure (declaredType, typedPattern, bindings)
 
 -- | Build the parameter object type, per-parameter bindings, and per-parameter Typed nodes. Each
 -- parameter's @label => pattern@ is checked as an annotated binder, so destructuring parameters are
