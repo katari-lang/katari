@@ -9,7 +9,7 @@
 -- the normalized type — used by tests that only need the type-level result.
 module Katari.Typechecker.Check where
 
-import Control.Monad (foldM, guard, unless, when, zipWithM)
+import Control.Monad (foldM, unless, when, zipWithM)
 import Control.Monad.RWS.Class (asks, tell)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -42,32 +42,22 @@ import Katari.Panic (panic)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
-    JumpKind (..),
-    capturingJumps,
-    collectingJumps,
     currentWorld,
-    emitBreakType,
+    emitContinue,
     emitEffect,
-    emitNextType,
-    emitReturnType,
+    emitExit,
     enterAgentBody,
     enterForBody,
     enterHandlerThen,
     enterRequestHandler,
-    forJumpInScope,
+    freshBoundaryId,
     freshGenericId,
-    handlerJumpInScope,
-    markJump,
-    returnInScope,
     runElaborator,
     runNormalizer,
-    withBreakInference,
     withEffectInference,
     withGeneric,
     withLocal,
-    withNextInference,
     withParameters,
-    withReturnInference,
     withWorld,
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
@@ -762,10 +752,16 @@ synthCallArguments sourceSpan arguments = do
               }
       pure (typedArg, argument.name, normalizedType)
 
+-- | Pure = no requests /and/ no escapes. Because a @return@ / @next@ / @break@ now contributes an escape
+-- effect, a control-flow branch that escapes is automatically impure here — the single rule that
+-- replaces the old per-branch jump-escape bookkeeping.
 isPureEffect :: NormalizedEffect -> Bool
-isPureEffect = \case
-  NormalizedEffectAny -> False
-  NormalizedEffectRow row -> Map.null row.request && Map.null row.tails
+isPureEffect effect =
+  pureRequests effect.requests && not (hasConcreteEscape effect)
+  where
+    pureRequests = \case
+      RequestEffectAny -> False
+      RequestEffectRow row -> Map.null row.request && Map.null row.tails
 
 liftByAttribute :: NormalizedAttribute -> NormalizedType -> NormalizedType
 liftByAttribute attribute normalizedType =
@@ -935,26 +931,24 @@ checkJump available sourceSpan keyword place value modifiers inScope = case avai
 
 checkReturnStatement :: ReturnStatement Identified -> Checker (ReturnStatement Typed)
 checkReturnStatement returnStmt = do
-  contexts <- asks (.jumps)
+  target <- asks (.returnTarget)
   (typedValue, _) <-
-    checkJump (guard (returnInScope contexts)) returnStmt.sourceSpan "return" "an agent body" returnStmt.value [] $ \() -> do
+    checkJump target returnStmt.sourceSpan "return" "an agent body" returnStmt.value [] $ \boundaryId -> do
       (typed, valueType) <- synthExpression returnStmt.value
-      -- The value joins the enclosing agent's inferred return type; it is checked against the agent's
-      -- declared / inferred return at the agent edge, not at each @return@.
-      emitReturnType returnStmt.sourceSpan valueType
-      markJump ReturnJump
+      -- The value rides an @EXIT(agent)@ escape effect; the enclosing agent discharges it (its union with
+      -- the body tail is the agent's return type, checked against the annotation at the agent edge).
+      emitExit returnStmt.sourceSpan boundaryId valueType
       pure typed
   pure ReturnStatement {value = typedValue, sourceSpan = returnStmt.sourceSpan}
 
 checkForNextStatement :: ForNextStatement Identified -> Checker (ForNextStatement Typed)
 checkForNextStatement forNextStmt = do
-  contexts <- asks (.jumps)
+  target <- asks (.forTarget)
   (typedValue, typedModifiers) <-
-    checkJump (guard (forJumpInScope contexts)) forNextStmt.sourceSpan "next" "a `for` body" forNextStmt.value forNextStmt.modifiers $ \() -> do
-      -- The element type is inferred: each `next` value joins the for-body's next channel.
+    checkJump target forNextStmt.sourceSpan "next" "a `for` body" forNextStmt.value forNextStmt.modifiers $ \boundaryId -> do
+      -- Each `next` value rides a @CONTINUE(for)@ escape; the for discharges it as an element of its map.
       (typed, valueType) <- synthExpression forNextStmt.value
-      emitNextType forNextStmt.sourceSpan valueType
-      markJump ForJump
+      emitContinue forNextStmt.sourceSpan boundaryId valueType
       pure typed
   pure
     ForNextStatement
@@ -965,14 +959,13 @@ checkForNextStatement forNextStmt = do
 
 checkForBreakStatement :: ForBreakStatement Identified -> Checker (ForBreakStatement Typed)
 checkForBreakStatement forBreakStmt = do
-  contexts <- asks (.jumps)
+  target <- asks (.forTarget)
   (typedValue, _) <-
-    checkJump (guard (forJumpInScope contexts)) forBreakStmt.sourceSpan "break" "a `for` body" forBreakStmt.value [] $ \() -> do
-      -- A `break` short-circuits the for with its value; that value joins the break channel, so the
-      -- for's result type includes it. It is not a `next` element.
+    checkJump target forBreakStmt.sourceSpan "break" "a `for` body" forBreakStmt.value [] $ \boundaryId -> do
+      -- A `break` rides an @EXIT(for)@ escape: it short-circuits the for, bypassing `then`, and its value
+      -- unions into the for's result. It is not a `next` element.
       (typed, valueType) <- synthExpression forBreakStmt.value
-      emitBreakType forBreakStmt.sourceSpan valueType
-      markJump ForJump
+      emitExit forBreakStmt.sourceSpan boundaryId valueType
       pure typed
   pure ForBreakStatement {value = typedValue, sourceSpan = forBreakStmt.sourceSpan}
 
@@ -1012,27 +1005,25 @@ retagModifier modifier = do
 
 checkBreakStatement :: BreakStatement Identified -> Checker (BreakStatement Typed)
 checkBreakStatement breakStmt = do
-  contexts <- asks (.jumps)
+  target <- asks (.handlerTarget)
   (typedValue, _) <-
-    checkJump (guard (handlerJumpInScope contexts)) breakStmt.sourceSpan "break" "a request handler body" breakStmt.value [] $ \() -> do
-      -- A @break@ short-circuits the handler, bypassing its @then@ clause: its value is not checked
-      -- against the result @R@ (the @then@ input), but unioned straight into the handler's result type.
+    checkJump target breakStmt.sourceSpan "break" "a request handler body" breakStmt.value [] $ \boundaryId -> do
+      -- A @break@ rides an @EXIT(handler)@ escape: it short-circuits the handler, bypassing its @then@
+      -- clause, and its value unions straight into the handler's result type (it is not checked against R).
       (typed, valueType) <- synthExpression breakStmt.value
-      emitBreakType breakStmt.sourceSpan valueType
-      markJump HandlerJump
+      emitExit breakStmt.sourceSpan boundaryId valueType
       pure typed
   pure BreakStatement {value = typedValue, sourceSpan = breakStmt.sourceSpan}
 
 checkNextStatement :: NextStatement Identified -> Checker (NextStatement Typed)
 checkNextStatement nextStmt = do
-  contexts <- asks (.jumps)
+  target <- asks (.handlerTarget)
   (typedValue, typedModifiers) <-
-    checkJump (guard (handlerJumpInScope contexts)) nextStmt.sourceSpan "next" "a request handler body" nextStmt.value nextStmt.modifiers $ \() -> do
-      -- A @next@ resumes the continuation with its value; that value joins the resume channel and is
-      -- checked against the request's return type at the request handler edge, not here.
+    checkJump target nextStmt.sourceSpan "next" "a request handler body" nextStmt.value nextStmt.modifiers $ \boundaryId -> do
+      -- A @next@ resumes the continuation with its value, riding a @CONTINUE(handler)@ escape; the
+      -- request handler discharges it and checks the resume value against the request's return type.
       (typed, valueType) <- synthExpression nextStmt.value
-      emitNextType nextStmt.sourceSpan valueType
-      markJump HandlerJump
+      emitContinue nextStmt.sourceSpan boundaryId valueType
       pure typed
   pure
     NextStatement
@@ -1383,23 +1374,27 @@ synthMatchExpression expression = do
       pure (cover, resultType, typedArm)
     combineUnion accumulator next = runNormalizer expression.sourceSpan (union accumulator next)
 
--- | Apply an observed value's world to a control-flow branch (a match arm body, an @if@ branch). The
--- branch was reached by observing the value (a match scrutinee, an @if@ condition), so its world flows
--- like a pure call's. A /pure/ branch — no effect and no escaping @return@ / @break@ / @next@ — carries
--- the observed attribute into its result (matching a private value in a pure arm yields a private
--- result). A branch that performs an effect or escapes via a jump cannot be lifted across worlds, so
--- the observed value must be allowed in the current world (its attribute <: world) and its effect is
--- re-emitted into the enclosing scope.
+-- | Apply an observed value's world to a result given its (already collected) effect. A /pure/ branch —
+-- no effect and no escaping @return@ / @break@ / @next@ (which now show up as escape effects, so
+-- 'isPureEffect' already accounts for them) — carries the observed attribute into its result. A branch
+-- that performs an effect or escapes cannot be lifted across worlds, so the observed value must be
+-- allowed in the current world (its attribute <: world) and its effect is re-emitted into the enclosing
+-- scope.
+observeResult :: SourceSpan -> NormalizedAttribute -> NormalizedEffect -> NormalizedType -> Checker NormalizedType
+observeResult sourceSpan observedAttribute branchEffect resultType =
+  if isPureEffect branchEffect
+    then pure (liftByAttribute observedAttribute resultType)
+    else do
+      runNormalizer sourceSpan (subtype observedAttribute bottomAttribute)
+      emitEffect sourceSpan branchEffect
+      pure resultType
+
+-- | Run a control-flow branch (a match arm body, an @if@ branch) collecting its effect, then apply the
+-- observation rule ('observeResult').
 processObserved :: SourceSpan -> NormalizedAttribute -> Checker (node, NormalizedType) -> Checker (node, NormalizedType)
 processObserved sourceSpan observedAttribute walk = do
-  (branchEffect, (escaped, (node, bodyType))) <- withEffectInference (collectingJumps walk)
-  resultType <-
-    if isPureEffect branchEffect && not escaped
-      then pure (liftByAttribute observedAttribute bodyType)
-      else do
-        runNormalizer sourceSpan (subtype observedAttribute bottomAttribute)
-        emitEffect sourceSpan branchEffect
-        pure bodyType
+  (branchEffect, (node, bodyType)) <- withEffectInference walk
+  resultType <- observeResult sourceSpan observedAttribute branchEffect bodyType
   pure (node, resultType)
 
 ------------------------------------------------------------------------------------------------
@@ -1410,43 +1405,37 @@ synthForExpression :: ForExpression Identified -> Checker (Expression Typed, Nor
 synthForExpression expression = do
   (typedSource, sourceType) <- synthExpression expression.inBinding.source
   -- A `for` is a control construct: like `if` / `match`, it observes its source, so the source's
-  -- attribute carries into the result. 'processObserved' over the whole body + then clause enforces
-  -- that — a pure loop over a private source yields a private result, and a loop with effects /
-  -- escaping jumps over a private source is rejected (its attribute must fit the world).
+  -- attribute carries into the result ('observeResult' over the loop's residual effect enforces that —
+  -- a pure loop over a private source yields a private result; a loop with effects / outer escapes over
+  -- a private source is rejected).
   sourceAttribute <- runNormalizer (sourceSpanOf expression.inBinding.source) (foldAttribute sourceType)
   elementType <- extractIterableElementType (sourceSpanOf expression.inBinding.source) sourceType
   (typedPattern, _, patternBindings) <- checkPattern expression.inBinding.pattern elementType
-  -- The `var` state scopes over the body /and/ the then clause; the loop pattern and the for-inference
-  -- (next / break accumulators) scope over the body alone.
-  (typedVarBindings, ((typedBody, typedThen), finalType)) <-
-    withVarBindingsTyped expression.varBindings $
-      processObserved expression.sourceSpan sourceAttribute $ do
-        (inferredNextType, (inferredBreakType, typedBody)) <-
-          withNextInference $
-            withBreakInference $
-              enterForBody $
-                withParameters patternBindings $
-                  -- The `for` captures its own `next` / `break`, so they do not escape an enclosing branch.
-                  capturingJumps ForJump $ do
-                    -- A `for` is a map: its body tail is an element, joining the next channel alongside
-                    -- every explicit `next` value (a body ending in `next` / `break` diverges, so its tail
-                    -- is @never@ and contributes nothing).
-                    (typed, bodyTail) <- synthBlock expression.body
-                    emitNextType expression.body.sourceSpan bodyTail
-                    pure typed
-        -- A `for` maps to @array[R]@ where R is its element (next + body-tail) channel; a position the
-        -- body did not emit is absent, not null, which @array@'s "present then this type" tail already
-        -- captures (no null is unioned in).
-        let arrayType = arrayOf inferredNextType
-        -- The for's normal result is its array (or the then clause's value); a `break` short-circuits
-        -- with its own value, so the result type also includes every break value. The then finalizer is
-        -- walked by the shared 'walkThenClause' (a `for`'s @then@ inherits the outer control context); its
-        -- effect is re-emitted into the loop's observed scope (where every other loop effect lands).
-        (thenEffect, maybeThenResult, typedThen) <- walkThenClause ForThen arrayType expression.thenClause
-        emitEffect expression.sourceSpan thenEffect
-        let normalType = fromMaybe arrayType maybeThenResult
-        finalType <- runNormalizer expression.sourceSpan (union normalType inferredBreakType)
-        pure ((typedBody, typedThen), finalType)
+  -- The `var` state scopes over the body /and/ the then clause; the loop pattern scopes over the body.
+  (typedVarBindings, (typedBody, typedThen, finalType)) <-
+    withVarBindingsTyped expression.varBindings $ do
+      boundaryId <- freshBoundaryId
+      -- Collect the for body's whole effect (its @CONTINUE(for)@ elements, @EXIT(for)@ breaks, and any
+      -- ordinary effects / outer escapes).
+      (bodyEffect, (typedBody, bodyTail)) <-
+        withEffectInference $
+          enterForBody boundaryId $
+            withParameters patternBindings (synthBlock expression.body)
+      -- Discharge the for's own escapes. A `for` is a map: each @CONTINUE@ element and the body tail join
+      -- the element type R; a @break@ (@EXIT@) bypasses `then` and unions into the result. The residual
+      -- is the loop's observable effect.
+      let (continueType, afterContinue) = splitContinue boundaryId bodyEffect
+          (breakType, residualEffect) = splitExit boundaryId afterContinue
+      elementR <- runNormalizer expression.sourceSpan (union bodyTail continueType)
+      let arrayType = arrayOf elementR
+      -- The `then` clause inherits the outer control context (no barrier) and runs in the `var` scope;
+      -- its own effect joins the loop's observed effect.
+      (thenEffect, maybeThenResult, typedThen) <- walkThenClause ForThen arrayType expression.thenClause
+      let normalType = fromMaybe arrayType maybeThenResult
+      breakAndNormal <- runNormalizer expression.sourceSpan (union normalType breakType)
+      observedEffect <- runNormalizer expression.sourceSpan (union residualEffect thenEffect)
+      finalType <- observeResult expression.sourceSpan sourceAttribute observedEffect breakAndNormal
+      pure (typedBody, typedThen, finalType)
   typedExpression expression.sourceSpan finalType $ \semantic ->
     ExpressionFor
       ForExpression
@@ -1600,18 +1589,18 @@ checkHandlerScheme expression = do
   (typedVarBindings, (handled, typedHandlers, typedThen, breakUnion, bodyEffect, thenResult)) <-
     withVarBindingsTyped expression.stateVariables $
       withGenerics handlerGenerics $ do
-        (breakUnion, (handlerBodyEffect, results)) <-
-          withBreakInference $
-            withEffectInference $
-              catMaybes <$> traverse walkRequestHandler expression.handlers
-        -- Only explicit @break@s reach the handler's result, bypassing @then@ and unioning straight in.
-        -- A request body's resume values (its @next@ and body tail) were already checked against the
-        -- request return type in 'walkResolvedRequestHandler'. The handler @then@ is jumpless.
+        (handlerBodyEffect, results) <-
+          withEffectInference $
+            catMaybes <$> traverse walkRequestHandler expression.handlers
+        -- Only explicit @break@s reach the handler's result (each request handler discharges its own and
+        -- returns it), bypassing @then@ and unioning straight in. A request body's resume values (its
+        -- @next@ and body tail) were already checked against the request return type. @then@ is jumpless.
+        breakUnion <- foldM (\accumulated (_, _, breakType, _) -> runNormalizer expression.sourceSpan (union accumulated breakType)) bottomType results
         (thenEffect, maybeThenResult, typedThen) <- walkThenClause HandlerThen resultVariable expression.thenClause
         totalBodyEffect <- runNormalizer expression.sourceSpan (union handlerBodyEffect thenEffect)
         pure
-          ( [(name, requestArguments) | (name, requestArguments, _) <- results],
-            [node | (_, _, node) <- results],
+          ( [(name, requestArguments) | (name, requestArguments, _, _) <- results],
+            [node | (_, _, _, node) <- results],
             typedThen,
             breakUnion,
             totalBodyEffect,
@@ -1619,8 +1608,8 @@ checkHandlerScheme expression = do
           )
   let handledRequests = Map.fromList handled
       continuationEffect =
-        NormalizedEffectRow EffectRow {request = handledRequests, tails = Map.singleton effectId (Map.keysSet handledRequests)}
-      effectVariable = NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton effectId mempty}
+        effectRow EffectRow {request = handledRequests, tails = Map.singleton effectId (Map.keysSet handledRequests)}
+      effectVariable = effectRow EffectRow {request = mempty, tails = Map.singleton effectId mempty}
   handlerEffect <- runNormalizer expression.sourceSpan (union effectVariable bodyEffect)
   handlerResult <- runNormalizer expression.sourceSpan (union breakUnion thenResult)
   let outerParameter = continuationExpectedArgument nullType resultVariable continuationEffect
@@ -1734,7 +1723,7 @@ walkThenClause scope matchedType = \case
 -- the environment would be a genuine compiler bug, but the same report keeps the checker total.
 walkRequestHandler ::
   RequestHandler Identified ->
-  Checker (Maybe (QualifiedName, Map Text NormalizedKindedType, RequestHandler Typed))
+  Checker (Maybe (QualifiedName, Map Text NormalizedKindedType, NormalizedType, RequestHandler Typed))
 walkRequestHandler handler = do
   requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
   let resolvedRequest = case handler.typeReference.resolution of
@@ -1746,12 +1735,16 @@ walkRequestHandler handler = do
       pure Nothing
     Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
 
--- | Walk a request handler whose handled request has been resolved (see 'walkRequestHandler').
+-- | Walk a request handler whose handled request has been resolved (see 'walkRequestHandler'). Returns
+-- the handled request name, its inferred generic arguments, the @break@ value it discharges (a value the
+-- handler returns without resuming — it bypasses @then@), and the typed node. The body's resume values
+-- (its @next@ and its tail) are checked against the request's return type here; its residual effect is
+-- re-emitted into the handler's effect scope.
 walkResolvedRequestHandler ::
   RequestHandler Identified ->
   QualifiedName ->
   RequestInformation ->
-  Checker (QualifiedName, Map Text NormalizedKindedType, RequestHandler Typed)
+  Checker (QualifiedName, Map Text NormalizedKindedType, NormalizedType, RequestHandler Typed)
 walkResolvedRequestHandler handler requestName requestInfo = do
   -- The handler's parameters are built first: when the request's generics are not written explicitly,
   -- they are derived from the parameter annotations (a @request foo(x : int)@ handler of @foo[a](x: a)@
@@ -1763,25 +1756,23 @@ walkResolvedRequestHandler handler requestName requestInfo = do
   instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.parameterType)
   instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.returnType)
   runNormalizer handler.sourceSpan (subtype instantiatedParam paramObject)
-  (resumeUnion, typedBlock) <-
+  boundaryId <- freshBoundaryId
+  (bodyEffect, (typedBlock, bodyTail)) <-
     -- A request handler body is deferred — it runs when the handler is invoked, not where it is written
-    -- — so it sees none of the enclosing agent's / `for`'s jump targets: a `return` is barred
-    -- ('enterRequestHandler' is a barrier — only a nested closure's own boundary catches one), and only
-    -- the handler's own `break` / `next` are in scope. Its resume values are collected in the next
-    -- channel.
-    withNextInference $
-      enterRequestHandler $
-        withParameters paramBindings $
-          -- The request handler captures its own `next` / `break`, so they do not escape an enclosing branch.
-          capturingJumps HandlerJump $ do
-            (typed, bodyTail) <- synthBlock handler.body
-            -- The body tail resumes the continuation (an implicit @next@), so it joins the resume channel
-            -- alongside every explicit @next@; it is not part of the handler result.
-            emitNextType handler.body.sourceSpan bodyTail
-            pure typed
-  -- Every resume value (a handler @next@ or the body tail) must be a valid result of the handled request,
-  -- checked here at the request handler edge against the request's (instantiated) return type.
+    -- — so it sees none of the enclosing agent's / `for`'s targets: a `return` is barred
+    -- ('enterRequestHandler' clears the return / `for` targets — only a nested closure's own boundary
+    -- catches a `return`), and only the handler's own `break` / `next` are in scope.
+    withEffectInference $
+      enterRequestHandler boundaryId $
+        withParameters paramBindings (synthBlock handler.body)
+  -- Discharge the handler's own escapes: its @CONTINUE@ resumes (with the body tail, an implicit @next@)
+  -- must be valid request results; its @break@s (@EXIT@) bypass @then@ and become handler results.
+  let (resumeContinue, afterContinue) = splitContinue boundaryId bodyEffect
+      (breakType, residualEffect) = splitExit boundaryId afterContinue
+  resumeUnion <- runNormalizer handler.sourceSpan (union bodyTail resumeContinue)
   runNormalizer handler.sourceSpan (subtype resumeUnion instantiatedReturn)
+  -- The body's residual effect joins the handler's effect scope (it becomes part of @E | bodyEffect@).
+  emitEffect handler.sourceSpan residualEffect
   instantiation <- instantiationOf handler.sourceSpan requestInfo.genericParameters substitution
   -- The request's generic arguments by name, for the continuation's overwrite effect @{...E, req[..]}@.
   let requestArguments = instantiationByName requestInfo.genericParameters substitution
@@ -1797,7 +1788,7 @@ walkResolvedRequestHandler handler requestName requestInfo = do
             body = typedBlock,
             sourceSpan = handler.sourceSpan
           }
-  pure (requestName, requestArguments, typedHandler)
+  pure (requestName, requestArguments, breakType, typedHandler)
 
 -- | The generic substitution for a constructor pattern. Explicit @[...]@ arguments are elaborated as
 -- usual (the pattern's signature is written). With none, the data type's generic arguments are
@@ -2035,16 +2026,18 @@ walkAgentBody declaration preparation expectedReturn expectedEffect =
     . withWorld preparation.declaredAttribute
     . withParameters preparation.parameterBindings
     $ do
-      (collectedReturns, (inferredEffect, (typedBody, tailType))) <-
-        withReturnInference
-          $ withEffectInference
-          $ enterAgentBody
-            . capturingJumps ReturnJump
-          $ synthBlock declaration.body
-      -- The agent's result is the union of its body tail and its @return@s (a diverging body's tail is
-      -- @never@, so the @return@s drive it). An unannotated return type is exactly that union; an annotated
-      -- one is the annotation, checked against the union here.
-      inferredReturn <- runNormalizer declaration.sourceSpan (union tailType collectedReturns)
+      boundaryId <- freshBoundaryId
+      (bodyEffect, (typedBody, tailType)) <-
+        withEffectInference $ enterAgentBody boundaryId $ synthBlock declaration.body
+      -- Discharge the agent's own @return@s (@EXIT(self)@): their union with the body tail is the agent's
+      -- result (a diverging body's tail is @never@, so the @return@s drive it). An unannotated return type
+      -- is exactly that union; an annotated one is the annotation, checked against the union here.
+      let (returnExit, residualEffect) = splitExit boundaryId bodyEffect
+      inferredReturn <- runNormalizer declaration.sourceSpan (union tailType returnExit)
+      -- After discharging its own @return@, any concrete escape left in the effect targets a boundary
+      -- that is not in scope — a misplaced jump or an escaping continuation (the soundness check).
+      when (hasConcreteEscape residualEffect) $
+        reportMisplacedJump declaration.sourceSpan "a `next` / `break` / `return`" "an enclosing `for`, handler, or agent that is still in scope"
       returnType <- case expectedReturn of
         Just expected -> do
           runNormalizer declaration.sourceSpan (subtype inferredReturn expected)
@@ -2052,9 +2045,9 @@ walkAgentBody declaration preparation expectedReturn expectedEffect =
         Nothing -> pure inferredReturn
       finalEffect <- case expectedEffect of
         Just declared -> do
-          runNormalizer declaration.sourceSpan (subtype inferredEffect declared)
+          runNormalizer declaration.sourceSpan (subtype residualEffect declared)
           pure declared
-        Nothing -> pure inferredEffect
+        Nothing -> pure residualEffect
       pure (returnType, finalEffect, typedBody)
 
 -- | Check one acyclic agent, producing its 'Scheme' (its generics plus the function type). The
@@ -2187,7 +2180,7 @@ requestValueScheme sourceSpan qualifiedName parameters = do
     Just info -> do
       checkConstructorDefaults info.genericParameters info.parameterType parameters
       arguments <- ownGenericArguments sourceSpan info.genericParameters
-      let effect = NormalizedEffectRow EffectRow {request = Map.singleton qualifiedName arguments, tails = mempty}
+      let effect = effectRow EffectRow {request = Map.singleton qualifiedName arguments, tails = mempty}
       -- Performing the request accepts the /call/ shape (defaulted parameters optional); the handler
       -- still receives the (required) read shape, the runtime having filled the defaults.
       pure Scheme {genericParameters = info.genericParameters, valueType = assembleAgent bottomAttribute (callShape parameters info.parameterType) info.returnType effect}

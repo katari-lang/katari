@@ -242,7 +242,7 @@ spec = do
             (initialCheckerEnvironment emptyTypeEnvironment) {locals = callableLocal}
           (result, diagnostics) = runChecker environment (synthAgentType declaration)
           expectedEffect =
-            NormalizedEffectRow
+            effectRow
               EffectRow {request = Map.singleton fakeRequestName mempty, tails = mempty}
        in (extractAgentEffect result, toList diagnostics) `shouldBe` (expectedEffect, [])
 
@@ -263,7 +263,7 @@ spec = do
           environment =
             (initialCheckerEnvironment emptyTypeEnvironment) {locals = callableLocal}
           (result, diagnostics) = runChecker environment (synthAgentType declaration)
-       in (extractAgentEffect result, toList diagnostics) `shouldBe` (NormalizedEffectAny, [])
+       in (extractAgentEffect result, toList diagnostics) `shouldBe` (anyEffect, [])
 
     it "synthHandler does not emit any effect to the enclosing scope (handler is a value, not a call)" $
       let handlerExpr = handlerExpressionBuilder [integerAnnotation, allEffectAnnotation] [] Nothing
@@ -379,7 +379,7 @@ spec = do
                       NormalizedFunction
                         { argumentType = recordNormalized [("value", integerType)],
                           returnType = stringType,
-                          effect = NormalizedEffectAny
+                          effect = anyEffect
                         }
                 }
           providerType =
@@ -392,7 +392,7 @@ spec = do
                             NormalizedFunction
                               { argumentType = recordNormalized [("continuation", continuationAgent)],
                                 returnType = stringType,
-                                effect = NormalizedEffectAny
+                                effect = anyEffect
                               }
                       },
                 generics = mempty,
@@ -402,7 +402,7 @@ spec = do
           -- The continuation's result R is the use body's tail (here the string "ok"), matching the
           -- provider's expected continuation return type.
           useStmt = useStatementBuilder (Just (LocalVariableId 1, integerAnnotation)) (variableExpression (LocalVariableId 0)) (exprBlock (stringLiteral "ok"))
-          action = enterAgentBody (walkStatements [useStmt] (pure ()))
+          action = walkStatements [useStmt] (pure ())
           (_, diagnostics) = runAt providerLocal mempty action
        in toList diagnostics `shouldBe` []
 
@@ -454,7 +454,7 @@ spec = do
               (Just (LocalVariableId 1, integerAnnotation))
               (variableExpression (LocalVariableId 0))
               (bodyOf [StatementExpression callInBody] (Just (stringLiteral "ok")))
-          action = enterAgentBody (walkStatements [useStmt] (pure ()))
+          action = walkStatements [useStmt] (pure ())
           (_, diagnostics) = runAt localBindings mempty action
        in -- The continuation subtype check at the use site catches the over-broad body effect.
           hasErrorCode "K3001" diagnostics `shouldBe` True
@@ -470,7 +470,7 @@ spec = do
                             NormalizedFunction
                               { argumentType = recordNormalized [("continuation", topType)],
                                 returnType = topType,
-                                effect = NormalizedEffectAny
+                                effect = anyEffect
                               }
                       },
                 generics = mempty,
@@ -486,7 +486,7 @@ spec = do
                   body = exprBlock nullLiteral,
                   sourceSpan = testSpan
                 }
-          action = enterAgentBody (walkStatements [useStmt] (pure ()))
+          action = walkStatements [useStmt] (pure ())
           (_, diagnostics) = runAt providerLocal mempty action
        in hasErrorCode "K3013" diagnostics `shouldBe` True
 
@@ -502,7 +502,7 @@ spec = do
                       NormalizedFunction
                         { argumentType = recordNormalized [("value", nullType)],
                           returnType = integerType,
-                          effect = NormalizedEffectAny
+                          effect = anyEffect
                         }
                 }
           expected =
@@ -515,7 +515,7 @@ spec = do
                             NormalizedFunction
                               { argumentType = recordNormalized [("continuation", continuationAgent)],
                                 returnType = integerType,
-                                effect = NormalizedEffectAny
+                                effect = anyEffect
                               }
                       },
                 generics = mempty,
@@ -555,7 +555,7 @@ spec = do
                       NormalizedFunction
                         { argumentType = recordNormalized [("value", nullType)],
                           returnType = integerType,
-                          effect = NormalizedEffectAny
+                          effect = anyEffect
                         }
                 }
           expected =
@@ -568,7 +568,7 @@ spec = do
                             NormalizedFunction
                               { argumentType = recordNormalized [("continuation", continuationAgent)],
                                 returnType = stringType,
-                                effect = NormalizedEffectAny
+                                effect = anyEffect
                               }
                       },
                 generics = mempty,
@@ -618,7 +618,7 @@ spec = do
               bottomAttribute
               (paramObject [("x", integerType)])
               integerType
-              (NormalizedEffectRow EffectRow {request = Map.singleton secondRequestName mempty, tails = mempty})
+              (effectRow EffectRow {request = Map.singleton secondRequestName mempty, tails = mempty})
           callExpr = callExpression (variableExpression (LocalVariableId 9)) [("x", integerLiteral 1)]
           handlerExpr =
             handlerExpressionBuilder
@@ -729,13 +729,13 @@ spec = do
 
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
-      let action = enterAgentBody (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
+      let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
     it "`return` inside a request handler body is K3012 (a request handler bars `return`)" $
-      -- The request handler frame is a barrier: a `return` may not escape to the enclosing agent.
-      let action = enterRequestHandler (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
+      -- A request handler clears the return target: a `return` may not escape to the enclosing agent.
+      let action = enterRequestHandler (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
@@ -744,12 +744,12 @@ spec = do
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`next` inside a for body is accepted (the element type is inferred)" $
-      let action = enterForBody (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
+      let action = enterForBody (BoundaryId 0) (walkStatements [forNextStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
     it "`break` inside a for body is accepted (it short-circuits with its value)" $
-      let action = enterForBody (walkStatements [forBreakStatementBuilder (stringLiteral "x")] (pure ()))
+      let action = enterForBody (BoundaryId 0) (walkStatements [forBreakStatementBuilder (stringLiteral "x")] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
@@ -758,7 +758,7 @@ spec = do
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`break` inside a handler frame is accepted (collected into the result, not checked against R)" $
-      let action = enterRequestHandler (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
+      let action = enterRequestHandler (BoundaryId 0) (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
@@ -1082,7 +1082,7 @@ nonPureAgentType outerAttribute parameterType returnType =
     outerAttribute
     parameterType
     returnType
-    (NormalizedEffectRow EffectRow {request = Map.singleton fakeRequestName mempty, tails = mempty})
+    (effectRow EffectRow {request = Map.singleton fakeRequestName mempty, tails = mempty})
 
 fakeRequestName :: QualifiedName
 fakeRequestName = QualifiedName {moduleName = ModuleName "test", name = "req"}

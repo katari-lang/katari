@@ -33,9 +33,9 @@ import GHC.List (List)
 import Katari.Common (intersectWithKeyM, unionWithKeyM)
 import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
-import Katari.Data.Id (GenericId)
+import Katari.Data.Id (GenericId, inferenceModuleName)
 import Katari.Data.NormalizedType
-import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
+import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
 import Katari.Data.Variance (Variance (..), composeVariance)
 import Katari.Error (CannotBeIntersectedErrorInfo (..), CannotBeUnionedErrorInfo (..), GenericArityErrorInfo (..), KindErrorInfo (..), SubtypeErrorInfo (..), TypeError (..))
@@ -324,9 +324,9 @@ normalizeEffect effect = case effect of
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
     requestInfo <- requestInfoFor qualifiedName
     checkApplicationBounds requestInfo.genericParameters normalizedGenericArguments
-    pure $ NormalizedEffectRow $ EffectRow {request = Map.singleton qualifiedName normalizedGenericArguments, tails = mempty}
+    pure $ effectRow EffectRow {request = Map.singleton qualifiedName normalizedGenericArguments, tails = mempty}
   SemanticEffectGeneric genericArgumentName ->
-    pure $ NormalizedEffectRow $ EffectRow {request = mempty, tails = Map.singleton genericArgumentName mempty}
+    pure $ effectRow EffectRow {request = mempty, tails = Map.singleton genericArgumentName mempty}
   SemanticEffectOverwrite baseEffect overwrites -> do
     normalized <- normalizeEffect baseEffect
     overwriteRequests <-
@@ -340,16 +340,21 @@ normalizeEffect effect = case effect of
               pure (qualifiedName, normalizedGenericArguments)
           )
           overwrites
-    pure $ case normalized of
-      NormalizedEffectAny -> NormalizedEffectAny
-      NormalizedEffectRow effectRow ->
-        NormalizedEffectRow $
-          EffectRow
-            { -- the overwrite wins over the base's concrete request of the same name (left-biased union)
-              request = Map.union overwriteRequests effectRow.request,
-              -- and over every tail's contribution: the overwritten names are removed from each tail
-              tails = Map.map (Set.union (Map.keysSet overwriteRequests)) effectRow.tails
-            }
+    -- The overwrite applies only to the request part; escapes (never present in a normalized /written/
+    -- effect) pass through.
+    pure $ case normalized.requests of
+      RequestEffectAny -> normalized
+      RequestEffectRow row ->
+        normalized
+          { requests =
+              RequestEffectRow
+                EffectRow
+                  { -- the overwrite wins over the base's concrete request of the same name (left-biased union)
+                    request = Map.union overwriteRequests row.request,
+                    -- and over every tail's contribution: the overwritten names are removed from each tail
+                    tails = Map.map (Set.union (Map.keysSet overwriteRequests)) row.tails
+                  }
+          }
   SemanticEffectUnion effects -> foldM union bottomEffect =<< mapM normalizeEffect effects
 
 normalizeGenericArgument :: SemanticGenericArgument -> Normalizer NormalizedKindedType
@@ -462,54 +467,80 @@ instance TypeLattice NormalizedAttribute where
       tellAttributeMismatch "Private attribute cannot be a subtype of public attribute" effectiveLeft worldedRight
 
 instance TypeLattice NormalizedEffect where
-  combine direction left right = case (left, right, direction) of
-    -- NOTE: any is the top effect: it absorbs the join and is the identity of the meet
-    (NormalizedEffectAny, _, Join) -> pure NormalizedEffectAny
-    (_, NormalizedEffectAny, Join) -> pure NormalizedEffectAny
-    (NormalizedEffectAny, other, Meet) -> pure other
-    (other, NormalizedEffectAny, Meet) -> pure other
-    (NormalizedEffectRow leftRow, NormalizedEffectRow rightRow, _) -> do
-      -- NOTE: requests behave covariantly as a set: the join keeps requests of either side, the
-      -- meet keeps only requests present in both
-      combinedRequests <-
-        keyedMerge direction (combineRequestArguments direction) leftRow.request rightRow.request
-      pure $ NormalizedEffectRow $ EffectRow {request = combinedRequests, tails = combineTails direction leftRow.tails rightRow.tails}
+  -- The request part combines as before; the two escape channels combine independently (and so are
+  -- never absorbed by @all@), each behaving covariantly as a set keyed by 'BoundaryId'.
+  combine direction left right = do
+    combinedRequests <- combineRequestEffect direction left.requests right.requests
+    combinedExits <- keyedMerge direction (\_ -> combine direction) left.exits right.exits
+    combinedContinues <- keyedMerge direction (\_ -> combine direction) left.continues right.continues
+    pure NormalizedEffect {requests = combinedRequests, exits = combinedExits, continues = combinedContinues}
 
-  subtype left right = case (left, right) of
-    (NormalizedEffectAny, NormalizedEffectAny) -> pure ()
-    (NormalizedEffectAny, NormalizedEffectRow _) ->
-      tellEffectMismatch "Any effect cannot be a subtype of a known effect" left right
-    (NormalizedEffectRow _, NormalizedEffectAny) -> pure ()
-    (NormalizedEffectRow _, NormalizedEffectRow rightRow) -> do
-      -- Expand the left's tails to their upper bounds (transitively), treating the supertype's own
-      -- tails as already covered, then compare requests and tail lacks.
-      effectiveLeft <- boundedEffect rightRow.tails left
-      case effectiveLeft of
-        -- A left-only tail is unbounded (any), so the effective left effect is any and cannot be a
-        -- subtype of a known effect row.
-        NormalizedEffectAny -> tellEffectMismatch "A left-only effect generic is unbounded, so the left effect is effectively any" effectiveLeft right
-        NormalizedEffectRow effectiveLeftRow -> do
-          -- NOTE: requests are covariant; every request the left performs must appear on the right
-          mapM_
-            ( \(qualifiedName, leftArguments) ->
-                case Map.lookup qualifiedName rightRow.request of
-                  Nothing -> tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName) effectiveLeft right
-                  Just rightArguments -> do
-                    requestInfo <- requestInfoFor qualifiedName
-                    subtypeArgumentsWith ((.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
-            )
-            (Map.toList effectiveLeftRow.request)
-          -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
-          -- only if the right removes no more requests than the left (right lacks ⊆ left lacks).
-          mapM_
-            ( \(genericId, leftLacks) ->
-                case Map.lookup genericId rightRow.tails of
-                  Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
-                  Just rightLacks ->
-                    unless (rightLacks `Set.isSubsetOf` leftLacks) $
-                      tellEffectMismatch "Effect generic overrides are incompatible" effectiveLeft right
-            )
-            (Map.toList effectiveLeftRow.tails)
+  -- The request parts subtype as before; then every escape the left carries must appear on the right
+  -- with a covariant value type (independent of the request parts, so @all@ does not cover an escape).
+  subtype left right = do
+    subtypeRequestEffect left right
+    subtypeEscapes left.exits right.exits
+    subtypeEscapes left.continues right.continues
+    where
+      subtypeEscapes leftMap rightMap =
+        mapM_
+          ( \(boundaryId, leftType) ->
+              case Map.lookup boundaryId rightMap of
+                Nothing -> tellEffectMismatch "Left effect carries a global escape not present in the right effect" left right
+                Just rightType -> subtype leftType rightType
+          )
+          (Map.toList leftMap)
+
+-- | Combine the request parts of two effects (the old effect lattice): @all@ absorbs the join and is the
+-- identity of the meet; two concrete rows merge their requests (covariant set) and tails.
+combineRequestEffect :: LatticeDirection -> RequestEffect -> RequestEffect -> Normalizer RequestEffect
+combineRequestEffect direction left right = case (left, right, direction) of
+  (RequestEffectAny, _, Join) -> pure RequestEffectAny
+  (_, RequestEffectAny, Join) -> pure RequestEffectAny
+  (RequestEffectAny, other, Meet) -> pure other
+  (other, RequestEffectAny, Meet) -> pure other
+  (RequestEffectRow leftRow, RequestEffectRow rightRow, _) -> do
+    combinedRequests <- keyedMerge direction (combineRequestArguments direction) leftRow.request rightRow.request
+    pure $ RequestEffectRow EffectRow {request = combinedRequests, tails = combineTails direction leftRow.tails rightRow.tails}
+
+-- | Subtype the request parts of two effects (the old effect subtyping): expand the left's tails to
+-- their bounds, then compare requests (covariant) and tail lacks (contravariant).
+subtypeRequestEffect :: NormalizedEffect -> NormalizedEffect -> Normalizer ()
+subtypeRequestEffect left right = case (left.requests, right.requests) of
+  (RequestEffectAny, RequestEffectAny) -> pure ()
+  (RequestEffectAny, RequestEffectRow _) ->
+    tellEffectMismatch "Any effect cannot be a subtype of a known effect" left right
+  (RequestEffectRow _, RequestEffectAny) -> pure ()
+  (RequestEffectRow _, RequestEffectRow rightRow) -> do
+    -- Expand the left's tails to their upper bounds (transitively), treating the supertype's own
+    -- tails as already covered, then compare requests and tail lacks.
+    effectiveLeft <- boundedEffect rightRow.tails left
+    case effectiveLeft.requests of
+      -- A left-only tail is unbounded (any), so the effective left effect is any and cannot be a
+      -- subtype of a known effect row.
+      RequestEffectAny -> tellEffectMismatch "A left-only effect generic is unbounded, so the left effect is effectively any" effectiveLeft right
+      RequestEffectRow effectiveLeftRow -> do
+        -- NOTE: requests are covariant; every request the left performs must appear on the right
+        mapM_
+          ( \(qualifiedName, leftArguments) ->
+              case Map.lookup qualifiedName rightRow.request of
+                Nothing -> tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName) effectiveLeft right
+                Just rightArguments -> do
+                  requestInfo <- requestInfoFor qualifiedName
+                  subtypeArgumentsWith ((.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
+          )
+          (Map.toList effectiveLeftRow.request)
+        -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
+        -- only if the right removes no more requests than the left (right lacks ⊆ left lacks).
+        mapM_
+          ( \(genericId, leftLacks) ->
+              case Map.lookup genericId rightRow.tails of
+                Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
+                Just rightLacks ->
+                  unless (rightLacks `Set.isSubsetOf` leftLacks) $
+                    tellEffectMismatch "Effect generic overrides are incompatible" effectiveLeft right
+          )
+          (Map.toList effectiveLeftRow.tails)
 
 -- | Combine the argument maps of one request name according to the request's declared variances.
 combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Map Text NormalizedKindedType)
@@ -895,14 +926,18 @@ boundedAttribute = resolveGenerics (\attribute -> attribute.generic) (\generics 
 -- replaced by a concrete effect (bound expansion, substitution). @all@ has no representable
 -- restriction, so it is returned unchanged (a sound over-approximation).
 restrictEffect :: Set QualifiedName -> NormalizedEffect -> NormalizedEffect
-restrictEffect lacks = \case
-  NormalizedEffectAny -> NormalizedEffectAny
-  NormalizedEffectRow effectRow ->
-    NormalizedEffectRow
-      EffectRow
-        { request = Map.withoutKeys effectRow.request lacks,
-          tails = Map.map (Set.union lacks) effectRow.tails
-        }
+restrictEffect lacks effect = effect {requests = restricted effect.requests}
+  where
+    -- Only the request part is restricted; the escape channels pass through unchanged — which is exactly
+    -- what lets the @{...E, req}@ inference keep a continuation's escapes when it solves @E@.
+    restricted = \case
+      RequestEffectAny -> RequestEffectAny
+      RequestEffectRow row ->
+        RequestEffectRow
+          EffectRow
+            { request = Map.withoutKeys row.request lacks,
+              tails = Map.map (Set.union lacks) row.tails
+            }
 
 -- | The declared upper bound of an effect generic; an unregistered generic defaults to @all@. The
 -- effect lattice resolves tails bespoke (see 'boundedEffect'), so it is not folded by 'boundedType'.
@@ -923,15 +958,16 @@ effectBoundFor genericId = do
 boundedEffect :: Map GenericId (Set QualifiedName) -> NormalizedEffect -> Normalizer NormalizedEffect
 boundedEffect coveredTails = resolveGenerics genericsOf absorbRound (Map.keysSet coveredTails)
   where
-    genericsOf = \case
-      NormalizedEffectAny -> Set.empty
-      NormalizedEffectRow effectRow -> Map.keysSet effectRow.tails
-    absorbRound tailsToExpand = \case
-      NormalizedEffectAny -> pure NormalizedEffectAny
-      NormalizedEffectRow effectRow -> do
-        let expanding = Map.restrictKeys effectRow.tails tailsToExpand
+    genericsOf effect = case effect.requests of
+      RequestEffectAny -> Set.empty
+      RequestEffectRow row -> Map.keysSet row.tails
+    absorbRound tailsToExpand effect = case effect.requests of
+      RequestEffectAny -> pure effect
+      RequestEffectRow row -> do
+        let expanding = Map.restrictKeys row.tails tailsToExpand
         expansions <- mapM (\(genericId, lacks) -> restrictEffect lacks <$> effectBoundFor genericId) (Map.toList expanding)
-        foldM union (NormalizedEffectRow effectRow {tails = Map.withoutKeys effectRow.tails tailsToExpand}) expansions
+        -- Expanding tails touches only the request part; the effect's escapes ride through 'union'.
+        foldM union (effect {requests = RequestEffectRow row {tails = Map.withoutKeys row.tails tailsToExpand}}) expansions
 
 ------------------------------------------------------------------------------------------------
 -- Generic substitution
@@ -992,13 +1028,19 @@ objectAsType object = layeredAsType neverLayer {objectLayer = Just object}
 -- names ('restrictEffect') — the override's precedence, re-applied at substitution as at bound
 -- expansion.
 substituteEffect :: Map GenericId NormalizedKindedType -> NormalizedEffect -> Normalizer NormalizedEffect
-substituteEffect substitution effect = case effect of
-  NormalizedEffectAny -> pure NormalizedEffectAny
-  NormalizedEffectRow effectRow -> do
-    substitutedRequests <- mapM (mapM (substituteGenericArgument substitution)) effectRow.request
-    let (replacedTails, keptTails) = Map.partitionWithKey (\genericId _ -> Map.member genericId substitution) effectRow.tails
-        base = NormalizedEffectRow effectRow {request = substitutedRequests, tails = keptTails}
-    foldM spliceTail base (Map.toList replacedTails)
+substituteEffect substitution effect = do
+  -- Substitute into the escape value types (they may mention generics); a tail @E@ that is replaced by
+  -- an effect carrying escapes brings them in via 'spliceTail' below.
+  substitutedExits <- mapM (substituteType substitution) effect.exits
+  substitutedContinues <- mapM (substituteType substitution) effect.continues
+  let withEscapes base = base {exits = substitutedExits, continues = substitutedContinues}
+  case effect.requests of
+    RequestEffectAny -> pure (withEscapes effect)
+    RequestEffectRow row -> do
+      substitutedRequests <- mapM (mapM (substituteGenericArgument substitution)) row.request
+      let (replacedTails, keptTails) = Map.partitionWithKey (\genericId _ -> Map.member genericId substitution) row.tails
+          base = withEscapes (effect {requests = RequestEffectRow row {request = substitutedRequests, tails = keptTails}})
+      foldM spliceTail base (Map.toList replacedTails)
   where
     spliceTail accumulated (genericId, lacks) = case Map.lookup genericId substitution of
       Just (NormalizedKindedTypeEffect replacement) -> union accumulated (restrictEffect lacks replacement)
@@ -1200,15 +1242,24 @@ denormalizeAttribute attribute =
     many -> SemanticAttributeUnion many
 
 denormalizeEffect :: NormalizedEffect -> Normalizer SemanticEffect
-denormalizeEffect effect = case effect of
-  NormalizedEffectAny -> pure SemanticEffectAny
-  NormalizedEffectRow effectRow -> do
-    requestEffects <- mapM (uncurry denormalizeRequest) (Map.toList effectRow.request)
-    let genericEffects = SemanticEffectGeneric <$> Map.keys effectRow.tails
-    pure $ case requestEffects <> genericEffects of
-      [] -> SemanticEffectPure
-      [single] -> single
-      many -> SemanticEffectUnion many
+denormalizeEffect effect = do
+  requestPart <- case effect.requests of
+    RequestEffectAny -> pure [SemanticEffectAny]
+    RequestEffectRow row -> do
+      requestEffects <- mapM (uncurry denormalizeRequest) (Map.toList row.request)
+      let genericEffects = SemanticEffectGeneric <$> Map.keys row.tails
+      pure (requestEffects <> genericEffects)
+  -- Escapes are internal and discharged before any public type; they only surface here in an
+  -- effect-mismatch message, rendered as reserved pseudo-requests so the message stays total.
+  let escapePart =
+        [escapeRequest "<escape>" | not (Map.null effect.exits)]
+          <> [escapeRequest "<resume>" | not (Map.null effect.continues)]
+  pure $ case requestPart <> escapePart of
+    [] -> SemanticEffectPure
+    [single] -> single
+    many -> SemanticEffectUnion many
+  where
+    escapeRequest name = SemanticEffectRequest (QualifiedName {moduleName = inferenceModuleName, name = name}) mempty
 
 denormalizeRequest :: QualifiedName -> Map Text NormalizedKindedType -> Normalizer SemanticEffect
 denormalizeRequest qualifiedName arguments = do

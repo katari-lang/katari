@@ -136,14 +136,14 @@ spec = do
     it "unions nested overwrite shadows instead of replacing them" $
       runNormalizer
         (normalizeEffect (SemanticEffectOverwrite (SemanticEffectOverwrite (SemanticEffectGeneric effectGeneric) [(askName, mempty)]) [(logName, mempty)]))
-        `shouldBe` NormalizedEffectRow
+        `shouldBe` effectRow
           EffectRow
             { request = Map.fromList [(askName, mempty), (logName, mempty)],
               tails = Map.singleton effectGeneric (Set.fromList [askName, logName])
             }
     it "records no shadow over a concrete base" $
       runNormalizer (normalizeEffect (SemanticEffectOverwrite (SemanticEffectRequest askName mempty) [(askName, mempty)]))
-        `shouldBe` NormalizedEffectRow
+        `shouldBe` effectRow
           EffectRow
             { request = Map.singleton askName mempty,
               tails = mempty
@@ -155,10 +155,27 @@ spec = do
       -- is restricted to lack ask (the flat-shadowed predecessor dropped this).
       runNormalizer
         ( substituteEffect
-            (Map.singleton effectGeneric (NormalizedKindedTypeEffect (NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton substituteTargetGeneric mempty})))
-            (NormalizedEffectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton effectGeneric (Set.singleton askName)})
+            (Map.singleton effectGeneric (NormalizedKindedTypeEffect (effectRow EffectRow {request = mempty, tails = Map.singleton substituteTargetGeneric mempty})))
+            (effectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton effectGeneric (Set.singleton askName)})
         )
-        `shouldBe` NormalizedEffectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton substituteTargetGeneric (Set.singleton askName)}
+        `shouldBe` effectRow EffectRow {request = Map.singleton askName mempty, tails = Map.singleton substituteTargetGeneric (Set.singleton askName)}
+
+  describe "effect escapes (exits / continues)" $ do
+    it "unions two exits with the same boundary covariantly" $
+      runNormalizer (union (exitEffect (BoundaryId 0) intType) (exitEffect (BoundaryId 0) stringType))
+        `shouldBe` exitEffect (BoundaryId 0) (runNormalizer (union intType stringType))
+    it "keeps an escape orthogonal to `all` (a join with Any does not absorb it)" $
+      runNormalizer (union topEffect (exitEffect (BoundaryId 0) intType))
+        `shouldBe` topEffect {exits = Map.singleton (BoundaryId 0) intType}
+    it "an exit's value type is covariant (int <: number)" $
+      normalizerErrors (subtype (exitEffect (BoundaryId 0) intType) (exitEffect (BoundaryId 0) numberType)) `shouldBe` []
+    it "rejects an exit whose value type does not match (string </: int)" $
+      normalizerErrors (subtype (exitEffect (BoundaryId 0) stringType) (exitEffect (BoundaryId 0) intType)) `shouldSatisfy` (not . null)
+    it "does not let `all` cover an escape on the left" $
+      normalizerErrors (subtype (exitEffect (BoundaryId 0) intType) topEffect) `shouldSatisfy` (not . null)
+    it "tracks continues separately from exits (same boundary, both channels)" $
+      runNormalizer (union (exitEffect (BoundaryId 0) intType) (continueEffect (BoundaryId 0) stringType))
+        `shouldBe` (bottomEffect {exits = Map.singleton (BoundaryId 0) intType, continues = Map.singleton (BoundaryId 0) stringType})
 
   describe "normalizeType (generic arity)" $ do
     it "accepts a data application with exactly the declared arguments" $
@@ -287,7 +304,7 @@ logName = QualifiedName {moduleName = ModuleName "test", name = "log"}
 -- | @{...E, ask}@ with @E@'s bound being @log@: request ask, tail E lacking ask.
 shadowingRow :: NormalizedEffect
 shadowingRow =
-  NormalizedEffectRow
+  effectRow
     EffectRow
       { request = Map.singleton askName mempty,
         tails = Map.singleton boundedEffectGeneric (Set.singleton askName)
@@ -296,7 +313,7 @@ shadowingRow =
 -- | @{...log, ask}@ written concretely: requests ask and log, no tail.
 shadowedSupertype :: NormalizedEffect
 shadowedSupertype =
-  NormalizedEffectRow
+  effectRow
     EffectRow
       { request = Map.fromList [(askName, mempty), (logName, mempty)],
         tails = mempty
@@ -359,7 +376,7 @@ boundedEffectParameter =
     { genericId = boundedEffectGeneric,
       kind = GenericKindEffect,
       variance = Bivariant,
-      upperBound = Just (NormalizedKindedTypeEffect (NormalizedEffectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
+      upperBound = Just (NormalizedKindedTypeEffect (effectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
     }
 
 layerType :: LayeredType -> NormalizedType

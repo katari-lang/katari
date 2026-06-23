@@ -73,7 +73,7 @@ metavarKinded kind metavar = case kind of
     NormalizedKindedTypeType
       NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton metavar, attribute = bottomAttribute}
   GenericKindEffect ->
-    NormalizedKindedTypeEffect (NormalizedEffectRow EffectRow {request = mempty, tails = Map.singleton metavar mempty})
+    NormalizedKindedTypeEffect (effectRow EffectRow {request = mempty, tails = Map.singleton metavar mempty})
   GenericKindAttribute ->
     NormalizedKindedTypeAttribute NormalizedAttribute {private = False, generic = Set.singleton metavar}
 
@@ -135,14 +135,16 @@ asTypeMetavar flexible normalizedType = case normalizedType.baseType of
 -- | Whether an effect is exactly a bare flexible effect metavariable (no concrete requests, a single
 -- flexible tail with no overrides) — the form 'metavarKinded' produces for an effect generic.
 asEffectMetavar :: Set GenericId -> NormalizedEffect -> Maybe GenericId
-asEffectMetavar flexible = \case
-  NormalizedEffectRow row
-    | Map.null row.request,
-      [(metavar, lacks)] <- Map.toList row.tails,
-      Set.null lacks,
-      metavar `Set.member` flexible ->
-        Just metavar
-  _ -> Nothing
+asEffectMetavar flexible effect
+  | Map.null effect.exits,
+    Map.null effect.continues,
+    RequestEffectRow row <- effect.requests,
+    Map.null row.request,
+    [(metavar, lacks)] <- Map.toList row.tails,
+    Set.null lacks,
+    metavar `Set.member` flexible =
+      Just metavar
+  | otherwise = Nothing
 
 -- | Whether an attribute is exactly a bare flexible attribute metavariable (public, a single flexible
 -- generic) — the form 'metavarKinded' produces for an attribute generic.
@@ -163,12 +165,14 @@ asAttributeMetavar flexible attribute
 collectEffectConstraints :: Set GenericId -> NormalizedEffect -> NormalizedEffect -> Constraints
 collectEffectConstraints flexible actual parameter
   | Just metavar <- asEffectMetavar flexible parameter = lowerEffect metavar actual
-  | otherwise = case parameter of
-      NormalizedEffectRow parameterRow ->
+  | otherwise = case parameter.requests of
+      RequestEffectRow parameterRow ->
         let concreteKeys = Map.keysSet parameterRow.request
             flexibleTails = [(metavar, lacks) | (metavar, lacks) <- Map.toList parameterRow.tails, metavar `Set.member` flexible]
-         in mconcat [lowerEffect metavar (restrictEffect (Set.union concreteKeys lacks) actual) | (metavar, lacks) <- flexibleTails]
-      NormalizedEffectAny -> mempty
+         in -- 'restrictEffect' keeps the actual's escape channels, so a continuation's escapes flow into
+            -- the solved @E@ and are discharged later at their target boundary.
+            mconcat [lowerEffect metavar (restrictEffect (Set.union concreteKeys lacks) actual) | (metavar, lacks) <- flexibleTails]
+      RequestEffectAny -> mempty
 
 -- | As 'collectEffectConstraints', for the attribute of a node (only the bare-metavariable shapes are
 -- recognised; richer attributes contribute nothing and are left to the dispose check).
@@ -277,10 +281,13 @@ deepGenerics normalizedType =
       Set.unions (deepGenerics normalizedSequence.rest : map deepGenerics normalizedSequence.items)
     objectGenerics normalizedObject =
       Set.unions (deepGenerics normalizedObject.rest : [deepGenerics field.normalizedType | field <- Map.elems normalizedObject.fields])
-    effectGenerics = \case
-      NormalizedEffectAny -> Set.empty
-      NormalizedEffectRow row ->
-        Set.unions (Map.keysSet row.tails : [kindedGenerics argument | arguments <- Map.elems row.request, argument <- Map.elems arguments])
+    effectGenerics effect =
+      Set.unions $
+        (deepGenerics <$> (Map.elems effect.exits <> Map.elems effect.continues))
+          <> case effect.requests of
+            RequestEffectAny -> []
+            RequestEffectRow row ->
+              Map.keysSet row.tails : [kindedGenerics argument | arguments <- Map.elems row.request, argument <- Map.elems arguments]
     kindedGenerics = \case
       NormalizedKindedTypeType normalizedType' -> deepGenerics normalizedType'
       NormalizedKindedTypeEffect effect -> effectGenerics effect

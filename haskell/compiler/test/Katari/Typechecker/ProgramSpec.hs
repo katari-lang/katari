@@ -226,6 +226,14 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "does not flag a handler on a genuine request" $
     typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { use handler { request tick() -> integer { break 0 } }\n0 }")] `shouldBe` []
 
+  -- A `return` after a `use` rides the continuation's effect (an internal `EXIT` escape) back to the
+  -- enclosing agent, where it is discharged and checked against the agent's return type.
+  it "checks a `return` after a `use` against the enclosing agent's return type" $
+    typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { use handler { request tick() -> integer { break 0 } }\nreturn 5 }")] `shouldBe` []
+
+  it "rejects a `return` after a `use` whose value mismatches the agent's return type (K3001)" $
+    typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { use handler { request tick() -> integer { break 0 } }\nreturn \"wrong\" }")] `shouldContain` ["K3001"]
+
   -- Destructuring distributes the container's privacy to its components (like a `match` scrutinee), so a
   -- private value's elements may not escape to a public context.
   it "a let-destructured element of a private value is itself private (K3001 on public escape)" $

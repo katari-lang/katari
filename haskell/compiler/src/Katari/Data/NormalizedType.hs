@@ -7,6 +7,7 @@
 module Katari.Data.NormalizedType where
 
 import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -99,12 +100,30 @@ data NormalizedKindedType where
   NormalizedKindedTypeAttribute :: NormalizedAttribute -> NormalizedKindedType
   deriving (Eq, Ord, Show)
 
-data NormalizedEffect where
-  NormalizedEffectAny :: NormalizedEffect
-  NormalizedEffectRow :: EffectRow -> NormalizedEffect
+-- | An effect has two independent parts: its /request/ part ('requests' — the ordinary effects a value
+-- may perform, possibly @all@) and its /escape/ channels ('exits' / 'continues' — the internal global
+-- escapes @return@ / @break@ / @next@ ride on). The escape channels are kept orthogonal to the request
+-- part /on purpose/: @all@ (top) absorbs requests but must never absorb an escape, because an escape's
+-- value type has to survive (it is discharged and checked at the boundary it names — see 'BoundaryId').
+data NormalizedEffect = NormalizedEffect
+  { requests :: RequestEffect,
+    -- | @EXIT(id, T)@ entries: a @return@ (target = agent), a @break@ (target = handler) or a @for@
+    -- @break@ (target = for). The value type @T@ is covariant. Discharged (removed) at the boundary whose
+    -- 'BoundaryId' it names; a concrete entry surviving an agent boundary is a misplaced / escaping jump.
+    exits :: Map BoundaryId NormalizedType,
+    -- | @CONTINUE(id, T)@ entries: a @next@ (target = handler resume) or a @for@ @next@ (target = for).
+    -- Covariant @T@. Discharged at the boundary it names.
+    continues :: Map BoundaryId NormalizedType
+  }
   deriving (Eq, Ord, Show)
 
--- | An effect is the union of its concrete @request@s and its @tails@. Each tail maps an
+-- | The request part of an effect: either @all@ (the top effect) or a concrete row.
+data RequestEffect where
+  RequestEffectAny :: RequestEffect
+  RequestEffectRow :: EffectRow -> RequestEffect
+  deriving (Eq, Ord, Show)
+
+-- | An effect's request part is the union of its concrete @request@s and its @tails@. Each tail maps an
 -- effect-generic variable to the request names removed from it (its "lacks" set): @(E, lacks)@
 -- denotes @E@ with every request in @lacks@ overridden, recording the @{...E, req}@ overrides.
 data EffectRow = EffectRow
@@ -112,6 +131,53 @@ data EffectRow = EffectRow
     tails :: Map GenericId (Set QualifiedName)
   }
   deriving (Eq, Ord, Show)
+
+-- | A fresh, per-walk opaque identifier for a control-flow boundary (an agent / @for@ / request
+-- handler). The internal escape effects ('exits' / 'continues') are keyed by it, and the boundary
+-- discharges the entries naming its own id. Never serialized: escapes are discharged before any public
+-- scheme, so ids never cross a single agent's type-check walk.
+newtype BoundaryId = BoundaryId Int
+  deriving stock (Eq, Ord, Show)
+
+-- | An effect with the given request part and no escapes.
+fromRequestEffect :: RequestEffect -> NormalizedEffect
+fromRequestEffect requestEffect = NormalizedEffect {requests = requestEffect, exits = mempty, continues = mempty}
+
+-- | An effect that is exactly one concrete request row, with no escapes.
+effectRow :: EffectRow -> NormalizedEffect
+effectRow = fromRequestEffect . RequestEffectRow
+
+-- | The @all@ effect with no escapes.
+anyEffect :: NormalizedEffect
+anyEffect = fromRequestEffect RequestEffectAny
+
+-- | The empty request row (no requests, no tails).
+emptyEffectRow :: EffectRow
+emptyEffectRow = EffectRow {request = mempty, tails = mempty}
+
+-- | An effect carrying a single @EXIT(id, T)@ escape (and nothing else).
+exitEffect :: BoundaryId -> NormalizedType -> NormalizedEffect
+exitEffect boundaryId valueType = (effectRow emptyEffectRow) {exits = Map.singleton boundaryId valueType}
+
+-- | An effect carrying a single @CONTINUE(id, T)@ escape (and nothing else).
+continueEffect :: BoundaryId -> NormalizedType -> NormalizedEffect
+continueEffect boundaryId valueType = (effectRow emptyEffectRow) {continues = Map.singleton boundaryId valueType}
+
+-- | Whether an effect carries any concrete escape entry. The leak check at an agent boundary: after the
+-- agent discharges its own escapes, any survivor is a misplaced / escaping jump.
+hasConcreteEscape :: NormalizedEffect -> Bool
+hasConcreteEscape effect = not (Map.null effect.exits && Map.null effect.continues)
+
+-- | Discharge a boundary's own @EXIT(id)@: its value type (bottom if it never fired) and the effect with
+-- that entry removed. Pure because each channel holds at most one entry per id.
+splitExit :: BoundaryId -> NormalizedEffect -> (NormalizedType, NormalizedEffect)
+splitExit boundaryId effect =
+  (Map.findWithDefault bottomType boundaryId effect.exits, effect {exits = Map.delete boundaryId effect.exits})
+
+-- | Discharge a boundary's own @CONTINUE(id)@, as 'splitExit'.
+splitContinue :: BoundaryId -> NormalizedEffect -> (NormalizedType, NormalizedEffect)
+splitContinue boundaryId effect =
+  (Map.findWithDefault bottomType boundaryId effect.continues, effect {continues = Map.delete boundaryId effect.continues})
 
 data NormalizedAttribute = NormalizedAttribute
   { private :: Bool,
@@ -151,7 +217,7 @@ bottomAttribute :: NormalizedAttribute
 bottomAttribute = NormalizedAttribute {private = False, generic = Set.empty}
 
 bottomEffect :: NormalizedEffect
-bottomEffect = NormalizedEffectRow $ EffectRow {request = mempty, tails = mempty}
+bottomEffect = effectRow emptyEffectRow
 
 topType :: NormalizedType
 topType = NormalizedType {baseType = NormalizedBaseTypeUnknown, generics = Set.empty, attribute = topAttribute}
@@ -160,7 +226,7 @@ topAttribute :: NormalizedAttribute
 topAttribute = NormalizedAttribute {private = True, generic = Set.empty}
 
 topEffect :: NormalizedEffect
-topEffect = NormalizedEffectAny
+topEffect = anyEffect
 
 -- | Union @null@ into a type (set its null layer). On @unknown@ (already the top, which subsumes
 -- null) this is the identity. Used where a read may be absent — an undeclared object key, a future
