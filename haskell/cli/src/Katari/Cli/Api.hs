@@ -114,10 +114,9 @@ runtimeAuthFromEnvironment = do
 -- Response envelope
 -- ===========================================================================
 
--- | The success half of the runtime's @{ ok, data }@ envelope; only @data@ is kept.
-newtype SuccessEnvelope a = SuccessEnvelope
-  { payload :: a
-  }
+-- | The success half of the runtime's @{ ok, data }@ envelope; only @data@ is kept (consumers
+-- pattern-match the wrapped value, so it is a plain newtype rather than a record).
+newtype SuccessEnvelope a = SuccessEnvelope a
 
 instance (FromJSON a) => FromJSON (SuccessEnvelope a) where
   parseJSON = withObject "SuccessEnvelope" $ \object' -> SuccessEnvelope <$> object' .: "data"
