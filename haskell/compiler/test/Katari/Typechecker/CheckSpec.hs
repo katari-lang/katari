@@ -20,14 +20,13 @@ import Katari.Typechecker.Check
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
-    HandleContext (..),
+    enterAgentBody,
     enterForBody,
+    enterRequestHandler,
     initialCheckerEnvironment,
-    pushHandleContext,
     runChecker,
     runNormalizer,
     withEffectInference,
-    withReturnTarget,
     withWorld,
   )
 import Katari.Typechecker.Elaborate (emptyContext)
@@ -400,8 +399,10 @@ spec = do
                 attribute = bottomAttribute
               }
           providerLocal = Map.singleton (LocalVariableId 0) (monoScheme providerType)
+          -- The continuation's result R is the use body's tail (here the string "ok"), matching the
+          -- provider's expected continuation return type.
           useStmt = useStatementBuilder (Just (LocalVariableId 1, integerAnnotation)) (variableExpression (LocalVariableId 0)) (exprBlock (stringLiteral "ok"))
-          action = withReturnTarget stringType (walkStatements [useStmt] (pure ()))
+          action = enterAgentBody (walkStatements [useStmt] (pure ()))
           (_, diagnostics) = runAt providerLocal mempty action
        in toList diagnostics `shouldBe` []
 
@@ -441,7 +442,9 @@ spec = do
               [ (LocalVariableId 0, monoScheme providerType),
                 (LocalVariableId 2, monoScheme nonPureCallable)
               ]
-          -- use's body calls the non-pure callable — its inferred effect includes fakeRequestName.
+          -- use's body calls the non-pure callable — its inferred effect includes fakeRequestName. Its
+          -- tail is a string, so R matches the provider's expected continuation return type and only the
+          -- over-broad effect can trip the continuation subtype check.
           callInBody =
             callExpression
               (variableExpression (LocalVariableId 2))
@@ -450,8 +453,8 @@ spec = do
             useStatementBuilder
               (Just (LocalVariableId 1, integerAnnotation))
               (variableExpression (LocalVariableId 0))
-              (exprBlock callInBody)
-          action = withReturnTarget stringType (walkStatements [useStmt] (pure ()))
+              (bodyOf [StatementExpression callInBody] (Just (stringLiteral "ok")))
+          action = enterAgentBody (walkStatements [useStmt] (pure ()))
           (_, diagnostics) = runAt localBindings mempty action
        in -- The continuation subtype check at the use site catches the over-broad body effect.
           hasErrorCode "K3001" diagnostics `shouldBe` True
@@ -483,7 +486,7 @@ spec = do
                   body = exprBlock nullLiteral,
                   sourceSpan = testSpan
                 }
-          action = withReturnTarget topType (walkStatements [useStmt] (pure ()))
+          action = enterAgentBody (walkStatements [useStmt] (pure ()))
           (_, diagnostics) = runAt providerLocal mempty action
        in hasErrorCode "K3013" diagnostics `shouldBe` True
 
@@ -574,23 +577,24 @@ spec = do
        in (result, toList diagnostics) `shouldBe` (expected, [])
 
   describe "request handler body" $ do
-    it "a request body tail joins the result as an implicit break (it is not checked against R)" $
-      -- handler[integer, all] { request req() { "no" } }: the body's tail is an implicit break, so its
-      -- string value joins the handler's result (which becomes string | integer) rather than being
-      -- rejected against R = integer. R is the continuation's result, not a body tail.
+    it "a request body tail is the resume value, checked against the request return type (K3001 on mismatch)" $
+      -- handler[integer, all] { request req() { "no" } }: the body's tail resumes the continuation, so it
+      -- is checked against req's return type (here null). A string tail is not a valid resume, so it is
+      -- rejected — it is /not/ joined into the handler result.
       let handlerExpr =
             handlerExpressionBuilder
               [integerAnnotation, allEffectAnnotation]
               [requestHandlerForFake (exprBlock (stringLiteral "no"))]
               Nothing
           (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
-       in toList diagnostics `shouldBe` []
+       in hasErrorCode "K3001" diagnostics `shouldBe` True
 
-    it "accepts a request body whose tail type is the handler result R" $
+    it "accepts a request body whose tail is a valid resume value (the request return type)" $
+      -- req returns null, so a null tail is a valid resume value.
       let handlerExpr =
             handlerExpressionBuilder
               [integerAnnotation, allEffectAnnotation]
-              [requestHandlerForFake (exprBlock (integerLiteral 7))]
+              [requestHandlerForFake (exprBlock nullLiteral)]
               Nothing
           (_, diagnostics) = runChecker (initialCheckerEnvironment typeEnvironmentWithFakeRequest) (synthExpressionType handlerExpr)
        in toList diagnostics `shouldBe` []
@@ -619,7 +623,9 @@ spec = do
           handlerExpr =
             handlerExpressionBuilder
               [integerAnnotation, requestEffectAnnotation fakeRequestName]
-              [requestHandlerForFake (bodyOf [StatementExpression callExpr] (Just (integerLiteral 0)))]
+              -- The trailing @null@ is a valid resume value for req (which returns null), so only the
+              -- body's effect is under test here.
+              [requestHandlerForFake (bodyOf [StatementExpression callExpr] (Just nullLiteral))]
               Nothing
           environment =
             (initialCheckerEnvironment typeEnvironmentWithFakeRequest)
@@ -664,6 +670,18 @@ spec = do
           (result, _) = runAt sourceLocal mempty (synthExpressionType forExpr)
        in -- result should be array[int | string | null]
           extractSequenceElement result `shouldSatisfy` carriesIntegerAndString
+
+    it "a body whose tail is an expression (no `next`) maps each element through it" $
+      -- for (x in [1]) { x } maps to array[integer]: the body tail is an element, like an implicit `next`.
+      let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType]))
+          forExpr =
+            forExpressionBuilder
+              (variablePatternForLocal (LocalVariableId 1))
+              (variableExpression (LocalVariableId 0))
+              (exprBlock (variableExpression (LocalVariableId 1)))
+              Nothing
+          (result, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
+       in (result, toList diagnostics) `shouldBe` (arrayOf integerType, [])
 
     it "with a then clause, evaluates to the then body's type" $
       let sourceLocal = Map.singleton (LocalVariableId 0) (monoScheme (tupleNormalized [integerType]))
@@ -710,15 +728,16 @@ spec = do
        in hasErrorCode "K3014" diagnostics `shouldBe` True
 
   describe "jump statements" $ do
-    it "`return` matches the agent's return type" $
-      let action = withReturnTarget integerType (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
+    it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
+      let action = enterAgentBody (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 
-    it "`return` value mismatched against the return type is K3001" $
-      let action = withReturnTarget integerType (walkStatements [returnStatementBuilder (stringLiteral "x")] (pure ()))
+    it "`return` inside a request handler body is K3012 (a request handler bars `return`)" $
+      -- The request handler frame is a barrier: a `return` may not escape to the enclosing agent.
+      let action = enterRequestHandler (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
-       in hasErrorCode "K3001" diagnostics `shouldBe` True
+       in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`return` outside an agent body is K3012" $
       let (_, diagnostics) = runAt mempty mempty (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
@@ -739,8 +758,7 @@ spec = do
        in hasErrorCode "K3012" diagnostics `shouldBe` True
 
     it "`break` inside a handler frame is accepted (collected into the result, not checked against R)" $
-      let frame = HandleContext {currentRequestReturnType = topType}
-          action = pushHandleContext frame (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
+      let action = enterRequestHandler (walkStatements [breakStatementBuilder (integerLiteral 1)] (pure ()))
           (_, diagnostics) = runAt mempty mempty action
        in toList diagnostics `shouldBe` []
 

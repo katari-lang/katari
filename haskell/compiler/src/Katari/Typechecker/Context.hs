@@ -2,26 +2,39 @@
 -- environment it threads. Per-kind checking ("Katari.Typechecker.Check", "Katari.Typechecker.Pattern")
 -- reads from this; the driver ("Katari.Typechecker") seeds it and walks the value SCCs.
 --
--- Two structural ideas organise this module:
+-- Three structural ideas organise this module:
 --
 --   * The /world/ — the attribute of the lexical scope the checker is currently inside. Top-level
 --     starts public (bottom); a @private agent@ body raises it to private; a local agent declared in
 --     a private world inherits the world (the value's outer attribute joins it). Every subtype
 --     comparison goes through the normalizer which joins the world into both sides, so attribute
---     propagation is contextual, not pushed down.
+--     propagation is contextual, not pushed down. The world and the in-scope generics are kept /flat/
+--     on 'CheckerEnvironment'; the 'SubtypingContext' the normalizer needs is assembled from them at
+--     the edge ('normalizerEnvironment'), the same way the elaborate context is assembled in
+--     'runElaborator' — neither is stored pre-built.
 --
---   * /Jump contexts/ — a stack of in-scope @return@ / @break@ / @next@ targets. A @return@
---     statement reads the enclosing agent's return type; a @break@ / @next@ reads the innermost
---     enclosing @for@ or @handler@ frame's expected type. Frames are pushed by 'withReturnTarget' /
---     'enterForBody' / 'pushHandleContext' on the way down (all through 'pushJumpFrame'), popped (by
---     'local') on the way back up.
+--   * /Jump frames/ — a stack of the control-flow boundaries the walk has descended through, innermost
+--     first. The frames are pure markers (they carry no type); a jump's validity is decided by /scanning/
+--     the stack for its target, blocked by a /barrier/ frame ('hasTarget'). A @return@ finds the
+--     enclosing agent / closure ('ReturnFrame'); a @for@ @next@ / @break@ the enclosing @for@
+--     ('ForFrame'); a handler @next@ / @break@ the enclosing request handler ('RequestHandlerFrame').
+--     A 'RequestHandlerFrame' is a barrier to @return@ (a @return@ may not escape a request handler — only
+--     a nested closure's own 'ReturnFrame' catches it), and a 'HandlerThenFrame' is a barrier to every
+--     jump (a handler @then@ finalizer is jumpless). Jumplessness is thus expressed /in the stack/ (a
+--     barrier frame), not by clearing it.
+--
+--   * /Inference scopes/ — the value channels a construct collects while its result type is inferred:
+--     the @return@ values of an agent ('returnAccumulator'), the @next@ / body-tail values of a @for@ or
+--     a request handler ('nextAccumulator'), and the @break@ values of a @for@ or a handler
+--     ('breakAccumulator'). A jump emits into the matching channel; the construct reads it back at its
+--     edge ('with*Inference' snapshots / resets / restores so a nested scope sees only its own
+--     contributions). The dual control-flow bookkeeping ('escapingJumps') drives branch purity.
 module Katari.Typechecker.Context where
 
 import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (MonadWriter (..), asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (listToMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import GHC.List (List)
@@ -55,60 +68,84 @@ import Katari.Typechecker.Normalizer
   )
 
 ------------------------------------------------------------------------------------------------
--- Jump contexts
+-- Jump frames
 ------------------------------------------------------------------------------------------------
 
--- | The stack of jump targets in scope at one point of the walk, innermost first. A jump consults the
--- innermost frame of its own kind: a @return@ the innermost 'ReturnFrame' (the enclosing agent), a
--- @for@ @next@ / @break@ the innermost 'ForFrame', a handler @next@ / @break@ the innermost
--- 'HandlerFrame'. One uniform stack replaces three parallel fields; the accessors 'returnTarget',
--- 'insideForBody' and 'innermostHandler' project the frame each jump needs.
+-- | The stack of control-flow boundaries in scope at one point of the walk, innermost first. The frames
+-- are pure markers; a jump consults the stack through 'hasTarget', which decides validity by the first
+-- frame /relevant/ to that jump (its target, or a barrier that blocks it).
 newtype JumpContexts = JumpContexts {frames :: List JumpFrame}
   deriving stock (Eq, Show)
 
--- | One enclosing jump target the walk has descended through. A 'ForFrame' carries no data: a @for@'s
--- element / break-result types are inferred into 'CheckerState' (reset per innermost @for@), so a
--- @next@ / @break@ needs only to know a @for@ encloses it.
+-- | One control-flow boundary the walk has descended through. No frame carries a type: a jump value is
+-- checked at the construct's /edge/ (an agent's against its return type, a request handler's @next@ /
+-- body tail against the request return type), not where the jump is written.
 data JumpFrame
-  = ReturnFrame NormalizedType
-  | ForFrame
-  | HandlerFrame HandleContext
+  = -- | An agent / closure body: the target of @return@.
+    ReturnFrame
+  | -- | A @for@ body: the target of @for@ @next@ / @break@.
+    ForFrame
+  | -- | A request handler body: the target of a handler @next@ / @break@, and a /barrier/ to @return@ (a
+    -- @return@ may not escape a request handler — only a nested closure's own 'ReturnFrame' catches it).
+    RequestHandlerFrame
+  | -- | A handler @then@ finalizer body: a /barrier/ to every jump (a handler @then@ is jumpless).
+    HandlerThenFrame
   deriving stock (Eq, Show)
 
 emptyJumpContexts :: JumpContexts
 emptyJumpContexts = JumpContexts {frames = []}
 
--- | What a @handler@'s request-handler bodies consult: the handler's overall result type @R@ (the
--- target of a @break@) and the expected value type of a @next@ in the current request handler.
-newtype HandleContext = HandleContext
-  { -- | The expected type of @next e@ inside the current request handler body — the intercepted
-    -- request's return type with the handler's generic arguments substituted in. One frame is
-    -- pushed per request handler walk, so the innermost frame always carries the right value.
-    --
-    -- The handler's result @R@ is /not/ carried here: a @break@ does not check against @R@ (it
-    -- short-circuits past @then@ and is collected into the handler's result via 'emitHandlerBreakType'),
-    -- and a body tail is handled where the request handler is walked. So a frame only needs to answer
-    -- "what does @next@ expect" and "is a @break@ / @next@ in scope at all".
-    currentRequestReturnType :: NormalizedType
-  }
+-- | A frame's relevance to a particular jump, while scanning for the jump's target.
+data FrameRole
+  = -- | This frame captures the jump: it is in scope.
+    Target
+  | -- | This frame blocks the jump: it is out of scope (the jump may not escape past this boundary).
+    Barrier
+  | -- | This frame is irrelevant to the jump: keep scanning past it.
+    Transparent
   deriving stock (Eq, Show)
 
--- | The innermost enclosing agent's @return@ target, if any. 'Nothing' at module top level — a stray
--- @return@ is diagnosed by the checker.
-returnTarget :: JumpContexts -> Maybe NormalizedType
-returnTarget contexts = listToMaybe [target | ReturnFrame target <- contexts.frames]
-
--- | Whether the walk is inside a @for@ body (so a @for@ @next@ / @break@ has a frame to target).
-insideForBody :: JumpContexts -> Bool
-insideForBody contexts = any isForFrame contexts.frames
+-- | Scan the frame stack innermost-first: the jump is in scope iff the first frame that is not
+-- 'Transparent' to it is its 'Target' (a 'Barrier' encountered first blocks it). The single home of the
+-- "find my target, but not past a barrier" rule every jump shares.
+hasTarget :: (JumpFrame -> FrameRole) -> JumpContexts -> Bool
+hasTarget role contexts = go contexts.frames
   where
-    isForFrame = \case
-      ForFrame -> True
-      _ -> False
+    go = \case
+      [] -> False
+      frame : rest -> case role frame of
+        Target -> True
+        Barrier -> False
+        Transparent -> go rest
 
--- | The innermost enclosing @handler@ frame, if any.
-innermostHandler :: JumpContexts -> Maybe HandleContext
-innermostHandler contexts = listToMaybe [context | HandlerFrame context <- contexts.frames]
+-- | Whether a @return@ has an enclosing agent / closure to target. A request handler or a handler @then@
+-- encountered first blocks it (a @return@ may not escape either); a @for@ is transparent (a @return@
+-- inside a @for@ targets the enclosing agent).
+returnInScope :: JumpContexts -> Bool
+returnInScope =
+  hasTarget $ \case
+    ReturnFrame -> Target
+    RequestHandlerFrame -> Barrier
+    HandlerThenFrame -> Barrier
+    ForFrame -> Transparent
+
+-- | Whether a handler @next@ / @break@ has an enclosing request handler to target. A handler @then@ or an
+-- agent / closure boundary encountered first blocks it; a @for@ is transparent.
+handlerJumpInScope :: JumpContexts -> Bool
+handlerJumpInScope =
+  hasTarget $ \case
+    RequestHandlerFrame -> Target
+    HandlerThenFrame -> Barrier
+    ReturnFrame -> Barrier
+    ForFrame -> Transparent
+
+-- | Whether a @for@ @next@ / @break@ has an enclosing @for@ to target. Any agent / handler boundary
+-- encountered first blocks it (a @for@ jump may not escape a deferred body).
+forJumpInScope :: JumpContexts -> Bool
+forJumpInScope =
+  hasTarget $ \case
+    ForFrame -> Target
+    _ -> Barrier
 
 ------------------------------------------------------------------------------------------------
 -- The checker monad
@@ -118,7 +155,8 @@ innermostHandler contexts = listToMaybe [context | HandlerFrame context <- conte
 data CheckerEnvironment = CheckerEnvironment
   { -- | The global type-level environment built by the env-build phase. Also carries the
     -- elaborator's signature registry ('elaborateContext'), so the checker can elaborate type /
-    -- effect / attribute annotations encountered inside agent bodies.
+    -- effect / attribute annotations encountered inside agent bodies, and the nominal environments the
+    -- normalizer needs ('normalizerEnvironment' projects them).
     typeEnvironment :: TypeEnvironment,
     -- | Top-level values whose scheme is known; grown SCC by SCC by the driver as components are
     -- checked, so a callee is registered before any caller is walked.
@@ -127,11 +165,13 @@ data CheckerEnvironment = CheckerEnvironment
     -- holds a 'Scheme' like a top-level value — usually non-generic, but a local @agent@ may declare
     -- generics, so explicit application works on locals too.
     locals :: Map LocalVariableId Scheme,
-    -- | The context the normalizer runs against: the nominal environment, the generics in scope (an
-    -- agent's / handler's declared generics, whose bounds 'subtype' consults), and the lexical 'world'
-    -- attribute (top-level public; a @private agent@ body raises it). Carried verbatim so the checker
-    -- and the normalizer share one source of truth — 'normalizerEnvironment' is just its projection.
-    subtyping :: SubtypingContext,
+    -- | The attribute of the lexical scope the checker is currently inside (top-level public; a
+    -- @private agent@ body raises it). Joined into every subtype comparison by the normalizer.
+    world :: NormalizedAttribute,
+    -- | The generic parameters currently in scope, keyed by id (an agent's / handler's declared
+    -- generics, whose bounds @subtype@ consults). Held flat and handed to the normalizer / elaborator
+    -- at the edge.
+    genericsInScope :: Map GenericId GenericParameterInformation,
     jumps :: JumpContexts
   }
 
@@ -148,20 +188,21 @@ data JumpKind = ReturnJump | ForJump | HandlerJump
 -- bottom outside its scope and is meaningful only inside the matching @with*Inference@ run, which
 -- 'collecting' snapshots / resets / restores so a nested scope sees only its own contributions.
 data CheckerState = CheckerState
-  { -- | The innermost @for@ body's result channels (its @next@ elements and @break@ values); bottom
-    -- outside a @for@.
-    forAccumulator :: ResultChannels,
+  { -- | The union of every @return@ value in the enclosing agent / closure body (a 'withReturnInference'
+    -- run), so an unannotated agent's return type is inferred from its @return@s as well as its block
+    -- tail. Bottom outside an agent body.
+    returnAccumulator :: NormalizedType,
+    -- | The innermost @for@'s element values (its @next@ values and its body tail — a @for@ is a map) or
+    -- a request handler's resume values (its handler @next@ values and its body tail, checked against the
+    -- request return type at the edge). Bottom outside such a scope ('withNextInference').
+    nextAccumulator :: NormalizedType,
+    -- | The @break@ values of the innermost @for@ or handler — short-circuit results that bypass @then@
+    -- and union straight into the construct's result. Bottom outside such a scope ('withBreakInference').
+    breakAccumulator :: NormalizedType,
     -- | The union of every effect contribution in the innermost effect-collection scope (a
     -- 'withEffectInference' run): non-pure calls and @use@ statements emit into it. Bottom (pure)
     -- outside such a scope.
     effectAccumulator :: NormalizedEffect,
-    -- | The union of every @return@ value in the enclosing agent body (a 'withReturnInference' run),
-    -- so an unannotated agent's return type is inferred from its @return@s as well as its block tail.
-    -- Bottom outside an agent body.
-    returnAccumulator :: NormalizedType,
-    -- | The innermost @handler@ body's result channels (its request-body tails — the inferred @R@ — and
-    -- explicit @break@ values that bypass @then@); bottom outside a 'withHandlerResultInference' scope.
-    handlerAccumulator :: ResultChannels,
     -- | The kinds of jump that have escaped the current capture region (the dual of the value
     -- accumulators, for control flow). A jump statement adds its kind ('markJump'); a capturing
     -- construct removes the kind it consumes ('capturingJumps'); a branch reads what is left to decide
@@ -174,25 +215,18 @@ data CheckerState = CheckerState
   }
   deriving stock (Eq, Show)
 
--- | The two result channels a @for@ / @handler@ body accumulates, while its result type is inferred. A
--- construct produces @(then-transformed normal channel) ∪ (raw escape channel)@: the /normal/ channel is
--- the value @then@ transforms — a @for@'s @next@ elements (its array), a @handler@'s request-body tails
--- (its @R@) — and the /escape/ channel is the explicit @break@ values, which bypass @then@ and union
--- straight into the result. Keeping the two apart is exactly what lets @break@ bypass @then@; the same
--- structure serves both constructs.
-data ResultChannels = ResultChannels
-  { normalChannel :: NormalizedType,
-    escapeChannel :: NormalizedType
-  }
-  deriving stock (Eq, Show)
-
-emptyResultChannels :: ResultChannels
-emptyResultChannels = ResultChannels {normalChannel = bottomType, escapeChannel = bottomType}
-
 -- | The initial state — every accumulator at its bottom (a join with anything is the other thing, so
 -- a not-yet-walked scope starts collecting from there).
 initialCheckerState :: CheckerState
-initialCheckerState = CheckerState {forAccumulator = emptyResultChannels, effectAccumulator = bottomEffect, returnAccumulator = bottomType, handlerAccumulator = emptyResultChannels, escapingJumps = Set.empty, metavarCounter = 0}
+initialCheckerState =
+  CheckerState
+    { returnAccumulator = bottomType,
+      nextAccumulator = bottomType,
+      breakAccumulator = bottomType,
+      effectAccumulator = bottomEffect,
+      escapingJumps = Set.empty,
+      metavarCounter = 0
+    }
 
 -- | Mint a fresh inference variable id under the reserved 'inferenceModuleName', advancing the
 -- per-walk counter. Used by generic-argument inference to instantiate a scheme's parameters as
@@ -214,13 +248,8 @@ initialCheckerEnvironment typeEnvironment =
     { typeEnvironment = typeEnvironment,
       valueEnvironment = mempty,
       locals = mempty,
-      subtyping =
-        SubtypingContext
-          { dataEnvironment = typeEnvironment.dataEnvironment,
-            requestEnvironment = typeEnvironment.requestEnvironment,
-            genericsInScope = mempty,
-            world = bottomAttribute
-          },
+      world = bottomAttribute,
+      genericsInScope = mempty,
       jumps = emptyJumpContexts
     }
 
@@ -232,10 +261,22 @@ runChecker environment action =
 -- Normalizer bridging
 ------------------------------------------------------------------------------------------------
 
--- | The normalizer runs against exactly the checker's embedded subtyping context, so @subtype@ /
--- @union@ / @intersect@ behave consistently inside and outside the checker.
+-- | Assemble the 'SubtypingContext' the normalizer runs against from the checker's flat state — the
+-- nominal environments (from 'typeEnvironment'), the in-scope generics and the lexical 'world'. Built at
+-- the edge rather than stored pre-built, so the checker keeps a single flat source of truth and the
+-- normalizer always sees exactly the current world / generics.
 normalizerEnvironment :: Checker NormalizerEnvironment
-normalizerEnvironment = asks (.subtyping)
+normalizerEnvironment = do
+  typeEnvironment <- asks (.typeEnvironment)
+  generics <- asks (.genericsInScope)
+  world <- asks (.world)
+  pure
+    SubtypingContext
+      { dataEnvironment = typeEnvironment.dataEnvironment,
+        requestEnvironment = typeEnvironment.requestEnvironment,
+        genericsInScope = generics,
+        world = world
+      }
 
 -- | Run a 'Normalizer' sub-action with the current checker environment, anchoring its errors at
 -- the given source span. The normalizer is span-free (it operates over already-normalized types),
@@ -255,7 +296,7 @@ runNormalizer sourceSpan action = do
 runElaborator :: Elaborate a -> Checker a
 runElaborator action = do
   context <- asks (.typeEnvironment.elaborateContext)
-  generics <- asks (\environment -> environment.subtyping.genericsInScope)
+  generics <- asks (.genericsInScope)
   let scoped = scopeGenerics generics context
       (result, diagnostics) = runElaborate scoped action
   tell diagnostics
@@ -268,16 +309,17 @@ runElaborator action = do
 -- | The attribute of the lexical scope the checker is currently inside (the @world@ a @private agent@
 -- raises). The closure attribute a nested agent inherits.
 currentWorld :: Checker NormalizedAttribute
-currentWorld = asks (\environment -> environment.subtyping.world)
-
--- | Modify the embedded subtyping context for the sub-action.
-overSubtyping :: (SubtypingContext -> SubtypingContext) -> Checker a -> Checker a
-overSubtyping update = local (\environment -> environment {subtyping = update environment.subtyping})
+currentWorld = asks (.world)
 
 -- | Raise the world by @attribute@ for the sub-action: every comparison inside observes the new
 -- world. The lexical body of a @private agent@ uses this, joining its declared attribute in.
 withWorld :: NormalizedAttribute -> Checker a -> Checker a
-withWorld attribute = overSubtyping (\context -> context {world = joinAttribute context.world attribute})
+withWorld attribute = local raise
+  where
+    -- The signature disambiguates the record update: @world@ is a field of both 'CheckerEnvironment'
+    -- and 'SubtypingContext'.
+    raise :: CheckerEnvironment -> CheckerEnvironment
+    raise environment = environment {world = joinAttribute environment.world attribute}
 
 ------------------------------------------------------------------------------------------------
 -- Environment extension
@@ -306,11 +348,15 @@ extendValueEnvironment additions environment =
 -- | Bring an in-scope generic parameter into scope for the sub-action (used while checking an
 -- agent / handler with declared generics; the parameter's bound is consulted by 'subtype').
 withGeneric :: GenericId -> GenericParameterInformation -> Checker a -> Checker a
-withGeneric genericId info =
-  overSubtyping (\context -> context {genericsInScope = Map.insert genericId info context.genericsInScope})
+withGeneric genericId info = local extend
+  where
+    -- The signature disambiguates the record update: @genericsInScope@ is a field of both
+    -- 'CheckerEnvironment' and 'SubtypingContext'.
+    extend :: CheckerEnvironment -> CheckerEnvironment
+    extend environment = environment {genericsInScope = Map.insert genericId info environment.genericsInScope}
 
 ------------------------------------------------------------------------------------------------
--- Jump contexts
+-- Jump frames
 ------------------------------------------------------------------------------------------------
 
 -- | Push a jump frame for the sub-action; 'local' pops it when the outer environment is restored.
@@ -318,26 +364,24 @@ pushJumpFrame :: JumpFrame -> Checker a -> Checker a
 pushJumpFrame frame =
   local (\environment -> environment {jumps = JumpContexts {frames = frame : environment.jumps.frames}})
 
--- | Enter an agent body: a @return@ inside now targets @target@ (the innermost 'ReturnFrame'), not the
--- enclosing agent's.
-withReturnTarget :: NormalizedType -> Checker a -> Checker a
-withReturnTarget target = pushJumpFrame (ReturnFrame target)
+-- | Enter an agent / closure body: a @return@ inside now targets this body (the innermost 'ReturnFrame').
+enterAgentBody :: Checker a -> Checker a
+enterAgentBody = pushJumpFrame ReturnFrame
 
 -- | Enter a @for@ body, so a @for@ @next@ / @break@ inside has a frame to target.
 enterForBody :: Checker a -> Checker a
 enterForBody = pushJumpFrame ForFrame
 
--- | Push a @handler@ frame for the sub-action.
-pushHandleContext :: HandleContext -> Checker a -> Checker a
-pushHandleContext context = pushJumpFrame (HandlerFrame context)
+-- | Enter a request handler body: a handler @next@ / @break@ targets it, and a @return@ is blocked (the
+-- frame is a barrier — a request handler body is deferred, so a @return@ may not escape to the enclosing
+-- agent; only a nested closure's own 'ReturnFrame' catches one).
+enterRequestHandler :: Checker a -> Checker a
+enterRequestHandler = pushJumpFrame RequestHandlerFrame
 
--- | Run a sub-action with no jump targets in scope, so a @return@ / @break@ / @next@ inside is
--- reported misplaced. A /deferred/ or /finalizer/ body uses this: a handler request body runs when the
--- handler is invoked, not where it is written, so it must not @return@ to the enclosing agent (it then
--- pushes only its own 'HandlerFrame' for its @break@ / @next@); a @then@ finalizer runs once after its
--- construct and permits no jumps at all.
-withoutJumpTargets :: Checker a -> Checker a
-withoutJumpTargets = local (\environment -> environment {jumps = emptyJumpContexts})
+-- | Enter a handler @then@ finalizer body: every jump is blocked (the @then@ runs once after the handler,
+-- so a @return@ / @next@ / @break@ inside has no target and is reported misplaced).
+enterHandlerThen :: Checker a -> Checker a
+enterHandlerThen = pushJumpFrame HandlerThenFrame
 
 ------------------------------------------------------------------------------------------------
 -- Inference scopes
@@ -366,93 +410,46 @@ accumulateInto get put sourceSpan addition = do
   joined <- runNormalizer sourceSpan (union current addition)
   modify (put joined)
 
--- | A 'ResultChannels' accumulator slot in 'CheckerState' — a @for@ body's or a @handler@ body's. One
--- value identifies which accumulator the channel combinators ('withResultChannels', 'emitNormalChannel',
--- 'emitEscapeChannel') act on, so the two constructs share one implementation instead of a 2×2 of
--- copy-pasted lenses (which is exactly where a @for@-@break@ emitted into the normal channel would hide).
-data ChannelSlot = ChannelSlot
-  { getChannels :: CheckerState -> ResultChannels,
-    setChannels :: ResultChannels -> CheckerState -> CheckerState
-  }
+-- | Run an agent / closure body collecting the union of its @return@ values, so an unannotated agent's
+-- return type is inferred from its @return@s in addition to its block tail. Scopes the accumulator to the
+-- body, so a nested agent's @return@s do not leak out.
+withReturnInference :: Checker a -> Checker (NormalizedType, a)
+withReturnInference = collecting (.returnAccumulator) (\value state -> state {returnAccumulator = value}) bottomType
 
-forChannels :: ChannelSlot
-forChannels = ChannelSlot {getChannels = (.forAccumulator), setChannels = \value state -> state {forAccumulator = value}}
+-- | Run a @for@ body or a request handler body collecting its @next@ / body-tail values — a @for@'s
+-- inferred element type, or a request handler's resume values (checked against the request return type at
+-- the edge). Scopes the accumulator to this construct.
+withNextInference :: Checker a -> Checker (NormalizedType, a)
+withNextInference = collecting (.nextAccumulator) (\value state -> state {nextAccumulator = value}) bottomType
 
-handlerChannels :: ChannelSlot
-handlerChannels = ChannelSlot {getChannels = (.handlerAccumulator), setChannels = \value state -> state {handlerAccumulator = value}}
-
--- | Run a body collecting the given accumulator's 'ResultChannels' — the @then@-transformed normal
--- channel and the raw escape channel — scoping it to this body. Returns @(normalChannel, escapeChannel,
--- result)@. The effect accumulator is left untouched (a different scope axis).
-withResultChannels :: ChannelSlot -> Checker a -> Checker (NormalizedType, NormalizedType, a)
-withResultChannels slot action = do
-  (accumulator, result) <- collecting slot.getChannels slot.setChannels emptyResultChannels action
-  pure (accumulator.normalChannel, accumulator.escapeChannel, result)
-
--- | Join a value into the accumulator's /normal/ channel (a @for@'s @next@ elements, a @handler@'s
--- request-body tails — the value @then@ transforms).
-emitNormalChannel :: ChannelSlot -> SourceSpan -> NormalizedType -> Checker ()
-emitNormalChannel slot =
-  accumulateInto
-    (\state -> (slot.getChannels state).normalChannel)
-    (\value state -> slot.setChannels ((slot.getChannels state) {normalChannel = value}) state)
-
--- | Join a value into the accumulator's /escape/ channel (explicit @break@ values, which bypass @then@
--- and union straight into the result).
-emitEscapeChannel :: ChannelSlot -> SourceSpan -> NormalizedType -> Checker ()
-emitEscapeChannel slot =
-  accumulateInto
-    (\state -> (slot.getChannels state).escapeChannel)
-    (\value state -> slot.setChannels ((slot.getChannels state) {escapeChannel = value}) state)
-
--- | Run a @for@ body collecting its 'ResultChannels' — the inferred next-element (normal) and
--- break-result (escape) types.
-withForInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
-withForInference = withResultChannels forChannels
+-- | Run a @for@ body or a handler collecting its @break@ values — the short-circuit results that bypass
+-- @then@ and union straight into the construct's result. Scopes the accumulator to this construct.
+withBreakInference :: Checker a -> Checker (NormalizedType, a)
+withBreakInference = collecting (.breakAccumulator) (\value state -> state {breakAccumulator = value}) bottomType
 
 -- | Run an effect-collection scope (a handler request body, a @use@ continuation) returning its
 -- inferred residual effect; the effects performed inside do not leak to the enclosing scope.
 withEffectInference :: Checker a -> Checker (NormalizedEffect, a)
 withEffectInference = collecting (.effectAccumulator) (\value state -> state {effectAccumulator = value}) bottomEffect
 
--- | Run an agent body collecting the union of its @return@ values, so an unannotated agent's return
--- type is inferred from its @return@s in addition to its block tail. Scopes the accumulator to the
--- agent, so a nested agent's @return@s do not leak out.
-withReturnInference :: Checker a -> Checker (NormalizedType, a)
-withReturnInference = collecting (.returnAccumulator) (\value state -> state {returnAccumulator = value}) bottomType
-
--- | Run a @handler@'s request bodies collecting its 'ResultChannels' — the body tails (normal channel,
--- the inferred @R@) and the explicit @break@ values (escape channel, which bypass @then@). Scopes the
--- accumulator to this handler, so a nested handler's results do not leak out. Returns
--- @(normalChannel, escapeChannel, result)@.
-withHandlerResultInference :: Checker a -> Checker (NormalizedType, NormalizedType, a)
-withHandlerResultInference = withResultChannels handlerChannels
-
--- | A @for@ body's @next@ value joins the inferred element type (its normal channel).
-emitForNextType :: SourceSpan -> NormalizedType -> Checker ()
-emitForNextType = emitNormalChannel forChannels
-
--- | A @for@ body's @break@ value joins the short-circuit results (its escape channel).
-emitForBreakType :: SourceSpan -> NormalizedType -> Checker ()
-emitForBreakType = emitEscapeChannel forChannels
-
--- | An effect contribution (a non-pure call, a @use@) joins the enclosing scope's inferred effect.
-emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
-emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectAccumulator = value})
-
 -- | A @return@ value joins the enclosing agent's inferred return type.
 emitReturnType :: SourceSpan -> NormalizedType -> Checker ()
 emitReturnType = accumulateInto (.returnAccumulator) (\value state -> state {returnAccumulator = value})
 
--- | A request body's implicit-break tail joins the inferred @handler@ result @R@ — the value @then@
--- transforms (its normal channel).
-emitHandlerTailType :: SourceSpan -> NormalizedType -> Checker ()
-emitHandlerTailType = emitNormalChannel handlerChannels
+-- | A @next@ value (or a @for@ / request-handler body tail) joins the enclosing construct's @next@
+-- channel — the inferred @for@ element type, or the resume values a request handler checks against its
+-- request return type.
+emitNextType :: SourceSpan -> NormalizedType -> Checker ()
+emitNextType = accumulateInto (.nextAccumulator) (\value state -> state {nextAccumulator = value})
 
--- | An explicit @break@ value joins the @handler@'s short-circuit results (its escape channel — these
--- bypass @then@ and union straight into the handler's result type).
-emitHandlerBreakType :: SourceSpan -> NormalizedType -> Checker ()
-emitHandlerBreakType = emitEscapeChannel handlerChannels
+-- | A @break@ value joins the enclosing construct's short-circuit results (its @break@ channel — these
+-- bypass @then@ and union straight into the result type).
+emitBreakType :: SourceSpan -> NormalizedType -> Checker ()
+emitBreakType = accumulateInto (.breakAccumulator) (\value state -> state {breakAccumulator = value})
+
+-- | An effect contribution (a non-pure call, a @use@) joins the enclosing scope's inferred effect.
+emitEffect :: SourceSpan -> NormalizedEffect -> Checker ()
+emitEffect = accumulateInto (.effectAccumulator) (\value state -> state {effectAccumulator = value})
 
 -- | Record that a jump of this kind has fired, so an enclosing branch that does not capture it sees
 -- the branch as escaping (hence non-pure).

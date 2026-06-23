@@ -199,13 +199,14 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "still rejects a non-exhaustive match (K3001)" $
     typeErrorCodes [("test", "agent f(b: boolean) -> integer { match (b) { case true -> 1 } }")] `shouldContain` ["K3001"]
 
-  -- A handler request body is deferred, and a @then@ finalizer runs once after its construct, so
-  -- neither may @return@ to the enclosing agent: such a jump is misplaced (K3012).
+  -- A handler request body is deferred and a handler @then@ finalizer is jumpless, so neither may
+  -- @return@ to the enclosing agent: such a jump is misplaced (K3012). A @for@'s @then@, by contrast,
+  -- inherits the outer control context, so a @return@ there validly targets the enclosing agent.
   it "rejects a `return` inside a handler request body (K3012)" $
     typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { let h = handler[integer, all] { request tick() -> integer { return 5 } }\nreturn 0 }")] `shouldContain` ["K3012"]
 
-  it "rejects a `return` inside a `for` then clause (K3012)" $
-    typeErrorCodes [("test", "agent f() -> integer { for (x in [1]) { next x } then (r) { return 0 } }")] `shouldContain` ["K3012"]
+  it "accepts a `return` inside a `for` then clause (it targets the enclosing agent)" $
+    typeErrorCodes [("test", "agent f() -> integer { for (x in [1]) { next x } then (r) { return 0 } }")] `shouldNotContain` ["K3012"]
 
   it "rejects a `return` inside a handler then clause (K3012)" $
     typeErrorCodes [("test", "request tick() -> integer\nagent f() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } } then (r) { return r }\nreturn 0 }")] `shouldContain` ["K3012"]

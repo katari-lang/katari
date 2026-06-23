@@ -42,36 +42,33 @@ import Katari.Panic (panic)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
-    HandleContext (..),
     JumpKind (..),
     capturingJumps,
     collectingJumps,
     currentWorld,
+    emitBreakType,
     emitEffect,
-    emitForBreakType,
-    emitForNextType,
-    emitHandlerBreakType,
-    emitHandlerTailType,
+    emitNextType,
     emitReturnType,
+    enterAgentBody,
     enterForBody,
+    enterHandlerThen,
+    enterRequestHandler,
+    forJumpInScope,
     freshGenericId,
-    innermostHandler,
-    insideForBody,
+    handlerJumpInScope,
     markJump,
-    pushHandleContext,
-    returnTarget,
+    returnInScope,
     runElaborator,
     runNormalizer,
+    withBreakInference,
     withEffectInference,
-    withForInference,
     withGeneric,
-    withHandlerResultInference,
     withLocal,
+    withNextInference,
     withParameters,
     withReturnInference,
-    withReturnTarget,
     withWorld,
-    withoutJumpTargets,
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
@@ -264,34 +261,36 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 -- @use@ statement
 --
 -- @{ stmts_before; let x : A = use h; stmts_after; return e }@ is typed as if it desugared into
--- @{ stmts_before; h(continuation = agent({value: A}) -> R with E' { stmts_after; return e }) }@.
--- Per Q1, @x@'s annotation is required, R is the enclosing return target, and E' is the
--- continuation body's /inferred/ effect (so the subtype check against the provider's expected
--- continuation effect enforces "body effects ⊆ what the handler expects").
+-- @{ stmts_before; h(continuation = agent({value: A}) -> R with E' { stmts_after; e }) }@.
+-- @x@'s annotation is required (the continuation's value type A), R is the continuation body's /tail/
+-- (its trailing value — a @return@ inside it short-circuits the enclosing agent, not the continuation,
+-- so it does not contribute to R), and E' is the continuation body's /inferred/ effect (so the subtype
+-- check against the provider's expected continuation effect enforces "body effects ⊆ what the handler
+-- expects").
 ------------------------------------------------------------------------------------------------
 
 handleUseStatement :: UseStatement Identified -> Checker (UseStatement Typed)
 handleUseStatement useStmt = do
-  -- The binder declares the continuation's value type A (required per Q1); without a binder the
-  -- continuation receives null.
+  -- The binder declares the continuation's value type A (required); without a binder the continuation
+  -- receives null.
   (bindingType, typedBinder, bindings) <- case useStmt.binder of
     Nothing -> pure (nullType, Nothing, [])
     Just patternNode -> do
       (declaredType, typedPattern, binderBindings) <-
         checkAnnotatedBinder "`use` binder requires an explicit type annotation" patternNode
       pure (declaredType, Just typedPattern, binderBindings)
-  contexts <- asks (.jumps)
-  let resultType = fromMaybe topType (returnTarget contexts)
-  (inferredContinuationEffect, typedBody) <-
-    withEffectInference
-      $ withParameters bindings
-        . withReturnTarget resultType
-      $ checkBlock useStmt.body resultType
+  -- The continuation is the rest of the block; its result R is its trailing value, synthesized in the
+  -- /current/ context — no new return target is pushed, so a @return@ inside escapes to the enclosing
+  -- agent (caught at the agent edge) rather than ending the continuation.
+  (inferredContinuationEffect, (typedBody, resultType)) <-
+    withEffectInference $
+      withParameters bindings $
+        synthBlock useStmt.body
   let providerExpectedArgument = continuationExpectedArgument bindingType resultType inferredContinuationEffect
   -- Apply the provider to the continuation argument through the shared callee-application rule, so a
   -- @use@ provider is held to the same world / effect discipline as a direct call AND gets the same
   -- generic-argument inference: a provider generic in its continuation result @R@ has @R@ inferred from
-  -- this continuation argument (whose return type is the enclosing @return@ target).
+  -- this continuation argument (whose return type is the continuation body's tail).
   (typedProvider, scheme) <- synthApplicationCallee useStmt.provider
   argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
   _ <- applyCallee useStmt.sourceSpan scheme providerExpectedArgument argumentAttribute
@@ -938,10 +937,10 @@ checkReturnStatement :: ReturnStatement Identified -> Checker (ReturnStatement T
 checkReturnStatement returnStmt = do
   contexts <- asks (.jumps)
   (typedValue, _) <-
-    checkJump (returnTarget contexts) returnStmt.sourceSpan "return" "an agent body" returnStmt.value [] $ \target -> do
+    checkJump (guard (returnInScope contexts)) returnStmt.sourceSpan "return" "an agent body" returnStmt.value [] $ \() -> do
       (typed, valueType) <- synthExpression returnStmt.value
-      runNormalizer (sourceSpanOf returnStmt.value) (subtype valueType target)
-      -- The value joins the agent's inferred return type (used when the return type is unannotated).
+      -- The value joins the enclosing agent's inferred return type; it is checked against the agent's
+      -- declared / inferred return at the agent edge, not at each @return@.
       emitReturnType returnStmt.sourceSpan valueType
       markJump ReturnJump
       pure typed
@@ -951,10 +950,10 @@ checkForNextStatement :: ForNextStatement Identified -> Checker (ForNextStatemen
 checkForNextStatement forNextStmt = do
   contexts <- asks (.jumps)
   (typedValue, typedModifiers) <-
-    checkJump (guard (insideForBody contexts)) forNextStmt.sourceSpan "next" "a `for` body" forNextStmt.value forNextStmt.modifiers $ \() -> do
-      -- The element type is inferred: each `next` value joins the for-body accumulator.
+    checkJump (guard (forJumpInScope contexts)) forNextStmt.sourceSpan "next" "a `for` body" forNextStmt.value forNextStmt.modifiers $ \() -> do
+      -- The element type is inferred: each `next` value joins the for-body's next channel.
       (typed, valueType) <- synthExpression forNextStmt.value
-      emitForNextType forNextStmt.sourceSpan valueType
+      emitNextType forNextStmt.sourceSpan valueType
       markJump ForJump
       pure typed
   pure
@@ -968,11 +967,11 @@ checkForBreakStatement :: ForBreakStatement Identified -> Checker (ForBreakState
 checkForBreakStatement forBreakStmt = do
   contexts <- asks (.jumps)
   (typedValue, _) <-
-    checkJump (guard (insideForBody contexts)) forBreakStmt.sourceSpan "break" "a `for` body" forBreakStmt.value [] $ \() -> do
-      -- A `break` short-circuits the for with its value; that value joins the break accumulator, so
-      -- the for's result type includes it. It is not a `next` element.
+    checkJump (guard (forJumpInScope contexts)) forBreakStmt.sourceSpan "break" "a `for` body" forBreakStmt.value [] $ \() -> do
+      -- A `break` short-circuits the for with its value; that value joins the break channel, so the
+      -- for's result type includes it. It is not a `next` element.
       (typed, valueType) <- synthExpression forBreakStmt.value
-      emitForBreakType forBreakStmt.sourceSpan valueType
+      emitBreakType forBreakStmt.sourceSpan valueType
       markJump ForJump
       pure typed
   pure ForBreakStatement {value = typedValue, sourceSpan = forBreakStmt.sourceSpan}
@@ -1015,11 +1014,11 @@ checkBreakStatement :: BreakStatement Identified -> Checker (BreakStatement Type
 checkBreakStatement breakStmt = do
   contexts <- asks (.jumps)
   (typedValue, _) <-
-    checkJump (innermostHandler contexts) breakStmt.sourceSpan "break" "a request handler body" breakStmt.value [] $ \_frame -> do
+    checkJump (guard (handlerJumpInScope contexts)) breakStmt.sourceSpan "break" "a request handler body" breakStmt.value [] $ \() -> do
       -- A @break@ short-circuits the handler, bypassing its @then@ clause: its value is not checked
       -- against the result @R@ (the @then@ input), but unioned straight into the handler's result type.
       (typed, valueType) <- synthExpression breakStmt.value
-      emitHandlerBreakType breakStmt.sourceSpan valueType
+      emitBreakType breakStmt.sourceSpan valueType
       markJump HandlerJump
       pure typed
   pure BreakStatement {value = typedValue, sourceSpan = breakStmt.sourceSpan}
@@ -1028,10 +1027,13 @@ checkNextStatement :: NextStatement Identified -> Checker (NextStatement Typed)
 checkNextStatement nextStmt = do
   contexts <- asks (.jumps)
   (typedValue, typedModifiers) <-
-    checkJump (innermostHandler contexts) nextStmt.sourceSpan "next" "a request handler body" nextStmt.value nextStmt.modifiers $ \frame -> do
-      typedValue <- checkExpression nextStmt.value frame.currentRequestReturnType
+    checkJump (guard (handlerJumpInScope contexts)) nextStmt.sourceSpan "next" "a request handler body" nextStmt.value nextStmt.modifiers $ \() -> do
+      -- A @next@ resumes the continuation with its value; that value joins the resume channel and is
+      -- checked against the request's return type at the request handler edge, not here.
+      (typed, valueType) <- synthExpression nextStmt.value
+      emitNextType nextStmt.sourceSpan valueType
       markJump HandlerJump
-      pure typedValue
+      pure typed
   pure
     NextStatement
       { value = typedValue,
@@ -1419,20 +1421,28 @@ synthForExpression expression = do
   (typedVarBindings, ((typedBody, typedThen), finalType)) <-
     withVarBindingsTyped expression.varBindings $
       processObserved expression.sourceSpan sourceAttribute $ do
-        (inferredNextType, inferredBreakType, typedBody) <-
-          withForInference $
-            enterForBody $
-              withParameters patternBindings $
-                -- The `for` captures its own `next` / `break`, so they do not escape an enclosing branch.
-                capturingJumps ForJump (fst <$> synthBlock expression.body)
-        -- A `for` maps to @array[nextType]@; a position the body did not emit is absent, not null, which
-        -- @array@'s "present then this type" tail already captures (no null is unioned in).
+        (inferredNextType, (inferredBreakType, typedBody)) <-
+          withNextInference $
+            withBreakInference $
+              enterForBody $
+                withParameters patternBindings $
+                  -- The `for` captures its own `next` / `break`, so they do not escape an enclosing branch.
+                  capturingJumps ForJump $ do
+                    -- A `for` is a map: its body tail is an element, joining the next channel alongside
+                    -- every explicit `next` value (a body ending in `next` / `break` diverges, so its tail
+                    -- is @never@ and contributes nothing).
+                    (typed, bodyTail) <- synthBlock expression.body
+                    emitNextType expression.body.sourceSpan bodyTail
+                    pure typed
+        -- A `for` maps to @array[R]@ where R is its element (next + body-tail) channel; a position the
+        -- body did not emit is absent, not null, which @array@'s "present then this type" tail already
+        -- captures (no null is unioned in).
         let arrayType = arrayOf inferredNextType
         -- The for's normal result is its array (or the then clause's value); a `break` short-circuits
         -- with its own value, so the result type also includes every break value. The then finalizer is
-        -- walked by the shared 'walkThenClause'; its effect is re-emitted into the loop's observed scope
-        -- (where every other loop effect lands), keeping for / handler then-handling on one path.
-        (thenEffect, maybeThenResult, typedThen) <- walkThenClause arrayType expression.thenClause
+        -- walked by the shared 'walkThenClause' (a `for`'s @then@ inherits the outer control context); its
+        -- effect is re-emitted into the loop's observed scope (where every other loop effect lands).
+        (thenEffect, maybeThenResult, typedThen) <- walkThenClause ForThen arrayType expression.thenClause
         emitEffect expression.sourceSpan thenEffect
         let normalType = fromMaybe arrayType maybeThenResult
         finalType <- runNormalizer expression.sourceSpan (union normalType inferredBreakType)
@@ -1566,10 +1576,12 @@ data HandlerComponents = HandlerComponents
 -- @∀R E. agent({continuation: agent({value: null}) -> R with {...E, req1[..], ...}})
 --        -> (break-union | then(R)) with (E | bodyEffect)@
 --
--- The request bodies are checked with @R@ / @E@ as rigid generics: their tails / breaks form the
+-- The request bodies are checked with @R@ / @E@ as rigid generics: their explicit @break@s form the
 -- (concrete) break union and their effects the (concrete) body effect, while @R@ appears only as the
 -- @then@ binder's type and @E@ only in the effect rows — so the body never compares a concrete value
--- against a rigid @R@ / @E@. The continuation effect is the /overwrite/ @{...E, req[..]}@: @E@ lacks
+-- against a rigid @R@ / @E@. A request body's resume values (its handler @next@ and its body tail) are
+-- /not/ part of the result: they are checked against the request's own return type inside
+-- 'walkResolvedRequestHandler'. The continuation effect is the /overwrite/ @{...E, req[..]}@: @E@ lacks
 -- every handled request, which appears as a concrete override (its generic arguments resolved per
 -- request handler). At a call / @use@ the standard generic-argument inference solves @R@ from the
 -- continuation's return and @E@ from its effect (the handled requests dropped).
@@ -1588,14 +1600,14 @@ checkHandlerScheme expression = do
   (typedVarBindings, (handled, typedHandlers, typedThen, breakUnion, bodyEffect, thenResult)) <-
     withVarBindingsTyped expression.stateVariables $
       withGenerics handlerGenerics $ do
-        (tailResults, breakResults, (handlerBodyEffect, results)) <-
-          withHandlerResultInference $
+        (breakUnion, (handlerBodyEffect, results)) <-
+          withBreakInference $
             withEffectInference $
               catMaybes <$> traverse walkRequestHandler expression.handlers
-        -- Both the body tails and the explicit breaks are values the handler returns without resuming,
-        -- so they bypass @then@ and union directly into the result.
-        breakUnion <- runNormalizer expression.sourceSpan (union tailResults breakResults)
-        (thenEffect, maybeThenResult, typedThen) <- walkThenClause resultVariable expression.thenClause
+        -- Only explicit @break@s reach the handler's result, bypassing @then@ and unioning straight in.
+        -- A request body's resume values (its @next@ and body tail) were already checked against the
+        -- request return type in 'walkResolvedRequestHandler'. The handler @then@ is jumpless.
+        (thenEffect, maybeThenResult, typedThen) <- walkThenClause HandlerThen resultVariable expression.thenClause
         totalBodyEffect <- runNormalizer expression.sourceSpan (union handlerBodyEffect thenEffect)
         pure
           ( [(name, requestArguments) | (name, requestArguments, _) <- results],
@@ -1677,27 +1689,38 @@ checkThenBinder matchedType = \case
     (typedPattern, _, bindings) <- checkPattern binder matchedType
     pure (Just typedPattern, bindings)
 
+-- | Whether a @then@ finalizer inherits the outer control context (a @for@'s @then@) or is jumpless (a
+-- handler's @then@). The parser already binds a @then@-clause @next@ / @break@ to the /outer/ loop
+-- context, so a @for@'s @then@ targets the enclosing @for@ / handler / agent; a handler's @then@ pushes a
+-- barrier so no jump escapes it (the handler is a deferred value).
+data ThenScope = ForThen | HandlerThen
+
 -- | Walk a @then@ finalizer — a @for@'s or a @handler@'s, the single home of the rule. Its binder
 -- matches @matchedType@ (the value the construct produces before @then@: a @for@'s result array, a
 -- handler's result @R@), and its body freely synthesizes the transformed result. Returns the body's
 -- inferred effect (the caller folds it into the construct's effect — a handler unions it into @E@, a
 -- @for@ re-emits it into its enclosing observed scope), the synthesized result (so the caller can make
--- it the construct's result), and the typed clause. The body is walked jumpless: the finalizer runs once
--- after the construct, so a @break@ / @next@ / @return@ inside has no target and is reported misplaced.
--- Walked inside the construct's @var@ state scope (the finalizer reads the accumulated state).
+-- it the construct's result), and the typed clause. A @for@'s @then@ inherits the outer control context;
+-- a handler's @then@ is jumpless ('enterHandlerThen' bars every jump). Walked inside the construct's
+-- @var@ state scope (the finalizer reads the accumulated state).
 walkThenClause ::
+  ThenScope ->
   NormalizedType ->
   Maybe (ThenClause Identified) ->
   Checker (NormalizedEffect, Maybe NormalizedType, Maybe (ThenClause Typed))
-walkThenClause matchedType = \case
+walkThenClause scope matchedType = \case
   Nothing -> pure (bottomEffect, Nothing, Nothing)
   Just thenClause -> do
     (typedBinder, thenBindings) <- checkThenBinder matchedType thenClause.binder
     (thenEffect, (typedBody, thenResult)) <-
       withEffectInference $
         withParameters thenBindings $
-          withoutJumpTargets (synthBlock thenClause.body)
+          enterThen (synthBlock thenClause.body)
     pure (thenEffect, Just thenResult, Just ThenClause {binder = typedBinder, body = typedBody, sourceSpan = thenClause.sourceSpan})
+  where
+    enterThen = case scope of
+      ForThen -> id
+      HandlerThen -> enterHandlerThen
 
 -- | Walk one request handler: resolve the handled request's generic arguments (explicit, or derived
 -- from the handler's parameters), check the handler's parameters accept the request's argument object,
@@ -1740,19 +1763,25 @@ walkResolvedRequestHandler handler requestName requestInfo = do
   instantiatedParam <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.parameterType)
   instantiatedReturn <- runNormalizer handler.sourceSpan (substituteType substitution requestInfo.returnType)
   runNormalizer handler.sourceSpan (subtype instantiatedParam paramObject)
-  let context = HandleContext {currentRequestReturnType = instantiatedReturn}
-  (typedBlock, bodyType) <-
-    -- A request handler body is deferred — it runs when the handler is invoked, not where it is
-    -- written — so it sees none of the enclosing agent's / `for`'s jump targets: a `return` inside is
-    -- misplaced, and only the handler's own `break` / `next` (the pushed 'HandleContext') are in scope.
-    withoutJumpTargets $
-      pushHandleContext context $
+  (resumeUnion, typedBlock) <-
+    -- A request handler body is deferred — it runs when the handler is invoked, not where it is written
+    -- — so it sees none of the enclosing agent's / `for`'s jump targets: a `return` is barred
+    -- ('enterRequestHandler' is a barrier — only a nested closure's own boundary catches one), and only
+    -- the handler's own `break` / `next` are in scope. Its resume values are collected in the next
+    -- channel.
+    withNextInference $
+      enterRequestHandler $
         withParameters paramBindings $
           -- The request handler captures its own `next` / `break`, so they do not escape an enclosing branch.
-          capturingJumps HandlerJump (synthBlock handler.body)
-  -- The body tail is an implicit @break@ (the handler returns it without resuming), so it bypasses
-  -- @then@ and joins the break union; @R@ (the continuation's result) is a separate generic.
-  emitHandlerTailType handler.sourceSpan bodyType
+          capturingJumps HandlerJump $ do
+            (typed, bodyTail) <- synthBlock handler.body
+            -- The body tail resumes the continuation (an implicit @next@), so it joins the resume channel
+            -- alongside every explicit @next@; it is not part of the handler result.
+            emitNextType handler.body.sourceSpan bodyTail
+            pure typed
+  -- Every resume value (a handler @next@ or the body tail) must be a valid result of the handled request,
+  -- checked here at the request handler edge against the request's (instantiated) return type.
+  runNormalizer handler.sourceSpan (subtype resumeUnion instantiatedReturn)
   instantiation <- instantiationOf handler.sourceSpan requestInfo.genericParameters substitution
   -- The request's generic arguments by name, for the continuation's overwrite effect @{...E, req[..]}@.
   let requestArguments = instantiationByName requestInfo.genericParameters substitution
@@ -1986,22 +2015,47 @@ assembleTypedAgentDeclaration declaration typedParameters typedBody functionType
     }
 
 -- | The agent-body walk shared by the acyclic ('synthAgent') and recursive ('checkAgentBody') paths:
--- bring the agent's generics, world (declared attribute) and parameters into scope and capture its own
--- @return@s (so a local agent's @return@ does not escape an enclosing branch), running @walk@ inside.
--- @walk@ supplies the return-target policy (annotated vs synthesized). Returns the collected @return@
--- values, the inferred effect, and the walk's result. ('withReturnTarget' commutes with the
--- 'capturingJumps' state bracket, so it lives inside @walk@ for both callers.)
-walkAgentBody :: AgentPreparation -> Checker a -> Checker (NormalizedType, NormalizedEffect, a)
-walkAgentBody preparation walk = do
-  (collectedReturns, (inferredEffect, result)) <-
-    withReturnInference
-      $ withEffectInference
-      $ withGenerics preparation.genericParameters
-        . withWorld preparation.declaredAttribute
-        . withParameters preparation.parameterBindings
-        . capturingJumps ReturnJump
-      $ walk
-  pure (collectedReturns, inferredEffect, result)
+-- bring the agent's generics, world (declared attribute) and parameters into scope, push the agent's
+-- @return@ boundary ('enterAgentBody') and capture its own @return@s (so a local agent's @return@ does
+-- not escape an enclosing branch), synthesize the body, then /reconcile the result at the edge inside the
+-- same scope/ — the inferred result (the body tail unioned with the collected @return@s) and inferred
+-- effect, checked against any annotation. Running the edge checks inside the generics + world scope is
+-- essential: a private agent's private result, or a generic's @extends@ bound, are only accepted against
+-- the annotation under the body's world / generics. @expectedReturn@ / @expectedEffect@ are the annotation
+-- policy ('Just' to check against, 'Nothing' to infer). Returns the resolved return type, effect and
+-- typed body.
+walkAgentBody ::
+  AgentDeclaration Identified ->
+  AgentPreparation ->
+  Maybe NormalizedType ->
+  Maybe NormalizedEffect ->
+  Checker (NormalizedType, NormalizedEffect, Block Typed)
+walkAgentBody declaration preparation expectedReturn expectedEffect =
+  withGenerics preparation.genericParameters
+    . withWorld preparation.declaredAttribute
+    . withParameters preparation.parameterBindings
+    $ do
+      (collectedReturns, (inferredEffect, (typedBody, tailType))) <-
+        withReturnInference
+          $ withEffectInference
+          $ enterAgentBody
+            . capturingJumps ReturnJump
+          $ synthBlock declaration.body
+      -- The agent's result is the union of its body tail and its @return@s (a diverging body's tail is
+      -- @never@, so the @return@s drive it). An unannotated return type is exactly that union; an annotated
+      -- one is the annotation, checked against the union here.
+      inferredReturn <- runNormalizer declaration.sourceSpan (union tailType collectedReturns)
+      returnType <- case expectedReturn of
+        Just expected -> do
+          runNormalizer declaration.sourceSpan (subtype inferredReturn expected)
+          pure expected
+        Nothing -> pure inferredReturn
+      finalEffect <- case expectedEffect of
+        Just declared -> do
+          runNormalizer declaration.sourceSpan (subtype inferredEffect declared)
+          pure declared
+        Nothing -> pure inferredEffect
+      pure (returnType, finalEffect, typedBody)
 
 -- | Check one acyclic agent, producing its 'Scheme' (its generics plus the function type). The
 -- annotation policy is optional: a missing return type is synthesized from the body, a missing
@@ -2009,23 +2063,8 @@ walkAgentBody preparation walk = do
 synthAgent :: AgentDeclaration Identified -> Checker (AgentDeclaration Typed, Scheme)
 synthAgent declaration = do
   preparation <- prepareAgent declaration
-  (collectedReturns, inferredEffect, (typedBody, tailType)) <-
-    walkAgentBody preparation $
-      case preparation.annotatedReturnType of
-        Just expected -> do
-          typedB <- withReturnTarget expected (checkBlock declaration.body expected)
-          pure (typedB, expected)
-        Nothing -> withReturnTarget topType (synthBlock declaration.body)
-  -- An unannotated return type is the union of the body's tail and its @return@ values; an annotated
-  -- one is the annotation (each @return@ was already checked against it).
-  returnType <- case preparation.annotatedReturnType of
-    Just expected -> pure expected
-    Nothing -> runNormalizer declaration.sourceSpan (union tailType collectedReturns)
-  finalEffect <- case preparation.annotatedEffect of
-    Just declared -> do
-      runNormalizer declaration.sourceSpan (subtype inferredEffect declared)
-      pure declared
-    Nothing -> pure inferredEffect
+  (returnType, finalEffect, typedBody) <-
+    walkAgentBody declaration preparation preparation.annotatedReturnType preparation.annotatedEffect
   let functionType = assembleAgent preparation.outerAttribute preparation.parameterObject returnType finalEffect
   functionSemantic <- denormalizeAt declaration.sourceSpan functionType
   pure
@@ -2074,12 +2113,9 @@ seedAgentType declaration preparation = do
 checkAgentBody :: AgentDeclaration Identified -> AgentPreparation -> Checker (AgentDeclaration Typed)
 checkAgentBody declaration preparation = do
   let seeded = seedReturnEffect preparation
-  -- The return type is annotated (recursive groups require it), so the collected returns are
-  -- discarded; 'withReturnInference' only scopes the accumulator so it does not leak across members.
-  (_, inferredEffect, typedBody) <-
-    walkAgentBody preparation $
-      withReturnTarget seeded.returnType (checkBlock declaration.body seeded.returnType)
-  runNormalizer declaration.sourceSpan (subtype inferredEffect seeded.effect)
+  -- The body is synthesized and its result (tail unioned with its @return@s) and effect are checked
+  -- against the seed's (annotated, recursive-group-required) return / effect inside 'walkAgentBody'.
+  (_, _, typedBody) <- walkAgentBody declaration preparation (Just seeded.returnType) (Just seeded.effect)
   -- The stamped function type uses the seed's (annotated) return / effect, identical to this member's
   -- seed scheme ('seedAgentType'), so the typed declaration and the value environment agree.
   functionSemantic <-
