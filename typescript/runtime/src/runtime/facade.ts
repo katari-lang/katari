@@ -1,10 +1,13 @@
 // Engine façade: the command side of the API — the single entry from the stateless HTTP services into the
-// stateful, per-project engine. It owns the warm `RuntimeHost` (module scope, so a project's actor stays
-// warm across requests), converts the wire's raw `Json` to/from the engine's tagged `Value`, and translates
-// each operation into engine work: start a run (record its metadata sidecar + kick the run off), cancel a
-// run, answer an escalation. Reads (run list/get, open escalations) do NOT go through here — they read
-// Layer 1 directly in their repositories (the run's outcome is its delegation; an open escalation is an
+// stateful, per-project engine. It reaches each project's warm actor through the module-scope
+// `ProjectRegistry`, converts the wire's raw `Json` to/from the engine's tagged `Value`, and translates each
+// command into engine work: start a run (record its metadata sidecar + kick the run off), cancel a run,
+// answer an escalation. Reads (run list/get, open escalations) do NOT go through here — they read Layer 1
+// directly in their repositories (the run's outcome is its delegation; an open escalation is an
 // `escalations` row), so a restart never makes them stale.
+//
+// (This is the api root's *issuing* side; in the three-layer plan — docs/2026-06-25-three-layer-runtime.md —
+// it merges with the api root's *reaction* side into the per-project ApiReactor.)
 
 import { createAgentName, type Json } from "@katari-lang/types";
 import { eq } from "drizzle-orm";
@@ -16,8 +19,8 @@ import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { StubExternalRunner } from "./external/runner.js";
-import { RuntimeHost } from "./host.js";
-import type { EscalationId, ProjectId, SnapshotId } from "./ids.js";
+import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "./ids.js";
+import { ProjectRegistry } from "./registry.js";
 import { jsonToValue } from "./value/codec.js";
 
 export interface StartRunInput {
@@ -43,21 +46,9 @@ export interface AnswerEscalationInput {
   value: Json;
 }
 
-/** The stateful core, behind a thin async interface the HTTP layer depends on. Reads (run list/get, open
- *  escalations) go straight to Layer 1 in the repositories, not through here — the façade is the command
- *  side (start / cancel / answer), translating to the engine. */
-export interface RuntimeFacade {
-  /** Summon the run's root instance and return its durable run record id. */
-  startRun(input: StartRunInput): Promise<{ runId: string }>;
-  /** Request cancellation of a running run (terminate cascade). */
-  cancel(input: CancelRunInput): Promise<void>;
-  /** Answer a user-facing escalation, resuming the raiser. */
-  answerEscalation(input: AnswerEscalationInput): Promise<void>;
-}
-
-// The warm host: one per process, backed by the DB (IR module store + engine-graph persistence). A
+// The warm registry: one per process, backed by the DB (IR module store + engine-graph persistence). A
 // project's actor is created lazily and kept warm. FFI / env are not wired yet (stub runner, pure prims).
-const host = new RuntimeHost({
+const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
   prims: new PrimRegistry(),
@@ -78,44 +69,44 @@ async function resolveSnapshot(projectId: string, snapshotId?: string): Promise<
   return project.head;
 }
 
-export const facade: RuntimeFacade = {
-  async startRun(input) {
+/** The command side of the API — start / cancel / answer, translating the wire's `Json` to the engine's
+ *  `Value` and driving the per-project actor (reached through the registry). Reads (run list/get, open
+ *  escalations) go straight to Layer 1 in the repositories, not through here. */
+export const facade = {
+  async startRun(input: StartRunInput): Promise<{ runId: string }> {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
     const argument = input.argument !== undefined ? jsonToValue(input.argument) : null;
     // The engine mints the run delegation and kicks off the run; its id is the durable run handle and its
     // Layer 1 row is the outcome's source of truth. We only record the run's metadata sidecar under that id
     // (the engine writes / updates the delegation row itself). The in-process `result` promise is ignored —
     // the API reads the outcome from the delegation (so it is correct even after a crash + recovery).
-    const { runId, result } = host.startRun(
-      input.projectId as ProjectId,
-      createAgentName(input.qualifiedName),
-      snapshotId as SnapshotId,
-      argument,
-    );
+    const { run, result } = registry
+      .actorFor(input.projectId as ProjectId)
+      .startRun(createAgentName(input.qualifiedName), snapshotId as SnapshotId, argument);
     void result.catch(() => {}); // swallow: the durable outcome is the delegation, not this promise
     await runRepository.start(db, {
-      id: runId,
+      id: run,
       projectId: input.projectId,
       name: input.name ?? input.qualifiedName,
       qualifiedName: input.qualifiedName,
       snapshotId,
       argument,
     });
-    return { runId };
+    return { runId: run };
   },
 
-  async cancel(input) {
+  async cancel(input: CancelRunInput): Promise<void> {
     // Record the user's reason, then ask the engine to terminate the run's root. The terminate cascade moves
     // the run delegation to `gone` — the durable `cancelled` outcome the API projects.
     await runRepository.setCancelReason(db, input.projectId, input.runId, input.reason);
-    host.cancelRun(input.projectId as ProjectId, input.runId, input.reason);
+    registry
+      .actorFor(input.projectId as ProjectId)
+      .cancelRun(input.runId as DelegationId, input.reason);
   },
 
-  async answerEscalation(input) {
-    await host.answerEscalation(
-      input.projectId as ProjectId,
-      input.escalationId as EscalationId,
-      jsonToValue(input.value),
-    );
+  async answerEscalation(input: AnswerEscalationInput): Promise<void> {
+    await registry
+      .actorFor(input.projectId as ProjectId)
+      .answerEscalation(input.escalationId as EscalationId, jsonToValue(input.value));
   },
 };

@@ -1,22 +1,23 @@
-// RuntimeHost: the in-memory core's composition root. It holds the warm `Map<projectId, ProjectActor>`
-// (a project's actor is created lazily on its first run and stays warm), the shared snapshot IR
-// registry, and the cross-cutting dependencies (blob store, prim runner, persistence). The external
-// runner is per-actor (each registers its own completion sink), so it comes from a factory. This is the
-// single object the HTTP service layer drives once it lands (facade.startRun -> host.startRun); deploy
-// registers a snapshot's IR via `registerSnapshot`. v0.1.0 wires it to the in-memory seams by default.
+// ProjectRegistry: the process-global warm registry of per-project actors. It holds the
+// `Map<projectId, ProjectActor>` (a project's actor is created lazily on first use and kept warm), the
+// shared snapshot IR registry, and the cross-cutting dependencies (blob store, prim runner, persistence).
+// The external runner is per-actor (each registers its own completion sink), so it comes from a factory.
+//
+// It does no command translation — that is the command surface's job (`facade`, the api root's issuing
+// side); the registry only does lookup + lifecycle. Both the command surface and the read repositories
+// reach a project's machinery through `actorFor`.
 
-import type { IRModule, QualifiedName } from "@katari-lang/types";
+import type { IRModule } from "@katari-lang/types";
 import { InMemoryPersistence, type Persistence } from "./actor/persistence.js";
 import { ProjectActor } from "./actor/project-actor.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { type ExternalRunner, StubExternalRunner } from "./external/runner.js";
-import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "./ids.js";
+import type { ProjectId, SnapshotId } from "./ids.js";
 import { type IrSource, SnapshotRegistry } from "./ir.js";
 import { type BlobStore, InMemoryBlobStore } from "./value/blob-store.js";
-import type { Value } from "./value/types.js";
 
-export interface RuntimeHostDependencies {
+export interface ProjectRegistryDependencies {
   /** The IR source (a DB-backed `DbIrSource` in the API; defaults to an in-memory registry for tests). */
   ir?: IrSource;
   /** The blob byte store (project-keyed). Defaults to in-memory. */
@@ -30,7 +31,7 @@ export interface RuntimeHostDependencies {
   externalFactory?: () => ExternalRunner;
 }
 
-export class RuntimeHost {
+export class ProjectRegistry {
   private readonly ir: IrSource;
   private readonly actors = new Map<ProjectId, ProjectActor>();
 
@@ -39,7 +40,7 @@ export class RuntimeHost {
   private readonly prims: PrimRunner;
   private readonly externalFactory: () => ExternalRunner;
 
-  constructor(dependencies: RuntimeHostDependencies = {}) {
+  constructor(dependencies: ProjectRegistryDependencies = {}) {
     this.ir = dependencies.ir ?? new SnapshotRegistry();
     this.blobs = dependencies.blobs ?? new InMemoryBlobStore();
     this.persistence = dependencies.persistence ?? new InMemoryPersistence();
@@ -56,34 +57,9 @@ export class RuntimeHost {
     this.ir.set(snapshot, module, ir);
   }
 
-  /** Start a run on a project. Returns its `runId` — the run delegation id, which is the durable handle
-   *  (`runs.id`, the join key to its Layer 1 outcome) — plus an in-process `result` promise that settles
-   *  with the run's value (the durable outcome lives in the delegation, so the promise is a convenience for
-   *  in-process callers, not the source of truth). */
-  startRun(
-    projectId: ProjectId,
-    qualifiedName: QualifiedName,
-    snapshot: SnapshotId,
-    argument: Value | null,
-  ): { runId: string; result: Promise<Value> } {
-    const { run, result } = this.actorFor(projectId).startRun(qualifiedName, snapshot, argument);
-    return { runId: run, result };
-  }
-
-  /** Request a run's cancellation. `runId` is the run delegation id; a terminate is produced for it (a
-   *  no-op in the engine if the run already finished). */
-  cancelRun(projectId: ProjectId, runId: string, reason?: string): void {
-    this.actorFor(projectId).cancelRun(runId as DelegationId, reason);
-  }
-
-  /** Answer an open run-root escalation on a project, resuming the suspended run. Resolves once the answer
-   *  is durably produced (the actor loads / rehydrates first if cold). */
-  answerEscalation(projectId: ProjectId, escalation: EscalationId, value: Value): Promise<void> {
-    return this.actorFor(projectId).answerEscalation(escalation, value);
-  }
-
-  /** The warm actor for a project, created (and kept) on first use. */
-  private actorFor(projectId: ProjectId): ProjectActor {
+  /** The warm actor for a project, created (and kept) on first use. The command surface and the read
+   *  repositories both reach a project's engine through this. */
+  actorFor(projectId: ProjectId): ProjectActor {
     const existing = this.actors.get(projectId);
     if (existing !== undefined) return existing;
     const actor = new ProjectActor({

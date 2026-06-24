@@ -12,7 +12,7 @@ import {
   InProcessExternalRunner,
   StubExternalRunner,
 } from "../src/runtime/external/runner.js";
-import { RuntimeHost } from "../src/runtime/host.js";
+import { ProjectRegistry } from "../src/runtime/registry.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
@@ -972,7 +972,7 @@ describe("in-memory core", () => {
     expect(actor.listOpenEscalations()).toHaveLength(0);
   });
 
-  test("runs through the RuntimeHost composition root", async () => {
+  test("runs through the ProjectRegistry composition root", async () => {
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -990,10 +990,12 @@ describe("in-memory core", () => {
       names: {},
     };
 
-    const host = new RuntimeHost();
-    host.registerModule(SNAPSHOT, "", ir); // the `answer` agent lives in the empty (user) module
-    const { runId, result } = host.startRun(PROJECT, createAgentName("answer"), SNAPSHOT, null);
-    expect(typeof runId).toBe("string"); // the run delegation id — the durable run handle
+    const registry = new ProjectRegistry();
+    registry.registerModule(SNAPSHOT, "", ir); // the `answer` agent lives in the empty (user) module
+    const { run, result } = registry
+      .actorFor(PROJECT)
+      .startRun(createAgentName("answer"), SNAPSHOT, null);
+    expect(typeof run).toBe("string"); // the run delegation id — the durable run handle
     await expect(result).resolves.toEqual({ kind: "integer", value: 42 });
   });
 });
