@@ -183,42 +183,34 @@ export const outbox = pgTable(
   ],
 );
 
-/** The API module's per-run management record (1:1 with a run's instance). Reflects the run's outcome. */
+/** The API's per-run metadata sidecar. A run *is* the api root's delegation (`delegations` where
+ *  `caller_instance_id = apiRootIdOf(projectId)`), and that Layer 1 row is the single source of truth for
+ *  the run's outcome — state (running / cancelling / done→done / gone→cancelled / failed→error), result,
+ *  and error. This table holds only what the delegation does not: the run's `id` (= the run delegation id),
+ *  the human `name` label, the immediately-known launch metadata (so a run lists the instant it starts, even
+ *  before its delegation row is created asynchronously), and the user's cancel reason. The API projects the
+ *  two together (this row LEFT JOIN its delegation) — see `run.repository`. */
 export const runs = pgTable(
   "runs",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
+    /** The run delegation id — the join key to its Layer 1 outcome row. */
+    id: uuid("id").primaryKey(),
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    /** The run's CORE instance; nullable + set-null because that instance self-deletes at its terminal
-     *  while this durable run record survives to hold the outcome. */
-    instanceId: uuid("instance_id").references(() => instances.id, { onDelete: "set null" }),
-    /** The version this run executed. Audit-only and nullable: a running run is pinned via its
-     *  `instances.snapshotId`, so once it finishes this reference may go null if the snapshot is GC'd. */
+    /** The version this run was launched against (denormalised launch metadata). Nullable + set-null so a
+     *  snapshot GC after the run finishes does not pin it forever. */
     snapshotId: uuid("snapshot_id").references(() => snapshots.id, { onDelete: "set null" }),
     name: text("name").notNull(),
     qualifiedName: text("qualified_name").notNull(),
     argument: jsonb("argument").$type<Value | null>(),
-    /** running | cancelling | done | error (reflects the run's CORE instance child). */
-    state: text("state").$type<RunState>().notNull(),
-    result: jsonb("result").$type<Value | null>(),
-    errorMessage: text("error_message"),
+    /** The reason a user gave when cancelling (the delegation records the `gone` state, not the reason). */
     cancelReason: text("cancel_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
   },
   (table) => [
     // `GET /projects/:projectId/runs` lists runs by project.
     index("runs_project_id_idx").on(table.projectId),
-    check(
-      "runs_state_check",
-      sql`${table.state} in ('running', 'cancelling', 'done', 'error', 'cancelled')`,
-    ),
   ],
 );
 

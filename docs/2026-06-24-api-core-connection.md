@@ -1,8 +1,11 @@
 # Katari Runtime — API ↔ CORE 接続 設計 (v0.1.0, scrap-and-build)
 
-> **状態: 設計確定 (2026-06-24)。Step 1–3c + Step 4(engine 側) + Step 5(outbox) 実装済。残るは Step 4 の
-> runs DB 直読(Postgres test 要)のみ。** main ブランチ(prototype)の API/CORE/FFI/ENV module + bus を、
-> **1 actor 内の「instance kind」**に畳んだ軽量版。
+> **状態: Step 1–5 実装完了 (2026-06-25)。** この設計（everything-is-an-instance + 6 external event +
+> 3 レイヤ atomic-tx 永続化 + outbox + runs を Layer 1 から projection）は実装済み。main ブランチ(prototype)の
+> API/CORE/FFI/ENV module + bus を、**1 actor 内の「instance kind」**に畳んだ軽量版。
+> 注: DB 層（Hono repo の Drizzle query）は in-memory suite では検証不能（Postgres integration test 未整備）。
+> pure logic（projectRun mapper 等）は unit test 済。残課題は escalation list の Layer 1 直読化（現状 warm
+> actor 経由）と run_escalations_audit/escalation の projection 整理（任意）。
 >
 > 中心となる決定:
 > 1. **すべては Instance**(generic interface)。共通 ＋ **`engine_state` だけ kind 別**(`core`/`api`=root)。
@@ -267,8 +270,14 @@ turn = 1 atomic tx なので、どこから読んでも整合。`api` root は p
 [済]         **重要バグ修正**: lazy reactivate を全 commit の前に（`ensureLoaded`、loadingPromise で 1 回）。
 [済]         さもないと produce が commit→outbox 書込み後に reactivate が走り、その行を pendingOutbox として
 [済]         **二重 replay**（cascade 二重起動）。test: outbox balance(完了後 size 0) / seed→fresh actor で replay。
-[次]          [次] runs list/get を Layer 1 直読に（state/result/error を delegations から、promise でなく）。
-                 DB 層（Hono repo）、Postgres integration test 要。これで Step 4/5 完了。
+[済]          [済] runs list/get を Layer 1 直読に。`runs` table は metadata sidecar に slim 化（id = run
+[済]              delegation id、name/qualified_name/snapshot/argument/cancel_reason、migration 0007 で
+[済]              state/result/error_message/completed_at/updated_at/instance_id を drop）。outcome は
+[済]              delegations を LEFT JOIN（state は delegationToRunState で gone→cancelled・failed→error
+[済]              に写像、result=done、errorMessage=failed、completedAt=terminal の updatedAt）。host.startRun
+[済]              は runId(=delegation id) を返す（runs map 廃止）。facade は promise settle を廃止（durable
+[済]              は delegation）、cancel は cancel_reason のみ書く。API response shape は不変。pure mapper
+[済]              `projectRun` を unit test（DB query は Postgres 要なので mapper のみ検証）。
 ```
 
 > 注: Step 3b で **delegation 行はその子の create turn が書く**（caller は routing から既知、run は api root）。

@@ -12,7 +12,7 @@ import { NotFoundError } from "../lib/errors.js";
 import { runRepository } from "../modules/run/run.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
-import { type OpenEscalation, RunCancelledError } from "./actor/project-actor.js";
+import type { OpenEscalation } from "./actor/project-actor.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { StubExternalRunner } from "./external/runner.js";
 import { RuntimeHost } from "./host.js";
@@ -88,39 +88,32 @@ export const facade: RuntimeFacade = {
   async startRun(input) {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
     const argument = input.argument !== undefined ? jsonToValue(input.argument) : null;
-    const run = await runRepository.start(db, {
+    // The engine mints the run delegation and kicks off the run; its id is the durable run handle and its
+    // Layer 1 row is the outcome's source of truth. We only record the run's metadata sidecar under that id
+    // (the engine writes / updates the delegation row itself). The in-process `result` promise is ignored —
+    // the API reads the outcome from the delegation (so it is correct even after a crash + recovery).
+    const { runId, result } = host.startRun(
+      input.projectId as ProjectId,
+      createAgentName(input.qualifiedName),
+      snapshotId as SnapshotId,
+      argument,
+    );
+    void result.catch(() => {}); // swallow: the durable outcome is the delegation, not this promise
+    await runRepository.start(db, {
+      id: runId,
       projectId: input.projectId,
       name: input.name ?? input.qualifiedName,
       qualifiedName: input.qualifiedName,
       snapshotId,
       argument,
     });
-    // Execute on the host and settle the run row when it finishes; the HTTP call does not wait. A cancel
-    // surfaces as a `RunCancelledError` rejection, settled as `cancelled` (vs a genuine `error`).
-    void host
-      .startRun(
-        input.projectId as ProjectId,
-        run.id,
-        createAgentName(input.qualifiedName),
-        snapshotId as SnapshotId,
-        argument,
-      )
-      .then((result) => runRepository.settle(db, run.id, { state: "done", result }))
-      .catch((error: unknown) =>
-        error instanceof RunCancelledError
-          ? runRepository.settle(db, run.id, { state: "cancelled", cancelReason: error.reason })
-          : runRepository.settle(db, run.id, {
-              state: "error",
-              errorMessage: error instanceof Error ? error.message : String(error),
-            }),
-      );
-    return { runId: run.id };
+    return { runId };
   },
 
   async cancel(input) {
-    // Mark the run cancelling, then ask the host to terminate its root instance. The terminate cascade
-    // confirms back as a `RunCancelledError`, which the run's background settler records as `cancelled`.
-    await runRepository.markCancelling(db, input.runId, input.reason);
+    // Record the user's reason, then ask the engine to terminate the run's root. The terminate cascade moves
+    // the run delegation to `gone` — the durable `cancelled` outcome the API projects.
+    await runRepository.setCancelReason(db, input.projectId, input.runId, input.reason);
     host.cancelRun(input.projectId as ProjectId, input.runId, input.reason);
   },
 

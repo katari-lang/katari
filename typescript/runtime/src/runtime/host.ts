@@ -33,9 +33,6 @@ export interface RuntimeHostDependencies {
 export class RuntimeHost {
   private readonly ir: IrSource;
   private readonly actors = new Map<ProjectId, ProjectActor>();
-  /** A live run's engine handle (its run delegation), keyed by the durable run id — so a later cancel /
-   *  status call routes to the right actor + delegation. Cleared when the run settles. */
-  private readonly runs = new Map<string, { projectId: ProjectId; run: DelegationId }>();
 
   private readonly blobs: BlobStore;
   private readonly persistence: Persistence;
@@ -59,30 +56,24 @@ export class RuntimeHost {
     this.ir.set(snapshot, module, ir);
   }
 
-  /** Start a run on a project and resolve with its result value. `runId` is the caller's durable handle
-   *  (the `runs` row id); the host remembers it so `cancelRun` can later reach the run's engine delegation. */
+  /** Start a run on a project. Returns its `runId` — the run delegation id, which is the durable handle
+   *  (`runs.id`, the join key to its Layer 1 outcome) — plus an in-process `result` promise that settles
+   *  with the run's value (the durable outcome lives in the delegation, so the promise is a convenience for
+   *  in-process callers, not the source of truth). */
   startRun(
     projectId: ProjectId,
-    runId: string,
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
     argument: Value | null,
-  ): Promise<Value> {
+  ): { runId: string; result: Promise<Value> } {
     const { run, result } = this.actorFor(projectId).startRun(qualifiedName, snapshot, argument);
-    this.runs.set(runId, { projectId, run });
-    const forget = (): void => {
-      this.runs.delete(runId);
-    };
-    void result.then(forget, forget); // drop the handle once the run settles (resolved, failed, cancelled)
-    return result;
+    return { runId: run, result };
   }
 
-  /** Request a run's cancellation (a no-op if it already settled, is unknown to this warm host, or belongs
-   *  to a different project). */
+  /** Request a run's cancellation. `runId` is the run delegation id; a terminate is produced for it (a
+   *  no-op in the engine if the run already finished). */
   cancelRun(projectId: ProjectId, runId: string, reason?: string): void {
-    const entry = this.runs.get(runId);
-    if (entry === undefined || entry.projectId !== projectId) return;
-    this.actorFor(projectId).cancelRun(entry.run, reason);
+    this.actorFor(projectId).cancelRun(runId as DelegationId, reason);
   }
 
   /** Answer an open run-root escalation on a project, resuming the suspended run. */

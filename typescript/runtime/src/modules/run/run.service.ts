@@ -1,27 +1,25 @@
 import { db } from "../../db/client.js";
-import type { runs } from "../../db/tables/execution.js";
 import { NotFoundError } from "../../lib/errors.js";
 import { facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
-import { runRepository } from "./run.repository.js";
+import { type RunView, runRepository } from "./run.repository.js";
 import type { StartRunBody } from "./run.schema.js";
 
-type RunRow = typeof runs.$inferSelect;
-
-/** The wire shape of a run record: the tagged `argument` / `result` `Value`s are rendered back to Json. */
-function toRunResponse(row: RunRow) {
+/** The wire shape of a run: its projected view with the tagged `argument` / `result` `Value`s rendered
+ *  back to Json. (The view's state / result / error are projected from the run's Layer 1 delegation.) */
+function toRunResponse(view: RunView) {
   return {
-    id: row.id,
-    name: row.name,
-    qualifiedName: row.qualifiedName,
-    snapshotId: row.snapshotId,
-    state: row.state,
-    argument: row.argument === null ? null : valueToJson(row.argument),
-    result: row.result === null ? null : valueToJson(row.result),
-    errorMessage: row.errorMessage,
-    cancelReason: row.cancelReason,
-    createdAt: row.createdAt,
-    completedAt: row.completedAt,
+    id: view.id,
+    name: view.name,
+    qualifiedName: view.qualifiedName,
+    snapshotId: view.snapshotId,
+    state: view.state,
+    argument: view.argument === null ? null : valueToJson(view.argument),
+    result: view.result === null ? null : valueToJson(view.result),
+    errorMessage: view.errorMessage,
+    cancelReason: view.cancelReason,
+    createdAt: view.createdAt,
+    completedAt: view.completedAt,
   };
 }
 
@@ -35,15 +33,15 @@ export const runService = {
   },
 
   async list(projectId: string) {
-    const rows = await runRepository.list(db, projectId);
-    return rows.map(toRunResponse);
+    const views = await runRepository.list(db, projectId);
+    return views.map(toRunResponse);
   },
 
   async getById(projectId: string, runId: string) {
-    const [row] = await runRepository.get(db, projectId, runId);
-    if (row === undefined) {
+    const view = await runRepository.get(db, projectId, runId);
+    if (view === undefined) {
       throw new NotFoundError(`run ${runId} not found`);
     }
-    return toRunResponse(row);
+    return toRunResponse(view);
   },
 };

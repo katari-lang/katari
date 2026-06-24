@@ -992,11 +992,8 @@ describe("in-memory core", () => {
 
     const host = new RuntimeHost();
     host.registerModule(SNAPSHOT, "", ir); // the `answer` agent lives in the empty (user) module
-    await expect(
-      host.startRun(PROJECT, "run-host", createAgentName("answer"), SNAPSHOT, null),
-    ).resolves.toEqual({
-      kind: "integer",
-      value: 42,
-    });
+    const { runId, result } = host.startRun(PROJECT, createAgentName("answer"), SNAPSHOT, null);
+    expect(typeof runId).toBe("string"); // the run delegation id — the durable run handle
+    await expect(result).resolves.toEqual({ kind: "integer", value: 42 });
   });
 });
