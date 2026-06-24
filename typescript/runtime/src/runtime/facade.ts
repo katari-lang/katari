@@ -112,7 +112,7 @@ export const facade: RuntimeFacade = {
   },
 
   async answerEscalation(input) {
-    host.answerEscalation(
+    await host.answerEscalation(
       input.projectId as ProjectId,
       input.escalationId as EscalationId,
       jsonToValue(input.value),

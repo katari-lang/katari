@@ -76,9 +76,10 @@ export class RuntimeHost {
     this.actorFor(projectId).cancelRun(runId as DelegationId, reason);
   }
 
-  /** Answer an open run-root escalation on a project, resuming the suspended run. */
-  answerEscalation(projectId: ProjectId, escalation: EscalationId, value: Value): void {
-    this.actorFor(projectId).answerEscalation(escalation, value);
+  /** Answer an open run-root escalation on a project, resuming the suspended run. Resolves once the answer
+   *  is durably produced (the actor loads / rehydrates first if cold). */
+  answerEscalation(projectId: ProjectId, escalation: EscalationId, value: Value): Promise<void> {
+    return this.actorFor(projectId).answerEscalation(escalation, value);
   }
 
   /** The warm actor for a project, created (and kept) on first use. */

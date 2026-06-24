@@ -51,6 +51,11 @@ export interface ProjectSnapshot {
 export interface Persistence {
   /** Load a project's persisted instances + scopes + live delegation edges to reactivate its warm actor. */
   loadProject(projectId: ProjectId): Promise<ProjectSnapshot>;
+  /** Durably ensure the project's permanent `api` management root exists as an `instances` row, so a run's
+   *  `delegation-open` (whose caller is the api root) satisfies the `delegations.caller_instance_id` FK.
+   *  Idempotent; a no-op for the in-memory seam (no FK to satisfy). Called once on reactivation, before any
+   *  commit can reference the api root. */
+  ensureApiRoot(projectId: ProjectId, apiRootId: InstanceId): Promise<void>;
   /** Commit one turn atomically: its Layer 2 (persist the instance's graph, or drop it) together with the
    *  Layer 1 entity transitions it implies. */
   commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void>;
@@ -68,5 +73,6 @@ export class InMemoryPersistence implements Persistence {
       pendingOutbox: [],
     };
   }
+  async ensureApiRoot(): Promise<void> {}
   async commitTurn(): Promise<void> {}
 }

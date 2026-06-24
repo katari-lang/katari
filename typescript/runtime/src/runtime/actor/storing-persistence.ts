@@ -51,6 +51,11 @@ export class StoringPersistence implements Persistence {
   /** Layer 3: the transactional outbox (produced-but-not-consumed events), insertion-ordered. */
   private readonly outbox = new Map<OutboxSeq, OutboxMessage>();
 
+  async ensureApiRoot(): Promise<void> {
+    // No FK to satisfy here (the in-memory twin enforces none), and the warm actor recreates the api root
+    // in its store on every reactivation, so there is nothing to persist. Present for interface parity.
+  }
+
   async loadProject(_projectId: ProjectId): Promise<ProjectSnapshot> {
     const engine = deserializeProject(
       [...this.instances.values()],

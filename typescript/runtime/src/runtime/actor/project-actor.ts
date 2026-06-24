@@ -246,12 +246,16 @@ export class ProjectActor {
     void this.produce([{ kind: "terminate", delegation: run }]);
   }
 
-  /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes. */
-  answerEscalation(escalation: EscalationId, value: Value): void {
+  /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes.
+   *  Loads first, so a cold / freshly-recovered actor rehydrates its open escalations from Layer 1 before
+   *  the lookup (otherwise a valid answer would be silently dropped). The in-memory entry is cleared only
+   *  after the `escalateAck` is durably produced, so a commit failure leaves it answerable. */
+  async answerEscalation(escalation: EscalationId, value: Value): Promise<void> {
+    await this.ensureLoaded();
     const open = this.openEscalations[escalation];
     if (open === undefined) return;
+    await this.produce([{ kind: "escalateAck", delegation: open.run, escalation, value }]);
     delete this.openEscalations[escalation];
-    void this.produce([{ kind: "escalateAck", delegation: open.run, escalation, value }]);
   }
 
   /** The run-root escalations currently awaiting an answer. */
@@ -288,7 +292,20 @@ export class ProjectActor {
    *  before producing prevents a just-produced row being re-read by `loadProject` and replayed. */
   private ensureLoaded(): Promise<void> {
     if (this.loaded) return Promise.resolve();
-    if (this.loadingPromise === null) this.loadingPromise = this.reactivate();
+    if (this.loadingPromise === null) {
+      // `loaded` flips true only once reactivation FULLY succeeds (including re-dispatching in-flight
+      // externals); a failure clears `loadingPromise` so the next caller retries rather than proceeding on
+      // a half-initialised actor.
+      this.loadingPromise = this.reactivate().then(
+        () => {
+          this.loaded = true;
+        },
+        (error) => {
+          this.loadingPromise = null;
+          throw error;
+        },
+      );
+    }
     return this.loadingPromise;
   }
 
@@ -419,6 +436,8 @@ export class ProjectActor {
     }
     // The api management root is a permanent per-project fixture; (re)create it after loading replaced the
     // store, so a run's delegateAck / escalate / terminateAck can always find it as the delegation's caller.
+    // Durably first (so a run's `delegation-open` caller FK resolves), then in the warm store.
+    await this.persistence.ensureApiRoot(this.projectId, this.apiRootId);
     ensureApiRoot(this.store, this.apiRootId);
     // Replay the undrained outbox into the mailbox: events produced before the crash but not yet consumed
     // (e.g. a completed child's `delegateAck` whose parent never resumed). A replayed `delegate` re-uses its
@@ -429,7 +448,8 @@ export class ProjectActor {
       }
       this.mailbox.push({ message: message.event, seq: message.seq });
     }
-    this.loaded = true;
+    // NB: `loaded` is set by `ensureLoaded` only after this whole method (incl. the resume below) resolves,
+    // so a resume failure does not leave the actor marked loaded-but-half-initialised.
     await this.resumeInFlightExternals();
   }
 

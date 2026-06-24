@@ -294,6 +294,14 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
 }
 
 export function dispatchCancelAck(ctx: StepContext, thread: Thread, callId: CallId): void {
+  if (thread.status === "cancelling") {
+    // The parent itself is being torn down (e.g. a `break-for` cancelling the whole loop while one
+    // iteration's `next-for` cancel was still in flight): whichever teardown reached the parent first wins,
+    // and a child's cancelAck now carries no further meaning — its pending `next` / `next-for` collect is
+    // moot (it drops with the subtree). Just record the child gone, mirroring `dispatchCallAck`.
+    noteChildGone(ctx, thread.id);
+    return;
+  }
   if (thread.kind === "handle" && thread.postCancelActions[callId] !== undefined) {
     // A targeted `next`-cancel of a handler body finished: answer the request it was handling.
     fireHandlerAnswer(ctx, thread, callId);
