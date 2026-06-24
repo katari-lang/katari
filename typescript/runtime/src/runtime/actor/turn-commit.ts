@@ -23,6 +23,7 @@ export type EntityTransition =
   | { kind: "delegation-done"; delegation: DelegationId; result: Value }
   | { kind: "delegation-cancelling"; delegation: DelegationId }
   | { kind: "delegation-gone"; delegation: DelegationId }
+  | { kind: "delegation-failed"; delegation: DelegationId; errorMessage: string }
   | {
       kind: "escalation-open";
       escalation: EscalationId;
@@ -32,11 +33,13 @@ export type EntityTransition =
     }
   | { kind: "escalation-answered"; escalation: EscalationId; answer: Value };
 
-/** Where a turn's Layer 2 (engine continuation) goes: persisted through (still running) or dropped (it
- *  completed / was torn down — its threads + owned scopes cascade away). */
+/** Where a turn's Layer 2 (engine continuation) goes: persisted through (still running), dropped (it
+ *  completed / was torn down — its threads + owned scopes cascade away), or none (an api-root "turn" — it
+ *  runs no engine threads, so it only carries Layer 1 transitions). */
 export type Layer2Commit =
   | { kind: "persist"; instance: CoreInstance; ownedScopes: Scope[] }
-  | { kind: "drop" };
+  | { kind: "drop" }
+  | { kind: "none" };
 
 /** Everything one turn changed, to be committed atomically: its Layer 2 plus the Layer 1 transitions it
  *  implies. One `TurnCommit` per turn boundary. */

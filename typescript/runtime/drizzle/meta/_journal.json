@@ -36,6 +36,13 @@
       "when": 1782295444724,
       "tag": "0004_new_living_mummy",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782311428135,
+      "tag": "0005_premium_lord_hawal",
+      "breakpoints": true
     }
   ]
 }

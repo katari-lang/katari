@@ -173,7 +173,9 @@ export class ProjectActor {
 
   /** A run's escalation reached the root unhandled: a genuine request is kept open for a user to answer
    *  (the run stays suspended); a panic / unhandled escape fails the run. */
-  private handleApiEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
+  private async handleApiEscalate(
+    event: Extract<ExternalEvent, { kind: "escalate" }>,
+  ): Promise<void> {
     const ask = event.ask;
     if (ask.kind === "request" && ask.request !== PANIC_REQUEST) {
       this.openEscalations[event.escalation] = {
@@ -184,7 +186,18 @@ export class ProjectActor {
       };
       return;
     }
-    this.settleRun(event.delegation, { error: new Error(escalationErrorMessage(event)) });
+    // The run failed (a panic / unhandled escape reached the root). Record it durably as the run
+    // delegation's terminal `failed` state (an api-root commit — no engine threads), settle the result
+    // promise, then terminate the run's still-suspended root instance so it does not leak. The terminate
+    // teardown's eventual `gone` is a no-op against the now-terminal `failed` (terminal states are sticky).
+    const errorMessage = escalationErrorMessage(event);
+    await this.persistence.commitTurn(this.projectId, {
+      instanceId: this.apiRootId,
+      layer2: { kind: "none" },
+      transitions: [{ kind: "delegation-failed", delegation: event.delegation, errorMessage }],
+    });
+    this.settleRun(event.delegation, { error: new Error(errorMessage) });
+    this.feed({ kind: "terminate", delegation: event.delegation });
   }
 
   /** A run's terminate cascade confirmed: settle it as cancelled. */
@@ -436,7 +449,7 @@ export class ProjectActor {
     if (caller.kind === "api") {
       // Reached the management root unhandled → a user-facing open escalation (the raiser stays suspended,
       // found later via `delegationChild` when answered). Panic / unhandled escape fails the run.
-      this.handleApiEscalate(event);
+      await this.handleApiEscalate(event);
       return;
     }
     const proxy = delegateProxyOf(caller, event.delegation);

@@ -248,13 +248,19 @@ turn = 1 atomic tx なので、どこから読んでも整合。`api` root は p
 [済]         （in-flight external 復帰 / run routing を table から復元し結果を done で durable 記録）。
 [半] Step 4  [済] open escalation recovery: reactivate が escalations(open) から user-facing なもの（raiser が
 [半]              run root = 委譲 caller が api root、かつ panic/control でない genuine request）を openEscalations
-[半]              に再構築。recovery test（run を open escalation で中断→fresh actor で list/answer→run 完了を
-[半]              delegations done で durable 確認）。
-[次]         [次] runs projection / 付加属性（cancel_reason 等）+ service の list/get を Layer 1 直読に。run 結果は
-                 promise ではなく delegations(done).result を読む（DB 層、Postgres integration test 要）。
-[  ] Step 5  outbox を mailbox 供給に統合: api 操作も含め全 external event を outbox に同一 tx 永続化 + 消費を
-             dequeue + recovery replay（mailbox = outbox の warm cache に、in-flight event の crash 安全を完成）。
-             これで api 発 event（startRun/cancel/answer）も durable になり、run 失敗の durable 記録も入る。
+[半]              に再構築。recovery test。
+[半]          [済] run terminal の durable 化: delegations に `failed` state + `error_message`（migration 0005）。
+[半]              commitTurn は `layer2: none`（api root turn — engine thread 無し）をサポート。run 失敗
+[半]              （panic/unhandled escape が root 到達）= handleApiEscalate が delegation-failed を api-commit
+[半]              ＋ root を terminate で teardown（leak 解消）。terminal state は sticky（先に failed なら
+[半]              teardown の gone は no-op）。test（panic run → failed+message durable、root teardown）。
+[次]          [次] runs list/get を Layer 1 直読に（state/result/error を delegations から、promise でなく）。
+                 DB 層（Hono repo）、Postgres integration test 要。
+[  ] Step 5  outbox を mailbox 供給に統合: 全 external event を outbox に同一 tx で produce + 消費を dequeue
+             + recovery replay（mailbox = outbox の warm cache）。これで child 完了→delegateAck が outbox に
+             ある状態で crash しても親が replay で resume（現状: in-flight event は mailbox のみ＝crash で消失、
+             親が stuck）。api 発 event（startRun/cancel/answer）も durable に。api-commit 基盤（`layer2: none`）は
+             Step 4 で導入済。
 ```
 
 > 注: Step 3b で **delegation 行はその子の create turn が書く**（caller は routing から既知、run は api root）。

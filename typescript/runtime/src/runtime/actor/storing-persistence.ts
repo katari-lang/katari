@@ -19,8 +19,15 @@ import type { EntityTransition, TurnCommit } from "./turn-commit.js";
  *  running / cancelling delegations (which still route) and false once done / gone (history only). */
 interface StoredDelegation {
   caller: InstanceId;
-  state: "running" | "cancelling" | "done" | "gone";
+  state: "running" | "cancelling" | "done" | "gone" | "failed";
   result?: Value;
+  errorMessage?: string;
+}
+
+/** A delegation is still live (carries routing / accepts state transitions) only while running or
+ *  cancelling; done / gone / failed are terminal and sticky. */
+function isLiveDelegationState(state: StoredDelegation["state"]): boolean {
+  return state === "running" || state === "cancelling";
 }
 
 interface StoredEscalation {
@@ -51,7 +58,7 @@ export class StoringPersistence implements Persistence {
     const delegations: Record<DelegationId, InstanceId> = {};
     for (const [id, edge] of this.delegations) {
       // Only live (running / cancelling) edges carry routing; finished ones are history.
-      if (edge.state === "running" || edge.state === "cancelling") {
+      if (isLiveDelegationState(edge.state)) {
         delegations[id] = edge.caller;
       }
     }
@@ -72,19 +79,26 @@ export class StoringPersistence implements Persistence {
   async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {
     // Layer 1 first: a `delegation-open` must precede the child instance that references it (FK order).
     for (const transition of commit.transitions) this.applyTransition(transition);
-    // Layer 2: persist the instance's graph, or drop it (cascading its threads / owned scopes / entities).
-    if (commit.layer2.kind === "drop") {
-      this.dropInstance(commit.instanceId);
-      return;
+    // Layer 2: persist the instance's graph, drop it (cascading its threads / scopes / entities), or none
+    // (an api-root turn carries no engine continuation).
+    switch (commit.layer2.kind) {
+      case "none":
+        return;
+      case "drop":
+        this.dropInstance(commit.instanceId);
+        return;
+      case "persist": {
+        const serialized = serializeInstance(
+          projectId,
+          commit.layer2.instance,
+          commit.layer2.ownedScopes,
+        );
+        this.instances.set(serialized.instance.id, serialized.instance);
+        this.threads.set(serialized.instance.id, serialized.threads);
+        for (const scope of serialized.scopes) this.scopes.set(scope.scopeId, scope);
+        return;
+      }
     }
-    const serialized = serializeInstance(
-      projectId,
-      commit.layer2.instance,
-      commit.layer2.ownedScopes,
-    );
-    this.instances.set(serialized.instance.id, serialized.instance);
-    this.threads.set(serialized.instance.id, serialized.threads);
-    for (const scope of serialized.scopes) this.scopes.set(scope.scopeId, scope);
   }
 
   private applyTransition(transition: EntityTransition): void {
@@ -96,21 +110,31 @@ export class StoringPersistence implements Persistence {
         });
         break;
       case "delegation-done": {
+        // Terminal states are sticky — only a live delegation moves to a terminal one.
         const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined) {
+        if (edge !== undefined && isLiveDelegationState(edge.state)) {
           edge.state = "done";
           edge.result = transition.result;
         }
         break;
       }
       case "delegation-cancelling": {
+        // `cancelling` only from `running` (never resurrecting a terminal or re-cancelling).
         const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined) edge.state = "cancelling";
+        if (edge !== undefined && edge.state === "running") edge.state = "cancelling";
         break;
       }
       case "delegation-gone": {
         const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined) edge.state = "gone";
+        if (edge !== undefined && isLiveDelegationState(edge.state)) edge.state = "gone";
+        break;
+      }
+      case "delegation-failed": {
+        const edge = this.delegations.get(transition.delegation);
+        if (edge !== undefined && isLiveDelegationState(edge.state)) {
+          edge.state = "failed";
+          edge.errorMessage = transition.errorMessage;
+        }
         break;
       }
       case "escalation-open":

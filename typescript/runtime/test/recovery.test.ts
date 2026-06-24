@@ -275,4 +275,65 @@ describe("recovery", () => {
     expect(done.result).toEqual({ kind: "integer", value: 42 });
     expect(actorTwo.listOpenEscalations()).toHaveLength(0);
   });
+
+  test("records a failed run durably in Layer 1 (delegation failed + message) and tears down its root", async () => {
+    // agent main() { add({ left: 1, right: "x" }) }  — the add prim panics (a string is not a number); with
+    // no handler the panic reaches the run root, which fails the run. The failure must be recorded durably
+    // (the run delegation moves to `failed` with the message) and the still-suspended root torn down (no
+    // leak) — previously it only rejected an in-actor promise, leaving the engine state inconsistent.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 2, value: { kind: "integer", value: 1 } },
+              { kind: "loadLiteral", output: 3, value: { kind: "string", value: "x" } },
+              {
+                kind: "makeRecord",
+                entries: [
+                  ["left", 2],
+                  ["right", 3],
+                ],
+                output: 4,
+              },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("primitive.add") },
+                argument: 4,
+                output: 5,
+              },
+              { kind: "exit", target: 0, value: 5 },
+            ],
+          },
+          parameters: { parameter: 1 },
+        },
+        6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        7: {
+          block: { kind: "primitive", name: "primitive.add", input: 8 },
+          parameters: { parameter: 8 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("primitive.add")]: 6,
+      },
+      names: {},
+    };
+
+    const persistence = new StoringPersistence();
+    const actor = makeActor(ir, persistence);
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await expect(result).rejects.toThrow(/panic.*number/);
+    // The failure is durable in Layer 1 by the time the run settles (recorded before the promise rejects).
+    const edge = persistence.peekDelegation(run);
+    expect(edge?.state).toBe("failed");
+    expect(edge?.errorMessage).toMatch(/panic.*number/);
+    // And the run's root instance (and its descendants) were torn down — nothing left suspended.
+    await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
+  });
 });

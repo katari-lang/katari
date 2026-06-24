@@ -35,7 +35,7 @@ import { projects, snapshots } from "./projects.js";
 // the DB CHECK constraints below so recovery can trust the stored value. The terminal states are kept
 // in place (the row is not deleted on completion) so a delegation / escalation row is its own durable
 // history — `runs` and the escalations audit are projections of these, not separate sources of truth.
-export type DelegationState = "running" | "cancelling" | "done" | "gone";
+export type DelegationState = "running" | "cancelling" | "done" | "gone" | "failed";
 export type EscalationState = "open" | "answered";
 export type RunState = "running" | "cancelling" | "done" | "error" | "cancelled";
 
@@ -99,11 +99,14 @@ export const delegations = pgTable(
     }),
     target: jsonb("target").$type<DelegateTarget>().notNull(),
     argument: jsonb("argument").$type<Value | null>(),
-    /** running → done (delegateAck'd, `result` set) | cancelling → gone (terminateAck'd). Terminal rows
-     *  are retained as history (the parent's record of what it summoned and how it ended). */
+    /** running → done (delegateAck'd, `result` set) | cancelling → gone (terminateAck'd) | failed (a panic
+     *  / unhandled escape reached the run root, `error_message` set). Terminal rows are retained as history
+     *  (the parent's record of what it summoned and how it ended), and terminal states are sticky. */
     state: text("state").$type<DelegationState>().notNull(),
-    /** The `delegateAck` value once the child completed (state `done`); `null` while running. */
+    /** The `delegateAck` value once the child completed (state `done`); `null` otherwise. */
     result: jsonb("result").$type<Value | null>(),
+    /** The failure message when the run failed (state `failed`); `null` otherwise. */
+    errorMessage: text("error_message"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
@@ -114,7 +117,7 @@ export const delegations = pgTable(
     index("delegations_caller_instance_id_idx").on(table.callerInstanceId),
     check(
       "delegations_state_check",
-      sql`${table.state} in ('running', 'cancelling', 'done', 'gone')`,
+      sql`${table.state} in ('running', 'cancelling', 'done', 'gone', 'failed')`,
     ),
   ],
 );

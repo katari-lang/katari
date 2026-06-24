@@ -123,7 +123,7 @@ export class DbPersistence implements Persistence {
         await tx
           .delete(instances)
           .where(and(eq(instances.projectId, projectId), eq(instances.id, commit.instanceId)));
-      } else {
+      } else if (commit.layer2.kind === "persist") {
         const serialized = serializeInstance(
           projectId,
           commit.layer2.instance,
@@ -163,7 +163,11 @@ export class DbPersistence implements Persistence {
       }
 
       // Edge state updates (and escalation opens, which need their raiser instance to exist). No-ops if the
-      // row was already cascade-removed (e.g. a delegation whose caller dropped this same turn).
+      // row was already cascade-removed (e.g. a delegation whose caller dropped this same turn). Terminal
+      // states are sticky: a `done` / `gone` / `failed` only takes from a live (running / cancelling) row,
+      // and `cancelling` only from `running` — so a failure recorded first is never overwritten by the
+      // `gone` of the teardown it triggers.
+      const live = ["running", "cancelling"] as const;
       for (const transition of commit.transitions) {
         switch (transition.kind) {
           case "delegation-done":
@@ -174,6 +178,7 @@ export class DbPersistence implements Persistence {
                 and(
                   eq(delegations.projectId, projectId),
                   eq(delegations.id, transition.delegation),
+                  inArray(delegations.state, live),
                 ),
               );
             break;
@@ -185,6 +190,7 @@ export class DbPersistence implements Persistence {
                 and(
                   eq(delegations.projectId, projectId),
                   eq(delegations.id, transition.delegation),
+                  eq(delegations.state, "running"),
                 ),
               );
             break;
@@ -196,6 +202,19 @@ export class DbPersistence implements Persistence {
                 and(
                   eq(delegations.projectId, projectId),
                   eq(delegations.id, transition.delegation),
+                  inArray(delegations.state, live),
+                ),
+              );
+            break;
+          case "delegation-failed":
+            await tx
+              .update(delegations)
+              .set({ state: "failed", errorMessage: transition.errorMessage })
+              .where(
+                and(
+                  eq(delegations.projectId, projectId),
+                  eq(delegations.id, transition.delegation),
+                  inArray(delegations.state, live),
                 ),
               );
             break;
