@@ -163,6 +163,12 @@ exitEffect boundaryId valueType = (effectRow emptyEffectRow) {exits = Map.single
 continueEffect :: BoundaryId -> NormalizedType -> NormalizedEffect
 continueEffect boundaryId valueType = (effectRow emptyEffectRow) {continues = Map.singleton boundaryId valueType}
 
+-- | The bare effect variable @E@: one flexible effect-generic tail with no overrides, no concrete
+-- requests and no escapes. This is exactly the shape 'Katari.Typechecker.Inference.asEffectMetavar'
+-- recognises, so an effect generic is built and matched through the same constructor.
+singleTailEffect :: GenericId -> NormalizedEffect
+singleTailEffect generic = effectRow EffectRow {request = mempty, tails = Map.singleton generic mempty}
+
 -- | Whether an effect carries any concrete escape entry. The leak check at an agent boundary: after the
 -- agent discharges its own escapes, any survivor is a misplaced / escaping jump.
 hasConcreteEscape :: NormalizedEffect -> Bool

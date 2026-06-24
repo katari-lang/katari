@@ -129,6 +129,11 @@ spec = do
       codesFor (providerDecl <> "agent run() -> string { let x : integer = use foo\n\"result\" }") `shouldBe` []
     it "rejects a use binder whose type the provider's continuation does not accept (K3001)" $
       codesFor (providerDecl <> "agent run() -> string { let x : string = use foo\n\"result\" }") `shouldContain` ["K3001"]
+    it "rejects a `return` after a `use` of a pure-continuation provider (the escape is not a pure effect)" $
+      -- foo's continuation is pure (`agent(value: integer) -> R`, no `with E`), so a `return` — an escape
+      -- effect carried by the continuation — is not admitted; only a handler-shaped provider, generic in its
+      -- continuation effect, accepts one (then the escape rides E to the enclosing agent).
+      codesFor (providerDecl <> "agent run() -> integer { let x : integer = use foo\nreturn 5 }") `shouldContain` ["K3001"]
 
   describe "request handler generic inference (param-derived)" $ do
     it "infers the request's generic from a handler parameter annotation" $

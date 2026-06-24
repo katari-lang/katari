@@ -2,7 +2,7 @@
 -- typed node alongside the normalized type it computed; the 'typeOf' field on every typed
 -- expression / pattern is the denormalized semantic type of that node.
 --
--- The public entry points are 'synthExpression' / 'checkExpression' / 'synthBlock' / 'checkBlock' /
+-- The public entry points are 'synthExpression' / 'checkExpression' / 'synthBlock' /
 -- 'walkStatements' / 'checkPattern' / 'synthAgent' / 'prepareAgent' / 'seedAgentType' /
 -- 'checkAgentBody'.
 -- Convenience wrappers ('synthExpressionType', 'synthAgentType') drop the typed AST and yield just
@@ -129,26 +129,6 @@ synthBlock block = do
       if blockExits block then bottomType else trailingType
     )
 
-checkBlock :: Block Identified -> NormalizedType -> Checker (Block Typed)
-checkBlock block expected = do
-  let diverges = blockExits block
-  (typedReturn, typedStatements) <-
-    walkStatements block.statements $ case block.returnExpression of
-      Just expression
-        -- A diverging block's tail is unreachable: synthesize it (for the typed AST) but do not
-        -- constrain it against the expectation.
-        | diverges -> Just . fst <$> synthExpression expression
-        | otherwise -> Just <$> checkExpression expression expected
-      Nothing -> do
-        unless diverges $ runNormalizer block.sourceSpan (subtype nullType expected)
-        pure Nothing
-  pure
-    Block
-      { statements = typedStatements,
-        returnExpression = typedReturn,
-        sourceSpan = block.sourceSpan
-      }
-
 -- | Whether a block makes a global exit, so control never reaches its tail. True once any statement
 -- transfers control out of the block: a @return@ / @break@ / @next@ jump, or a @use@ (which delegates
 -- the rest of the block to its continuation). Such a block's value type is @never@.
@@ -256,7 +236,8 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 -- (its trailing value — a @return@ inside it short-circuits the enclosing agent, not the continuation,
 -- so it does not contribute to R), and E' is the continuation body's /inferred/ effect (so the subtype
 -- check against the provider's expected continuation effect enforces "body effects ⊆ what the handler
--- expects").
+-- expects" — and, since an escape is part of E', a provider that expects a pure continuation rejects one
+-- that escapes).
 ------------------------------------------------------------------------------------------------
 
 handleUseStatement :: UseStatement Identified -> Checker (UseStatement Typed)
@@ -270,8 +251,12 @@ handleUseStatement useStmt = do
         checkAnnotatedBinder "`use` binder requires an explicit type annotation" patternNode
       pure (declaredType, Just typedPattern, binderBindings)
   -- The continuation is the rest of the block; its result R is its trailing value, synthesized in the
-  -- /current/ context — no new return target is pushed, so a @return@ inside escapes to the enclosing
-  -- agent (caught at the agent edge) rather than ending the continuation.
+  -- /current/ context — no new return target is pushed, so a @return@ inside targets the enclosing agent
+  -- (it does not end the continuation). A control escape is an effect /of the continuation/, so it rides
+  -- the continuation's inferred effect and is checked against the provider's expected continuation effect:
+  -- a provider whose continuation is pure (@agent(..) -> R@, no @with E@) therefore /rejects/ a continuation
+  -- that escapes, while a handler-shaped provider (@{...E, req}@) admits it via @E@ and it then reaches the
+  -- enclosing agent.
   (inferredContinuationEffect, (typedBody, resultType)) <-
     withEffectInference $
       withParameters bindings $
@@ -1430,7 +1415,7 @@ synthForExpression expression = do
       let arrayType = arrayOf elementR
       -- The `then` clause inherits the outer control context (no barrier) and runs in the `var` scope;
       -- its own effect joins the loop's observed effect.
-      (thenEffect, maybeThenResult, typedThen) <- walkThenClause ForThen arrayType expression.thenClause
+      (thenEffect, maybeThenResult, typedThen) <- walkThenClause id arrayType expression.thenClause
       let normalType = fromMaybe arrayType maybeThenResult
       breakAndNormal <- runNormalizer expression.sourceSpan (union normalType breakType)
       observedEffect <- runNormalizer expression.sourceSpan (union residualEffect thenEffect)
@@ -1596,7 +1581,7 @@ checkHandlerScheme expression = do
         -- returns it), bypassing @then@ and unioning straight in. A request body's resume values (its
         -- @next@ and body tail) were already checked against the request return type. @then@ is jumpless.
         breakUnion <- foldM (\accumulated (_, _, breakType, _) -> runNormalizer expression.sourceSpan (union accumulated breakType)) bottomType results
-        (thenEffect, maybeThenResult, typedThen) <- walkThenClause HandlerThen resultVariable expression.thenClause
+        (thenEffect, maybeThenResult, typedThen) <- walkThenClause enterHandlerThen resultVariable expression.thenClause
         totalBodyEffect <- runNormalizer expression.sourceSpan (union handlerBodyEffect thenEffect)
         pure
           ( [(name, requestArguments) | (name, requestArguments, _, _) <- results],
@@ -1606,10 +1591,16 @@ checkHandlerScheme expression = do
             totalBodyEffect,
             fromMaybe resultVariable maybeThenResult
           )
+  -- Symmetric to the agent edge ('walkAgentBody'): the handler is a value whose effect is baked into its
+  -- scheme, so any concrete escape surviving the body targets a boundary not in scope. Each request
+  -- handler discharges its own @break@ / @next@ and bars @return@ / @for@ jumps, so a survivor here is a
+  -- leaked / misplaced jump.
+  when (hasConcreteEscape bodyEffect) $
+    reportMisplacedJump expression.sourceSpan "a `next` / `break` / `return`" "an enclosing `for`, handler, or agent that is still in scope"
   let handledRequests = Map.fromList handled
       continuationEffect =
         effectRow EffectRow {request = handledRequests, tails = Map.singleton effectId (Map.keysSet handledRequests)}
-      effectVariable = effectRow EffectRow {request = mempty, tails = Map.singleton effectId mempty}
+      effectVariable = singleTailEffect effectId
   handlerEffect <- runNormalizer expression.sourceSpan (union effectVariable bodyEffect)
   handlerResult <- runNormalizer expression.sourceSpan (union breakUnion thenResult)
   let outerParameter = continuationExpectedArgument nullType resultVariable continuationEffect
@@ -1678,38 +1669,30 @@ checkThenBinder matchedType = \case
     (typedPattern, _, bindings) <- checkPattern binder matchedType
     pure (Just typedPattern, bindings)
 
--- | Whether a @then@ finalizer inherits the outer control context (a @for@'s @then@) or is jumpless (a
--- handler's @then@). The parser already binds a @then@-clause @next@ / @break@ to the /outer/ loop
--- context, so a @for@'s @then@ targets the enclosing @for@ / handler / agent; a handler's @then@ pushes a
--- barrier so no jump escapes it (the handler is a deferred value).
-data ThenScope = ForThen | HandlerThen
-
 -- | Walk a @then@ finalizer — a @for@'s or a @handler@'s, the single home of the rule. Its binder
 -- matches @matchedType@ (the value the construct produces before @then@: a @for@'s result array, a
 -- handler's result @R@), and its body freely synthesizes the transformed result. Returns the body's
 -- inferred effect (the caller folds it into the construct's effect — a handler unions it into @E@, a
 -- @for@ re-emits it into its enclosing observed scope), the synthesized result (so the caller can make
--- it the construct's result), and the typed clause. A @for@'s @then@ inherits the outer control context;
--- a handler's @then@ is jumpless ('enterHandlerThen' bars every jump). Walked inside the construct's
--- @var@ state scope (the finalizer reads the accumulated state).
+-- it the construct's result), and the typed clause. @barrier@ scopes the body's control context: a
+-- @for@'s @then@ inherits the outer context ('id', so its @next@ / @break@ target the enclosing @for@ /
+-- handler / agent, as the parser bound them); a handler's @then@ is jumpless ('enterHandlerThen' bars
+-- every jump, since the handler is a deferred value). Walked inside the construct's @var@ state scope
+-- (the finalizer reads the accumulated state).
 walkThenClause ::
-  ThenScope ->
+  (Checker (Block Typed, NormalizedType) -> Checker (Block Typed, NormalizedType)) ->
   NormalizedType ->
   Maybe (ThenClause Identified) ->
   Checker (NormalizedEffect, Maybe NormalizedType, Maybe (ThenClause Typed))
-walkThenClause scope matchedType = \case
+walkThenClause barrier matchedType = \case
   Nothing -> pure (bottomEffect, Nothing, Nothing)
   Just thenClause -> do
     (typedBinder, thenBindings) <- checkThenBinder matchedType thenClause.binder
     (thenEffect, (typedBody, thenResult)) <-
       withEffectInference $
         withParameters thenBindings $
-          enterThen (synthBlock thenClause.body)
+          barrier (synthBlock thenClause.body)
     pure (thenEffect, Just thenResult, Just ThenClause {binder = typedBinder, body = typedBody, sourceSpan = thenClause.sourceSpan})
-  where
-    enterThen = case scope of
-      ForThen -> id
-      HandlerThen -> enterHandlerThen
 
 -- | Walk one request handler: resolve the handled request's generic arguments (explicit, or derived
 -- from the handler's parameters), check the handler's parameters accept the request's argument object,

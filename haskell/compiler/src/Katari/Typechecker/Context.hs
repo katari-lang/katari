@@ -1,3 +1,10 @@
+-- @world@ / @genericsInScope@ are deliberately shared field names across 'CheckerEnvironment' and the
+-- 'SubtypingContext' imported from "Katari.Typechecker.Normalizer" (the project's duplicate-field
+-- convention). Both are in scope here, so the record updates in 'withWorld' / 'withGeneric' resolve by
+-- the helper's signature — exactly what @-Wambiguous-fields@ (folded into @-Wcompat@) flags. The
+-- convention is intentional, so the warning is suppressed for this module.
+{-# OPTIONS_GHC -Wno-ambiguous-fields #-}
+
 -- | The checker's runtime context (Phase C, "Katari.Typechecker"): the monad and the read-only
 -- environment it threads. Per-kind checking ("Katari.Typechecker.Check", "Katari.Typechecker.Pattern")
 -- reads from this; the driver ("Katari.Typechecker") seeds it and walks the value SCCs.
@@ -199,8 +206,8 @@ currentWorld = asks (.world)
 withWorld :: NormalizedAttribute -> Checker a -> Checker a
 withWorld attribute = local raise
   where
-    -- The signature disambiguates the record update: @world@ is a field of both 'CheckerEnvironment'
-    -- and 'SubtypingContext'.
+    -- @world@ is shared with 'SubtypingContext'; the update resolves by this signature (see the
+    -- module-header note on @-Wambiguous-fields@).
     raise :: CheckerEnvironment -> CheckerEnvironment
     raise environment = environment {world = joinAttribute environment.world attribute}
 
@@ -230,8 +237,8 @@ extendValueEnvironment additions environment =
 withGeneric :: GenericId -> GenericParameterInformation -> Checker a -> Checker a
 withGeneric genericId info = local extend
   where
-    -- The signature disambiguates the record update: @genericsInScope@ is a field of both
-    -- 'CheckerEnvironment' and 'SubtypingContext'.
+    -- @genericsInScope@ is shared with 'SubtypingContext'; the update resolves by this signature (see
+    -- the module-header note on @-Wambiguous-fields@).
     extend :: CheckerEnvironment -> CheckerEnvironment
     extend environment = environment {genericsInScope = Map.insert genericId info environment.genericsInScope}
 

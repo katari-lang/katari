@@ -73,7 +73,7 @@ metavarKinded kind metavar = case kind of
     NormalizedKindedTypeType
       NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton metavar, attribute = bottomAttribute}
   GenericKindEffect ->
-    NormalizedKindedTypeEffect (effectRow EffectRow {request = mempty, tails = Map.singleton metavar mempty})
+    NormalizedKindedTypeEffect (singleTailEffect metavar)
   GenericKindAttribute ->
     NormalizedKindedTypeAttribute NormalizedAttribute {private = False, generic = Set.singleton metavar}
 

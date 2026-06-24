@@ -326,7 +326,7 @@ normalizeEffect effect = case effect of
     checkApplicationBounds requestInfo.genericParameters normalizedGenericArguments
     pure $ effectRow EffectRow {request = Map.singleton qualifiedName normalizedGenericArguments, tails = mempty}
   SemanticEffectGeneric genericArgumentName ->
-    pure $ effectRow EffectRow {request = mempty, tails = Map.singleton genericArgumentName mempty}
+    pure $ singleTailEffect genericArgumentName
   SemanticEffectOverwrite baseEffect overwrites -> do
     normalized <- normalizeEffect baseEffect
     overwriteRequests <-
