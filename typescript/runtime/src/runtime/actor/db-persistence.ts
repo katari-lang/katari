@@ -4,11 +4,11 @@
 // transaction, so an edge's durable row never lags the engine threads that reference it. Loading returns
 // the engine graph plus the live (running / cancelling) delegation edges the actor routes by.
 
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
 import { scopes, threads } from "../../db/tables/engine.js";
-import { delegations, escalations, instances } from "../../db/tables/execution.js";
-import type { DelegationId, EscalationId, InstanceId, ProjectId } from "../ids.js";
+import { delegations, escalations, instances, outbox } from "../../db/tables/execution.js";
+import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Persistence, ProjectSnapshot } from "./persistence.js";
 import {
   deserializeProject,
@@ -23,8 +23,8 @@ export class DbPersistence implements Persistence {
   constructor(private readonly db: Database) {}
 
   async loadProject(projectId: ProjectId): Promise<ProjectSnapshot> {
-    const [instanceRows, threadRows, scopeRows, delegationRows, escalationRows] = await Promise.all(
-      [
+    const [instanceRows, threadRows, scopeRows, delegationRows, escalationRows, outboxRows] =
+      await Promise.all([
         this.db
           .select()
           .from(instances)
@@ -45,8 +45,14 @@ export class DbPersistence implements Persistence {
           .select()
           .from(escalations)
           .where(and(eq(escalations.projectId, projectId), eq(escalations.state, "open"))),
-      ],
-    );
+        // Undrained outbox rows, in production order (routing recovers from Layer 1, so replay order only
+        // needs to be stable, not strictly causal).
+        this.db
+          .select()
+          .from(outbox)
+          .where(eq(outbox.projectId, projectId))
+          .orderBy(asc(outbox.createdAt)),
+      ]);
     const persistedInstances: PersistedInstance[] = instanceRows.flatMap((row) =>
       row.engineState === null
         ? []
@@ -96,11 +102,31 @@ export class DbPersistence implements Persistence {
       request: row.request,
       argument: row.argument,
     }));
-    return { ...engine, delegations: liveDelegations, openEscalations };
+    const pendingOutbox: ProjectSnapshot["pendingOutbox"] = outboxRows.map((row) => ({
+      seq: row.seq as OutboxSeq,
+      issuer: row.instanceId as InstanceId,
+      event: row.event,
+    }));
+    return { ...engine, delegations: liveDelegations, openEscalations, pendingOutbox };
   }
 
   async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {
     await this.db.transaction(async (tx) => {
+      // Layer 3 (transactional outbox): consume the inbound row and enqueue the produced ones, in the same
+      // tx as the Layer 1/2 effects — so a crash neither loses an in-flight event nor double-delivers it.
+      if (commit.consumed !== null) {
+        await tx.delete(outbox).where(eq(outbox.seq, commit.consumed));
+      }
+      if (commit.produced.length > 0) {
+        await tx.insert(outbox).values(
+          commit.produced.map((message) => ({
+            seq: message.seq,
+            projectId,
+            instanceId: message.issuer,
+            event: message.event,
+          })),
+        );
+      }
       // FK ordering: open a delegation *before* the child instance that references it; open an escalation
       // *after* its raiser instance exists; apply state updates last (they touch existing rows only).
       for (const transition of commit.transitions) {

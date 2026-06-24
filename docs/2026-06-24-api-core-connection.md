@@ -1,7 +1,7 @@
 # Katari Runtime — API ↔ CORE 接続 設計 (v0.1.0, scrap-and-build)
 
-> **状態: 設計確定 (2026-06-24)。Step 1–3c + Step 4(open escalation recovery) 実装済、Step 4 残(runs
-> projection の DB 直読) / Step 5 実装中。** main ブランチ(prototype)の API/CORE/FFI/ENV module + bus を、
+> **状態: 設計確定 (2026-06-24)。Step 1–3c + Step 4(engine 側) + Step 5(outbox) 実装済。残るは Step 4 の
+> runs DB 直読(Postgres test 要)のみ。** main ブランチ(prototype)の API/CORE/FFI/ENV module + bus を、
 > **1 actor 内の「instance kind」**に畳んだ軽量版。
 >
 > 中心となる決定:
@@ -256,14 +256,23 @@ turn = 1 atomic tx なので、どこから読んでも整合。`api` root は p
 [半]              teardown の gone は no-op）。test（panic run → failed+message durable、root teardown）。
 [次]          [次] runs list/get を Layer 1 直読に（state/result/error を delegations から、promise でなく）。
                  DB 層（Hono repo）、Postgres integration test 要。
-[  ] Step 5  outbox を mailbox 供給に統合: 全 external event を outbox に同一 tx で produce + 消費を dequeue
-             + recovery replay（mailbox = outbox の warm cache）。これで child 完了→delegateAck が outbox に
-             ある状態で crash しても親が replay で resume（現状: in-flight event は mailbox のみ＝crash で消失、
-             親が stuck）。api 発 event（startRun/cancel/answer）も durable に。api-commit 基盤（`layer2: none`）は
-             Step 4 で導入済。
+[済] Step 5  outbox = mailbox の durable backing。`TurnCommit` に `consumed: OutboxSeq|null` + `produced:
+[済]         OutboxMessage[]`（{seq, issuer, event}、issuer は replay 時 delegate の caller 再建）。全 turn が
+[済]         「consumed 行 delete + produced 行 insert」を Layer1/2 と同一 tx で commit（transactional
+[済]         outbox/consumer）。actor: mailbox=`{message,seq}[]`、seq を handler に明示 thread（各 path は自分の
+[済]         turn commit か `consumeOnly` で 1 回だけ consume）。`commit` helper が commitChain mutex で直列化＋
+[済]         deliver。api ops（startRun/cancel/answer/run失敗の terminate）も `produce`/`commit` 経由で durable。
+[済]         reactivate が pendingOutbox を replay。schema: outbox.instance_id=issuer（FK 撤去・NOT NULL）、
+[済]         event 型 ExternalEvent（migration 0006）。
+[済]         **重要バグ修正**: lazy reactivate を全 commit の前に（`ensureLoaded`、loadingPromise で 1 回）。
+[済]         さもないと produce が commit→outbox 書込み後に reactivate が走り、その行を pendingOutbox として
+[済]         **二重 replay**（cascade 二重起動）。test: outbox balance(完了後 size 0) / seed→fresh actor で replay。
+[次]          [次] runs list/get を Layer 1 直読に（state/result/error を delegations から、promise でなく）。
+                 DB 層（Hono repo）、Postgres integration test 要。これで Step 4/5 完了。
 ```
 
 > 注: Step 3b で **delegation 行はその子の create turn が書く**（caller は routing から既知、run は api root）。
 > これにより startRun/cancelRun は同期のまま（api root 専用 turn を作らずに済む）。caller turn の DelegateThread
 > と delegation 行の間の一時的 gap は、recovery が **生存 DelegateThread からも** caller を再構築するため埋まる。
-> escalation の answered 反映（api 発の escalateAck）と outbox 永続化は Step 4/5 で完成。
+> Step 5 で in-flight event（child 完了→delegateAck が outbox にある状態で crash でも親が replay で resume）と
+> api 発 event が durable になった。残るは runs の Layer 1 直読（DB 層、Postgres test 要）のみ。

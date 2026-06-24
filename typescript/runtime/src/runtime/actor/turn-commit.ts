@@ -6,7 +6,7 @@
 
 import type { CoreInstance, Scope } from "../engine/types.js";
 import type { DelegateTarget, ExternalEvent } from "../event/types.js";
-import type { DelegationId, EscalationId, InstanceId } from "../ids.js";
+import type { DelegationId, EscalationId, InstanceId, OutboxSeq } from "../ids.js";
 import type { Value } from "../value/types.js";
 
 /** A Layer 1 entity state transition a turn implies. The committing turn writes these atomically with its
@@ -41,12 +41,28 @@ export type Layer2Commit =
   | { kind: "drop" }
   | { kind: "none" };
 
-/** Everything one turn changed, to be committed atomically: its Layer 2 plus the Layer 1 transitions it
- *  implies. One `TurnCommit` per turn boundary. */
+/** One produced external event awaiting delivery — a durable outbox row. `issuer` is the instance that
+ *  produced it (the api root for an api operation); on recovery it re-establishes a replayed `delegate`'s
+ *  caller, which the event itself does not carry. */
+export interface OutboxMessage {
+  seq: OutboxSeq;
+  issuer: InstanceId;
+  event: ExternalEvent;
+}
+
+/** Everything one turn changed, to be committed atomically: its Layer 2, the Layer 1 transitions it
+ *  implies, and the transactional-outbox bookkeeping — the inbound event it consumes (delete that row) and
+ *  the events it produces (insert those rows). Writing the outbox in the same tx is what lets a crash
+ *  neither lose an in-flight event nor double-deliver a consumed one. */
 export interface TurnCommit {
   instanceId: InstanceId;
   layer2: Layer2Commit;
   transitions: EntityTransition[];
+  /** The outbox row this turn consumes (delete it). `null` for an FFI-triggered turn or an api operation,
+   *  which originate an event rather than consuming a durable one. */
+  consumed: OutboxSeq | null;
+  /** The external events this turn produces (insert as outbox rows), delivered to the mailbox after commit. */
+  produced: OutboxMessage[];
 }
 
 /** The Layer 1 transitions a turn's *outbound external events* imply (issuer = the turn's instance). The

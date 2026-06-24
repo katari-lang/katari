@@ -42,6 +42,8 @@ import {
   type EscalationId,
   type InstanceId,
   newDelegationId,
+  newOutboxSeq,
+  type OutboxSeq,
   type ProjectId,
   type ScopeId,
   type SnapshotId,
@@ -50,7 +52,12 @@ import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
 import type { Persistence } from "./persistence.js";
-import { type EntityTransition, outboundTransitions } from "./turn-commit.js";
+import {
+  type EntityTransition,
+  type Layer2Commit,
+  type OutboxMessage,
+  outboundTransitions,
+} from "./turn-commit.js";
 
 export interface ProjectActorDependencies {
   projectId: ProjectId;
@@ -90,10 +97,20 @@ export class ProjectActor {
    *  user-facing escalations). Its id is the project id (the single source of truth) — deterministic and
    *  stable across restarts, so no layer manages or persists it as a separate handle. */
   private readonly apiRootId: InstanceId;
-  private readonly mailbox: ActorMessage[] = [];
+  /** The serial inbox. Each entry carries the durable outbox row it came from (`seq`) so the turn that
+   *  processes it consumes that row in its commit; `null` for an FFI completion (ephemeral, not an outbox
+   *  event). The mailbox is just the warm cache of the outbox — replayed into on recovery. */
+  private readonly mailbox: { message: ActorMessage; seq: OutboxSeq | null }[] = [];
   private pumping = false;
+  /** Serialises every `commitTurn` against the others, so no two DB transactions interleave in the single
+   *  (event-loop-concurrent) actor. */
+  private commitChain: Promise<unknown> = Promise.resolve();
   /** Whether the project's persisted state has been reloaded into the warm store (lazy, on first use). */
   private loaded = false;
+  /** The in-flight reactivation, so concurrent first-use callers (an api `produce` and the `pump`) share one
+   *  load. Loading MUST complete before any commit — otherwise a just-produced outbox row would be re-read
+   *  by `loadProject` and replayed (double-delivered). */
+  private loadingPromise: Promise<void> | null = null;
 
   /** A pending delegate's caller instance, for routing its delegateAck / escalate home (the `delegations`
    *  row's caller). Absent for a run-root delegate, whose ack resolves the run instead (`runResolvers`). */
@@ -134,19 +151,22 @@ export class ProjectActor {
   ): { run: DelegationId; result: Promise<Value> } {
     // A run is a `delegate` the api root issues to a `core` instance. Record the root as the delegation's
     // caller *explicitly* (it is the issuer) — this is what routes the run's delegateAck / escalate /
-    // terminateAck to the api handler, exactly as `routeOutbound` records the caller of a core sub-delegate.
+    // terminateAck to the api handler. The delegate is produced durably (an outbox row), so the run is not
+    // lost if the process goes down before its root instance is created.
     const delegation = newDelegationId();
     this.delegationCaller[delegation] = this.apiRootId;
     const result = new Promise<Value>((resolve, reject) => {
       this.runResolvers[delegation] = resolve;
       this.runRejecters[delegation] = reject;
     });
-    this.feed({
-      kind: "delegate",
-      delegation,
-      target: { kind: "named", name: qualifiedName, snapshot },
-      argument,
-    });
+    void this.produce([
+      {
+        kind: "delegate",
+        delegation,
+        target: { kind: "named", name: qualifiedName, snapshot },
+        argument,
+      },
+    ]);
     return { run: delegation, result };
   }
 
@@ -172,9 +192,11 @@ export class ProjectActor {
   }
 
   /** A run's escalation reached the root unhandled: a genuine request is kept open for a user to answer
-   *  (the run stays suspended); a panic / unhandled escape fails the run. */
+   *  (the run stays suspended); a panic / unhandled escape fails the run. Consumes the escalate's outbox
+   *  row (`seq`). */
   private async handleApiEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
+    seq: OutboxSeq | null,
   ): Promise<void> {
     const ask = event.ask;
     if (ask.kind === "request" && ask.request !== PANIC_REQUEST) {
@@ -184,20 +206,29 @@ export class ProjectActor {
         request: ask.request,
         argument: ask.argument,
       };
+      await this.consumeOnly(seq);
       return;
     }
-    // The run failed (a panic / unhandled escape reached the root). Record it durably as the run
-    // delegation's terminal `failed` state (an api-root commit — no engine threads), settle the result
-    // promise, then terminate the run's still-suspended root instance so it does not leak. The terminate
-    // teardown's eventual `gone` is a no-op against the now-terminal `failed` (terminal states are sticky).
+    // The run failed (a panic / unhandled escape reached the root). In one api-root commit (no engine
+    // threads): record the run delegation's terminal `failed` state and durably produce the `terminate`
+    // that tears its still-suspended root down (so it does not leak). The teardown's eventual `gone` is a
+    // no-op against the now-terminal `failed` (terminal states are sticky). Then settle the result promise.
     const errorMessage = escalationErrorMessage(event);
-    await this.persistence.commitTurn(this.projectId, {
+    const produced: OutboxMessage[] = [
+      {
+        seq: newOutboxSeq(),
+        issuer: this.apiRootId,
+        event: { kind: "terminate", delegation: event.delegation },
+      },
+    ];
+    await this.commit({
       instanceId: this.apiRootId,
       layer2: { kind: "none" },
       transitions: [{ kind: "delegation-failed", delegation: event.delegation, errorMessage }],
+      consumed: seq,
+      produced,
     });
     this.settleRun(event.delegation, { error: new Error(errorMessage) });
-    this.feed({ kind: "terminate", delegation: event.delegation });
   }
 
   /** A run's terminate cascade confirmed: settle it as cancelled. */
@@ -211,7 +242,7 @@ export class ProjectActor {
    *  already finished. */
   cancelRun(run: DelegationId, reason?: string): void {
     this.cancelReasons[run] = reason;
-    this.feed({ kind: "terminate", delegation: run });
+    void this.produce([{ kind: "terminate", delegation: run }]);
   }
 
   /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes. */
@@ -219,7 +250,7 @@ export class ProjectActor {
     const open = this.openEscalations[escalation];
     if (open === undefined) return;
     delete this.openEscalations[escalation];
-    this.feed({ kind: "escalateAck", delegation: open.run, escalation, value });
+    void this.produce([{ kind: "escalateAck", delegation: open.run, escalation, value }]);
   }
 
   /** The run-root escalations currently awaiting an answer. */
@@ -245,10 +276,78 @@ export class ProjectActor {
     else rejecter?.(outcome.error);
   }
 
-  /** Enqueue an external message and ensure the serial loop is running. */
-  feed(message: ActorMessage): void {
-    this.mailbox.push(message);
+  /** Feed an FFI completion into the serial loop. FFI completions are ephemeral (not outbox events — they
+   *  are re-derived from the `ExternalThread` rows on recovery), so they carry no outbox row (`seq` null). */
+  feed(result: FfiResult): void {
+    this.mailbox.push({ message: result, seq: null });
     void this.pump();
+  }
+
+  /** Reactivate the project once, before any commit. The lazy load reads the persisted outbox; doing it
+   *  before producing prevents a just-produced row being re-read by `loadProject` and replayed. */
+  private ensureLoaded(): Promise<void> {
+    if (this.loaded) return Promise.resolve();
+    if (this.loadingPromise === null) this.loadingPromise = this.reactivate();
+    return this.loadingPromise;
+  }
+
+  /** Durably produce external events from an api operation (no inbound event is being consumed): commit the
+   *  outbox rows, then deliver them to the mailbox. The issuer is the api root (it re-establishes a replayed
+   *  delegate's caller). */
+  private async produce(events: ExternalEvent[]): Promise<void> {
+    await this.ensureLoaded();
+    const produced = events.map((event) => ({
+      seq: newOutboxSeq(),
+      issuer: this.apiRootId,
+      event,
+    }));
+    await this.commit({
+      instanceId: this.apiRootId,
+      layer2: { kind: "none" },
+      transitions: [],
+      consumed: null,
+      produced,
+    });
+  }
+
+  /** Commit one turn (serialised against all the others, so no two DB transactions interleave in the
+   *  event-loop-concurrent actor), then deliver its produced events to the mailbox. */
+  private async commit(commit: {
+    instanceId: InstanceId;
+    layer2: Layer2Commit;
+    transitions: EntityTransition[];
+    consumed: OutboxSeq | null;
+    produced: OutboxMessage[];
+  }): Promise<void> {
+    const run = this.commitChain.then(() => this.persistence.commitTurn(this.projectId, commit));
+    this.commitChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
+    this.deliver(commit.produced);
+  }
+
+  /** Consume an outbox row with no other effect — used by a handler that processes its event without a turn
+   *  (an early return whose target is already gone, or an api handler that only settles a promise). A `null`
+   *  seq (an FFI completion) has no row, so this is a no-op. */
+  private consumeOnly(seq: OutboxSeq | null): Promise<void> {
+    if (seq === null) return Promise.resolve();
+    return this.commit({
+      instanceId: this.apiRootId,
+      layer2: { kind: "none" },
+      transitions: [],
+      consumed: seq,
+      produced: [],
+    });
+  }
+
+  /** Deliver produced events to the mailbox (after their commit) and kick the loop. */
+  private deliver(produced: OutboxMessage[]): void {
+    for (const message of produced) {
+      this.mailbox.push({ message: message.event, seq: message.seq });
+    }
+    if (produced.length > 0) void this.pump();
   }
 
   /** Activate a (possibly recovered) actor: reload persisted state and re-dispatch in-flight external
@@ -264,11 +363,11 @@ export class ProjectActor {
     if (this.pumping) return;
     this.pumping = true;
     try {
-      if (!this.loaded) await this.reactivate();
+      await this.ensureLoaded();
       while (this.mailbox.length > 0) {
-        const message = this.mailbox.shift();
-        if (message === undefined) break;
-        await this.handle(message);
+        const entry = this.mailbox.shift();
+        if (entry === undefined) break;
+        await this.handle(entry.message, entry.seq);
       }
     } finally {
       this.pumping = false;
@@ -320,6 +419,15 @@ export class ProjectActor {
     // The api management root is a permanent per-project fixture; (re)create it after loading replaced the
     // store, so a run's delegateAck / escalate / terminateAck can always find it as the delegation's caller.
     ensureApiRoot(this.store, this.apiRootId);
+    // Replay the undrained outbox into the mailbox: events produced before the crash but not yet consumed
+    // (e.g. a completed child's `delegateAck` whose parent never resumed). A replayed `delegate` re-uses its
+    // row's issuer as its caller (the event itself does not carry it), exactly as the warm path records it.
+    for (const message of snapshot.pendingOutbox) {
+      if (message.event.kind === "delegate") {
+        this.delegationCaller[message.event.delegation] = message.issuer;
+      }
+      this.mailbox.push({ message: message.event, seq: message.seq });
+    }
     this.loaded = true;
     await this.resumeInFlightExternals();
   }
@@ -357,36 +465,42 @@ export class ProjectActor {
     }
   }
 
-  private async handle(message: ActorMessage): Promise<void> {
+  /** Route one inbound message to its handler. `seq` is the durable outbox row it came from (`null` for an
+   *  FFI completion); the handler consumes it in the same commit as its effects (the transactional
+   *  consumer), so a crash never replays an event whose effect already committed. */
+  private async handle(message: ActorMessage, seq: OutboxSeq | null): Promise<void> {
     if (isFfiResult(message)) {
       await this.onFfiResult(message);
       return;
     }
     switch (message.kind) {
       case "delegate":
-        await this.onDelegate(message);
+        await this.onDelegate(message, seq);
         return;
       case "delegateAck":
-        await this.onDelegateAck(message);
+        await this.onDelegateAck(message, seq);
         return;
       case "escalate":
-        await this.onEscalate(message);
+        await this.onEscalate(message, seq);
         return;
       case "escalateAck":
-        await this.onEscalateAck(message);
+        await this.onEscalateAck(message, seq);
         return;
       case "terminate":
-        await this.onTerminate(message);
+        await this.onTerminate(message, seq);
         return;
       case "terminateAck":
-        await this.onTerminateAck(message);
+        await this.onTerminateAck(message, seq);
         return;
     }
   }
 
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
-  private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
+  private async onDelegate(
+    event: Extract<ExternalEvent, { kind: "delegate" }>,
+    seq: OutboxSeq | null,
+  ): Promise<void> {
     await this.ir.preload(event.target.snapshot);
     const resolved = this.resolveTarget(event.target);
     const instance = createInstance(this.store, {
@@ -415,18 +529,19 @@ export class ProjectActor {
               argument: event.argument,
             },
           ];
-    await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }], open);
+    await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }], open, seq);
   }
 
   private async onDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
+    seq: OutboxSeq | null,
   ): Promise<void> {
     delete this.delegationChild[event.delegation];
     const caller = this.callerOf(event.delegation);
-    if (caller === undefined) return;
+    if (caller === undefined) return this.consumeOnly(seq);
     if (caller.kind === "api") {
       this.handleApiDelegateAck(event.delegation, event.value);
-      return;
+      return this.consumeOnly(seq);
     }
     delete this.delegationCaller[event.delegation];
     // Claim any resources the returned value carries up (a returned closure's captured scope chain, a
@@ -434,56 +549,74 @@ export class ProjectActor {
     // about to bind the value.
     reownResources(this.store, caller.id, event.value);
     const proxy = delegateProxyOf(caller, event.delegation);
-    if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) return;
+    if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) {
+      return this.consumeOnly(seq);
+    }
     delete caller.threads[proxy.id];
-    await this.runTurn(caller, [
-      { kind: "callAck", target: proxy.parent, callId: proxy.parentCallId, value: event.value },
-    ]);
+    await this.runTurn(
+      caller,
+      [{ kind: "callAck", target: proxy.parent, callId: proxy.parentCallId, value: event.value }],
+      [],
+      seq,
+    );
   }
 
   // ─── escalate / escalateAck (a request / control ask crossing the instance boundary) ────────────
 
-  private async onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): Promise<void> {
+  private async onEscalate(
+    event: Extract<ExternalEvent, { kind: "escalate" }>,
+    seq: OutboxSeq | null,
+  ): Promise<void> {
     const caller = this.callerOf(event.delegation);
-    if (caller === undefined) return;
+    if (caller === undefined) return this.consumeOnly(seq);
     if (caller.kind === "api") {
       // Reached the management root unhandled → a user-facing open escalation (the raiser stays suspended,
       // found later via `delegationChild` when answered). Panic / unhandled escape fails the run.
-      await this.handleApiEscalate(event);
+      await this.handleApiEscalate(event, seq);
       return;
     }
     const proxy = delegateProxyOf(caller, event.delegation);
-    if (proxy === undefined) return;
+    if (proxy === undefined) return this.consumeOnly(seq);
     // Re-raise the ask inside the caller from the proxy's position; it bubbles toward a handle. The relay
     // echoes the raiser's `(delegation, escalation)` so its eventual `escalateAck` finds its way home.
-    await this.runTurnWith(caller, (ctx) => {
-      relayEscalate(ctx, proxy.id, event.escalation, event.ask);
-    });
+    await this.runTurnWith(
+      caller,
+      (ctx) => {
+        relayEscalate(ctx, proxy.id, event.escalation, event.ask);
+      },
+      [],
+      seq,
+    );
   }
 
   private async onEscalateAck(
     event: Extract<ExternalEvent, { kind: "escalateAck" }>,
+    seq: OutboxSeq | null,
   ): Promise<void> {
     // The escalating child is the delegation's child, so it is also the raiser. Hand the answer to its
     // Agent root in external vocabulary `(escalation, value)`; the Agent maps the escalation back to its
     // internal askId and re-enters it as an askAck. The actor never names an inner thread. (The raiser is
     // always a `core` instance — the api root never raises.)
     const instance = this.coreInstance(this.delegationChild[event.delegation]);
-    if (instance === undefined) return;
+    if (instance === undefined) return this.consumeOnly(seq);
     // Mark the escalation answered in this same turn (the api root, or a relaying parent, runs no turn that
     // would emit the escalateAck as outbound, so record it here from the consumed event).
     await this.runTurnWith(
       instance,
       (ctx) => resumeEscalation(ctx, event.escalation, event.value),
       [{ kind: "escalation-answered", escalation: event.escalation, answer: event.value }],
+      seq,
     );
   }
 
   // ─── terminate / terminateAck (graceful cross-instance cancel) ──────────────────────────────────
 
-  private async onTerminate(event: Extract<ExternalEvent, { kind: "terminate" }>): Promise<void> {
+  private async onTerminate(
+    event: Extract<ExternalEvent, { kind: "terminate" }>,
+    seq: OutboxSeq | null,
+  ): Promise<void> {
     const child = this.coreInstance(this.delegationChild[event.delegation]);
-    if (child === undefined) return;
+    if (child === undefined) return this.consumeOnly(seq);
     child.status = "cancelling";
     // Cancel the root; once its subtree is torn down it emits terminateAck and retires the instance. Record
     // the delegation moving to `cancelling` in this same turn (so it holds even for an api-issued cancel,
@@ -492,29 +625,36 @@ export class ProjectActor {
       child,
       [{ kind: "cancel", target: child.rootThreadId }],
       [{ kind: "delegation-cancelling", delegation: event.delegation }],
+      seq,
     );
   }
 
   private async onTerminateAck(
     event: Extract<ExternalEvent, { kind: "terminateAck" }>,
+    seq: OutboxSeq | null,
   ): Promise<void> {
     delete this.delegationChild[event.delegation];
     const caller = this.callerOf(event.delegation);
-    if (caller === undefined) return;
+    if (caller === undefined) return this.consumeOnly(seq);
     if (caller.kind === "api") {
       // A run terminate confirmed: the cancelled run's tree is gone — settle it as cancelled.
       this.handleApiTerminateAck(event.delegation);
-      return;
+      return this.consumeOnly(seq);
     }
     delete this.delegationCaller[event.delegation];
     const proxy = delegateProxyOf(caller, event.delegation);
-    if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) return;
+    if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) {
+      return this.consumeOnly(seq);
+    }
     // The child confirmed teardown: retire the proxy and cancelAck its parent (the cancel cascade continues).
     delete caller.threads[proxy.id];
     delete caller.cancelExits[proxy.id];
-    await this.runTurn(caller, [
-      { kind: "cancelAck", target: proxy.parent, callId: proxy.parentCallId },
-    ]);
+    await this.runTurn(
+      caller,
+      [{ kind: "cancelAck", target: proxy.parent, callId: proxy.parentCallId }],
+      [],
+      seq,
+    );
   }
 
   // ─── FFI completion ──────────────────────────────────────────────────────────────────────────
@@ -567,6 +707,7 @@ export class ProjectActor {
     instance: CoreInstance,
     initial: InternalEvent[],
     extraTransitions: EntityTransition[] = [],
+    consumed: OutboxSeq | null = null,
   ): Promise<void> {
     return this.runTurnWith(
       instance,
@@ -574,6 +715,7 @@ export class ProjectActor {
         ctx.buffers.internalQueue.push(...initial);
       },
       extraTransitions,
+      consumed,
     );
   }
 
@@ -581,11 +723,13 @@ export class ProjectActor {
    *  helper that needs the StepContext such as `relayEscalate`); then commit the turn and flush. The turn
    *  commits atomically: its Layer 2 (the instance's graph, persisted, or dropped if it completed) together
    *  with the Layer 1 entity transitions it implies — `extraTransitions` from the handler (a delegation it
-   *  is opening / cancelling, an escalation it is answering) plus the ones its outbound events imply. */
+   *  is opening / cancelling, an escalation it is answering) plus the ones its outbound events imply — and
+   *  the outbox bookkeeping (consume the handled row `consumed`, durably produce the outbound events). */
   private async runTurnWith(
     instance: CoreInstance,
     seed: (ctx: StepContext) => void,
     extraTransitions: EntityTransition[] = [],
+    consumed: OutboxSeq | null = null,
   ): Promise<void> {
     const snapshot = instance.target.snapshot;
     await this.ir.preload(snapshot);
@@ -603,44 +747,34 @@ export class ProjectActor {
     // DB reflection happens once the internal queue is empty (the turn boundary). A completed instance is
     // dropped (cascade), a still-running one is written through with its owned scopes — either way together
     // with the Layer 1 transitions, in one atomic commit.
-    const transitions = [
-      ...extraTransitions,
-      ...outboundTransitions(instance.id, ctx.buffers.outbound),
-    ];
+    const outbound = ctx.buffers.outbound;
+    const transitions = [...extraTransitions, ...outboundTransitions(instance.id, outbound)];
+    // Record the caller of every delegate this turn issues (the warm-path mirror; the outbox row's issuer
+    // re-establishes the same on recovery). The escalate / escalateAck / terminate legs route by
+    // `delegationChild`, already set when the child was summoned, so they need no separate mirror.
+    for (const event of outbound) {
+      if (event.kind === "delegate") this.delegationCaller[event.delegation] = instance.id;
+    }
+    const produced: OutboxMessage[] = outbound.map((event) => ({
+      seq: newOutboxSeq(),
+      issuer: instance.id,
+      event,
+    }));
+    let layer2: Layer2Commit;
     if (isInstanceComplete(instance)) {
       // Before dropping the instance's scopes, ascend the ones its returned value captures (set them
       // in-transit) so the caller re-owns them in its `onDelegateAck`. Only when there is a caller — a
       // run-root result leaves the engine, so its captured scopes (if any) simply drop with the instance.
-      this.ascendReturnedResources(instance, ctx.buffers.outbound);
+      this.ascendReturnedResources(instance, outbound);
       teardownInstance(this.store, instance.id);
-      await this.persistence.commitTurn(this.projectId, {
-        instanceId: instance.id,
-        layer2: { kind: "drop" },
-        transitions,
-      });
+      layer2 = { kind: "drop" };
     } else {
       const ownedScopes = Object.values(this.store.scopes).filter(
         (scope) => scope.owner === instance.id,
       );
-      await this.persistence.commitTurn(this.projectId, {
-        instanceId: instance.id,
-        layer2: { kind: "persist", instance, ownedScopes },
-        transitions,
-      });
+      layer2 = { kind: "persist", instance, ownedScopes };
     }
-    for (const event of ctx.buffers.outbound) {
-      this.routeOutbound(instance.id, event);
-    }
-  }
-
-  /** Send a turn's outbound external event onward: a delegate records its caller for ack routing (the
-   *  escalate / escalateAck legs route by `delegationChild`, already set when the child was summoned, so
-   *  they need no separate mirror); then every event re-enters the serial mailbox. */
-  private routeOutbound(fromInstanceId: InstanceId, event: ExternalEvent): void {
-    if (event.kind === "delegate") {
-      this.delegationCaller[event.delegation] = fromInstanceId;
-    }
-    this.mailbox.push(event);
+    await this.commit({ instanceId: instance.id, layer2, transitions, consumed, produced });
   }
 
   private resolveTarget(target: DelegateTarget): {

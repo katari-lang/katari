@@ -43,6 +43,13 @@
       "when": 1782311428135,
       "tag": "0005_premium_lord_hawal",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782313629430,
+      "tag": "0006_lying_puff_adder",
+      "breakpoints": true
     }
   ]
 }

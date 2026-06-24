@@ -3,7 +3,7 @@
 // is exercisable without Postgres. The DB-backed `DbPersistence` mirrors this against real tables; keeping
 // a faithful in-memory twin lets recovery be unit-tested deterministically.
 
-import type { DelegationId, EscalationId, InstanceId, ProjectId } from "../ids.js";
+import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { Persistence, ProjectSnapshot } from "./persistence.js";
 import {
@@ -13,7 +13,7 @@ import {
   type PersistedThread,
   serializeInstance,
 } from "./persistence-codec.js";
-import type { EntityTransition, TurnCommit } from "./turn-commit.js";
+import type { EntityTransition, OutboxMessage, TurnCommit } from "./turn-commit.js";
 
 /** A stored Layer 1 delegation edge (the durable parent→child record + its lifecycle). `live` is true for
  *  running / cancelling delegations (which still route) and false once done / gone (history only). */
@@ -48,6 +48,8 @@ export class StoringPersistence implements Persistence {
    *  with its raiser), matching the tables' `ON DELETE CASCADE`. */
   private readonly delegations = new Map<DelegationId, StoredDelegation>();
   private readonly escalations = new Map<EscalationId, StoredEscalation>();
+  /** Layer 3: the transactional outbox (produced-but-not-consumed events), insertion-ordered. */
+  private readonly outbox = new Map<OutboxSeq, OutboxMessage>();
 
   async loadProject(_projectId: ProjectId): Promise<ProjectSnapshot> {
     const engine = deserializeProject(
@@ -73,11 +75,15 @@ export class StoringPersistence implements Persistence {
         });
       }
     }
-    return { ...engine, delegations, openEscalations };
+    return { ...engine, delegations, openEscalations, pendingOutbox: [...this.outbox.values()] };
   }
 
   async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {
-    // Layer 1 first: a `delegation-open` must precede the child instance that references it (FK order).
+    // Layer 3 (transactional outbox): consume the inbound row, produce the outbound ones — together with
+    // Layer 1 / Layer 2, so a crash neither loses an in-flight event nor double-delivers a consumed one.
+    if (commit.consumed !== null) this.outbox.delete(commit.consumed);
+    for (const message of commit.produced) this.outbox.set(message.seq, message);
+    // Layer 1: a `delegation-open` must precede the child instance that references it (FK order).
     for (const transition of commit.transitions) this.applyTransition(transition);
     // Layer 2: persist the instance's graph, drop it (cascading its threads / scopes / entities), or none
     // (an api-root turn carries no engine continuation).
@@ -171,6 +177,18 @@ export class StoringPersistence implements Persistence {
   /** Test helper: how many instances currently have live Layer 2. */
   instanceCount(): number {
     return this.instances.size;
+  }
+
+  /** Test helper: how many produced events are still undrained in the outbox (0 once a project quiesces —
+   *  every produced event was consumed). */
+  outboxSize(): number {
+    return this.outbox.size;
+  }
+
+  /** Test helper: seed the outbox directly, simulating an event produced just before a crash (so a fresh
+   *  actor must replay it). */
+  seedOutbox(message: OutboxMessage): void {
+    this.outbox.set(message.seq, message);
   }
 
   /** Test helper: the stored Layer 1 state of a delegation (for asserting a run's durable outcome). */

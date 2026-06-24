@@ -24,6 +24,9 @@ export type DelegationId = Brand<string, "DelegationId">;
 export type EscalationId = Brand<string, "EscalationId">;
 export type RunId = Brand<string, "RunId">;
 export type BlobId = Brand<string, "BlobId">;
+/** The id of one durable outbox row — a produced-but-not-yet-consumed external event (the transactional
+ *  outbox backing the actor's mailbox, so an in-flight event survives a crash). */
+export type OutboxSeq = Brand<string, "OutboxSeq">;
 
 /** Mint a fresh persistent UUID. The branded wrappers below keep the families distinct at the call site. */
 const newUuid = (): string => crypto.randomUUID();
@@ -38,6 +41,7 @@ export const newDelegationId = (): DelegationId => newUuid() as DelegationId;
 export const apiRootIdOf = (projectId: ProjectId): InstanceId => projectId as string as InstanceId;
 export const newEscalationId = (): EscalationId => newUuid() as EscalationId;
 export const newBlobId = (): BlobId => newUuid() as BlobId;
+export const newOutboxSeq = (): OutboxSeq => newUuid() as OutboxSeq;
 
 /** Unique within one instance's thread tree. */
 export type ThreadId = Brand<number, "ThreadId">;

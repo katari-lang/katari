@@ -11,7 +11,13 @@ import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js"
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import type { FfiResult } from "../src/runtime/event/types.js";
 import type { ExternalCall, ExternalRunner } from "../src/runtime/external/runner.js";
-import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import {
+  apiRootIdOf,
+  newDelegationId,
+  newOutboxSeq,
+  type ProjectId,
+  type SnapshotId,
+} from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { StubExternalRunner } from "../src/runtime/external/runner.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
@@ -335,5 +341,65 @@ describe("recovery", () => {
     expect(edge?.errorMessage).toMatch(/panic.*number/);
     // And the run's root instance (and its descendants) were torn down — nothing left suspended.
     await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
+  });
+
+  // agent main() { return 7 }  (no children, completes in its own create turn)
+  function constantIr(): IRModule {
+    return {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: 2,
+            operations: [{ kind: "loadLiteral", output: 2, value: { kind: "integer", value: 7 } }],
+          },
+          parameters: { parameter: 11 },
+        },
+      },
+      entries: { [createAgentName("main")]: 0 },
+      names: {},
+    };
+  }
+
+  test("drains the outbox to empty once a run completes (every produced event was consumed)", async () => {
+    const persistence = new StoringPersistence();
+    const actor = makeActor(constantIr(), persistence);
+    await expect(actor.startRun(createAgentName("main"), SNAPSHOT, null).result).resolves.toEqual({
+      kind: "integer",
+      value: 7,
+    });
+    // The run delegate + the run root's delegateAck were each produced then consumed: no leak.
+    await waitUntil(() => (persistence.outboxSize() === 0 ? true : undefined));
+    expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("replays an undrained outbox event in a fresh actor (a produced event survives a crash)", async () => {
+    // Seed the outbox with a run `delegate` (issuer = api root) as if it had been produced just before a
+    // crash, never consumed. A fresh actor must replay it from the outbox, summon the agent, and run it to
+    // completion — recorded durably as the delegation's `done` result, all reconstructed from the row.
+    const persistence = new StoringPersistence();
+    const run = newDelegationId();
+    persistence.seedOutbox({
+      seq: newOutboxSeq(),
+      issuer: apiRootIdOf(PROJECT),
+      event: {
+        kind: "delegate",
+        delegation: run,
+        target: { kind: "named", name: createAgentName("main"), snapshot: SNAPSHOT },
+        argument: null,
+      },
+    });
+
+    const actor = makeActor(constantIr(), persistence);
+    await actor.activate();
+
+    const done = await waitUntil(() => {
+      const edge = persistence.peekDelegation(run);
+      return edge?.state === "done" ? edge : undefined;
+    });
+    expect(done.result).toEqual({ kind: "integer", value: 7 });
+    expect(persistence.outboxSize()).toBe(0);
   });
 });

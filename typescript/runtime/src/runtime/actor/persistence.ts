@@ -14,7 +14,7 @@
 import type { ProjectStore } from "../engine/types.js";
 import type { DelegationId, EscalationId, InstanceId, ProjectId } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { TurnCommit } from "./turn-commit.js";
+import type { OutboxMessage, TurnCommit } from "./turn-commit.js";
 
 /** A persisted open escalation (an `escalations` row still in the `open` state). The actor rehydrates the
  *  user-facing ones (those raised by a run root) into its open-escalation registry on reactivation. */
@@ -43,6 +43,9 @@ export interface ProjectSnapshot {
    *  run suspended awaiting a user's answer must survive a restart. Inner-hop escalations recover with the
    *  engine threads (their relay state is Layer 2), so the actor ignores those here. */
   openEscalations: PersistedOpenEscalation[];
+  /** Undrained outbox rows: events produced before the crash but not yet consumed. The actor replays them
+   *  into its mailbox so an in-flight event (e.g. a completed child's `delegateAck`) is not lost. */
+  pendingOutbox: OutboxMessage[];
 }
 
 export interface Persistence {
@@ -56,7 +59,14 @@ export interface Persistence {
 /** The seam implementation: the warm store is the truth, so nothing persists and nothing loads. */
 export class InMemoryPersistence implements Persistence {
   async loadProject(): Promise<ProjectSnapshot> {
-    return { instances: {}, scopes: {}, nextScopeId: 0, delegations: {}, openEscalations: [] };
+    return {
+      instances: {},
+      scopes: {},
+      nextScopeId: 0,
+      delegations: {},
+      openEscalations: [],
+      pendingOutbox: [],
+    };
   }
   async commitTurn(): Promise<void> {}
 }

@@ -27,7 +27,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
-import type { ActorMessage, DelegateTarget } from "../../runtime/event/types.js";
+import type { DelegateTarget, ExternalEvent } from "../../runtime/event/types.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
@@ -157,11 +157,11 @@ export const escalations = pgTable(
   ],
 );
 
-/** Layer 3 — the transactional outbox: external events (and FFI completions) produced by a turn but not
- *  yet consumed by their destination turn. The turn that *produces* events and the turn that *consumes*
- *  one commit in a single tx alongside their Layer 1/2 writes (transactional outbox / consumer), so a
- *  crash neither loses an in-flight event nor double-delivers it. The actor drains this into its mailbox;
- *  on recovery the undrained rows are replayed. `seq` is the global delivery order. */
+/** Layer 3 — the transactional outbox: external events produced by a turn but not yet consumed. The turn
+ *  that *produces* events and the turn that *consumes* one commit in a single tx alongside their Layer 1/2
+ *  writes (transactional outbox / consumer), so a crash neither loses an in-flight event nor double-delivers
+ *  it. The actor drains this into its mailbox; on recovery the undrained rows are replayed. (FFI completions
+ *  are NOT here — they are an ephemeral side channel re-derived from the `ExternalThread` rows on recovery.) */
 export const outbox = pgTable(
   "outbox",
   {
@@ -169,11 +169,12 @@ export const outbox = pgTable(
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    /** The instance whose turn will consume this event. `null` for a `delegate` (its destination child is
-     *  created only when the event is consumed) — the actor routes those by the event's target instead. */
-    instanceId: uuid("instance_id").references(() => instances.id, { onDelete: "cascade" }),
-    /** The external event / FFI completion payload (an `ActorMessage`). */
-    event: jsonb("event").$type<ActorMessage>().notNull(),
+    /** The instance that produced this event (the api root for an api operation). On replay it
+     *  re-establishes a `delegate`'s caller, which the event payload does not itself carry. NOT a foreign
+     *  key: the api root has no `instances` row, and an in-flight event must outlive its issuer's drop. */
+    instanceId: uuid("instance_id").notNull(),
+    /** The external event payload. */
+    event: jsonb("event").$type<ExternalEvent>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
