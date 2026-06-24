@@ -8,13 +8,7 @@
 
 import type { QualifiedName } from "@katari-lang/types";
 import { ascendResources, reownResources } from "../engine/ascent.js";
-import {
-  delegateProxyOf,
-  PANIC_REQUEST,
-  raisePanic,
-  relayEscalate,
-  resumeEscalation,
-} from "../engine/common.js";
+import { delegateProxyOf, raisePanic, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
 import {
@@ -42,7 +36,6 @@ import {
   type DelegationId,
   type EscalationId,
   type InstanceId,
-  newDelegationId,
   newOutboxSeq,
   type OutboxSeq,
   type ProjectId,
@@ -52,6 +45,7 @@ import {
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
+import { type ApiHost, ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import type { Persistence } from "./persistence.js";
 import {
   type EntityTransition,
@@ -60,6 +54,10 @@ import {
   outboundTransitions,
 } from "./turn-commit.js";
 
+// The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
+// so existing importers (tests, callers) keep their entry point.
+export { type OpenEscalation, RunCancelledError } from "./api-reactor.js";
+
 export interface ProjectActorDependencies {
   projectId: ProjectId;
   ir: IrSource;
@@ -67,22 +65,6 @@ export interface ProjectActorDependencies {
   blobs: BlobStore;
   external: ExternalRunner;
   persistence: Persistence;
-}
-
-/** One run-root request the engine could not handle internally, awaiting a user's answer. */
-export interface OpenEscalation {
-  escalation: EscalationId;
-  request: QualifiedName;
-  argument: Value | null;
-}
-
-/** Why a run's `result` promise rejected: it was cancelled (vs failed). Lets the run layer settle the
- *  durable run record as `cancelled` rather than `error`. */
-export class RunCancelledError extends Error {
-  constructor(public readonly reason?: string) {
-    super(reason !== undefined ? `run cancelled: ${reason}` : "run cancelled");
-    this.name = "RunCancelledError";
-  }
 }
 
 export class ProjectActor {
@@ -119,16 +101,11 @@ export class ProjectActor {
   /** A delegation's spawned child instance — for routing a `terminate` to it, and an `escalateAck` back to
    *  the raiser (the escalating child is the delegation's child, so this is its raiser too). */
   private readonly delegationChild: Record<DelegationId, InstanceId> = {};
-  /** Settle / reject a run-root delegation: its delegateAck resolves the `startRun` promise; a panic /
-   *  unhandled escape at the run root rejects it; a terminate (cancel) rejects it with `RunCancelledError`. */
-  private readonly runResolvers: Record<DelegationId, (value: Value) => void> = {};
-  private readonly runRejecters: Record<DelegationId, (error: Error) => void> = {};
-  /** Run-root requests the engine could not handle, kept open (their run-root instance stays suspended)
-   *  until a user answers — keyed by the escalation id, which also names the run delegation it belongs to. */
-  private readonly openEscalations: Record<EscalationId, OpenEscalation & { run: DelegationId }> =
-    {};
-  /** A cancelling run's reason, held until its terminateAck settles the run (`RunCancelledError`). */
-  private readonly cancelReasons: Record<DelegationId, string | undefined> = {};
+
+  /** The api management root's reactor: the user-facing run / escalation logic (it issues the run delegate /
+   *  terminate / escalateAck and reacts to a run's delegateAck / escalate / terminateAck). It owns the api
+   *  root's own state; the actor here is its substrate, exposed through the `ApiHost` adapter below. */
+  private readonly api: ApiReactor;
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
@@ -138,37 +115,37 @@ export class ProjectActor {
     this.blobs = dependencies.blobs;
     this.external = dependencies.external;
     this.persistence = dependencies.persistence;
+    this.api = new ApiReactor(this.apiHost());
     // FFI completions re-enter through the same serial mailbox as every other external message.
     this.external.onResult((result) => this.feed(result));
   }
 
-  /** Start a run: summon a root instance for `qualifiedName@snapshot`. Returns the run delegation (the
-   *  handle for `cancelRun`) and a promise that settles with the result (or rejects: a panic / unhandled
-   *  escape fails it, a cancel rejects it with `RunCancelledError`). */
+  /** The narrow substrate slice the api root drives (produce / commit / consume + the run delegation's
+   *  routing edge). Built once; the arrows close over this actor's private machinery. */
+  private apiHost(): ApiHost {
+    return {
+      apiRootId: this.apiRootId,
+      ensureLoaded: () => this.ensureLoaded(),
+      produce: (events) => this.produce(events),
+      consume: (seq) => this.consumeOnly(seq),
+      commit: (commit) => this.commit(commit),
+      openRunDelegation: (delegation) => {
+        this.delegationCaller[delegation] = this.apiRootId;
+      },
+      closeRunDelegation: (delegation) => {
+        delete this.delegationCaller[delegation];
+      },
+    };
+  }
+
+  /** Start a run on the api root. The actor exposes it for in-process callers (tests / the façade); the
+   *  run id is the run delegation id (the durable handle), the `result` promise an in-process convenience. */
   startRun(
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
     argument: Value | null,
   ): { run: DelegationId; result: Promise<Value> } {
-    // A run is a `delegate` the api root issues to a `core` instance. Record the root as the delegation's
-    // caller *explicitly* (it is the issuer) — this is what routes the run's delegateAck / escalate /
-    // terminateAck to the api handler. The delegate is produced durably (an outbox row), so the run is not
-    // lost if the process goes down before its root instance is created.
-    const delegation = newDelegationId();
-    this.delegationCaller[delegation] = this.apiRootId;
-    const result = new Promise<Value>((resolve, reject) => {
-      this.runResolvers[delegation] = resolve;
-      this.runRejecters[delegation] = reject;
-    });
-    void this.produce([
-      {
-        kind: "delegate",
-        delegation,
-        target: { kind: "named", name: qualifiedName, snapshot },
-        argument,
-      },
-    ]);
-    return { run: delegation, result };
+    return this.api.startRun(qualifiedName, snapshot, argument);
   }
 
   /** The loaded instance under `id` if it is a `core` instance (the engine only ever drives core). */
@@ -184,101 +161,21 @@ export class ProjectActor {
     return id !== undefined ? this.store.instances[id] : undefined;
   }
 
-  // ─── api root handlers (a run's delegateAck / escalate / terminateAck reaching the management root) ──
+  // ─── api root commands (exposed for in-process callers; the logic lives in the ApiReactor) ──────────
 
-  /** A run finished: settle its result. */
-  private handleApiDelegateAck(delegation: DelegationId, value: Value): void {
-    delete this.delegationCaller[delegation];
-    this.settleRun(delegation, { value });
-  }
-
-  /** A run's escalation reached the root unhandled: a genuine request is kept open for a user to answer
-   *  (the run stays suspended); a panic / unhandled escape fails the run. Consumes the escalate's outbox
-   *  row (`seq`). */
-  private async handleApiEscalate(
-    event: Extract<ExternalEvent, { kind: "escalate" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
-    const ask = event.ask;
-    if (ask.kind === "request" && ask.request !== PANIC_REQUEST) {
-      this.openEscalations[event.escalation] = {
-        run: event.delegation,
-        escalation: event.escalation,
-        request: ask.request,
-        argument: ask.argument,
-      };
-      await this.consumeOnly(seq);
-      return;
-    }
-    // The run failed (a panic / unhandled escape reached the root). In one api-root commit (no engine
-    // threads): record the run delegation's terminal `failed` state and durably produce the `terminate`
-    // that tears its still-suspended root down (so it does not leak). The teardown's eventual `gone` is a
-    // no-op against the now-terminal `failed` (terminal states are sticky). Then settle the result promise.
-    const errorMessage = escalationErrorMessage(event);
-    const produced: OutboxMessage[] = [
-      {
-        seq: newOutboxSeq(),
-        issuer: this.apiRootId,
-        event: { kind: "terminate", delegation: event.delegation },
-      },
-    ];
-    await this.commit({
-      instanceId: this.apiRootId,
-      layer2: { kind: "none" },
-      transitions: [{ kind: "delegation-failed", delegation: event.delegation, errorMessage }],
-      consumed: seq,
-      produced,
-    });
-    this.settleRun(event.delegation, { error: new Error(errorMessage) });
-  }
-
-  /** A run's terminate cascade confirmed: settle it as cancelled. */
-  private handleApiTerminateAck(delegation: DelegationId): void {
-    delete this.delegationCaller[delegation];
-    this.settleRun(delegation, { error: new RunCancelledError(this.cancelReasons[delegation]) });
-  }
-
-  /** Request a run's cancellation: terminate its root instance (the run delegation's child). The cascade
-   *  tears the tree down and the terminateAck rejects the run with `RunCancelledError`. A no-op if the run
-   *  already finished. */
+  /** Request a run's cancellation (terminate cascade). A no-op in the engine if the run already finished. */
   cancelRun(run: DelegationId, reason?: string): void {
-    this.cancelReasons[run] = reason;
-    void this.produce([{ kind: "terminate", delegation: run }]);
+    this.api.cancelRun(run, reason);
   }
 
-  /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes.
-   *  Loads first, so a cold / freshly-recovered actor rehydrates its open escalations from Layer 1 before
-   *  the lookup (otherwise a valid answer would be silently dropped). The in-memory entry is cleared only
-   *  after the `escalateAck` is durably produced, so a commit failure leaves it answerable. */
-  async answerEscalation(escalation: EscalationId, value: Value): Promise<void> {
-    await this.ensureLoaded();
-    const open = this.openEscalations[escalation];
-    if (open === undefined) return;
-    await this.produce([{ kind: "escalateAck", delegation: open.run, escalation, value }]);
-    delete this.openEscalations[escalation];
+  /** Answer an open run-root escalation, resuming its suspended raiser. */
+  answerEscalation(escalation: EscalationId, value: Value): Promise<void> {
+    return this.api.answerEscalation(escalation, value);
   }
 
   /** The run-root escalations currently awaiting an answer. */
   listOpenEscalations(): OpenEscalation[] {
-    return Object.values(this.openEscalations).map(({ escalation, request, argument }) => ({
-      escalation,
-      request,
-      argument,
-    }));
-  }
-
-  /** Settle a run-root delegation either way and drop its handlers + any of its still-open escalations. */
-  private settleRun(delegation: DelegationId, outcome: { value: Value } | { error: Error }): void {
-    const resolver = this.runResolvers[delegation];
-    const rejecter = this.runRejecters[delegation];
-    delete this.runResolvers[delegation];
-    delete this.runRejecters[delegation];
-    delete this.cancelReasons[delegation];
-    for (const [escalation, open] of Object.entries(this.openEscalations)) {
-      if (open.run === delegation) delete this.openEscalations[escalation as EscalationId];
-    }
-    if ("value" in outcome) resolver?.(outcome.value);
-    else rejecter?.(outcome.error);
+    return this.api.listOpenEscalations();
   }
 
   /** Feed an FFI completion into the serial loop. FFI completions are ephemeral (not outbox events — they
@@ -427,12 +324,12 @@ export class ProjectActor {
       if (run === undefined || run === null) continue;
       if (this.delegationCaller[run] !== this.apiRootId) continue;
       if (!isUserFacingRequest(open.request)) continue;
-      this.openEscalations[open.escalation] = {
+      this.api.rehydrateOpenEscalation({
         run,
         escalation: open.escalation,
         request: open.request as QualifiedName,
         argument: open.argument,
-      };
+      });
     }
     // The api management root is a permanent per-project fixture; (re)create it after loading replaced the
     // store, so a run's delegateAck / escalate / terminateAck can always find it as the delegation's caller.
@@ -561,7 +458,8 @@ export class ProjectActor {
     const caller = this.callerOf(event.delegation);
     if (caller === undefined) return this.consumeOnly(seq);
     if (caller.kind === "api") {
-      this.handleApiDelegateAck(event.delegation, event.value);
+      // A run finished: the ApiReactor settles its result and drops the run's routing edge.
+      this.api.onDelegateAck(event.delegation, event.value);
       return this.consumeOnly(seq);
     }
     delete this.delegationCaller[event.delegation];
@@ -591,9 +489,9 @@ export class ProjectActor {
     const caller = this.callerOf(event.delegation);
     if (caller === undefined) return this.consumeOnly(seq);
     if (caller.kind === "api") {
-      // Reached the management root unhandled → a user-facing open escalation (the raiser stays suspended,
-      // found later via `delegationChild` when answered). Panic / unhandled escape fails the run.
-      await this.handleApiEscalate(event, seq);
+      // Reached the management root unhandled → the ApiReactor opens a user-facing escalation (the raiser
+      // stays suspended, found later via `delegationChild` when answered) or fails the run (panic / escape).
+      await this.api.onEscalate(event, seq);
       return;
     }
     const proxy = delegateProxyOf(caller, event.delegation);
@@ -658,8 +556,8 @@ export class ProjectActor {
     const caller = this.callerOf(event.delegation);
     if (caller === undefined) return this.consumeOnly(seq);
     if (caller.kind === "api") {
-      // A run terminate confirmed: the cancelled run's tree is gone — settle it as cancelled.
-      this.handleApiTerminateAck(event.delegation);
+      // A run terminate confirmed: the cancelled run's tree is gone — the ApiReactor settles it as cancelled.
+      this.api.onTerminateAck(event.delegation);
       return this.consumeOnly(seq);
     }
     delete this.delegationCaller[event.delegation];
@@ -821,21 +719,4 @@ export class ProjectActor {
 /** The module a delegate target's agent lives in (block ids are module-local). */
 function moduleOf(target: DelegateTarget): string {
   return target.kind === "named" ? moduleOfName(target.name) : target.module;
-}
-
-/** A human message for an escalation that reached the run root unhandled (it fails the run). A panic
- *  reports its `{ msg }`; any other unhandled request / control escape reports its name. */
-function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate" }>): string {
-  if (event.ask.kind !== "request") {
-    return `unhandled "${event.ask.kind}" reached the run root`;
-  }
-  if (event.ask.request === PANIC_REQUEST) {
-    const argument = event.ask.argument;
-    const message =
-      argument?.kind === "record" && argument.fields.msg?.kind === "string"
-        ? argument.fields.msg.value
-        : "(no message)";
-    return `panic: ${message}`;
-  }
-  return `unhandled request "${event.ask.request}" reached the run root`;
 }
