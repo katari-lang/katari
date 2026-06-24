@@ -1,7 +1,8 @@
 # Katari Runtime — API ↔ CORE 接続 設計 (v0.1.0, scrap-and-build)
 
-> **状態: 設計確定 (2026-06-24)。Step 1–3c 実装済、Step 4 以降 実装中。** main ブランチ(prototype)の
-> API/CORE/FFI/ENV module + bus を、**1 actor 内の「instance kind」**に畳んだ軽量版。
+> **状態: 設計確定 (2026-06-24)。Step 1–3c + Step 4(open escalation recovery) 実装済、Step 4 残(runs
+> projection の DB 直読) / Step 5 実装中。** main ブランチ(prototype)の API/CORE/FFI/ENV module + bus を、
+> **1 actor 内の「instance kind」**に畳んだ軽量版。
 >
 > 中心となる決定:
 > 1. **すべては Instance**(generic interface)。共通 ＋ **`engine_state` だけ kind 別**(`core`/`api`=root)。
@@ -245,10 +246,15 @@ turn = 1 atomic tx なので、どこから読んでも整合。`api` root は p
 [済] Step 3c reactivate を Layer 1 から: delegations(live)→delegationCaller（run 委譲は thread が無いので table が
 [済]         唯一の出所、生存 DelegateThread からも併せて再構築）。検証用 StoringPersistence + recovery test
 [済]         （in-flight external 復帰 / run routing を table から復元し結果を done で durable 記録）。
-[次] Step 4  runs projection / 付加属性（cancel_reason 等）+ service の list/get を Layer 1 直読に。run 結果は
-             promise ではなく delegations(done).result を読む。open escalation も escalations(open) から復元。
+[半] Step 4  [済] open escalation recovery: reactivate が escalations(open) から user-facing なもの（raiser が
+[半]              run root = 委譲 caller が api root、かつ panic/control でない genuine request）を openEscalations
+[半]              に再構築。recovery test（run を open escalation で中断→fresh actor で list/answer→run 完了を
+[半]              delegations done で durable 確認）。
+[次]         [次] runs projection / 付加属性（cancel_reason 等）+ service の list/get を Layer 1 直読に。run 結果は
+                 promise ではなく delegations(done).result を読む（DB 層、Postgres integration test 要）。
 [  ] Step 5  outbox を mailbox 供給に統合: api 操作も含め全 external event を outbox に同一 tx 永続化 + 消費を
              dequeue + recovery replay（mailbox = outbox の warm cache に、in-flight event の crash 安全を完成）。
+             これで api 発 event（startRun/cancel/answer）も durable になり、run 失敗の durable 記録も入る。
 ```
 
 > 注: Step 3b で **delegation 行はその子の create turn が書く**（caller は routing から既知、run は api root）。

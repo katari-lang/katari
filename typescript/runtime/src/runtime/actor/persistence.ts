@@ -12,8 +12,18 @@
 // its Layer 2 is dropped rather than persisted.
 
 import type { ProjectStore } from "../engine/types.js";
-import type { DelegationId, InstanceId, ProjectId } from "../ids.js";
+import type { DelegationId, EscalationId, InstanceId, ProjectId } from "../ids.js";
+import type { Value } from "../value/types.js";
 import type { TurnCommit } from "./turn-commit.js";
+
+/** A persisted open escalation (an `escalations` row still in the `open` state). The actor rehydrates the
+ *  user-facing ones (those raised by a run root) into its open-escalation registry on reactivation. */
+export interface PersistedOpenEscalation {
+  escalation: EscalationId;
+  raiser: InstanceId;
+  request: string;
+  argument: Value | null;
+}
 
 /** A project's reconstructed engine state (the actor rebuilds its routing maps from this on reactivation).
  *
@@ -29,6 +39,10 @@ export interface ProjectSnapshot {
   /** Live (running / cancelling) delegation edges: delegation id → its caller instance. Finished
    *  delegations (done / gone) are history and carry no live routing, so they are excluded here. */
   delegations: Record<DelegationId, InstanceId>;
+  /** Open escalations (the `open` rows). The actor keeps the user-facing ones (raised by a run root) — a
+   *  run suspended awaiting a user's answer must survive a restart. Inner-hop escalations recover with the
+   *  engine threads (their relay state is Layer 2), so the actor ignores those here. */
+  openEscalations: PersistedOpenEscalation[];
 }
 
 export interface Persistence {
@@ -42,7 +56,7 @@ export interface Persistence {
 /** The seam implementation: the warm store is the truth, so nothing persists and nothing loads. */
 export class InMemoryPersistence implements Persistence {
   async loadProject(): Promise<ProjectSnapshot> {
-    return { instances: {}, scopes: {}, nextScopeId: 0, delegations: {} };
+    return { instances: {}, scopes: {}, nextScopeId: 0, delegations: {}, openEscalations: [] };
   }
   async commitTurn(): Promise<void> {}
 }

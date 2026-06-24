@@ -13,6 +13,7 @@ import type { FfiResult } from "../src/runtime/event/types.js";
 import type { ExternalCall, ExternalRunner } from "../src/runtime/external/runner.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
+import { StubExternalRunner } from "../src/runtime/external/runner.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 
 const PROJECT = "project-recovery" as ProjectId;
@@ -47,7 +48,11 @@ function recordingRunner(complete: Record<string, boolean>): {
   return { runner, dispatched };
 }
 
-function makeActor(ir: IRModule, persistence: StoringPersistence, external: ExternalRunner): ProjectActor {
+function makeActor(
+  ir: IRModule,
+  persistence: StoringPersistence,
+  external: ExternalRunner = new StubExternalRunner(),
+): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(ir.entries)) {
     registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
@@ -197,5 +202,77 @@ describe("recovery", () => {
       return edge?.state === "done" ? edge : undefined;
     });
     expect(done.result).toEqual({ kind: "string", value: "step1-done" });
+  });
+
+  test("recovers a run suspended on an open user escalation and resumes it when answered in a fresh actor", async () => {
+    // agent main() { ask_value({}) }   — ask_value has no handler, so its request escalates all the way to
+    // the run root, where the engine keeps it open (the run suspends awaiting a user's answer). The open
+    // escalation lives only in actor memory until persisted as an `escalations(open)` row; recovery must
+    // rehydrate it so a fresh actor can list and answer it, resuming the run.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 20 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("ask_value") },
+                argument: 20,
+                output: 21,
+              },
+              { kind: "exit", target: 0, value: 21 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("ask_value")]: 5,
+      },
+      names: {},
+    };
+
+    const persistence = new StoringPersistence();
+
+    const actorOne = makeActor(ir, persistence);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    // Drive to the suspend point: the run is open on the unhandled `ask_value` request (now an
+    // `escalations(open)` row, raised by the run root).
+    await waitUntil(() => (actorOne.listOpenEscalations().length > 0 ? true : undefined));
+
+    // Crash + recover in a fresh actor — no in-memory open-escalation registry survives, so it must come
+    // back from the persisted `escalations(open)` row.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const open = await waitUntil(() => {
+      const list = actorTwo.listOpenEscalations();
+      return list.length > 0 ? list : undefined;
+    });
+    expect(open).toHaveLength(1);
+    expect(open[0]?.request).toBe(createAgentName("ask_value"));
+    expect(open[0]?.argument).toEqual({ kind: "record", fields: {} });
+
+    // Answering it in the recovered actor resumes the run to completion, recorded durably as the run
+    // delegation's `done` result.
+    const escalation = open[0]?.escalation;
+    if (escalation === undefined) throw new Error("no recovered open escalation");
+    actorTwo.answerEscalation(escalation, { kind: "integer", value: 42 });
+    const done = await waitUntil(() => {
+      const edge = persistence.peekDelegation(run);
+      return edge?.state === "done" ? edge : undefined;
+    });
+    expect(done.result).toEqual({ kind: "integer", value: 42 });
+    expect(actorTwo.listOpenEscalations()).toHaveLength(0);
   });
 });

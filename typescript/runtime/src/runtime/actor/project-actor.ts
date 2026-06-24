@@ -288,6 +288,22 @@ export class ProjectActor {
       // No escalation mirror to rebuild — an `escalateAck` routes to its raiser via `delegationChild`
       // (set above from each instance's own `delegationId`).
     }
+    // Rehydrate the user-facing open escalations (a run suspended awaiting a user's answer must survive a
+    // restart). An open escalation is user-facing iff its raiser is a run root (its delegation's caller is
+    // the api root) and it is a genuine request (not a panic / control escape, which fail rather than wait).
+    for (const open of snapshot.openEscalations) {
+      const raiser = this.coreInstance(open.raiser);
+      const run = raiser?.delegationId;
+      if (run === undefined || run === null) continue;
+      if (this.delegationCaller[run] !== this.apiRootId) continue;
+      if (!isUserFacingRequest(open.request)) continue;
+      this.openEscalations[open.escalation] = {
+        run,
+        escalation: open.escalation,
+        request: open.request as QualifiedName,
+        argument: open.argument,
+      };
+    }
     // The api management root is a permanent per-project fixture; (re)create it after loading replaced the
     // store, so a run's delegateAck / escalate / terminateAck can always find it as the delegation's caller.
     ensureApiRoot(this.store, this.apiRootId);
@@ -637,6 +653,18 @@ export class ProjectActor {
 /** The module a delegate target's agent lives in (block ids are module-local). */
 function moduleOf(target: DelegateTarget): string {
   return target.kind === "named" ? moduleOfName(target.name) : target.module;
+}
+
+/** The `AskKind`s that are control-flow escapes (not capability requests). An escalation carrying one of
+ *  these is an unwind crossing an instance boundary, not a user-answerable request. */
+const CONTROL_ESCAPE_KINDS = new Set(["next", "next-for", "return", "break", "break-for"]);
+
+/** Whether a persisted escalation's `request` names a genuine user-answerable capability — i.e. it is not a
+ *  panic and not a control-flow escape (both of which fail the run rather than wait for an answer). The
+ *  `request` column stores a request ask's qualified name, or a control ask's bare `kind`; capability
+ *  names are qualified, so they never collide with the bare control keywords. */
+function isUserFacingRequest(request: string): boolean {
+  return request !== PANIC_REQUEST && !CONTROL_ESCAPE_KINDS.has(request);
 }
 
 /** A human message for an escalation that reached the run root unhandled (it fails the run). A panic

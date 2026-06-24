@@ -8,7 +8,7 @@ import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
 import { scopes, threads } from "../../db/tables/engine.js";
 import { delegations, escalations, instances } from "../../db/tables/execution.js";
-import type { DelegationId, InstanceId, ProjectId } from "../ids.js";
+import type { DelegationId, EscalationId, InstanceId, ProjectId } from "../ids.js";
 import type { Persistence, ProjectSnapshot } from "./persistence.js";
 import {
   deserializeProject,
@@ -23,24 +23,30 @@ export class DbPersistence implements Persistence {
   constructor(private readonly db: Database) {}
 
   async loadProject(projectId: ProjectId): Promise<ProjectSnapshot> {
-    const [instanceRows, threadRows, scopeRows, delegationRows] = await Promise.all([
-      this.db
-        .select()
-        .from(instances)
-        .where(and(eq(instances.projectId, projectId), isNotNull(instances.engineState))),
-      this.db.select().from(threads).where(eq(threads.projectId, projectId)),
-      this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
-      // Only live edges carry routing; finished ones (done / gone) are history.
-      this.db
-        .select()
-        .from(delegations)
-        .where(
-          and(
-            eq(delegations.projectId, projectId),
-            inArray(delegations.state, ["running", "cancelling"]),
+    const [instanceRows, threadRows, scopeRows, delegationRows, escalationRows] = await Promise.all(
+      [
+        this.db
+          .select()
+          .from(instances)
+          .where(and(eq(instances.projectId, projectId), isNotNull(instances.engineState))),
+        this.db.select().from(threads).where(eq(threads.projectId, projectId)),
+        this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
+        // Only live edges carry routing; finished ones (done / gone) are history.
+        this.db
+          .select()
+          .from(delegations)
+          .where(
+            and(
+              eq(delegations.projectId, projectId),
+              inArray(delegations.state, ["running", "cancelling"]),
+            ),
           ),
-        ),
-    ]);
+        this.db
+          .select()
+          .from(escalations)
+          .where(and(eq(escalations.projectId, projectId), eq(escalations.state, "open"))),
+      ],
+    );
     const persistedInstances: PersistedInstance[] = instanceRows.flatMap((row) =>
       row.engineState === null
         ? []
@@ -84,7 +90,13 @@ export class DbPersistence implements Persistence {
         liveDelegations[row.id as DelegationId] = row.callerInstanceId as InstanceId;
       }
     }
-    return { ...engine, delegations: liveDelegations };
+    const openEscalations: ProjectSnapshot["openEscalations"] = escalationRows.map((row) => ({
+      escalation: row.id as EscalationId,
+      raiser: row.raiserInstanceId as InstanceId,
+      request: row.request,
+      argument: row.argument,
+    }));
+    return { ...engine, delegations: liveDelegations, openEscalations };
   }
 
   async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {

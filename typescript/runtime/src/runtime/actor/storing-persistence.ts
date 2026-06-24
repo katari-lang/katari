@@ -26,6 +26,8 @@ interface StoredDelegation {
 interface StoredEscalation {
   raiser: InstanceId;
   state: "open" | "answered";
+  request: string;
+  argument: Value | null;
 }
 
 export class StoringPersistence implements Persistence {
@@ -53,7 +55,18 @@ export class StoringPersistence implements Persistence {
         delegations[id] = edge.caller;
       }
     }
-    return { ...engine, delegations };
+    const openEscalations: ProjectSnapshot["openEscalations"] = [];
+    for (const [id, edge] of this.escalations) {
+      if (edge.state === "open") {
+        openEscalations.push({
+          escalation: id,
+          raiser: edge.raiser,
+          request: edge.request,
+          argument: edge.argument,
+        });
+      }
+    }
+    return { ...engine, delegations, openEscalations };
   }
 
   async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {
@@ -101,7 +114,12 @@ export class StoringPersistence implements Persistence {
         break;
       }
       case "escalation-open":
-        this.escalations.set(transition.escalation, { raiser: transition.raiser, state: "open" });
+        this.escalations.set(transition.escalation, {
+          raiser: transition.raiser,
+          state: "open",
+          request: transition.request,
+          argument: transition.argument,
+        });
         break;
       case "escalation-answered": {
         const edge = this.escalations.get(transition.escalation);
