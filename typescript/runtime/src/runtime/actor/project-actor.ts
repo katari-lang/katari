@@ -385,7 +385,12 @@ export class ProjectActor {
 
   /** Route one inbound message to its handler. `seq` is the durable outbox row it came from (`null` for an
    *  FFI completion); the handler consumes it in the same commit as its effects (the transactional
-   *  consumer), so a crash never replays an event whose effect already committed. */
+   *  consumer), so a crash never replays an event whose effect already committed.
+   *
+   *  `delegate`, `escalateAck`, and `terminate` always target a `core` instance (a freshly summoned child,
+   *  the escalation's raiser, the cancelled child). Only `delegateAck` / `escalate` / `terminateAck` route
+   *  to the delegation's *caller* — which is the api root (a run) or a core instance — so they pass through
+   *  `routeToCaller`, the one place the api|core decision is made. */
   private async handle(message: ActorMessage, seq: OutboxSeq | null): Promise<void> {
     if (isFfiResult(message)) {
       await this.onFfiResult(message);
@@ -393,23 +398,66 @@ export class ProjectActor {
     }
     switch (message.kind) {
       case "delegate":
-        await this.onDelegate(message, seq);
-        return;
-      case "delegateAck":
-        await this.onDelegateAck(message, seq);
-        return;
-      case "escalate":
-        await this.onEscalate(message, seq);
-        return;
+        return this.onDelegate(message, seq);
       case "escalateAck":
-        await this.onEscalateAck(message, seq);
-        return;
+        return this.onEscalateAck(message, seq);
       case "terminate":
-        await this.onTerminate(message, seq);
-        return;
+        return this.onTerminate(message, seq);
+      case "delegateAck":
+      case "escalate":
       case "terminateAck":
-        await this.onTerminateAck(message, seq);
-        return;
+        return this.routeToCaller(message, seq);
+    }
+  }
+
+  /** The single api|core dispatch. A `delegateAck` / `escalate` / `terminateAck` routes to its delegation's
+   *  caller; resolve it once and branch here. After this point neither the ApiReactor nor the core handlers
+   *  inspect the other's kind — this is the only place the boundary is crossed. */
+  private routeToCaller(
+    message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
+    seq: OutboxSeq | null,
+  ): Promise<void> {
+    // delegateAck / terminateAck end the delegation, so its child edge is dropped here (an `escalate` leaves
+    // the run running, so it keeps its child — that is how the eventual `escalateAck` finds the raiser).
+    if (message.kind !== "escalate") delete this.delegationChild[message.delegation];
+    const caller = this.callerOf(message.delegation);
+    if (caller === undefined) return this.consumeOnly(seq);
+    return caller.kind === "api"
+      ? this.reactApi(message, seq)
+      : this.reactCore(message, caller, seq);
+  }
+
+  /** The api root's reaction to a run's delegateAck / escalate / terminateAck. */
+  private reactApi(
+    message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
+    seq: OutboxSeq | null,
+  ): Promise<void> {
+    switch (message.kind) {
+      case "delegateAck":
+        this.api.onDelegateAck(message.delegation, message.value);
+        return this.consumeOnly(seq);
+      case "escalate":
+        return this.api.onEscalate(message, seq);
+      case "terminateAck":
+        this.api.onTerminateAck(message.delegation);
+        return this.consumeOnly(seq);
+    }
+  }
+
+  /** A core caller's reaction to a sub-call's delegateAck / escalate / terminateAck (`caller` is resolved
+   *  once in `routeToCaller`, so these never re-look-up or re-check kind). */
+  private reactCore(
+    message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
+    caller: CoreInstance,
+    seq: OutboxSeq | null,
+  ): Promise<void> {
+    switch (message.kind) {
+      case "delegateAck":
+        return this.onCoreDelegateAck(message, caller, seq);
+      case "escalate":
+        return this.onCoreEscalate(message, caller, seq);
+      case "terminateAck":
+        return this.onCoreTerminateAck(message, caller, seq);
     }
   }
 
@@ -450,18 +498,13 @@ export class ProjectActor {
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }], open, seq);
   }
 
-  private async onDelegateAck(
+  /** A core sub-call returned: hand its value to the caller's pending proxy slot (`caller` and the dropped
+   *  child edge are handled by `routeToCaller`). */
+  private async onCoreDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
+    caller: CoreInstance,
     seq: OutboxSeq | null,
   ): Promise<void> {
-    delete this.delegationChild[event.delegation];
-    const caller = this.callerOf(event.delegation);
-    if (caller === undefined) return this.consumeOnly(seq);
-    if (caller.kind === "api") {
-      // A run finished: the ApiReactor settles its result and drops the run's routing edge.
-      this.api.onDelegateAck(event.delegation, event.value);
-      return this.consumeOnly(seq);
-    }
     delete this.delegationCaller[event.delegation];
     // Claim any resources the returned value carries up (a returned closure's captured scope chain, a
     // returned blob — set in-transit when the child retired): they now belong to this caller, which is
@@ -482,22 +525,16 @@ export class ProjectActor {
 
   // ─── escalate / escalateAck (a request / control ask crossing the instance boundary) ────────────
 
-  private async onEscalate(
+  /** A sub-call's escalation reached a core caller: re-raise it inside the caller from the proxy's position
+   *  so it bubbles toward a handle (`caller` resolved by `routeToCaller`). */
+  private async onCoreEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
+    caller: CoreInstance,
     seq: OutboxSeq | null,
   ): Promise<void> {
-    const caller = this.callerOf(event.delegation);
-    if (caller === undefined) return this.consumeOnly(seq);
-    if (caller.kind === "api") {
-      // Reached the management root unhandled → the ApiReactor opens a user-facing escalation (the raiser
-      // stays suspended, found later via `delegationChild` when answered) or fails the run (panic / escape).
-      await this.api.onEscalate(event, seq);
-      return;
-    }
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined) return this.consumeOnly(seq);
-    // Re-raise the ask inside the caller from the proxy's position; it bubbles toward a handle. The relay
-    // echoes the raiser's `(delegation, escalation)` so its eventual `escalateAck` finds its way home.
+    // The relay echoes the raiser's `(delegation, escalation)` so its eventual `escalateAck` finds its way home.
     await this.runTurnWith(
       caller,
       (ctx) => {
@@ -548,24 +585,18 @@ export class ProjectActor {
     );
   }
 
-  private async onTerminateAck(
+  /** A core sub-call's terminate cascade confirmed: retire the proxy and cancelAck the caller's parent so the
+   *  cancel cascade continues (`caller` and the dropped child edge are handled by `routeToCaller`). */
+  private async onCoreTerminateAck(
     event: Extract<ExternalEvent, { kind: "terminateAck" }>,
+    caller: CoreInstance,
     seq: OutboxSeq | null,
   ): Promise<void> {
-    delete this.delegationChild[event.delegation];
-    const caller = this.callerOf(event.delegation);
-    if (caller === undefined) return this.consumeOnly(seq);
-    if (caller.kind === "api") {
-      // A run terminate confirmed: the cancelled run's tree is gone — the ApiReactor settles it as cancelled.
-      this.api.onTerminateAck(event.delegation);
-      return this.consumeOnly(seq);
-    }
     delete this.delegationCaller[event.delegation];
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) {
       return this.consumeOnly(seq);
     }
-    // The child confirmed teardown: retire the proxy and cancelAck its parent (the cancel cascade continues).
     delete caller.threads[proxy.id];
     delete caller.cancelExits[proxy.id];
     await this.runTurn(
