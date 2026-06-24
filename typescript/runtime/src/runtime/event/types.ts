@@ -77,30 +77,39 @@ export type ExternalEvent =
   | { kind: "terminateAck"; delegation: DelegationId }
   | {
       kind: "escalate";
-      /** The escalating child's delegation (so the parent finds the DelegateThread proxying it). */
+      /** The escalating child's delegation. It routes both legs by external vocabulary alone: the parent
+       *  finds the proxy via it (`delegationCaller` → the caller, then its `DelegateThread` by id), and
+       *  the `escalateAck` finds the raiser back through it (`delegationChild` → this child). */
       delegation: DelegationId;
-      /** This escalation's id, correlating the `escalateAck` (only a `request` ask is answered). */
+      /** This escalation's id — the per-escape correlation the `escalateAck` echoes (one delegation can
+       *  have several escapes in flight). Opaque to the actor; the raiser's *Agent thread* maps it back to
+       *  the internal `askId` it escaped under (its `escalations` bridge). */
       escalation: EscalationId;
       /** The ask that escaped the child instance: a `request` (capability), or a control-flow unwind
        *  (`break` / `next` / `return`) crossing the boundary toward a lexical ancestor (via a closure). */
       ask: AskKind;
     }
-  | { kind: "escalateAck"; escalation: EscalationId; value: Value };
+  | { kind: "escalateAck"; delegation: DelegationId; escalation: EscalationId; value: Value };
 
 export type EngineEvent = InternalEvent | ExternalEvent;
 
 // ─── FFI completion + actor mailbox (the "external consumer" input) ───────────────────────────────
 
 /**
- * An external (FFI) process result fed back to resume the suspended `ExternalThread` that dispatched
- * it. FFI is deliberately NOT an inter-instance event (domain-model R3: an external call is an external
- * *thread* suspend/resume, not an instance) — its dispatch and completion are a private side channel
- * between the external thread and the single FFI abstraction (`ExternalRunner`). It still re-enters
- * through the actor's serial mailbox, so a completion can never race a turn already in flight.
+ * An external (FFI) process result fed back to the suspended `ExternalThread` that dispatched it. FFI is
+ * deliberately NOT an inter-instance event (domain-model R3: an external call is an external *thread*
+ * suspend/resume, not an instance) — its dispatch and completion are a private side channel between the
+ * external thread and the single FFI abstraction (`ExternalRunner`). It still re-enters through the
+ * actor's serial mailbox, so a completion can never race a turn already in flight.
+ *
+ * `ffiCancelled` is the abort confirmation: when an external thread is cancelled the engine asks the
+ * runner to abort and *waits*, finishing the thread's cancel only once the runner reports back here — so
+ * teardown is graceful (the external call has really stopped before its parent's cancel proceeds).
  */
 export type FfiResult =
   | { kind: "ffiResult"; instance: InstanceId; thread: ThreadId; value: Value }
-  | { kind: "ffiError"; instance: InstanceId; thread: ThreadId; message: string };
+  | { kind: "ffiError"; instance: InstanceId; thread: ThreadId; message: string }
+  | { kind: "ffiCancelled"; instance: InstanceId; thread: ThreadId };
 
 /**
  * The project actor's serial mailbox input (the "external consumer"): inter-instance external events
@@ -113,7 +122,9 @@ export type ActorMessage = ExternalEvent | FfiResult;
 
 /** Type guard: is this mailbox message an FFI completion (vs an inter-instance external event)? */
 export function isFfiResult(message: ActorMessage): message is FfiResult {
-  return message.kind === "ffiResult" || message.kind === "ffiError";
+  return (
+    message.kind === "ffiResult" || message.kind === "ffiError" || message.kind === "ffiCancelled"
+  );
 }
 
 /** Type guard: is this an engine-internal event (vs an inter-instance one)? */

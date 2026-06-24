@@ -120,9 +120,10 @@ initialLowerState =
 -- malformed shape here is a compiler bug and 'panic's rather than emitting a diagnostic.
 type Lower = RWS LowerEnvironment Diagnostics LowerState
 
--- | How a block body finished: normally with an optional tail value, or via a non-local jump (so the
--- jump already emitted its 'OperationExit' / 'OperationContinue' and the tail is unreachable). A request
--- handler turns a normal completion into an implicit @break@ (Koka-style).
+-- | How a block body finished: normally with an optional tail value (carried on the block's @result@),
+-- or via a non-local jump (so the jump already emitted its 'OperationExit' / 'OperationContinue' and the
+-- tail is unreachable). A @for@ / request-handler body's normal completion is an implicit @next@: the
+-- tail value rides on @result@ and the runtime resumes from the body's fall-through.
 data BlockCompletion
   = CompletedWith (Maybe VariableId)
   | Exited
@@ -981,7 +982,9 @@ buildHandleBody continuationVariable stateParameters = do
   pure blockId
 
 -- | One request handler. Its body is seeded with the request argument under @parameter@ and the current
--- @state_N@s; on normal completion it implicitly @break@s the handle scope with its tail value.
+-- @state_N@s; on normal completion its tail value is the implicit @next@ (resume) — it rides on the
+-- block's @result@ and the runtime treats the body's fall-through as a @next@, mirroring a @for@ body.
+-- An explicit @break@ inside (which 'Exited') exits the whole handle instead.
 lowerRequestHandler ::
   BlockId ->
   List (Text, VariableId) ->
@@ -991,18 +994,13 @@ lowerRequestHandler ::
 lowerRequestHandler handleBlock stateParameters stateLocals requestHandler = do
   let requestName = resolvedRequestName requestHandler.typeReference
   argumentVariable <- freshVariableId
-  (_, operations) <- withFreshOperations $ do
+  (completion, operations) <- withFreshOperations $ do
     parameterLocals <- concat <$> mapM (bindAgentParameter argumentVariable) requestHandler.parameters
-    completion <- withHandlerContext handleBlock (withLocals (parameterLocals <> stateLocals) (lowerBlockValue requestHandler.body))
-    case completion of
-      Exited -> pure ()
-      CompletedWith maybeValue -> do
-        value <- maybe (loadLiteral LiteralNull) pure maybeValue
-        emit (OperationExit ExitOperation {target = handleBlock, value = value})
+    withHandlerContext handleBlock (withLocals (parameterLocals <> stateLocals) (lowerBlockValue requestHandler.body))
   blockId <- freshBlockId
   recordBlock
     blockId
-    (BlockSequence Sequence {operations = operations, result = Nothing})
+    (BlockSequence Sequence {operations = operations, result = completionResult completion})
     (Map.fromList (("parameter", argumentVariable) : stateParameters))
     Nothing
   pure Handler {request = requestName, body = blockId}

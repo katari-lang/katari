@@ -5,7 +5,7 @@
 import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
-import { ProjectActor } from "../src/runtime/actor/project-actor.js";
+import { ProjectActor, RunCancelledError } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import {
   type ExternalRunner,
@@ -44,15 +44,10 @@ function registerModules(registry: SnapshotRegistry, ir: IRModule): void {
   }
 }
 
-function run(
-  ir: IRModule,
-  entry: string,
-  argument: Value | null,
-  external: ExternalRunner = new StubExternalRunner(),
-): Promise<Value> {
+function makeActor(ir: IRModule, external: ExternalRunner = new StubExternalRunner()): ProjectActor {
   const registry = new SnapshotRegistry();
   registerModules(registry, ir);
-  const actor = new ProjectActor({
+  return new ProjectActor({
     projectId: PROJECT,
     ir: registry,
     prims: new PrimRegistry(),
@@ -60,7 +55,25 @@ function run(
     external,
     persistence: new InMemoryPersistence(),
   });
-  return actor.startRun(createAgentName(entry), SNAPSHOT, argument);
+}
+
+function run(
+  ir: IRModule,
+  entry: string,
+  argument: Value | null,
+  external: ExternalRunner = new StubExternalRunner(),
+): Promise<Value> {
+  return makeActor(ir, external).startRun(createAgentName(entry), SNAPSHOT, argument).result;
+}
+
+/** Spin the event loop until `predicate` holds (the actor pumps its mailbox asynchronously). */
+async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const value = predicate();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("waitUntil: predicate never held");
 }
 
 describe("in-memory core", () => {
@@ -196,6 +209,93 @@ describe("in-memory core", () => {
     });
   });
 
+  test("collects a nested next-for, tearing its iteration subtree down via the cancel cascade", async () => {
+    // agent echo(xs) { for (x in xs) { match x { v => next-for v } } }
+    // The `next-for` is raised from inside a match arm (a nested structural node), so it bubbles two
+    // proxy hops to the for, which cancels the whole iteration subtree (body sequence + match + arm) and
+    // collects the value on its teardown — no ad-hoc drop that would leak the match subtree.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "getField", source: 10, field: "xs", output: 11 },
+              { kind: "call", target: 2, output: 12 },
+              { kind: "exit", target: 0, value: 12 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        2: {
+          block: {
+            kind: "for",
+            parallel: false,
+            source: 11,
+            initialStates: [],
+            body: 3,
+            thenClause: null,
+          },
+          parameters: {},
+        },
+        // for body: call into a match over the iterator (the arm raises the next-for)
+        3: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [{ kind: "call", target: 4, output: 30 }],
+          },
+          parameters: { iterator: 20 },
+        },
+        4: {
+          block: {
+            kind: "match",
+            subject: 20,
+            arms: [{ pattern: { kind: "variable", variable: 40 }, body: 5 }],
+            fallback: null,
+          },
+          parameters: {},
+        },
+        // match arm: next-for the bound value (targets the for block)
+        5: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [{ kind: "continue", target: 2, value: 40, modifiers: [] }],
+          },
+          parameters: {},
+        },
+      },
+      entries: { [createAgentName("echo")]: 0 },
+      names: {},
+    };
+
+    const argument: Value = {
+      kind: "record",
+      fields: {
+        xs: {
+          kind: "array",
+          elements: [
+            { kind: "integer", value: 1 },
+            { kind: "integer", value: 2 },
+            { kind: "integer", value: 3 },
+          ],
+        },
+      },
+    };
+    await expect(run(ir, "echo", argument)).resolves.toEqual({
+      kind: "array",
+      elements: [
+        { kind: "integer", value: 1 },
+        { kind: "integer", value: 2 },
+        { kind: "integer", value: 3 },
+      ],
+    });
+  });
+
   test("selects a match arm and binds its pattern variable", async () => {
     // agent classify(n) { match n { 0 => "zero"; m => "other" } }   (over the record field `n`)
     const ir: IRModule = {
@@ -314,6 +414,149 @@ describe("in-memory core", () => {
     });
   });
 
+  test("aborts an in-flight external call on cancel, completing only once the runner confirms", async () => {
+    // agent main() { par [ greet({}), return 7 ] }
+    // The `return 7` cancels the par; that terminates greet's instance, whose external leaf is in flight.
+    // The leaf's cancel is graceful: it waits for the runner's `ffiCancelled`. The run resolves to 7 only
+    // after that confirmation (so the run would *hang* if the abort were not wired), and the runner saw
+    // exactly one cancel.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [{ kind: "call", target: 2, output: 10 }],
+          },
+          parameters: { parameter: 11 },
+        },
+        2: { block: { kind: "parallel", elements: [3, 4] }, parameters: {} },
+        // element 0: greet({}) — an external call that never resolves
+        3: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 30 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("greet") },
+                argument: 30,
+                output: 31,
+              },
+            ],
+          },
+          parameters: {},
+        },
+        // element 1: return 7 (cancels the par, and with it the in-flight external)
+        4: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 40, value: { kind: "integer", value: 7 } },
+              { kind: "exit", target: 0, value: 40 },
+            ],
+          },
+          parameters: {},
+        },
+        6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        7: { block: { kind: "external", key: "greet", input: 8 }, parameters: { parameter: 8 } },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("greet")]: 6,
+      },
+      names: {},
+    };
+
+    // A runner whose dispatch never completes; its `cancel` records the call and reports the abort.
+    const cancelled: number[] = [];
+    let sink: ((result: import("../src/runtime/event/types.js").FfiResult) => void) | null = null;
+    const external: ExternalRunner = {
+      onResult(register) {
+        sink = register;
+      },
+      dispatch() {
+        // never resolves
+      },
+      cancel(instance, thread) {
+        cancelled.push(thread);
+        sink?.({ kind: "ffiCancelled", instance, thread });
+      },
+    };
+
+    await expect(run(ir, "main", null, external)).resolves.toEqual({ kind: "integer", value: 7 });
+    expect(cancelled).toHaveLength(1);
+  });
+
+  test("keeps a returned closure callable after its producer retires (scope ascent)", async () => {
+    // agent makeConst(n) { return () => n }   agent main() { let f = makeConst(5); return f() }
+    // makeConst returns a closure capturing its body scope (where n = 5), then retires. Its scope must
+    // ascend to main rather than be dropped, so calling the closure later still resolves n -> 5. (Without
+    // ascent the scope is gone and `n` reads null.)
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 60, value: { kind: "integer", value: 5 } },
+              { kind: "makeRecord", entries: [["n", 60]], output: 61 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("makeConst") },
+                argument: 61,
+                output: 62,
+              },
+              { kind: "makeRecord", entries: [], output: 63 },
+              // Call the returned closure value (the producer makeConst is gone by now).
+              { kind: "delegate", target: { kind: "value", variable: 62 }, argument: 63, output: 64 },
+              { kind: "exit", target: 0, value: 64 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        2: { block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        // makeConst body: capture the scope holding n and return a closure over it
+        3: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "getField", source: 10, field: "n", output: 20 },
+              { kind: "makeClosure", output: 30, agent: 4 },
+              { kind: "exit", target: 2, value: 30 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        4: { block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        // closure body: return n, read from the captured (ascended) scope of makeConst
+        5: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [{ kind: "exit", target: 4, value: 20 }],
+          },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("makeConst")]: 2,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 5 });
+  });
+
   test("dispatches a request to a handler and resumes via next", async () => {
     // agent main() { handle { ask_value({ value: 7 }) } with ask_value(p) => { next 100 } }
     // The body raises ask_value (a request, summoned as a child instance); it escalates out of that
@@ -375,6 +618,80 @@ describe("in-memory core", () => {
           parameters: { parameter: 41 },
         },
         // ask_value request agent + its request leaf
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("ask_value")]: 5,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 100 });
+  });
+
+  test("resumes via an implicit next when a handler body falls through to its tail", async () => {
+    // agent main() { handle { ask_value({ value: 7 }) } with ask_value(p) => { 100 } }
+    // The handler body has no explicit `next`/`break`: it falls through with tail value 100, which is an
+    // implicit `next` (resume) — so the request answers 100, exactly like the explicit-next variant above.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "call", target: 2, output: 10 },
+              { kind: "exit", target: 0, value: 10 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        2: {
+          block: {
+            kind: "handle",
+            parallel: false,
+            initialStates: [],
+            body: 3,
+            handlers: [{ request: createAgentName("ask_value"), body: 4 }],
+            thenClause: null,
+          },
+          parameters: {},
+        },
+        3: {
+          block: {
+            kind: "sequence",
+            result: 22,
+            operations: [
+              { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 7 } },
+              { kind: "makeRecord", entries: [["value", 20]], output: 21 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("ask_value") },
+                argument: 21,
+                output: 22,
+              },
+            ],
+          },
+          parameters: {},
+        },
+        // handler body: falls through with tail value 100 (result = 40, no explicit continue/exit)
+        4: {
+          block: {
+            kind: "sequence",
+            result: 40,
+            operations: [
+              { kind: "loadLiteral", output: 40, value: { kind: "integer", value: 100 } },
+            ],
+          },
+          parameters: { parameter: 41 },
+        },
         5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
         6: {
           block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
@@ -587,6 +904,74 @@ describe("in-memory core", () => {
     await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: -1 });
   });
 
+  // agent main() { ask_value({}) }  — ask_value has no handler, so it escalates all the way to the run
+  // root, where the engine keeps it open (the run suspends) instead of failing the run.
+  function runRootRequestIr(): IRModule {
+    return {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 20 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("ask_value") },
+                argument: 20,
+                output: 21,
+              },
+              { kind: "exit", target: 0, value: 21 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("ask_value")]: 5,
+      },
+      names: {},
+    };
+  }
+
+  test("keeps a run-root request open and resumes the run when it is answered", async () => {
+    const actor = makeActor(runRootRequestIr());
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const open = await waitUntil(() => {
+      const list = actor.listOpenEscalations();
+      return list.length > 0 ? list : undefined;
+    });
+    expect(open).toHaveLength(1);
+    expect(open[0]?.request).toBe(createAgentName("ask_value"));
+    expect(open[0]?.argument).toEqual({ kind: "record", fields: {} });
+
+    const escalation = open[0]?.escalation;
+    if (escalation === undefined) throw new Error("no open escalation");
+    actor.answerEscalation(escalation, { kind: "integer", value: 42 });
+    await expect(result).resolves.toEqual({ kind: "integer", value: 42 });
+    expect(actor.listOpenEscalations()).toHaveLength(0);
+  });
+
+  test("cancels a suspended run, rejecting its result with RunCancelledError", async () => {
+    const actor = makeActor(runRootRequestIr());
+    const { run: runDelegation, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await waitUntil(() => (actor.listOpenEscalations().length > 0 ? true : undefined));
+    actor.cancelRun(runDelegation, "user requested");
+
+    await expect(result).rejects.toBeInstanceOf(RunCancelledError);
+    expect(actor.listOpenEscalations()).toHaveLength(0);
+  });
+
   test("runs through the RuntimeHost composition root", async () => {
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
@@ -607,7 +992,9 @@ describe("in-memory core", () => {
 
     const host = new RuntimeHost();
     host.registerModule(SNAPSHOT, "", ir); // the `answer` agent lives in the empty (user) module
-    await expect(host.startRun(PROJECT, createAgentName("answer"), SNAPSHOT, null)).resolves.toEqual({
+    await expect(
+      host.startRun(PROJECT, "run-host", createAgentName("answer"), SNAPSHOT, null),
+    ).resolves.toEqual({
       kind: "integer",
       value: 42,
     });

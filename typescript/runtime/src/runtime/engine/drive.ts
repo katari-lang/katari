@@ -4,12 +4,11 @@
 // resolves — exactly the "network / DB bound during async processing" the design calls out. The actor
 // persists and flushes the buffered outbound external events only once this returns (the queue empty).
 //
-// `askAck` is routed here rather than per-thread: a proxy / relay continuation recorded in
-// `instance.askRoutes` forwards the answer (down the bubble chain, or out as an escalateAck); only when
-// no continuation matches is the target the genuine asker, dispatched to its own handler.
+// `askAck` is addressed to a thread: that thread either forwards it on (via its `forwardRoutes`, one hop
+// down the bubble chain or out as an escalateAck) or, if it is the genuine asker, consumes it — all in
+// `dispatchAskAck`, so the drive loop just routes by target like every other internal event.
 
 import type { InternalEvent } from "../event/types.js";
-import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import {
   dispatchAsk,
@@ -19,7 +18,6 @@ import {
   dispatchCancelAck,
   dispatchCreate,
 } from "./thread-ops.js";
-import type { AnswerContinuation } from "./types.js";
 
 /** Drive the instance bound to `ctx` until its internal queue is empty (one turn / quantum). */
 export async function drive(ctx: StepContext): Promise<void> {
@@ -59,28 +57,9 @@ async function step(ctx: StepContext, event: InternalEvent): Promise<void> {
       return;
     }
     case "askAck": {
-      const route = ctx.instance.askRoutes[event.askId];
-      if (route !== undefined) {
-        delete ctx.instance.askRoutes[event.askId];
-        resolveContinuation(ctx, route, event.value);
-        return;
-      }
       const thread = ctx.instance.threads[event.target];
       if (thread !== undefined) dispatchAskAck(ctx, thread, event.askId, event.value);
       return;
     }
-  }
-}
-
-/** Apply a recorded answer continuation: forward the answer down the bubble chain, or relay it out as
- *  an escalateAck to a child instance (the latter consumed by the instance / external layer). */
-function resolveContinuation(ctx: StepContext, route: AnswerContinuation, value: Value): void {
-  switch (route.kind) {
-    case "resumeThread":
-      ctx.enqueue({ kind: "askAck", target: route.thread, askId: route.askId, value });
-      return;
-    case "relayEscalateAck":
-      ctx.emit({ kind: "escalateAck", escalation: route.escalation, value });
-      return;
   }
 }

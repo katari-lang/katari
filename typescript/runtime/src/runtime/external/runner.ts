@@ -22,6 +22,10 @@ export interface ExternalCall {
   /** The opaque dispatch key the handler interprets (the external block's `key`). */
   key: string;
   argument: Value | null;
+  /** True when this is a recovery re-dispatch of a still-`open` call (the process went down with the
+   *  call in flight). A handler can use it to treat the call as a retry — e.g. dedupe a non-idempotent
+   *  side effect — rather than a first invocation. Absent / false on the original dispatch. */
+  redispatch?: boolean;
 }
 
 export interface ExternalRunner {
@@ -29,7 +33,12 @@ export interface ExternalRunner {
   onResult(sink: (result: FfiResult) => void): void;
   /** Dispatch a call. Fire-and-forget — the result arrives later via the sink as an `FfiResult`. */
   dispatch(call: ExternalCall): void;
-  /** Cancel an in-flight call (its thread is being cancelled / its instance terminated). Best-effort. */
+  /**
+   * Abort an in-flight call (its thread is being cancelled / its instance terminated). Fire-and-forget:
+   * once the underlying process has actually stopped, report it via the sink as `ffiCancelled` so the
+   * engine can finish the thread's cancel gracefully. (A late real result/error for an aborted call is
+   * harmless — the engine treats any completion of a cancelling external thread as the abort.)
+   */
   cancel(instance: InstanceId, thread: ThreadId): void;
 }
 
@@ -96,7 +105,11 @@ export class InProcessExternalRunner implements ExternalRunner {
   }
 
   cancel(instance: InstanceId, thread: ThreadId): void {
+    // In-process handlers cannot truly be interrupted, so "abort" means: drop whatever the handler
+    // eventually returns (the `cancelled` token), and confirm the abort immediately. The confirmation
+    // re-enters serially through the sink, exactly like a real result.
     this.cancelled.add(this.token(instance, thread));
+    this.sink?.({ kind: "ffiCancelled", instance, thread });
   }
 
   private token(instance: InstanceId, thread: ThreadId): string {

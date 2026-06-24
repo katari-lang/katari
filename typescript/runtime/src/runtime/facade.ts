@@ -8,15 +8,16 @@ import { createAgentName, type Json } from "@katari-lang/types";
 import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { projects } from "../db/tables/projects.js";
-import { NotFoundError, NotImplementedError } from "../lib/errors.js";
+import { NotFoundError } from "../lib/errors.js";
 import { runRepository } from "../modules/run/run.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
+import { type OpenEscalation, RunCancelledError } from "./actor/project-actor.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { StubExternalRunner } from "./external/runner.js";
 import { RuntimeHost } from "./host.js";
-import type { ProjectId, SnapshotId } from "./ids.js";
-import { jsonToValue } from "./value/codec.js";
+import type { EscalationId, ProjectId, SnapshotId } from "./ids.js";
+import { jsonToValue, valueToJson } from "./value/codec.js";
 
 export interface StartRunInput {
   projectId: string;
@@ -41,6 +42,13 @@ export interface AnswerEscalationInput {
   value: Json;
 }
 
+/** A run-root escalation awaiting an answer, in the wire's `Json` shape. */
+export interface OpenEscalationView {
+  id: string;
+  request: string;
+  argument: Json | null;
+}
+
 /** The stateful core, behind a thin async interface the HTTP layer depends on. */
 export interface RuntimeFacade {
   /** Summon the run's root instance and return its durable run record id. */
@@ -49,6 +57,8 @@ export interface RuntimeFacade {
   cancel(input: CancelRunInput): Promise<void>;
   /** Answer a user-facing escalation, resuming the raiser. */
   answerEscalation(input: AnswerEscalationInput): Promise<void>;
+  /** The run-root escalations on a project awaiting an answer. */
+  listOpenEscalations(projectId: string): OpenEscalationView[];
 }
 
 // The warm host: one per process, backed by the DB (IR module store + engine-graph persistence). A
@@ -85,33 +95,48 @@ export const facade: RuntimeFacade = {
       snapshotId,
       argument,
     });
-    // Execute on the host and settle the run row when it finishes; the HTTP call does not wait.
+    // Execute on the host and settle the run row when it finishes; the HTTP call does not wait. A cancel
+    // surfaces as a `RunCancelledError` rejection, settled as `cancelled` (vs a genuine `error`).
     void host
       .startRun(
         input.projectId as ProjectId,
+        run.id,
         createAgentName(input.qualifiedName),
         snapshotId as SnapshotId,
         argument,
       )
       .then((result) => runRepository.settle(db, run.id, { state: "done", result }))
       .catch((error: unknown) =>
-        runRepository.settle(db, run.id, {
-          state: "error",
-          errorMessage: error instanceof Error ? error.message : String(error),
-        }),
+        error instanceof RunCancelledError
+          ? runRepository.settle(db, run.id, { state: "cancelled", cancelReason: error.reason })
+          : runRepository.settle(db, run.id, {
+              state: "error",
+              errorMessage: error instanceof Error ? error.message : String(error),
+            }),
       );
     return { runId: run.id };
   },
 
-  cancel() {
-    // Cancellation routes a `terminate` to the run's root instance; the host does not yet expose a run
-    // handle for it (the run delegation is internal). Wired with run-handle support.
-    throw new NotImplementedError("Run cancellation is not wired yet.");
+  async cancel(input) {
+    // Mark the run cancelling, then ask the host to terminate its root instance. The terminate cascade
+    // confirms back as a `RunCancelledError`, which the run's background settler records as `cancelled`.
+    await runRepository.markCancelling(db, input.runId, input.reason);
+    host.cancelRun(input.projectId as ProjectId, input.runId, input.reason);
   },
 
-  answerEscalation() {
-    // Answering routes an `escalateAck` to the run's suspended escalation; this needs the engine to keep
-    // an unhandled run-root request open (rather than failing the run) — a follow-up.
-    throw new NotImplementedError("Escalation answering is not wired yet.");
+  async answerEscalation(input) {
+    host.answerEscalation(
+      input.projectId as ProjectId,
+      input.escalationId as EscalationId,
+      jsonToValue(input.value),
+    );
+  },
+
+  listOpenEscalations(projectId) {
+    return host.listOpenEscalations(projectId as ProjectId).map((open: OpenEscalation) => ({
+      id: open.escalation,
+      request: open.request,
+      argument: open.argument === null ? null : valueToJson(open.argument),
+    }));
   },
 };

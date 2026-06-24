@@ -12,7 +12,7 @@ import type { ExternalRunner } from "../external/runner.js";
 import type { ProjectId, SnapshotId } from "../ids.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
-import type { Instance, ProjectStore } from "./types.js";
+import type { CoreInstance, ProjectStore } from "./types.js";
 
 /**
  * Read access to the IR the running instance needs, bound to that instance's (snapshot, module). Block
@@ -58,7 +58,7 @@ export interface StepContext {
   readonly projectId: ProjectId;
   readonly store: ProjectStore;
   /** The single instance this turn drives. */
-  readonly instance: Instance;
+  readonly instance: CoreInstance;
   readonly ir: IrAccess;
   readonly prims: PrimRunner;
   readonly blobs: BlobStore;
@@ -76,7 +76,7 @@ export interface StepContext {
 export function makeStepContext(args: {
   projectId: ProjectId;
   store: ProjectStore;
-  instance: Instance;
+  instance: CoreInstance;
   ir: IrAccess;
   prims: PrimRunner;
   blobs: BlobStore;

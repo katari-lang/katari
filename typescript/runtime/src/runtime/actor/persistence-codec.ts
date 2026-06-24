@@ -5,7 +5,16 @@
 // actor derives its routing maps from the instances). Kept separate from the DB so the round-trip is
 // unit-testable without Postgres.
 
-import type { EngineState, Instance, InstanceStatus, Scope, Thread } from "../engine/types.js";
+import type {
+  CoreInstance,
+  EngineState,
+  Instance,
+  InstanceKind,
+  InstanceStatus,
+  ProjectStore,
+  Scope,
+  Thread,
+} from "../engine/types.js";
 import type { DelegateTarget } from "../event/types.js";
 import {
   type DelegationId,
@@ -15,17 +24,27 @@ import {
   toScopeId,
 } from "../ids.js";
 import type { GenericSubstitution } from "../value/types.js";
-import type { ProjectSnapshot } from "./persistence.js";
+
+/** The engine half of a `ProjectSnapshot` the codec reconstructs from rows. The Layer 1 delegation edges
+ *  are added by the persistence implementation (from its own `delegations` storage), not derivable here. */
+export interface DeserializedEngine {
+  instances: ProjectStore["instances"];
+  scopes: ProjectStore["scopes"];
+  nextScopeId: number;
+}
 
 export interface PersistedInstance {
   id: InstanceId;
   projectId: ProjectId;
+  kind: InstanceKind;
   delegationId: DelegationId | null;
-  target: DelegateTarget;
-  snapshotId: SnapshotId;
+  /** `null` for the `api` root (which runs no IR). */
+  target: DelegateTarget | null;
+  snapshotId: SnapshotId | null;
   status: InstanceStatus;
   ambientGenerics: GenericSubstitution | null;
-  engineState: EngineState;
+  /** `null` for the `api` root. */
+  engineState: EngineState | null;
 }
 
 export interface PersistedThread {
@@ -56,16 +75,18 @@ export interface SerializedInstance {
   scopes: PersistedScope[];
 }
 
-/** Serialise a still-running instance + the scopes it owns into their row shapes. */
+/** Serialise a still-running `core` instance + the scopes it owns into their row shapes. (Only core
+ *  instances carry engine state; the `api` root's runs / escalations persist as the audit, not here.) */
 export function serializeInstance(
   projectId: ProjectId,
-  instance: Instance,
+  instance: CoreInstance,
   ownedScopes: Scope[],
 ): SerializedInstance {
   return {
     instance: {
       id: instance.id,
       projectId,
+      kind: "core",
       delegationId: instance.delegationId,
       target: instance.target,
       snapshotId: instance.target.snapshot,
@@ -96,12 +117,9 @@ export function serializeInstance(
 }
 
 /** The instance bookkeeping that has no dedicated column (its threads live in the threads table). */
-export function engineStateOf(instance: Instance): EngineState {
+export function engineStateOf(instance: CoreInstance): EngineState {
   return {
     rootThreadId: instance.rootThreadId,
-    pendingDelegations: instance.pendingDelegations,
-    askRoutes: instance.askRoutes,
-    escalationContinuations: instance.escalationContinuations,
     cancelExits: instance.cancelExits,
     nextThreadId: instance.nextThreadId,
     nextCallId: instance.nextCallId,
@@ -115,7 +133,7 @@ export function deserializeProject(
   instances: PersistedInstance[],
   threads: PersistedThread[],
   scopes: PersistedScope[],
-): ProjectSnapshot {
+): DeserializedEngine {
   const threadsByInstance = new Map<InstanceId, Record<number, Thread>>();
   for (const row of threads) {
     const tree = threadsByInstance.get(row.instanceId) ?? {};
@@ -125,7 +143,14 @@ export function deserializeProject(
 
   const instanceMap: Record<InstanceId, Instance> = {};
   for (const row of instances) {
+    if (row.kind === "api") {
+      // The management root: no engine state / thread tree — just identity + status.
+      instanceMap[row.id] = { kind: "api", id: row.id, status: row.status };
+      continue;
+    }
+    if (row.engineState === null || row.target === null) continue; // a malformed core row
     instanceMap[row.id] = {
+      kind: "core",
       id: row.id,
       delegationId: row.delegationId,
       target: row.target,
@@ -134,9 +159,6 @@ export function deserializeProject(
       ...(row.ambientGenerics !== null ? { ambientGenerics: row.ambientGenerics } : {}),
       rootThreadId: row.engineState.rootThreadId,
       threads: threadsByInstance.get(row.id) ?? {},
-      pendingDelegations: row.engineState.pendingDelegations,
-      askRoutes: row.engineState.askRoutes,
-      escalationContinuations: row.engineState.escalationContinuations,
       cancelExits: row.engineState.cancelExits,
       nextThreadId: row.engineState.nextThreadId,
       nextCallId: row.engineState.nextCallId,

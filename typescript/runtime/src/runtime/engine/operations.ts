@@ -164,11 +164,11 @@ function enterDelegate(
     scopeId: thread.scopeId,
     blockId: thread.blockId,
     status: "running",
+    forwardRoutes: {},
     kind: "delegate",
     delegationId,
+    relays: {},
   };
-  ctx.instance.pendingDelegations[delegationId] = proxyId;
-
   ctx.emit({
     kind: "delegate",
     delegation: delegationId,

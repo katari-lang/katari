@@ -162,11 +162,30 @@ export function dispatchAsk(
 
 // ─── askAck (an answered ask resumes its asker) ─────────────────────────────────────────────────
 
-// The genuine askers are the request leaf and an external leaf that raised a `panic` on an FFI error;
-// either completes with the answered value. A proxy/relay continuation in the drive loop handles every
-// intermediate hop, so any other direct askAck is a routing bug.
+// An askAck is addressed to a thread, which either forwards it on one more hop or, if it is the genuine
+// asker, consumes it:
+//   - a `delegate` proxy relaying an inbound escalation sends the answer back out as that escalate's
+//     `escalateAck` (its `relays` entry);
+//   - any other proxying thread (and the agent root resolving a returned escalateAck) forwards it one hop
+//     down to the child that raised it (its `forwardRoutes` entry);
+//   - with no route, the thread is the genuine asker — a request leaf, or an external leaf that raised a
+//     `panic` on an FFI error — and it completes with the value.
 export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, value: Value): void {
   if (thread.status === "cancelling") return; // a late answer for a thread being torn down
+  if (thread.kind === "delegate") {
+    const escalation = thread.relays[askId];
+    if (escalation !== undefined) {
+      delete thread.relays[askId];
+      ctx.emit({ kind: "escalateAck", delegation: thread.delegationId, escalation, value });
+      return;
+    }
+  }
+  const route = thread.forwardRoutes[askId];
+  if (route !== undefined) {
+    delete thread.forwardRoutes[askId];
+    ctx.enqueue({ kind: "askAck", target: route.thread, askId: route.askId, value });
+    return;
+  }
   if (thread.kind === "request" || thread.kind === "external") {
     completeThread(ctx, thread, value);
     return;
@@ -249,10 +268,12 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
       ctx.emit({ kind: "terminate", delegation: thread.delegationId });
       return;
     case "external":
-      ctx.external.cancel(ctx.instance.id, thread.id);
+      // Ask the runner to abort, then wait: the thread stays `cancelling` until the runner confirms the
+      // abort (an `ffiCancelled` completion, relayed in via `completeExternalAbort`), so the call has
+      // really stopped before this thread acks its parent. Graceful, unlike an immediate finish.
       thread.status = "cancelling";
       ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
-      finishCancel(ctx, thread);
+      ctx.external.cancel(ctx.instance.id, thread.id);
       return;
     case "primitive":
     case "construct":
@@ -278,7 +299,24 @@ export function dispatchCancelAck(ctx: StepContext, thread: Thread, callId: Call
     fireHandlerAnswer(ctx, thread, callId);
     return;
   }
+  if (thread.kind === "for" && thread.postCancelCollect[callId] !== undefined) {
+    // A targeted `next`-cancel of a for iteration finished: collect its value and advance (the for
+    // analogue of `fireHandlerAnswer`).
+    const action = thread.postCancelCollect[callId];
+    delete thread.postCancelCollect[callId];
+    collectIteration(ctx, thread, callId, action.value, action.modifiers);
+    return;
+  }
   noteChildGone(ctx, thread.id);
+}
+
+/** The runner confirmed a cancelling external thread's abort (its `ffiCancelled`, or any late completion
+ *  of a thread already cancelling): finish its graceful cancel now — ack its parent and retire it. A stray
+ *  confirmation for a thread that is not being aborted is ignored. */
+export function completeExternalAbort(ctx: StepContext, threadId: ThreadId): void {
+  const thread = ctx.instance.threads[threadId];
+  if (thread === undefined || thread.kind !== "external" || thread.status !== "cancelling") return;
+  finishCancel(ctx, thread);
 }
 
 // ─── agent root ─────────────────────────────────────────────────────────────────────────────────
@@ -580,16 +618,20 @@ function forAsk(
   ask: AskKind,
 ): void {
   if (ask.kind === "next-for" && ask.target === thread.blockId) {
-    // A body explicitly nexted: it has no in-flight children (next is its last op), so drop it directly.
+    // A body iteration `next`ed: cancel that iteration's subtree through the same cascade as a handle's
+    // `next` (the `next` may have escaped from inside still-running nested structure — a `par` element,
+    // a match arm — so an ad-hoc drop would leak it), then collect the value on its teardown.
     const child = ctx.instance.threads[from];
     const callId = child?.parentCallId ?? null;
-    if (callId === null) throw new Error(`next-for from ${from} has no iteration call`);
-    removeThread(ctx, from);
-    collectIteration(ctx, thread, callId, ask.value, ask.modifiers);
+    if (child === undefined || callId === null) {
+      throw new Error(`next-for from ${from} has no iteration call`);
+    }
+    thread.postCancelCollect[callId] = { value: ask.value, modifiers: ask.modifiers };
+    beginCancel(ctx, child, { kind: "ackParent" });
     return;
   }
   if (ask.kind === "break-for" && ask.target === thread.blockId) {
-    // Early exit: cancel the in-flight iterations, then finish with the mapping collected so far.
+    // Early exit: cancel all the in-flight iterations, then finish with the mapping collected so far.
     beginCancel(ctx, thread, { kind: "finishFor" });
     return;
   }
@@ -676,9 +718,16 @@ function handleHandleCallAck(
     });
     return;
   }
-  throw new Error(
-    `handle ${thread.id} got a callAck from a handler body (must exit via break/next)`,
-  );
+  // A handler body fell through to its tail without an explicit jump: its tail value is an implicit
+  // `next` (resume the asker, no state modifiers) — mirroring a `for` body's implicit next. The handler
+  // body has already retired with this callAck, so there is no subtree to cancel; answer the request
+  // directly and free the handler slot.
+  const answer = thread.handlers[callId];
+  if (answer === undefined) {
+    throw new Error(`handle ${thread.id} got an unexpected callAck (callId ${callId})`);
+  }
+  delete thread.handlers[callId];
+  resumeRequestAsker(ctx, thread, answer, value);
 }
 
 function handleAsk(
@@ -769,14 +818,25 @@ function handleNext(
 function fireHandlerAnswer(ctx: StepContext, thread: HandleThread, handlerCall: CallId): void {
   const action = thread.postCancelActions[handlerCall];
   delete thread.postCancelActions[handlerCall];
-  if (action !== undefined) {
-    ctx.enqueue({
-      kind: "askAck",
-      target: action.answerThread,
-      askId: action.answerAskId,
-      value: action.value,
-    });
-  }
+  if (action === undefined) return;
+  resumeRequestAsker(
+    ctx,
+    thread,
+    { answerThread: action.answerThread, answerAskId: action.answerAskId },
+    action.value,
+  );
+}
+
+/** Resume a caught request's asker with `value` (a handler's explicit `next` value or its fall-through
+ *  tail value), then — in sequential mode, now that this handler slot is free — dispatch the next queued
+ *  request. Shared by the explicit-`next` (post-cancel) path and the implicit-`next` fall-through path. */
+function resumeRequestAsker(
+  ctx: StepContext,
+  thread: HandleThread,
+  answer: { answerThread: ThreadId; answerAskId: AskId },
+  value: Value,
+): void {
+  ctx.enqueue({ kind: "askAck", target: answer.answerThread, askId: answer.answerAskId, value });
   if (thread.parallel || handleBusy(thread)) return;
   const next = thread.pendingRequests.shift();
   if (next === undefined) return;

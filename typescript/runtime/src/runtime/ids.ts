@@ -30,6 +30,12 @@ const newUuid = (): string => crypto.randomUUID();
 
 export const newInstanceId = (): InstanceId => newUuid() as InstanceId;
 export const newDelegationId = (): DelegationId => newUuid() as DelegationId;
+
+/** The id of a project's one `api` management root. It IS the project id — there is exactly one root per
+ *  project, so the project id is its single source of truth: stable across restarts, derivable in any
+ *  layer, needing no registry. This is the one place the project / instance id families deliberately
+ *  coincide (mirrors the prototype's `project-root entity id = projectId`). */
+export const apiRootIdOf = (projectId: ProjectId): InstanceId => projectId as string as InstanceId;
 export const newEscalationId = (): EscalationId => newUuid() as EscalationId;
 export const newBlobId = (): BlobId => newUuid() as BlobId;
 

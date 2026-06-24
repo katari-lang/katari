@@ -12,11 +12,11 @@ import {
   toCallId,
   toThreadId,
 } from "../ids.js";
-import type { Instance, ProjectStore } from "./types.js";
+import type { CoreInstance, Instance, ProjectStore } from "./types.js";
 
 /** A fresh, empty warm store for a project (scope ids start at 0). */
 export function createProjectStore(): ProjectStore {
-  return { instances: {}, scopes: {}, nextScopeId: 0 };
+  return { instances: {}, scopes: {}, nextScopeId: 0, blobOwners: {} };
 }
 
 /** Look up a loaded instance; throws if absent (the caller routed to an instance not in the store). */
@@ -34,21 +34,21 @@ export function findInstance(store: ProjectStore, instanceId: InstanceId): Insta
 }
 
 /** Allocate the next thread id within an instance's local thread tree. */
-export function allocateThreadId(instance: Instance): ThreadId {
+export function allocateThreadId(instance: CoreInstance): ThreadId {
   const id = toThreadId(instance.nextThreadId);
   instance.nextThreadId += 1;
   return id;
 }
 
 /** Allocate the next call id (a parent's handle on one outstanding child) within an instance. */
-export function allocateCallId(instance: Instance): CallId {
+export function allocateCallId(instance: CoreInstance): CallId {
   const id = toCallId(instance.nextCallId);
   instance.nextCallId += 1;
   return id;
 }
 
 /** Allocate the next ask id (a thread's handle on one outstanding upward ask) within an instance. */
-export function allocateAskId(instance: Instance): AskId {
+export function allocateAskId(instance: CoreInstance): AskId {
   const id = toAskId(instance.nextAskId);
   instance.nextAskId += 1;
   return id;

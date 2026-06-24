@@ -11,6 +11,7 @@ import type { BlockId, QualifiedName } from "@katari-lang/types";
 import type { DelegateTarget } from "../event/types.js";
 import type {
   AskId,
+  BlobId,
   CallId,
   DelegationId,
   EscalationId,
@@ -53,6 +54,17 @@ export type ThreadBase = {
   /** The block this thread runs. */
   blockId: BlockId;
   status: ThreadStatus;
+  /**
+   * For each ask this thread bubbled up under its own local `askId`, the child `(thread, askId)` to send
+   * the answer back to — one hop down. When a thread receives an ask it does not consume, it re-raises a
+   * fresh ask to its parent and records this; the answer then reverses the bubble path one step at a time,
+   * with no instance-global continuation table. Because the routes live on the thread, a cancelled thread
+   * drops its pending routes for free — every outstanding ask either gets answered (its route fires) or is
+   * cancelled (its route dies with the thread), so no ask kind needs special "is it answered?" bookkeeping.
+   * (Forwarding *out* across an instance boundary is not here: that is the `DelegateThread`'s job — see
+   * its `relays` — and the `AgentThread`'s escape bridge — see its `escalations`.)
+   */
+  forwardRoutes: Record<number, { thread: ThreadId; askId: AskId }>;
 };
 
 /** Tracks one outstanding child a thread spawned and is awaiting (callAck) and where to bind its value. */
@@ -99,6 +111,14 @@ export type AgentThread = ThreadBase & {
   kind: "agent";
   /** The body call in flight (the agent body always runs as exactly one child). */
   pending: PendingCall | null;
+  /**
+   * The escalation boundary's external↔internal bridge: for each `escalate` this root emitted, the local
+   * `askId` it escaped under. It exists only so the cross-instance events stay in pure external vocabulary
+   * (an `escalation` id, no inner thread / askId): when an `escalateAck` returns, this Agent thread maps
+   * its `escalation` back to that `askId` and re-enters it as an ordinary internal `askAck` to itself —
+   * whence its own `forwardRoutes` carry the answer on down, like any bubbled answer. No thread id here.
+   */
+  escalations: Record<EscalationId, AskId>;
 };
 
 /** Runs a `sequence` block's operations one at a time, awaiting any spawning op before advancing. */
@@ -138,7 +158,11 @@ export type MatchThread = ThreadBase & {
   pending: PendingCall | null;
 };
 
-/** Drives a `for` loop, collecting each iteration's `next` value into `collected` in source order. */
+/** Drives a `for` loop, collecting each iteration's `next` value into `collected` in source order. A
+ *  `for` is, structurally, the handler of a per-element `go` effect: an iteration body's `next` (or its
+ *  fall-through tail) is the resume value for that element, and a `break-for` aborts the whole map. So it
+ *  uses the same cancel-then-act machinery as `handle` — `next-for` cancels just that iteration's subtree
+ *  and `break-for` cancels them all (mirroring a handler's `next` / `break`). */
 export type ForThread = ThreadBase & {
   kind: "for";
   parallel: boolean;
@@ -152,16 +176,20 @@ export type ForThread = ThreadBase & {
   states: Record<number, Value>;
   /** Iteration index -> the child call running it (one for sequential, many concurrent for parallel). */
   pending: Record<number, CallId>;
+  /** An iteration body's call -> the `next` value/modifiers to collect once its targeted `next`-cancel
+   *  completes (the for analogue of a handle's `postCancelActions`). */
+  postCancelCollect: Record<number, { value: Value; modifiers: Record<number, Value> }>;
   /** Once the source is exhausted, the then-clause's call (if any): its value is the loop's value. */
   thenPending: CallId | null;
 };
 
 /**
  * Runs a `handle` body, dispatching the requests it owns to handlers and resuming the asker via `next`
- * (or exiting via `break`). A handler that falls through implicitly breaks (the compiler enforces an
- * exit). Sequential mode runs one handler / then-clause at a time (others queue in `pendingRequests`);
- * parallel mode runs them concurrently. States are seeded into each child's `state_N` and updated by a
- * `next … with (…)`.
+ * (or exiting the whole handle via `break`). A handler that falls through to its tail implicitly `next`s
+ * with that tail value (resuming the asker) — like a `for` body's implicit next; only an explicit `break`
+ * exits the handle. Sequential mode runs one handler / then-clause at a time (others queue in
+ * `pendingRequests`); parallel mode runs them concurrently. States are seeded into each child's `state_N`
+ * and updated by a `next … with (…)`.
  */
 export type HandleThread = ThreadBase & {
   kind: "handle";
@@ -207,6 +235,11 @@ export type DelegateThread = ThreadBase & {
    *  `delegations` row) the recovery handle. The result binds via the spawning thread's pending slot,
    *  so no separate output is kept here; `target` / `argument` live in the `delegations` row. */
   delegationId: DelegationId;
+  /** Inbound escalations this proxy is relaying inward, keyed by the local `askId` it re-raised each
+   *  under. When that ask is answered, the proxy sends the value back out as the `escalateAck` of
+   *  `(delegationId, escalation)`. A delegate proxy has no in-instance children, so its pending answers
+   *  live here — the outbound counterpart of every other thread's downward `forwardRoutes`. */
+  relays: Record<number, EscalationId>;
 };
 
 /**
@@ -220,21 +253,7 @@ export type ExternalThread = ThreadBase & {
   externalState: "open" | "done";
 };
 
-// ─── Ask / escalation routing ─────────────────────────────────────────────────────────────────
-
-/**
- * What to do when a *resuming* ask is answered — either its internal `askAck`, or the `escalateAck` of
- * the outbound escalation it became. This is the single mechanism behind request and `next` routing,
- * both as it bubbles up the thread tree (each proxying thread records one) and as it crosses instance
- * boundaries (the root `AgentThread` records one when it escalates; a `DelegateThread` records one when
- * it relays a child's escalation inward). Unwinding asks (`return` / `break`) carry no continuation —
- * they terminate their asker rather than resume it.
- */
-export type AnswerContinuation =
-  /** Resume an internal asker: emit `askAck(thread, askId, value)`. */
-  | { kind: "resumeThread"; thread: ThreadId; askId: AskId }
-  /** Relay the answer back out to a child instance: emit `escalateAck(escalation, value)`. */
-  | { kind: "relayEscalateAck"; escalation: EscalationId };
+// ─── Cancel exits ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * What a thread does once its cancel cascade clears (its whole subtree — across instance boundaries via
@@ -258,26 +277,35 @@ export type CancelExit =
 
 export type InstanceStatus = "running" | "cancelling";
 
+/** Which structure an instance carries: `core` runs IR; `api` is the project's management root. */
+export type InstanceKind = "core" | "api";
+
 /**
- * One agent activation: a thread tree plus the bookkeeping to route inbound external events to the
- * right waiting thread. This is the unit of ownership and of load/persist (a shard). Scopes are NOT
- * here — they live in the per-project store (`ProjectStore.scopes`); this instance owns a subset of
- * them via `Scope.owner`. An instance is ephemeral (no terminal status — that lives on the run record);
- * its parent is not a field but is recovered through its `delegationId` (→ `delegations.callerInstanceId`).
- *
- * `ambientGenerics` is this activation's generic substitution (carried in on the spawning `delegate`
- * event). Inner scopes do not store it; they look it up on the instance.
+ * A node in the project's delegation tree. Every instance shares an identity + status + kind; only its
+ * engine state differs by `kind` (`docs/2026-06-24-api-core-connection.md`):
+ *   - a `core` instance runs IR (an agent activation): a thread tree + the routing bookkeeping below.
+ *   - an `api` instance is the project's permanent management root: it runs no IR (no thread tree); its
+ *     "state" is the runs (delegations it issued) + open escalations, tracked by the actor / audit.
+ * External events route to instances uniformly; the actor dispatches by kind (engine turn vs bookkeeping).
  */
-export type Instance = {
+export type Instance = CoreInstance | ApiInstance;
+
+/**
+ * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right
+ * waiting thread. The unit of ownership and of load/persist (a shard). Scopes live in the per-project
+ * store (`ProjectStore.scopes`); this instance owns a subset via `Scope.owner`. Its parent is recovered
+ * through `delegationId` (→ the issuing instance). `ambientGenerics` is this activation's generic
+ * substitution (carried in on the spawning `delegate`); inner scopes look it up here.
+ */
+export type CoreInstance = {
+  kind: "core";
   id: InstanceId;
-  /** The delegation that summoned this instance (`null` only for the project root); the parent is
-   *  recovered from it. Also the correlation id of this instance's `delegateAck`. */
+  /** The delegation that summoned this instance; the parent is recovered from it. Also the correlation id
+   *  of this instance's `delegateAck`. (`null` only defensively — a real core instance is always summoned.) */
   delegationId: DelegationId | null;
-  /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here, not as a
-   *  standalone instance attribute. */
+  /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here. */
   target: DelegateTarget;
-  /** The argument this activation was summoned with (the spawning `delegate.argument`). The root
-   *  `AgentThread` reads it, applies the agent's `defaults`, and seeds the body's `parameter`. */
+  /** The argument this activation was summoned with (the spawning `delegate.argument`). */
   argument: Value | null;
   status: InstanceStatus;
   /** The ambient generic substitution for this activation (from the spawning `delegate.generics`). */
@@ -285,19 +313,30 @@ export type Instance = {
   rootThreadId: ThreadId;
   /** ThreadId -> Thread (instance-local). */
   threads: Record<number, Thread>;
-  /** Outbound delegate -> the DelegateThread awaiting its ack (sender side). */
-  pendingDelegations: Record<DelegationId, ThreadId>;
-  /** A pending ask's id -> what to do when its `askAck` lands (resume an asker / relay an escalateAck). */
-  askRoutes: Record<AskId, AnswerContinuation>;
-  /** An outbound escalation's id -> what to do when its `escalateAck` lands. Replaces a bare owner map:
-   *  routing the answer needs the full continuation, not just the issuing thread. */
-  escalationContinuations: Record<EscalationId, AnswerContinuation>;
+  // No outbound-delegation map: the `DelegateThread` proxying an outbound delegate already carries its
+  // `delegationId`, so an outbound delegation's proxy (and its caller, on reactivation) is found by that
+  // back-reference — never duplicated in a separate `pendingDelegations` map.
+  // No escalation routing map: an escape uses the root thread's ordinary `forwardRoutes` (it proxies to
+  // the outside instead of to a parent), and the returning `escalateAck` re-enters as a plain `askAck` to
+  // that root thread. The actor routes the round trip by `delegation` (→ `delegationChild` = the raiser).
   /** A cancelling thread's id -> the exit it performs once its subtree's teardown is confirmed. */
   cancelExits: Record<number, CancelExit>;
   // Instance-local id counters.
   nextThreadId: number;
   nextCallId: number;
   nextAskId: number;
+};
+
+/**
+ * The `api` management root (one per project, permanent). It runs no IR — its job is to turn the external
+ * events that reach it into durable user-facing records: a `delegate` it issued is a *run*, an `escalate`
+ * that bubbles to it is a user-facing *open escalation*. It has no thread tree; the runs / escalations it
+ * holds are tracked by the actor (and, once durable, the `runs` / `run_escalations_audit` audit).
+ */
+export type ApiInstance = {
+  kind: "api";
+  id: InstanceId;
+  status: InstanceStatus;
 };
 
 /**
@@ -309,20 +348,24 @@ export type ProjectStore = {
   /** ScopeId -> Scope (CORE-global per project). */
   scopes: Record<number, Scope>;
   nextScopeId: number;
+  /** BlobId -> the instance that owns the blob's bytes (`null` while in-transit mid-ascent). Drives blob
+   *  GC / ascent symmetrically to a scope's `owner`. Warm-store-only today (no producer / no durability —
+   *  see `ascent.ts`). */
+  blobOwners: Record<BlobId, InstanceId | null>;
 };
 
 /**
  * The instance bookkeeping that has no dedicated `instances` column — persisted as the row's
  * `engine_state` JSON (its threads ride in the `threads` table). On load the actor's routing maps are
- * rebuilt from these: a `pendingDelegations` key names the caller of a delegation, `delegationId` names
- * its child, an `escalationContinuations` key names an escalation's raiser — so no separate
- * delegation/escalation rows are needed for engine recovery.
+ * rebuilt from the instances' threads: a `DelegateThread`'s `delegationId` names the caller of an
+ * outbound delegation, and an instance's `delegationId` names its child (which doubles as an escalation's
+ * raiser) — so no separate delegation/escalation rows are needed for engine recovery.
  */
 export type EngineState = {
   rootThreadId: ThreadId;
-  pendingDelegations: Record<DelegationId, ThreadId>;
-  askRoutes: Record<AskId, AnswerContinuation>;
-  escalationContinuations: Record<EscalationId, AnswerContinuation>;
+  // Outbound-delegation routing no longer lives here: a `DelegateThread`'s `delegationId` is its source of
+  // truth. Answer routing rides per-thread in `Thread.forwardRoutes`. The actor needs no escalation mirror
+  // (a returning `escalateAck` routes to the raiser via the existing `delegationChild` map).
   cancelExits: Record<number, CancelExit>;
   nextThreadId: number;
   nextCallId: number;

@@ -7,6 +7,7 @@
 import type { BlockId } from "@katari-lang/types";
 import type { DelegateTarget } from "../event/types.js";
 import {
+  type BlobId,
   type DelegationId,
   type InstanceId,
   newInstanceId,
@@ -17,12 +18,12 @@ import {
 import type { GenericSubstitution, Value } from "../value/types.js";
 import { allocateScope } from "./scope.js";
 import { allocateThreadId } from "./store.js";
-import type { Instance, ProjectStore } from "./types.js";
+import type { ApiInstance, CoreInstance, ProjectStore } from "./types.js";
 
 /**
- * Create a fresh instance: its root scope (chained to a captured closure scope, if any) and its root
- * `AgentThread`. The caller then drives a `create` event for `rootThreadId` to start it. The argument is
- * stored for the AgentThread to default + seed; generics ride as the activation's ambient substitution.
+ * Create a fresh `core` instance: its root scope (chained to a captured closure scope, if any) and its
+ * root `AgentThread`. The caller then drives a `create` event for `rootThreadId` to start it. The argument
+ * is stored for the AgentThread to default + seed; generics ride as the activation's ambient substitution.
  */
 export function createInstance(
   store: ProjectStore,
@@ -35,9 +36,10 @@ export function createInstance(
     snapshotId: SnapshotId;
     ambientGenerics?: GenericSubstitution;
   },
-): Instance {
+): CoreInstance {
   const id = newInstanceId();
-  const instance: Instance = {
+  const instance: CoreInstance = {
+    kind: "core",
     id,
     delegationId: args.delegationId,
     target: args.target,
@@ -45,9 +47,6 @@ export function createInstance(
     status: "running",
     rootThreadId: toThreadId(0),
     threads: {},
-    pendingDelegations: {},
-    askRoutes: {},
-    escalationContinuations: {},
     cancelExits: {},
     nextThreadId: 0,
     nextCallId: 0,
@@ -66,24 +65,48 @@ export function createInstance(
     scopeId,
     blockId: args.agentBlockId,
     status: "running",
+    forwardRoutes: {},
     kind: "agent",
     pending: null,
+    escalations: {},
   };
   return instance;
 }
 
-/** Whether an instance has finished (its thread tree is empty — the agent root completed). */
-export function isInstanceComplete(instance: Instance): boolean {
+/** Whether a `core` instance has finished (its thread tree is empty — the agent root completed). */
+export function isInstanceComplete(instance: CoreInstance): boolean {
   return Object.keys(instance.threads).length === 0;
 }
 
-/** Tear down a finished instance: cascade-drop the scopes it owns, then drop the instance. (Escaping
- *  values that should ascend to the parent are a refinement; a scalar / self-contained result needs none.) */
+/**
+ * Get (or create) the project's permanent `api` management root. It runs no IR — it only holds the runs
+ * it issues and the escalations that bubble to it (tracked by the actor / audit). Its id is deterministic
+ * per project so a restart recovers the same root.
+ */
+export function ensureApiRoot(store: ProjectStore, apiRootId: InstanceId): ApiInstance {
+  const existing = store.instances[apiRootId];
+  if (existing !== undefined && existing.kind === "api") return existing;
+  const root: ApiInstance = { kind: "api", id: apiRootId, status: "running" };
+  store.instances[apiRootId] = root;
+  return root;
+}
+
+/** Tear down a finished instance: cascade-drop the scopes (and blob ownerships) it still owns, then drop
+ *  the instance. Resources its returned value captured were already lifted to in-transit (`owner = null`)
+ *  by `ascendResources`, so they are not owned by this instance here and survive for the caller to re-own.
+ *  (Dropping a blob's actual bytes — a `BlobStore.delete` — is a follow-up; `blobOwners` is empty until a
+ *  blob producer exists.) */
 export function teardownInstance(store: ProjectStore, instanceId: InstanceId): void {
   for (const key of Object.keys(store.scopes)) {
     const scopeId = Number(key);
     if (store.scopes[scopeId]?.owner === instanceId) {
       delete store.scopes[scopeId];
+    }
+  }
+  for (const key of Object.keys(store.blobOwners)) {
+    const blobId = key as BlobId;
+    if (store.blobOwners[blobId] === instanceId) {
+      delete store.blobOwners[blobId];
     }
   }
   delete store.instances[instanceId];

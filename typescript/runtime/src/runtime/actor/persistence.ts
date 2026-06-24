@@ -1,37 +1,48 @@
-// The persistence boundary. The design persists an instance's graph after its internal queue drains
-// (the turn boundary: "DB reflection after the internal queue is empty"). Engine recovery needs only
-// three row sets — instances (with an `engine_state` JSON of the bookkeeping), threads, and scopes —
-// because the actor's routing maps are all derivable from them (a `pendingDelegations` key names a
-// delegation's caller, `delegationId` its child, an `escalationContinuations` key its raiser).
+// The persistence boundary. An instance's turn drains its internal queue, then commits at the turn
+// boundary ("DB reflection after the internal queue is empty"). One turn = one atomic `commitTurn`: the
+// turn's Layer 2 (engine continuation — its threads + owned scopes, or its drop) is written together with
+// the Layer 1 entity transitions it implies (delegations / escalations state changes). Writing both in one
+// transaction is what closes the gap a `DelegateThread` would otherwise open — referencing a delegation
+// whose durable row had not been written yet.
 //
-// v0.1.0 ships two implementations: an in-memory no-op (the warm store is the truth) and a drizzle-backed
-// one (`DbPersistence`). The warm per-project actor loads once on first use and write-through persists
-// each turn; a transient instance that completes within its spawn turn never touches the DB.
+// v0.1.0 ships three implementations: an in-memory no-op (`InMemoryPersistence` — the warm store is the
+// truth), an in-memory *storing* twin (`StoringPersistence`, for recovery tests), and a drizzle-backed one
+// (`DbPersistence`). The warm per-project actor loads once on first use and write-through commits each
+// turn; a transient instance that completes within its spawn turn still commits (its Layer 1 edges), but
+// its Layer 2 is dropped rather than persisted.
 
-import type { Instance, ProjectStore, Scope } from "../engine/types.js";
-import type { InstanceId, ProjectId } from "../ids.js";
+import type { ProjectStore } from "../engine/types.js";
+import type { DelegationId, InstanceId, ProjectId } from "../ids.js";
+import type { TurnCommit } from "./turn-commit.js";
 
-/** A project's reconstructed engine state (the actor rebuilds its routing maps from the instances). */
+/** A project's reconstructed engine state (the actor rebuilds its routing maps from this on reactivation).
+ *
+ *  Routing is recovered from two complementary sources. A surviving `DelegateThread` names its delegation's
+ *  caller (its own instance) — this covers a freshly-issued delegation whose child instance may not have
+ *  been created yet. The `delegations` map (the live Layer 1 edges) covers the rest, in particular the api
+ *  root's run delegations, which have no `DelegateThread` to rebuild from. An instance's own `delegationId`
+ *  names its child (and, since the escalating child is the delegation's child, its escalation raiser). */
 export interface ProjectSnapshot {
   instances: ProjectStore["instances"];
   scopes: ProjectStore["scopes"];
   nextScopeId: number;
+  /** Live (running / cancelling) delegation edges: delegation id → its caller instance. Finished
+   *  delegations (done / gone) are history and carry no live routing, so they are excluded here. */
+  delegations: Record<DelegationId, InstanceId>;
 }
 
 export interface Persistence {
-  /** Load a project's persisted instances + scopes to reactivate its warm actor (recovery). */
+  /** Load a project's persisted instances + scopes + live delegation edges to reactivate its warm actor. */
   loadProject(projectId: ProjectId): Promise<ProjectSnapshot>;
-  /** Write-through a still-running instance's graph (its row + engine_state, threads, owned scopes). */
-  persistInstance(projectId: ProjectId, instance: Instance, ownedScopes: Scope[]): Promise<void>;
-  /** Drop a completed / terminated instance (cascade removes its threads, scopes, …). */
-  dropInstance(projectId: ProjectId, instanceId: InstanceId): Promise<void>;
+  /** Commit one turn atomically: its Layer 2 (persist the instance's graph, or drop it) together with the
+   *  Layer 1 entity transitions it implies. */
+  commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void>;
 }
 
 /** The seam implementation: the warm store is the truth, so nothing persists and nothing loads. */
 export class InMemoryPersistence implements Persistence {
   async loadProject(): Promise<ProjectSnapshot> {
-    return { instances: {}, scopes: {}, nextScopeId: 0 };
+    return { instances: {}, scopes: {}, nextScopeId: 0, delegations: {} };
   }
-  async persistInstance(): Promise<void> {}
-  async dropInstance(): Promise<void> {}
+  async commitTurn(): Promise<void> {}
 }

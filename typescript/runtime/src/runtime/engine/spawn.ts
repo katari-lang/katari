@@ -52,6 +52,7 @@ export function spawnThread(
     scopeId,
     blockId: args.blockId,
     status: "running",
+    forwardRoutes: {},
   };
   ctx.instance.threads[threadId] = threadForBlock(information.block, base);
   ctx.enqueue({ kind: "create", thread: threadId });
@@ -83,6 +84,7 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
         collected: {},
         states: {},
         pending: {},
+        postCancelCollect: {},
         thenPending: null,
       };
     case "handle":

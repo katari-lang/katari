@@ -9,9 +9,11 @@ import {
 import type { Instance, Scope } from "../src/runtime/engine/types.js";
 import {
   type DelegationId,
+  type EscalationId,
   type InstanceId,
   type ProjectId,
   type SnapshotId,
+  toAskId,
   toCallId,
   toScopeId,
   toThreadId,
@@ -26,6 +28,7 @@ describe("persistence codec", () => {
   test("round-trips a suspended instance, its threads, and its owned scopes", () => {
     // An instance whose body delegated to a child and is awaiting its delegateAck (a real suspend point).
     const instance: Instance = {
+      kind: "core",
       id: INSTANCE,
       delegationId: DELEGATION,
       target: { kind: "named", name: "demo.main" as never, snapshot: SNAPSHOT },
@@ -40,8 +43,13 @@ describe("persistence codec", () => {
           scopeId: toScopeId(0),
           blockId: 0,
           status: "running",
+          // The root's forward route for an in-flight escape, plus the escalation→askId bridge that
+          // converts its returning escalateAck — both ride in the root thread payload now (was the
+          // instance's engine_state) and must survive the round-trip.
+          forwardRoutes: { [toAskId(2)]: { thread: toThreadId(1), askId: toAskId(0) } },
           kind: "agent",
           pending: { callId: toCallId(0), output: null },
+          escalations: { ["escalation-r" as EscalationId]: toAskId(2) },
         },
         1: {
           id: toThreadId(1),
@@ -50,6 +58,7 @@ describe("persistence codec", () => {
           scopeId: toScopeId(0),
           blockId: 1,
           status: "running",
+          forwardRoutes: {},
           kind: "sequence",
           cursor: 3,
           pending: { callId: toCallId(1), output: 7 },
@@ -61,13 +70,14 @@ describe("persistence codec", () => {
           scopeId: toScopeId(0),
           blockId: 1,
           status: "running",
+          forwardRoutes: {},
           kind: "delegate",
           delegationId: "delegation-child" as DelegationId,
+          // A delegate proxy relaying an inbound escalate holds the escalation here — it must survive the
+          // round-trip (routes now ride per-thread, not in the instance's engine_state).
+          relays: { [toAskId(4)]: "escalation-e" as EscalationId },
         },
       },
-      pendingDelegations: { ["delegation-child" as DelegationId]: toThreadId(2) },
-      askRoutes: {},
-      escalationContinuations: {},
       cancelExits: {},
       nextThreadId: 3,
       nextCallId: 2,

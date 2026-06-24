@@ -35,20 +35,37 @@ export const runRepository = {
     return row;
   },
 
-  /** Settle a run: `done` with its result, or `error` with its message. */
+  /** Settle a run terminally: `done` with its result, `error` with its message, or `cancelled` with its
+   *  reason (the engine confirmed the terminate cascade). */
   async settle(
     executor: Executor,
     runId: string,
-    outcome: { state: "done"; result: Value | null } | { state: "error"; errorMessage: string },
+    outcome:
+      | { state: "done"; result: Value | null }
+      | { state: "error"; errorMessage: string }
+      | { state: "cancelled"; cancelReason?: string },
   ): Promise<void> {
+    const completedAt = new Date();
+    const patch =
+      outcome.state === "done"
+        ? { state: "done" as const, result: outcome.result, completedAt }
+        : outcome.state === "error"
+          ? { state: "error" as const, errorMessage: outcome.errorMessage, completedAt }
+          : {
+              state: "cancelled" as const,
+              cancelReason: outcome.cancelReason ?? null,
+              completedAt,
+            };
+    await executor.update(runs).set(patch).where(eq(runs.id, runId));
+  },
+
+  /** Mark a still-running run as `cancelling` (its terminate was requested). A no-op on an already-settled
+   *  run, so a late cancel cannot resurrect it. */
+  async markCancelling(executor: Executor, runId: string, reason?: string): Promise<void> {
     await executor
       .update(runs)
-      .set(
-        outcome.state === "done"
-          ? { state: "done", result: outcome.result, completedAt: new Date() }
-          : { state: "error", errorMessage: outcome.errorMessage, completedAt: new Date() },
-      )
-      .where(eq(runs.id, runId));
+      .set({ state: "cancelling", cancelReason: reason ?? null })
+      .where(and(eq(runs.id, runId), eq(runs.state, "running")));
   },
 
   list(executor: Executor, projectId: string) {
