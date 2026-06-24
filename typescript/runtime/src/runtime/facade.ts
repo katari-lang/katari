@@ -1,8 +1,10 @@
-// Engine façade: the single entry from the stateless HTTP services into the stateful, per-project
-// engine. It owns the warm `RuntimeHost` (module scope, so a project's actor stays warm across requests),
-// converts the wire's raw `Json` to/from the engine's tagged `Value`, and orchestrates the run lifecycle:
-// resolve the snapshot, open a `runs` row, kick the run off on the host, and settle the row when it
-// completes (done / error) in the background — the HTTP call returns the run id immediately.
+// Engine façade: the command side of the API — the single entry from the stateless HTTP services into the
+// stateful, per-project engine. It owns the warm `RuntimeHost` (module scope, so a project's actor stays
+// warm across requests), converts the wire's raw `Json` to/from the engine's tagged `Value`, and translates
+// each operation into engine work: start a run (record its metadata sidecar + kick the run off), cancel a
+// run, answer an escalation. Reads (run list/get, open escalations) do NOT go through here — they read
+// Layer 1 directly in their repositories (the run's outcome is its delegation; an open escalation is an
+// `escalations` row), so a restart never makes them stale.
 
 import { createAgentName, type Json } from "@katari-lang/types";
 import { eq } from "drizzle-orm";
@@ -12,12 +14,11 @@ import { NotFoundError } from "../lib/errors.js";
 import { runRepository } from "../modules/run/run.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
-import type { OpenEscalation } from "./actor/project-actor.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { StubExternalRunner } from "./external/runner.js";
 import { RuntimeHost } from "./host.js";
 import type { EscalationId, ProjectId, SnapshotId } from "./ids.js";
-import { jsonToValue, valueToJson } from "./value/codec.js";
+import { jsonToValue } from "./value/codec.js";
 
 export interface StartRunInput {
   projectId: string;
@@ -42,14 +43,9 @@ export interface AnswerEscalationInput {
   value: Json;
 }
 
-/** A run-root escalation awaiting an answer, in the wire's `Json` shape. */
-export interface OpenEscalationView {
-  id: string;
-  request: string;
-  argument: Json | null;
-}
-
-/** The stateful core, behind a thin async interface the HTTP layer depends on. */
+/** The stateful core, behind a thin async interface the HTTP layer depends on. Reads (run list/get, open
+ *  escalations) go straight to Layer 1 in the repositories, not through here — the façade is the command
+ *  side (start / cancel / answer), translating to the engine. */
 export interface RuntimeFacade {
   /** Summon the run's root instance and return its durable run record id. */
   startRun(input: StartRunInput): Promise<{ runId: string }>;
@@ -57,8 +53,6 @@ export interface RuntimeFacade {
   cancel(input: CancelRunInput): Promise<void>;
   /** Answer a user-facing escalation, resuming the raiser. */
   answerEscalation(input: AnswerEscalationInput): Promise<void>;
-  /** The run-root escalations on a project awaiting an answer. */
-  listOpenEscalations(projectId: string): OpenEscalationView[];
 }
 
 // The warm host: one per process, backed by the DB (IR module store + engine-graph persistence). A
@@ -123,13 +117,5 @@ export const facade: RuntimeFacade = {
       input.escalationId as EscalationId,
       jsonToValue(input.value),
     );
-  },
-
-  listOpenEscalations(projectId) {
-    return host.listOpenEscalations(projectId as ProjectId).map((open: OpenEscalation) => ({
-      id: open.escalation,
-      request: open.request,
-      argument: open.argument === null ? null : valueToJson(open.argument),
-    }));
   },
 };

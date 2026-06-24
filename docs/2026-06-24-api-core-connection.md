@@ -1,11 +1,12 @@
 # Katari Runtime — API ↔ CORE 接続 設計 (v0.1.0, scrap-and-build)
 
 > **状態: Step 1–5 実装完了 (2026-06-25)。** この設計（everything-is-an-instance + 6 external event +
-> 3 レイヤ atomic-tx 永続化 + outbox + runs を Layer 1 から projection）は実装済み。main ブランチ(prototype)の
-> API/CORE/FFI/ENV module + bus を、**1 actor 内の「instance kind」**に畳んだ軽量版。
-> 注: DB 層（Hono repo の Drizzle query）は in-memory suite では検証不能（Postgres integration test 未整備）。
-> pure logic（projectRun mapper 等）は unit test 済。残課題は escalation list の Layer 1 直読化（現状 warm
-> actor 経由）と run_escalations_audit/escalation の projection 整理（任意）。
+> 3 レイヤ atomic-tx 永続化 + outbox + runs/escalations を Layer 1 から projection）は実装済み。main
+> ブランチ(prototype)の API/CORE/FFI/ENV module + bus を、**1 actor 内の「instance kind」**に畳んだ軽量版。
+> 読み取り（run list/get、open escalation list）は repository が Layer 1（delegations / escalations）を
+> 直読し、facade は command 側（start/cancel/answer）のみ。
+> 注: DB 層（Hono repo の Drizzle query）は in-memory suite では検証不能（Postgres integration test は別途
+> 整備予定）。pure logic（projectRun / isUserFacingRequest 等）は unit test 済。
 >
 > 中心となる決定:
 > 1. **すべては Instance**(generic interface)。共通 ＋ **`engine_state` だけ kind 別**(`core`/`api`=root)。

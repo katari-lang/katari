@@ -7,7 +7,7 @@
 
 import type { IRModule, QualifiedName } from "@katari-lang/types";
 import { InMemoryPersistence, type Persistence } from "./actor/persistence.js";
-import { type OpenEscalation, ProjectActor } from "./actor/project-actor.js";
+import { ProjectActor } from "./actor/project-actor.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { type ExternalRunner, StubExternalRunner } from "./external/runner.js";
@@ -79,11 +79,6 @@ export class RuntimeHost {
   /** Answer an open run-root escalation on a project, resuming the suspended run. */
   answerEscalation(projectId: ProjectId, escalation: EscalationId, value: Value): void {
     this.actorFor(projectId).answerEscalation(escalation, value);
-  }
-
-  /** The run-root escalations on a project awaiting an answer. */
-  listOpenEscalations(projectId: ProjectId): OpenEscalation[] {
-    return this.actorFor(projectId).listOpenEscalations();
   }
 
   /** The warm actor for a project, created (and kept) on first use. */
