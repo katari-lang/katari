@@ -192,22 +192,37 @@ Unchanged engine internals (thread-ops, the internal-event world, drive). As a r
 The engine `Instance` union is already collapsed to `CoreInstance` (done, commit `eede0bf`); here it simply
 becomes "the core reactor's instance type".
 
-### 4.2 `api` — the management root (no instances, no sentinel)
+### 4.2 `api` — the management root (one permanent instance; routing by name, not by id)
 
-The api reactor is the user-facing bridge — it **issues** runs and **reacts** to their replies. Critically, in
-this model **it owns no instance and needs no sentinel id**:
+The api reactor is the user-facing bridge — it **issues** runs and **reacts** to their replies. It owns
+**exactly one permanent instance**, the api root (`id = apiRootIdOf(project)`, `kind = api`), created once by
+`ensureApiRoot`. That instance is a **durable Layer 1 entity, but not a warm engine instance** (it runs no IR,
+holds no thread tree). It exists for **ownership**, which routing-by-name does not provide:
+
+- it is the **caller of every run delegation** (`delegations.caller_instance_id` → the api root) — without it
+  the run-delegation caller FK has no referent (this is exactly C1, and the api root instance is its fix);
+- it is the **durable owner of resources that escape in a run result** (`blobs`/`scopes.owner_instance_id` →
+  the api root). A run-root core instance retires when the run completes; a blob/closure in its result must
+  outlive it, so it **ascends to the api root** (a permanent owner) instead of dropping. (See the change to
+  `ascendReturnedResources` — today run-result resources are dropped, which is a latent dangling-reference bug
+  once blobs are real.)
+
+What the reactor model **does** change is only the **dispatch**: an ack/escalate/terminate for a run routes by
+**reactor name** (`event.to === "api"`), replacing the `caller === apiRootId` sentinel branch. `apiRootIdOf`
+stays — but as the api root instance's **id** (an FK referent), not as a routing key.
 
 - `startRun` (a command) → `bus.feed` a produce-only turn that `issue(delegate)`s the run (`from = api`,
-  `to = core`). The run delegation's caller reactor is `api`, **caller instance is null**.
+  `to = core`). The run delegation's caller is the api root instance.
 - `onDelegateAck` → the run finished (durable delegation `done`); settle the optional in-process hook.
-- `onEscalate` → a user-facing request opens (durable `escalation`), or a panic/escape fails the run.
+- `onEscalate` → a user-facing request opens (durable `escalation`, raiser = the run-root **core** instance —
+  the api reactor only tracks it in memory to answer it; it does not own the row), or a panic/escape fails the
+  run.
 - `onTerminateAck` → the run was cancelled (`gone`).
 - Reads (GET) project from durable Layer 1 (CQRS), unchanged.
 
-Because routing is by **reactor name** (`to = api`), not by an instance id, **the api root no longer needs an
-`instances` row** — which dissolves C1 (the caller-FK problem) and deletes `Persistence.ensureApiRoot`, the
-`apiRootIdOf` sentinel, and the `ApiInstance` remnants entirely. The in-process run maps stay only as the
-non-SoT notification hook (per the narrowed Phase 3).
+So the api reactor's single permanent instance is the degenerate case of "every reactor owns instances": core
+has many ephemeral ones (activations), ffi many (pending calls), api exactly one (permanent, no
+`reactor_state`). The in-process run maps stay only as the non-SoT notification hook (per the narrowed Phase 3).
 
 ### 4.3 `ffi` — external calls as a first-class reactor
 
@@ -260,20 +275,27 @@ hottest part of the code.
 
 ## 6. Persistence model (generalised, mostly already there)
 
-- **`instances`**: `kind` generalises from `core|api` to the **reactor name** (`core | ffi`; `api` creates
-  none). `engine_state` generalises to **`reactor_state`** (opaque per-reactor JSONB: core's bookkeeping,
-  ffi's call descriptor). `threads` stays a core-only spill of its reactor_state for queryability.
-- **`delegations`**: add **`caller_reactor`** (text) alongside the now-nullable `caller_instance_id`
-  (null for a run, whose caller is the `api` reactor). Routing an ack/escalate/terminate reads `caller_reactor`
-  for `to`. The state machine + sticky-terminal rules + `LIVE_DELEGATION_STATES` (already a single source of
-  truth) are unchanged.
-- **`escalations`**: add **`raiser_reactor`** (symmetric). Still ephemeral (cascades with the raiser instance).
-  The durable user-facing Q&A history is `run_escalations_audit`, **wired on `escalation-answered`** for
-  user-facing escalations (resolving the earlier open question — the audit is *needed* precisely because
-  escalations are ephemeral).
-- **`outbox`** / **`runs`** / **`run_escalations_audit`**: unchanged in spirit; the outbox now carries a `to`
-  per row (already in the event payload).
-- **Deleted**: `Persistence.ensureApiRoot`, the api `instances` row, `apiRootIdOf`.
+- **`instances`**: `kind` generalises from `core|api` to the **reactor name** (`core | api | ffi`). Every
+  reactor owns instances — core many (activations), ffi many (pending calls), **api exactly one** (the
+  permanent root). An instance's **`kind` *is* its reactor**, so routing's `to` for an ack/escalate is the
+  caller/raiser instance's `kind` — no separate `*_reactor` column is needed. `engine_state` generalises to
+  **`reactor_state`** (opaque per-reactor JSONB: core's bookkeeping, ffi's call descriptor, `null` for the api
+  root). `threads` stays a core-only spill of its reactor_state for queryability.
+- **`delegations`**: `caller_instance_id` is **always set** now — a sub-call's caller is a core instance, a
+  run's caller is the api root instance (so the caller FK always has a referent; this *is* the C1 fix). The
+  ack's `to` derives from that instance's `kind`. The state machine + sticky-terminal rules +
+  `LIVE_DELEGATION_STATES` (already a single source of truth) are unchanged.
+- **`escalations`**: still ephemeral (cascades with the raiser **core** instance). The durable user-facing Q&A
+  history is `run_escalations_audit`, **wired on `escalation-answered`** for user-facing escalations (resolving
+  the earlier open question — the audit is *needed* precisely because escalations are ephemeral).
+- **`blobs` / `scopes`**: `owner_instance_id` may now be the **api root** (a resource that escapes in a run
+  result ascends to it, instead of dropping — see §4.2). The api root being a permanent instance is what gives
+  these escaped resources a durable owner.
+- **`outbox`** / **`runs`** / **`run_escalations_audit`**: unchanged in spirit; each outbox row's event already
+  carries its `to`.
+- **Kept (NOT deleted)**: `Persistence.ensureApiRoot`, the api root `instances` row, `apiRootIdOf` — these are
+  the api root **instance** (the durable owner). Only the sentinel *dispatch* (`caller === apiRootId`) goes
+  away, replaced by `event.to === "api"`.
 
 ## 7. Recovery — uniform, no special cases
 
@@ -294,8 +316,9 @@ same assumption as today, now localised in the ffi reactor.
 
 - `ExternalRunner` as a top-level dependency; the `external` engine thread kind; `completeExternalAbort`;
   `resumeInFlightExternals`. (→ ffi reactor + executor port.)
-- `Persistence.ensureApiRoot`, the api `instances` row, `apiRootIdOf` sentinel, the `kind === "api"` /
-  sentinel dispatch. (→ routing by reactor name; api reactor owns no instance.)
+- Only the **sentinel dispatch** (`caller === apiRootId` / `kind === "api"` branching). (→ routing by reactor
+  name.) `Persistence.ensureApiRoot`, the api root `instances` row, and `apiRootIdOf` **stay** — they are the
+  api root instance (the durable owner of run delegations + escaped run-result resources).
 - The `ProjectActor` god-object: split into `Substrate` + `Reactor` base + `core`/`api`/`ffi` reactors.
 - Carried over as keepers: the typed event vocabulary, the atomic `commitTurn`, the transactional outbox,
   runs-as-projection, `LIVE_DELEGATION_STATES`/`isLiveDelegationState`, the C10 request-only escalation rule,
@@ -309,8 +332,10 @@ Each phase ships green; the engine internals (thread-ops) are untouched througho
   `ProjectActor` into `Substrate`; define `Reactor` (feed/issue/reactivate/afterCommit) returning a `Reaction`.
   Move the api-root logic into an `ApiReactor extends Reactor` (it already mostly is). Pure refactor; tests green.
 - **R2 — Core reactor.** Wrap the engine handlers (`onDelegate` … `runTurn`) as a `CoreReactor extends Reactor`
-  returning Reactions; the substrate commits. `from`/`to` added to events; routing switches to reactor name;
-  drop the `apiRootId` sentinel and `ensureApiRoot`. (C1 dissolves here.)
+  returning Reactions; the substrate commits. `from`/`to` added to events; routing switches from the
+  `apiRootId` sentinel to **reactor name** (`event.to`). The api root **instance** + `ensureApiRoot` stay (the
+  durable owner); only the dispatch branch changes. Ascend run-result resources to the api root instead of
+  dropping them.
 - **R3 — FFI reactor.** Introduce `FfiReactor` + the `FfiExecutor` port; reroute external-agent delegates to
   `to = ffi`; delete `ExternalThread` / `ExternalRunner` / `resumeInFlightExternals`. Recovery via re-dispatch.
 - **R4 — generalise persistence.** `kind → reactor name`, `engine_state → reactor_state`, add
@@ -323,8 +348,10 @@ Each phase ships green; the engine internals (thread-ops) are untouched througho
 
 ## 10. Open decisions (flagged judgment calls)
 
-1. **api owns no instance / routing by reactor name** (drops the sentinel + the FK hack). Strongly recommended;
-   it deletes a whole class of problems. Confirm.
+1. **api root is one permanent durable instance (the owner of run delegations + escaped run-result resources);
+   routing is by reactor name.** Routing-by-name replaces only the sentinel *dispatch*; `ensureApiRoot` and the
+   api root instance row **stay** (they are the FK referent / cascade owner). [Corrected from an earlier draft
+   that wrongly proposed deleting the api instance — ownership needs it; routing does not.]
 2. **FFI completion stays ephemeral** (idempotent-under-redispatch), vs making it a durable mailbox event.
    Recommended ephemeral (matches today; durable would require the sidecar to be transactional). Confirm.
 3. **`reactor_state` as one opaque JSONB per reactor** vs keeping `engine_state` core-specific and giving ffi
