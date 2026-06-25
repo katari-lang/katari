@@ -168,3 +168,25 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
   - **Whole redesign (P1–P5) is landed.** The standing follow-ups (not P5 scope) are: api-root-owned
     run-result scope GC (intentionally deferred — returned-closure scopes are not reclaimed), blob ownership
     persistence + blob-byte freeing, and the FFI-reactor phase (`ExternalThread` / `reactFfi` stay for now).
+
+## 10. Post-P5: the load-side SoT completion (`ensureApiRoot` fold + per-reactor load)
+
+P2–P5 dissolved the *write*-side god-blob (`commitTurn` → per-component `persist(tx)`) but left the *load*
+side as its twin: `loadProject` returned a `ProjectSnapshot` that `reactivate` hand-distributed, classifying
+user-facing escalations through the `caller === apiRootId` sentinel + core's rebuilt routing graph (a `core
+hydrate → classify for api` barrier). Two follow-ups finished §6's intent (delete `ProjectSnapshot` /
+`loadProject` too) and §8's stated cleanups:
+
+- **`ensureApiRoot` fold (done, `894f42d`)** — the api root is an `instances` row the **ApiReactor owns**, so
+  it moved off the `Persistence` boundary onto `PersistenceTx`: the api reactor ensures it in the same commit
+  as a run's `delegate`, before the run delegation's caller FK. `Persistence` collapses to `load` +
+  `transaction`.
+- **Per-reactor self-selecting load (done, `b5fc04c`)** — each Layer 1 edge records its reactors on its
+  durable row (`delegations` / `escalations` gain `from_reactor` = issuer, `to_reactor` = peer; an escalation
+  also gains its `delegation` = the raiser's, which for `to = api` IS the run). The opener stamps them. Then
+  each reactor self-selects on load — core: engine graph + `from = core`; api: delegations `from = api` +
+  open escalations `to = api` (rebuilt from the row alone). `loadProject` / `ProjectSnapshot` /
+  `userFacingOpenEscalations` are replaced by a `Loader` read-surface + `reactor.load(loader)` symmetric to
+  `persist(tx)`. No cross-reactor classification, no apiRoot sentinel at load. (`caller_instance_id` /
+  `raiser_instance_id` stay — FK + the proxy-lookup routing rebuilt from `DelegateThread`s; the reactor
+  columns are purely additive. The emit-side `routeOf` is unchanged.)
