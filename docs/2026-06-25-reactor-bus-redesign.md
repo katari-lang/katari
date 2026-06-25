@@ -342,16 +342,31 @@ Each phase ships green; the engine internals (thread-ops) are untouched througho
   `registry[event.to].react`. Likewise `issue()` was not introduced (the api root mints its own ids and the
   outbound→transition mapping is `outboundTransitions`); it lands with the core reactor in R2/R3 if it earns
   its keep. Pure refactor; 33 tests green throughout.
-- **R2 — Core reactor.** Wrap the engine handlers (`onDelegate` … `runTurn`) as a `CoreReactor extends Reactor`
-  returning Reactions; the substrate commits. `from`/`to` added to events; routing switches from the
-  `apiRootId` sentinel to **reactor name** (`event.to`). The api root **instance** + `ensureApiRoot` stay (the
-  durable owner); only the dispatch branch changes. Ascend run-result resources to the api root instead of
-  dropping them.
+- **R2 — Core reactor. ✅ core done** (commits `fc25040` R2.1, `a7b2e86` R2.2). R2.1: every core handler made
+  pure — drive the turn, then *return* a Reaction; the seq/consumed threading collapses to `handle`, now the
+  single commit funnel for both core and api (`route → substrate.commit → after`, the api result promise
+  settling durable-first in `after`). R2.2: the engine extracted into `CoreReactor extends Reactor` — it owns
+  the `ProjectStore` + the delegation routing graph + the turn machinery + all handlers, reacting through one
+  `react(event) → Reaction` (caller-side legs resolve their caller from its own graph) plus `reactFfi`;
+  `loadState`/`userFacingOpenEscalations`/`resumeInFlightExternals` rebuild it. `ProjectActor` is now a thin
+  composition root (~190 lines): wire substrate + core + api, route, commit, reactivate.
+  **Two deliberate deviations:** (1) **No per-event `from`/`to`; no substrate registry route-by-name.** The
+  api|core decision is genuine *engine* knowledge (a delegation's caller is the api root), so it stays as the
+  dispatcher querying the core reactor's `isRunDelegation` sentinel rather than moving into the substrate as a
+  reactor-name route. The substrate stays reactor-agnostic via the `dispatch` seam; pushing the routing graph
+  into it (and a registry) would only relocate the same sentinel, adding indirection. (2) **The run-result
+  resource ascent moves to R4.** It is *not* self-contained: an api-root-owned scope/blob needs the
+  persistence layer to persist it and rebuild it on reactivate, but the api root runs no `persist` turn — so
+  it belongs with R4's persistence generalisation. It is latent meanwhile (blobs are inert; a clean drop today
+  beats a warm-only reown that vanishes on restart). 33 tests green throughout.
 - **R3 — FFI reactor.** Introduce `FfiReactor` + the `FfiExecutor` port; reroute external-agent delegates to
   `to = ffi`; delete `ExternalThread` / `ExternalRunner` / `resumeInFlightExternals`. Recovery via re-dispatch.
 - **R4 — generalise persistence.** `kind → reactor name` (an instance's kind *is* its reactor, so no separate
   `*_reactor` columns), `engine_state → reactor_state`; one `applyTransition` over the shared vocabulary (the
-  executors stay native — Maps vs SQL). Wire `run_escalations_audit` on `escalation-answered`.
+  executors stay native — Maps vs SQL). Wire `run_escalations_audit` on `escalation-answered`. **Also folds in
+  R2's deferred ascend fix:** make the api root a durable owner of escaped run-result resources (persist
+  api-root-owned scopes/blobs + rebuild on reactivate), then have `ascendReturnedResources` reown a run
+  result's captured resources to the api root instead of dropping them.
 - **R5 — the deferred correctness items on the new structure.** C4 (commit-failure → drop & reactivate — now
   trivial: the substrate drops warm reactors and re-runs `reactivate`), C7 (drop re-keys ascended scopes), C8
   (outbox ordinal), C3 (atomic startRun). These are cheaper here than on the old shape, which is why they were
