@@ -19,7 +19,14 @@ import {
   runEscalationsAudit,
   runs,
 } from "../../db/tables/execution.js";
-import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
+import type {
+  DelegationId,
+  EscalationId,
+  InstanceId,
+  OutboxSeq,
+  ProjectId,
+  SnapshotId,
+} from "../ids.js";
 import type { Loader, Persistence, PersistenceTx } from "./persistence.js";
 import {
   deserializeProject,
@@ -156,6 +163,7 @@ export class DbPersistence implements Persistence {
         return rows.map((row) => ({
           delegation: row.delegation as DelegationId,
           instance: row.instanceId as InstanceId,
+          snapshot: row.snapshotId as SnapshotId,
           key: row.key,
           argument: row.argument,
           caller: row.callerReactor,
@@ -344,6 +352,7 @@ export class DbPersistence implements Persistence {
             delegation: call.delegation,
             projectId,
             instanceId: call.instance,
+            snapshotId: call.snapshot,
             key: call.key,
             argument: call.argument,
             callerReactor: call.caller,

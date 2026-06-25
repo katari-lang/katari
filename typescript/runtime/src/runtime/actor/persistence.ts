@@ -100,6 +100,8 @@ export interface PersistedRunEscalationAudit {
 export interface PersistedFfiCall {
   delegation: DelegationId;
   instance: InstanceId;
+  /** The snapshot whose sidecar bundle hosts the handler — so a recovery re-dispatch targets the right one. */
+  snapshot: SnapshotId;
   key: string;
   argument: Value | null;
   caller: ReactorName;

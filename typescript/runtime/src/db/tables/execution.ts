@@ -196,6 +196,11 @@ export const ffiCalls = pgTable(
       .references(() => projects.id, { onDelete: "cascade" }),
     /** This call's own instance id — the issuer stamped on the replies the ffi reactor produces for it. */
     instanceId: uuid("instance_id").notNull(),
+    /** The snapshot whose compiled sidecar bundle hosts this handler — pins the version (no cascade) so an
+     *  in-flight call can still re-dispatch to the right bundle after recovery, like a running instance. */
+    snapshotId: uuid("snapshot_id")
+      .notNull()
+      .references(() => snapshots.id),
     /** The handler dispatch key (the external block's `key`). */
     key: text("key").notNull(),
     argument: jsonb("argument").$type<Value | null>(),

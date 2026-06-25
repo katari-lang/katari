@@ -440,7 +440,8 @@ function createExternal(ctx: StepContext, thread: ExternalThread): void {
   ctx.emit({
     kind: "delegate",
     delegation: thread.delegationId,
-    target: { kind: "external", key: block.key },
+    // The handler lives in this agent's snapshot bundle, so the ffi transport spawns that bundle.
+    target: { kind: "external", key: block.key, snapshot: ctx.ir.snapshot },
     argument,
   });
 }

@@ -13,11 +13,17 @@ import {
   SubprocessFfiTransport,
   subprocessSidecar,
 } from "../src/runtime/external/subprocess-runner.js";
+import type { Json } from "@katari-lang/types";
 import type { SidecarReply, SidecarRequest } from "../src/runtime/external/sidecar-protocol.js";
-import { type DelegationId, type ProjectId, toDelegationId } from "../src/runtime/ids.js";
-import type { Value } from "../src/runtime/value/types.js";
+import {
+  type DelegationId,
+  type ProjectId,
+  type SnapshotId,
+  toDelegationId,
+} from "../src/runtime/ids.js";
 
 const PROJECT = "project-ffi" as ProjectId;
+const SNAPSHOT = "snapshot-ffi" as SnapshotId;
 
 /** A fake channel: records what the transport sends, lets the test drive replies / a crash on the latest
  *  spawn, and counts spawns (so respawn-after-crash is observable). */
@@ -58,9 +64,10 @@ function collectCompletions(transport: SubprocessFfiTransport): FfiCompletion[] 
 
 describe("SubprocessFfiTransport (protocol logic)", () => {
   const delegation = toDelegationId("delegation-1");
-  const call = (key: string, argument: Value | null = null) => ({
+  const call = (key: string, argument: Json | null = null) => ({
     projectId: PROJECT,
     delegation,
+    snapshot: SNAPSHOT,
     key,
     argument,
   });
@@ -114,7 +121,7 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
     const second = toDelegationId("delegation-2");
 
     transport.dispatch(call("a"));
-    transport.dispatch({ projectId: PROJECT, delegation: second, key: "b", argument: null });
+    transport.dispatch({ projectId: PROJECT, delegation: second, snapshot: SNAPSHOT, key: "b", argument: null });
     channel.crash("FFI sidecar exited (code 1)");
 
     expect(completions).toEqual([
@@ -178,9 +185,9 @@ describe("subprocessSidecar (real process)", () => {
     const hang = toDelegationId("d-hang");
     const crash = toDelegationId("d-crash");
     try {
-      transport.dispatch({ projectId: PROJECT, delegation: echo, key: "echo", argument: { kind: "integer", value: 42 } });
-      transport.dispatch({ projectId: PROJECT, delegation: boom, key: "boom", argument: null });
-      transport.dispatch({ projectId: PROJECT, delegation: hang, key: "hang", argument: null });
+      transport.dispatch({ projectId: PROJECT, delegation: echo, snapshot: SNAPSHOT, key: "echo", argument: { kind: "integer", value: 42 } });
+      transport.dispatch({ projectId: PROJECT, delegation: boom, snapshot: SNAPSHOT, key: "boom", argument: null });
+      transport.dispatch({ projectId: PROJECT, delegation: hang, snapshot: SNAPSHOT, key: "hang", argument: null });
       transport.abort(hang);
 
       expect(await waitUntil(() => found(echo))).toEqual({
@@ -197,7 +204,7 @@ describe("subprocessSidecar (real process)", () => {
       });
 
       // A crashing dispatch fails its call as a panic (the process exits while it is in flight).
-      transport.dispatch({ projectId: PROJECT, delegation: crash, key: "crash", argument: null });
+      transport.dispatch({ projectId: PROJECT, delegation: crash, snapshot: SNAPSHOT, key: "crash", argument: null });
       const crashed = await waitUntil(() =>
         found(crash)?.outcome.kind === "error" ? found(crash) : undefined,
       );

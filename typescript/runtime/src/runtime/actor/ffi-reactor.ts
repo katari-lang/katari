@@ -20,6 +20,7 @@ import {
   newEscalationId,
   newInstanceId,
   type ProjectId,
+  type SnapshotId,
 } from "../ids.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
@@ -35,6 +36,9 @@ import type { ResourcePool } from "./resource-pool.js";
  *  panic escalated, awaiting a caught-panic answer or the run's terminate). */
 interface PendingCall {
   instance: InstanceId;
+  /** The snapshot whose sidecar bundle hosts this handler — passed to the transport so it spawns the
+   *  right bundle, and persisted so a recovery re-dispatch still targets it. */
+  snapshot: SnapshotId;
   key: string;
   argument: Value | null;
   caller: ReactorName;
@@ -77,6 +81,7 @@ export class FfiReactor extends Reactor {
         // A fresh per-delegation callee instance, like core's createInstance for a sub-call.
         this.put(event.delegation, {
           instance: newInstanceId(),
+          snapshot: event.target.snapshot,
           key: event.target.key,
           argument: event.argument,
           caller: event.from,
@@ -169,6 +174,7 @@ export class FfiReactor extends Reactor {
       this.transport.dispatch({
         projectId: this.projectId,
         delegation: event.delegation,
+        snapshot: event.target.snapshot,
         key: event.target.key,
         // Lower the engine's Value to plain Json for the sidecar; the reactor keeps the Value for recovery.
         argument: event.argument === null ? null : valueToJson(event.argument),
@@ -190,6 +196,7 @@ export class FfiReactor extends Reactor {
         await tx.putFfiCall({
           delegation,
           instance: call.instance,
+          snapshot: call.snapshot,
           key: call.key,
           argument: call.argument,
           caller: call.caller,
@@ -206,6 +213,7 @@ export class FfiReactor extends Reactor {
     for (const row of await loader.ffiCalls()) {
       this.calls.set(row.delegation, {
         instance: row.instance,
+        snapshot: row.snapshot,
         key: row.key,
         argument: row.argument,
         caller: row.caller,
@@ -215,6 +223,7 @@ export class FfiReactor extends Reactor {
         this.transport.dispatch({
           projectId: this.projectId,
           delegation: row.delegation,
+          snapshot: row.snapshot,
           key: row.key,
           argument: row.argument === null ? null : valueToJson(row.argument),
           redispatch: true,

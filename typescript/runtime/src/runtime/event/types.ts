@@ -57,13 +57,14 @@ export type InternalEvent =
 // ─── External (inter-instance) ──────────────────────────────────────────────────────────────────
 
 /** What a `delegate` summons: a top-level named agent, a closure (block + captured scope), or an `external`
- *  (FFI) handler — the last runs in the `ffi` reactor against its `key`, not the IR, so it carries no
- *  snapshot. An external delegate behaves like any sub-call delegate; only its `to` (the ffi reactor) and the
- *  callee differ. */
+ *  (FFI) handler. The external handler runs in the `ffi` reactor against its `key` (not the IR), but its
+ *  `snapshot` still matters — the handler lives in that snapshot's compiled sidecar bundle, so the ffi
+ *  transport spawns the right one. It is the calling agent's snapshot (an agent and its FFI handler deploy
+ *  together). An external delegate behaves like any sub-call; only its `to` (the ffi reactor) differs. */
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
   | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string }
-  | { kind: "external"; key: string };
+  | { kind: "external"; key: string; snapshot: SnapshotId };
 
 /** Which reactor an external event originates from / is destined for. An event is self-routing: the
  *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
@@ -105,15 +106,9 @@ export type ExternalEventBody =
  *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives. */
 export type ExternalEvent = ExternalEventBody & { from: ReactorName; to: ReactorName };
 
-/** The snapshot an agent target is pinned to. Only `named` / `closure` targets run IR (a core instance); an
- *  `external` target runs in the ffi reactor against its key, so it carries no snapshot — reaching here with
- *  one is an engine bug (a core instance is never summoned from an external target). */
+/** The snapshot a delegate target is pinned to: the version whose IR a `named` / `closure` runs, or whose
+ *  compiled sidecar bundle hosts an `external` handler. Every target carries one. */
 export function agentSnapshot(target: DelegateTarget): SnapshotId {
-  if (target.kind === "external") {
-    throw new Error(
-      "an external target carries no snapshot (it runs in the ffi reactor, not the IR)",
-    );
-  }
   return target.snapshot;
 }
 

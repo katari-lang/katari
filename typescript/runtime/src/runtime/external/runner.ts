@@ -11,7 +11,7 @@
 // Calls are correlated by their `delegation` id — the same id core's external proxy thread holds.
 
 import type { Json } from "@katari-lang/types";
-import type { DelegationId, ProjectId } from "../ids.js";
+import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
 
 /** One external dispatch: the call's `delegation`, the handler `key`, and the argument. The argument is
  *  plain `Json` — the ffi reactor converts the engine's `Value` at this seam, so the transport and the
@@ -19,6 +19,8 @@ import type { DelegationId, ProjectId } from "../ids.js";
 export interface FfiCall {
   projectId: ProjectId;
   delegation: DelegationId;
+  /** The snapshot whose compiled sidecar bundle hosts this handler — the transport spawns that bundle. */
+  snapshot: SnapshotId;
   /** The opaque dispatch key the handler interprets (the external block's `key`). */
   key: string;
   argument: Json | null;
