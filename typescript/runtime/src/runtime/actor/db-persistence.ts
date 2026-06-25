@@ -242,6 +242,11 @@ export class DbPersistence implements Persistence {
             },
           });
       },
+      deleteScope: async (scopeId) => {
+        await drizzleTx
+          .delete(scopes)
+          .where(and(eq(scopes.projectId, projectId), eq(scopes.scopeId, scopeId)));
+      },
       dropInstance: async (instanceId) => {
         // Cascade removes the instance's threads / the scopes it still owns / owned delegations + escalations.
         // A scope its result released to in-transit (`owner = null`) is not owned by it, so it survives; the

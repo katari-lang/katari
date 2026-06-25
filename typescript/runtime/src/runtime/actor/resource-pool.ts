@@ -25,11 +25,20 @@ export class ResourcePool {
   /** Scope ids whose row changed this turn (allocated / mutated / re-owned) — flushed and cleared by
    *  `persist`. Empty for a turn that touched no scope, so `persist` is then a no-op. */
   private readonly dirty = new Set<ScopeId>();
+  /** Scope ids freed this turn (intra-instance GC) — their durable row is deleted by `persist`. */
+  private readonly freed = new Set<ScopeId>();
 
   constructor(
     private readonly projectId: ProjectId,
     private readonly store: ProjectStore,
   ) {}
+
+  /** Free a scope the GC found dead: drop it from the warm store and stage its durable row for deletion. */
+  free(scopeId: ScopeId): void {
+    delete this.store.scopes[scopeId];
+    this.dirty.delete(scopeId);
+    this.freed.add(scopeId);
+  }
 
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
    *  the value's recipient can re-own them rather than have them dropped with `owner`. Only `owner`'s own
@@ -75,14 +84,16 @@ export class ResourcePool {
     }
   }
 
-  /** Write the scopes touched this turn into the transaction (upsert each, with its current owner — possibly
-   *  `null` for one in transit). A freed scope is gone from the store and is reclaimed by its owner's drop
-   *  cascade, so it never appears here. No-op when nothing was touched. */
+  /** Write the scopes touched this turn into the transaction: upsert each still-live one (with its current
+   *  owner — possibly `null` for one in transit), then delete each one the GC freed. No-op when nothing was
+   *  touched. (A scope freed by an instance *drop* is reclaimed by that cascade instead, not here.) */
   async persist(tx: PersistenceTx): Promise<void> {
     for (const scopeId of this.dirty) {
       const scope = this.store.scopes[scopeId];
       if (scope !== undefined) await tx.putScope(serializeScope(this.projectId, scope));
     }
+    for (const scopeId of this.freed) await tx.deleteScope(scopeId);
     this.dirty.clear();
+    this.freed.clear();
   }
 }

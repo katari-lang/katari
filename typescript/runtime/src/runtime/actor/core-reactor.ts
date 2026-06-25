@@ -16,6 +16,7 @@ import type { QualifiedName } from "@katari-lang/types";
 import { delegateProxyOf, raisePanic, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
+import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { readVariable } from "../engine/scope.js";
 import { completeExternalAbort } from "../engine/thread-ops.js";
@@ -422,6 +423,9 @@ export class CoreReactor extends Reactor {
       teardownInstance(this.store, instance.id);
       this.turnLayer2 = { kind: "drop", instanceId: instance.id };
     } else {
+      // Intra-instance GC: reclaim the scopes this instance owns but no longer references (a completed
+      // sub-thread's scope, unless its result captured it). Free them before flushing the survivors.
+      for (const dead of unreachableOwnedScopes(this.store, instance)) this.pool.free(dead);
       this.pool.markOwnedDirty(instance.id);
       this.turnLayer2 = { kind: "persist", instance };
     }

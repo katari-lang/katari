@@ -14,7 +14,14 @@
 import type { DelegationState, EscalationState } from "../../db/tables/execution.js";
 import type { ProjectStore } from "../engine/types.js";
 import type { DelegateTarget, ExternalEvent } from "../event/types.js";
-import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
+import type {
+  DelegationId,
+  EscalationId,
+  InstanceId,
+  OutboxSeq,
+  ProjectId,
+  ScopeId,
+} from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { PersistedScope, SerializedInstance } from "./persistence-codec.js";
 
@@ -65,6 +72,9 @@ export interface PersistenceTx {
   putInstance(serialized: SerializedInstance): Promise<void>;
   /** Upsert one scope (the `ResourcePool`'s unit). `owner` may be `null` (in transit between owners). */
   putScope(scope: PersistedScope): Promise<void>;
+  /** Delete one scope the intra-instance GC reclaimed (it is owned by a still-running instance, so no drop
+   *  cascade removes it). */
+  deleteScope(scopeId: ScopeId): Promise<void>;
   /** Drop a completed / torn-down instance, cascading its threads, the scopes it still owns, its issued
    *  delegations, and its raised escalations (mirrors the tables' ON DELETE CASCADE). A scope its result
    *  released to in-transit (`owner = null`) is no longer owned by it, so it survives the cascade. */
@@ -151,6 +161,7 @@ const NO_OP_TX: PersistenceTx = {
   async putEscalation() {},
   async putInstance() {},
   async putScope() {},
+  async deleteScope() {},
   async dropInstance() {},
   async consumeOutbox() {},
   async produceOutbox() {},

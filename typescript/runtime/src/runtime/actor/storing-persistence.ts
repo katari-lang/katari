@@ -139,6 +139,9 @@ export class StoringPersistence implements Persistence {
       putScope: async (scope) => {
         this.scopes.set(scope.scopeId, scope);
       },
+      deleteScope: async (scopeId) => {
+        this.scopes.delete(scopeId);
+      },
       dropInstance: async (instanceId) => {
         this.dropInstance(instanceId);
       },
