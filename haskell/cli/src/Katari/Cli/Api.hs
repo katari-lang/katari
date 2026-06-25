@@ -192,10 +192,16 @@ listHeadModules client projectId = do
     requestJson client "GET" ("/projects/" <> projectId <> "/snapshots/head") Nothing
   pure head'.modules
 
--- | Deploy a new snapshot from the complete desired manifest, returning the new snapshot's id.
-deploySnapshot :: RuntimeClient -> Text -> Text -> Map Text ModuleUpload -> IO Text
-deploySnapshot client projectId message modules = do
-  let body = object ["message" .= message, "modules" .= modules]
+-- | Deploy a new snapshot from the complete desired manifest, returning the new snapshot's id. The
+-- compiled FFI sidecar bundle (the bundler's opaque JSON, or 'Nothing' when the project has no external
+-- handlers) rides along; it is omitted from the body when absent, matching the runtime's optional field.
+deploySnapshot :: RuntimeClient -> Text -> Text -> Maybe Value -> Map Text ModuleUpload -> IO Text
+deploySnapshot client projectId message sidecarBundle modules = do
+  let body =
+        object
+          ( ["message" .= message, "modules" .= modules]
+              <> maybe [] (\value -> ["sidecarBundle" .= value]) sidecarBundle
+          )
   SuccessEnvelope (response :: DeployResponse) <-
     requestJson client "POST" ("/projects/" <> projectId <> "/snapshots") (Just (Aeson.encode body))
   pure response.id

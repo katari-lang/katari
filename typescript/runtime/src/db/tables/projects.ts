@@ -6,7 +6,7 @@
 // `projects.head_snapshot_id` tracks the currently-live version (see
 // docs/2026-06-19-per-module-snapshot.md).
 
-import type { IRModule } from "@katari-lang/types";
+import type { IRModule, SidecarBundle } from "@katari-lang/types";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
   boolean,
@@ -64,8 +64,9 @@ export const snapshots = pgTable(
     /** This version's manifest: module name -> the `modules.hash` holding that module's IR. Resolved
      *  through the module store at run time; the hashes are validated against `modules` on deploy. */
     modules: jsonb("modules").$type<Record<string, ModuleHash>>().notNull(),
-    /** The bundled FFI/sidecar code for this version, if any. */
-    sidecarBundle: jsonb("sidecar_bundle"),
+    /** The compiled FFI sidecar bundle for this version, if any (absent when the snapshot has no
+     *  external handlers). Stored verbatim and handed to a `node` sidecar process at run time. */
+    sidecarBundle: jsonb("sidecar_bundle").$type<SidecarBundle>(),
     message: text("message").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -1,7 +1,7 @@
 // Drizzle queries for the content-addressed module store and the snapshot manifests built over it.
 // Each takes an `Executor` so the deploy can run them all inside one transaction.
 
-import type { IRModule } from "@katari-lang/types";
+import type { IRModule, SidecarBundle } from "@katari-lang/types";
 import { and, desc, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { modules, projects, snapshots } from "../../db/tables/projects.js";
@@ -45,7 +45,7 @@ export const snapshotRepository = {
     executor: Executor,
     projectId: string,
     manifest: Record<string, ModuleHash>,
-    sidecarBundle: unknown,
+    sidecarBundle: SidecarBundle | null,
     message: string,
   ) {
     return executor

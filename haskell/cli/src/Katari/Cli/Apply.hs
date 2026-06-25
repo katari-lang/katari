@@ -15,14 +15,18 @@ module Katari.Cli.Apply
 where
 
 import Control.Monad (when)
-import Data.Aeson (toJSON)
+import Data.Aeson (FromJSON (..), Value, toJSON, withObject, (.:))
+import Data.Aeson qualified as Aeson
+import Data.List (isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
 import Data.Text.IO qualified as TextIO
+import GHC.List (List)
 import Katari.Cli.Api
   ( ModuleUpload (..),
     ProjectRow (..),
@@ -37,7 +41,7 @@ import Katari.Cli.Api
 import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, writeOrExit)
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
-import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..))
+import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), SidecarSection (..))
 import Katari.Project.Error (renderProjectError)
 import Katari.Project.Lockfile (lockfileFilename, writeLockfile)
 import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), lockfileFromResolved, resolveProject)
@@ -45,7 +49,9 @@ import Katari.Project.Upload (ModuleHash (..), UploadPlan (..), hashModule, plan
 import Network.HTTP.Client.TLS (newTlsManager)
 import Options.Applicative
 import System.Environment (lookupEnv)
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.Process (readProcessWithExitCode)
 
 data Options = Options
   { projectRoot :: Maybe FilePath,
@@ -125,10 +131,11 @@ run options = do
   let plan = planUpload loweredModules runtimeHashes
   reportPlan url name plan
 
-  -- 4. Send the complete desired manifest.
+  -- 4. Bundle the FFI sidecars (reusing the resolved closure) and send the complete desired manifest.
+  sidecarBundle <- runKatariBundle (packagesFromResolved resolved)
   let manifest = buildManifest loweredModules plan
       message = fromMaybe "katari apply" options.message
-  snapshotId <- deploySnapshot client projectId message manifest
+  snapshotId <- deploySnapshot client projectId message sidecarBundle manifest
   TextIO.putStrLn ("Applied snapshot " <> snapshotId <> " to project " <> name)
 
 -- | Resolve the runtime URL: the @--url@ override, then @KATARI_API_URL@, then @[runtime].url@.
@@ -178,3 +185,67 @@ reportPlan url name plan = do
     )
   mapM_ (\moduleName -> TextIO.putStrLn ("  + " <> renderModuleName moduleName)) (Map.keys plan.changed)
   mapM_ (\moduleName -> TextIO.putStrLn ("  - " <> renderModuleName moduleName)) (Set.toList plan.removed)
+
+-- ---------------------------------------------------------------------------
+-- FFI sidecar bundling
+-- ---------------------------------------------------------------------------
+
+-- | A package handed to @katari-bundle@: its name (the flat namespace prefix every
+-- @katari.agent(name, ...)@ in its sidecar registers under, i.e. @\<packageName\>.name@ — the key the
+-- compiler lowers an @external agent@ to) and the absolute source root holding its sidecar entry.
+data BundlePackage = BundlePackage
+  { packageName :: Text,
+    sourceRoot :: FilePath
+  }
+
+-- | Every package in the resolved closure (root + dependencies) as a bundler input. A package's sidecar
+-- source root is the first @[sidecar].sourceRoots@ entry, or @[package].src@ when it declares no sidecar
+-- section. Packages with no sidecar contribute nothing — the bundler skips a root holding no handler.
+packagesFromResolved :: ResolvedProject -> List BundlePackage
+packagesFromResolved resolved =
+  [ BundlePackage
+      { packageName = package.config.package.name,
+        sourceRoot = package.root </> sidecarSourceRoot package.config
+      }
+    | package <- resolved.rootPackage : Map.elems resolved.depPackages
+  ]
+  where
+    sidecarSourceRoot config = case config.sidecar of
+      Just section | (root : _) <- section.sourceRoots -> root
+      _ -> config.package.src
+
+-- | Spawn @katari-bundle@ with one @--package \<name\>=\<path\>@ flag per package and decode its
+-- @{ bundle }@ stdout — the compiled sidecar, or 'Nothing' when no package has one. The binary is found
+-- via @KATARI_BUNDLE_BIN@ (a @.js@ value is run through @node@, for a dev checkout) or on @PATH@.
+runKatariBundle :: List BundlePackage -> IO (Maybe Value)
+runKatariBundle packages = do
+  binOverride <- lookupEnv "KATARI_BUNDLE_BIN"
+  let (bundleCommand, prefixArguments) = case binOverride of
+        Just path | ".js" `isSuffixOf` path -> ("node", [path])
+        Just path -> (path, [])
+        Nothing -> ("katari-bundle", [])
+      arguments =
+        prefixArguments
+          <> concatMap
+            (\package -> ["--package", Text.unpack package.packageName <> "=" <> package.sourceRoot])
+            packages
+  (exitCode, output, errorOutput) <- readProcessWithExitCode bundleCommand arguments ""
+  case exitCode of
+    ExitFailure code ->
+      dieIn
+        "apply"
+        ("katari-bundle exited " <> Text.pack (show code) <> " (stderr: " <> Text.pack errorOutput <> ")")
+    -- The bundler writes UTF-8 JSON on stdout; re-encode the decoded String as UTF-8 (a Char8 pack would
+    -- truncate a multibyte char to its low byte — e.g. a box-drawing char in a comment → NUL, which
+    -- Postgres then rejects).
+    ExitSuccess -> case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 (Text.pack output)) of
+      Left decodeError -> dieIn "apply" ("katari-bundle returned unparseable JSON: " <> Text.pack decodeError)
+      Right (response :: BundleResponse) -> pure response.bundle
+
+-- | The wire shape of @katari-bundle@'s stdout: @{ "bundle": SidecarBundle | null }@. The bundle is kept
+-- opaque (a 'Value') — it is produced by our own bundler and stored verbatim by the runtime, so the CLI
+-- never needs to interpret it.
+newtype BundleResponse = BundleResponse {bundle :: Maybe Value}
+
+instance FromJSON BundleResponse where
+  parseJSON = withObject "BundleResponse" $ \object' -> BundleResponse <$> object' .: "bundle"

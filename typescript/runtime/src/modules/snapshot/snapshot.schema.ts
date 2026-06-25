@@ -9,7 +9,7 @@
 // cannot be expressed here, since the parsed body the validator sees has already lost a stripped
 // `__proto__` key. See snapshot.middleware.ts.
 
-import type { IRModule } from "@katari-lang/types";
+import type { IRModule, SidecarBundle } from "@katari-lang/types";
 import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
@@ -25,9 +25,18 @@ export const moduleUploadSchema = z.object({
   ir: z.custom<IRModule>(isModuleObject).optional(),
 });
 
+// The compiled FFI sidecar bundle, as produced by `@katari-lang/bundle` and uploaded with the deploy.
+// Stored verbatim and only ever handed back to a `node` sidecar process, so the bytes are not validated
+// beyond their shape — `entry` is opaque JavaScript the runtime never parses.
+const sidecarBundleSchema = z.object({
+  entry: z.string(),
+  runtime: z.literal("node"),
+}) satisfies z.ZodType<SidecarBundle>;
+
 export const deploySnapshotSchema = z.object({
   message: z.string().min(1),
-  sidecarBundle: z.unknown().optional(),
+  /** Present only when the snapshot has external (FFI) handlers; absent otherwise (no sidecar runs). */
+  sidecarBundle: sidecarBundleSchema.optional(),
   /** The full manifest: module name -> { hash, ir? }. A deploy describes the complete desired world,
    *  so at least one module is required — an empty manifest is rejected rather than made head. */
   modules: z
