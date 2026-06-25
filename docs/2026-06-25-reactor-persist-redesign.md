@@ -115,11 +115,22 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
 
 ## 9. Staged implementation (each ships green; engine internals untouched)
 
-- **P1** — `from`/`to` on `ExternalEvent`; `ReactorName`; substrate registry + route-by-`to`. The reactors
-  stamp `to` on send. (Reaction still present; pure routing change.)
-- **P2** — the Reactor base class owns each reactor's delegations/escalations (kill the mixed map / the
-  `openRunDelegation` injection); `react` sends events directly (dissolve `Reaction`'s `outbound`).
-- **P3** — `persist(tx)` per reactor + pool; delete `turn-commit` / `commitTurn`; the substrate drives the
-  one-tx turn. Simplify the persistence backends (in-memory no-op, DB writes).
+- **P1 (done, `5bc68e2`)** — `from`/`to` on `ExternalEvent`; `ReactorName`; substrate registry + route-by-`to`.
+  The reactors stamp `to` on send. (Reaction still present; pure routing change.)
+- **P2 + P3 (done, `5662a5c`)** — landed together (the base class owning the rows *is* the persistence change).
+  The Reactor base class is the single delegation/escalation protocol layer: each reactor holds the Layer 1
+  rows it owns (caller-side delegations, raiser-side escalations) as the in-memory SoT and `send`s follow-on
+  events directly — `Reaction.outbound` and the `openRunDelegation` injection into CORE are gone, and core no
+  longer references the api root at all (a reply routes to `api` iff the delegation has no in-core caller).
+  One turn = one `transaction`: the reactor writes itself through a `PersistenceTx`
+  (putDelegation/putEscalation/putInstance/dropInstance), the substrate writes the outbox, all atomically;
+  `turn-commit.ts` and `Persistence.commitTurn` are deleted. State transitions are caller-owned (open /
+  cancelling on issue, done / gone on receipt), terminal rows are written once then evicted (sticky-terminal
+  for free), and `startRun` opens the run row atomically with producing its delegate.
+  **Deviations**: (1) the *pool* did not split out — scopes still ride with the core instance's Layer 2
+  (`putInstance`); the shared resource pool view + the run-result-drop fix move to P4 with the reown. (2)
+  per the doc, `ExternalThread` / `reactFfi` stay until the FFI reactor phase. (3) api commands run as serial
+  *command turns* on the bus (a thunk that mutates + sends, committed like any reaction) rather than a direct
+  out-of-band commit.
 - **P4** — the shared resource pool view + base-class two-step reown; fix the run-result drop.
 - **P5** — sweep the deferred correctness items (C3/C4/C7/C8, audit wiring) on the new shape.
