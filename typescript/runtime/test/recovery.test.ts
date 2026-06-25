@@ -376,22 +376,18 @@ describe("recovery", () => {
   });
 
   test("replays an undrained outbox event in a fresh actor (a produced event survives a crash)", async () => {
-    // Seed the outbox with a run `delegate` (issuer = api root) as if it had been produced just before a
-    // crash, never consumed. A fresh actor must replay it from the outbox, summon the agent, and run it to
-    // completion — recorded durably as the delegation's `done` result, all reconstructed from the row.
+    // Simulate a crash right after `startRun` committed: the api root opened the run's delegation row
+    // (running) and produced its `delegate` atomically, but the delegate was never consumed. A fresh actor
+    // must reload the run row, replay the delegate from the outbox, summon the agent, and run it to
+    // completion — recorded durably as the delegation's `done` result, all reconstructed from the rows.
     const persistence = new StoringPersistence();
     const run = newDelegationId();
+    const target = { kind: "named" as const, name: createAgentName("main"), snapshot: SNAPSHOT };
+    persistence.seedDelegation(run, { caller: apiRootIdOf(PROJECT), target, argument: null });
     persistence.seedOutbox({
       seq: newOutboxSeq(),
       issuer: apiRootIdOf(PROJECT),
-      event: {
-        kind: "delegate",
-        from: "api",
-        to: "core",
-        delegation: run,
-        target: { kind: "named", name: createAgentName("main"), snapshot: SNAPSHOT },
-        argument: null,
-      },
+      event: { kind: "delegate", from: "api", to: "core", delegation: run, target, argument: null },
     });
 
     const actor = makeActor(constantIr(), persistence);

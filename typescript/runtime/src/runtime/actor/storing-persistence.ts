@@ -2,27 +2,39 @@
 // no-op), so the recovery path — commit at the turn boundary, then reload + reactivate in a fresh actor —
 // is exercisable without Postgres. The DB-backed `DbPersistence` mirrors this against real tables; keeping
 // a faithful in-memory twin lets recovery be unit-tested deterministically.
+//
+// One turn = one `transaction`: the substrate hands the reactor + outbox a `PersistenceTx` whose methods
+// mutate these maps. There is no real atomicity to enforce here (a single-threaded twin), so the tx just
+// applies each write as it is called; the FK / cascade order is the caller's (the reactor writes its instance
+// before the rows that reference it, and `dropInstance` cascades last).
 
 import { type DelegationState, isLiveDelegationState } from "../../db/tables/execution.js";
+import type { DelegateTarget } from "../event/types.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { Persistence, ProjectSnapshot } from "./persistence.js";
+import type {
+  OutboxMessage,
+  PersistedDelegation,
+  PersistedOpenEscalation,
+  Persistence,
+  PersistenceTx,
+  ProjectSnapshot,
+} from "./persistence.js";
 import {
   deserializeProject,
   type PersistedInstance,
   type PersistedScope,
   type PersistedThread,
-  serializeInstance,
 } from "./persistence-codec.js";
-import type { EntityTransition, OutboxMessage, TurnCommit } from "./turn-commit.js";
 
-/** A stored Layer 1 delegation edge (the durable parent→child record + its lifecycle). `live` is true for
- *  running / cancelling delegations (which still route) and false once done / gone (history only). */
+/** A stored Layer 1 delegation row (the durable caller→child record + its lifecycle). */
 interface StoredDelegation {
   caller: InstanceId;
+  target: DelegateTarget;
+  argument: Value | null;
   state: DelegationState;
-  result?: Value;
-  errorMessage?: string;
+  result: Value | null;
+  errorMessage: string | null;
 }
 
 interface StoredEscalation {
@@ -30,17 +42,17 @@ interface StoredEscalation {
   state: "open" | "answered";
   request: string;
   argument: Value | null;
+  answer: Value | null;
 }
 
 export class StoringPersistence implements Persistence {
   /** Layer 2, per instance: the instance row and its whole thread tree (replaced wholesale each turn). */
   private readonly instances = new Map<InstanceId, PersistedInstance>();
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
-  /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. A
-   *  scope that ascended to a new owner is re-keyed here by that owner's next persist. */
+  /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
-  /** Layer 1 entities. Cascaded with their owner on `drop` (a delegation with its caller, an escalation
-   *  with its raiser), matching the tables' `ON DELETE CASCADE`. */
+  /** Layer 1 entities. Cascaded with their owner on `dropInstance` (a delegation with its caller, an
+   *  escalation with its raiser), matching the tables' `ON DELETE CASCADE`. */
   private readonly delegations = new Map<DelegationId, StoredDelegation>();
   private readonly escalations = new Map<EscalationId, StoredEscalation>();
   /** Layer 3: the transactional outbox (produced-but-not-consumed events), insertion-ordered. */
@@ -57,106 +69,84 @@ export class StoringPersistence implements Persistence {
       [...this.threads.values()].flat(),
       [...this.scopes.values()],
     );
-    const delegations: Record<DelegationId, InstanceId> = {};
-    for (const [id, edge] of this.delegations) {
-      // Only live (running / cancelling) edges carry routing; finished ones are history.
-      if (isLiveDelegationState(edge.state)) {
-        delegations[id] = edge.caller;
-      }
-    }
-    const openEscalations: ProjectSnapshot["openEscalations"] = [];
-    for (const [id, edge] of this.escalations) {
-      if (edge.state === "open") {
-        openEscalations.push({
-          escalation: id,
-          raiser: edge.raiser,
-          request: edge.request,
-          argument: edge.argument,
+    const liveDelegations: PersistedDelegation[] = [];
+    for (const [delegation, row] of this.delegations) {
+      // Only live (running / cancelling) rows carry routing; finished ones are history.
+      if (isLiveDelegationState(row.state)) {
+        liveDelegations.push({
+          delegation,
+          caller: row.caller,
+          target: row.target,
+          argument: row.argument,
+          state: row.state,
+          result: row.result,
+          errorMessage: row.errorMessage,
         });
       }
     }
-    return { ...engine, delegations, openEscalations, pendingOutbox: [...this.outbox.values()] };
+    const openEscalations: PersistedOpenEscalation[] = [];
+    for (const [escalation, row] of this.escalations) {
+      if (row.state === "open") {
+        openEscalations.push({
+          escalation,
+          raiser: row.raiser,
+          request: row.request,
+          argument: row.argument,
+        });
+      }
+    }
+    return {
+      ...engine,
+      liveDelegations,
+      openEscalations,
+      pendingOutbox: [...this.outbox.values()],
+    };
   }
 
-  async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {
-    // Layer 3 (transactional outbox): consume the inbound row, produce the outbound ones — together with
-    // Layer 1 / Layer 2, so a crash neither loses an in-flight event nor double-delivers a consumed one.
-    if (commit.consumed !== null) this.outbox.delete(commit.consumed);
-    for (const message of commit.produced) this.outbox.set(message.seq, message);
-    // Layer 1: a `delegation-open` must precede the child instance that references it (FK order).
-    for (const transition of commit.transitions) this.applyTransition(transition);
-    // Layer 2: persist the instance's graph, drop it (cascading its threads / scopes / entities), or none
-    // (an api-root turn carries no engine continuation).
-    switch (commit.layer2.kind) {
-      case "none":
-        return;
-      case "drop":
-        this.dropInstance(commit.instanceId);
-        return;
-      case "persist": {
-        const serialized = serializeInstance(
-          projectId,
-          commit.layer2.instance,
-          commit.layer2.ownedScopes,
-        );
+  async transaction(
+    _projectId: ProjectId,
+    body: (tx: PersistenceTx) => Promise<void>,
+  ): Promise<void> {
+    await body(this.tx());
+  }
+
+  /** The per-turn write surface over the twin's maps (mutating in call order). */
+  private tx(): PersistenceTx {
+    return {
+      putDelegation: async (row) => {
+        this.delegations.set(row.delegation, {
+          caller: row.caller,
+          target: row.target,
+          argument: row.argument,
+          state: row.state,
+          result: row.result,
+          errorMessage: row.errorMessage,
+        });
+      },
+      putEscalation: async (row) => {
+        this.escalations.set(row.escalation, {
+          raiser: row.raiser,
+          state: row.state,
+          request: row.request,
+          argument: row.argument,
+          answer: row.answer,
+        });
+      },
+      putInstance: async (serialized) => {
         this.instances.set(serialized.instance.id, serialized.instance);
         this.threads.set(serialized.instance.id, serialized.threads);
         for (const scope of serialized.scopes) this.scopes.set(scope.scopeId, scope);
-        return;
-      }
-    }
-  }
-
-  private applyTransition(transition: EntityTransition): void {
-    switch (transition.kind) {
-      case "delegation-open":
-        this.delegations.set(transition.delegation, {
-          caller: transition.caller,
-          state: "running",
-        });
-        break;
-      case "delegation-done": {
-        // Terminal states are sticky — only a live delegation moves to a terminal one.
-        const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined && isLiveDelegationState(edge.state)) {
-          edge.state = "done";
-          edge.result = transition.result;
-        }
-        break;
-      }
-      case "delegation-cancelling": {
-        // `cancelling` only from `running` (never resurrecting a terminal or re-cancelling).
-        const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined && edge.state === "running") edge.state = "cancelling";
-        break;
-      }
-      case "delegation-gone": {
-        const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined && isLiveDelegationState(edge.state)) edge.state = "gone";
-        break;
-      }
-      case "delegation-failed": {
-        const edge = this.delegations.get(transition.delegation);
-        if (edge !== undefined && isLiveDelegationState(edge.state)) {
-          edge.state = "failed";
-          edge.errorMessage = transition.errorMessage;
-        }
-        break;
-      }
-      case "escalation-open":
-        this.escalations.set(transition.escalation, {
-          raiser: transition.raiser,
-          state: "open",
-          request: transition.request,
-          argument: transition.argument,
-        });
-        break;
-      case "escalation-answered": {
-        const edge = this.escalations.get(transition.escalation);
-        if (edge !== undefined) edge.state = "answered";
-        break;
-      }
-    }
+      },
+      dropInstance: async (instanceId) => {
+        this.dropInstance(instanceId);
+      },
+      consumeOutbox: async (seq) => {
+        this.outbox.delete(seq);
+      },
+      produceOutbox: async (messages) => {
+        for (const message of messages) this.outbox.set(message.seq, message);
+      },
+    };
   }
 
   private dropInstance(instanceId: InstanceId): void {
@@ -166,11 +156,11 @@ export class StoringPersistence implements Persistence {
       if (scope.ownerInstanceId === instanceId) this.scopes.delete(id);
     }
     // Cascade the entities this instance owns (issued delegations / raised escalations), like the FKs.
-    for (const [id, edge] of this.delegations) {
-      if (edge.caller === instanceId) this.delegations.delete(id);
+    for (const [id, row] of this.delegations) {
+      if (row.caller === instanceId) this.delegations.delete(id);
     }
-    for (const [id, edge] of this.escalations) {
-      if (edge.raiser === instanceId) this.escalations.delete(id);
+    for (const [id, row] of this.escalations) {
+      if (row.raiser === instanceId) this.escalations.delete(id);
     }
   }
 
@@ -179,16 +169,31 @@ export class StoringPersistence implements Persistence {
     return this.instances.size;
   }
 
-  /** Test helper: how many produced events are still undrained in the outbox (0 once a project quiesces —
-   *  every produced event was consumed). */
+  /** Test helper: how many produced events are still undrained in the outbox (0 once a project quiesces). */
   outboxSize(): number {
     return this.outbox.size;
   }
 
-  /** Test helper: seed the outbox directly, simulating an event produced just before a crash (so a fresh
-   *  actor must replay it). */
+  /** Test helper: seed the outbox directly, simulating an event produced just before a crash. */
   seedOutbox(message: OutboxMessage): void {
     this.outbox.set(message.seq, message);
+  }
+
+  /** Test helper: seed a live delegation row directly, simulating one the caller persisted just before a
+   *  crash (the caller opens its delegation row atomically with producing the `delegate`, so a recovered
+   *  actor sees both — the row in `liveDelegations`, the event in the outbox). */
+  seedDelegation(
+    delegation: DelegationId,
+    row: { caller: InstanceId; target: DelegateTarget; argument: Value | null },
+  ): void {
+    this.delegations.set(delegation, {
+      caller: row.caller,
+      target: row.target,
+      argument: row.argument,
+      state: "running",
+      result: null,
+      errorMessage: null,
+    });
   }
 
   /** Test helper: the stored Layer 1 state of a delegation (for asserting a run's durable outcome). */

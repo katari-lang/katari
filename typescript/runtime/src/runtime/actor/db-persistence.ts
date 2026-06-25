@@ -1,8 +1,10 @@
-// Drizzle-backed persistence: commit one turn atomically each turn boundary, load a project's graph on
-// reactivation. A commit writes the turn's Layer 2 (instances + threads + scopes — or the instance's drop)
-// together with the Layer 1 entity transitions it implies (delegations / escalations), in a single
-// transaction, so an edge's durable row never lags the engine threads that reference it. Loading returns
-// the engine graph plus the live (running / cancelling) delegation edges the actor routes by.
+// Drizzle-backed persistence: one turn = one `transaction`, in which the reacting reactor writes its own
+// state through a `PersistenceTx` and the substrate writes the transactional outbox. A delegation row is
+// upserted by its caller, an escalation by its raiser, a still-running instance's Layer 2 (instance +
+// threads + owned scopes) is replaced wholesale, and a completed instance is dropped (cascade). Writing all
+// of it in a single DB transaction is what keeps an edge's durable row from lagging the engine threads that
+// reference it. Loading returns the engine graph plus the live (running / cancelling) delegation rows and
+// open escalations each reactor reloads as its own.
 
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
@@ -15,23 +17,27 @@ import {
   outbox,
 } from "../../db/tables/execution.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
-import type { Persistence, ProjectSnapshot } from "./persistence.js";
+import type {
+  PersistedDelegation,
+  PersistedOpenEscalation,
+  Persistence,
+  PersistenceTx,
+  ProjectSnapshot,
+} from "./persistence.js";
 import {
   deserializeProject,
   type PersistedInstance,
   type PersistedScope,
   type PersistedThread,
-  serializeInstance,
 } from "./persistence-codec.js";
-import type { TurnCommit } from "./turn-commit.js";
 
 export class DbPersistence implements Persistence {
   constructor(private readonly db: Database) {}
 
   async ensureApiRoot(projectId: ProjectId, apiRootId: InstanceId): Promise<void> {
     // The api root runs no IR (no target / snapshot / engine state), so its row carries only identity +
-    // kind + status. It must exist before the first run's `delegation-open` (caller = the api root) is
-    // inserted, or the caller FK fails. Idempotent across restarts.
+    // kind + status. It must exist before the first run's delegation (caller = the api root) is inserted, or
+    // the caller FK fails. Idempotent across restarts.
     await this.db
       .insert(instances)
       .values({ id: apiRootId, projectId, kind: "api", status: "running" })
@@ -47,7 +53,7 @@ export class DbPersistence implements Persistence {
           .where(and(eq(instances.projectId, projectId), isNotNull(instances.engineState))),
         this.db.select().from(threads).where(eq(threads.projectId, projectId)),
         this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
-        // Only live edges carry routing; finished ones (done / gone) are history.
+        // Only live rows carry routing; finished ones (done / gone / failed) are history.
         this.db
           .select()
           .from(delegations)
@@ -61,8 +67,8 @@ export class DbPersistence implements Persistence {
           .select()
           .from(escalations)
           .where(and(eq(escalations.projectId, projectId), eq(escalations.state, "open"))),
-        // Undrained outbox rows, in production order (routing recovers from Layer 1, so replay order only
-        // needs to be stable, not strictly causal).
+        // Undrained outbox rows, in production order (routing recovers from the engine threads, so replay
+        // order only needs to be stable, not strictly causal).
         this.db
           .select()
           .from(outbox)
@@ -106,13 +112,22 @@ export class DbPersistence implements Persistence {
       values: row.values,
     }));
     const engine = deserializeProject(persistedInstances, persistedThreads, persistedScopes);
-    const liveDelegations: Record<DelegationId, InstanceId> = {};
-    for (const row of delegationRows) {
-      if (row.callerInstanceId !== null) {
-        liveDelegations[row.id as DelegationId] = row.callerInstanceId as InstanceId;
-      }
-    }
-    const openEscalations: ProjectSnapshot["openEscalations"] = escalationRows.map((row) => ({
+    const liveDelegations: PersistedDelegation[] = delegationRows.flatMap((row) =>
+      row.callerInstanceId === null
+        ? []
+        : [
+            {
+              delegation: row.id as DelegationId,
+              caller: row.callerInstanceId as InstanceId,
+              target: row.target,
+              argument: row.argument,
+              state: row.state,
+              result: row.result,
+              errorMessage: row.errorMessage,
+            },
+          ],
+    );
+    const openEscalations: PersistedOpenEscalation[] = escalationRows.map((row) => ({
       escalation: row.id as EscalationId,
       raiser: row.raiserInstanceId as InstanceId,
       request: row.request,
@@ -123,168 +138,114 @@ export class DbPersistence implements Persistence {
       issuer: row.instanceId as InstanceId,
       event: row.event,
     }));
-    return { ...engine, delegations: liveDelegations, openEscalations, pendingOutbox };
+    return { ...engine, liveDelegations, openEscalations, pendingOutbox };
   }
 
-  async commitTurn(projectId: ProjectId, commit: TurnCommit): Promise<void> {
-    await this.db.transaction(async (tx) => {
-      // Layer 3 (transactional outbox): consume the inbound row and enqueue the produced ones, in the same
-      // tx as the Layer 1/2 effects — so a crash neither loses an in-flight event nor double-delivers it.
-      if (commit.consumed !== null) {
-        await tx.delete(outbox).where(eq(outbox.seq, commit.consumed));
-      }
-      if (commit.produced.length > 0) {
-        await tx.insert(outbox).values(
-          commit.produced.map((message) => ({
+  async transaction(
+    projectId: ProjectId,
+    body: (tx: PersistenceTx) => Promise<void>,
+  ): Promise<void> {
+    await this.db.transaction(async (drizzleTx) => {
+      await body(this.tx(drizzleTx, projectId));
+    });
+  }
+
+  /** The per-turn write surface over one DB transaction. Each method issues a single statement; FK ordering
+   *  (instance before the rows that reference it, cascade drop last) is the reactor's call order. */
+  private tx(
+    drizzleTx: Parameters<Parameters<Database["transaction"]>[0]>[0],
+    projectId: ProjectId,
+  ): PersistenceTx {
+    return {
+      putDelegation: async (row) => {
+        await drizzleTx
+          .insert(delegations)
+          .values({
+            id: row.delegation,
+            projectId,
+            callerInstanceId: row.caller,
+            target: row.target,
+            argument: row.argument,
+            state: row.state,
+            result: row.result,
+            errorMessage: row.errorMessage,
+          })
+          .onConflictDoUpdate({
+            target: delegations.id,
+            set: { state: row.state, result: row.result, errorMessage: row.errorMessage },
+          });
+      },
+      putEscalation: async (row) => {
+        await drizzleTx
+          .insert(escalations)
+          .values({
+            id: row.escalation,
+            projectId,
+            raiserInstanceId: row.raiser,
+            request: row.request,
+            argument: row.argument,
+            state: row.state,
+            answer: row.answer,
+          })
+          .onConflictDoUpdate({
+            target: escalations.id,
+            set: { state: row.state, answer: row.answer },
+          });
+      },
+      putInstance: async (serialized) => {
+        const instance = serialized.instance;
+        await drizzleTx
+          .insert(instances)
+          .values({
+            id: instance.id,
+            projectId,
+            kind: instance.kind,
+            target: instance.target,
+            snapshotId: instance.snapshotId,
+            status: instance.status,
+            ambientGenerics: instance.ambientGenerics ?? undefined,
+            engineState: instance.engineState ?? undefined,
+            delegationId: instance.delegationId,
+          })
+          .onConflictDoUpdate({
+            target: instances.id,
+            set: {
+              status: instance.status,
+              engineState: instance.engineState ?? undefined,
+              ambientGenerics: instance.ambientGenerics ?? undefined,
+            },
+          });
+        // Replace the instance's thread + owned-scope rows wholesale (the trees are small).
+        await drizzleTx
+          .delete(threads)
+          .where(and(eq(threads.projectId, projectId), eq(threads.instanceId, instance.id)));
+        if (serialized.threads.length > 0)
+          await drizzleTx.insert(threads).values(serialized.threads);
+        await drizzleTx
+          .delete(scopes)
+          .where(and(eq(scopes.projectId, projectId), eq(scopes.ownerInstanceId, instance.id)));
+        if (serialized.scopes.length > 0) await drizzleTx.insert(scopes).values(serialized.scopes);
+      },
+      dropInstance: async (instanceId) => {
+        // Cascade removes the instance's threads / scopes / owned delegations + escalations.
+        await drizzleTx
+          .delete(instances)
+          .where(and(eq(instances.projectId, projectId), eq(instances.id, instanceId)));
+      },
+      consumeOutbox: async (seq) => {
+        await drizzleTx.delete(outbox).where(eq(outbox.seq, seq));
+      },
+      produceOutbox: async (messages) => {
+        if (messages.length === 0) return;
+        await drizzleTx.insert(outbox).values(
+          messages.map((message) => ({
             seq: message.seq,
             projectId,
             instanceId: message.issuer,
             event: message.event,
           })),
         );
-      }
-      // FK ordering: open a delegation *before* the child instance that references it; open an escalation
-      // *after* its raiser instance exists; apply state updates last (they touch existing rows only).
-      for (const transition of commit.transitions) {
-        if (transition.kind !== "delegation-open") continue;
-        await tx
-          .insert(delegations)
-          .values({
-            id: transition.delegation,
-            projectId,
-            callerInstanceId: transition.caller,
-            target: transition.target,
-            argument: transition.argument,
-            state: "running",
-          })
-          .onConflictDoNothing();
-      }
-
-      if (commit.layer2.kind === "drop") {
-        // Cascade removes the instance's threads / scopes / owned delegations + escalations.
-        await tx
-          .delete(instances)
-          .where(and(eq(instances.projectId, projectId), eq(instances.id, commit.instanceId)));
-      } else if (commit.layer2.kind === "persist") {
-        const serialized = serializeInstance(
-          projectId,
-          commit.layer2.instance,
-          commit.layer2.ownedScopes,
-        );
-        await tx
-          .insert(instances)
-          .values({
-            id: serialized.instance.id,
-            projectId,
-            kind: serialized.instance.kind,
-            delegationId: serialized.instance.delegationId,
-            target: serialized.instance.target,
-            snapshotId: serialized.instance.snapshotId,
-            status: serialized.instance.status,
-            ambientGenerics: serialized.instance.ambientGenerics ?? undefined,
-            engineState: serialized.instance.engineState ?? undefined,
-          })
-          .onConflictDoUpdate({
-            target: instances.id,
-            set: {
-              status: serialized.instance.status,
-              engineState: serialized.instance.engineState ?? undefined,
-              ambientGenerics: serialized.instance.ambientGenerics ?? undefined,
-            },
-          });
-        // Replace the instance's thread + owned-scope rows wholesale (the trees are small).
-        const instanceId = serialized.instance.id;
-        await tx
-          .delete(threads)
-          .where(and(eq(threads.projectId, projectId), eq(threads.instanceId, instanceId)));
-        if (serialized.threads.length > 0) await tx.insert(threads).values(serialized.threads);
-        await tx
-          .delete(scopes)
-          .where(and(eq(scopes.projectId, projectId), eq(scopes.ownerInstanceId, instanceId)));
-        if (serialized.scopes.length > 0) await tx.insert(scopes).values(serialized.scopes);
-      }
-
-      // Edge state updates (and escalation opens, which need their raiser instance to exist). No-ops if the
-      // row was already cascade-removed (e.g. a delegation whose caller dropped this same turn). Terminal
-      // states are sticky: a `done` / `gone` / `failed` only takes from a live (running / cancelling) row,
-      // and `cancelling` only from `running` — so a failure recorded first is never overwritten by the
-      // `gone` of the teardown it triggers.
-      for (const transition of commit.transitions) {
-        switch (transition.kind) {
-          case "delegation-done":
-            await tx
-              .update(delegations)
-              .set({ state: "done", result: transition.result })
-              .where(
-                and(
-                  eq(delegations.projectId, projectId),
-                  eq(delegations.id, transition.delegation),
-                  inArray(delegations.state, LIVE_DELEGATION_STATES),
-                ),
-              );
-            break;
-          case "delegation-cancelling":
-            await tx
-              .update(delegations)
-              .set({ state: "cancelling" })
-              .where(
-                and(
-                  eq(delegations.projectId, projectId),
-                  eq(delegations.id, transition.delegation),
-                  eq(delegations.state, "running"),
-                ),
-              );
-            break;
-          case "delegation-gone":
-            await tx
-              .update(delegations)
-              .set({ state: "gone" })
-              .where(
-                and(
-                  eq(delegations.projectId, projectId),
-                  eq(delegations.id, transition.delegation),
-                  inArray(delegations.state, LIVE_DELEGATION_STATES),
-                ),
-              );
-            break;
-          case "delegation-failed":
-            await tx
-              .update(delegations)
-              .set({ state: "failed", errorMessage: transition.errorMessage })
-              .where(
-                and(
-                  eq(delegations.projectId, projectId),
-                  eq(delegations.id, transition.delegation),
-                  inArray(delegations.state, LIVE_DELEGATION_STATES),
-                ),
-              );
-            break;
-          case "escalation-open":
-            await tx
-              .insert(escalations)
-              .values({
-                id: transition.escalation,
-                projectId,
-                raiserInstanceId: transition.raiser,
-                request: transition.request,
-                argument: transition.argument,
-                state: "open",
-              })
-              .onConflictDoNothing();
-            break;
-          case "escalation-answered":
-            await tx
-              .update(escalations)
-              .set({ state: "answered", answer: transition.answer })
-              .where(
-                and(
-                  eq(escalations.projectId, projectId),
-                  eq(escalations.id, transition.escalation),
-                ),
-              );
-            break;
-        }
-      }
-    });
+      },
+    };
   }
 }
