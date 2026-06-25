@@ -12,8 +12,9 @@ export abstract class Reactor {
   /** React to one inbound external event: run the turn in memory (updating this reactor's own view of the
    *  entities it owns) and return the `Reaction` the substrate commits — its Layer 1 transitions, Layer 2,
    *  and the events to emit. Pure with respect to the DB: it persists nothing, so the same turn can be
-   *  re-run if its commit fails. */
-  abstract react(event: ExternalEvent): Reaction;
+   *  re-run if its commit fails. May be async (the core engine's drive awaits the IR); the api root, which
+   *  runs no engine threads, reacts synchronously. */
+  abstract react(event: ExternalEvent): Reaction | Promise<Reaction>;
 
   /** Strictly-post-commit side effects (durable-first): settle an in-process promise, dispatch an FFI call,
    *  drop a routing edge. Runs only after the Reaction is durably committed, so recovery is always possible
