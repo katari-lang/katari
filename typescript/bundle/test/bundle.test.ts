@@ -3,7 +3,7 @@
 // proving it is valid, self-contained ESM whose registrations land under the package name (the bundle↔port
 // contract: each file sets `globalThis.__katariModule`, and `katari.agent` reads it).
 
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -107,6 +107,17 @@ describe("bundleSidecar", () => {
       packages: [{ packageName: "empty", sourceRoot: join(tmpdir(), "katari-does-not-exist-xyz") }],
     });
     expect(bundle).toBeNull();
+  });
+
+  test("terminates on a symlink cycle in the source tree", async () => {
+    const src = await fixture({
+      "main.ts": `import katari from "@katari-lang/port";\nkatari.agent("a", () => 1);`,
+    });
+    // A subdirectory symlinked back to the source root loops forever without the cycle guard.
+    await symlink(src, join(src, "loop"), "dir");
+    const bundle = await bundleSidecar({ packages: [{ packageName: "ext_agent", sourceRoot: src }] });
+    const registered = await runBundle(bundle?.entry ?? "");
+    expect(registered).toEqual(["ext_agent.a"]); // walked once, registered once — no hang, no dup
   });
 
   test("surfaces an esbuild failure as a BundleError", async () => {

@@ -9,6 +9,7 @@
 // runs before the file body yet keeps the file's own imports and exports legal at the module top level, so
 // a package can split its sidecar across several files that import/export from one another.
 
+import type { Stats } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import type { SidecarBundle } from "@katari-lang/types";
@@ -74,19 +75,39 @@ async function resolveSources(packages: BundlePackage[]): Promise<PackageSource[
   return sources;
 }
 
-/** Every `.ts`/`.js` file under `root` (recursively), sorted for a reproducible bundle. Type-declaration
- *  files (`.d.ts`) are skipped — they carry no runtime code to register. */
+/** Every `.ts`/`.js` file under `root` (recursively), sorted for a reproducible bundle. Symlinks are
+ *  followed (a symlinked source file or directory is included, like the compiler's `.ktr` scan), guarding
+ *  against cycles by walking each canonical directory once. Type-declaration files (`.d.ts`) are skipped —
+ *  they carry no runtime code to register. */
 async function collectSourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];
+  const seenDirectories = new Set<string>();
   const directories = [root];
   for (let directory = directories.pop(); directory !== undefined; directory = directories.pop()) {
+    // A directory reached twice (a symlink loop, or a shared symlinked subtree) is walked once. Keying on
+    // the canonical path is what makes the guard cycle-proof.
+    const canonical = await realpath(directory);
+    if (seenDirectories.has(canonical)) continue;
+    seenDirectories.add(canonical);
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const full = join(directory, entry.name);
-      if (entry.isDirectory()) directories.push(full);
-      else if (entry.isFile() && isSourceFile(entry.name)) files.push(full);
+      // Classify by the symlink's target (the `Dirent` reflects the link itself), so a symlinked source is
+      // followed rather than skipped; a broken symlink resolves to null and is ignored.
+      const target = entry.isSymbolicLink() ? await statOrNull(full) : entry;
+      if (target === null) continue;
+      if (target.isDirectory()) directories.push(full);
+      else if (target.isFile() && isSourceFile(entry.name)) files.push(full);
     }
   }
   return files.sort();
+}
+
+async function statOrNull(path: string): Promise<Stats | null> {
+  try {
+    return await stat(path);
+  } catch {
+    return null;
+  }
 }
 
 function isSourceFile(name: string): boolean {
