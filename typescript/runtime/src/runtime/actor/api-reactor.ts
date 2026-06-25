@@ -107,6 +107,8 @@ export class ApiReactor extends Reactor {
         outbound: [
           {
             kind: "delegate",
+            from: "api",
+            to: "core",
             delegation,
             target: { kind: "named", name: qualifiedName, snapshot },
             argument,
@@ -131,7 +133,7 @@ export class ApiReactor extends Reactor {
         instanceId: this.host.apiRootId,
         layer2: { kind: "none" },
         transitions: [],
-        outbound: [{ kind: "terminate", delegation: run }],
+        outbound: [{ kind: "terminate", from: "api", to: "core", delegation: run }],
       },
       null,
     );
@@ -150,7 +152,9 @@ export class ApiReactor extends Reactor {
         instanceId: this.host.apiRootId,
         layer2: { kind: "none" },
         transitions: [],
-        outbound: [{ kind: "escalateAck", delegation: open.run, escalation, value }],
+        outbound: [
+          { kind: "escalateAck", from: "api", to: "core", delegation: open.run, escalation, value },
+        ],
       },
       null,
     );
@@ -241,7 +245,7 @@ export class ApiReactor extends Reactor {
           errorMessage: escalationErrorMessage(event),
         },
       ],
-      outbound: [{ kind: "terminate", delegation: event.delegation }],
+      outbound: [{ kind: "terminate", from: "api", to: "core", delegation: event.delegation }],
     };
   }
 

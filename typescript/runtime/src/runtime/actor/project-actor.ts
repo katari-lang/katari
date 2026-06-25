@@ -1,18 +1,17 @@
-// ProjectActor: the warm, per-project composition root. It wires three siblings together and routes between
-// them: the `Substrate` (the transactional bus — serial mailbox + the one atomic commit per turn), the
-// `CoreReactor` (the engine — instances, the delegation graph, the IR turns), and the `ApiReactor` (the
-// user-facing management root — runs and escalations). It owns no engine state itself; it is the substrate's
-// host (supplying `dispatch` + the domain half of `reactivate`) and the dispatcher that decides, for each
-// inbound event, which reactor reacts. Everything is serial; concurrency is the ack model (a parent that
-// fanned out several delegates resumes each branch as its delegateAck lands).
+// ProjectActor: the warm, per-project composition root. It wires three siblings together: the `Substrate`
+// (the transactional bus — serial mailbox + the one atomic commit per turn), the `CoreReactor` (the engine —
+// instances, the delegation graph, the IR turns), and the `ApiReactor` (the user-facing management root —
+// runs and escalations). It owns no engine state itself; it is the substrate's host (supplying `dispatch` +
+// the domain half of `reactivate`) and routes each inbound event **purely by its `to`** (`reactors[to]`) — no
+// api|core decision, since the emitter stamped the destination. Everything is serial; concurrency is the ack
+// model (a parent that fanned out several delegates resumes each branch as its delegateAck lands).
 //
-// Until the FFI reactor lands (R3), FFI completions still route to the core reactor (`reactFfi`); and the
-// api|core routing decision is a sentinel comparison (a run delegation's caller is the api root) rather than
-// an event's reactor-name address.
+// Until the FFI reactor lands, FFI completions still route to the core reactor (`reactFfi`) as an ephemeral
+// trigger (they carry no `to`).
 
 import type { QualifiedName } from "@katari-lang/types";
 import type { PrimRunner } from "../engine/context.js";
-import type { ActorMessage, ExternalEvent, FfiResult } from "../event/types.js";
+import type { ActorMessage, FfiResult, ReactorName } from "../event/types.js";
 import { isFfiResult } from "../event/types.js";
 import type { ExternalRunner } from "../external/runner.js";
 import {
@@ -30,16 +29,8 @@ import type { Value } from "../value/types.js";
 import { type ApiHost, ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
 import type { Persistence } from "./persistence.js";
+import type { Reactor } from "./reactor.js";
 import { Substrate } from "./substrate.js";
-import type { Reaction } from "./turn-commit.js";
-
-/** What routing one inbound message produced: the Reaction the substrate commits (`null` = nothing to
- *  commit — a late FFI completion whose instance is already gone, which also carries no outbox row), plus an
- *  optional strictly-post-commit side effect (the api root settling its in-process result promise). */
-interface Routed {
-  reaction: Reaction | null;
-  after?: () => void;
-}
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
 // so existing importers (tests, callers) keep their entry point.
@@ -68,6 +59,8 @@ export class ProjectActor {
   private readonly core: CoreReactor;
   /** The api management root reactor: the user-facing run / escalation logic. */
   private readonly api: ApiReactor;
+  /** The reactor registry, keyed by name: the substrate dispatches an inbound event purely by its `to`. */
+  private readonly reactors: Record<ReactorName, Reactor>;
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
@@ -86,6 +79,7 @@ export class ProjectActor {
       dispatch: (message, seq) => this.handle(message, seq),
     });
     this.api = new ApiReactor(this.apiHost());
+    this.reactors = { core: this.core, api: this.api };
     // FFI completions re-enter through the same serial mailbox as every other external message.
     dependencies.external.onResult((result) => this.feed(result));
   }
@@ -172,48 +166,21 @@ export class ProjectActor {
 
   // ─── dispatch (the substrate's routing half) ────────────────────────────────────────────────────
 
-  /** Route one inbound message to the reactor that owns it and run its turn in memory, returning the Reaction
-   *  the substrate then commits (with the inbound row `seq`) plus any post-commit side effect. This is the
-   *  single commit funnel: every turn — core or api — flows `route → substrate.commit → after`. A late FFI
-   *  completion whose instance is gone yields a `null` reaction (and carries no row), so nothing commits. */
+  /** Route one inbound message to the reactor that owns it, run its turn, commit, then run its post-commit
+   *  side effect. Self-routing: the destination is the event's `to` (the emitter stamped it) — there is no
+   *  api|core decision here, just a registry lookup. A reactor reacts (mutating its warm state and producing
+   *  sends), the substrate commits the Reaction, then `afterCommit` settles durable-first (the api root's
+   *  result promise; a no-op for core). An FFI completion is an ephemeral core trigger (no `to`): it resumes
+   *  its core instance directly, and yields a `null` reaction when its instance is already gone (no row). */
   private async handle(message: ActorMessage, seq: OutboxSeq | null): Promise<void> {
-    const { reaction, after } = await this.route(message);
-    if (reaction !== null) await this.substrate.commit(reaction, seq);
-    after?.();
-  }
-
-  /** Decide which reactor owns `message` and run its turn. `delegate`, `escalateAck`, and `terminate` always
-   *  target a `core` instance (a freshly summoned child, the escalation's raiser, the cancelled child); only
-   *  `delegateAck` / `escalate` / `terminateAck` route to the delegation's *caller* via `routeToCaller`. FFI
-   *  completions are ephemeral triggers that resume their core instance. */
-  private async route(message: ActorMessage): Promise<Routed> {
-    if (isFfiResult(message)) return { reaction: await this.core.reactFfi(message) };
-    switch (message.kind) {
-      case "delegate":
-      case "escalateAck":
-      case "terminate":
-        return { reaction: await this.core.react(message) };
-      case "delegateAck":
-      case "escalate":
-      case "terminateAck":
-        return this.routeToCaller(message);
+    if (isFfiResult(message)) {
+      const reaction = await this.core.reactFfi(message);
+      if (reaction !== null) await this.substrate.commit(reaction, seq);
+      return;
     }
-  }
-
-  /** The single api|core dispatch. A `delegateAck` / `escalate` / `terminateAck` routes to its delegation's
-   *  caller: a run's caller is the api root (reacts in the `ApiReactor`, settling its result promise after
-   *  commit), else a core caller reacts in the engine (which resolves the caller from its own routing graph).
-   *  The boundary is crossed once, here, by the core reactor's `isRunDelegation` sentinel. */
-  private async routeToCaller(
-    message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
-  ): Promise<Routed> {
-    // delegateAck / terminateAck end the delegation, so its child edge is dropped (an `escalate` leaves the
-    // run running, so it keeps its child — that is how the eventual `escalateAck` finds the raiser).
-    if (message.kind !== "escalate") this.core.dropChildEdge(message.delegation);
-    if (this.core.isRunDelegation(message.delegation)) {
-      const reaction = this.api.react(message);
-      return { reaction, after: () => this.api.afterCommit(message, reaction) };
-    }
-    return { reaction: await this.core.react(message) };
+    const reactor = this.reactors[message.to];
+    const reaction = await reactor.react(message);
+    await this.substrate.commit(reaction, seq);
+    reactor.afterCommit(message, reaction);
   }
 }

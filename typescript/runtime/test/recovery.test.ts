@@ -386,6 +386,8 @@ describe("recovery", () => {
       issuer: apiRootIdOf(PROJECT),
       event: {
         kind: "delegate",
+        from: "api",
+        to: "core",
         delegation: run,
         target: { kind: "named", name: createAgentName("main"), snapshot: SNAPSHOT },
         argument: null,

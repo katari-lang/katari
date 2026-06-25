@@ -20,7 +20,14 @@ import { createProjectStore } from "../engine/store.js";
 import { completeExternalAbort } from "../engine/thread-ops.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
-import type { DelegateTarget, ExternalEvent, FfiResult, InternalEvent } from "../event/types.js";
+import type {
+  DelegateTarget,
+  ExternalEvent,
+  ExternalEventBody,
+  FfiResult,
+  InternalEvent,
+  ReactorName,
+} from "../event/types.js";
 import type { ExternalRunner } from "../external/runner.js";
 import type { DelegationId, InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
@@ -87,10 +94,18 @@ export class CoreReactor extends Reactor {
     return this.delegationCaller[delegation] === this.apiRootId;
   }
 
-  /** Drop a finished delegation's child edge (a terminal ack ends it; an `escalate` keeps it so the eventual
-   *  `escalateAck` still finds the raiser). */
-  dropChildEdge(delegation: DelegationId): void {
-    delete this.delegationChild[delegation];
+  /** The destination reactor for an engine-emitted event. An ack / escalate routes to the delegation's
+   *  caller reactor (the api root for a run, else core); a request leg (delegate / terminate / escalateAck)
+   *  targets core (a sub-callee / cancelled child / core raiser — all core in v0.1.0; ffi is in-CORE). */
+  private routeOf(body: ExternalEventBody): ReactorName {
+    switch (body.kind) {
+      case "delegateAck":
+      case "escalate":
+      case "terminateAck":
+        return this.isRunDelegation(body.delegation) ? "api" : "core";
+      default:
+        return "core";
+    }
   }
 
   /** Record / drop a run delegation the api root issues / finishes (its caller is the api root). */
@@ -376,13 +391,20 @@ export class CoreReactor extends Reactor {
     // DB reflection happens once the internal queue is empty (the turn boundary). A completed instance is
     // dropped (cascade), a still-running one is written through with its owned scopes — either way together
     // with the Layer 1 transitions, in one atomic commit.
-    const outbound = ctx.buffers.outbound;
+    // Stamp routing on the engine's routing-less outbound: every event is `from: "core"`; its `to` is the
+    // delegation's caller reactor for an ack / escalate leg (the api root for a run, else core), or core for a
+    // request leg (a sub-call's delegate, a cancel's terminate, an answer's escalateAck — all core in v0.1.0).
+    const outbound: ExternalEvent[] = ctx.buffers.outbound.map((body) => ({
+      ...body,
+      from: "core" as const,
+      to: this.routeOf(body),
+    }));
     const transitions = [...extraTransitions, ...outboundTransitions(instance.id, outbound)];
     // Record the caller of every delegate this turn issues (the warm-path mirror; the outbox row's issuer
     // re-establishes the same on recovery). The escalate / escalateAck / terminate legs route by
     // `delegationChild`, already set when the child was summoned, so they need no separate mirror.
-    for (const event of outbound) {
-      if (event.kind === "delegate") this.delegationCaller[event.delegation] = instance.id;
+    for (const body of ctx.buffers.outbound) {
+      if (body.kind === "delegate") this.delegationCaller[body.delegation] = instance.id;
     }
     let layer2: Layer2Commit;
     if (isInstanceComplete(instance)) {
@@ -390,6 +412,9 @@ export class CoreReactor extends Reactor {
       // in-transit) so the caller re-owns them in its `onDelegateAck`. Only when there is a caller — a
       // run-root result leaves the engine, so its captured scopes (if any) simply drop with the instance.
       this.ascendReturnedResources(instance, outbound);
+      // The completing instance ends its delegation: drop its child edge here, in CORE's turn, so the cleanup
+      // does not depend on which reactor handles the resulting delegateAck / terminateAck (a run's goes to api).
+      if (instance.delegationId !== null) delete this.delegationChild[instance.delegationId];
       teardownInstance(this.store, instance.id);
       layer2 = { kind: "drop" };
     } else {

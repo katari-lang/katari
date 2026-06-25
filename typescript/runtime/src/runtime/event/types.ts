@@ -62,7 +62,13 @@ export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
   | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string };
 
-export type ExternalEvent =
+/** Which reactor an external event originates from / is destined for. An event is self-routing: the
+ *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
+ *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. */
+export type ReactorName = "core" | "api";
+
+/** An external event's payload — what the engine emits, before routing is stamped on it. */
+export type ExternalEventBody =
   | {
       kind: "delegate";
       delegation: DelegationId;
@@ -91,7 +97,11 @@ export type ExternalEvent =
     }
   | { kind: "escalateAck"; delegation: DelegationId; escalation: EscalationId; value: Value };
 
-export type EngineEvent = InternalEvent | ExternalEvent;
+/** A routed external event: a payload plus its `from` (issuing reactor) and `to` (destination reactor). The
+ *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives. */
+export type ExternalEvent = ExternalEventBody & { from: ReactorName; to: ReactorName };
+
+export type EngineEvent = InternalEvent | ExternalEventBody;
 
 // ─── FFI completion + actor mailbox (the "external consumer" input) ───────────────────────────────
 

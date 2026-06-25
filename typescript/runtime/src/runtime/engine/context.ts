@@ -7,7 +7,7 @@
 // drains (domain-model §5: "DB reflection after the internal queue is empty").
 
 import type { BlockId, BlockInformation } from "@katari-lang/types";
-import type { ExternalEvent, InternalEvent } from "../event/types.js";
+import type { ExternalEventBody, InternalEvent } from "../event/types.js";
 import type { ExternalRunner } from "../external/runner.js";
 import type { ProjectId, SnapshotId } from "../ids.js";
 import type { BlobStore } from "../value/blob-store.js";
@@ -48,8 +48,9 @@ export interface LogEntry {
 export interface StepBuffers {
   /** The internal event queue, drained to empty within the turn. */
   internalQueue: InternalEvent[];
-  /** External events produced this turn, flushed to the actor mailbox after the DB persist. */
-  outbound: ExternalEvent[];
+  /** External events produced this turn (routing-less payloads — the CORE reactor stamps from/to when it
+   *  harvests them), flushed to the actor mailbox after the DB persist. */
+  outbound: ExternalEventBody[];
   /** Structured log lines emitted this turn. */
   logs: LogEntry[];
 }
@@ -68,7 +69,7 @@ export interface StepContext {
   /** Push an internal event onto this turn's queue (processed before the turn ends). */
   enqueue(event: InternalEvent): void;
   /** Buffer an outbound external event (flushed by the actor after persist). */
-  emit(event: ExternalEvent): void;
+  emit(event: ExternalEventBody): void;
   log(level: LogLevel, message: string): void;
 }
 
