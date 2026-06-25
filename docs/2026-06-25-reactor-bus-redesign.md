@@ -338,23 +338,24 @@ Each phase ships green; the engine internals (thread-ops) are untouched througho
   dropping them.
 - **R3 — FFI reactor.** Introduce `FfiReactor` + the `FfiExecutor` port; reroute external-agent delegates to
   `to = ffi`; delete `ExternalThread` / `ExternalRunner` / `resumeInFlightExternals`. Recovery via re-dispatch.
-- **R4 — generalise persistence.** `kind → reactor name`, `engine_state → reactor_state`, add
-  `caller_reactor` / `raiser_reactor`; one `applyTransition` over the shared vocabulary (the executors stay
-  native — Maps vs SQL). Wire `run_escalations_audit` on `escalation-answered`.
+- **R4 — generalise persistence.** `kind → reactor name` (an instance's kind *is* its reactor, so no separate
+  `*_reactor` columns), `engine_state → reactor_state`; one `applyTransition` over the shared vocabulary (the
+  executors stay native — Maps vs SQL). Wire `run_escalations_audit` on `escalation-answered`.
 - **R5 — the deferred correctness items on the new structure.** C4 (commit-failure → drop & reactivate — now
   trivial: the substrate drops warm reactors and re-runs `reactivate`), C7 (drop re-keys ascended scopes), C8
   (outbox ordinal), C3 (atomic startRun). These are cheaper here than on the old shape, which is why they were
   deferred.
 
-## 10. Open decisions (flagged judgment calls)
+## 10. Decisions (resolved 2026-06-25)
 
-1. **api root is one permanent durable instance (the owner of run delegations + escaped run-result resources);
-   routing is by reactor name.** Routing-by-name replaces only the sentinel *dispatch*; `ensureApiRoot` and the
-   api root instance row **stay** (they are the FK referent / cascade owner). [Corrected from an earlier draft
-   that wrongly proposed deleting the api instance — ownership needs it; routing does not.]
-2. **FFI completion stays ephemeral** (idempotent-under-redispatch), vs making it a durable mailbox event.
-   Recommended ephemeral (matches today; durable would require the sidecar to be transactional). Confirm.
-3. **`reactor_state` as one opaque JSONB per reactor** vs keeping `engine_state` core-specific and giving ffi
-   its own table. Recommended one column (uniform load/persist); ffi's descriptor is tiny.
-4. **ENV** — the prototype also had an ENV module. Not modelled here (no current consumer). Add as a reactor
-   later if/when env effects return, the same way ffi folds in.
+All confirmed with the user; the design is final.
+
+1. **api root is one permanent durable instance** (the owner of run delegations + escaped run-result
+   resources); **routing is by reactor name.** Routing-by-name replaces only the sentinel *dispatch*;
+   `ensureApiRoot` and the api root instance row **stay** (they are the FK referent / cascade owner).
+2. **FFI completion stays ephemeral** (idempotent-under-redispatch) — not a durable mailbox event. Matches
+   today; a durable completion would require the sidecar itself to be transactional, which is out of scope.
+3. **`reactor_state` is one opaque JSONB per reactor** (uniform load/persist); ffi's descriptor is tiny, so it
+   needs no table of its own.
+4. **ENV is not modelled now** (no current consumer). When env effects return, an `EnvReactor` folds in the
+   same way `ffi` does — no further design work needed.
