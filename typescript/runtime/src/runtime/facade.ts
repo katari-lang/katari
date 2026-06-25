@@ -14,7 +14,6 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { projects } from "../db/tables/projects.js";
 import { NotFoundError } from "../lib/errors.js";
-import { runRepository } from "../modules/run/run.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
@@ -77,29 +76,28 @@ export const facade = {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
     const argument = input.argument !== undefined ? jsonToValue(input.argument) : null;
     // The engine mints the run delegation and kicks off the run; its id is the durable run handle and its
-    // Layer 1 row is the outcome's source of truth. We only record the run's metadata sidecar under that id
-    // (the engine writes / updates the delegation row itself). The in-process `result` promise is ignored —
-    // the API reads the outcome from the delegation (so it is correct even after a crash + recovery).
-    const { run, result } = registry
+    // Layer 1 row is the outcome's source of truth. The run's metadata sidecar (`runs` row) is written by the
+    // engine in the SAME commit as the run's `delegate` — `await started` resolves once that launch commit is
+    // durable, so the run is immediately visible to the API's reads. The in-process `result` promise is
+    // ignored (the API reads the outcome from the delegation, correct even after a crash + recovery).
+    const { run, result, started } = registry
       .actorFor(input.projectId as ProjectId)
-      .startRun(createAgentName(input.qualifiedName), snapshotId as SnapshotId, argument);
+      .startRun(
+        createAgentName(input.qualifiedName),
+        snapshotId as SnapshotId,
+        argument,
+        input.name ?? input.qualifiedName,
+      );
     void result.catch(() => {}); // swallow: the durable outcome is the delegation, not this promise
-    await runRepository.start(db, {
-      id: run,
-      projectId: input.projectId,
-      name: input.name ?? input.qualifiedName,
-      qualifiedName: input.qualifiedName,
-      snapshotId,
-      argument,
-    });
+    await started;
     return { runId: run };
   },
 
   async cancel(input: CancelRunInput): Promise<void> {
-    // Record the user's reason, then ask the engine to terminate the run's root. The terminate cascade moves
-    // the run delegation to `gone` — the durable `cancelled` outcome the API projects.
-    await runRepository.setCancelReason(db, input.projectId, input.runId, input.reason);
-    registry
+    // Ask the engine to terminate the run's root, recording the user's reason on the `runs` row in the same
+    // commit as the `terminate`. The terminate cascade moves the run delegation to `gone` — the durable
+    // `cancelled` outcome the API projects.
+    await registry
       .actorFor(input.projectId as ProjectId)
       .cancelRun(input.runId as DelegationId, input.reason);
   },

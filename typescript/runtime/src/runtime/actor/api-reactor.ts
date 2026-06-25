@@ -23,7 +23,12 @@ import {
   type SnapshotId,
 } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { PersistedDelegation, PersistenceTx } from "./persistence.js";
+import type {
+  PersistedDelegation,
+  PersistedRun,
+  PersistedRunEscalationAudit,
+  PersistenceTx,
+} from "./persistence.js";
 import { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
 
@@ -67,6 +72,12 @@ export class ApiReactor extends Reactor {
   /** A cancelling run's reason — held only to decorate the in-process `RunCancelledError` (the durable
    *  reason is `runs.cancelReason`). Kept only while the run is tracked in-process, so it cannot leak. */
   private readonly cancelReasons: Record<DelegationId, string | undefined> = {};
+  /** This turn's `runs`-table writes — the api root owns the metadata sidecar (it persists them atomically
+   *  with the run's `delegate` / `terminate` / `escalateAck`, so the API never sees a run without metadata).
+   *  Flushed and cleared by `persist`. */
+  private pendingRunStarts: PersistedRun[] = [];
+  private pendingCancelReasons: Array<{ run: DelegationId; reason: string | null }> = [];
+  private pendingAudits: PersistedRunEscalationAudit[] = [];
 
   constructor(
     private readonly apiRootId: InstanceId,
@@ -80,9 +91,17 @@ export class ApiReactor extends Reactor {
     return this.apiRootId;
   }
 
-  /** The api root runs no engine threads — its turn writes only the Layer 1 rows it owns. */
+  /** The api root runs no engine threads — its turn writes the Layer 1 rows it owns plus the run-metadata
+   *  sidecar / audit it staged this turn (so they commit atomically with the events it produced). */
   async persist(tx: PersistenceTx): Promise<void> {
     await this.flushLayer1(tx);
+    for (const run of this.pendingRunStarts) await tx.putRun(run);
+    for (const { run, reason } of this.pendingCancelReasons)
+      await tx.setRunCancelReason(run, reason);
+    for (const audit of this.pendingAudits) await tx.putRunEscalationAudit(audit);
+    this.pendingRunStarts = [];
+    this.pendingCancelReasons = [];
+    this.pendingAudits = [];
   }
 
   /** Drop the api root's durable-derived warm state so reactivation rebuilds it (idempotent — safe on a cold
@@ -96,6 +115,9 @@ export class ApiReactor extends Reactor {
     }
     for (const key of Object.keys(this.cancelReasons))
       delete this.cancelReasons[key as DelegationId];
+    this.pendingRunStarts = [];
+    this.pendingCancelReasons = [];
+    this.pendingAudits = [];
   }
 
   /** Reject and drop every in-process run-result promise after a poisoned commit: the run continues durably
@@ -109,26 +131,36 @@ export class ApiReactor extends Reactor {
 
   // ─── commands (the api root issuing external events on a user's behalf) ─────────────────────────
 
-  /** Start a run: summon a root instance for `qualifiedName@snapshot`. Returns the run delegation (the handle
-   *  for `cancelRun`) and a promise that settles with the result (or rejects: a panic / unhandled escape
-   *  fails it, a cancel rejects it with `RunCancelledError`). The delegation row + delegate are produced in a
-   *  serial command turn; the resolvers are captured now so a fast run cannot settle before they exist. */
+  /** Start a run: summon a root instance for `qualifiedName@snapshot`, recording its `runs` metadata sidecar
+   *  atomically with the run's `delegate` (so the API never sees a run without its launch metadata, nor vice
+   *  versa). Returns the run delegation (the `cancelRun` handle), an in-process `result` promise (a non-SoT
+   *  notification hook), and `started` — which resolves once the launch commit is durable (the façade awaits
+   *  it so a just-returned run is immediately visible). The resolvers are captured now so a fast run cannot
+   *  settle before they exist. */
   startRun(
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
     argument: Value | null,
-  ): { run: DelegationId; result: Promise<Value> } {
+    name: string,
+  ): { run: DelegationId; result: Promise<Value>; started: Promise<void> } {
     const delegation = newDelegationId();
     const result = new Promise<Value>((resolve, reject) => {
       this.runResolvers[delegation] = resolve;
       this.runRejecters[delegation] = reject;
     });
-    void this.commands.enqueue(() => {
-      // The api root owns this run delegation (it is the caller); recording it here, before the delegate is
-      // produced, means the run survives a crash before its root is even created.
+    const started = this.commands.enqueue(() => {
+      // The api root owns this run delegation (it is the caller) and its metadata sidecar; recording both
+      // here, before the delegate is produced, means the run survives a crash before its root is even created.
       this.openDelegation(delegation, {
         caller: this.apiRootId,
         target: { kind: "named", name: qualifiedName, snapshot },
+        argument,
+      });
+      this.pendingRunStarts.push({
+        run: delegation,
+        name,
+        qualifiedName,
+        snapshotId: snapshot,
         argument,
       });
       this.send(
@@ -141,30 +173,39 @@ export class ApiReactor extends Reactor {
         "core",
       );
     });
-    return { run: delegation, result };
+    return { run: delegation, result, started };
   }
 
-  /** Request a run's cancellation: move it to `cancelling` and terminate its root. The cascade tears the tree
-   *  down; the terminateAck moves it to `gone` and rejects the run with `RunCancelledError`. Always produce
-   *  the terminate (so a recovered, still-live run is cancellable). Record the in-process reason only while
-   *  the run is still tracked here (else there is nothing to decorate, and storing it would leak). */
-  cancelRun(run: DelegationId, reason?: string): void {
-    void this.commands.enqueue(() => {
+  /** Request a run's cancellation: move it to `cancelling`, record the cancel reason on its `runs` row, and
+   *  terminate its root — all in one commit. The cascade tears the tree down; the terminateAck moves it to
+   *  `gone` and rejects the run with `RunCancelledError`. Always produce the terminate (so a recovered,
+   *  still-live run is cancellable). The in-process reason (to decorate the error) is kept only while the run
+   *  is tracked here, so it cannot leak. Returns when the cancel commit is durable. */
+  cancelRun(run: DelegationId, reason?: string): Promise<void> {
+    return this.commands.enqueue(() => {
       if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
       this.transitionDelegation(run, "cancelling");
+      this.pendingCancelReasons.push({ run, reason: reason ?? null });
       this.send({ kind: "terminate", delegation: run }, "core");
     });
   }
 
-  /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes. The
-   *  command turn runs after the project is loaded, so a freshly-recovered actor has rehydrated its open
-   *  escalations before the lookup; the in-memory entry is cleared once the `escalateAck` is produced. The
-   *  durable `escalations` row is marked answered by core (the raiser) when it receives the escalateAck. */
+  /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes, and
+   *  record the answered escalation in the run's history — atomically with the `escalateAck`. The command
+   *  turn runs after the project is loaded, so a freshly-recovered actor has rehydrated its open escalations
+   *  before the lookup; the in-memory entry is cleared once the `escalateAck` is produced. The durable
+   *  `escalations` row is marked answered by core (the raiser) when it receives the escalateAck. */
   answerEscalation(escalation: EscalationId, value: Value): Promise<void> {
     return this.commands.enqueue(() => {
       const open = this.openEscalations[escalation];
       if (open === undefined) return;
       this.send({ kind: "escalateAck", delegation: open.run, escalation, value }, "core");
+      this.pendingAudits.push({
+        run: open.run,
+        escalation,
+        question: open.argument,
+        answer: value,
+      });
       delete this.openEscalations[escalation];
     });
   }

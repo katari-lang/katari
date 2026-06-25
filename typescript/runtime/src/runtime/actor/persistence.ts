@@ -21,6 +21,7 @@ import type {
   OutboxSeq,
   ProjectId,
   ScopeId,
+  SnapshotId,
 } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { PersistedScope, SerializedInstance } from "./persistence-codec.js";
@@ -58,6 +59,28 @@ export interface OutboxMessage {
   event: ExternalEvent;
 }
 
+/** A run's API metadata sidecar (`runs` row), written by the api root atomically with the run's `delegate`
+ *  so a run is never visible without its launch metadata (and vice versa). The run's *outcome* is its
+ *  delegation row, not this; this holds only what the delegation does not — the human label + launch
+ *  metadata. `run` is the run delegation id (the join key). */
+export interface PersistedRun {
+  run: DelegationId;
+  name: string;
+  qualifiedName: string;
+  snapshotId: SnapshotId;
+  argument: Value | null;
+}
+
+/** One answered user-facing escalation, recorded for the run's history (`run_escalations_audit`) when the
+ *  api root relays the answer back — live escalations are open-only and raiser-owned, so the answered ones
+ *  live as this projection. */
+export interface PersistedRunEscalationAudit {
+  run: DelegationId;
+  escalation: EscalationId;
+  question: Value | null;
+  answer: Value;
+}
+
 /** The per-turn write surface a reactor + the substrate use to commit one turn atomically. Method-call order
  *  is the FK order the caller is responsible for: a reactor writes its instance (`putInstance`) before the
  *  Layer 1 rows that reference it, and `dropInstance` (which cascades the rows the instance owns) comes last.
@@ -84,6 +107,13 @@ export interface PersistenceTx {
   consumeOutbox(seq: OutboxSeq): Promise<void>;
   /** Insert the events this turn produced as outbox rows (delivered to the mailbox after the commit). */
   produceOutbox(messages: OutboxMessage[]): Promise<void>;
+  /** Insert a run's metadata sidecar — written by the api root in the same commit as the run's `delegate`, so
+   *  startRun is atomic (a run is never durable without its launch metadata). Idempotent. */
+  putRun(run: PersistedRun): Promise<void>;
+  /** Record a user's cancel reason on a run, in the same commit as its `terminate`. */
+  setRunCancelReason(run: DelegationId, reason: string | null): Promise<void>;
+  /** Append a run's answered-escalation history row, in the same commit as the relayed `escalateAck`. */
+  putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
 }
 
 /** A persisted open escalation (an `escalations` row still in the `open` state). The actor rehydrates the
@@ -165,4 +195,7 @@ const NO_OP_TX: PersistenceTx = {
   async dropInstance() {},
   async consumeOutbox() {},
   async produceOutbox() {},
+  async putRun() {},
+  async setRunCancelReason() {},
+  async putRunEscalationAudit() {},
 };

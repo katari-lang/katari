@@ -15,6 +15,8 @@ import {
   instances,
   LIVE_DELEGATION_STATES,
   outbox,
+  runEscalationsAudit,
+  runs,
 } from "../../db/tables/execution.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type {
@@ -268,6 +270,36 @@ export class DbPersistence implements Persistence {
             event: message.event,
           })),
         );
+      },
+      putRun: async (run) => {
+        await drizzleTx
+          .insert(runs)
+          .values({
+            id: run.run,
+            projectId,
+            snapshotId: run.snapshotId,
+            name: run.name,
+            qualifiedName: run.qualifiedName,
+            argument: run.argument,
+          })
+          .onConflictDoNothing();
+      },
+      setRunCancelReason: async (run, reason) => {
+        await drizzleTx
+          .update(runs)
+          .set({ cancelReason: reason })
+          .where(and(eq(runs.projectId, projectId), eq(runs.id, run)));
+      },
+      putRunEscalationAudit: async (audit) => {
+        await drizzleTx
+          .insert(runEscalationsAudit)
+          .values({
+            runId: audit.run,
+            escalationId: audit.escalation,
+            question: audit.question,
+            answer: audit.answer,
+          })
+          .onConflictDoNothing();
       },
     };
   }

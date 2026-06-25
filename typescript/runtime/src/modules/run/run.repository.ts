@@ -100,34 +100,9 @@ const projectionColumns = {
 };
 
 export const runRepository = {
-  /** Record a run's metadata sidecar. `id` is the run delegation id (the engine writes the delegation row
-   *  itself, asynchronously, as the run's root instance is created). */
-  async start(
-    executor: Executor,
-    input: {
-      id: string;
-      projectId: string;
-      name: string;
-      qualifiedName: string;
-      snapshotId: string;
-      argument: Value | null;
-    },
-  ): Promise<void> {
-    await executor.insert(runs).values(input);
-  },
-
-  /** Record the user's cancel reason (the delegation records only the `gone` state, not the reason). */
-  async setCancelReason(
-    executor: Executor,
-    projectId: string,
-    runId: string,
-    reason?: string,
-  ): Promise<void> {
-    await executor
-      .update(runs)
-      .set({ cancelReason: reason ?? null })
-      .where(and(eq(runs.projectId, projectId), eq(runs.id, runId)));
-  },
+  // The run's metadata sidecar (`runs` row) and cancel reason are written by the engine, atomically with the
+  // run's `delegate` / `terminate` (see `ApiReactor` / `PersistenceTx.putRun`), not here — this module is the
+  // read side only (the projection + the list / get queries).
 
   async list(executor: Executor, projectId: string): Promise<RunView[]> {
     const rows = await executor

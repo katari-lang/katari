@@ -101,19 +101,22 @@ export class ProjectActor {
 
   // ─── api root commands (exposed for in-process callers; the logic lives in the ApiReactor) ──────────
 
-  /** Start a run on the api root. The run id is the run delegation id (the durable handle), the `result`
-   *  promise an in-process convenience. */
+  /** Start a run on the api root. The run id is the run delegation id (the durable handle); `result` is an
+   *  in-process convenience; `started` resolves once the launch (delegation + `runs` metadata + delegate) is
+   *  durably committed. `name` is the run's human label (defaults to the qualified name). */
   startRun(
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
     argument: Value | null,
-  ): { run: DelegationId; result: Promise<Value> } {
-    return this.api.startRun(qualifiedName, snapshot, argument);
+    name?: string,
+  ): { run: DelegationId; result: Promise<Value>; started: Promise<void> } {
+    return this.api.startRun(qualifiedName, snapshot, argument, name ?? qualifiedName);
   }
 
-  /** Request a run's cancellation (terminate cascade). A no-op in the engine if the run already finished. */
-  cancelRun(run: DelegationId, reason?: string): void {
-    this.api.cancelRun(run, reason);
+  /** Request a run's cancellation (terminate cascade + durable cancel reason). Resolves once the cancel
+   *  commit is durable; a no-op in the engine if the run already finished. */
+  cancelRun(run: DelegationId, reason?: string): Promise<void> {
+    return this.api.cancelRun(run, reason);
   }
 
   /** Answer an open run-root escalation, resuming its suspended raiser. */

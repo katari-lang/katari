@@ -16,6 +16,8 @@ import type {
   OutboxMessage,
   PersistedDelegation,
   PersistedOpenEscalation,
+  PersistedRun,
+  PersistedRunEscalationAudit,
   Persistence,
   PersistenceTx,
   ProjectSnapshot,
@@ -45,6 +47,11 @@ interface StoredEscalation {
   answer: Value | null;
 }
 
+/** A stored run metadata sidecar + the API's cancel reason (the run's outcome is its delegation, not this). */
+interface StoredRun extends PersistedRun {
+  cancelReason: string | null;
+}
+
 export class StoringPersistence implements Persistence {
   /** Layer 2, per instance: the instance row and its whole thread tree (replaced wholesale each turn). */
   private readonly instances = new Map<InstanceId, PersistedInstance>();
@@ -57,6 +64,10 @@ export class StoringPersistence implements Persistence {
   private readonly escalations = new Map<EscalationId, StoredEscalation>();
   /** Layer 3: the transactional outbox (produced-but-not-consumed events), insertion-ordered. */
   private readonly outbox = new Map<OutboxSeq, OutboxMessage>();
+  /** The API's run-metadata sidecar + answered-escalation history (DB-SoT projections; reads go straight to
+   *  these, not through the warm actor). */
+  private readonly runs = new Map<DelegationId, StoredRun>();
+  private readonly audits: PersistedRunEscalationAudit[] = [];
 
   async ensureApiRoot(): Promise<void> {
     // No FK to satisfy here (the in-memory twin enforces none), and the warm actor recreates the api root
@@ -151,6 +162,16 @@ export class StoringPersistence implements Persistence {
       produceOutbox: async (messages) => {
         for (const message of messages) this.outbox.set(message.seq, message);
       },
+      putRun: async (run) => {
+        this.runs.set(run.run, { ...run, cancelReason: null });
+      },
+      setRunCancelReason: async (run, reason) => {
+        const stored = this.runs.get(run);
+        if (stored !== undefined) stored.cancelReason = reason;
+      },
+      putRunEscalationAudit: async (audit) => {
+        this.audits.push(audit);
+      },
     };
   }
 
@@ -204,5 +225,15 @@ export class StoringPersistence implements Persistence {
   /** Test helper: the stored Layer 1 state of a delegation (for asserting a run's durable outcome). */
   peekDelegation(delegation: DelegationId): StoredDelegation | undefined {
     return this.delegations.get(delegation);
+  }
+
+  /** Test helper: the stored `runs` metadata sidecar (+ cancel reason) for a run. */
+  peekRun(run: DelegationId): StoredRun | undefined {
+    return this.runs.get(run);
+  }
+
+  /** Test helper: the answered-escalation audit rows recorded for a run, in answer order. */
+  auditsFor(run: DelegationId): PersistedRunEscalationAudit[] {
+    return this.audits.filter((audit) => audit.run === run);
   }
 }

@@ -296,13 +296,45 @@ describe("recovery", () => {
     // delegation's `done` result.
     const escalation = open[0]?.escalation;
     if (escalation === undefined) throw new Error("no recovered open escalation");
-    actorTwo.answerEscalation(escalation, { kind: "integer", value: 42 });
+    await actorTwo.answerEscalation(escalation, { kind: "integer", value: 42 });
     const done = await waitUntil(() => {
       const edge = persistence.peekDelegation(run);
       return edge?.state === "done" ? edge : undefined;
     });
     expect(done.result).toEqual({ kind: "integer", value: 42 });
     expect(actorTwo.listOpenEscalations()).toHaveLength(0);
+    // Answering recorded the run's escalation history (question + answer), written atomically with the
+    // relayed escalateAck.
+    const audit = persistence.auditsFor(run);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]?.escalation).toBe(escalation);
+    expect(audit[0]?.question).toEqual({ kind: "record", fields: {} });
+    expect(audit[0]?.answer).toEqual({ kind: "integer", value: 42 });
+  });
+
+  test("startRun writes the run's metadata sidecar atomically with its delegation", async () => {
+    // C3: the engine writes the `runs` metadata row in the same commit as the run's `delegate`, so after the
+    // launch commit (`started`) a run is durable with BOTH its metadata and its delegation — never one alone.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(constantIr(), persistence);
+    const argument = { kind: "integer" as const, value: 3 };
+    const { run, result, started } = actor.startRun(
+      createAgentName("main"),
+      SNAPSHOT,
+      argument,
+      "nightly",
+    );
+    void result.catch(() => {});
+    await started;
+
+    const meta = persistence.peekRun(run);
+    expect(meta?.name).toBe("nightly");
+    expect(meta?.qualifiedName).toBe(createAgentName("main"));
+    expect(meta?.snapshotId).toBe(SNAPSHOT);
+    expect(meta?.argument).toEqual(argument);
+    expect(meta?.cancelReason).toBeNull();
+    // The delegation row committed in the same launch commit — both durable, atomically.
+    expect(persistence.peekDelegation(run)).toBeDefined();
   });
 
   test("records a failed run durably in Layer 1 (delegation failed + message) and tears down its root", async () => {
