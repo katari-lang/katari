@@ -1,10 +1,13 @@
-// ProjectActor: the warm, per-project external consumer. It owns the project's `ProjectStore` (the
-// loaded instances + shared scopes) and a serial mailbox of external events. The loop pulls one message
-// at a time, routes it to the owning instance, drives that instance's internal turn to quiescence,
-// persists at the turn boundary, then flushes the turn's outbound external events back onto the mailbox.
-// Everything is serial; concurrency is the ack model (a parent that fanned out several delegates resumes
-// each branch as its delegateAck lands). FFI completions and the inter-instance escalate / terminate
-// halves arrive through the same mailbox and are handled in their respective (later) layers.
+// ProjectActor: the warm, per-project consumer. It owns the project's `ProjectStore` (the loaded instances +
+// shared scopes), the routing maps, and the api reactor; the transactional bus — the serial mailbox and the
+// one atomic commit per turn — lives in the `Substrate` it composes. The actor is the substrate's host: it
+// routes one inbound message at a time (`handle`/`dispatch`) to the owning instance, drives that instance's
+// internal turn to quiescence, and hands the result to `substrate.commit`, which persists Layer 1 + Layer 2 +
+// outbox atomically and delivers the produced events back onto the mailbox. Everything is serial; concurrency
+// is the ack model (a parent that fanned out several delegates resumes each branch as its delegateAck lands).
+//
+// Transitionally this actor still holds the core-engine handlers (onDelegate / runTurn / …) and the api|core
+// routing decision; R2 splits those into a `CoreReactor` the substrate routes to by reactor name.
 
 import type { QualifiedName } from "@katari-lang/types";
 import { ascendResources, reownResources } from "../engine/ascent.js";
@@ -31,7 +34,6 @@ import {
   type DelegationId,
   type EscalationId,
   type InstanceId,
-  newOutboxSeq,
   type OutboxSeq,
   type ProjectId,
   type ScopeId,
@@ -42,13 +44,8 @@ import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
 import { type ApiHost, ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import type { Persistence } from "./persistence.js";
-import {
-  type EntityTransition,
-  type Layer2Commit,
-  type OutboxMessage,
-  outboundTransitions,
-  type Reaction,
-} from "./turn-commit.js";
+import { Substrate } from "./substrate.js";
+import { type EntityTransition, type Layer2Commit, outboundTransitions } from "./turn-commit.js";
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
 // so existing importers (tests, callers) keep their entry point.
@@ -76,20 +73,9 @@ export class ProjectActor {
    *  user-facing escalations). Its id is the project id (the single source of truth) — deterministic and
    *  stable across restarts, so no layer manages or persists it as a separate handle. */
   private readonly apiRootId: InstanceId;
-  /** The serial inbox. Each entry carries the durable outbox row it came from (`seq`) so the turn that
-   *  processes it consumes that row in its commit; `null` for an FFI completion (ephemeral, not an outbox
-   *  event). The mailbox is just the warm cache of the outbox — replayed into on recovery. */
-  private readonly mailbox: { message: ActorMessage; seq: OutboxSeq | null }[] = [];
-  private pumping = false;
-  /** Serialises every `commitTurn` against the others, so no two DB transactions interleave in the single
-   *  (event-loop-concurrent) actor. */
-  private commitChain: Promise<unknown> = Promise.resolve();
-  /** Whether the project's persisted state has been reloaded into the warm store (lazy, on first use). */
-  private loaded = false;
-  /** The in-flight reactivation, so concurrent first-use callers (an api `produce` and the `pump`) share one
-   *  load. Loading MUST complete before any commit — otherwise a just-produced outbox row would be re-read
-   *  by `loadProject` and replayed (double-delivered). */
-  private loadingPromise: Promise<void> | null = null;
+  /** The bus: the serial mailbox + the one atomic commit per turn. This actor is its host — it supplies the
+   *  routing (`dispatch`) and the domain half of reactivation, and drives its turns through `substrate.commit`. */
+  private readonly substrate: Substrate;
 
   /** A pending delegate's caller instance, for routing its delegateAck / escalate home (the `delegations`
    *  row's caller). Absent for a run-root delegate, whose ack resolves the run instead (`runResolvers`). */
@@ -111,6 +97,10 @@ export class ProjectActor {
     this.blobs = dependencies.blobs;
     this.external = dependencies.external;
     this.persistence = dependencies.persistence;
+    this.substrate = new Substrate(this.projectId, this.persistence, {
+      reactivate: () => this.reactivate(),
+      dispatch: (message, seq) => this.handle(message, seq),
+    });
     this.api = new ApiReactor(this.apiHost());
     // FFI completions re-enter through the same serial mailbox as every other external message.
     this.external.onResult((result) => this.feed(result));
@@ -121,8 +111,8 @@ export class ProjectActor {
   private apiHost(): ApiHost {
     return {
       apiRootId: this.apiRootId,
-      ensureLoaded: () => this.ensureLoaded(),
-      commit: (reaction, consumed) => this.commitReaction(reaction, consumed),
+      ensureLoaded: () => this.substrate.ensureLoaded(),
+      commit: (reaction, consumed) => this.substrate.commit(reaction, consumed),
       openRunDelegation: (delegation) => {
         this.delegationCaller[delegation] = this.apiRootId;
       },
@@ -174,115 +164,29 @@ export class ProjectActor {
   /** Feed an FFI completion into the serial loop. FFI completions are ephemeral (not outbox events — they
    *  are re-derived from the `ExternalThread` rows on recovery), so they carry no outbox row (`seq` null). */
   feed(result: FfiResult): void {
-    this.mailbox.push({ message: result, seq: null });
-    void this.pump();
-  }
-
-  /** Reactivate the project once, before any commit. The lazy load reads the persisted outbox; doing it
-   *  before producing prevents a just-produced row being re-read by `loadProject` and replayed. */
-  private ensureLoaded(): Promise<void> {
-    if (this.loaded) return Promise.resolve();
-    if (this.loadingPromise === null) {
-      // `loaded` flips true only once reactivation FULLY succeeds (including re-dispatching in-flight
-      // externals); a failure clears `loadingPromise` so the next caller retries rather than proceeding on
-      // a half-initialised actor.
-      this.loadingPromise = this.reactivate().then(
-        () => {
-          this.loaded = true;
-        },
-        (error) => {
-          this.loadingPromise = null;
-          throw error;
-        },
-      );
-    }
-    return this.loadingPromise;
-  }
-
-  /** Durably produce external events from an api operation (no inbound event is being consumed): commit the
-   *  outbox rows, then deliver them to the mailbox. The issuer is the api root (it re-establishes a replayed
-   *  delegate's caller). */
-  /** Commit one reactor turn (the substrate side of the bus): reactivate first so loading can never race a
-   *  just-produced row, mint an outbox seq per `outbound` event (issued by the turn's instance), then write
-   *  the whole turn — its Reaction plus the inbound `consumed` row — atomically and deliver. This is the one
-   *  funnel every commit flows through, so "loading before any commit" and "seqs are the bus's" hold in one
-   *  place. */
-  private async commitReaction(reaction: Reaction, consumed: OutboxSeq | null): Promise<void> {
-    await this.ensureLoaded();
-    const produced: OutboxMessage[] = reaction.outbound.map((event) => ({
-      seq: newOutboxSeq(),
-      issuer: reaction.instanceId,
-      event,
-    }));
-    await this.commit({
-      instanceId: reaction.instanceId,
-      layer2: reaction.layer2,
-      transitions: reaction.transitions,
-      consumed,
-      produced,
-    });
-  }
-
-  /** Commit one turn (serialised against all the others, so no two DB transactions interleave in the
-   *  event-loop-concurrent actor), then deliver its produced events to the mailbox. */
-  private async commit(commit: {
-    instanceId: InstanceId;
-    layer2: Layer2Commit;
-    transitions: EntityTransition[];
-    consumed: OutboxSeq | null;
-    produced: OutboxMessage[];
-  }): Promise<void> {
-    const run = this.commitChain.then(() => this.persistence.commitTurn(this.projectId, commit));
-    this.commitChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    await run;
-    this.deliver(commit.produced);
+    this.substrate.feed(result, null);
   }
 
   /** Consume an outbox row with no other effect — used by a handler that processes its event without a turn
    *  (an early return whose target is already gone, or an api handler that only settles a promise). A `null`
-   *  seq (an FFI completion) has no row, so this is a no-op. */
+   *  seq (an FFI completion) has no row, so this is a no-op. The instance the empty turn names is irrelevant
+   *  (it touches none — `layer2: none`), so it borrows the api root id. */
   private consumeOnly(seq: OutboxSeq | null): Promise<void> {
     if (seq === null) return Promise.resolve();
-    return this.commitReaction(
+    return this.substrate.commit(
       { instanceId: this.apiRootId, layer2: { kind: "none" }, transitions: [], outbound: [] },
       seq,
     );
-  }
-
-  /** Deliver produced events to the mailbox (after their commit) and kick the loop. */
-  private deliver(produced: OutboxMessage[]): void {
-    for (const message of produced) {
-      this.mailbox.push({ message: message.event, seq: message.seq });
-    }
-    if (produced.length > 0) void this.pump();
   }
 
   /** Activate a (possibly recovered) actor: reload persisted state and re-dispatch in-flight external
    *  work, without an inbound message to trigger it. Idempotent — the warm actor also self-activates on
    *  its first `feed`; a host calls this on boot to resume a project whose process went down mid-flight. */
   async activate(): Promise<void> {
-    await this.pump();
+    await this.substrate.activate();
   }
 
-  // ─── serial loop ──────────────────────────────────────────────────────────────────────────────
-
-  private async pump(): Promise<void> {
-    if (this.pumping) return;
-    this.pumping = true;
-    try {
-      await this.ensureLoaded();
-      while (this.mailbox.length > 0) {
-        const entry = this.mailbox.shift();
-        if (entry === undefined) break;
-        await this.handle(entry.message, entry.seq);
-      }
-    } finally {
-      this.pumping = false;
-    }
-  }
+  // ─── reactivation (the substrate's domain half) ─────────────────────────────────────────────────
 
   /** Lazily reload the project's persisted engine state on first use, rebuilding the routing maps from
    *  the instances (a pending delegation's key names its caller; an instance's `delegationId` its child —
@@ -336,10 +240,10 @@ export class ProjectActor {
       if (message.event.kind === "delegate") {
         this.delegationCaller[message.event.delegation] = message.issuer;
       }
-      this.mailbox.push({ message: message.event, seq: message.seq });
+      this.substrate.enqueue(message.event, message.seq);
     }
-    // NB: `loaded` is set by `ensureLoaded` only after this whole method (incl. the resume below) resolves,
-    // so a resume failure does not leave the actor marked loaded-but-half-initialised.
+    // NB: the substrate marks the project loaded only after this whole method (incl. the resume below)
+    // resolves, so a resume failure does not leave it loaded-but-half-initialised — the next caller retries.
     await this.resumeInFlightExternals();
   }
 
@@ -428,7 +332,7 @@ export class ProjectActor {
     seq: OutboxSeq | null,
   ): Promise<void> {
     const reaction = this.api.react(message);
-    await this.commitReaction(reaction, seq);
+    await this.substrate.commit(reaction, seq);
     this.api.afterCommit(message, reaction);
   }
 
@@ -709,7 +613,10 @@ export class ProjectActor {
       );
       layer2 = { kind: "persist", instance, ownedScopes };
     }
-    await this.commitReaction({ instanceId: instance.id, layer2, transitions, outbound }, consumed);
+    await this.substrate.commit(
+      { instanceId: instance.id, layer2, transitions, outbound },
+      consumed,
+    );
   }
 
   private resolveTarget(target: DelegateTarget): {
