@@ -92,8 +92,11 @@ export class ApiReactor extends Reactor {
   }
 
   /** The api root runs no engine threads — its turn writes the Layer 1 rows it owns plus the run-metadata
-   *  sidecar / audit it staged this turn (so they commit atomically with the events it produced). */
+   *  sidecar / audit it staged this turn (so they commit atomically with the events it produced). Starting a
+   *  run first ensures the api root's own `instances` row, before `flushLayer1` writes the run delegation
+   *  whose caller FK points at it (the api root has no producing `delegate` turn to create it otherwise). */
   async persist(tx: PersistenceTx): Promise<void> {
+    if (this.pendingRunStarts.length > 0) await tx.ensureApiRoot(this.apiRootId);
     await this.flushLayer1(tx);
     for (const run of this.pendingRunStarts) await tx.putRun(run);
     for (const { run, reason } of this.pendingCancelReasons)

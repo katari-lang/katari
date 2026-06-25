@@ -69,11 +69,6 @@ export class StoringPersistence implements Persistence {
   private readonly runs = new Map<DelegationId, StoredRun>();
   private readonly audits: PersistedRunEscalationAudit[] = [];
 
-  async ensureApiRoot(): Promise<void> {
-    // No FK to satisfy here (the in-memory twin enforces none), and the warm actor recreates the api root
-    // in its store on every reactivation, so there is nothing to persist. Present for interface parity.
-  }
-
   async loadProject(_projectId: ProjectId): Promise<ProjectSnapshot> {
     const engine = deserializeProject(
       [...this.instances.values()],
@@ -171,6 +166,9 @@ export class StoringPersistence implements Persistence {
       },
       putRunEscalationAudit: async (audit) => {
         this.audits.push(audit);
+      },
+      ensureApiRoot: async () => {
+        // The in-memory twin enforces no FK, so the api root needs no durable row here.
       },
     };
   }

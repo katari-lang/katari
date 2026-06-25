@@ -114,6 +114,12 @@ export interface PersistenceTx {
   setRunCancelReason(run: DelegationId, reason: string | null): Promise<void>;
   /** Append a run's answered-escalation history row, in the same commit as the relayed `escalateAck`. */
   putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
+  /** Idempotently ensure the project's permanent `api` management root `instances` row exists. The api root
+   *  is the only durable instance with no producing `delegate` turn of its own (it has no Layer 2), yet it is
+   *  the FK target of every run delegation's caller and of a run result's escaped scopes — so the api reactor
+   *  ensures it in the same commit as the run's `delegate`, before that delegation's FK. A no-op for the
+   *  in-memory backends (no FK to satisfy). */
+  ensureApiRoot(apiRootId: InstanceId): Promise<void>;
 }
 
 /** A persisted open escalation (an `escalations` row still in the `open` state). The actor rehydrates the
@@ -153,11 +159,6 @@ export interface Persistence {
   /** Load a project's persisted engine graph + live delegation rows + open escalations to reactivate its
    *  warm actor. */
   loadProject(projectId: ProjectId): Promise<ProjectSnapshot>;
-  /** Durably ensure the project's permanent `api` management root exists as an `instances` row, so a run's
-   *  delegation (whose caller is the api root) satisfies the `delegations.caller_instance_id` FK. Idempotent;
-   *  a no-op for the in-memory seam (no FK to satisfy). Called once on reactivation, before any commit can
-   *  reference the api root. */
-  ensureApiRoot(projectId: ProjectId, apiRootId: InstanceId): Promise<void>;
   /** Run one turn's writes atomically: open a transaction, hand the reactor + substrate a `PersistenceTx`,
    *  and commit. The body issues the reactor's `persist(tx)` and the outbox consume / produce. */
   transaction(projectId: ProjectId, body: (tx: PersistenceTx) => Promise<void>): Promise<void>;
@@ -175,7 +176,6 @@ export class InMemoryPersistence implements Persistence {
       pendingOutbox: [],
     };
   }
-  async ensureApiRoot(): Promise<void> {}
   async transaction(
     _projectId: ProjectId,
     body: (tx: PersistenceTx) => Promise<void>,
@@ -198,4 +198,5 @@ const NO_OP_TX: PersistenceTx = {
   async putRun() {},
   async setRunCancelReason() {},
   async putRunEscalationAudit() {},
+  async ensureApiRoot() {},
 };

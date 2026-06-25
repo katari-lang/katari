@@ -36,16 +36,6 @@ import {
 export class DbPersistence implements Persistence {
   constructor(private readonly db: Database) {}
 
-  async ensureApiRoot(projectId: ProjectId, apiRootId: InstanceId): Promise<void> {
-    // The api root runs no IR (no target / snapshot / engine state), so its row carries only identity +
-    // kind + status. It must exist before the first run's delegation (caller = the api root) is inserted, or
-    // the caller FK fails. Idempotent across restarts.
-    await this.db
-      .insert(instances)
-      .values({ id: apiRootId, projectId, kind: "api", status: "running" })
-      .onConflictDoNothing();
-  }
-
   async loadProject(projectId: ProjectId): Promise<ProjectSnapshot> {
     const [instanceRows, threadRows, scopeRows, delegationRows, escalationRows, outboxRows] =
       await Promise.all([
@@ -299,6 +289,15 @@ export class DbPersistence implements Persistence {
             question: audit.question,
             answer: audit.answer,
           })
+          .onConflictDoNothing();
+      },
+      ensureApiRoot: async (apiRootId) => {
+        // The api root runs no IR (no target / snapshot / engine state), so its row carries only identity +
+        // kind + status. The api reactor calls this in the same commit as the first run's `delegate`, before
+        // that delegation's caller FK. Idempotent across runs and restarts.
+        await drizzleTx
+          .insert(instances)
+          .values({ id: apiRootId, projectId, kind: "api", status: "running" })
           .onConflictDoNothing();
       },
     };

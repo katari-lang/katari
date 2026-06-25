@@ -156,9 +156,8 @@ export class ProjectActor {
       this.api.rehydrateOpenEscalation(open);
     }
     this.api.loadRuns(snapshot.liveDelegations);
-    // The api management root is a permanent per-project fixture (not an engine instance). Ensure its durable
-    // `instances` row exists so a run's delegation, whose caller is the api root, satisfies the caller FK.
-    await this.persistence.ensureApiRoot(this.projectId, this.apiRootId);
+    // The api management root's durable `instances` row is ensured by the api reactor in the same commit as
+    // each run's `delegate` (it owns that row); reactivation only reloads, so it is not ensured here.
     // Replay the undrained outbox: events produced before the crash but not yet consumed.
     for (const message of snapshot.pendingOutbox) {
       this.substrate.enqueueOutbox(message.event, message.seq);
