@@ -101,6 +101,13 @@ export type ExternalEventBody =
  *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives. */
 export type ExternalEvent = ExternalEventBody & { from: ReactorName; to: ReactorName };
 
+/** The value an `escalate` carries up across the instance boundary: a `request`'s argument, or a control
+ *  escape's (`next` / `break` / `return`) carried value. The two-step reown uses it — the raiser releases
+ *  the resources this value captures on send, the receiver reowns them on receipt. */
+export function escalateValue(ask: AskKind): Value | null {
+  return ask.kind === "request" ? ask.argument : ask.value;
+}
+
 export type EngineEvent = InternalEvent | ExternalEventBody;
 
 // ─── FFI completion + actor mailbox (the "external consumer" input) ───────────────────────────────

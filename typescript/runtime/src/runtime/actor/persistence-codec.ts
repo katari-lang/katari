@@ -125,6 +125,7 @@ export function serializeScope(projectId: ProjectId, scope: Scope): PersistedSco
 export function engineStateOf(instance: CoreInstance): EngineState {
   return {
     rootThreadId: instance.rootThreadId,
+    callerReactor: instance.callerReactor,
     cancelExits: instance.cancelExits,
     nextThreadId: instance.nextThreadId,
     nextCallId: instance.nextCallId,
@@ -155,6 +156,7 @@ export function deserializeProject(
       kind: "core",
       id: row.id,
       delegationId: row.delegationId,
+      callerReactor: row.engineState.callerReactor,
       target: row.target,
       argument: null,
       status: row.status,

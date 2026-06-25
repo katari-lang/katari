@@ -12,11 +12,12 @@
 
 import type { DelegationState } from "../../db/tables/execution.js";
 import { isLiveDelegationState } from "../../db/tables/execution.js";
-import type {
-  DelegateTarget,
-  ExternalEvent,
-  ExternalEventBody,
-  ReactorName,
+import {
+  type DelegateTarget,
+  type ExternalEvent,
+  type ExternalEventBody,
+  escalateValue,
+  type ReactorName,
 } from "../event/types.js";
 import type { DelegationId, EscalationId, InstanceId } from "../ids.js";
 import type { Value } from "../value/types.js";
@@ -91,11 +92,17 @@ export abstract class Reactor {
   // ─── send / drain (the from/to protocol) ────────────────────────────────────────────────────────
 
   /** Buffer one follow-on event, stamped `from: this.name`, addressed `to` the target reactor. The first
-   *  step of the two-step reown rides here: sending a `delegateAck` (a result leaving its instance) RELEASES
-   *  the value's captured resources from the turn's owner to in-transit, so the receiver can reown them — for
-   *  a sub-call (a core caller reowns) and a run (the api root reowns) by the same path. */
+   *  step of the two-step reown rides here: a value leaving its instance UP across the boundary RELEASES the
+   *  resources it captures from the turn's owner to in-transit, so the receiver can reown them. The two
+   *  upward value flows are a sub-call / run result (`delegateAck`) and an escalation's carried value
+   *  (`escalate`); the downward legs (`delegate` argument, `escalateAck` answer) stay owned by the still-live
+   *  sender and are read in place, so nothing is released for them. */
   protected send(body: ExternalEventBody, to: ReactorName): void {
     if (body.kind === "delegateAck") this.pool.release(body.value, this.currentTurnOwner());
+    else if (body.kind === "escalate") {
+      const value = escalateValue(body.ask);
+      if (value !== null) this.pool.release(value, this.currentTurnOwner());
+    }
     this.sendBuffer.push({ ...body, from: this.name, to });
   }
 
@@ -149,6 +156,14 @@ export abstract class Reactor {
     if (extra.result !== undefined) row.result = extra.result;
     if (extra.errorMessage !== undefined) row.errorMessage = extra.errorMessage;
     this.dirtyDelegations.add(delegation);
+  }
+
+  /** Whether this reactor still holds `delegation` as a live (running / cancelling) row. Becomes false once
+   *  the row reaches a terminal state and is evicted — a command guards on this so an already-finished entity
+   *  is not acted on (e.g. a `cancel` racing the run's completion must not stamp a cancel reason on it). */
+  protected hasLiveDelegation(delegation: DelegationId): boolean {
+    const row = this.delegations.get(delegation);
+    return row !== undefined && isLiveDelegationState(row.state);
   }
 
   /** Reload a live delegation row this reactor owns on reactivation (the in-memory SoT, not dirty). */

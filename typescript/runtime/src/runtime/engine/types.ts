@@ -8,7 +8,7 @@
 // the engine's working set; its exact fields will firm up in the engine phase.
 
 import type { BlockId, QualifiedName } from "@katari-lang/types";
-import type { DelegateTarget } from "../event/types.js";
+import type { DelegateTarget, ReactorName } from "../event/types.js";
 import type {
   AskId,
   BlobId,
@@ -298,6 +298,11 @@ export type CoreInstance = {
   /** The delegation that summoned this instance; the parent is recovered from it. Also the correlation id
    *  of this instance's `delegateAck`. (`null` only defensively — a real core instance is always summoned.) */
   delegationId: DelegationId | null;
+  /** The reactor that summoned this instance (the summoning `delegate`'s `from`): `core` for a sub-call,
+   *  `api` for a run root. A reply this instance emits (delegateAck / escalate / terminateAck) routes back
+   *  here — a recorded fact, so core never infers the destination from a routing map's absence and a future
+   *  ffi caller routes the same way. */
+  callerReactor: ReactorName;
   /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here. */
   target: DelegateTarget;
   /** The argument this activation was summoned with (the spawning `delegate.argument`). */
@@ -347,6 +352,9 @@ export type ProjectStore = {
  */
 export type EngineState = {
   rootThreadId: ThreadId;
+  /** The reactor that summoned this instance — persisted so reply routing survives a restart without
+   *  re-inferring it from the engine graph (see `CoreInstance.callerReactor`). */
+  callerReactor: ReactorName;
   // Outbound-delegation routing no longer lives here: a `DelegateThread`'s `delegationId` is its source of
   // truth. Answer routing rides per-thread in `Thread.forwardRoutes`. The actor needs no escalation mirror
   // (a returning `escalateAck` routes to the raiser via the existing `delegationChild` map).

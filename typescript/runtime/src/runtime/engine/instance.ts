@@ -5,7 +5,7 @@
 // that ascent is a refinement on top of this cascade.
 
 import type { BlockId } from "@katari-lang/types";
-import type { DelegateTarget } from "../event/types.js";
+import type { DelegateTarget, ReactorName } from "../event/types.js";
 import {
   type BlobId,
   type DelegationId,
@@ -29,6 +29,7 @@ export function createInstance(
   store: ProjectStore,
   args: {
     delegationId: DelegationId | null;
+    callerReactor: ReactorName;
     target: DelegateTarget;
     argument: Value | null;
     agentBlockId: BlockId;
@@ -42,6 +43,7 @@ export function createInstance(
     kind: "core",
     id,
     delegationId: args.delegationId,
+    callerReactor: args.callerReactor,
     target: args.target,
     argument: args.argument,
     status: "running",

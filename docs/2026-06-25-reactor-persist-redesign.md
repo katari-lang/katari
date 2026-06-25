@@ -28,12 +28,15 @@ every reactor**:
   root injects its run delegations into CORE's `delegationCaller` map via `openRunDelegation`.)
 - **(b) from/to send / receive.** `send(event)` stamps `from = self`; `to` is the target (a fresh delegate's
   callee, resolved from the IR; a reply's remembered `from`). Received events route in by the substrate.
-- **(c) the two-step reown** on the shared resource pool (§4). Symmetric and uniform:
-  - on **sending** a value-carrying event (`delegate` arg, `delegateAck` result, `escalate` arg,
-    `escalateAck` answer): **release** the value's captured resources from the local owner → *in-transit*.
+- **(c) the two-step reown** on the shared resource pool (§4). It applies to the two **upward** value flows
+  — a result (`delegateAck`) and an escalation's carried value (`escalate`) — both of which leave their
+  raiser/child and may outlive it:
+  - on **sending** one: **release** the value's captured resources from the local owner → *in-transit*.
   - on **receiving** one: **reown** the in-transit resources to the local owner.
-  The owner each side uses is the local owner the base class already tracks per delegation/escalation, so the
-  api root reowns a run result to itself exactly like a core caller reowns a sub-call result. No reactor
+  The **downward** legs (`delegate` argument, `escalateAck` answer) do **not** reown: the sender (the caller /
+  answerer) stays live and the child/raiser reads the value in place, so its resources stay owned by the
+  still-live sender. The owner each side uses is the local owner the base class already tracks, so the api
+  root reowns a run result to itself exactly like a core caller reowns a sub-call result. No reactor
   special-case, no api-root "drop".
 - **persist(tx).** Snapshot the reactor's own warm state (its instances / run-state + its delegations /
   escalations). In-memory is the SoT during operation; persist is just a time-slice snapshot for recovery.

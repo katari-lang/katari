@@ -188,6 +188,9 @@ export class ApiReactor extends Reactor {
    *  is tracked here, so it cannot leak. Returns when the cancel commit is durable. */
   cancelRun(run: DelegationId, reason?: string): Promise<void> {
     return this.commands.enqueue(() => {
+      // A run that already reached a terminal state (done / failed / gone) cannot be cancelled — its row is
+      // gone from the live map, so do not stamp a cancel reason or emit a redundant terminate for it.
+      if (!this.hasLiveDelegation(run)) return;
       if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
       this.transitionDelegation(run, "cancelling");
       this.pendingCancelReasons.push({ run, reason: reason ?? null });
@@ -240,7 +243,9 @@ export class ApiReactor extends Reactor {
       });
     }
     for (const open of await loader.openEscalations({ to: "api" })) {
-      if (!isUserFacingRequest(open.request)) continue;
+      // Every open escalation addressed to the api root is user-facing by construction — core opens a row
+      // only for an answerable request (a panic / control escape reaching the run root fails the run, it is
+      // never an open escalation), so no re-classification is needed on load.
       this.openEscalations[open.escalation] = {
         run: open.delegation,
         escalation: open.escalation,
@@ -302,7 +307,10 @@ export class ApiReactor extends Reactor {
    *  terminate its still-suspended root (the teardown's eventual `gone` is a sticky no-op). */
   private reactEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
     const ask = event.ask;
-    if (ask.kind === "request" && ask.request !== PANIC_REQUEST) {
+    if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
+      // Reown the question's resources to the api root: the raiser released them on send, and the root now
+      // holds the open escalation across an arbitrary wait for the user's answer.
+      if (ask.argument !== null) this.reownIncoming(ask.argument, this.apiRootId);
       this.openEscalations[event.escalation] = {
         run: event.delegation,
         escalation: event.escalation,
@@ -335,7 +343,7 @@ export class ApiReactor extends Reactor {
 /** Whether an escalation reaching the run root *fails* the run (rather than opening a user-facing request):
  *  a control escape (next / break / return crossing the root) or a panic. */
 function isRunFailure(event: Extract<ExternalEvent, { kind: "escalate" }>): boolean {
-  return event.ask.kind !== "request" || event.ask.request === PANIC_REQUEST;
+  return !(event.ask.kind === "request" && isUserFacingRequest(event.ask.request));
 }
 
 /** A human message for an escalation that reached the run root unhandled (it fails the run). A panic reports
