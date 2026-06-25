@@ -62,16 +62,17 @@ describe("bundleSidecar", () => {
     return (globalThis as Record<string, unknown>).__katariRegistered as string[];
   }
 
-  test("bundles a multi-file package into runnable ESM whose registrations land under the package name", async () => {
+  test("imports every file of a package equally (no entry) and namespaces their registrations", async () => {
     const src = await fixture({
-      // The entry registers an agent and imports a helper that itself exports — a layout main's
-      // function-wrapping broke (an `export` cannot live inside the wrapper).
-      "ext_agent.ts": [
+      // Two files both register agents — there is no privileged entry — and one of them imports a helper
+      // that itself `export`s (a layout main's function-wrapping broke: an export can't live in a wrapper).
+      "greet.ts": [
         `import katari from "@katari-lang/port";`,
-        `import { topic } from "./helper.js";`,
+        `import { topic } from "./shared.js";`,
         `katari.agent("greet_" + topic, () => "hi");`,
       ].join("\n"),
-      "helper.ts": `export const topic = "world";`,
+      "farewell.ts": `import katari from "@katari-lang/port";\nkatari.agent("bye", () => "bye");`,
+      "shared.ts": `export const topic = "world";`,
     });
 
     const bundle = await bundleSidecar({ packages: [{ packageName: "ext_agent", sourceRoot: src }] });
@@ -80,7 +81,7 @@ describe("bundleSidecar", () => {
     expect(bundle?.entry).toContain("__startSidecar()");
 
     const registered = await runBundle(bundle?.entry ?? "");
-    expect(registered).toEqual(["ext_agent.greet_world"]);
+    expect(new Set(registered)).toEqual(new Set(["ext_agent.greet_world", "ext_agent.bye"]));
   });
 
   test("namespaces each package's registrations independently when several are bundled", async () => {
@@ -108,11 +109,8 @@ describe("bundleSidecar", () => {
     expect(bundle).toBeNull();
   });
 
-  test("rejects an ambiguous multi-file package with no named entry", async () => {
-    const src = await fixture({
-      "alpha.ts": `export const a = 1;`,
-      "beta.ts": `export const b = 2;`,
-    });
+  test("surfaces an esbuild failure as a BundleError", async () => {
+    const src = await fixture({ "broken.ts": `katari.agent(` }); // unterminated — a parse error
     await expect(
       bundleSidecar({ packages: [{ packageName: "ext_agent", sourceRoot: src }] }),
     ).rejects.toBeInstanceOf(BundleError);
