@@ -62,15 +62,19 @@ export interface ApiHost {
 }
 
 export class ApiReactor {
-  /** Settle / reject a run-root delegation: its delegateAck resolves the `startRun` promise; a panic /
-   *  unhandled escape at the run root rejects it; a terminate (cancel) rejects it with `RunCancelledError`. */
+  /** The in-process run-result *notification hook* (NOT the source of truth — a run's outcome is its durable
+   *  delegation row, which the API reads by projection). It lets an in-process caller `await` a run it started
+   *  in this process: a delegateAck resolves it, a panic / unhandled escape rejects it, a terminate (cancel)
+   *  rejects it with `RunCancelledError`. Absent for a recovered run (no in-process caller is awaiting it). */
   private readonly runResolvers: Record<DelegationId, (value: Value) => void> = {};
   private readonly runRejecters: Record<DelegationId, (error: Error) => void> = {};
   /** Run-root requests the engine could not handle, kept open (their run-root instance stays suspended)
    *  until a user answers — keyed by the escalation id, which also names the run delegation it belongs to. */
   private readonly openEscalations: Record<EscalationId, OpenEscalation & { run: DelegationId }> =
     {};
-  /** A cancelling run's reason, held until its terminateAck settles the run (`RunCancelledError`). */
+  /** A cancelling run's reason — held only to decorate the in-process `RunCancelledError` (the durable cancel
+   *  reason is recorded separately, on `runs.cancelReason`, and is the source of truth). Kept only while we
+   *  are still tracking the run in-process, so it cannot outlive the run it belongs to (see `cancelRun`). */
   private readonly cancelReasons: Record<DelegationId, string | undefined> = {};
 
   constructor(private readonly host: ApiHost) {}
@@ -106,9 +110,13 @@ export class ApiReactor {
   }
 
   /** Request a run's cancellation: terminate its root instance. The cascade tears the tree down and the
-   *  terminateAck rejects the run with `RunCancelledError`. A no-op in the engine if the run already finished. */
+   *  terminateAck rejects the run with `RunCancelledError`; a no-op in the engine if the run already finished.
+   *  Always produce the terminate (so a recovered, still-live run is cancellable too — it has no in-process
+   *  handlers). Record the in-process reason only while this run is still tracked here: if it already settled
+   *  (or this is a recovered run with no in-process awaiter), there is nothing to decorate and no terminateAck
+   *  will arrive to clear the entry, so storing it would leak — the durable `runs.cancelReason` holds it. */
   cancelRun(run: DelegationId, reason?: string): void {
-    this.cancelReasons[run] = reason;
+    if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
     void this.host.produce([{ kind: "terminate", delegation: run }]);
   }
 
