@@ -8,7 +8,7 @@
 // threads are spawned by the delegate op (they proxy a cross-instance child, not a block).
 
 import type { Block, BlockId } from "@katari-lang/types";
-import type { CallId, ScopeId, ThreadId } from "../ids.js";
+import { type CallId, newDelegationId, type ScopeId, type ThreadId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateScope, writeVariable } from "./scope.js";
@@ -72,7 +72,9 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
     case "request":
       return { ...base, kind: "request" };
     case "external":
-      return { ...base, kind: "external", externalState: "open" };
+      // Born like a delegate proxy: a fresh ffi delegation it will open on `create` when it emits its
+      // `delegate` to the ffi reactor.
+      return { ...base, kind: "external", delegationId: newDelegationId(), relays: {} };
     case "match":
       return { ...base, kind: "match", pending: null };
     case "for":

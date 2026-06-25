@@ -10,8 +10,12 @@ import type { Persistence, PersistenceTx } from "../src/runtime/actor/persistenc
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
-import type { FfiResult } from "../src/runtime/event/types.js";
-import type { ExternalCall, ExternalRunner } from "../src/runtime/external/runner.js";
+import {
+  type FfiCall,
+  type FfiCompletion,
+  type FfiTransport,
+  StubFfiTransport,
+} from "../src/runtime/external/runner.js";
 import {
   apiRootIdOf,
   newDelegationId,
@@ -20,37 +24,34 @@ import {
   type SnapshotId,
 } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
-import { StubExternalRunner } from "../src/runtime/external/runner.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 
 const PROJECT = "project-recovery" as ProjectId;
 const SNAPSHOT = "snapshot-recovery" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
-/** A recording external runner: logs each dispatched key, and optionally completes some keys immediately
+/** A recording FFI transport: logs each dispatched key, and optionally completes some keys immediately
  *  (the others stay in flight forever, modelling a slow external call). */
 function recordingRunner(complete: Record<string, boolean>): {
-  runner: ExternalRunner;
+  runner: FfiTransport;
   dispatched: string[];
 } {
   const dispatched: string[] = [];
-  let sink: ((result: FfiResult) => void) | null = null;
-  const runner: ExternalRunner = {
-    onResult(register) {
+  let sink: ((completion: FfiCompletion) => void) | null = null;
+  const runner: FfiTransport = {
+    onComplete(register) {
       sink = register;
     },
-    dispatch(call: ExternalCall) {
+    dispatch(call: FfiCall) {
       dispatched.push(call.key);
       if (complete[call.key]) {
         sink?.({
-          kind: "ffiResult",
-          instance: call.instance,
-          thread: call.thread,
-          value: { kind: "string", value: `${call.key}-done` },
+          delegation: call.delegation,
+          outcome: { kind: "result", value: { kind: "string", value: `${call.key}-done` } },
         });
       }
     },
-    cancel() {},
+    abort() {},
   };
   return { runner, dispatched };
 }
@@ -77,7 +78,7 @@ class FailingPersistence implements Persistence {
 function makeActor(
   ir: IRModule,
   persistence: Persistence,
-  external: ExternalRunner = new StubExternalRunner(),
+  external: FfiTransport = new StubFfiTransport(),
 ): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(ir.entries)) {

@@ -16,6 +16,7 @@ import type {
   Loader,
   OutboxMessage,
   PersistedDelegation,
+  PersistedFfiCall,
   PersistedOpenEscalation,
   PersistedRun,
   PersistedRunEscalationAudit,
@@ -73,6 +74,8 @@ export class StoringPersistence implements Persistence {
    *  these, not through the warm actor). */
   private readonly runs = new Map<DelegationId, StoredRun>();
   private readonly audits: PersistedRunEscalationAudit[] = [];
+  /** The ffi reactor's in-flight calls (its callee-side records). */
+  private readonly ffiCallRows = new Map<DelegationId, PersistedFfiCall>();
 
   async load(_projectId: ProjectId, body: (loader: Loader) => Promise<void>): Promise<void> {
     await body(this.loader());
@@ -124,6 +127,7 @@ export class StoringPersistence implements Persistence {
         return result;
       },
       outbox: async () => [...this.outbox.values()],
+      ffiCalls: async () => [...this.ffiCallRows.values()],
     };
   }
 
@@ -192,6 +196,12 @@ export class StoringPersistence implements Persistence {
       },
       ensureApiRoot: async () => {
         // The in-memory twin enforces no FK, so the api root needs no durable row here.
+      },
+      putFfiCall: async (call) => {
+        this.ffiCallRows.set(call.delegation, call);
+      },
+      dropFfiCall: async (delegation) => {
+        this.ffiCallRows.delete(delegation);
       },
     };
   }

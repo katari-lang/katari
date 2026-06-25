@@ -10,7 +10,7 @@ import type { QualifiedName } from "@katari-lang/types";
 import type { PrimRunner } from "../engine/context.js";
 import { createProjectStore } from "../engine/store.js";
 import type { ReactorName } from "../event/types.js";
-import type { ExternalRunner } from "../external/runner.js";
+import type { FfiTransport } from "../external/runner.js";
 import {
   apiRootIdOf,
   type DelegationId,
@@ -24,6 +24,7 @@ import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
 import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
+import { FfiReactor } from "./ffi-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { ResourcePool } from "./resource-pool.js";
@@ -38,7 +39,8 @@ export interface ProjectActorDependencies {
   ir: IrSource;
   prims: PrimRunner;
   blobs: BlobStore;
-  external: ExternalRunner;
+  /** The FFI transport the `ffi` reactor dispatches external handlers through. */
+  external: FfiTransport;
   persistence: Persistence;
 }
 
@@ -53,6 +55,8 @@ export class ProjectActor {
   private readonly core: CoreReactor;
   /** The api management root reactor: the user-facing run / escalation logic. */
   private readonly api: ApiReactor;
+  /** The ffi reactor: external (FFI) calls — a `delegate` to it, the transport, its in-flight call records. */
+  private readonly ffi: FfiReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -72,10 +76,12 @@ export class ProjectActor {
       dependencies.ir,
       dependencies.prims,
       dependencies.blobs,
-      dependencies.external,
       store,
       pool,
     );
+    // The ffi reactor runs external (FFI) handlers through the injected transport; an external call reaches
+    // it as a `delegate` from core's external proxy.
+    this.ffi = new FfiReactor(this.projectId, dependencies.external, pool);
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
@@ -83,7 +89,11 @@ export class ProjectActor {
       { enqueue: (thunk) => this.substrate.enqueueCommand(this.api, thunk) },
       pool,
     );
-    const registry: Record<ReactorName, Reactor> = { core: this.core, api: this.api };
+    const registry: Record<ReactorName, Reactor> = {
+      core: this.core,
+      api: this.api,
+      ffi: this.ffi,
+    };
     this.substrate = new Substrate(this.projectId, this.persistence, registry, pool, {
       reactivate: () => this.reactivate(),
       onPoison: (error) =>
@@ -93,9 +103,10 @@ export class ProjectActor {
             : new Error("run tracking reset after a commit failure; query the run's durable state"),
         ),
     });
-    // FFI completions re-enter through the same serial mailbox as every other turn, as a core FFI turn.
-    dependencies.external.onResult((result) =>
-      this.substrate.submit(this.core, () => this.core.reactFfi(result)),
+    // An FFI transport completion re-enters through the same serial mailbox as every other turn, as a ffi
+    // reactor turn that turns it into the call's delegateAck / escalate / terminateAck.
+    dependencies.external.onComplete((completion) =>
+      this.substrate.submit(this.ffi, () => this.ffi.complete(completion)),
     );
   }
 
@@ -140,26 +151,27 @@ export class ProjectActor {
 
   /** Lazily reload the project's persisted state on first use: each reactor pulls only the rows it owns from
    *  the loader (core its engine graph + routing + its delegations/escalations; the api root its run
-   *  delegations + answerable escalations) — no central blob, no cross-reactor classification. The undrained
-   *  outbox is replayed into the mailbox; in-flight external calls are re-dispatched. The api management
-   *  root's durable `instances` row is ensured by the api reactor in each run's `delegate` commit (it owns
-   *  that row), so reactivation only reads. */
+   *  delegations + answerable escalations; the ffi reactor its in-flight calls, which it re-dispatches) —
+   *  no central blob, no cross-reactor classification. The undrained outbox is replayed into the mailbox.
+   *  The api management root's durable `instances` row is ensured by the api reactor in each run's
+   *  `delegate` commit (it owns that row), so reactivation only reads. */
   private async reactivate(): Promise<void> {
     // Reactivation is idempotent and is the recovery path after a poisoned commit too: drop any warm state
     // first (a cold start clears empty state — a no-op), so reloading never accumulates stale routing.
     this.core.reset();
     this.api.reset();
+    this.ffi.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       await this.core.load(loader);
       await this.api.load(loader);
+      // The ffi reactor's load re-dispatches its in-flight calls through the transport (a side effect), so it
+      // runs only after the load fully succeeds — guarded like the rest of this method.
+      await this.ffi.load(loader);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox()) {
         this.substrate.enqueueOutbox(message.event, message.seq);
       }
     });
-    // NB: the substrate marks the project loaded only after this whole method (incl. the resume below)
-    // resolves, so a resume failure does not leave it loaded-but-half-initialised — the next caller retries.
-    await this.core.resumeInFlightExternals();
   }
 }

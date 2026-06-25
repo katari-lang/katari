@@ -28,16 +28,22 @@ import {
 import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateAskId } from "./store.js";
-import type { CoreInstance, DelegateThread, Thread } from "./types.js";
+import type { CoreInstance, DelegateThread, ExternalThread, Thread } from "./types.js";
 
-/** The `DelegateThread` proxying an outbound `delegation` in `instance`, found by the proxy's own
- *  `delegationId` back-reference (the source of truth — there is no separate outbound-delegation map). */
+/** The proxy thread for an outbound `delegation` in `instance`, found by its own `delegationId`
+ *  back-reference (the source of truth — there is no separate outbound-delegation map). Both a
+ *  `DelegateThread` (a core sub-call) and an `ExternalThread` (an ffi call) are such proxies. */
 export function delegateProxyOf(
   instance: CoreInstance,
   delegation: DelegationId,
-): DelegateThread | undefined {
+): DelegateThread | ExternalThread | undefined {
   for (const thread of Object.values(instance.threads)) {
-    if (thread.kind === "delegate" && thread.delegationId === delegation) return thread;
+    if (
+      (thread.kind === "delegate" || thread.kind === "external") &&
+      thread.delegationId === delegation
+    ) {
+      return thread;
+    }
   }
   return undefined;
 }
@@ -149,9 +155,10 @@ export function resumeEscalation(ctx: StepContext, escalation: EscalationId, val
 }
 
 /**
- * Re-raise an inbound `escalate`'s ask inside the parent instance, from the proxy DelegateThread's
- * position (so it bubbles toward a handle / the parent agent), recording the `escalation` on the proxy's
- * `relays` so its answer leaves again as that escalate's `escalateAck` (`(proxy.delegationId, escalation)`).
+ * Re-raise an inbound `escalate`'s ask inside the parent instance, from the proxy's position (so it bubbles
+ * toward a handle / the parent agent), recording the `escalation` on the proxy's `relays` so its answer
+ * leaves again as that escalate's `escalateAck` (`(proxy.delegationId, escalation)`). The proxy is a
+ * `DelegateThread` (a sub-call's escalation) or an `ExternalThread` (an ffi error's panic).
  */
 export function relayEscalate(
   ctx: StepContext,
@@ -160,7 +167,11 @@ export function relayEscalate(
   ask: AskKind,
 ): void {
   const proxy = ctx.instance.threads[proxyId];
-  if (proxy === undefined || proxy.parent === null || proxy.kind !== "delegate") {
+  if (
+    proxy === undefined ||
+    proxy.parent === null ||
+    (proxy.kind !== "delegate" && proxy.kind !== "external")
+  ) {
     return; // the caller was torn down; the escalating child will be terminated independently
   }
   const askId = allocateAskId(ctx.instance);

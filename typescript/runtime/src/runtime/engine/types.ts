@@ -243,14 +243,17 @@ export type DelegateThread = ThreadBase & {
 };
 
 /**
- * The thread running an `ExternalBlock` body: suspended on the external handler (FFI / sidecar).
- * This replaces the separate `external_calls` table — recovery scans `threads where kind='external'`.
+ * The thread running an `ExternalBlock` body. It behaves exactly like a `DelegateThread`, but its callee is
+ * the `ffi` reactor instead of another core instance: on `create` it emits a `delegate` to ffi (target
+ * `{ external, key }`) and suspends as the caller-side proxy, resuming on the `delegateAck` (its result), an
+ * `escalate` (an FFI error → a panic it relays inward), or a `terminateAck` (its abort confirmed). The engine
+ * drives it through the same proxy machinery as `DelegateThread`: `delegationId` is the ffi delegation it
+ * proxies, `relays` carries an inbound escalation it is relaying inward.
  */
 export type ExternalThread = ThreadBase & {
   kind: "external";
-  /** open while the FFI dispatch is in flight, done once its result has landed. The dispatch key and
-   *  argument are re-derived from the block + scope, so a recovered turn can re-dispatch an open call. */
-  externalState: "open" | "done";
+  delegationId: DelegationId;
+  relays: Record<number, EscalationId>;
 };
 
 // ─── Cancel exits ─────────────────────────────────────────────────────────────────────────────

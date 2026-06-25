@@ -1,18 +1,18 @@
-// SubprocessExternalRunner: an `ExternalRunner` backed by a long-lived external (FFI) sidecar process. It
-// speaks the newline-JSON `sidecar-protocol` over the child's stdio: a `dispatch` goes out on the child's
-// stdin, the reply (`result` / `error` / `cancelled`) comes back on its stdout, and stderr is left for the
-// sidecar's own logs. The sidecar is spawned lazily on the first dispatch and respawned after a crash; a
-// crash fails every call still in flight as an `ffiError` (a panic), so the engine never waits forever on a
-// dead process.
+// SubprocessFfiTransport: an `FfiTransport` backed by a long-lived external (FFI) sidecar process. It speaks
+// the newline-JSON `sidecar-protocol` over the child's stdio: a `dispatch` goes out on the child's stdin, the
+// reply (`result` / `error` / `cancelled`) comes back on its stdout, and stderr is left for the sidecar's own
+// logs. The sidecar is spawned lazily on the first dispatch and respawned after a crash; a crash fails every
+// call still in flight as an `error` completion (a panic), so the ffi reactor never waits forever on a dead
+// process. Calls are correlated by their `delegation` id — the id the ffi reactor's pending-call and core's
+// external proxy thread share — so the transport needs no request-id table of its own.
 //
 // The transport is split from the channel: this class implements the protocol logic over an injected
 // `SidecarSpawner`, so the routing / crash / cancel behaviour is unit-testable with a fake channel, while
 // `subprocessSidecar` is the thin real channel that spawns the process and frames its stdio.
 
 import { spawn } from "node:child_process";
-import type { FfiResult } from "../event/types.js";
-import type { InstanceId, ThreadId } from "../ids.js";
-import type { ExternalCall, ExternalRunner } from "./runner.js";
+import type { DelegationId } from "../ids.js";
+import type { FfiCall, FfiCompletion, FfiTransport } from "./runner.js";
 import {
   decodeReply,
   encodeRequest,
@@ -27,7 +27,7 @@ export interface SidecarHandle {
   kill(): void;
 }
 
-/** How the runner is notified by a sidecar: one reply per completed message, and one close (exit / spawn
+/** How the transport is notified by a sidecar: one reply per completed message, and one close (exit / spawn
  *  failure) with a human reason. */
 export interface SidecarHandlers {
   onReply(reply: SidecarReply): void;
@@ -38,38 +38,34 @@ export interface SidecarHandlers {
  *  logic can be tested without a real process. */
 export type SidecarSpawner = (handlers: SidecarHandlers) => SidecarHandle;
 
-export class SubprocessExternalRunner implements ExternalRunner {
-  private sink: ((result: FfiResult) => void) | null = null;
+export class SubprocessFfiTransport implements FfiTransport {
+  private sink: ((completion: FfiCompletion) => void) | null = null;
   private handle: SidecarHandle | null = null;
-  /** Calls dispatched but not yet replied — keyed by `(instance, thread)`, so a sidecar crash can fail them
-   *  all as panics rather than leave their threads suspended forever. */
-  private readonly inFlight = new Map<string, { instance: InstanceId; thread: ThreadId }>();
+  /** Calls dispatched but not yet replied — keyed by `delegation`, so a sidecar crash can fail them all as
+   *  panics rather than leave their proxy threads suspended forever. */
+  private readonly inFlight = new Set<DelegationId>();
 
   constructor(private readonly spawner: SidecarSpawner) {}
 
-  onResult(sink: (result: FfiResult) => void): void {
+  onComplete(sink: (completion: FfiCompletion) => void): void {
     this.sink = sink;
   }
 
-  dispatch(call: ExternalCall): void {
-    this.inFlight.set(token(call.instance, call.thread), {
-      instance: call.instance,
-      thread: call.thread,
-    });
+  dispatch(call: FfiCall): void {
+    this.inFlight.add(call.delegation);
     this.ensureSpawned().send({
       kind: "dispatch",
-      instance: call.instance,
-      thread: call.thread,
+      delegation: call.delegation,
       key: call.key,
       argument: call.argument,
       redispatch: call.redispatch ?? false,
     });
   }
 
-  cancel(instance: InstanceId, thread: ThreadId): void {
+  abort(delegation: DelegationId): void {
     // Nothing to abort if no sidecar is running (the call cannot be in flight); otherwise ask it to stop, and
-    // wait for its `cancelled` (or any other completion, which the engine treats as the abort).
-    this.handle?.send({ kind: "abort", instance, thread });
+    // wait for its `cancelled` (or any other completion, which the reactor treats as the abort).
+    this.handle?.send({ kind: "abort", delegation });
   }
 
   /** Kill the sidecar (host cleanup on actor disposal). In-flight calls fail through the close handler. */
@@ -89,19 +85,19 @@ export class SubprocessExternalRunner implements ExternalRunner {
   }
 
   private onReply(reply: SidecarReply): void {
-    this.inFlight.delete(token(reply.instance, reply.thread));
-    this.sink?.(toFfiResult(reply));
+    this.inFlight.delete(reply.delegation);
+    this.sink?.(toCompletion(reply));
   }
 
   private onClose(reason: string): void {
     // The sidecar died: fail every call still in flight as a panic, and drop the handle so the next dispatch
-    // respawns. (A failure of a call whose thread is already cancelling is treated by the engine as its
-    // abort confirmation, so an abort that races the crash still completes gracefully.)
-    const failed = [...this.inFlight.values()];
+    // respawns. (A failure of a call whose proxy is already cancelling is treated by the reactor as its abort
+    // confirmation, so an abort that races the crash still completes gracefully.)
+    const failed = [...this.inFlight];
     this.inFlight.clear();
     this.handle = null;
-    for (const { instance, thread } of failed) {
-      this.sink?.({ kind: "ffiError", instance, thread, message: reason });
+    for (const delegation of failed) {
+      this.sink?.({ delegation, outcome: { kind: "error", message: reason } });
     }
   }
 }
@@ -141,27 +137,13 @@ function exitReason(code: number | null, signal: NodeJS.Signals | null): string 
   return `FFI sidecar exited (code ${code ?? "unknown"})`;
 }
 
-function toFfiResult(reply: SidecarReply): FfiResult {
+function toCompletion(reply: SidecarReply): FfiCompletion {
   switch (reply.kind) {
     case "result":
-      return {
-        kind: "ffiResult",
-        instance: reply.instance,
-        thread: reply.thread,
-        value: reply.value,
-      };
+      return { delegation: reply.delegation, outcome: { kind: "result", value: reply.value } };
     case "error":
-      return {
-        kind: "ffiError",
-        instance: reply.instance,
-        thread: reply.thread,
-        message: reply.message,
-      };
+      return { delegation: reply.delegation, outcome: { kind: "error", message: reply.message } };
     case "cancelled":
-      return { kind: "ffiCancelled", instance: reply.instance, thread: reply.thread };
+      return { delegation: reply.delegation, outcome: { kind: "cancelled" } };
   }
-}
-
-function token(instance: InstanceId, thread: ThreadId): string {
-  return `${instance}/${thread}`;
 }

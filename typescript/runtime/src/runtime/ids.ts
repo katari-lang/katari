@@ -34,6 +34,10 @@ const newUuid = (): string => crypto.randomUUID();
 export const newInstanceId = (): InstanceId => newUuid() as InstanceId;
 export const newDelegationId = (): DelegationId => newUuid() as DelegationId;
 
+/** Brand a wire-supplied string as a `DelegationId`. The FFI sidecar echoes back the delegation it was
+ *  dispatched under as a plain string; this is the single boundary cast that re-brands it on the way in. */
+export const toDelegationId = (value: string): DelegationId => value as DelegationId;
+
 /** The id of a project's one `api` management root. It IS the project id — there is exactly one root per
  *  project, so the project id is its single source of truth: stable across restarts, derivable in any
  *  layer, needing no registry. This is the one place the project / instance id families deliberately

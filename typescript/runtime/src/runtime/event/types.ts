@@ -15,7 +15,6 @@ import type {
   CallId,
   DelegationId,
   EscalationId,
-  InstanceId,
   ScopeId,
   SnapshotId,
   ThreadId,
@@ -57,15 +56,20 @@ export type InternalEvent =
 
 // ─── External (inter-instance) ──────────────────────────────────────────────────────────────────
 
-/** What a `delegate` summons: a top-level named agent, or a closure (block + captured scope). */
+/** What a `delegate` summons: a top-level named agent, a closure (block + captured scope), or an `external`
+ *  (FFI) handler — the last runs in the `ffi` reactor against its `key`, not the IR, so it carries no
+ *  snapshot. An external delegate behaves like any sub-call delegate; only its `to` (the ffi reactor) and the
+ *  callee differ. */
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
-  | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string };
+  | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string }
+  | { kind: "external"; key: string };
 
 /** Which reactor an external event originates from / is destined for. An event is self-routing: the
  *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
- *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. */
-export type ReactorName = "core" | "api";
+ *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. `ffi` runs external
+ *  (FFI) handlers — an external call is a `delegate` to it, exactly like a core sub-call. */
+export type ReactorName = "core" | "api" | "ffi";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =
@@ -101,6 +105,18 @@ export type ExternalEventBody =
  *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives. */
 export type ExternalEvent = ExternalEventBody & { from: ReactorName; to: ReactorName };
 
+/** The snapshot an agent target is pinned to. Only `named` / `closure` targets run IR (a core instance); an
+ *  `external` target runs in the ffi reactor against its key, so it carries no snapshot — reaching here with
+ *  one is an engine bug (a core instance is never summoned from an external target). */
+export function agentSnapshot(target: DelegateTarget): SnapshotId {
+  if (target.kind === "external") {
+    throw new Error(
+      "an external target carries no snapshot (it runs in the ffi reactor, not the IR)",
+    );
+  }
+  return target.snapshot;
+}
+
 /** The value an `escalate` carries up across the instance boundary: a `request`'s argument, or a control
  *  escape's (`next` / `break` / `return`) carried value. The two-step reown uses it — the raiser releases
  *  the resources this value captures on send, the receiver reowns them on receipt. */
@@ -108,20 +124,7 @@ export function escalateValue(ask: AskKind): Value | null {
   return ask.kind === "request" ? ask.argument : ask.value;
 }
 
-// ─── FFI completion (the external thread's private side channel) ──────────────────────────────────
-
-/**
- * An external (FFI) process result fed back to the suspended `ExternalThread` that dispatched it. FFI is
- * deliberately NOT an inter-instance event (domain-model R3: an external call is an external *thread*
- * suspend/resume, not an instance) — its dispatch and completion are a private side channel between the
- * external thread and the single FFI abstraction (`ExternalRunner`). It still re-enters through the
- * actor's serial mailbox, so a completion can never race a turn already in flight.
- *
- * `ffiCancelled` is the abort confirmation: when an external thread is cancelled the engine asks the
- * runner to abort and *waits*, finishing the thread's cancel only once the runner reports back here — so
- * teardown is graceful (the external call has really stopped before its parent's cancel proceeds).
- */
-export type FfiResult =
-  | { kind: "ffiResult"; instance: InstanceId; thread: ThreadId; value: Value }
-  | { kind: "ffiError"; instance: InstanceId; thread: ThreadId; message: string }
-  | { kind: "ffiCancelled"; instance: InstanceId; thread: ThreadId };
+// FFI is no longer a private side channel on the external thread: an external call is a `delegate` to the
+// `ffi` reactor (above), and its completion comes back as a `delegateAck` / `escalate` / `terminateAck` like
+// any sub-call. The transport's own completion shape (ffi reactor ↔ sidecar) lives with the transport, in
+// `external/`.

@@ -94,6 +94,18 @@ export interface PersistedRunEscalationAudit {
   answer: Value;
 }
 
+/** One in-flight FFI call — the `ffi` reactor's per-delegation callee instance (the `ffi_calls` table), keyed
+ *  by its delegation. Re-dispatched / re-aborted on recovery by status. `instance` is the call's own id (the
+ *  issuer on its replies); `caller` is the reactor to reply to. */
+export interface PersistedFfiCall {
+  delegation: DelegationId;
+  instance: InstanceId;
+  key: string;
+  argument: Value | null;
+  caller: ReactorName;
+  status: "running" | "cancelling" | "awaitingAnswer";
+}
+
 /** The per-turn write surface a reactor + the substrate use to commit one turn atomically. Method-call order
  *  is the FK order the caller is responsible for: a reactor writes its instance (`putInstance`) before the
  *  Layer 1 rows that reference it, and `dropInstance` (which cascades the rows the instance owns) comes last.
@@ -133,6 +145,10 @@ export interface PersistenceTx {
    *  ensures it in the same commit as the run's `delegate`, before that delegation's FK. A no-op for the
    *  in-memory backends (no FK to satisfy). */
   ensureApiRoot(apiRootId: InstanceId): Promise<void>;
+  /** Upsert an in-flight FFI call (the ffi reactor's callee-side record). */
+  putFfiCall(call: PersistedFfiCall): Promise<void>;
+  /** Drop a resolved FFI call. */
+  dropFfiCall(delegation: DelegationId): Promise<void>;
 }
 
 /** A persisted open escalation (an `escalations` row still in the `open` state). Each reactor self-selects
@@ -168,6 +184,8 @@ export interface Loader {
   /** Undrained outbox rows (produced but not consumed), replayed into the mailbox so an in-flight event is
    *  not lost across a restart. */
   outbox(): Promise<OutboxMessage[]>;
+  /** The ffi reactor's in-flight calls, to re-dispatch / re-abort on recovery. */
+  ffiCalls(): Promise<PersistedFfiCall[]>;
 }
 
 export interface Persistence {
@@ -208,6 +226,8 @@ const NO_OP_TX: PersistenceTx = {
   async setRunCancelReason() {},
   async putRunEscalationAudit() {},
   async ensureApiRoot() {},
+  async putFfiCall() {},
+  async dropFfiCall() {},
 };
 
 const EMPTY_LOADER: Loader = {
@@ -221,6 +241,9 @@ const EMPTY_LOADER: Loader = {
     return [];
   },
   async outbox() {
+    return [];
+  },
+  async ffiCalls() {
     return [];
   },
 };

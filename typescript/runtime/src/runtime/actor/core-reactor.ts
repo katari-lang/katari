@@ -13,25 +13,23 @@
 // delegate's `from`), so a reply it emits routes to `api` without core inferring it. FFI completions arrive
 // via `reactFfi` until the FFI reactor lands.
 
-import { delegateProxyOf, raisePanic, relayEscalate, resumeEscalation } from "../engine/common.js";
+import { delegateProxyOf, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
-import { readVariable, rebuildScopeOwnerIndex } from "../engine/scope.js";
-import { completeExternalAbort } from "../engine/thread-ops.js";
+import { rebuildScopeOwnerIndex } from "../engine/scope.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import {
+  agentSnapshot,
   type DelegateTarget,
   type ExternalEvent,
   type ExternalEventBody,
   escalateValue,
-  type FfiResult,
   type InternalEvent,
   type ReactorName,
 } from "../event/types.js";
-import type { ExternalRunner } from "../external/runner.js";
 import type { DelegationId, InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
@@ -69,7 +67,6 @@ export class CoreReactor extends Reactor {
     private readonly ir: IrSource,
     private readonly prims: PrimRunner,
     private readonly blobs: BlobStore,
-    private readonly external: ExternalRunner,
     /** The project's shared scope store (also wrapped by the `ResourcePool` below), so the engine and the
      *  pool touch the same scopes in place. */
     private readonly store: ProjectStore,
@@ -140,21 +137,27 @@ export class CoreReactor extends Reactor {
     this.turnOwnerId = undefined;
   }
 
-  // ─── routing (a reply goes to the reactor that summoned this instance; the api root is never referenced) ─
+  // ─── routing (replies follow the summoner; requests follow the callee — `core` or `ffi`) ─────────
 
-  /** The destination reactor for an engine-emitted event. A reply (delegateAck / escalate / terminateAck) is
-   *  emitted by the delegation's child, so it routes to the reactor that summoned that child
-   *  (`instance.callerReactor` — `core` for a sub-call, `api` for a run root): a recorded fact, not an
-   *  inference from a routing map's absence. A request leg (delegate / terminate / escalateAck) always
-   *  targets `core` in v0.1.0 (a sub-callee / cancelled child / core raiser). */
-  private routeReplyTo(body: ExternalEventBody, instance: CoreInstance): ReactorName {
+  /** The destination reactor for an engine-emitted event.
+   *  - A *reply* (delegateAck / escalate / terminateAck) is emitted by the delegation's child, so it routes
+   *    to the reactor that summoned that child (`instance.callerReactor` — `core` for a sub-call, `api` for a
+   *    run root): a recorded fact, not an inference from a routing map's absence.
+   *  - A *request* leg routes to the callee: a `delegate` by its target (an `external` target → the `ffi`
+   *    reactor, else a core sub-call); a `terminate` / `escalateAck` by the delegation's peer (the callee it
+   *    was opened against — `ffi` for an ffi call, else `core`). So an external call is routed exactly like a
+   *    core self-delegate; only `to` differs. */
+  private routeOf(body: ExternalEventBody, instance: CoreInstance): ReactorName {
     switch (body.kind) {
       case "delegateAck":
       case "escalate":
       case "terminateAck":
         return instance.callerReactor;
-      default:
-        return "core";
+      case "delegate":
+        return body.target.kind === "external" ? "ffi" : "core";
+      case "terminate":
+      case "escalateAck":
+        return this.peerOf(body.delegation) ?? "core";
     }
   }
 
@@ -175,7 +178,11 @@ export class CoreReactor extends Reactor {
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) this.delegationChild[instance.delegationId] = instance.id;
       for (const thread of Object.values(instance.threads)) {
-        if (thread.kind === "delegate") this.delegationCaller[thread.delegationId] = instance.id;
+        // Both a `DelegateThread` (a core sub-call) and an `ExternalThread` (an ffi call) are caller-side
+        // proxies, so each names its delegation's caller (this instance) — the proxy onDelegateAck resumes.
+        if (thread.kind === "delegate" || thread.kind === "external") {
+          this.delegationCaller[thread.delegationId] = instance.id;
+        }
       }
     }
     for (const row of await loader.delegations("core")) {
@@ -198,41 +205,11 @@ export class CoreReactor extends Reactor {
     }
   }
 
-  /** After reactivation, re-dispatch every external (FFI) leaf still `open`: its in-flight dispatch was a
-   *  private side channel (not a persisted event), so the process going down lost it. The durable
-   *  `ExternalThread` row is the recovery handle — key + argument are re-derived from its block + scope. */
-  async resumeInFlightExternals(): Promise<void> {
-    for (const instance of Object.values(this.store.instances)) {
-      const snapshot = instance.target.snapshot;
-      await this.ir.preload(snapshot);
-      const ir = this.ir.access(snapshot, moduleOf(instance.target));
-      for (const thread of Object.values(instance.threads)) {
-        if (thread.kind !== "external" || thread.externalState !== "open") continue;
-        if (thread.status === "cancelling") {
-          // A mid-abort external: re-request the abort (its `ffiCancelled` confirmation may have been lost
-          // when the process went down) rather than re-dispatch the call.
-          this.external.cancel(instance.id, thread.id);
-          continue;
-        }
-        const block = ir.block(thread.blockId).block;
-        if (block.kind !== "external") continue;
-        const argument = readVariable(this.store, thread.scopeId, block.input) ?? null;
-        this.external.dispatch({
-          projectId: this.projectId,
-          instance: instance.id,
-          thread: thread.id,
-          key: block.key,
-          argument,
-          redispatch: true,
-        });
-      }
-    }
-  }
-
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
   private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
-    await this.ir.preload(event.target.snapshot);
+    // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
+    await this.ir.preload(agentSnapshot(event.target));
     const resolved = this.resolveTarget(event.target);
     const instance = createInstance(this.store, {
       delegationId: event.delegation,
@@ -337,35 +314,6 @@ export class CoreReactor extends Reactor {
     ]);
   }
 
-  // ─── FFI completion (until the FFI reactor lands) ───────────────────────────────────────────────
-
-  /** Feed an FFI completion back to the suspended `ExternalThread` it belongs to: a result resumes it
-   *  (ack its parent → completes the call's instance → delegateAck), an error raises a panic, and an abort
-   *  confirmation finishes a cancelling thread's graceful cancel. A no-op when the completion is late (its
-   *  instance / thread is gone). */
-  async reactFfi(result: FfiResult): Promise<void> {
-    this.beginTurn();
-    const instance = this.coreInstance(result.instance);
-    if (instance === undefined) return; // instance torn down — drop the late result
-    const thread = instance.threads[result.thread];
-    if (thread === undefined || thread.kind !== "external") return;
-    if (result.kind === "ffiCancelled" || thread.status === "cancelling") {
-      // The thread is being aborted: any completion finishes its graceful cancel. The value is discarded.
-      await this.runTurnWith(instance, (ctx) => completeExternalAbort(ctx, thread.id));
-      return;
-    }
-    if (result.kind === "ffiError") {
-      // An FFI failure is a panic raised from the external leaf (it bubbles to a handler / fails the run).
-      await this.runTurnWith(instance, (ctx) => raisePanic(ctx, thread, result.message));
-      return;
-    }
-    if (thread.parent === null || thread.parentCallId === null) return;
-    delete instance.threads[thread.id];
-    await this.runTurn(instance, [
-      { kind: "callAck", target: thread.parent, callId: thread.parentCallId, value: result.value },
-    ]);
-  }
-
   // ─── one instance turn ────────────────────────────────────────────────────────────────────────
 
   private runTurn(instance: CoreInstance, initial: InternalEvent[]): Promise<void> {
@@ -381,7 +329,7 @@ export class CoreReactor extends Reactor {
     instance: CoreInstance,
     seed: (ctx: StepContext) => void,
   ): Promise<void> {
-    const snapshot = instance.target.snapshot;
+    const snapshot = agentSnapshot(instance.target);
     await this.ir.preload(snapshot);
     const ctx = makeStepContext({
       projectId: this.projectId,
@@ -390,16 +338,15 @@ export class CoreReactor extends Reactor {
       ir: this.ir.access(snapshot, moduleOf(instance.target)),
       prims: this.prims,
       blobs: this.blobs,
-      external: this.external,
     });
     seed(ctx);
     await drive(ctx);
     this.turnOwnerId = instance.id;
-    // Route each routing-less engine outbound (to the reactor that summoned this instance, for a reply) and
-    // record the Layer 1 row core owns as caller / raiser — the receiving side (done / gone / answered) is
-    // recorded in the react handlers.
+    // Route each routing-less engine outbound (a reply to its summoner, a request to its callee) and record
+    // the Layer 1 row core owns as caller / raiser — the receiving side (done / gone / answered) is recorded
+    // in the react handlers.
     for (const body of ctx.buffers.outbound) {
-      const to = this.routeReplyTo(body, instance);
+      const to = this.routeOf(body, instance);
       this.recordOutbound(body, instance, to);
       this.send(body, to);
     }
@@ -429,11 +376,12 @@ export class CoreReactor extends Reactor {
     switch (body.kind) {
       case "delegate":
         this.delegationCaller[body.delegation] = instance.id;
-        // Core only ever delegates to a core callee in v0.1.0 (a sub-call); the run path delegates from the
-        // api root, not here.
+        // The callee: a core sub-call, or — for an `external` target — the ffi reactor (an external call is a
+        // delegate to ffi, owned by core just like a sub-call). The run path delegates from the api root, not
+        // here, so `from` is always core.
         this.openDelegation(body.delegation, {
           caller: instance.id,
-          peer: "core",
+          peer: body.target.kind === "external" ? "ffi" : "core",
           target: body.target,
           argument: body.argument,
         });
@@ -470,22 +418,36 @@ export class CoreReactor extends Reactor {
     capturedScopeId: ScopeId | null;
     snapshot: SnapshotId;
   } {
-    if (target.kind === "named") {
-      return {
-        agentBlockId: this.ir.locate(target.snapshot, target.name).blockId,
-        capturedScopeId: null,
-        snapshot: target.snapshot,
-      };
+    switch (target.kind) {
+      case "named":
+        return {
+          agentBlockId: this.ir.locate(target.snapshot, target.name).blockId,
+          capturedScopeId: null,
+          snapshot: target.snapshot,
+        };
+      case "closure":
+        return {
+          agentBlockId: target.blockId,
+          capturedScopeId: target.scopeId,
+          snapshot: target.snapshot,
+        };
+      case "external":
+        // An external target is routed to the ffi reactor, never summoned as a core instance — core resolves
+        // only the named / closure agents it runs.
+        throw new Error("core cannot summon an external (ffi) target as an instance");
     }
-    return {
-      agentBlockId: target.blockId,
-      capturedScopeId: target.scopeId,
-      snapshot: target.snapshot,
-    };
   }
 }
 
-/** The module a delegate target's agent lives in (block ids are module-local). */
+/** The module a delegate target's agent lives in (block ids are module-local). External targets run in the
+ *  ffi reactor (no module), so a core instance never carries one. */
 function moduleOf(target: DelegateTarget): string {
-  return target.kind === "named" ? moduleOfName(target.name) : target.module;
+  switch (target.kind) {
+    case "named":
+      return moduleOfName(target.name);
+    case "closure":
+      return target.module;
+    case "external":
+      throw new Error("an external target has no module (it runs in the ffi reactor, not the IR)");
+  }
 }

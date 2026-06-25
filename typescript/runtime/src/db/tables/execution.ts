@@ -184,11 +184,37 @@ export const escalations = pgTable(
   ],
 );
 
+/** The `ffi` reactor's in-flight external calls — its callee-side durable record, keyed by the delegation
+ *  core's external proxy holds. Re-dispatched / re-aborted on recovery by `status`. Cascades with the
+ *  project (the caller-side delegation lives in `delegations`, owned by core). */
+export const ffiCalls = pgTable(
+  "ffi_calls",
+  {
+    delegation: uuid("delegation").primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** This call's own instance id — the issuer stamped on the replies the ffi reactor produces for it. */
+    instanceId: uuid("instance_id").notNull(),
+    /** The handler dispatch key (the external block's `key`). */
+    key: text("key").notNull(),
+    argument: jsonb("argument").$type<Value | null>(),
+    /** The reactor that issued the delegate (its reply goes back there) — `core` in v0.1.0. */
+    callerReactor: text("caller_reactor").$type<ReactorName>().notNull(),
+    /** running (transport in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
+     *  awaiting a caught-panic answer or the run's terminate). */
+    status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("ffi_calls_project_id_idx").on(table.projectId)],
+);
+
 /** Layer 3 — the transactional outbox: external events produced by a turn but not yet consumed. The turn
  *  that *produces* events and the turn that *consumes* one commit in a single tx alongside their Layer 1/2
  *  writes (transactional outbox / consumer), so a crash neither loses an in-flight event nor double-delivers
  *  it. The actor drains this into its mailbox; on recovery the undrained rows are replayed. (FFI completions
- *  are NOT here — they are an ephemeral side channel re-derived from the `ExternalThread` rows on recovery.) */
+ *  are NOT here — they are an ephemeral transport side channel; the ffi reactor re-dispatches its in-flight
+ *  calls from its own `ffi_calls` rows on recovery.) */
 export const outbox = pgTable(
   "outbox",
   {

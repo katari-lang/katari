@@ -1,26 +1,26 @@
-// The FFI subprocess transport: the protocol logic (dispatch → reply routing, cancel, crash recovery) is
+// The FFI subprocess transport: the protocol logic (dispatch → reply routing, abort, crash recovery) is
 // unit-tested against a fake channel, and the real `subprocessSidecar` channel is integration-tested against
-// a genuine `node` sidecar that speaks the wire protocol — proving the stdio framing end to end.
+// a genuine `node` sidecar that speaks the wire protocol — proving the stdio framing end to end. Every call
+// is correlated by its `delegation` id (the id the ffi reactor's pending-call and core's proxy share).
 
 import { describe, expect, test } from "vitest";
-import type { FfiResult } from "../src/runtime/external/runner.js";
+import type { FfiCompletion } from "../src/runtime/external/runner.js";
 import type {
   SidecarHandlers,
   SidecarSpawner,
 } from "../src/runtime/external/subprocess-runner.js";
 import {
-  SubprocessExternalRunner,
+  SubprocessFfiTransport,
   subprocessSidecar,
 } from "../src/runtime/external/subprocess-runner.js";
 import type { SidecarReply, SidecarRequest } from "../src/runtime/external/sidecar-protocol.js";
-import { type InstanceId, type ProjectId, type ThreadId, toThreadId } from "../src/runtime/ids.js";
+import { type DelegationId, type ProjectId, toDelegationId } from "../src/runtime/ids.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const PROJECT = "project-ffi" as ProjectId;
-const INSTANCE = "instance-ffi" as InstanceId;
 
-/** A fake channel: records what the runner sends, lets the test drive replies / a crash on the latest spawn,
- *  and counts spawns (so respawn-after-crash is observable). */
+/** A fake channel: records what the transport sends, lets the test drive replies / a crash on the latest
+ *  spawn, and counts spawns (so respawn-after-crash is observable). */
 function fakeChannel() {
   const sent: SidecarRequest[] = [];
   let current: SidecarHandlers | null = null;
@@ -50,93 +50,85 @@ function fakeChannel() {
   };
 }
 
-function collectResults(runner: SubprocessExternalRunner): FfiResult[] {
-  const results: FfiResult[] = [];
-  runner.onResult((result) => results.push(result));
-  return results;
+function collectCompletions(transport: SubprocessFfiTransport): FfiCompletion[] {
+  const completions: FfiCompletion[] = [];
+  transport.onComplete((completion) => completions.push(completion));
+  return completions;
 }
 
-describe("SubprocessExternalRunner (protocol logic)", () => {
-  const thread = toThreadId(1);
+describe("SubprocessFfiTransport (protocol logic)", () => {
+  const delegation = toDelegationId("delegation-1");
   const call = (key: string, argument: Value | null = null) => ({
     projectId: PROJECT,
-    instance: INSTANCE,
-    thread,
+    delegation,
     key,
     argument,
   });
 
   test("spawns lazily on the first dispatch and routes the reply to the sink", () => {
     const channel = fakeChannel();
-    const runner = new SubprocessExternalRunner(channel.spawner);
-    const results = collectResults(runner);
+    const transport = new SubprocessFfiTransport(channel.spawner);
+    const completions = collectCompletions(transport);
     expect(channel.spawnCount).toBe(0); // nothing spawned until there is work
 
-    runner.dispatch(call("echo", { kind: "integer", value: 7 }));
+    transport.dispatch(call("echo", { kind: "integer", value: 7 }));
     expect(channel.spawnCount).toBe(1);
     expect(channel.sent).toEqual([
       {
         kind: "dispatch",
-        instance: INSTANCE,
-        thread,
+        delegation,
         key: "echo",
         argument: { kind: "integer", value: 7 },
         redispatch: false,
       },
     ]);
 
-    channel.reply({ kind: "result", instance: INSTANCE, thread, value: { kind: "integer", value: 7 } });
-    expect(results).toEqual([
-      { kind: "ffiResult", instance: INSTANCE, thread, value: { kind: "integer", value: 7 } },
+    channel.reply({ kind: "result", delegation, value: { kind: "integer", value: 7 } });
+    expect(completions).toEqual([
+      { delegation, outcome: { kind: "result", value: { kind: "integer", value: 7 } } },
     ]);
   });
 
   test("maps an error reply to a panic and a cancelled reply to the abort confirmation", () => {
     const channel = fakeChannel();
-    const runner = new SubprocessExternalRunner(channel.spawner);
-    const results = collectResults(runner);
+    const transport = new SubprocessFfiTransport(channel.spawner);
+    const completions = collectCompletions(transport);
 
-    runner.dispatch(call("boom"));
-    channel.reply({ kind: "error", instance: INSTANCE, thread, message: "boom!" });
-    runner.dispatch(call("slow"));
-    runner.cancel(INSTANCE, thread);
-    expect(channel.sent.at(-1)).toEqual({ kind: "abort", instance: INSTANCE, thread });
-    channel.reply({ kind: "cancelled", instance: INSTANCE, thread });
+    transport.dispatch(call("boom"));
+    channel.reply({ kind: "error", delegation, message: "boom!" });
+    transport.dispatch(call("slow"));
+    transport.abort(delegation);
+    expect(channel.sent.at(-1)).toEqual({ kind: "abort", delegation });
+    channel.reply({ kind: "cancelled", delegation });
 
-    expect(results).toEqual([
-      { kind: "ffiError", instance: INSTANCE, thread, message: "boom!" },
-      { kind: "ffiCancelled", instance: INSTANCE, thread },
+    expect(completions).toEqual([
+      { delegation, outcome: { kind: "error", message: "boom!" } },
+      { delegation, outcome: { kind: "cancelled" } },
     ]);
   });
 
   test("a sidecar crash fails every in-flight call as a panic, and the next dispatch respawns", () => {
     const channel = fakeChannel();
-    const runner = new SubprocessExternalRunner(channel.spawner);
-    const results = collectResults(runner);
+    const transport = new SubprocessFfiTransport(channel.spawner);
+    const completions = collectCompletions(transport);
+    const second = toDelegationId("delegation-2");
 
-    runner.dispatch(call("a"));
-    runner.dispatch({ ...call("b"), thread: toThreadId(2) });
+    transport.dispatch(call("a"));
+    transport.dispatch({ projectId: PROJECT, delegation: second, key: "b", argument: null });
     channel.crash("FFI sidecar exited (code 1)");
 
-    expect(results).toEqual([
-      { kind: "ffiError", instance: INSTANCE, thread, message: "FFI sidecar exited (code 1)" },
-      {
-        kind: "ffiError",
-        instance: INSTANCE,
-        thread: toThreadId(2),
-        message: "FFI sidecar exited (code 1)",
-      },
+    expect(completions).toEqual([
+      { delegation, outcome: { kind: "error", message: "FFI sidecar exited (code 1)" } },
+      { delegation: second, outcome: { kind: "error", message: "FFI sidecar exited (code 1)" } },
     ]);
 
     // A new dispatch respawns; the crashed call is not re-failed (it was cleared).
-    runner.dispatch(call("c"));
+    transport.dispatch(call("c"));
     expect(channel.spawnCount).toBe(2);
-    channel.reply({ kind: "result", instance: INSTANCE, thread, value: { kind: "string", value: "ok" } });
-    expect(results.at(-1)).toEqual({
-      kind: "ffiResult",
-      instance: INSTANCE,
-      thread,
-      value: { kind: "string", value: "ok" },
+    channel.reply({ kind: "result", delegation, value: { kind: "string", value: "ok" } });
+    expect(completions.at(-1)).toEqual({
+      delegation,
+      outcome: { kind: "result", value: { kind: "string", value: "ok" } },
     });
   });
 });
@@ -144,7 +136,7 @@ describe("SubprocessExternalRunner (protocol logic)", () => {
 // A genuine sidecar (CommonJS, run via `node -e`): reads dispatch / abort lines on stdin and replies on
 // stdout — echoing the argument as the result, erroring on key "boom", leaving key "hang" in flight (no
 // reply) until an abort confirms it cancelled, exiting on "crash". Proves the real stdio framing, not just
-// the in-memory protocol.
+// the in-memory protocol. Each reply echoes the `delegation` it answers.
 const SIDECAR = `
 let buffer = "";
 process.stdin.on("data", (chunk) => {
@@ -156,7 +148,7 @@ process.stdin.on("data", (chunk) => {
     if (!line) continue;
     const message = JSON.parse(line);
     const reply = (object) => process.stdout.write(JSON.stringify(object) + "\\n");
-    const head = { instance: message.instance, thread: message.thread };
+    const head = { delegation: message.delegation };
     if (message.kind === "abort") { reply({ kind: "cancelled", ...head }); continue; }
     if (message.key === "crash") { process.exit(1); }
     if (message.key === "boom") { reply({ kind: "error", ...head, message: "boom!" }); continue; }
@@ -177,35 +169,41 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
 
 describe("subprocessSidecar (real process)", () => {
   test("dispatches to a real node sidecar and routes result / error / cancelled / crash back", async () => {
-    const runner = new SubprocessExternalRunner(subprocessSidecar("node", ["-e", SIDECAR]));
-    const results = collectResults(runner);
-    const base = { projectId: PROJECT, instance: INSTANCE };
+    const transport = new SubprocessFfiTransport(subprocessSidecar("node", ["-e", SIDECAR]));
+    const completions = collectCompletions(transport);
+    const found = (delegation: DelegationId) =>
+      completions.find((completion) => completion.delegation === delegation);
+    const echo = toDelegationId("d-echo");
+    const boom = toDelegationId("d-boom");
+    const hang = toDelegationId("d-hang");
+    const crash = toDelegationId("d-crash");
     try {
-      runner.dispatch({ ...base, thread: toThreadId(1), key: "echo", argument: { kind: "integer", value: 42 } });
-      runner.dispatch({ ...base, thread: toThreadId(2), key: "boom", argument: null });
-      runner.dispatch({ ...base, thread: toThreadId(3), key: "hang", argument: null });
-      runner.cancel(INSTANCE, toThreadId(3));
+      transport.dispatch({ projectId: PROJECT, delegation: echo, key: "echo", argument: { kind: "integer", value: 42 } });
+      transport.dispatch({ projectId: PROJECT, delegation: boom, key: "boom", argument: null });
+      transport.dispatch({ projectId: PROJECT, delegation: hang, key: "hang", argument: null });
+      transport.abort(hang);
 
-      const echo = await waitUntil(() => results.find((r) => r.thread === toThreadId(1)));
-      expect(echo).toEqual({
-        kind: "ffiResult",
-        instance: INSTANCE,
-        thread: toThreadId(1),
-        value: { kind: "integer", value: 42 },
+      expect(await waitUntil(() => found(echo))).toEqual({
+        delegation: echo,
+        outcome: { kind: "result", value: { kind: "integer", value: 42 } },
       });
-      const boom = await waitUntil(() => results.find((r) => r.thread === toThreadId(2)));
-      expect(boom).toEqual({ kind: "ffiError", instance: INSTANCE, thread: toThreadId(2), message: "boom!" });
-      const cancelled = await waitUntil(() => results.find((r) => r.thread === toThreadId(3)));
-      expect(cancelled).toEqual({ kind: "ffiCancelled", instance: INSTANCE, thread: toThreadId(3) });
+      expect(await waitUntil(() => found(boom))).toEqual({
+        delegation: boom,
+        outcome: { kind: "error", message: "boom!" },
+      });
+      expect(await waitUntil(() => found(hang))).toEqual({
+        delegation: hang,
+        outcome: { kind: "cancelled" },
+      });
 
       // A crashing dispatch fails its call as a panic (the process exits while it is in flight).
-      runner.dispatch({ ...base, thread: toThreadId(4), key: "crash", argument: null });
+      transport.dispatch({ projectId: PROJECT, delegation: crash, key: "crash", argument: null });
       const crashed = await waitUntil(() =>
-        results.find((r) => r.thread === toThreadId(4) && r.kind === "ffiError"),
+        found(crash)?.outcome.kind === "error" ? found(crash) : undefined,
       );
-      expect(crashed?.kind).toBe("ffiError");
+      expect(crashed?.outcome.kind).toBe("error");
     } finally {
-      runner.close();
+      transport.close();
     }
   });
 });

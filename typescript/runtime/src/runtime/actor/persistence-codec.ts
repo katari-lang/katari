@@ -15,7 +15,7 @@ import type {
   Scope,
   Thread,
 } from "../engine/types.js";
-import type { DelegateTarget } from "../event/types.js";
+import { agentSnapshot, type DelegateTarget } from "../event/types.js";
 import {
   type DelegationId,
   type InstanceId,
@@ -89,7 +89,7 @@ export function serializeInstance(
       kind: "core",
       delegationId: instance.delegationId,
       target: instance.target,
-      snapshotId: instance.target.snapshot,
+      snapshotId: agentSnapshot(instance.target),
       status: instance.status,
       ambientGenerics: instance.ambientGenerics ?? null,
       engineState: engineStateOf(instance),

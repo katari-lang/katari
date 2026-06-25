@@ -17,7 +17,7 @@ import { NotFoundError } from "../lib/errors.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
-import { StubExternalRunner } from "./external/runner.js";
+import { StubFfiTransport } from "./external/runner.js";
 import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "./ids.js";
 import { ProjectRegistry } from "./registry.js";
 import { jsonToValue } from "./value/codec.js";
@@ -51,7 +51,7 @@ const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
   prims: new PrimRegistry(),
-  externalFactory: () => new StubExternalRunner(),
+  externalFactory: () => new StubFfiTransport(),
 });
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */

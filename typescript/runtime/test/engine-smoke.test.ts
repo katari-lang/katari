@@ -8,12 +8,13 @@ import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor, RunCancelledError } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import {
-  type ExternalRunner,
-  InProcessExternalRunner,
-  StubExternalRunner,
+  type FfiCompletion,
+  type FfiTransport,
+  InProcessFfiTransport,
+  StubFfiTransport,
 } from "../src/runtime/external/runner.js";
 import { ProjectRegistry } from "../src/runtime/registry.js";
-import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -44,7 +45,7 @@ function registerModules(registry: SnapshotRegistry, ir: IRModule): void {
   }
 }
 
-function makeActor(ir: IRModule, external: ExternalRunner = new StubExternalRunner()): ProjectActor {
+function makeActor(ir: IRModule, external: FfiTransport = new StubFfiTransport()): ProjectActor {
   const registry = new SnapshotRegistry();
   registerModules(registry, ir);
   return new ProjectActor({
@@ -61,7 +62,7 @@ function run(
   ir: IRModule,
   entry: string,
   argument: Value | null,
-  external: ExternalRunner = new StubExternalRunner(),
+  external: FfiTransport = new StubFfiTransport(),
 ): Promise<Value> {
   return makeActor(ir, external).startRun(createAgentName(entry), SNAPSHOT, argument).result;
 }
@@ -360,8 +361,8 @@ describe("in-memory core", () => {
   });
 
   test("suspends on an external (FFI) leaf and resumes from its completion", async () => {
-    // agent main() { return greet({ name: "world" }) }   (greet is an external agent — a child instance
-    // whose body is an ExternalThread that dispatches through the single ExternalRunner and suspends)
+    // agent main() { return greet({ name: "world" }) }   (greet is an external agent — its body is an
+    // ExternalThread proxy that delegates to the `ffi` reactor, which dispatches through the transport)
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -398,7 +399,7 @@ describe("in-memory core", () => {
       names: {},
     };
 
-    const external = new InProcessExternalRunner({
+    const external = new InProcessFfiTransport({
       greet: (argument) => {
         const name =
           argument?.kind === "record" && argument.fields.name?.kind === "string"
@@ -416,10 +417,10 @@ describe("in-memory core", () => {
 
   test("aborts an in-flight external call on cancel, completing only once the runner confirms", async () => {
     // agent main() { par [ greet({}), return 7 ] }
-    // The `return 7` cancels the par; that terminates greet's instance, whose external leaf is in flight.
-    // The leaf's cancel is graceful: it waits for the runner's `ffiCancelled`. The run resolves to 7 only
-    // after that confirmation (so the run would *hang* if the abort were not wired), and the runner saw
-    // exactly one cancel.
+    // The `return 7` cancels the par; that terminates greet's instance, whose external proxy delegates an
+    // in-flight ffi call. The cancel is graceful: it `terminate`s the ffi call, which the transport confirms
+    // with a `cancelled` completion. The run resolves to 7 only after that confirmation (so it would *hang*
+    // if the abort were not wired), and the transport saw exactly one abort.
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -472,24 +473,24 @@ describe("in-memory core", () => {
       names: {},
     };
 
-    // A runner whose dispatch never completes; its `cancel` records the call and reports the abort.
-    const cancelled: number[] = [];
-    let sink: ((result: import("../src/runtime/event/types.js").FfiResult) => void) | null = null;
-    const external: ExternalRunner = {
-      onResult(register) {
+    // A transport whose dispatch never completes; its `abort` records the call and reports the abort.
+    const aborted: DelegationId[] = [];
+    let sink: ((completion: FfiCompletion) => void) | null = null;
+    const external: FfiTransport = {
+      onComplete(register) {
         sink = register;
       },
       dispatch() {
         // never resolves
       },
-      cancel(instance, thread) {
-        cancelled.push(thread);
-        sink?.({ kind: "ffiCancelled", instance, thread });
+      abort(delegation) {
+        aborted.push(delegation);
+        sink?.({ delegation, outcome: { kind: "cancelled" } });
       },
     };
 
     await expect(run(ir, "main", null, external)).resolves.toEqual({ kind: "integer", value: 7 });
-    expect(cancelled).toHaveLength(1);
+    expect(aborted).toHaveLength(1);
   });
 
   test("keeps a returned closure callable after its producer retires (scope ascent)", async () => {

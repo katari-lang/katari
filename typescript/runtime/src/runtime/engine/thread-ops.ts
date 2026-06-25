@@ -75,6 +75,7 @@ export async function dispatchCreate(ctx: StepContext, thread: Thread): Promise<
       createHandle(ctx, thread);
       return;
     case "external":
+      // Like a delegate proxy, but it emits its own outbound `delegate` (to ffi) here on create.
       createExternal(ctx, thread);
       return;
     case "delegate":
@@ -149,13 +150,14 @@ export function dispatchAsk(
     case "match":
     case "parallel":
     case "delegate":
-      // None of these is a control target or a request handler: bubble every ask up unchanged.
+    case "external":
+      // None of these is a control target or a request handler: bubble every ask up unchanged. (A delegate /
+      // external proxy has no in-instance children to ask it, so this is reached only defensively.)
       proxyAsk(ctx, thread, ask, from, askId);
       return;
     case "primitive":
     case "construct":
     case "request":
-    case "external":
       throw new Error(`leaf thread "${thread.kind}" does not receive asks`);
   }
 }
@@ -164,15 +166,14 @@ export function dispatchAsk(
 
 // An askAck is addressed to a thread, which either forwards it on one more hop or, if it is the genuine
 // asker, consumes it:
-//   - a `delegate` proxy relaying an inbound escalation sends the answer back out as that escalate's
-//     `escalateAck` (its `relays` entry);
+//   - a `delegate` / `external` proxy relaying an inbound escalation sends the answer back out as that
+//     escalate's `escalateAck` (its `relays` entry);
 //   - any other proxying thread (and the agent root resolving a returned escalateAck) forwards it one hop
 //     down to the child that raised it (its `forwardRoutes` entry);
-//   - with no route, the thread is the genuine asker — a request leaf, or an external leaf that raised a
-//     `panic` on an FFI error — and it completes with the value.
+//   - with no route, the thread is the genuine asker — a request leaf — and it completes with the value.
 export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, value: Value): void {
   if (thread.status === "cancelling") return; // a late answer for a thread being torn down
-  if (thread.kind === "delegate") {
+  if (thread.kind === "delegate" || thread.kind === "external") {
     const escalation = thread.relays[askId];
     if (escalation !== undefined) {
       delete thread.relays[askId];
@@ -186,7 +187,7 @@ export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, v
     ctx.enqueue({ kind: "askAck", target: route.thread, askId: route.askId, value });
     return;
   }
-  if (thread.kind === "request" || thread.kind === "external") {
+  if (thread.kind === "request") {
     completeThread(ctx, thread, value);
     return;
   }
@@ -262,18 +263,13 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
       beginCancel(ctx, thread, { kind: "terminateInstance" });
       return;
     case "delegate":
-      // Terminate the child instance; its terminateAck becomes this proxy's cancelAck (via the actor).
+    case "external":
+      // Terminate the child (a core sub-call, or the ffi call); its terminateAck becomes this proxy's
+      // cancelAck (via the reactors). The proxy stays `cancelling` until that terminateAck arrives, so the
+      // callee has really stopped before it acks its parent — graceful, unlike an immediate finish.
       thread.status = "cancelling";
       ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
       ctx.emit({ kind: "terminate", delegation: thread.delegationId });
-      return;
-    case "external":
-      // Ask the runner to abort, then wait: the thread stays `cancelling` until the runner confirms the
-      // abort (an `ffiCancelled` completion, relayed in via `completeExternalAbort`), so the call has
-      // really stopped before this thread acks its parent. Graceful, unlike an immediate finish.
-      thread.status = "cancelling";
-      ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
-      ctx.external.cancel(ctx.instance.id, thread.id);
       return;
     case "primitive":
     case "construct":
@@ -316,15 +312,6 @@ export function dispatchCancelAck(ctx: StepContext, thread: Thread, callId: Call
     return;
   }
   noteChildGone(ctx, thread.id);
-}
-
-/** The runner confirmed a cancelling external thread's abort (its `ffiCancelled`, or any late completion
- *  of a thread already cancelling): finish its graceful cancel now — ack its parent and retire it. A stray
- *  confirmation for a thread that is not being aborted is ignored. */
-export function completeExternalAbort(ctx: StepContext, threadId: ThreadId): void {
-  const thread = ctx.instance.threads[threadId];
-  if (thread === undefined || thread.kind !== "external" || thread.status !== "cancelling") return;
-  finishCancel(ctx, thread);
 }
 
 // ─── agent root ─────────────────────────────────────────────────────────────────────────────────
@@ -442,17 +429,18 @@ function createRequest(ctx: StepContext, thread: RequestThread): void {
   });
 }
 
-/** Dispatch the external call through the single FFI abstraction and suspend. The thread stays `open`
- *  (the durable in-flight record); its completion re-enters via the actor as an `ffiResult`. */
+/** Emit the external call as a `delegate` to the `ffi` reactor and suspend as its proxy — exactly like a
+ *  sub-call delegate, but the callee is the ffi handler (`{ external, key }`) rather than a core instance.
+ *  The `delegateAck` (result), an `escalate` (an FFI error → a panic), or a `terminateAck` (abort) resumes it
+ *  through the shared proxy machinery. */
 function createExternal(ctx: StepContext, thread: ExternalThread): void {
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "external") throw new Error(`thread ${thread.id} is not an external block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? null;
-  ctx.external.dispatch({
-    projectId: ctx.projectId,
-    instance: ctx.instance.id,
-    thread: thread.id,
-    key: block.key,
+  ctx.emit({
+    kind: "delegate",
+    delegation: thread.delegationId,
+    target: { kind: "external", key: block.key },
     argument,
   });
 }

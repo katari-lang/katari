@@ -148,6 +148,14 @@ export abstract class Reactor {
     this.putDelegationRow(delegation, { ...row, state: "running" }, true);
   }
 
+  /** The callee reactor of one of this reactor's delegations (its `to`), or `undefined` if not held. Used to
+   *  route a request leg this reactor emits *to* the callee — a `terminate` (cancel the child) or an
+   *  `escalateAck` (answer the child's escalation) — to the right reactor (a core sub-call → `core`, an ffi
+   *  call → `ffi`). */
+  protected peerOf(delegation: DelegationId): ReactorName | undefined {
+    return this.delegations.get(delegation)?.peer;
+  }
+
   /** Move one of this reactor's delegations to a new state (no-op if it is gone or already terminal — which
    *  is exactly the sticky-terminal rule: a `failed` is never overwritten by the `gone` of the teardown it
    *  triggers, because the `failed` row was already evicted). `cancelling` only takes from `running`. */

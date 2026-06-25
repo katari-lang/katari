@@ -8,7 +8,6 @@
 
 import type { BlockId, BlockInformation } from "@katari-lang/types";
 import type { ExternalEventBody, InternalEvent } from "../event/types.js";
-import type { ExternalRunner } from "../external/runner.js";
 import type { ProjectId, SnapshotId } from "../ids.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
@@ -63,8 +62,6 @@ export interface StepContext {
   readonly ir: IrAccess;
   readonly prims: PrimRunner;
   readonly blobs: BlobStore;
-  /** The FFI abstraction an external leaf dispatches through (its completion re-enters via the actor). */
-  readonly external: ExternalRunner;
   readonly buffers: StepBuffers;
   /** Push an internal event onto this turn's queue (processed before the turn ends). */
   enqueue(event: InternalEvent): void;
@@ -81,7 +78,6 @@ export function makeStepContext(args: {
   ir: IrAccess;
   prims: PrimRunner;
   blobs: BlobStore;
-  external: ExternalRunner;
 }): StepContext {
   const buffers: StepBuffers = { internalQueue: [], outbound: [], logs: [] };
   return {
@@ -91,7 +87,6 @@ export function makeStepContext(args: {
     ir: args.ir,
     prims: args.prims,
     blobs: args.blobs,
-    external: args.external,
     buffers,
     enqueue(event) {
       buffers.internalQueue.push(event);

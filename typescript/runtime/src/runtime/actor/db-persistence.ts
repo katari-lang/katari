@@ -12,6 +12,7 @@ import { scopes, threads } from "../../db/tables/engine.js";
 import {
   delegations,
   escalations,
+  ffiCalls,
   instances,
   LIVE_DELEGATION_STATES,
   outbox,
@@ -148,6 +149,17 @@ export class DbPersistence implements Persistence {
           seq: row.seq as OutboxSeq,
           issuer: row.instanceId as InstanceId,
           event: row.event,
+        }));
+      },
+      ffiCalls: async () => {
+        const rows = await this.db.select().from(ffiCalls).where(eq(ffiCalls.projectId, projectId));
+        return rows.map((row) => ({
+          delegation: row.delegation as DelegationId,
+          instance: row.instanceId as InstanceId,
+          key: row.key,
+          argument: row.argument,
+          caller: row.callerReactor,
+          status: row.status,
         }));
       },
     };
@@ -324,6 +336,23 @@ export class DbPersistence implements Persistence {
           .insert(instances)
           .values({ id: apiRootId, projectId, kind: "api", status: "running" })
           .onConflictDoNothing();
+      },
+      putFfiCall: async (call) => {
+        await drizzleTx
+          .insert(ffiCalls)
+          .values({
+            delegation: call.delegation,
+            projectId,
+            instanceId: call.instance,
+            key: call.key,
+            argument: call.argument,
+            callerReactor: call.caller,
+            status: call.status,
+          })
+          .onConflictDoUpdate({ target: ffiCalls.delegation, set: { status: call.status } });
+      },
+      dropFfiCall: async (delegation) => {
+        await drizzleTx.delete(ffiCalls).where(eq(ffiCalls.delegation, delegation));
       },
     };
   }

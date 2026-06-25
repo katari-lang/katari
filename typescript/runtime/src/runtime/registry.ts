@@ -1,7 +1,7 @@
 // ProjectRegistry: the process-global warm registry of per-project actors. It holds the
 // `Map<projectId, ProjectActor>` (a project's actor is created lazily on first use and kept warm), the
 // shared snapshot IR registry, and the cross-cutting dependencies (blob store, prim runner, persistence).
-// The external runner is per-actor (each registers its own completion sink), so it comes from a factory.
+// The FFI transport is per-actor (each registers its own completion sink), so it comes from a factory.
 //
 // It does no command translation — that is the command surface's job (`facade`, the api root's issuing
 // side); the registry only does lookup + lifecycle. Both the command surface and the read repositories
@@ -12,7 +12,7 @@ import { InMemoryPersistence, type Persistence } from "./actor/persistence.js";
 import { ProjectActor } from "./actor/project-actor.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
-import { type ExternalRunner, StubExternalRunner } from "./external/runner.js";
+import { type FfiTransport, StubFfiTransport } from "./external/runner.js";
 import type { ProjectId, SnapshotId } from "./ids.js";
 import { type IrSource, SnapshotRegistry } from "./ir.js";
 import { type BlobStore, InMemoryBlobStore } from "./value/blob-store.js";
@@ -26,9 +26,9 @@ export interface ProjectRegistryDependencies {
   persistence?: Persistence;
   /** The primitive runner (the host may register env / file prims on it). Defaults to the pure built-ins. */
   prims?: PrimRunner;
-  /** Builds a fresh `ExternalRunner` per project actor (each needs its own completion sink). Defaults to
+  /** Builds a fresh `FfiTransport` per project actor (each needs its own completion sink). Defaults to
    *  the stub (FFI fails loudly until a real subprocess-backed runner is injected). */
-  externalFactory?: () => ExternalRunner;
+  externalFactory?: () => FfiTransport;
 }
 
 export class ProjectRegistry {
@@ -38,14 +38,14 @@ export class ProjectRegistry {
   private readonly blobs: BlobStore;
   private readonly persistence: Persistence;
   private readonly prims: PrimRunner;
-  private readonly externalFactory: () => ExternalRunner;
+  private readonly externalFactory: () => FfiTransport;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
     this.ir = dependencies.ir ?? new SnapshotRegistry();
     this.blobs = dependencies.blobs ?? new InMemoryBlobStore();
     this.persistence = dependencies.persistence ?? new InMemoryPersistence();
     this.prims = dependencies.prims ?? new PrimRegistry();
-    this.externalFactory = dependencies.externalFactory ?? (() => new StubExternalRunner());
+    this.externalFactory = dependencies.externalFactory ?? (() => new StubFfiTransport());
   }
 
   /** Register one module's IR within a snapshot — only on the default in-memory source (tests); the
