@@ -45,7 +45,20 @@ import type { Value } from "../value/types.js";
 import { type ApiHost, ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import type { Persistence } from "./persistence.js";
 import { Substrate } from "./substrate.js";
-import { type EntityTransition, type Layer2Commit, outboundTransitions } from "./turn-commit.js";
+import {
+  type EntityTransition,
+  type Layer2Commit,
+  outboundTransitions,
+  type Reaction,
+} from "./turn-commit.js";
+
+/** What routing one inbound message produced: the Reaction the substrate commits (`null` = nothing to
+ *  commit — a late FFI completion whose instance is already gone, which also carries no outbox row), plus an
+ *  optional strictly-post-commit side effect (the api root settling its in-process result promise). */
+interface Routed {
+  reaction: Reaction | null;
+  after?: () => void;
+}
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
 // so existing importers (tests, callers) keep their entry point.
@@ -167,16 +180,11 @@ export class ProjectActor {
     this.substrate.feed(result, null);
   }
 
-  /** Consume an outbox row with no other effect — used by a handler that processes its event without a turn
-   *  (an early return whose target is already gone, or an api handler that only settles a promise). A `null`
-   *  seq (an FFI completion) has no row, so this is a no-op. The instance the empty turn names is irrelevant
-   *  (it touches none — `layer2: none`), so it borrows the api root id. */
-  private consumeOnly(seq: OutboxSeq | null): Promise<void> {
-    if (seq === null) return Promise.resolve();
-    return this.substrate.commit(
-      { instanceId: this.apiRootId, layer2: { kind: "none" }, transitions: [], outbound: [] },
-      seq,
-    );
+  /** An empty turn: a handler whose event needs no engine turn (its target is already gone, or it only marks
+   *  a Layer 1 edge) returns this so `handle` still consumes the inbound row. The instance it names is
+   *  irrelevant — `layer2: none` touches none — so it borrows the api root id. */
+  private consume(): Reaction {
+    return { instanceId: this.apiRootId, layer2: { kind: "none" }, transitions: [], outbound: [] };
   }
 
   /** Activate a (possibly recovered) actor: reload persisted state and re-dispatch in-flight external
@@ -279,61 +287,52 @@ export class ProjectActor {
     }
   }
 
-  /** Route one inbound message to its handler. `seq` is the durable outbox row it came from (`null` for an
-   *  FFI completion); the handler consumes it in the same commit as its effects (the transactional
-   *  consumer), so a crash never replays an event whose effect already committed.
-   *
-   *  `delegate`, `escalateAck`, and `terminate` always target a `core` instance (a freshly summoned child,
-   *  the escalation's raiser, the cancelled child). Only `delegateAck` / `escalate` / `terminateAck` route
-   *  to the delegation's *caller* — which is the api root (a run) or a core instance — so they pass through
-   *  `routeToCaller`, the one place the api|core decision is made. */
+  /** Route one inbound message to the reactor that owns it and run its turn in memory, returning the Reaction
+   *  the substrate then commits (with the inbound row `seq`) plus any post-commit side effect. This is the
+   *  single commit funnel: every turn — core or api — flows `route → substrate.commit → after`. A late FFI
+   *  completion whose instance is gone yields a `null` reaction (and carries no row), so nothing commits. */
   private async handle(message: ActorMessage, seq: OutboxSeq | null): Promise<void> {
-    if (isFfiResult(message)) {
-      await this.onFfiResult(message);
-      return;
-    }
+    const { reaction, after } = await this.route(message);
+    if (reaction !== null) await this.substrate.commit(reaction, seq);
+    after?.();
+  }
+
+  /** Decide which reactor owns `message` and run its turn. `delegate`, `escalateAck`, and `terminate` always
+   *  target a `core` instance (a freshly summoned child, the escalation's raiser, the cancelled child); only
+   *  `delegateAck` / `escalate` / `terminateAck` route to the delegation's *caller* via `routeToCaller`. */
+  private async route(message: ActorMessage): Promise<Routed> {
+    if (isFfiResult(message)) return { reaction: await this.onFfiResult(message) };
     switch (message.kind) {
       case "delegate":
-        return this.onDelegate(message, seq);
+        return { reaction: await this.onDelegate(message) };
       case "escalateAck":
-        return this.onEscalateAck(message, seq);
+        return { reaction: await this.onEscalateAck(message) };
       case "terminate":
-        return this.onTerminate(message, seq);
+        return { reaction: await this.onTerminate(message) };
       case "delegateAck":
       case "escalate":
       case "terminateAck":
-        return this.routeToCaller(message, seq);
+        return this.routeToCaller(message);
     }
   }
 
   /** The single api|core dispatch. A `delegateAck` / `escalate` / `terminateAck` routes to its delegation's
-   *  caller; resolve it once and branch here. After this point neither the ApiReactor nor the core handlers
-   *  inspect the other's kind — this is the only place the boundary is crossed. */
-  private routeToCaller(
+   *  caller: a run's caller is the api root (reacts in the `ApiReactor`, settling its result promise after
+   *  commit), else a core caller reacts in the engine. The boundary is crossed once, here, by comparing the
+   *  caller id to the api root sentinel; after this neither side inspects the other's kind. */
+  private async routeToCaller(
     message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  ): Promise<Routed> {
     // delegateAck / terminateAck end the delegation, so its child edge is dropped here (an `escalate` leaves
     // the run running, so it keeps its child — that is how the eventual `escalateAck` finds the raiser).
     if (message.kind !== "escalate") delete this.delegationChild[message.delegation];
-    // The single api|core dispatch: a run delegation's caller is the api root (a sentinel id, not an engine
-    // instance), so the boundary is crossed by comparing ids — branch once, here, and never again.
-    if (this.isRunDelegation(message.delegation)) return this.reactApi(message, seq);
+    if (this.isRunDelegation(message.delegation)) {
+      const reaction = this.api.react(message);
+      return { reaction, after: () => this.api.afterCommit(message, reaction) };
+    }
     const caller = this.coreInstance(this.delegationCaller[message.delegation]);
-    if (caller === undefined) return this.consumeOnly(seq);
-    return this.reactCore(message, caller, seq);
-  }
-
-  /** The api root's reaction to a run's delegateAck / escalate / terminateAck. The reactor computes its turn
-   *  as a `Reaction` (the kind-dispatch lives inside `react`), the substrate commits it, then the reactor's
-   *  post-commit side effect (settling the in-process result promise) runs durable-first. */
-  private async reactApi(
-    message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
-    const reaction = this.api.react(message);
-    await this.substrate.commit(reaction, seq);
-    this.api.afterCommit(message, reaction);
+    if (caller === undefined) return { reaction: this.consume() };
+    return { reaction: await this.reactCore(message, caller) };
   }
 
   /** A core caller's reaction to a sub-call's delegateAck / escalate / terminateAck (`caller` is resolved
@@ -341,24 +340,20 @@ export class ProjectActor {
   private reactCore(
     message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
     caller: CoreInstance,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  ): Promise<Reaction> {
     switch (message.kind) {
       case "delegateAck":
-        return this.onCoreDelegateAck(message, caller, seq);
+        return this.onCoreDelegateAck(message, caller);
       case "escalate":
-        return this.onCoreEscalate(message, caller, seq);
+        return this.onCoreEscalate(message, caller);
       case "terminateAck":
-        return this.onCoreTerminateAck(message, caller, seq);
+        return this.onCoreTerminateAck(message, caller);
     }
   }
 
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
-  private async onDelegate(
-    event: Extract<ExternalEvent, { kind: "delegate" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<Reaction> {
     await this.ir.preload(event.target.snapshot);
     const resolved = this.resolveTarget(event.target);
     const instance = createInstance(this.store, {
@@ -387,7 +382,7 @@ export class ProjectActor {
               argument: event.argument,
             },
           ];
-    await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }], open, seq);
+    return this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }], open);
   }
 
   /** A core sub-call returned: hand its value to the caller's pending proxy slot (`caller` and the dropped
@@ -395,8 +390,7 @@ export class ProjectActor {
   private async onCoreDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
     caller: CoreInstance,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  ): Promise<Reaction> {
     delete this.delegationCaller[event.delegation];
     // Claim any resources the returned value carries up (a returned closure's captured scope chain, a
     // returned blob — set in-transit when the child retired): they now belong to this caller, which is
@@ -404,99 +398,78 @@ export class ProjectActor {
     reownResources(this.store, caller.id, event.value);
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) {
-      return this.consumeOnly(seq);
+      return this.consume();
     }
     delete caller.threads[proxy.id];
-    await this.runTurn(
-      caller,
-      [{ kind: "callAck", target: proxy.parent, callId: proxy.parentCallId, value: event.value }],
-      [],
-      seq,
-    );
+    return this.runTurn(caller, [
+      { kind: "callAck", target: proxy.parent, callId: proxy.parentCallId, value: event.value },
+    ]);
   }
 
   // ─── escalate / escalateAck (a request / control ask crossing the instance boundary) ────────────
 
   /** A sub-call's escalation reached a core caller: re-raise it inside the caller from the proxy's position
    *  so it bubbles toward a handle (`caller` resolved by `routeToCaller`). */
-  private async onCoreEscalate(
+  private onCoreEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
     caller: CoreInstance,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  ): Promise<Reaction> {
     const proxy = delegateProxyOf(caller, event.delegation);
-    if (proxy === undefined) return this.consumeOnly(seq);
+    if (proxy === undefined) return Promise.resolve(this.consume());
     // The relay echoes the raiser's `(delegation, escalation)` so its eventual `escalateAck` finds its way home.
-    await this.runTurnWith(
-      caller,
-      (ctx) => {
-        relayEscalate(ctx, proxy.id, event.escalation, event.ask);
-      },
-      [],
-      seq,
-    );
+    return this.runTurnWith(caller, (ctx) => {
+      relayEscalate(ctx, proxy.id, event.escalation, event.ask);
+    });
   }
 
-  private async onEscalateAck(
-    event: Extract<ExternalEvent, { kind: "escalateAck" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  private onEscalateAck(event: Extract<ExternalEvent, { kind: "escalateAck" }>): Promise<Reaction> {
     // The escalating child is the delegation's child, so it is also the raiser. Hand the answer to its
     // Agent root in external vocabulary `(escalation, value)`; the Agent maps the escalation back to its
     // internal askId and re-enters it as an askAck. The actor never names an inner thread. (The raiser is
     // always a `core` instance — the api root never raises.)
     const instance = this.coreInstance(this.delegationChild[event.delegation]);
-    if (instance === undefined) return this.consumeOnly(seq);
+    if (instance === undefined) return Promise.resolve(this.consume());
     // Mark the escalation answered in this same turn (the api root, or a relaying parent, runs no turn that
     // would emit the escalateAck as outbound, so record it here from the consumed event).
-    await this.runTurnWith(
+    return this.runTurnWith(
       instance,
       (ctx) => resumeEscalation(ctx, event.escalation, event.value),
       [{ kind: "escalation-answered", escalation: event.escalation, answer: event.value }],
-      seq,
     );
   }
 
   // ─── terminate / terminateAck (graceful cross-instance cancel) ──────────────────────────────────
 
-  private async onTerminate(
-    event: Extract<ExternalEvent, { kind: "terminate" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  private onTerminate(event: Extract<ExternalEvent, { kind: "terminate" }>): Promise<Reaction> {
     const child = this.coreInstance(this.delegationChild[event.delegation]);
-    if (child === undefined) return this.consumeOnly(seq);
+    if (child === undefined) return Promise.resolve(this.consume());
     child.status = "cancelling";
     // Cancel the root; once its subtree is torn down it emits terminateAck and retires the instance. Record
     // the delegation moving to `cancelling` in this same turn (so it holds even for an api-issued cancel,
     // which runs no turn of its own).
-    await this.runTurn(
+    return this.runTurn(
       child,
       [{ kind: "cancel", target: child.rootThreadId }],
       [{ kind: "delegation-cancelling", delegation: event.delegation }],
-      seq,
     );
   }
 
   /** A core sub-call's terminate cascade confirmed: retire the proxy and cancelAck the caller's parent so the
    *  cancel cascade continues (`caller` and the dropped child edge are handled by `routeToCaller`). */
-  private async onCoreTerminateAck(
+  private onCoreTerminateAck(
     event: Extract<ExternalEvent, { kind: "terminateAck" }>,
     caller: CoreInstance,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  ): Promise<Reaction> {
     delete this.delegationCaller[event.delegation];
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) {
-      return this.consumeOnly(seq);
+      return Promise.resolve(this.consume());
     }
     delete caller.threads[proxy.id];
     delete caller.cancelExits[proxy.id];
-    await this.runTurn(
-      caller,
-      [{ kind: "cancelAck", target: proxy.parent, callId: proxy.parentCallId }],
-      [],
-      seq,
-    );
+    return this.runTurn(caller, [
+      { kind: "cancelAck", target: proxy.parent, callId: proxy.parentCallId },
+    ]);
   }
 
   // ─── FFI completion ──────────────────────────────────────────────────────────────────────────
@@ -504,25 +477,23 @@ export class ProjectActor {
   /** Feed an FFI completion back to the suspended `ExternalThread` it belongs to: a result resumes it
    *  (ack its parent → completes the call's instance → delegateAck), an error raises a panic, and an
    *  abort confirmation finishes a cancelling thread's graceful cancel. */
-  private async onFfiResult(result: FfiResult): Promise<void> {
+  private onFfiResult(result: FfiResult): Promise<Reaction | null> {
     const instance = this.coreInstance(result.instance);
-    if (instance === undefined) return; // its instance was torn down (cancelled) — drop the late result
+    if (instance === undefined) return Promise.resolve(null); // instance torn down — drop the late result
     const thread = instance.threads[result.thread];
-    if (thread === undefined || thread.kind !== "external") return;
+    if (thread === undefined || thread.kind !== "external") return Promise.resolve(null);
     if (result.kind === "ffiCancelled" || thread.status === "cancelling") {
       // The thread is being aborted: any completion (the runner's `ffiCancelled`, or a real result/error
       // that raced the abort) finishes its graceful cancel. The value, if any, is discarded.
-      await this.runTurnWith(instance, (ctx) => completeExternalAbort(ctx, thread.id));
-      return;
+      return this.runTurnWith(instance, (ctx) => completeExternalAbort(ctx, thread.id));
     }
     if (result.kind === "ffiError") {
       // An FFI failure is a panic raised from the external leaf (it bubbles to a handler / fails the run).
-      await this.runTurnWith(instance, (ctx) => raisePanic(ctx, thread, result.message));
-      return;
+      return this.runTurnWith(instance, (ctx) => raisePanic(ctx, thread, result.message));
     }
-    if (thread.parent === null || thread.parentCallId === null) return;
+    if (thread.parent === null || thread.parentCallId === null) return Promise.resolve(null);
     delete instance.threads[thread.id];
-    await this.runTurn(instance, [
+    return this.runTurn(instance, [
       { kind: "callAck", target: thread.parent, callId: thread.parentCallId, value: result.value },
     ]);
   }
@@ -551,30 +522,27 @@ export class ProjectActor {
     instance: CoreInstance,
     initial: InternalEvent[],
     extraTransitions: EntityTransition[] = [],
-    consumed: OutboxSeq | null = null,
-  ): Promise<void> {
+  ): Promise<Reaction> {
     return this.runTurnWith(
       instance,
       (ctx) => {
         ctx.buffers.internalQueue.push(...initial);
       },
       extraTransitions,
-      consumed,
     );
   }
 
   /** Drive one `core` instance's turn after `seed` queues its initial internal events (directly, or via a
-   *  helper that needs the StepContext such as `relayEscalate`); then commit the turn and flush. The turn
-   *  commits atomically: its Layer 2 (the instance's graph, persisted, or dropped if it completed) together
-   *  with the Layer 1 entity transitions it implies — `extraTransitions` from the handler (a delegation it
-   *  is opening / cancelling, an escalation it is answering) plus the ones its outbound events imply — and
-   *  the outbox bookkeeping (consume the handled row `consumed`, durably produce the outbound events). */
+   *  helper that needs the StepContext such as `relayEscalate`), then return the turn as a `Reaction` for the
+   *  caller to commit. The Reaction carries the turn's Layer 2 (the instance's graph, persisted, or dropped
+   *  if it completed) together with the Layer 1 entity transitions it implies — `extraTransitions` from the
+   *  handler (a delegation it is opening / cancelling, an escalation it is answering) plus the ones its
+   *  outbound events imply — and the outbound events to durably produce. */
   private async runTurnWith(
     instance: CoreInstance,
     seed: (ctx: StepContext) => void,
     extraTransitions: EntityTransition[] = [],
-    consumed: OutboxSeq | null = null,
-  ): Promise<void> {
+  ): Promise<Reaction> {
     const snapshot = instance.target.snapshot;
     await this.ir.preload(snapshot);
     const ctx = makeStepContext({
@@ -613,10 +581,7 @@ export class ProjectActor {
       );
       layer2 = { kind: "persist", instance, ownedScopes };
     }
-    await this.substrate.commit(
-      { instanceId: instance.id, layer2, transitions, outbound },
-      consumed,
-    );
+    return { instanceId: instance.id, layer2, transitions, outbound };
   }
 
   private resolveTarget(target: DelegateTarget): {
