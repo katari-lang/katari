@@ -64,11 +64,8 @@ class FailingPersistence implements Persistence {
     private readonly inner: StoringPersistence,
     private readonly failOnCommit: number,
   ) {}
-  loadProject(projectId: ProjectId) {
-    return this.inner.loadProject(projectId);
-  }
-  ensureApiRoot(projectId: ProjectId, apiRootId: Parameters<Persistence["ensureApiRoot"]>[1]) {
-    return this.inner.ensureApiRoot(projectId, apiRootId);
+  load(projectId: ProjectId, body: Parameters<Persistence["load"]>[1]) {
+    return this.inner.load(projectId, body);
   }
   async transaction(projectId: ProjectId, body: (tx: PersistenceTx) => Promise<void>): Promise<void> {
     this.commits += 1;
@@ -438,7 +435,14 @@ describe("recovery", () => {
     const persistence = new StoringPersistence();
     const run = newDelegationId();
     const target = { kind: "named" as const, name: createAgentName("main"), snapshot: SNAPSHOT };
-    persistence.seedDelegation(run, { caller: apiRootIdOf(PROJECT), target, argument: null });
+    // A run delegation: issued by the api root (`from: api`) to a core instance (`to: core`).
+    persistence.seedDelegation(run, {
+      caller: apiRootIdOf(PROJECT),
+      fromReactor: "api",
+      toReactor: "core",
+      target,
+      argument: null,
+    });
     persistence.seedOutbox({
       seq: newOutboxSeq(),
       issuer: apiRootIdOf(PROJECT),

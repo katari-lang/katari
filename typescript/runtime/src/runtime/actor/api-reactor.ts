@@ -14,6 +14,7 @@
 
 import type { QualifiedName } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
+import { isUserFacingRequest } from "../escalation-filter.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import {
   type DelegationId,
@@ -24,7 +25,7 @@ import {
 } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type {
-  PersistedDelegation,
+  Loader,
   PersistedRun,
   PersistedRunEscalationAudit,
   PersistenceTx,
@@ -156,6 +157,7 @@ export class ApiReactor extends Reactor {
       // here, before the delegate is produced, means the run survives a crash before its root is even created.
       this.openDelegation(delegation, {
         caller: this.apiRootId,
+        peer: "core",
         target: { kind: "named", name: qualifiedName, snapshot },
         argument,
       });
@@ -222,23 +224,29 @@ export class ApiReactor extends Reactor {
     }));
   }
 
-  /** Re-establish one user-facing open escalation on recovery (core decides which are user-facing and
-   *  supplies the run delegation it belongs to). */
-  rehydrateOpenEscalation(open: OpenEscalation & { run: DelegationId }): void {
-    this.openEscalations[open.escalation] = open;
-  }
-
-  /** Reload the api root's live run delegation rows on recovery (those whose caller is the api root), so a
-   *  recovered run can still be cancelled / can record its terminal state when it finishes. */
-  loadRuns(liveDelegations: PersistedDelegation[]): void {
-    for (const row of liveDelegations) {
-      if (row.caller !== this.apiRootId) continue;
+  /** Reload the api root's own warm state from durable rows: the live run delegations it issued
+   *  (`from = api`), so a recovered run is cancellable and can record its terminal state; and its answerable
+   *  open escalations — those addressed to it (`to = api`, i.e. raised by a run root) that are genuine
+   *  requests (a panic / control escape that reached the run root fails the run, it is not answered). Both
+   *  are self-selected from the loader; `delegation` on a user-facing escalation is the run it belongs to. */
+  async load(loader: Loader): Promise<void> {
+    for (const row of await loader.delegations("api")) {
       this.reloadDelegation(row.delegation, {
         caller: row.caller,
+        peer: row.toReactor,
         target: row.target,
         argument: row.argument,
         state: row.state,
       });
+    }
+    for (const open of await loader.openEscalations({ to: "api" })) {
+      if (!isUserFacingRequest(open.request)) continue;
+      this.openEscalations[open.escalation] = {
+        run: open.delegation,
+        escalation: open.escalation,
+        request: open.request as QualifiedName,
+        argument: open.argument,
+      };
     }
   }
 

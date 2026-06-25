@@ -138,30 +138,26 @@ export class ProjectActor {
 
   // ─── reactivation (the substrate's domain half) ─────────────────────────────────────────────────
 
-  /** Lazily reload the project's persisted state on first use, splitting the snapshot across the reactors:
-   *  the core reactor rebuilds its store + routing + the Layer 1 rows it owns; the api reactor rehydrates its
-   *  user-facing open escalations and its live run delegations; the durable api root row is ensured; the
-   *  undrained outbox is replayed into the mailbox; and in-flight external calls are re-dispatched. */
+  /** Lazily reload the project's persisted state on first use: each reactor pulls only the rows it owns from
+   *  the loader (core its engine graph + routing + its delegations/escalations; the api root its run
+   *  delegations + answerable escalations) — no central blob, no cross-reactor classification. The undrained
+   *  outbox is replayed into the mailbox; in-flight external calls are re-dispatched. The api management
+   *  root's durable `instances` row is ensured by the api reactor in each run's `delegate` commit (it owns
+   *  that row), so reactivation only reads. */
   private async reactivate(): Promise<void> {
     // Reactivation is idempotent and is the recovery path after a poisoned commit too: drop any warm state
     // first (a cold start clears empty state — a no-op), so reloading never accumulates stale routing.
     this.core.reset();
     this.api.reset();
     this.pool.reset();
-    const snapshot = await this.persistence.loadProject(this.projectId);
-    this.core.loadState(snapshot);
-    // The core reactor decides which open escalations are user-facing (raised by a run root); the api reactor
-    // rehydrates those so a run suspended awaiting a user's answer survives a restart.
-    for (const open of this.core.userFacingOpenEscalations(snapshot.openEscalations)) {
-      this.api.rehydrateOpenEscalation(open);
-    }
-    this.api.loadRuns(snapshot.liveDelegations);
-    // The api management root's durable `instances` row is ensured by the api reactor in the same commit as
-    // each run's `delegate` (it owns that row); reactivation only reloads, so it is not ensured here.
-    // Replay the undrained outbox: events produced before the crash but not yet consumed.
-    for (const message of snapshot.pendingOutbox) {
-      this.substrate.enqueueOutbox(message.event, message.seq);
-    }
+    await this.persistence.load(this.projectId, async (loader) => {
+      await this.core.load(loader);
+      await this.api.load(loader);
+      // Replay the undrained outbox: events produced before the crash but not yet consumed.
+      for (const message of await loader.outbox()) {
+        this.substrate.enqueueOutbox(message.event, message.seq);
+      }
+    });
     // NB: the substrate marks the project loaded only after this whole method (incl. the resume below)
     // resolves, so a resume failure does not leave it loaded-but-half-initialised — the next caller retries.
     await this.core.resumeInFlightExternals();

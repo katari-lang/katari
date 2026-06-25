@@ -12,8 +12,7 @@
 // *storing* twin (`StoringPersistence`, for recovery tests), and a drizzle-backed one (`DbPersistence`).
 
 import type { DelegationState, EscalationState } from "../../db/tables/execution.js";
-import type { ProjectStore } from "../engine/types.js";
-import type { DelegateTarget, ExternalEvent } from "../event/types.js";
+import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import type {
   DelegationId,
   EscalationId,
@@ -24,14 +23,22 @@ import type {
   SnapshotId,
 } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { PersistedScope, SerializedInstance } from "./persistence-codec.js";
+import type {
+  DeserializedEngine,
+  PersistedScope,
+  SerializedInstance,
+} from "./persistence-codec.js";
 
 /** A caller-owned delegation row at one instant (the `delegations` table shape). The caller reactor (core
  *  for a sub-call, the api root for a run) is the source of truth and writes this each time the row's state
- *  changes — `running → done` (result set) / `cancelling → gone` / `failed` (errorMessage set). */
+ *  changes — `running → done` (result set) / `cancelling → gone` / `failed` (errorMessage set). `fromReactor`
+ *  (the caller's reactor) and `toReactor` (the callee's) let each reactor reload its own delegations on
+ *  restart without classifying by the caller's identity. */
 export interface PersistedDelegation {
   delegation: DelegationId;
   caller: InstanceId;
+  fromReactor: ReactorName;
+  toReactor: ReactorName;
   target: DelegateTarget;
   argument: Value | null;
   state: DelegationState;
@@ -40,10 +47,16 @@ export interface PersistedDelegation {
 }
 
 /** A raiser-owned escalation row at one instant (the `escalations` table shape). The raiser is always a
- *  `core` instance; the row moves `open → answered` (answer set) when the raiser receives the `escalateAck`. */
+ *  `core` instance; the row moves `open → answered` (answer set) when the raiser receives the `escalateAck`.
+ *  `fromReactor` (the raiser's reactor) / `toReactor` (the reactor the escalate was addressed to) let each
+ *  reactor self-select on restart — `toReactor = "api"` ⟺ the raiser is a run root (a user-facing
+ *  escalation). `delegation` is the raiser's delegation (the run, for a user-facing escalation). */
 export interface PersistedEscalation {
   escalation: EscalationId;
   raiser: InstanceId;
+  fromReactor: ReactorName;
+  toReactor: ReactorName;
+  delegation: DelegationId;
   request: string;
   argument: Value | null;
   state: EscalationState;
@@ -122,43 +135,45 @@ export interface PersistenceTx {
   ensureApiRoot(apiRootId: InstanceId): Promise<void>;
 }
 
-/** A persisted open escalation (an `escalations` row still in the `open` state). The actor rehydrates the
- *  user-facing ones (those raised by a run root) into the api reactor's registry on reactivation, and the
- *  core reactor reloads all of them (it is the raiser). */
+/** A persisted open escalation (an `escalations` row still in the `open` state). Each reactor self-selects
+ *  the ones it needs from the `Loader` by reactor (`from` = the raiser's reactor; `to` = the addressed
+ *  reactor — `to = "api"` is a user-facing escalation, whose `delegation` is the run). */
 export interface PersistedOpenEscalation {
   escalation: EscalationId;
   raiser: InstanceId;
+  fromReactor: ReactorName;
+  toReactor: ReactorName;
+  delegation: DelegationId;
   request: string;
   argument: Value | null;
 }
 
-/** A project's reconstructed state, sliced by each reactor on reactivation.
- *
- *  The engine graph (instances / scopes) rebuilds the core reactor's store; routing (which instance issued /
- *  handles each delegation) is rederived from the surviving `DelegateThread`s and instance `delegationId`s,
- *  so it never depends on a separate edge map. `liveDelegations` carries the still-running rows each reactor
- *  reloads as its own (the core reactor takes those whose caller is one of its instances; the api reactor
- *  takes the run rows whose caller is the api root). `openEscalations` are all core-raised. */
-export interface ProjectSnapshot {
-  instances: ProjectStore["instances"];
-  scopes: ProjectStore["scopes"];
-  nextScopeId: number;
-  /** Live (running / cancelling) delegation rows — the ones that still carry routing and still accept a
-   *  transition. Finished delegations (done / gone / failed) are history and are excluded. */
-  liveDelegations: PersistedDelegation[];
-  /** Open escalation rows. The actor keeps the user-facing ones (raised by a run root) so a run suspended
-   *  awaiting a user's answer survives a restart; the core reactor reloads all of them (it marks them
-   *  answered when the `escalateAck` arrives). */
-  openEscalations: PersistedOpenEscalation[];
-  /** Undrained outbox rows: events produced before the crash but not yet consumed. The actor replays them
-   *  into its mailbox so an in-flight event (e.g. a completed child's `delegateAck`) is not lost. */
-  pendingOutbox: OutboxMessage[];
+/** The per-reactor read surface, symmetric to `PersistenceTx` on the write side: on reactivation each reactor
+ *  pulls only the rows it owns, so there is no central blob nor cross-reactor classification. The engine
+ *  graph rebuilds the core reactor's store; routing (which instance issued / handles each delegation) is
+ *  rederived from the surviving `DelegateThread`s and instance `delegationId`s, not from a separate edge map.
+ *  Every query returns only live (running / cancelling) delegations / open escalations — terminal rows are
+ *  history. */
+export interface Loader {
+  /** The core engine graph (instances + their threads + the shared scopes). */
+  engine(): Promise<DeserializedEngine>;
+  /** Live delegations issued by `from` (the caller's reactor) — core takes `core`, the api root takes `api`. */
+  delegations(from: ReactorName): Promise<PersistedDelegation[]>;
+  /** Open escalations matching a reactor filter: `{ from }` for the raiser (core takes all it raised),
+   *  `{ to }` for the addressed reactor (the api root takes `to = "api"`, its answerable set). */
+  openEscalations(filter: {
+    from?: ReactorName;
+    to?: ReactorName;
+  }): Promise<PersistedOpenEscalation[]>;
+  /** Undrained outbox rows (produced but not consumed), replayed into the mailbox so an in-flight event is
+   *  not lost across a restart. */
+  outbox(): Promise<OutboxMessage[]>;
 }
 
 export interface Persistence {
-  /** Load a project's persisted engine graph + live delegation rows + open escalations to reactivate its
-   *  warm actor. */
-  loadProject(projectId: ProjectId): Promise<ProjectSnapshot>;
+  /** Reactivate a project: open a read, hand each reactor a `Loader` to pull the rows it owns, replay the
+   *  outbox. The body restores the warm reactors + enqueues the undrained outbox. */
+  load(projectId: ProjectId, body: (loader: Loader) => Promise<void>): Promise<void>;
   /** Run one turn's writes atomically: open a transaction, hand the reactor + substrate a `PersistenceTx`,
    *  and commit. The body issues the reactor's `persist(tx)` and the outbox consume / produce. */
   transaction(projectId: ProjectId, body: (tx: PersistenceTx) => Promise<void>): Promise<void>;
@@ -166,15 +181,9 @@ export interface Persistence {
 
 /** The seam implementation: the warm store is the truth, so nothing persists and nothing loads. */
 export class InMemoryPersistence implements Persistence {
-  async loadProject(): Promise<ProjectSnapshot> {
-    return {
-      instances: {},
-      scopes: {},
-      nextScopeId: 0,
-      liveDelegations: [],
-      openEscalations: [],
-      pendingOutbox: [],
-    };
+  async load(_projectId: ProjectId, body: (loader: Loader) => Promise<void>): Promise<void> {
+    // Nothing was stored, so every query is empty; the warm reactors come up clean.
+    await body(EMPTY_LOADER);
   }
   async transaction(
     _projectId: ProjectId,
@@ -199,4 +208,19 @@ const NO_OP_TX: PersistenceTx = {
   async setRunCancelReason() {},
   async putRunEscalationAudit() {},
   async ensureApiRoot() {},
+};
+
+const EMPTY_LOADER: Loader = {
+  async engine() {
+    return { instances: {}, scopes: {}, nextScopeId: 0 };
+  },
+  async delegations() {
+    return [];
+  },
+  async openEscalations() {
+    return [];
+  },
+  async outbox() {
+    return [];
+  },
 };

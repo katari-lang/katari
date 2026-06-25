@@ -23,9 +23,12 @@ import type { Value } from "../value/types.js";
 import type { PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
-/** A caller-owned delegation row in memory (the live source of truth). */
+/** A caller-owned delegation row in memory (the live source of truth). `peer` is the callee reactor (the
+ *  delegation's `to`); the issuer's own reactor (its `from`) is `this.name`. The pair lets each reactor
+ *  reload its own rows on restart without any cross-reactor classification. */
 interface DelegationRow {
   caller: InstanceId;
+  peer: ReactorName;
   target: DelegateTarget;
   argument: Value | null;
   state: DelegationState;
@@ -33,9 +36,15 @@ interface DelegationRow {
   errorMessage?: string;
 }
 
-/** A raiser-owned escalation row in memory (the live source of truth). */
+/** A raiser-owned escalation row in memory (the live source of truth). `peer` is the reactor the escalate was
+ *  addressed to (its `to` — the caller of the raiser's delegation; `api` ⟺ the raiser is a run root, i.e.
+ *  the escalation is user-facing); the raiser's own reactor (its `from`) is `this.name`. `delegation` is the
+ *  raiser's delegation, which for a user-facing escalation is the run — so the api root can rebuild its
+ *  answerable list (run + question) from the row alone. */
 interface EscalationRow {
   raiser: InstanceId;
+  peer: ReactorName;
+  delegation: DelegationId;
   request: string;
   argument: Value | null;
   state: "open" | "answered";
@@ -116,10 +125,10 @@ export abstract class Reactor {
 
   // ─── Layer 1 entity ownership (caller-side delegations, raiser-side escalations) ────────────────
 
-  /** Open a delegation this reactor issued as caller (state `running`). */
+  /** Open a delegation this reactor issued as caller (state `running`). `peer` is the callee reactor. */
   protected openDelegation(
     delegation: DelegationId,
-    row: { caller: InstanceId; target: DelegateTarget; argument: Value | null },
+    row: { caller: InstanceId; peer: ReactorName; target: DelegateTarget; argument: Value | null },
   ): void {
     this.delegations.set(delegation, { ...row, state: "running" });
     this.dirtyDelegations.add(delegation);
@@ -147,6 +156,7 @@ export abstract class Reactor {
     delegation: DelegationId,
     row: {
       caller: InstanceId;
+      peer: ReactorName;
       target: DelegateTarget;
       argument: Value | null;
       state: DelegationState;
@@ -156,10 +166,17 @@ export abstract class Reactor {
   }
 
   /** Open a request escalation this reactor raised (idempotent — a relay never reaches here with a duplicate
-   *  id since each instance boundary mints a fresh escalation, but the guard keeps reload + open uniform). */
+   *  id since each instance boundary mints a fresh escalation, but the guard keeps reload + open uniform).
+   *  `peer` is the reactor the escalate was addressed to; `delegation` is the raiser's delegation. */
   protected openEscalation(
     escalation: EscalationId,
-    row: { raiser: InstanceId; request: string; argument: Value | null },
+    row: {
+      raiser: InstanceId;
+      peer: ReactorName;
+      delegation: DelegationId;
+      request: string;
+      argument: Value | null;
+    },
   ): void {
     if (this.escalations.has(escalation)) return;
     this.escalations.set(escalation, { ...row, state: "open" });
@@ -178,7 +195,13 @@ export abstract class Reactor {
   /** Reload an open escalation row this reactor owns on reactivation (the in-memory SoT, not dirty). */
   protected reloadEscalation(
     escalation: EscalationId,
-    row: { raiser: InstanceId; request: string; argument: Value | null },
+    row: {
+      raiser: InstanceId;
+      peer: ReactorName;
+      delegation: DelegationId;
+      request: string;
+      argument: Value | null;
+    },
   ): void {
     this.escalations.set(escalation, { ...row, state: "open" });
   }
@@ -193,6 +216,8 @@ export abstract class Reactor {
       await tx.putDelegation({
         delegation,
         caller: row.caller,
+        fromReactor: this.name,
+        toReactor: row.peer,
         target: row.target,
         argument: row.argument,
         state: row.state,
@@ -206,6 +231,9 @@ export abstract class Reactor {
       await tx.putEscalation({
         escalation,
         raiser: row.raiser,
+        fromReactor: this.name,
+        toReactor: row.peer,
+        delegation: row.delegation,
         request: row.request,
         argument: row.argument,
         state: row.state,

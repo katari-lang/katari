@@ -9,10 +9,11 @@
 // before the rows that reference it, and `dropInstance` cascades last).
 
 import { type DelegationState, isLiveDelegationState } from "../../db/tables/execution.js";
-import type { DelegateTarget } from "../event/types.js";
+import type { DelegateTarget, ReactorName } from "../event/types.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type {
+  Loader,
   OutboxMessage,
   PersistedDelegation,
   PersistedOpenEscalation,
@@ -20,7 +21,6 @@ import type {
   PersistedRunEscalationAudit,
   Persistence,
   PersistenceTx,
-  ProjectSnapshot,
 } from "./persistence.js";
 import {
   deserializeProject,
@@ -29,9 +29,11 @@ import {
   type PersistedThread,
 } from "./persistence-codec.js";
 
-/** A stored Layer 1 delegation row (the durable caller→child record + its lifecycle). */
+/** A stored Layer 1 delegation row (the durable caller→child record + its lifecycle + its from/to reactors). */
 interface StoredDelegation {
   caller: InstanceId;
+  fromReactor: ReactorName;
+  toReactor: ReactorName;
   target: DelegateTarget;
   argument: Value | null;
   state: DelegationState;
@@ -41,6 +43,9 @@ interface StoredDelegation {
 
 interface StoredEscalation {
   raiser: InstanceId;
+  fromReactor: ReactorName;
+  toReactor: ReactorName;
+  delegation: DelegationId;
   state: "open" | "answered";
   request: string;
   argument: Value | null;
@@ -69,43 +74,56 @@ export class StoringPersistence implements Persistence {
   private readonly runs = new Map<DelegationId, StoredRun>();
   private readonly audits: PersistedRunEscalationAudit[] = [];
 
-  async loadProject(_projectId: ProjectId): Promise<ProjectSnapshot> {
-    const engine = deserializeProject(
-      [...this.instances.values()],
-      [...this.threads.values()].flat(),
-      [...this.scopes.values()],
-    );
-    const liveDelegations: PersistedDelegation[] = [];
-    for (const [delegation, row] of this.delegations) {
-      // Only live (running / cancelling) rows carry routing; finished ones are history.
-      if (isLiveDelegationState(row.state)) {
-        liveDelegations.push({
-          delegation,
-          caller: row.caller,
-          target: row.target,
-          argument: row.argument,
-          state: row.state,
-          result: row.result,
-          errorMessage: row.errorMessage,
-        });
-      }
-    }
-    const openEscalations: PersistedOpenEscalation[] = [];
-    for (const [escalation, row] of this.escalations) {
-      if (row.state === "open") {
-        openEscalations.push({
-          escalation,
-          raiser: row.raiser,
-          request: row.request,
-          argument: row.argument,
-        });
-      }
-    }
+  async load(_projectId: ProjectId, body: (loader: Loader) => Promise<void>): Promise<void> {
+    await body(this.loader());
+  }
+
+  /** The per-reactor read surface over the twin's maps — each query self-selects by reactor. */
+  private loader(): Loader {
     return {
-      ...engine,
-      liveDelegations,
-      openEscalations,
-      pendingOutbox: [...this.outbox.values()],
+      engine: async () =>
+        deserializeProject([...this.instances.values()], [...this.threads.values()].flat(), [
+          ...this.scopes.values(),
+        ]),
+      delegations: async (from) => {
+        const result: PersistedDelegation[] = [];
+        for (const [delegation, row] of this.delegations) {
+          // Only live (running / cancelling) rows carry routing; finished ones are history.
+          if (row.fromReactor === from && isLiveDelegationState(row.state)) {
+            result.push({
+              delegation,
+              caller: row.caller,
+              fromReactor: row.fromReactor,
+              toReactor: row.toReactor,
+              target: row.target,
+              argument: row.argument,
+              state: row.state,
+              result: row.result,
+              errorMessage: row.errorMessage,
+            });
+          }
+        }
+        return result;
+      },
+      openEscalations: async (filter) => {
+        const result: PersistedOpenEscalation[] = [];
+        for (const [escalation, row] of this.escalations) {
+          if (row.state !== "open") continue;
+          if (filter.from !== undefined && row.fromReactor !== filter.from) continue;
+          if (filter.to !== undefined && row.toReactor !== filter.to) continue;
+          result.push({
+            escalation,
+            raiser: row.raiser,
+            fromReactor: row.fromReactor,
+            toReactor: row.toReactor,
+            delegation: row.delegation,
+            request: row.request,
+            argument: row.argument,
+          });
+        }
+        return result;
+      },
+      outbox: async () => [...this.outbox.values()],
     };
   }
 
@@ -122,6 +140,8 @@ export class StoringPersistence implements Persistence {
       putDelegation: async (row) => {
         this.delegations.set(row.delegation, {
           caller: row.caller,
+          fromReactor: row.fromReactor,
+          toReactor: row.toReactor,
           target: row.target,
           argument: row.argument,
           state: row.state,
@@ -132,6 +152,9 @@ export class StoringPersistence implements Persistence {
       putEscalation: async (row) => {
         this.escalations.set(row.escalation, {
           raiser: row.raiser,
+          fromReactor: row.fromReactor,
+          toReactor: row.toReactor,
+          delegation: row.delegation,
           state: row.state,
           request: row.request,
           argument: row.argument,
@@ -208,10 +231,18 @@ export class StoringPersistence implements Persistence {
    *  actor sees both — the row in `liveDelegations`, the event in the outbox). */
   seedDelegation(
     delegation: DelegationId,
-    row: { caller: InstanceId; target: DelegateTarget; argument: Value | null },
+    row: {
+      caller: InstanceId;
+      fromReactor: ReactorName;
+      toReactor: ReactorName;
+      target: DelegateTarget;
+      argument: Value | null;
+    },
   ): void {
     this.delegations.set(delegation, {
       caller: row.caller,
+      fromReactor: row.fromReactor,
+      toReactor: row.toReactor,
       target: row.target,
       argument: row.argument,
       state: "running",

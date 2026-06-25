@@ -19,13 +19,7 @@ import {
   runs,
 } from "../../db/tables/execution.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
-import type {
-  PersistedDelegation,
-  PersistedOpenEscalation,
-  Persistence,
-  PersistenceTx,
-  ProjectSnapshot,
-} from "./persistence.js";
+import type { Loader, Persistence, PersistenceTx } from "./persistence.js";
 import {
   deserializeProject,
   type PersistedInstance,
@@ -36,101 +30,127 @@ import {
 export class DbPersistence implements Persistence {
   constructor(private readonly db: Database) {}
 
-  async loadProject(projectId: ProjectId): Promise<ProjectSnapshot> {
-    const [instanceRows, threadRows, scopeRows, delegationRows, escalationRows, outboxRows] =
-      await Promise.all([
-        this.db
-          .select()
-          .from(instances)
-          .where(and(eq(instances.projectId, projectId), isNotNull(instances.engineState))),
-        this.db.select().from(threads).where(eq(threads.projectId, projectId)),
-        this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
+  async load(projectId: ProjectId, body: (loader: Loader) => Promise<void>): Promise<void> {
+    await body(this.loader(projectId));
+  }
+
+  /** The per-reactor read surface: each method runs one query, self-selecting by reactor. Reactivation runs
+   *  before any commit on a serial actor, so separate reads see a consistent snapshot without a read tx. */
+  private loader(projectId: ProjectId): Loader {
+    return {
+      engine: async () => {
+        const [instanceRows, threadRows, scopeRows] = await Promise.all([
+          this.db
+            .select()
+            .from(instances)
+            .where(and(eq(instances.projectId, projectId), isNotNull(instances.engineState))),
+          this.db.select().from(threads).where(eq(threads.projectId, projectId)),
+          this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
+        ]);
+        const persistedInstances: PersistedInstance[] = instanceRows.flatMap((row) =>
+          row.engineState === null
+            ? []
+            : [
+                {
+                  id: row.id as InstanceId,
+                  projectId: row.projectId as ProjectId,
+                  kind: row.kind,
+                  delegationId: row.delegationId as PersistedInstance["delegationId"],
+                  target: row.target,
+                  snapshotId: row.snapshotId as PersistedInstance["snapshotId"],
+                  status: row.status,
+                  ambientGenerics: row.ambientGenerics ?? null,
+                  engineState: row.engineState,
+                },
+              ],
+        );
+        const persistedThreads: PersistedThread[] = threadRows.map((row) => ({
+          projectId: row.projectId as ProjectId,
+          instanceId: row.instanceId as InstanceId,
+          threadId: row.threadId,
+          kind: row.kind,
+          parentThreadId: row.parentThreadId,
+          parentCallId: row.parentCallId,
+          scopeId: row.scopeId,
+          blockId: row.blockId,
+          status: row.status,
+          payload: row.payload,
+        }));
+        const persistedScopes: PersistedScope[] = scopeRows.map((row) => ({
+          projectId: row.projectId as ProjectId,
+          scopeId: row.scopeId,
+          parentScopeId: row.parentScopeId,
+          ownerInstanceId: row.ownerInstanceId as InstanceId | null,
+          values: row.values,
+        }));
+        return deserializeProject(persistedInstances, persistedThreads, persistedScopes);
+      },
+      delegations: async (from) => {
         // Only live rows carry routing; finished ones (done / gone / failed) are history.
-        this.db
+        const rows = await this.db
           .select()
           .from(delegations)
           .where(
             and(
               eq(delegations.projectId, projectId),
+              eq(delegations.fromReactor, from),
               inArray(delegations.state, LIVE_DELEGATION_STATES),
             ),
-          ),
-        this.db
+          );
+        return rows.flatMap((row) =>
+          row.callerInstanceId === null
+            ? []
+            : [
+                {
+                  delegation: row.id as DelegationId,
+                  caller: row.callerInstanceId as InstanceId,
+                  fromReactor: row.fromReactor,
+                  toReactor: row.toReactor,
+                  target: row.target,
+                  argument: row.argument,
+                  state: row.state,
+                  result: row.result,
+                  errorMessage: row.errorMessage,
+                },
+              ],
+        );
+      },
+      openEscalations: async (filter) => {
+        const conditions = [
+          eq(escalations.projectId, projectId),
+          eq(escalations.state, "open" as const),
+        ];
+        if (filter.from !== undefined) conditions.push(eq(escalations.fromReactor, filter.from));
+        if (filter.to !== undefined) conditions.push(eq(escalations.toReactor, filter.to));
+        const rows = await this.db
           .select()
           .from(escalations)
-          .where(and(eq(escalations.projectId, projectId), eq(escalations.state, "open"))),
-        // Undrained outbox rows, in production order (routing recovers from the engine threads, so replay
-        // order only needs to be stable, not strictly causal).
-        this.db
+          .where(and(...conditions));
+        return rows.map((row) => ({
+          escalation: row.id as EscalationId,
+          raiser: row.raiserInstanceId as InstanceId,
+          fromReactor: row.fromReactor,
+          toReactor: row.toReactor,
+          delegation: row.delegationId as DelegationId,
+          request: row.request,
+          argument: row.argument,
+        }));
+      },
+      outbox: async () => {
+        // In production order (routing recovers from the engine threads, so replay order only needs to be
+        // stable, not strictly causal).
+        const rows = await this.db
           .select()
           .from(outbox)
           .where(eq(outbox.projectId, projectId))
-          .orderBy(asc(outbox.createdAt)),
-      ]);
-    const persistedInstances: PersistedInstance[] = instanceRows.flatMap((row) =>
-      row.engineState === null
-        ? []
-        : [
-            {
-              id: row.id as InstanceId,
-              projectId: row.projectId as ProjectId,
-              kind: row.kind,
-              delegationId: row.delegationId as PersistedInstance["delegationId"],
-              target: row.target,
-              snapshotId: row.snapshotId as PersistedInstance["snapshotId"],
-              status: row.status,
-              ambientGenerics: row.ambientGenerics ?? null,
-              engineState: row.engineState,
-            },
-          ],
-    );
-    const persistedThreads: PersistedThread[] = threadRows.map((row) => ({
-      projectId: row.projectId as ProjectId,
-      instanceId: row.instanceId as InstanceId,
-      threadId: row.threadId,
-      kind: row.kind,
-      parentThreadId: row.parentThreadId,
-      parentCallId: row.parentCallId,
-      scopeId: row.scopeId,
-      blockId: row.blockId,
-      status: row.status,
-      payload: row.payload,
-    }));
-    const persistedScopes: PersistedScope[] = scopeRows.map((row) => ({
-      projectId: row.projectId as ProjectId,
-      scopeId: row.scopeId,
-      parentScopeId: row.parentScopeId,
-      ownerInstanceId: row.ownerInstanceId as InstanceId | null,
-      values: row.values,
-    }));
-    const engine = deserializeProject(persistedInstances, persistedThreads, persistedScopes);
-    const liveDelegations: PersistedDelegation[] = delegationRows.flatMap((row) =>
-      row.callerInstanceId === null
-        ? []
-        : [
-            {
-              delegation: row.id as DelegationId,
-              caller: row.callerInstanceId as InstanceId,
-              target: row.target,
-              argument: row.argument,
-              state: row.state,
-              result: row.result,
-              errorMessage: row.errorMessage,
-            },
-          ],
-    );
-    const openEscalations: PersistedOpenEscalation[] = escalationRows.map((row) => ({
-      escalation: row.id as EscalationId,
-      raiser: row.raiserInstanceId as InstanceId,
-      request: row.request,
-      argument: row.argument,
-    }));
-    const pendingOutbox: ProjectSnapshot["pendingOutbox"] = outboxRows.map((row) => ({
-      seq: row.seq as OutboxSeq,
-      issuer: row.instanceId as InstanceId,
-      event: row.event,
-    }));
-    return { ...engine, liveDelegations, openEscalations, pendingOutbox };
+          .orderBy(asc(outbox.createdAt));
+        return rows.map((row) => ({
+          seq: row.seq as OutboxSeq,
+          issuer: row.instanceId as InstanceId,
+          event: row.event,
+        }));
+      },
+    };
   }
 
   async transaction(
@@ -156,6 +176,8 @@ export class DbPersistence implements Persistence {
             id: row.delegation,
             projectId,
             callerInstanceId: row.caller,
+            fromReactor: row.fromReactor,
+            toReactor: row.toReactor,
             target: row.target,
             argument: row.argument,
             state: row.state,
@@ -174,6 +196,9 @@ export class DbPersistence implements Persistence {
             id: row.escalation,
             projectId,
             raiserInstanceId: row.raiser,
+            fromReactor: row.fromReactor,
+            toReactor: row.toReactor,
+            delegationId: row.delegation,
             request: row.request,
             argument: row.argument,
             state: row.state,

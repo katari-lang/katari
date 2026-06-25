@@ -27,7 +27,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
-import type { DelegateTarget, ExternalEvent } from "../../runtime/event/types.js";
+import type { DelegateTarget, ExternalEvent, ReactorName } from "../../runtime/event/types.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
@@ -111,6 +111,11 @@ export const delegations = pgTable(
     callerInstanceId: uuid("caller_instance_id").references(() => instances.id, {
       onDelete: "cascade",
     }),
+    /** The reactors this delegation runs between: `from` = the caller's reactor (the owner — `core` for a
+     *  sub-call, `api` for a run), `to` = the callee's. Each reactor reloads its own delegations by
+     *  `from_reactor` on restart (no caller-identity classification). */
+    fromReactor: text("from_reactor").$type<ReactorName>().notNull(),
+    toReactor: text("to_reactor").$type<ReactorName>().notNull(),
     target: jsonb("target").$type<DelegateTarget>().notNull(),
     argument: jsonb("argument").$type<Value | null>(),
     /** running → done (delegateAck'd, `result` set) | cancelling → gone (terminateAck'd) | failed (a panic
@@ -147,6 +152,14 @@ export const escalations = pgTable(
     raiserInstanceId: uuid("raiser_instance_id")
       .notNull()
       .references(() => instances.id, { onDelete: "cascade" }),
+    /** The raiser's delegation — for a user-facing escalation (`to_reactor = 'api'`) this IS the run, so the
+     *  api root rebuilds its answerable list (run + question) from the row alone. */
+    delegationId: uuid("delegation_id").notNull(),
+    /** The reactors this escalation runs between: `from` = the raiser's reactor (always `core` today — only
+     *  core instances raise), `to` = the reactor the escalate was addressed to (`api` ⟺ the raiser is a run
+     *  root, i.e. a user-facing escalation). The api root self-selects its answerable set by `to_reactor`. */
+    fromReactor: text("from_reactor").$type<ReactorName>().notNull(),
+    toReactor: text("to_reactor").$type<ReactorName>().notNull(),
     /** The requested capability (the `request` qualified name). */
     request: text("request").notNull(),
     argument: jsonb("argument").$type<Value | null>(),

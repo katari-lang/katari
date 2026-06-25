@@ -12,7 +12,6 @@
 // the api root — core never inspects it; it routes a run's reply back to `api` simply because the run has no
 // in-core caller (`routeOf`). FFI completions arrive via `reactFfi` until the FFI reactor lands.
 
-import type { QualifiedName } from "@katari-lang/types";
 import { delegateProxyOf, raisePanic, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
@@ -21,7 +20,6 @@ import { createInstance, isInstanceComplete, teardownInstance } from "../engine/
 import { readVariable } from "../engine/scope.js";
 import { completeExternalAbort } from "../engine/thread-ops.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
-import { isUserFacingRequest } from "../escalation-filter.js";
 import type {
   DelegateTarget,
   ExternalEvent,
@@ -34,8 +32,7 @@ import type { ExternalRunner } from "../external/runner.js";
 import type { DelegationId, InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
-import type { OpenEscalation } from "./api-reactor.js";
-import type { PersistedOpenEscalation, PersistenceTx, ProjectSnapshot } from "./persistence.js";
+import type { Loader, PersistenceTx } from "./persistence.js";
 import { serializeInstance } from "./persistence-codec.js";
 import { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
@@ -158,62 +155,40 @@ export class CoreReactor extends Reactor {
 
   // ─── reactivation (rebuilt from durable rows; called by the actor's reactivate) ─────────────────
 
-  /** Reload the engine store and rebuild routing from a snapshot. Each surviving `DelegateThread` names its
-   *  delegation's caller (its own instance); each instance's `delegationId` names its child. Core then
-   *  reloads the Layer 1 rows it owns: the live delegations whose caller is one of its instances (its
-   *  sub-calls — run rows belong to the api root), and all open escalations (it is the raiser). */
-  loadState(snapshot: ProjectSnapshot): void {
-    this.store.instances = snapshot.instances;
-    this.store.scopes = snapshot.scopes;
-    this.store.nextScopeId = snapshot.nextScopeId;
+  /** Reload core's own warm state from durable rows: the engine store + routing (each surviving
+   *  `DelegateThread` names its delegation's caller; each instance's `delegationId` names its child), the
+   *  live delegations it issued (`from = core`, its sub-calls), and the open escalations it raised
+   *  (`from = core` — it is the raiser of all of them, so it can mark them answered). Each set is
+   *  self-selected from the loader; no cross-reactor classification. */
+  async load(loader: Loader): Promise<void> {
+    const engine = await loader.engine();
+    this.store.instances = engine.instances;
+    this.store.scopes = engine.scopes;
+    this.store.nextScopeId = engine.nextScopeId;
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) this.delegationChild[instance.delegationId] = instance.id;
       for (const thread of Object.values(instance.threads)) {
         if (thread.kind === "delegate") this.delegationCaller[thread.delegationId] = instance.id;
       }
     }
-    for (const row of snapshot.liveDelegations) {
-      // Core owns a delegation iff its caller is one of core's instances (a sub-call); a run's caller is the
-      // api root, which is not in this store, so the api reactor reloads it instead.
-      if (this.store.instances[row.caller] !== undefined) {
-        this.reloadDelegation(row.delegation, {
-          caller: row.caller,
-          target: row.target,
-          argument: row.argument,
-          state: row.state,
-        });
-      }
+    for (const row of await loader.delegations("core")) {
+      this.reloadDelegation(row.delegation, {
+        caller: row.caller,
+        peer: row.toReactor,
+        target: row.target,
+        argument: row.argument,
+        state: row.state,
+      });
     }
-    for (const open of snapshot.openEscalations) {
+    for (const open of await loader.openEscalations({ from: "core" })) {
       this.reloadEscalation(open.escalation, {
         raiser: open.raiser,
+        peer: open.toReactor,
+        delegation: open.delegation,
         request: open.request,
         argument: open.argument,
       });
     }
-  }
-
-  /** The user-facing open escalations among `opens`: those a run root raised (their delegation has no
-   *  in-core caller, so it is a run) and that are genuine requests (not panics / control escapes, which fail
-   *  rather than wait). The api reactor rehydrates these so a suspended run survives a restart. */
-  userFacingOpenEscalations(
-    opens: PersistedOpenEscalation[],
-  ): Array<OpenEscalation & { run: DelegationId }> {
-    const result: Array<OpenEscalation & { run: DelegationId }> = [];
-    for (const open of opens) {
-      const run = this.coreInstance(open.raiser)?.delegationId;
-      if (run === undefined || run === null) continue;
-      // A run delegation is one with no in-core caller (its caller is the api root).
-      if (this.delegationCaller[run] !== undefined) continue;
-      if (!isUserFacingRequest(open.request)) continue;
-      result.push({
-        run,
-        escalation: open.escalation,
-        request: open.request as QualifiedName,
-        argument: open.argument,
-      });
-    }
-    return result;
   }
 
   /** After reactivation, re-dispatch every external (FFI) leaf still `open`: its in-flight dispatch was a
@@ -409,8 +384,11 @@ export class CoreReactor extends Reactor {
       switch (body.kind) {
         case "delegate":
           this.delegationCaller[body.delegation] = instance.id;
+          // Core only ever delegates to a core callee in v0.1.0 (a sub-call); the run path delegates from
+          // the api root, not here.
           this.openDelegation(body.delegation, {
             caller: instance.id,
+            peer: "core",
             target: body.target,
             argument: body.argument,
           });
@@ -420,8 +398,12 @@ export class CoreReactor extends Reactor {
           break;
         case "escalate":
           if (body.ask.kind === "request") {
+            // `to` is the caller reactor of the raiser's delegation (`api` ⟺ the raiser is a run root, so
+            // the escalation is user-facing); `delegation` is that raiser's delegation (the run, if api).
             this.openEscalation(body.escalation, {
               raiser: instance.id,
+              peer: this.routeOf(body),
+              delegation: body.delegation,
               request: body.ask.request,
               argument: body.ask.argument,
             });
