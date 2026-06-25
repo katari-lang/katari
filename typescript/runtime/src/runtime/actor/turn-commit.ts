@@ -50,6 +50,20 @@ export interface OutboxMessage {
   event: ExternalEvent;
 }
 
+/** What one reactor turn *produced*, for the substrate to commit. A reactor computes its whole turn in
+ *  memory and returns this; the substrate stamps the transactional-outbox bookkeeping onto it (the inbound
+ *  `consumed` seq + a fresh seq per `outbound` event, issued by `instanceId`) and writes it atomically — see
+ *  `TurnCommit`. Keeping reactors at this level (no seqs, no `consumed`) is what makes them hold no DB: they
+ *  describe Layer 1 + Layer 2 + the events to emit, and the bus owns the durable bookkeeping. */
+export interface Reaction {
+  /** The instance whose turn this is — the Layer 2 target and the issuer stamped on every `outbound` event. */
+  instanceId: InstanceId;
+  layer2: Layer2Commit;
+  transitions: EntityTransition[];
+  /** The external events this turn emits (the bus mints an outbox seq for each at commit). */
+  outbound: ExternalEvent[];
+}
+
 /** Everything one turn changed, to be committed atomically: its Layer 2, the Layer 1 transitions it
  *  implies, and the transactional-outbox bookkeeping — the inbound event it consumes (delete that row) and
  *  the events it produces (insert those rows). Writing the outbox in the same tx is what lets a crash

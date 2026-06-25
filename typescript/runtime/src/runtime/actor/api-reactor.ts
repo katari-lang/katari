@@ -19,12 +19,11 @@ import {
   type EscalationId,
   type InstanceId,
   newDelegationId,
-  newOutboxSeq,
   type OutboxSeq,
   type SnapshotId,
 } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { OutboxMessage, TurnCommit } from "./turn-commit.js";
+import type { Reaction } from "./turn-commit.js";
 
 /** One run-root request the engine could not handle internally, awaiting a user's answer. */
 export interface OpenEscalation {
@@ -43,18 +42,17 @@ export class RunCancelledError extends Error {
 }
 
 /** The narrow slice of the substrate the api root drives. The substrate owns the mailbox, the transactional
- *  outbox, and the delegation routing graph; the api root only produces events, commits its own (engine-less)
- *  Layer 1 transitions, and opens / closes the routing edge for a run delegation it issues / finishes. */
+ *  outbox, and the delegation routing graph; the api root only describes its (engine-less) turns as
+ *  `Reaction`s for the bus to commit, and opens / closes the routing edge for a run delegation it issues /
+ *  finishes. */
 export interface ApiHost {
   readonly apiRootId: InstanceId;
   /** Reactivate the project before reading warm state (so a cold actor rehydrates its open escalations). */
   ensureLoaded(): Promise<void>;
-  /** Durably produce external events the api root issues (the run delegate, a terminate, an escalateAck). */
-  produce(events: ExternalEvent[]): Promise<void>;
-  /** Consume the inbound outbox row with no other effect (an api reaction that only settles a promise). */
-  consume(seq: OutboxSeq | null): Promise<void>;
-  /** Commit an api-root turn (no engine Layer 2): its Layer 1 transitions + outbox bookkeeping. */
-  commit(commit: TurnCommit): Promise<void>;
+  /** Commit one api-root turn atomically (the bus mints outbox seqs, writes Layer 1 + outbox, delivers): its
+   *  Reaction plus the inbound row it consumes — `null` for a command the api root injects (start / cancel /
+   *  answer), the escalate's `seq` for a reaction to one. */
+  commit(reaction: Reaction, consumed: OutboxSeq | null): Promise<void>;
   /** Record the delegation routing edge for a run the api root issues. */
   openRunDelegation(delegation: DelegationId): void;
   /** Drop the routing edge for a run the api root has finished. */
@@ -98,14 +96,22 @@ export class ApiReactor {
       this.runResolvers[delegation] = resolve;
       this.runRejecters[delegation] = reject;
     });
-    void this.host.produce([
+    void this.host.commit(
       {
-        kind: "delegate",
-        delegation,
-        target: { kind: "named", name: qualifiedName, snapshot },
-        argument,
+        instanceId: this.host.apiRootId,
+        layer2: { kind: "none" },
+        transitions: [],
+        outbound: [
+          {
+            kind: "delegate",
+            delegation,
+            target: { kind: "named", name: qualifiedName, snapshot },
+            argument,
+          },
+        ],
       },
-    ]);
+      null,
+    );
     return { run: delegation, result };
   }
 
@@ -117,7 +123,15 @@ export class ApiReactor {
    *  will arrive to clear the entry, so storing it would leak — the durable `runs.cancelReason` holds it. */
   cancelRun(run: DelegationId, reason?: string): void {
     if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
-    void this.host.produce([{ kind: "terminate", delegation: run }]);
+    void this.host.commit(
+      {
+        instanceId: this.host.apiRootId,
+        layer2: { kind: "none" },
+        transitions: [],
+        outbound: [{ kind: "terminate", delegation: run }],
+      },
+      null,
+    );
   }
 
   /** Answer an open run-root escalation: relay the value back to its suspended raiser, which resumes. Loads
@@ -128,7 +142,15 @@ export class ApiReactor {
     await this.host.ensureLoaded();
     const open = this.openEscalations[escalation];
     if (open === undefined) return;
-    await this.host.produce([{ kind: "escalateAck", delegation: open.run, escalation, value }]);
+    await this.host.commit(
+      {
+        instanceId: this.host.apiRootId,
+        layer2: { kind: "none" },
+        transitions: [],
+        outbound: [{ kind: "escalateAck", delegation: open.run, escalation, value }],
+      },
+      null,
+    );
     delete this.openEscalations[escalation];
   }
 
@@ -169,7 +191,17 @@ export class ApiReactor {
         request: ask.request,
         argument: ask.argument,
       };
-      await this.host.consume(seq);
+      // Just consume the escalate's row: the escalation already opened durably in the raiser's turn; the api
+      // root only keeps it in memory so it can be answered.
+      await this.host.commit(
+        {
+          instanceId: this.host.apiRootId,
+          layer2: { kind: "none" },
+          transitions: [],
+          outbound: [],
+        },
+        seq,
+      );
       return;
     }
     // The run failed (a panic / unhandled escape reached the root). In one api-root commit (no engine
@@ -177,20 +209,15 @@ export class ApiReactor {
     // that tears its still-suspended root down (so it does not leak). The teardown's eventual `gone` is a
     // no-op against the now-terminal `failed` (terminal states are sticky). Then settle the result promise.
     const errorMessage = escalationErrorMessage(event);
-    const produced: OutboxMessage[] = [
+    await this.host.commit(
       {
-        seq: newOutboxSeq(),
-        issuer: this.host.apiRootId,
-        event: { kind: "terminate", delegation: event.delegation },
+        instanceId: this.host.apiRootId,
+        layer2: { kind: "none" },
+        transitions: [{ kind: "delegation-failed", delegation: event.delegation, errorMessage }],
+        outbound: [{ kind: "terminate", delegation: event.delegation }],
       },
-    ];
-    await this.host.commit({
-      instanceId: this.host.apiRootId,
-      layer2: { kind: "none" },
-      transitions: [{ kind: "delegation-failed", delegation: event.delegation, errorMessage }],
-      consumed: seq,
-      produced,
-    });
+      seq,
+    );
     this.settleRun(event.delegation, { error: new Error(errorMessage) });
   }
 

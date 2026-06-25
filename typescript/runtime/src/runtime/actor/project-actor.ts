@@ -47,6 +47,7 @@ import {
   type Layer2Commit,
   type OutboxMessage,
   outboundTransitions,
+  type Reaction,
 } from "./turn-commit.js";
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
@@ -121,9 +122,7 @@ export class ProjectActor {
     return {
       apiRootId: this.apiRootId,
       ensureLoaded: () => this.ensureLoaded(),
-      produce: (events) => this.produce(events),
-      consume: (seq) => this.consumeOnly(seq),
-      commit: (commit) => this.commit(commit),
+      commit: (reaction, consumed) => this.commitReaction(reaction, consumed),
       openRunDelegation: (delegation) => {
         this.delegationCaller[delegation] = this.apiRootId;
       },
@@ -203,18 +202,23 @@ export class ProjectActor {
   /** Durably produce external events from an api operation (no inbound event is being consumed): commit the
    *  outbox rows, then deliver them to the mailbox. The issuer is the api root (it re-establishes a replayed
    *  delegate's caller). */
-  private async produce(events: ExternalEvent[]): Promise<void> {
+  /** Commit one reactor turn (the substrate side of the bus): reactivate first so loading can never race a
+   *  just-produced row, mint an outbox seq per `outbound` event (issued by the turn's instance), then write
+   *  the whole turn — its Reaction plus the inbound `consumed` row — atomically and deliver. This is the one
+   *  funnel every commit flows through, so "loading before any commit" and "seqs are the bus's" hold in one
+   *  place. */
+  private async commitReaction(reaction: Reaction, consumed: OutboxSeq | null): Promise<void> {
     await this.ensureLoaded();
-    const produced = events.map((event) => ({
+    const produced: OutboxMessage[] = reaction.outbound.map((event) => ({
       seq: newOutboxSeq(),
-      issuer: this.apiRootId,
+      issuer: reaction.instanceId,
       event,
     }));
     await this.commit({
-      instanceId: this.apiRootId,
-      layer2: { kind: "none" },
-      transitions: [],
-      consumed: null,
+      instanceId: reaction.instanceId,
+      layer2: reaction.layer2,
+      transitions: reaction.transitions,
+      consumed,
       produced,
     });
   }
@@ -242,13 +246,10 @@ export class ProjectActor {
    *  seq (an FFI completion) has no row, so this is a no-op. */
   private consumeOnly(seq: OutboxSeq | null): Promise<void> {
     if (seq === null) return Promise.resolve();
-    return this.commit({
-      instanceId: this.apiRootId,
-      layer2: { kind: "none" },
-      transitions: [],
-      consumed: seq,
-      produced: [],
-    });
+    return this.commitReaction(
+      { instanceId: this.apiRootId, layer2: { kind: "none" }, transitions: [], outbound: [] },
+      seq,
+    );
   }
 
   /** Deliver produced events to the mailbox (after their commit) and kick the loop. */
@@ -699,11 +700,6 @@ export class ProjectActor {
     for (const event of outbound) {
       if (event.kind === "delegate") this.delegationCaller[event.delegation] = instance.id;
     }
-    const produced: OutboxMessage[] = outbound.map((event) => ({
-      seq: newOutboxSeq(),
-      issuer: instance.id,
-      event,
-    }));
     let layer2: Layer2Commit;
     if (isInstanceComplete(instance)) {
       // Before dropping the instance's scopes, ascend the ones its returned value captures (set them
@@ -718,7 +714,7 @@ export class ProjectActor {
       );
       layer2 = { kind: "persist", instance, ownedScopes };
     }
-    await this.commit({ instanceId: instance.id, layer2, transitions, consumed, produced });
+    await this.commitReaction({ instanceId: instance.id, layer2, transitions, outbound }, consumed);
   }
 
   private resolveTarget(target: DelegateTarget): {
