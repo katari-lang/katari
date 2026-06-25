@@ -88,13 +88,21 @@ export function outboundTransitions(
         transitions.push({ kind: "delegation-gone", delegation: event.delegation });
         break;
       case "escalate":
-        transitions.push({
-          kind: "escalation-open",
-          escalation: event.escalation,
-          raiser: issuer,
-          request: event.ask.kind === "request" ? event.ask.request : event.ask.kind,
-          argument: event.ask.kind === "request" ? event.ask.argument : null,
-        });
+        // A Layer 1 escalation is a capability *request* awaiting an answer. A control escape (next / break
+        // / return) that crosses an instance boundary is a one-way internal unwind, not a request — it never
+        // gets an `escalateAck`, so opening a durable escalation row for it would only leak / pollute the
+        // audit. The typechecker's escape discipline already keeps these from reaching the run root; here we
+        // simply decline to record them as escalations. (A panic is structurally a `request`, so it is still
+        // recorded, then cascades away with its failing instance.)
+        if (event.ask.kind === "request") {
+          transitions.push({
+            kind: "escalation-open",
+            escalation: event.escalation,
+            raiser: issuer,
+            request: event.ask.request,
+            argument: event.ask.argument,
+          });
+        }
         break;
       case "escalateAck":
         transitions.push({
