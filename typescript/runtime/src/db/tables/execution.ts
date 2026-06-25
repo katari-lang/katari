@@ -39,6 +39,20 @@ export type DelegationState = "running" | "cancelling" | "done" | "gone" | "fail
 export type EscalationState = "open" | "answered";
 export type RunState = "running" | "cancelling" | "done" | "error" | "cancelled";
 
+/** The non-terminal delegation states — the ones that still carry routing and still accept a transition.
+ *  `done` / `gone` / `failed` are terminal and sticky. This is the single source of truth for "is this
+ *  delegation still live": every persistence backend (the in-memory twin's read-modify-write and the DB's
+ *  conditional `WHERE state IN (…)`) and the recovery load filter to exactly these. */
+export const LIVE_DELEGATION_STATES = [
+  "running",
+  "cancelling",
+] as const satisfies readonly DelegationState[];
+
+/** Whether a delegation is still live (running / cancelling) — i.e. not yet `done` / `gone` / `failed`. */
+export function isLiveDelegationState(state: DelegationState): boolean {
+  return LIVE_DELEGATION_STATES.some((live) => live === state);
+}
+
 export const instances = pgTable(
   "instances",
   {

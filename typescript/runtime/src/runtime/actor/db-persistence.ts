@@ -7,7 +7,13 @@
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
 import { scopes, threads } from "../../db/tables/engine.js";
-import { delegations, escalations, instances, outbox } from "../../db/tables/execution.js";
+import {
+  delegations,
+  escalations,
+  instances,
+  LIVE_DELEGATION_STATES,
+  outbox,
+} from "../../db/tables/execution.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Persistence, ProjectSnapshot } from "./persistence.js";
 import {
@@ -48,7 +54,7 @@ export class DbPersistence implements Persistence {
           .where(
             and(
               eq(delegations.projectId, projectId),
-              inArray(delegations.state, ["running", "cancelling"]),
+              inArray(delegations.state, LIVE_DELEGATION_STATES),
             ),
           ),
         this.db
@@ -203,7 +209,6 @@ export class DbPersistence implements Persistence {
       // states are sticky: a `done` / `gone` / `failed` only takes from a live (running / cancelling) row,
       // and `cancelling` only from `running` — so a failure recorded first is never overwritten by the
       // `gone` of the teardown it triggers.
-      const live = ["running", "cancelling"] as const;
       for (const transition of commit.transitions) {
         switch (transition.kind) {
           case "delegation-done":
@@ -214,7 +219,7 @@ export class DbPersistence implements Persistence {
                 and(
                   eq(delegations.projectId, projectId),
                   eq(delegations.id, transition.delegation),
-                  inArray(delegations.state, live),
+                  inArray(delegations.state, LIVE_DELEGATION_STATES),
                 ),
               );
             break;
@@ -238,7 +243,7 @@ export class DbPersistence implements Persistence {
                 and(
                   eq(delegations.projectId, projectId),
                   eq(delegations.id, transition.delegation),
-                  inArray(delegations.state, live),
+                  inArray(delegations.state, LIVE_DELEGATION_STATES),
                 ),
               );
             break;
@@ -250,7 +255,7 @@ export class DbPersistence implements Persistence {
                 and(
                   eq(delegations.projectId, projectId),
                   eq(delegations.id, transition.delegation),
-                  inArray(delegations.state, live),
+                  inArray(delegations.state, LIVE_DELEGATION_STATES),
                 ),
               );
             break;

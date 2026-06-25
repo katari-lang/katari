@@ -3,6 +3,7 @@
 // is exercisable without Postgres. The DB-backed `DbPersistence` mirrors this against real tables; keeping
 // a faithful in-memory twin lets recovery be unit-tested deterministically.
 
+import { type DelegationState, isLiveDelegationState } from "../../db/tables/execution.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { Persistence, ProjectSnapshot } from "./persistence.js";
@@ -19,15 +20,9 @@ import type { EntityTransition, OutboxMessage, TurnCommit } from "./turn-commit.
  *  running / cancelling delegations (which still route) and false once done / gone (history only). */
 interface StoredDelegation {
   caller: InstanceId;
-  state: "running" | "cancelling" | "done" | "gone" | "failed";
+  state: DelegationState;
   result?: Value;
   errorMessage?: string;
-}
-
-/** A delegation is still live (carries routing / accepts state transitions) only while running or
- *  cancelling; done / gone / failed are terminal and sticky. */
-function isLiveDelegationState(state: StoredDelegation["state"]): boolean {
-  return state === "running" || state === "cancelling";
 }
 
 interface StoredEscalation {
