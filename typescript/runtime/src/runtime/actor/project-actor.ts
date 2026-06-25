@@ -420,21 +420,16 @@ export class ProjectActor {
     return this.reactCore(message, caller, seq);
   }
 
-  /** The api root's reaction to a run's delegateAck / escalate / terminateAck. */
-  private reactApi(
+  /** The api root's reaction to a run's delegateAck / escalate / terminateAck. The reactor computes its turn
+   *  as a `Reaction` (the kind-dispatch lives inside `react`), the substrate commits it, then the reactor's
+   *  post-commit side effect (settling the in-process result promise) runs durable-first. */
+  private async reactApi(
     message: Extract<ExternalEvent, { kind: "delegateAck" | "escalate" | "terminateAck" }>,
     seq: OutboxSeq | null,
   ): Promise<void> {
-    switch (message.kind) {
-      case "delegateAck":
-        this.api.onDelegateAck(message.delegation, message.value);
-        return this.consumeOnly(seq);
-      case "escalate":
-        return this.api.onEscalate(message, seq);
-      case "terminateAck":
-        this.api.onTerminateAck(message.delegation);
-        return this.consumeOnly(seq);
-    }
+    const reaction = this.api.react(message);
+    await this.commitReaction(reaction, seq);
+    this.api.afterCommit(message, reaction);
   }
 
   /** A core caller's reaction to a sub-call's delegateAck / escalate / terminateAck (`caller` is resolved

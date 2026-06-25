@@ -23,6 +23,7 @@ import {
   type SnapshotId,
 } from "../ids.js";
 import type { Value } from "../value/types.js";
+import { Reactor } from "./reactor.js";
 import type { Reaction } from "./turn-commit.js";
 
 /** One run-root request the engine could not handle internally, awaiting a user's answer. */
@@ -59,7 +60,7 @@ export interface ApiHost {
   closeRunDelegation(delegation: DelegationId): void;
 }
 
-export class ApiReactor {
+export class ApiReactor extends Reactor {
   /** The in-process run-result *notification hook* (NOT the source of truth — a run's outcome is its durable
    *  delegation row, which the API reads by projection). It lets an in-process caller `await` a run it started
    *  in this process: a delegateAck resolves it, a panic / unhandled escape rejects it, a terminate (cancel)
@@ -75,7 +76,9 @@ export class ApiReactor {
    *  are still tracking the run in-process, so it cannot outlive the run it belongs to (see `cancelRun`). */
   private readonly cancelReasons: Record<DelegationId, string | undefined> = {};
 
-  constructor(private readonly host: ApiHost) {}
+  constructor(private readonly host: ApiHost) {
+    super();
+  }
 
   // ─── commands (the api root issuing external events on a user's behalf) ─────────────────────────
 
@@ -171,18 +174,53 @@ export class ApiReactor {
 
   // ─── reactions (a run's delegateAck / escalate / terminateAck reaching the management root) ──────
 
-  /** A run finished: settle its result. */
-  onDelegateAck(delegation: DelegationId, value: Value): void {
-    this.host.closeRunDelegation(delegation);
-    this.settleRun(delegation, { value });
+  /** React to one event a run's delegation routes back to the management root. Computes the Reaction the
+   *  substrate commits; the in-process result promise settles strictly post-commit in `afterCommit`. The api
+   *  root reacts only to these three legs — it never receives a `delegate` (nobody delegates *to* the root),
+   *  an `escalateAck` (it never raises), or a `terminate` (nothing cancels the root) — so any other kind is a
+   *  bare consume. */
+  react(event: ExternalEvent): Reaction {
+    switch (event.kind) {
+      case "escalate":
+        return this.reactEscalate(event);
+      // A finished run (`delegateAck`, already `done` from the raiser's turn) or a confirmed cancel
+      // (`terminateAck`, already `gone`): the root only consumes the inbound row; the result settles after.
+      default:
+        return this.consume();
+    }
   }
 
-  /** A run's escalation reached the root unhandled: a genuine request is kept open for a user to answer (the
-   *  run stays suspended); a panic / unhandled escape fails the run. Consumes the escalate's outbox row. */
-  async onEscalate(
-    event: Extract<ExternalEvent, { kind: "escalate" }>,
-    seq: OutboxSeq | null,
-  ): Promise<void> {
+  /** Settle the in-process result promise (the non-SoT notification hook) strictly after the Reaction is
+   *  durably committed — a finished run resolves, a cancelled run rejects with `RunCancelledError`, a failed
+   *  run rejects with its error. Also drops the finished run's routing edge. An open escalation's `escalate`
+   *  settles nothing (the run stays suspended awaiting a user's answer). */
+  afterCommit(event: ExternalEvent, _reaction: Reaction): void {
+    switch (event.kind) {
+      case "delegateAck":
+        this.host.closeRunDelegation(event.delegation);
+        this.settleRun(event.delegation, { value: event.value });
+        break;
+      case "terminateAck":
+        this.host.closeRunDelegation(event.delegation);
+        this.settleRun(event.delegation, {
+          error: new RunCancelledError(this.cancelReasons[event.delegation]),
+        });
+        break;
+      case "escalate":
+        if (isRunFailure(event)) {
+          this.settleRun(event.delegation, { error: new Error(escalationErrorMessage(event)) });
+        }
+        break;
+    }
+  }
+
+  /** Build the Reaction for a run's escalation reaching the root. A genuine request opens (kept in memory so
+   *  it can be answered — the durable row already opened in the raiser's turn, so the root just consumes the
+   *  escalate's row). A panic / unhandled escape fails the run: in one api-root commit (no engine threads)
+   *  record the delegation's terminal `failed` and durably produce the `terminate` that tears its still-
+   *  suspended root down (the teardown's eventual `gone` is a no-op against the sticky `failed`); the result
+   *  promise fails in `afterCommit`. */
+  private reactEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): Reaction {
     const ask = event.ask;
     if (ask.kind === "request" && ask.request !== PANIC_REQUEST) {
       this.openEscalations[event.escalation] = {
@@ -191,40 +229,31 @@ export class ApiReactor {
         request: ask.request,
         argument: ask.argument,
       };
-      // Just consume the escalate's row: the escalation already opened durably in the raiser's turn; the api
-      // root only keeps it in memory so it can be answered.
-      await this.host.commit(
-        {
-          instanceId: this.host.apiRootId,
-          layer2: { kind: "none" },
-          transitions: [],
-          outbound: [],
-        },
-        seq,
-      );
-      return;
+      return this.consume();
     }
-    // The run failed (a panic / unhandled escape reached the root). In one api-root commit (no engine
-    // threads): record the run delegation's terminal `failed` state and durably produce the `terminate`
-    // that tears its still-suspended root down (so it does not leak). The teardown's eventual `gone` is a
-    // no-op against the now-terminal `failed` (terminal states are sticky). Then settle the result promise.
-    const errorMessage = escalationErrorMessage(event);
-    await this.host.commit(
-      {
-        instanceId: this.host.apiRootId,
-        layer2: { kind: "none" },
-        transitions: [{ kind: "delegation-failed", delegation: event.delegation, errorMessage }],
-        outbound: [{ kind: "terminate", delegation: event.delegation }],
-      },
-      seq,
-    );
-    this.settleRun(event.delegation, { error: new Error(errorMessage) });
+    return {
+      instanceId: this.host.apiRootId,
+      layer2: { kind: "none" },
+      transitions: [
+        {
+          kind: "delegation-failed",
+          delegation: event.delegation,
+          errorMessage: escalationErrorMessage(event),
+        },
+      ],
+      outbound: [{ kind: "terminate", delegation: event.delegation }],
+    };
   }
 
-  /** A run's terminate cascade confirmed: settle it as cancelled. */
-  onTerminateAck(delegation: DelegationId): void {
-    this.host.closeRunDelegation(delegation);
-    this.settleRun(delegation, { error: new RunCancelledError(this.cancelReasons[delegation]) });
+  /** A bare consume: the api root's turn touches no instance and emits nothing — it only lets the substrate
+   *  delete the inbound outbox row. */
+  private consume(): Reaction {
+    return {
+      instanceId: this.host.apiRootId,
+      layer2: { kind: "none" },
+      transitions: [],
+      outbound: [],
+    };
   }
 
   /** Settle a run-root delegation either way and drop its handlers + any of its still-open escalations. */
@@ -240,6 +269,13 @@ export class ApiReactor {
     if ("value" in outcome) resolver?.(outcome.value);
     else rejecter?.(outcome.error);
   }
+}
+
+/** Whether an escalation reaching the run root *fails* the run (rather than opening a user-facing request):
+ *  a control escape (next / break / return crossing the root) or a panic. The complement — a genuine,
+ *  non-panic request — is the only thing kept open for a user to answer. */
+function isRunFailure(event: Extract<ExternalEvent, { kind: "escalate" }>): boolean {
+  return event.ask.kind !== "request" || event.ask.request === PANIC_REQUEST;
 }
 
 /** A human message for an escalation that reached the run root unhandled (it fails the run). A panic
