@@ -1,5 +1,11 @@
 # Reactor + bus redesign: modules over a typed, transactional bus
 
+Status: **SUPERSEDED by `2026-06-25-reactor-persist-redesign.md`** (the `Reaction`/`commitTurn` machinery and
+the from/to-deferral here were reworked: events carry from/to, the Reactor base class owns each reactor's own
+delegations/escalations + the two-step reown, persistence is per-component `persist(tx)`, scopes/blobs are an
+independent pool, and `ExternalThread` is kept). The §1–§8 contracts (typed events, atomic turn, outbox,
+runs-as-projection) still hold; read the new doc for the current shape.
+
 Status: design (2026-06-25)
 Supersedes the single-`ProjectActor` packaging of `2026-06-24-api-core-connection.md` and
 `2026-06-25-three-layer-runtime.md`. The **contracts** those established are kept verbatim — the typed
