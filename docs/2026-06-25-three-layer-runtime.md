@@ -222,6 +222,50 @@ Each phase is independently shippable with tests green. Phases 1–2 are pure re
   control escape at the api root fails loudly). Idempotency guard on `escalation-answered`. Delete
   `activate()`, `ApiInstance.status`; decide `run_escalations_audit`. SSoT/magic-literal consolidation.
 
+## 5a. Plan revisions discovered during implementation (2026-06-25)
+
+Phases 0, 1, 2a, 2b shipped as written (api/core separation + the single dispatch — concerns #1, #6). Two
+later phases turned out to rest on assumptions that do not survive contact with the code; recording the
+corrections here so the plan stays honest.
+
+- **Phase 2c (extract a `CoreReactor`) — do NOT do it; it would be over-layering, not abstraction (concern
+  #4).** The reason `ApiReactor` extracted cleanly is that the api root's state (run promises, open
+  escalations) is genuinely *separate* from the engine. The core reaction has no such separate state: it
+  reacts *over the `ProjectStore`* and the routing maps (`delegationCaller` / `delegationChild`), which are
+  the substrate's own state. A `CoreReactor` class would need nearly the whole substrate injected back into
+  it — a back-reference layer, not an abstraction. So the substrate **is** the core: `ProjectActor` =
+  substrate + core (essentially fused), with `ApiReactor` as the one genuinely-separable participant. The
+  api/core *separation* the review asked for is already achieved — api state lives in `ApiReactor`, the
+  boundary is crossed once in `routeToCaller`, and no core handler inspects `kind`. Splitting further buys
+  nothing and adds a seam.
+
+- **Phase 4 C9 (one `applyTransition` over a get/set/delete storage port) — wrong abstraction; reduced to
+  shared vocabulary (done).** A get/set/delete port would force the DB backend to do read-modify-write where
+  it currently does an atomic conditional `UPDATE … WHERE state IN (LIVE_DELEGATION_STATES)` — the
+  sticky-terminal rule expressed *as SQL*. Collapsing both backends onto one executor would degrade the DB
+  path. The genuine duplication was the *vocabulary* (the live-state set + the predicate), not the executor;
+  that is now a single source of truth (`LIVE_DELEGATION_STATES` / `isLiveDelegationState`), with each backend
+  keeping its native expression (Map read-modify-write vs SQL predicate). C9 is therefore complete; the
+  twin executors stay, because their difference is essential (in-memory vs transactional SQL), not incidental.
+
+- **Phase 3 (drop the in-memory api maps; project from durable Layer 1) — the `result` promise stays as an
+  explicit notification hook.** The smoke-test harness uses `InMemoryPersistence` (a no-op), so the
+  in-process `result` promise is its *only* way to observe a run's outcome; the recovery suite, by contrast,
+  uses `StoringPersistence` and already asserts the durable projection (`peekDelegation`). So "the api root
+  needs no in-memory state" is true of the **source of truth** (a run's outcome is its delegation row) but
+  not of the **convenience**: an in-process caller awaiting a run is a legitimate, decoupled notification
+  hook. The narrowed Phase 3 is therefore: keep `result` (relabelled as a non-SoT hook), collapse the
+  `ApiInstance` union out of the engine, fix the `cancelReasons` leak (set on a cancel of an
+  already-finished run, never settled), and delete `ApiInstance.status`. It is no longer "delete all
+  in-memory maps".
+
+**Remaining, in priority order:** (1) C10 — done. (2) Collapse the `ApiInstance` union + the `cancelReasons`
+leak + delete `ApiInstance.status` (the narrowed Phase 3). (3) C4 — commit-failure → top-level catch +
+drop-and-reactivate. (4) C7 — `drop` commit re-keys ascended scopes to `owner = null`. (5) C3/C8 — atomic
+`startRun` + outbox ordinal (DB-only; needs the Postgres harness to validate). (6) the `activate()` /
+`run_escalations_audit` legacy decisions. Items touching only `db-persistence` cannot be validated without
+the Postgres integration harness (a separate task) and should be batched accordingly.
+
 ## 6. Non-goals / explicitly kept
 
 - The external-event contract (delegate/escalate/terminate ± acks), the atomic turn commit, the transactional
