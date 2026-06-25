@@ -9,18 +9,32 @@
 // (This is the command edge only: it forwards each command to the project's `ApiReactor` — the api root's
 // issuing and reaction sides already live there — and never drives the engine directly.)
 
-import { createAgentName, type Json } from "@katari-lang/types";
-import { eq } from "drizzle-orm";
+import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/types";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { projects } from "../db/tables/projects.js";
+import { projects, snapshots } from "../db/tables/projects.js";
 import { NotFoundError } from "../lib/errors.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
-import { StubFfiTransport } from "./external/runner.js";
+import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "./ids.js";
 import { ProjectRegistry } from "./registry.js";
 import { jsonToValue } from "./value/codec.js";
+
+/** Read a snapshot's compiled sidecar bundle from the store (null when it has no FFI handlers). The
+ *  `SnapshotFfiTransport` spawns it as the `node` sidecar for that snapshot's external calls. */
+async function loadSidecarBundle(
+  projectId: ProjectId,
+  snapshot: SnapshotId,
+): Promise<SidecarBundle | null> {
+  const [row] = await db
+    .select({ bundle: snapshots.sidecarBundle })
+    .from(snapshots)
+    .where(and(eq(snapshots.id, snapshot), eq(snapshots.projectId, projectId)))
+    .limit(1);
+  return row?.bundle ?? null;
+}
 
 export interface StartRunInput {
   projectId: string;
@@ -46,12 +60,13 @@ export interface AnswerEscalationInput {
 }
 
 // The warm registry: one per process, backed by the DB (IR module store + engine-graph persistence). A
-// project's actor is created lazily and kept warm. FFI / env are not wired yet (stub runner, pure prims).
+// project's actor is created lazily and kept warm. FFI runs each snapshot's sidecar bundle as a `node`
+// process (per-project transport); env is not wired yet (pure prims).
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
   prims: new PrimRegistry(),
-  externalFactory: () => new StubFfiTransport(),
+  externalFactory: () => new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize),
 });
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */

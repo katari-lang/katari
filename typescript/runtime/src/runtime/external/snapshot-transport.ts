@@ -1,0 +1,114 @@
+// SnapshotFfiTransport: the production `FfiTransport` for a project actor. An FFI handler lives in a
+// specific snapshot's compiled sidecar bundle (the `key` is only defined there), so this multiplexes one
+// `SubprocessFfiTransport` per snapshot — each a `node` process running that snapshot's bundle — and routes
+// every call to the process for its `call.snapshot`. All processes report completions to the one shared
+// sink (the ffi reactor's mailbox feed). The per-snapshot process inherits the subprocess transport's
+// crash → fail-in-flight → respawn behaviour for free.
+//
+// The bundle bytes and the way a bundle becomes a running process are injected (`bundleSource` /
+// `materialize`), so the routing is unit-testable without a real DB or a real `node`; production wires the
+// `snapshots` table and a temp-file + `node` spawn.
+
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { SidecarBundle } from "@katari-lang/types";
+import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
+import type { FfiCall, FfiCompletion, FfiTransport } from "./runner.js";
+import type { SidecarSpawner } from "./subprocess-runner.js";
+import { SubprocessFfiTransport, subprocessSidecar } from "./subprocess-runner.js";
+
+/** Fetch a snapshot's compiled sidecar bundle (or null when that snapshot has no FFI handlers). */
+export type BundleSource = (
+  projectId: ProjectId,
+  snapshot: SnapshotId,
+) => Promise<SidecarBundle | null>;
+
+/** Turn a bundle into a spawner for its sidecar process (write it out, spawn the host). Injected so the
+ *  routing is testable with a fake process. */
+export type Materialize = (bundle: SidecarBundle, snapshot: SnapshotId) => Promise<SidecarSpawner>;
+
+export class SnapshotFfiTransport implements FfiTransport {
+  private sink: ((completion: FfiCompletion) => void) | null = null;
+  /** One sub-transport (one sidecar process) per snapshot, cached as the in-flight spawn promise so two
+   *  concurrent dispatches for the same snapshot share a single process. */
+  private readonly perSnapshot = new Map<SnapshotId, Promise<SubprocessFfiTransport>>();
+  /** Which snapshot each in-flight delegation belongs to, so an `abort` (delegation only) routes to the
+   *  right process. Cleared when the call completes. */
+  private readonly delegationSnapshot = new Map<DelegationId, SnapshotId>();
+
+  constructor(
+    private readonly bundleSource: BundleSource,
+    private readonly materialize: Materialize,
+  ) {}
+
+  onComplete(sink: (completion: FfiCompletion) => void): void {
+    this.sink = sink;
+  }
+
+  dispatch(call: FfiCall): void {
+    this.delegationSnapshot.set(call.delegation, call.snapshot);
+    // Resolving the snapshot's process is async (bundle fetch + spawn); dispatch stays fire-and-forget, and
+    // a fetch / spawn failure surfaces as an `error` completion so the call never hangs.
+    void this.transportFor(call.projectId, call.snapshot).then(
+      (transport) => transport.dispatch(call),
+      (error: unknown) => this.fail(call.delegation, error),
+    );
+  }
+
+  abort(delegation: DelegationId): void {
+    const snapshot = this.delegationSnapshot.get(delegation);
+    if (snapshot === undefined) return; // unknown / already completed — the reactor no-ops a late terminate
+    // Only abort if the process is up; if its spawn is still pending, the dispatch has not gone out yet.
+    void this.perSnapshot.get(snapshot)?.then((transport) => transport.abort(delegation));
+  }
+
+  /** Kill every sidecar process (host cleanup on actor disposal). */
+  close(): void {
+    for (const pending of this.perSnapshot.values()) {
+      void pending.then((transport) => transport.close()).catch(() => {});
+    }
+    this.perSnapshot.clear();
+  }
+
+  private transportFor(
+    projectId: ProjectId,
+    snapshot: SnapshotId,
+  ): Promise<SubprocessFfiTransport> {
+    const existing = this.perSnapshot.get(snapshot);
+    if (existing !== undefined) return existing;
+    const created = (async () => {
+      const bundle = await this.bundleSource(projectId, snapshot);
+      if (bundle === null) {
+        throw new Error(`snapshot ${snapshot} has no FFI sidecar bundle to dispatch to`);
+      }
+      const transport = new SubprocessFfiTransport(await this.materialize(bundle, snapshot));
+      transport.onComplete((completion) => {
+        this.delegationSnapshot.delete(completion.delegation);
+        this.sink?.(completion);
+      });
+      return transport;
+    })();
+    // Do not cache a failed spawn — a later dispatch should be able to retry rather than inherit the error.
+    created.catch(() => this.perSnapshot.delete(snapshot));
+    this.perSnapshot.set(snapshot, created);
+    return created;
+  }
+
+  private fail(delegation: DelegationId, error: unknown): void {
+    this.delegationSnapshot.delete(delegation);
+    this.sink?.({
+      delegation,
+      outcome: { kind: "error", message: error instanceof Error ? error.message : String(error) },
+    });
+  }
+}
+
+/** The production materialization: write the bundle's ESM to a per-snapshot temp file and spawn it with
+ *  `node`. A snapshot's bundle is immutable, so the file is written once per snapshot per process and the
+ *  long-lived sidecar runs from it. */
+export const nodeSidecarMaterialize: Materialize = async (bundle, snapshot) => {
+  const path = join(tmpdir(), `katari-sidecar-${snapshot}.mjs`);
+  await writeFile(path, bundle.entry);
+  return subprocessSidecar("node", [path]);
+};
