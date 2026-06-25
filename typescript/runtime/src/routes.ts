@@ -12,8 +12,8 @@ import type { AppEnv } from "./types/app-env.js";
 /**
  * Versioned API surface. Each feature module under `src/modules/<name>` owns its own routes and
  * carries the full path (`/projects/...`) internally, so they all mount at the root here and the
- * chained result keeps its types for the RPC client. Health / project / snapshot are live; run /
- * escalation / file / env / agent freeze their contracts and return 501 until the engine and stores land.
+ * chained result keeps its types for the RPC client. Health / project / snapshot / run / escalation / file
+ * are live; env / agent freeze their contracts and return 501 until those stores land.
  */
 export const apiRoutes = new Hono<AppEnv>()
   .route("/", healthRoutes)

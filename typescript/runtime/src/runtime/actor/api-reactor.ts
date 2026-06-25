@@ -14,9 +14,11 @@
 
 import type { QualifiedName } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
+import type { BlobEntry } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import {
+  type BlobId,
   type DelegationId,
   type EscalationId,
   type InstanceId,
@@ -79,6 +81,9 @@ export class ApiReactor extends Reactor {
   private pendingRunStarts: PersistedRun[] = [];
   private pendingCancelReasons: Array<{ run: DelegationId; reason: string | null }> = [];
   private pendingAudits: PersistedRunEscalationAudit[] = [];
+  /** Set when this turn registered an api-root-owned blob (a file upload), so `persist` ensures the api
+   *  root's `instances` row exists before the pool writes the blob whose owner FK points at it. */
+  private pendingBlobRegistration = false;
 
   constructor(
     private readonly apiRootId: InstanceId,
@@ -97,7 +102,11 @@ export class ApiReactor extends Reactor {
    *  run first ensures the api root's own `instances` row, before `flushLayer1` writes the run delegation
    *  whose caller FK points at it (the api root has no producing `delegate` turn to create it otherwise). */
   async persist(tx: PersistenceTx): Promise<void> {
-    if (this.pendingRunStarts.length > 0) await tx.ensureApiRoot(this.apiRootId);
+    // Ensure the api root's `instances` row before anything whose owner FK points at it: a run delegation
+    // (flushLayer1) or an api-root-owned blob (the pool, which the substrate flushes after this).
+    if (this.pendingRunStarts.length > 0 || this.pendingBlobRegistration) {
+      await tx.ensureApiRoot(this.apiRootId);
+    }
     await this.flushLayer1(tx);
     for (const run of this.pendingRunStarts) await tx.putRun(run);
     for (const { run, reason } of this.pendingCancelReasons)
@@ -106,6 +115,7 @@ export class ApiReactor extends Reactor {
     this.pendingRunStarts = [];
     this.pendingCancelReasons = [];
     this.pendingAudits = [];
+    this.pendingBlobRegistration = false;
   }
 
   /** Drop the api root's durable-derived warm state so reactivation rebuilds it (idempotent — safe on a cold
@@ -122,6 +132,17 @@ export class ApiReactor extends Reactor {
     this.pendingRunStarts = [];
     this.pendingCancelReasons = [];
     this.pendingAudits = [];
+    this.pendingBlobRegistration = false;
+  }
+
+  /** Register a freshly uploaded file as an api-root-owned blob (its bytes already in the BlobStore). Owned
+   *  by the api root, it is retained until an explicit user delete — never reclaimed by GC. Resolves when the
+   *  blob row is durably committed (the pool flushes it in the same turn). */
+  registerUploadedBlob(blobId: BlobId, entry: Omit<BlobEntry, "owner">): Promise<void> {
+    return this.commands.enqueue(() => {
+      this.pendingBlobRegistration = true;
+      this.pool.registerBlob(blobId, { owner: this.apiRootId, ...entry });
+    });
   }
 
   /** Reject and drop every in-process run-result promise after a poisoned commit: the run continues durably

@@ -10,10 +10,12 @@ import type { QualifiedName } from "@katari-lang/types";
 import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
 import { createProjectStore } from "../engine/store.js";
+import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
 import type { FfiTransport } from "../external/runner.js";
 import {
   apiRootIdOf,
+  type BlobId,
   type DelegationId,
   type EscalationId,
   type InstanceId,
@@ -143,6 +145,12 @@ export class ProjectActor {
   /** Answer an open run-root escalation, resuming its suspended raiser. */
   answerEscalation(escalation: EscalationId, value: Value): Promise<void> {
     return this.api.answerEscalation(escalation, value);
+  }
+
+  /** Register a freshly uploaded file as an api-root-owned blob (bytes already in the BlobStore). Resolves
+   *  once the blob row is durably committed. */
+  uploadBlob(blobId: BlobId, entry: Omit<BlobEntry, "owner">): Promise<void> {
+    return this.api.registerUploadedBlob(blobId, entry);
   }
 
   /** The run-root escalations currently awaiting an answer. */

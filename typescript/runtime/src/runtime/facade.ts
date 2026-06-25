@@ -9,6 +9,7 @@
 // (This is the command edge only: it forwards each command to the project's `ApiReactor` — the api root's
 // issuing and reaction sides already live there — and never drives the engine directly.)
 
+import { createHash } from "node:crypto";
 import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/types";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
@@ -18,8 +19,16 @@ import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
-import type { DelegationId, EscalationId, ProjectId, SnapshotId } from "./ids.js";
+import {
+  type BlobId,
+  type DelegationId,
+  type EscalationId,
+  newBlobId,
+  type ProjectId,
+  type SnapshotId,
+} from "./ids.js";
 import { ProjectRegistry } from "./registry.js";
+import { InMemoryBlobStore } from "./value/blob-store.js";
 import { jsonToValue } from "./value/codec.js";
 
 /** Read a snapshot's compiled sidecar bundle from the store (null when it has no FFI handlers). The
@@ -62,10 +71,16 @@ export interface AnswerEscalationInput {
 // The warm registry: one per process, backed by the DB (IR module store + engine-graph persistence). A
 // project's actor is created lazily and kept warm. FFI runs each snapshot's sidecar bundle as a `node`
 // process (per-project transport); env is not wired yet (pure prims).
+// The byte store for blobs (file uploads, future engine string-promotion). Shared with the project actors
+// (the same instance the engine reads through), so a blob's bytes are one source of truth. In-memory for
+// now; a host swaps in an S3-backed store behind the same interface.
+export const blobStore = new InMemoryBlobStore();
+
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
   prims: new PrimRegistry(),
+  blobs: blobStore,
   externalFactory: () => new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize),
 });
 
@@ -121,5 +136,28 @@ export const facade = {
     await registry
       .actorFor(input.projectId as ProjectId)
       .answerEscalation(input.escalationId as EscalationId, jsonToValue(input.value));
+  },
+
+  /** Upload a file as an api-root-owned blob: store the bytes (content-addressed by their hash), then
+   *  register the blob through the actor so its ownership row commits durably. Returns the blob handle the
+   *  caller downloads / references. The bytes are put before the (small) registration command, so the actor
+   *  loop never carries the payload; an orphaned put on a failed registration is a rare, harmless leak. */
+  async uploadFile(input: {
+    projectId: string;
+    bytes: Uint8Array;
+    contentType?: string;
+  }): Promise<{ id: string; hash: string; size: number }> {
+    const blobId = newBlobId();
+    const hash = createHash("sha256").update(input.bytes).digest("hex");
+    const size = input.bytes.byteLength;
+    const projectId = input.projectId as ProjectId;
+    await blobStore.put(projectId, blobId, input.bytes);
+    await registry.actorFor(projectId).uploadBlob(blobId, {
+      hash,
+      size,
+      semanticKind: "file",
+      ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
+    });
+    return { id: blobId, hash, size };
   },
 };

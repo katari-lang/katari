@@ -1,19 +1,36 @@
-import { NotImplementedError } from "../../lib/errors.js";
+// The file resource: a file is an api-root-owned blob. Upload goes through the engine command edge (the
+// facade → the actor → the ResourcePool, so the blob's ownership has one SoT); download / list are reads
+// straight from the committed `blobs` row + the BlobStore bytes. There is no explicit delete (api-root
+// blobs are retained until a future explicit-delete feature).
+
+import { db } from "../../db/client.js";
+import { NotFoundError } from "../../lib/errors.js";
+import { blobStore, facade } from "../../runtime/facade.js";
+import type { BlobId, ProjectId } from "../../runtime/ids.js";
+import { fileRepository } from "./file.repository.js";
+
+export interface DownloadedFile {
+  bytes: Uint8Array;
+  contentType: string | null;
+  size: number;
+}
 
 export const fileService = {
-  async upload(_projectId: string) {
-    throw new NotImplementedError("File upload is not implemented yet (blob store pending).");
+  /** Store the bytes and register the file as an api-root-owned blob; returns its handle. */
+  upload(projectId: string, bytes: Uint8Array, contentType?: string) {
+    return facade.uploadFile({ projectId, bytes, contentType });
   },
 
-  async list(_projectId: string) {
-    throw new NotImplementedError("Listing files is not implemented yet.");
+  /** Every file (blob) the project holds. */
+  list(projectId: string) {
+    return fileRepository.list(db, projectId);
   },
 
-  async download(_projectId: string, _fileId: string) {
-    throw new NotImplementedError("File download is not implemented yet (blob store pending).");
-  },
-
-  async delete(_projectId: string, _fileId: string) {
-    throw new NotImplementedError("Deleting a file is not implemented yet.");
+  /** A file's bytes + content type, or a 404 when it does not exist. */
+  async download(projectId: string, fileId: string): Promise<DownloadedFile> {
+    const row = await fileRepository.get(db, projectId, fileId);
+    if (row === undefined) throw new NotFoundError(`file ${fileId} not found`);
+    const bytes = await blobStore.get(projectId as ProjectId, fileId as BlobId);
+    return { bytes, contentType: row.contentType, size: row.size };
   },
 };
