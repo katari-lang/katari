@@ -132,5 +132,19 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
   per the doc, `ExternalThread` / `reactFfi` stay until the FFI reactor phase. (3) api commands run as serial
   *command turns* on the bus (a thunk that mutates + sends, committed like any reaction) rather than a direct
   out-of-band commit.
-- **P4** — the shared resource pool view + base-class two-step reown; fix the run-result drop.
-- **P5** — sweep the deferred correctness items (C3/C4/C7/C8, audit wiring) on the new shape.
+- **P4 (done, `ca6f5a5`)** — scopes / blob-ownership are an independent `ResourcePool` (over the engine's
+  `ProjectStore`, in place) instead of riding inside an instance's Layer 2: `serializeInstance` drops scopes,
+  `putInstance` stops writing them, and `putScope` + `pool.persist(tx)` flush the scopes a turn touched. The
+  base-class two-step reown is on the bus — `send(delegateAck)` releases the result's resources to in-transit,
+  the receiver reowns them to its local owner; the api root reowns a *run* result by the same path a core
+  caller reowns a sub-call, which **fixes the run-result drop** (`ascendReturnedResources` / `ascendResources`
+  / `reownResources` removed, folded into `pool.release` / `pool.reown`). A still-running instance flushes its
+  scopes wholesale (`markOwnedDirty`); an in-transit scope survives its instance's drop because the pool
+  re-writes it after the drop cascade in the same commit.
+  **Deviations / follow-ups**: (1) scope reclamation on a *finished* instance stays the drop cascade — full
+  reference-based GC is not implemented; in particular **api-root-owned run-result scopes are not yet GC'd**
+  (the api root never goes away), so a run that returns a closure leaks its scopes until reclaimed. (2) blob
+  ownership is updated in memory but still not persisted, and blob *bytes* are never freed — the same two
+  blob follow-ups noted in `engine/ascent.ts`.
+- **P5** — sweep the deferred correctness items (C3/C4/C7/C8, audit wiring) + the GC follow-ups above, on the
+  new shape.
