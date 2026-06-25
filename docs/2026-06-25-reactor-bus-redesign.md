@@ -328,9 +328,20 @@ same assumption as today, now localised in the ffi reactor.
 
 Each phase ships green; the engine internals (thread-ops) are untouched throughout.
 
-- **R1 — Substrate + Reactor base + Reaction.** Extract the bus (mailbox/outbox/commit/register/route) from
-  `ProjectActor` into `Substrate`; define `Reactor` (feed/issue/reactivate/afterCommit) returning a `Reaction`.
-  Move the api-root logic into an `ApiReactor extends Reactor` (it already mostly is). Pure refactor; tests green.
+- **R1 — Substrate + Reactor base + Reaction. ✅ done** (commits `3c546e9` R1.1, `11c2dd0` R1.2, `4c96d7a`
+  R1.3). R1.1: the `Reaction {instanceId, layer2, transitions, outbound}` type + the single `commit(reaction,
+  consumed)` funnel. R1.2: the `Reactor` base class — `react(event) → Reaction` (compute the turn in memory)
+  plus a strictly-post-commit `afterCommit` hook; `ApiReactor extends Reactor`, its three reaction methods
+  folded into one `react`, the in-process result promise now settling durable-first in `afterCommit`. R1.3:
+  the `Substrate` class (serial mailbox + pump, lazy load-gate, serial commit chain, the atomic `commit`
+  funnel) extracted from `ProjectActor`, which composes it as host.
+  **Deviation from the original sketch (deliberate):** the **reactor registry + route-by-name** are *not* in
+  R1.3 — without `from`/`to` on events the substrate cannot route by `to`, and a registry nothing reads is
+  dead code. Instead the substrate routes via a transitional `SubstrateHost.dispatch` callback (and reloads
+  domain state via `reactivate`); R2 adds `from`/`to` + the registry and collapses `dispatch` into
+  `registry[event.to].react`. Likewise `issue()` was not introduced (the api root mints its own ids and the
+  outbound→transition mapping is `outboundTransitions`); it lands with the core reactor in R2/R3 if it earns
+  its keep. Pure refactor; 33 tests green throughout.
 - **R2 — Core reactor.** Wrap the engine handlers (`onDelegate` … `runTurn`) as a `CoreReactor extends Reactor`
   returning Reactions; the substrate commits. `from`/`to` added to events; routing switches from the
   `apiRootId` sentinel to **reactor name** (`event.to`). The api root **instance** + `ensureApiRoot` stay (the
