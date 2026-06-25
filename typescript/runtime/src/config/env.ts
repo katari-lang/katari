@@ -20,6 +20,17 @@ const envSchema = z.object({
    *  unauthenticated, so a wildcard lets any site read responses cross-origin — lock this down in
    *  any shared/production deployment. */
   CORS_ORIGIN: z.string().min(1).default("*"),
+  /** Blob byte store: set `BLOB_S3_BUCKET` to use an S3-compatible store (the bytes for file uploads /
+   *  promoted blobs), otherwise the in-memory store (dev only — bytes are lost on restart). Credentials come
+   *  from the standard AWS chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`); `BLOB_S3_ENDPOINT` +
+   *  `BLOB_S3_FORCE_PATH_STYLE=true` target a non-AWS endpoint such as MinIO. */
+  BLOB_S3_BUCKET: z.string().min(1).optional(),
+  BLOB_S3_REGION: z.string().min(1).default("us-east-1"),
+  BLOB_S3_ENDPOINT: z.url().optional(),
+  BLOB_S3_FORCE_PATH_STYLE: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
 export type AppEnvVars = z.infer<typeof envSchema>;

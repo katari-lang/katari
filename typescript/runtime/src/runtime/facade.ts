@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/types";
 import { and, eq } from "drizzle-orm";
+import { config } from "../config/index.js";
 import { db } from "../db/client.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { NotFoundError } from "../lib/errors.js";
@@ -28,7 +29,7 @@ import {
   type SnapshotId,
 } from "./ids.js";
 import { ProjectRegistry } from "./registry.js";
-import { InMemoryBlobStore } from "./value/blob-store.js";
+import { createBlobStore } from "./value/blob-store.js";
 import { jsonToValue } from "./value/codec.js";
 
 /** Read a snapshot's compiled sidecar bundle from the store (null when it has no FFI handlers). The
@@ -72,9 +73,9 @@ export interface AnswerEscalationInput {
 // project's actor is created lazily and kept warm. FFI runs each snapshot's sidecar bundle as a `node`
 // process (per-project transport); env is not wired yet (pure prims).
 // The byte store for blobs (file uploads, future engine string-promotion). Shared with the project actors
-// (the same instance the engine reads through), so a blob's bytes are one source of truth. In-memory for
-// now; a host swaps in an S3-backed store behind the same interface.
-export const blobStore = new InMemoryBlobStore();
+// (the same instance the engine reads through), so a blob's bytes are one source of truth. S3 when
+// `BLOB_S3_BUCKET` is configured, else the in-memory dev store.
+export const blobStore = createBlobStore(config.blobS3);
 
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),

@@ -17,6 +17,16 @@ export const config = {
   // `*` for any origin, otherwise the parsed allowlist Hono's `cors` expects.
   corsOrigin:
     env.CORS_ORIGIN === "*" ? "*" : env.CORS_ORIGIN.split(",").map((origin) => origin.trim()),
+  // The blob byte store: an S3 config when `BLOB_S3_BUCKET` is set, otherwise `null` (in-memory dev store).
+  blobS3:
+    env.BLOB_S3_BUCKET === undefined
+      ? null
+      : {
+          bucket: env.BLOB_S3_BUCKET,
+          region: env.BLOB_S3_REGION,
+          endpoint: env.BLOB_S3_ENDPOINT,
+          forcePathStyle: env.BLOB_S3_FORCE_PATH_STYLE,
+        },
 } as const;
 
 export type Config = typeof config;

@@ -36,6 +36,7 @@
   "homepage": "https://katari-lang.dev",
   "bugs": "https://github.com/katari-lang/katari/issues",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1075.0",
     "@hono/node-server": "^2.0.4",
     "@hono/zod-validator": "^0.8.0",
     "@katari-lang/types": "workspace:*",
