@@ -3,12 +3,22 @@
   "version": "0.1.0-rc6",
   "description": "Katari FFI port: the sidecar runtime a user's external (FFI) handlers import to register and serve over IPC.",
   "type": "module",
-  "main": "dist/index.mjs",
-  "types": "dist/index.d.mts",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "publishConfig": {
+    "main": "dist/index.mjs",
+    "types": "dist/index.d.mts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.mts",
+        "import": "./dist/index.mjs"
+      }
     }
   },
   "files": [

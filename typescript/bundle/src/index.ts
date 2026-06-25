@@ -3,15 +3,17 @@
 // bundler generates its own entry that imports every `.ts`/`.js` file under each package's root, and esbuild
 // packs them into a single ESM bundle that hands stdio control to `@katari-lang/port` via `__startSidecar()`.
 //
-// Each package source file is prefixed with `globalThis.__katariModule = "<packageName>"`, so a
-// `katari.agent(localName, ...)` it runs registers under the flat key `<packageName>.<localName>` — exactly
-// the key the compiler lowers an `external agent` to. A plain prepended assignment (not a function wrapper)
-// runs before the file body yet keeps the file's own imports and exports legal at the module top level, so
-// a package can split its sidecar across several files that import/export from one another.
+// Each source file is prefixed with `globalThis.__katariModule = "<moduleName>"`, where `moduleName` is the
+// file's path relative to its package source root with the extension dropped and directory separators as
+// dots — exactly how the compiler names a `.ktr` module (`src/foo/bar.ts` → `foo.bar`). So a
+// `katari.agent(localName, ...)` the file runs registers under `<moduleName>.<localName>`, the key the
+// compiler lowers an `external agent` to. The convention this falls out of: `src/X.ktr` declares the
+// external agents, and `src/X.ts` (the same module path) implements them. A plain prepended assignment (not
+// a function wrapper) runs before the file body yet keeps its own imports and exports legal at the top level.
 
 import type { Stats } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { extname, join, resolve, sep } from "node:path";
+import { extname, join, relative, resolve, sep } from "node:path";
 import type { SidecarBundle } from "@katari-lang/types";
 import { build, type Plugin } from "esbuild";
 
@@ -23,11 +25,11 @@ export class BundleError extends Error {
 }
 
 export interface BundlePackage {
-  /** Package name from `katari.toml`. The flat prefix every `katari.agent(name)` in this package's
-   *  sidecar registers under (`<packageName>.<name>`), matching the compiler's external dispatch key. */
+  /** Package name from `katari.toml` — a label for diagnostics. The registration prefix is the file's
+   *  module path (relative to `sourceRoot`), not this, so it matches the compiler's module naming. */
   packageName: string;
-  /** Path of the package's sidecar source root. The entry is `<packageName>.{ts,js}` here (or the sole
-   *  top-level `.ts`/`.js` file); esbuild follows its imports for the rest. */
+  /** Path of the package's sidecar source root. Every `.ts`/`.js` under it is bundled, each registering its
+   *  agents under its own module path (the path relative to here, extension dropped, dirs → dots). */
   sourceRoot: string;
 }
 
@@ -49,15 +51,14 @@ export async function bundleSidecar(options: BundleOptions): Promise<SidecarBund
 // ─── Source discovery ──────────────────────────────────────────────────────
 
 interface PackageSource {
-  packageName: string;
   /** Absolute source root with a trailing separator, so a prefix test for "is this file in the package"
-   *  cannot match a sibling like `<root>-other`. */
+   *  cannot match a sibling like `<root>-other`, and module paths are taken relative to it. */
   root: string;
   /** Every sidecar source file under `root` (sorted), each imported by the synthetic entry. */
   files: string[];
 }
 
-/** Collect every package's sidecar source files, skipping packages with no sidecar source. Sorted by name
+/** Collect every package's sidecar source files, skipping packages with no sidecar source. Sorted by root
  *  for a reproducible bundle. */
 async function resolveSources(packages: BundlePackage[]): Promise<PackageSource[]> {
   const sources: PackageSource[] = [];
@@ -69,9 +70,9 @@ async function resolveSources(packages: BundlePackage[]): Promise<PackageSource[
     const root = await realpath(resolved);
     const files = await collectSourceFiles(root);
     if (files.length === 0) continue; // a source dir with no .ts/.js sidecar — nothing to bundle
-    sources.push({ packageName: pkg.packageName, root: root + sep, files });
+    sources.push({ root: root + sep, files });
   }
-  sources.sort((a, b) => (a.packageName < b.packageName ? -1 : 1));
+  sources.sort((a, b) => (a.root < b.root ? -1 : 1));
   return sources;
 }
 
@@ -165,10 +166,10 @@ function renderEntry(sources: PackageSource[]): string {
   return `import { __startSidecar } from "@katari-lang/port";\n${imports}\n__startSidecar();\n`;
 }
 
-/** Prefix each package source file with the ambient package-name assignment, so a `katari.agent(...)` the
- *  file runs registers under the package name. esbuild evaluates modules in dependency order and keeps each
+/** Prefix each package source file with its module-name assignment, so a `katari.agent(...)` the file runs
+ *  registers under `<moduleName>.<name>`. esbuild evaluates modules in dependency order and keeps each
  *  module's statements contiguous, so the assignment immediately precedes that file's own registrations
- *  even when several packages are bundled together. A file outside every package root (a dependency in
+ *  even when several files are bundled together. A file outside every package root (a dependency in
  *  node_modules) is left untouched. */
 function moduleNamePlugin(sources: PackageSource[]): Plugin {
   return {
@@ -178,13 +179,23 @@ function moduleNamePlugin(sources: PackageSource[]): Plugin {
         const owner = sources.find((source) => args.path.startsWith(source.root));
         if (owner === undefined) return null; // a dependency — esbuild loads it normally
         const source = await readFile(args.path, "utf8");
+        const moduleName = moduleNameOf(args.path, owner.root);
         return {
           loader: args.path.endsWith(".ts") ? "ts" : "js",
-          contents: `globalThis.__katariModule = ${JSON.stringify(owner.packageName)};\n${source}`,
+          contents: `globalThis.__katariModule = ${JSON.stringify(moduleName)};\n${source}`,
         };
       });
     },
   };
+}
+
+/** A source file's module name: its path relative to the package source root, extension dropped, directory
+ *  separators turned into dots — the same naming the compiler gives a `.ktr` module. */
+function moduleNameOf(file: string, root: string): string {
+  return relative(root, file)
+    .replace(/\.(ts|js)$/, "")
+    .split(sep)
+    .join(".");
 }
 
 // ─── fs helpers ────────────────────────────────────────────────────────────

@@ -62,17 +62,18 @@ describe("bundleSidecar", () => {
     return (globalThis as Record<string, unknown>).__katariRegistered as string[];
   }
 
-  test("imports every file of a package equally (no entry) and namespaces their registrations", async () => {
+  test("imports every file equally and registers under each file's module path", async () => {
     const src = await fixture({
-      // Two files both register agents — there is no privileged entry — and one of them imports a helper
-      // that itself `export`s (a layout main's function-wrapping broke: an export can't live in a wrapper).
-      "greet.ts": [
+      // `main.ts` registers under module `main` and imports a helper that `export`s (a layout main's
+      // function-wrapping broke: an export can't live in a wrapper). A nested file registers under its
+      // dotted module path (`sub/extra.ts` → `sub.extra`). There is no privileged entry.
+      "main.ts": [
         `import katari from "@katari-lang/port";`,
         `import { topic } from "./shared.js";`,
         `katari.agent("greet_" + topic, () => "hi");`,
       ].join("\n"),
-      "farewell.ts": `import katari from "@katari-lang/port";\nkatari.agent("bye", () => "bye");`,
       "shared.ts": `export const topic = "world";`,
+      "sub/extra.ts": `import katari from "@katari-lang/port";\nkatari.agent("ping", () => 1);`,
     });
 
     const bundle = await bundleSidecar({ packages: [{ packageName: "ext_agent", sourceRoot: src }] });
@@ -81,10 +82,10 @@ describe("bundleSidecar", () => {
     expect(bundle?.entry).toContain("__startSidecar()");
 
     const registered = await runBundle(bundle?.entry ?? "");
-    expect(new Set(registered)).toEqual(new Set(["ext_agent.greet_world", "ext_agent.bye"]));
+    expect(new Set(registered)).toEqual(new Set(["main.greet_world", "sub.extra.ping"]));
   });
 
-  test("namespaces each package's registrations independently when several are bundled", async () => {
+  test("namespaces by module path across several packages", async () => {
     const a = await fixture({
       "alpha.ts": `import katari from "@katari-lang/port";\nkatari.agent("ping", () => 1);`,
     });
@@ -117,7 +118,7 @@ describe("bundleSidecar", () => {
     await symlink(src, join(src, "loop"), "dir");
     const bundle = await bundleSidecar({ packages: [{ packageName: "ext_agent", sourceRoot: src }] });
     const registered = await runBundle(bundle?.entry ?? "");
-    expect(registered).toEqual(["ext_agent.a"]); // walked once, registered once — no hang, no dup
+    expect(registered).toEqual(["main.a"]); // walked once, registered once — no hang, no dup
   });
 
   test("surfaces an esbuild failure as a BundleError", async () => {
