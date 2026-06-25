@@ -832,6 +832,30 @@ describe("in-memory core", () => {
     await expect(run(ir, "main", null)).rejects.toThrow(/panic.*number/);
   });
 
+  test("fails the run (not hangs) when the run's agent cannot be resolved", async () => {
+    // `katari run missing.agent` — the run-root delegate resolves to no IR. A deterministic failure must
+    // fail the run as a panic, never throw from `react` (which the substrate would treat as a transient
+    // poison and replay-loop forever — a silent hang). The run's `result` rejects with the resolution error.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: 2,
+            operations: [{ kind: "loadLiteral", output: 2, value: { kind: "integer", value: 1 } }],
+          },
+          parameters: { parameter: 1 },
+        },
+      },
+      entries: { [createAgentName("main")]: 0 }, // only `main` exists — `missing.agent` does not
+      names: {},
+    };
+
+    await expect(run(ir, "missing.agent", null)).rejects.toThrow(/no IR for module/i);
+  });
+
   test("catches a panic with a handler", async () => {
     // agent main() { handle { add({ left: 1, right: "x" }) } with panic(e) => break -1 }
     const ir: IRModule = {

@@ -54,6 +54,12 @@ export function delegateProxyOf(
  *  Matches the stdlib `primitive.panic` declaration. */
 export const PANIC_REQUEST = "primitive.panic" as QualifiedName;
 
+/** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
+ *  reactor-level panic (an ffi error, an unresolvable delegate target). */
+export function panicArgument(message: string): Value {
+  return { kind: "record", fields: { msg: { kind: "string", value: message } } };
+}
+
 /** Raise a `panic` from a failing thread: an ask carrying `{ msg }` to its parent, escalating outward
  *  toward the nearest `panic` handler (or the run root). */
 export function raisePanic(ctx: StepContext, thread: Thread, message: string): void {
@@ -66,11 +72,7 @@ export function raisePanic(ctx: StepContext, thread: Thread, message: string): v
     target: thread.parent,
     from: thread.id,
     askId,
-    ask: {
-      kind: "request",
-      request: PANIC_REQUEST,
-      argument: { kind: "record", fields: { msg: { kind: "string", value: message } } },
-    },
+    ask: { kind: "request", request: PANIC_REQUEST, argument: panicArgument(message) },
   });
 }
 

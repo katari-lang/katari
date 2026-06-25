@@ -7,6 +7,7 @@
 // ack model (a parent that fanned out several delegates resumes each branch as its delegateAck lands).
 
 import type { QualifiedName } from "@katari-lang/types";
+import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
 import { createProjectStore } from "../engine/store.js";
 import type { ReactorName } from "../event/types.js";
@@ -94,15 +95,24 @@ export class ProjectActor {
       api: this.api,
       ffi: this.ffi,
     };
-    this.substrate = new Substrate(this.projectId, this.persistence, registry, pool, {
-      reactivate: () => this.reactivate(),
-      onPoison: (error) =>
-        this.api.poisonRunPromises(
-          error instanceof Error
-            ? new Error(`run tracking reset after a commit failure: ${error.message}`)
-            : new Error("run tracking reset after a commit failure; query the run's durable state"),
-        ),
-    });
+    this.substrate = new Substrate(
+      this.projectId,
+      this.persistence,
+      registry,
+      pool,
+      {
+        reactivate: () => this.reactivate(),
+        onPoison: (error) =>
+          this.api.poisonRunPromises(
+            error instanceof Error
+              ? new Error(`run tracking reset after a commit failure: ${error.message}`)
+              : new Error(
+                  "run tracking reset after a commit failure; query the run's durable state",
+                ),
+          ),
+      },
+      createLogger({ level: "info", bindings: { module: "substrate", projectId: this.projectId } }),
+    );
     // An FFI transport completion re-enters through the same serial mailbox as every other turn, as a ffi
     // reactor turn that turns it into the call's delegateAck / escalate / terminateAck.
     dependencies.external.onComplete((completion) =>

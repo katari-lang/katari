@@ -12,6 +12,7 @@
 
 import type { DelegationState } from "../../db/tables/execution.js";
 import { isLiveDelegationState } from "../../db/tables/execution.js";
+import { PANIC_REQUEST, panicArgument } from "../engine/common.js";
 import {
   type DelegateTarget,
   type ExternalEvent,
@@ -19,7 +20,7 @@ import {
   escalateValue,
   type ReactorName,
 } from "../event/types.js";
-import type { DelegationId, EscalationId, InstanceId } from "../ids.js";
+import { type DelegationId, type EscalationId, type InstanceId, newEscalationId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
@@ -110,6 +111,21 @@ export abstract class Reactor {
    *  in-transit resources it captures to `owner` (a core caller, or the api root for a run result). */
   protected reownIncoming(value: Value, owner: InstanceId): void {
     this.pool.reown(value, owner);
+  }
+
+  /** Fail a delegation with a `panic` escalation addressed to its caller (`to`). A panic is the deterministic
+   *  failure channel — an unhandled one fails the run (no recovery, no retry); it never rides the substrate's
+   *  poison/replay path. Used when a delegate cannot be fulfilled (an unresolvable target, an FFI error). The
+   *  `{ msg }` it carries captures no resources, so unlike `send` it needs no owner / release. */
+  protected raisePanic(delegation: DelegationId, message: string, to: ReactorName): void {
+    this.sendBuffer.push({
+      kind: "escalate",
+      delegation,
+      escalation: newEscalationId(),
+      ask: { kind: "request", request: PANIC_REQUEST, argument: panicArgument(message) },
+      from: this.name,
+      to,
+    });
   }
 
   /** Take and clear this turn's buffered sends (the substrate produces them into the outbox). */

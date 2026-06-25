@@ -11,13 +11,11 @@
 // caught it — the answer becomes the result) or a `terminate` (unhandled — the run is failing). The actual
 // process call has stopped, so that wait needs no transport.
 
-import { PANIC_REQUEST } from "../engine/common.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type { FfiCompletion, FfiTransport } from "../external/runner.js";
 import {
   type DelegationId,
   type InstanceId,
-  newEscalationId,
   newInstanceId,
   type ProjectId,
   type SnapshotId,
@@ -148,19 +146,9 @@ export class FfiReactor extends Reactor {
         this.drop(completion.delegation);
         return;
       case "error":
-        this.send(
-          {
-            kind: "escalate",
-            delegation: completion.delegation,
-            escalation: newEscalationId(),
-            ask: {
-              kind: "request",
-              request: PANIC_REQUEST,
-              argument: panicArgument(completion.outcome.message),
-            },
-          },
-          call.caller,
-        );
+        // An FFI error is a panic: escalate it to the caller. Unhandled, it fails the run; if a handler
+        // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer).
+        this.raisePanic(completion.delegation, completion.outcome.message, call.caller);
         call.status = "awaitingAnswer";
         this.dirty.add(completion.delegation);
         return;
@@ -250,9 +238,4 @@ export class FfiReactor extends Reactor {
     this.calls.delete(delegation);
     this.dirty.add(delegation);
   }
-}
-
-/** The `{ msg }` record a panic carries (matching `raisePanic`). */
-function panicArgument(message: string): Value {
-  return { kind: "record", fields: { msg: { kind: "string", value: message } } };
 }

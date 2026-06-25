@@ -30,7 +30,14 @@ import {
   type InternalEvent,
   type ReactorName,
 } from "../event/types.js";
-import type { DelegationId, InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
+import {
+  type DelegationId,
+  type InstanceId,
+  newInstanceId,
+  type ProjectId,
+  type ScopeId,
+  type SnapshotId,
+} from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
@@ -209,8 +216,24 @@ export class CoreReactor extends Reactor {
 
   private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
     // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
-    await this.ir.preload(agentSnapshot(event.target));
-    const resolved = this.resolveTarget(event.target);
+    // Resolving the target reads the IR; if it cannot resolve (a missing module / unknown agent — e.g. a bad
+    // qualified name from a run command), that is a deterministic program failure, not transient infra. Fail
+    // it as a panic to the caller (an unhandled panic fails the run); never let it throw, which the substrate
+    // would treat as a poisoned commit and replay-loop forever. No instance is born here, so the panic's
+    // outbox issuer is a throwaway id (the outbox issuer is not a foreign key).
+    let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
+    try {
+      await this.ir.preload(agentSnapshot(event.target));
+      resolved = this.resolveTarget(event.target);
+    } catch (error) {
+      this.turnOwnerId = newInstanceId();
+      this.raisePanic(
+        event.delegation,
+        error instanceof Error ? error.message : String(error),
+        event.from,
+      );
+      return;
+    }
     const instance = createInstance(this.store, {
       delegationId: event.delegation,
       // The summoner's reactor: a reply this instance emits routes back here (core for a sub-call, api for a

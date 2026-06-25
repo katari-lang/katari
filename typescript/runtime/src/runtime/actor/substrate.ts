@@ -11,11 +11,34 @@
 // that *originate* here (no inbound row to consume): a command additionally settles a promise so an
 // out-of-loop caller can await its turn.
 
+import type { Logger } from "../../lib/logger.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import { newOutboxSeq, type OutboxSeq, type ProjectId } from "../ids.js";
 import type { OutboxMessage, Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
+
+/** How many times a *commit* failure (transient infrastructure) replays its event before the substrate
+ *  gives up in-process. Backoff caps the spin; a persistent failure stops here and is retried only on the
+ *  next activation. (A *react* failure — a deterministic bug — is never retried; see `onReactFailure`.) */
+const MAX_COMMIT_RETRIES = 8;
+
+/** Exponential backoff (ms) for the nth commit retry, capped — so a repeated commit failure does not spin. */
+function commitBackoffMs(attempt: number): number {
+  return Math.min(20 * 2 ** (attempt - 1), 1000);
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** How `pump` proceeds after a turn: `ok` (continue), `retry` (back off, then replay from durable),
+ *  `reload` (re-pump now — warm was dropped and any dead event consumed), `stop` (stay dormant). */
+type TurnOutcome = "ok" | "retry" | "reload" | "stop";
 
 /** The substrate's collaborators on its owner: how to rebuild the project's warm domain state from durable
  *  rows (and replay the undrained outbox) on first use, and how to discard the non-durable in-process state
@@ -47,6 +70,9 @@ export class Substrate {
   /** The in-flight reactivation, so concurrent first-use callers share one load. Loading MUST complete before
    *  any commit — otherwise a just-produced outbox row would be re-read by `reactivate` and replayed. */
   private loadingPromise: Promise<void> | null = null;
+  /** Per durable inbound event (its outbox seq), how many times its commit has failed. Survives reactivation
+   *  (the substrate object persists; only warm reactor state is dropped), so the retry bound spans replays. */
+  private readonly commitRetries = new Map<OutboxSeq, number>();
 
   constructor(
     private readonly projectId: ProjectId,
@@ -54,6 +80,7 @@ export class Substrate {
     private readonly registry: Record<ReactorName, Reactor>,
     private readonly pool: ResourcePool,
     private readonly host: SubstrateHost,
+    private readonly logger: Logger,
   ) {}
 
   /** Submit an originated turn (an FFI completion, or the first leg of any out-of-loop work) and pump. Fire-
@@ -120,39 +147,142 @@ export class Substrate {
   private async pump(): Promise<void> {
     if (this.pumping) return;
     this.pumping = true;
-    let poisoned = false;
+    let after: TurnOutcome | null = null;
     try {
       await this.ensureLoaded();
-      while (this.mailbox.length > 0 && !poisoned) {
+      while (this.mailbox.length > 0) {
         const turn = this.mailbox.shift();
         if (turn === undefined) break;
-        try {
-          await turn.run();
-          await this.commit(turn.reactor, turn.consumed);
-          if (turn.event !== null) turn.reactor.afterCommit(turn.event);
-          turn.settle?.resolve();
-        } catch (error) {
-          turn.settle?.reject(error);
-          this.poison(error);
-          poisoned = true;
+        const outcome = await this.runOne(turn);
+        if (outcome !== "ok") {
+          after = outcome;
+          break;
         }
       }
     } catch (loadError) {
       // `ensureLoaded` (reactivate) failed: reject anything queued so callers do not hang; the cleared
-      // `loadingPromise` means the next caller retries the load.
+      // `loadingPromise` means the next caller retries the load. No re-pump — the next use retries.
+      this.logger.error("reactivation failed; queued work rejected", {
+        error: messageOf(loadError),
+      });
       this.rejectPending(loadError);
     } finally {
       this.pumping = false;
     }
-    // Re-enter after a poisoned commit: this fresh pump re-runs `ensureLoaded` → reactivate (which drops the
-    // warm state and reloads), then drains the replayed outbox.
-    if (poisoned) void this.pump();
+    // Re-enter as the outcome dictates. `retry` backs off first (a transient commit failure replays from the
+    // durable outbox); `reload` re-pumps immediately (state was dropped + the dead event consumed); `stop`
+    // leaves the actor dormant (the event stays durable, retried on the next activation).
+    if (after === "retry") {
+      await delay(this.pendingBackoffMs);
+      this.pendingBackoffMs = 0;
+      void this.pump();
+    } else if (after === "reload") {
+      void this.pump();
+    }
   }
 
-  /** Poison the actor after a failed commit: reject every other pending command, discard the mailbox (every
-   *  inbound / produced event is still in the durable outbox and replays), and mark the project unloaded so
-   *  the next pump reactivates from durable state. */
-  private poison(error: unknown): void {
+  /** The backoff (ms) the next `retry` re-pump waits — set by `onCommitFailure`, consumed by `pump`. */
+  private pendingBackoffMs = 0;
+
+  /** Run one turn through its three phases — react / commit / afterCommit — each with its own failure
+   *  policy. Returns how `pump` should proceed. */
+  private async runOne(turn: Turn): Promise<TurnOutcome> {
+    // Phase 1 — react: compute the reaction (mutate warm state, buffer sends). A failure here is a logic
+    // error, not state divergence (nothing committed yet); deterministic failures are supposed to surface as
+    // a panic, so a *throw* is a bug — never replay-loop it.
+    try {
+      await turn.run();
+    } catch (reactError) {
+      return this.onReactFailure(turn, reactError);
+    }
+    // Phase 2 — commit: the one atomic durable write. A failure here means the warm store advanced past
+    // durable, so it must be dropped + rebuilt; the (unconsumed) event replays as the retry.
+    try {
+      await this.commit(turn.reactor, turn.consumed);
+    } catch (commitError) {
+      return this.onCommitFailure(turn, commitError);
+    }
+    if (turn.consumed !== null) this.commitRetries.delete(turn.consumed); // committed → clear its retry count
+    // Phase 3 — afterCommit: strictly-post-commit side effects (FFI dispatch, etc.). The turn is already
+    // durable, so a failure here must NOT poison — it would discard a committed turn. Log and move on; the
+    // side effect (e.g. an FFI dispatch) is re-driven on the next reactivation from durable state.
+    if (turn.event !== null) {
+      try {
+        turn.reactor.afterCommit(turn.event);
+      } catch (afterError) {
+        this.logger.error("post-commit side effect failed (turn already committed)", {
+          kind: turn.event.kind,
+          error: messageOf(afterError),
+        });
+      }
+    }
+    turn.settle?.resolve();
+    return "ok";
+  }
+
+  /** A `react` throw: a deterministic failure should have surfaced as a panic, so this is a bug. Do not
+   *  poison-loop it — log loudly, reject the awaiter, consume the dead inbound event so it cannot replay into
+   *  the same throw, and drop + reload the (possibly partially mutated) warm state. */
+  private async onReactFailure(turn: Turn, error: unknown): Promise<TurnOutcome> {
+    this.logger.error(
+      "reactor threw while computing a turn (a bug: a deterministic failure should panic, not throw) — dropping the event",
+      { to: turn.event?.to, kind: turn.event?.kind, error: messageOf(error) },
+    );
+    turn.settle?.reject(error);
+    if (turn.consumed !== null) await this.consumeDeadEvent(turn.consumed);
+    this.dropWarm(error);
+    return "reload";
+  }
+
+  /** A `commit` throw: transient infrastructure (DB unreachable, deadlock, timeout). Drop + reload warm; the
+   *  unconsumed event replays as the retry. Bounded with backoff so a non-transient failure does not spin —
+   *  on exhaustion it stops in-process (the event stays durable, retried on the next activation). An
+   *  originated turn (a command / FFI completion) has nothing durable to replay, so its rejected caller
+   *  retries it. */
+  private async onCommitFailure(turn: Turn, error: unknown): Promise<TurnOutcome> {
+    turn.settle?.reject(error);
+    this.dropWarm(error);
+    if (turn.consumed === null) {
+      this.logger.warn("commit failed for an originated turn; reloading", {
+        error: messageOf(error),
+      });
+      return "reload";
+    }
+    const attempts = (this.commitRetries.get(turn.consumed) ?? 0) + 1;
+    if (attempts <= MAX_COMMIT_RETRIES) {
+      this.commitRetries.set(turn.consumed, attempts);
+      this.pendingBackoffMs = commitBackoffMs(attempts);
+      this.logger.warn("commit failed; will replay the event", {
+        attempts,
+        error: messageOf(error),
+      });
+      return "retry";
+    }
+    this.commitRetries.delete(turn.consumed);
+    this.logger.error("commit kept failing; giving up in-process (retries on next activation)", {
+      attempts,
+      error: messageOf(error),
+    });
+    return "stop";
+  }
+
+  /** Consume a dead inbound event (a minimal commit) so reactivation does not replay it. If even this fails
+   *  (the DB is down), the event survives and replays on the next activation — logged, not looped. */
+  private async consumeDeadEvent(seq: OutboxSeq): Promise<void> {
+    try {
+      await this.persistence.transaction(this.projectId, (tx) => tx.consumeOutbox(seq));
+      this.commitRetries.delete(seq);
+    } catch (error) {
+      this.logger.error("could not consume a dead event; it will replay on next activation", {
+        error: messageOf(error),
+      });
+    }
+  }
+
+  /** Drop the warm state after a failure: reject every queued command (none survive a reactivate — they are
+   *  not durable), discard the mailbox (inbound / produced events replay from the durable outbox), settle the
+   *  non-durable in-process hooks (run-result promises), and mark unloaded so the next pump reactivates. */
+  private dropWarm(error: unknown): void {
     this.rejectPending(error);
     this.host.onPoison(error);
     this.loaded = false;
