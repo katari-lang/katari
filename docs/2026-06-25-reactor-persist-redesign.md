@@ -146,7 +146,7 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
   (the api root never goes away), so a run that returns a closure leaks its scopes until reclaimed. (2) blob
   ownership is updated in memory but still not persisted, and blob *bytes* are never freed — the same two
   blob follow-ups noted in `engine/ascent.ts`.
-- **P5 (in progress)** — sweep the deferred correctness items + the GC follow-ups, on the new shape.
+- **P5 (done)** — sweep the deferred correctness items + the GC follow-ups, on the new shape.
   - **GC (done, `2d5dfdd`)** — intra-instance scope GC (`engine/gc.ts`): per core instance, at its turn
     boundary, mark the scopes reachable from its threads (scope chains + closures captured in thread values /
     bindings) and free the ones it OWNS that are unmarked; the pool's `free` + `deleteScope` make the durable
@@ -158,6 +158,13 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
     commit, so a crash between the drop turn and the reown turn cannot lose a returned closure's scope.
   - **C8 — not needed.** Routing recovers from the engine threads, so the outbox replay order only needs to be
     stable (the seq + `createdAt` ordering already is), not a strict monotonic ordinal.
-  - **Remaining**: C3 (fold the `runs` metadata sidecar into the run's delegate commit — atomic startRun) and
-    the `run_escalations_audit` wiring. Both are API/DB-sidecar writes (C3 touches the façade) with no test
-    coverage today, so they pair naturally with the Postgres test harness.
+  - **C3 (done, `0706a4a`)** — the engine writes the `runs` metadata sidecar in the same commit as the run's
+    `delegate` (atomic startRun) and the cancel reason with the `terminate`; `startRun` returns `started` (the
+    façade awaits it for immediate visibility), and the façade's `runRepository.start` / `setCancelReason`
+    writes are gone (the engine owns all `runs` writes; the repository is read-only now).
+  - **Audit (done, `0706a4a`)** — answering a user-facing escalation appends a `run_escalations_audit` row in
+    the same commit as the relayed `escalateAck`. New `PersistenceTx` methods, implemented by the Drizzle
+    backend and the in-memory twin (which now stores runs + audits for unit tests).
+  - **Whole redesign (P1–P5) is landed.** The standing follow-ups (not P5 scope) are: api-root-owned
+    run-result scope GC (intentionally deferred — returned-closure scopes are not reclaimed), blob ownership
+    persistence + blob-byte freeing, and the FFI-reactor phase (`ExternalThread` / `reactFfi` stay for now).
