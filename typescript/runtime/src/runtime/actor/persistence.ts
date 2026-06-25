@@ -16,7 +16,7 @@ import type { ProjectStore } from "../engine/types.js";
 import type { DelegateTarget, ExternalEvent } from "../event/types.js";
 import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { SerializedInstance } from "./persistence-codec.js";
+import type { PersistedScope, SerializedInstance } from "./persistence-codec.js";
 
 /** A caller-owned delegation row at one instant (the `delegations` table shape). The caller reactor (core
  *  for a sub-call, the api root for a run) is the source of truth and writes this each time the row's state
@@ -60,11 +60,14 @@ export interface PersistenceTx {
   putDelegation(row: PersistedDelegation): Promise<void>;
   /** Upsert a raiser-owned escalation row (its current state). */
   putEscalation(row: PersistedEscalation): Promise<void>;
-  /** Upsert a still-running core instance's Layer 2 (its instance row + threads + owned scopes, replaced
-   *  wholesale). */
+  /** Upsert a still-running core instance's Layer 2 (its instance row + thread tree, replaced wholesale).
+   *  Scopes are NOT here — they persist independently through `putScope`. */
   putInstance(serialized: SerializedInstance): Promise<void>;
-  /** Drop a completed / torn-down instance, cascading its threads, owned scopes, issued delegations, and
-   *  raised escalations (mirrors the tables' ON DELETE CASCADE). */
+  /** Upsert one scope (the `ResourcePool`'s unit). `owner` may be `null` (in transit between owners). */
+  putScope(scope: PersistedScope): Promise<void>;
+  /** Drop a completed / torn-down instance, cascading its threads, the scopes it still owns, its issued
+   *  delegations, and its raised escalations (mirrors the tables' ON DELETE CASCADE). A scope its result
+   *  released to in-transit (`owner = null`) is no longer owned by it, so it survives the cascade. */
   dropInstance(instanceId: InstanceId): Promise<void>;
   /** Delete the inbound outbox row this turn consumed (`null` for an originated turn — an api command or an
    *  ephemeral FFI completion — which has no durable row to delete). */
@@ -147,6 +150,7 @@ const NO_OP_TX: PersistenceTx = {
   async putDelegation() {},
   async putEscalation() {},
   async putInstance() {},
+  async putScope() {},
   async dropInstance() {},
   async consumeOutbox() {},
   async produceOutbox() {},

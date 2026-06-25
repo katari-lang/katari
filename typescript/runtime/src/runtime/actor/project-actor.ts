@@ -8,6 +8,7 @@
 
 import type { QualifiedName } from "@katari-lang/types";
 import type { PrimRunner } from "../engine/context.js";
+import { createProjectStore } from "../engine/store.js";
 import type { ReactorName } from "../event/types.js";
 import type { ExternalRunner } from "../external/runner.js";
 import {
@@ -25,6 +26,7 @@ import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
+import { ResourcePool } from "./resource-pool.js";
 import { Substrate } from "./substrate.js";
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
@@ -58,20 +60,28 @@ export class ProjectActor {
     this.projectId = dependencies.projectId;
     this.apiRootId = apiRootIdOf(this.projectId);
     this.persistence = dependencies.persistence;
+    // The shared scope store + the pool that wraps it: the engine reads / writes scopes in place, while every
+    // reactor reowns through the same pool (so a run result crosses from a core instance to the api root).
+    const store = createProjectStore();
+    const pool = new ResourcePool(this.projectId, store);
     this.core = new CoreReactor(
       this.projectId,
       dependencies.ir,
       dependencies.prims,
       dependencies.blobs,
       dependencies.external,
+      store,
+      pool,
     );
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
-    this.api = new ApiReactor(this.apiRootId, {
-      enqueue: (thunk) => this.substrate.enqueueCommand(this.api, thunk),
-    });
+    this.api = new ApiReactor(
+      this.apiRootId,
+      { enqueue: (thunk) => this.substrate.enqueueCommand(this.api, thunk) },
+      pool,
+    );
     const registry: Record<ReactorName, Reactor> = { core: this.core, api: this.api };
-    this.substrate = new Substrate(this.projectId, this.persistence, registry, {
+    this.substrate = new Substrate(this.projectId, this.persistence, registry, pool, {
       reactivate: () => this.reactivate(),
     });
     // FFI completions re-enter through the same serial mailbox as every other turn, as a core FFI turn.

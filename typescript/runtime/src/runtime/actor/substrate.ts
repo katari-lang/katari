@@ -15,6 +15,7 @@ import type { ExternalEvent, ReactorName } from "../event/types.js";
 import { newOutboxSeq, type OutboxSeq, type ProjectId } from "../ids.js";
 import type { OutboxMessage, Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
+import type { ResourcePool } from "./resource-pool.js";
 
 /** The substrate's one collaborator on its owner: how to rebuild the project's warm domain state from durable
  *  rows (and replay the undrained outbox) on first use. */
@@ -47,6 +48,7 @@ export class Substrate {
     private readonly projectId: ProjectId,
     private readonly persistence: Persistence,
     private readonly registry: Record<ReactorName, Reactor>,
+    private readonly pool: ResourcePool,
     private readonly host: SubstrateHost,
   ) {}
 
@@ -144,6 +146,9 @@ export class Substrate {
           }));
     await this.persistence.transaction(this.projectId, async (tx) => {
       await reactor.persist(tx);
+      // The pool flushes after the reactor so an in-transit scope (released as the run / sub-call result
+      // left its instance) is re-written AFTER that instance's drop cascade removed its stale row.
+      await this.pool.persist(tx);
       if (consumed !== null) await tx.consumeOutbox(consumed);
       if (produced.length > 0) await tx.produceOutbox(produced);
     });

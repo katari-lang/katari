@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 import {
   deserializeProject,
   serializeInstance,
+  serializeScope,
 } from "../src/runtime/actor/persistence-codec.js";
 import type { Instance, Scope } from "../src/runtime/engine/types.js";
 import {
@@ -92,16 +93,15 @@ describe("persistence codec", () => {
       },
     ];
 
-    const serialized = serializeInstance(PROJECT, instance, scopes);
+    const serialized = serializeInstance(PROJECT, instance);
     expect(serialized.threads).toHaveLength(3);
     expect(serialized.instance.snapshotId).toBe(SNAPSHOT);
     expect(serialized.instance.engineState.nextThreadId).toBe(3);
 
-    const snapshot = deserializeProject(
-      [serialized.instance],
-      serialized.threads,
-      serialized.scopes,
-    );
+    // Scopes persist independently of the instance Layer 2 now (the ResourcePool's unit), so the codec
+    // serialises them one at a time.
+    const serializedScopes = scopes.map((scope) => serializeScope(PROJECT, scope));
+    const snapshot = deserializeProject([serialized.instance], serialized.threads, serializedScopes);
 
     expect(snapshot.instances[INSTANCE]).toEqual(instance);
     expect(snapshot.scopes[0]).toEqual(scopes[0]);

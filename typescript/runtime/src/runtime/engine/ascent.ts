@@ -1,16 +1,15 @@
-// Resource ascent: a value that escapes an instance (returned to its caller) may capture resources — a
-// `closure`'s scope (and that scope's ancestors the instance owns) and a blob `ref`'s bytes. Those must
-// outlive the instance, so at teardown they are not dropped but set *in-transit* (`owner = null`), and the
-// instance that receives the value re-owns them. This is what keeps a returned closure callable, and a
-// returned blob readable, after the instance that built them is gone.
+// Resource reachability: the pure walker that finds every resource a value captures — a `closure`'s scope
+// chain and a blob `ref`'s id, through nested records / arrays. The *ownership transition* a captured set
+// undergoes when a value escapes one owner and lands in another (release → in-transit → reown) lives in the
+// shared `ResourcePool` (`actor/resource-pool.ts`), which is what keeps a returned closure callable, and a
+// returned blob readable, after the instance that built them is gone — for a sub-call (a core caller re-owns)
+// and a run alike (the api root re-owns).
 //
-// NOTE: blobs have no producer in the runtime yet (no large-value promotion, no blob prim), so the blob
-// half is currently inert — `store.blobOwners` stays empty. It is wired symmetrically to scopes so the
-// moment blobs are produced their lifecycle is already correct. Two follow-ups remain: GC of a dropped
-// blob's *bytes* (a `BlobStore.delete`, which needs the async store), and making `blobOwners` durable
-// (persisted + rebuilt on reactivate, like scopes); today it is warm-store-only.
+// NOTE: blobs have no producer in the runtime yet (no large-value promotion, no blob prim), so the blob half
+// is currently inert — `store.blobOwners` stays empty, and blob ownership is not yet persisted. The walker is
+// symmetric over scopes and blobs so the moment blobs are produced their reachability is already correct.
 
-import type { BlobId, InstanceId, ScopeId } from "../ids.js";
+import type { BlobId, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { ProjectStore, Scope } from "./types.js";
 
@@ -55,36 +54,5 @@ function addScopeChain(store: ProjectStore, scopeId: ScopeId, into: Set<ScopeId>
     if (scope === undefined) return;
     into.add(current);
     current = scope.parentId;
-  }
-}
-
-/**
- * At an instance's teardown: lift the resources its escaping `value` captures out of the drop set — set
- * them in-transit (`owner = null`) instead of letting teardown drop them, so the value's recipient can
- * re-own them. Only the instance's own resources ascend; ancestors / blobs owned by others are untouched.
- */
-export function ascendResources(store: ProjectStore, owner: InstanceId, value: Value): void {
-  const { scopes, blobs } = reachableResources(store, value);
-  for (const scopeId of scopes) {
-    const scope = store.scopes[scopeId];
-    if (scope?.owner === owner) scope.owner = null;
-  }
-  for (const blobId of blobs) {
-    if (store.blobOwners[blobId] === owner) store.blobOwners[blobId] = null;
-  }
-}
-
-/**
- * When an escaping value lands in an instance: claim the in-transit resources it captures (`owner = null`
- * → this instance). Resources already owned (by this caller or an ancestor) are left as they are.
- */
-export function reownResources(store: ProjectStore, owner: InstanceId, value: Value): void {
-  const { scopes, blobs } = reachableResources(store, value);
-  for (const scopeId of scopes) {
-    const scope = store.scopes[scopeId];
-    if (scope?.owner === null) scope.owner = owner;
-  }
-  for (const blobId of blobs) {
-    if (store.blobOwners[blobId] === null) store.blobOwners[blobId] = owner;
   }
 }

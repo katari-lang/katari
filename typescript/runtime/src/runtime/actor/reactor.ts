@@ -21,6 +21,7 @@ import type {
 import type { DelegationId, EscalationId, InstanceId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { PersistenceTx } from "./persistence.js";
+import type { ResourcePool } from "./resource-pool.js";
 
 /** A caller-owned delegation row in memory (the live source of truth). */
 interface DelegationRow {
@@ -45,6 +46,10 @@ export abstract class Reactor {
   /** This reactor's routing name — `send` stamps it as the event's `from`, and the substrate routes inbound
    *  events to `registry[event.to]`. */
   abstract readonly name: ReactorName;
+
+  /** The shared resource pool — every reactor reowns within the same one, so a value's captured resources
+   *  cross a reactor boundary (a sender releases, a receiver reowns). */
+  constructor(protected readonly pool: ResourcePool) {}
 
   /** The follow-on events this turn produced, buffered until the substrate drains them into the outbox. */
   private readonly sendBuffer: ExternalEvent[] = [];
@@ -76,9 +81,19 @@ export abstract class Reactor {
 
   // ─── send / drain (the from/to protocol) ────────────────────────────────────────────────────────
 
-  /** Buffer one follow-on event, stamped `from: this.name`, addressed `to` the target reactor. */
+  /** Buffer one follow-on event, stamped `from: this.name`, addressed `to` the target reactor. The first
+   *  step of the two-step reown rides here: sending a `delegateAck` (a result leaving its instance) RELEASES
+   *  the value's captured resources from the turn's owner to in-transit, so the receiver can reown them — for
+   *  a sub-call (a core caller reowns) and a run (the api root reowns) by the same path. */
   protected send(body: ExternalEventBody, to: ReactorName): void {
+    if (body.kind === "delegateAck") this.pool.release(body.value, this.currentTurnOwner());
     this.sendBuffer.push({ ...body, from: this.name, to });
+  }
+
+  /** The second step of the two-step reown: an incoming `delegateAck`'s result lands here — claim the
+   *  in-transit resources it captures to `owner` (a core caller, or the api root for a run result). */
+  protected reownIncoming(value: Value, owner: InstanceId): void {
+    this.pool.reown(value, owner);
   }
 
   /** Take and clear this turn's buffered sends (the substrate produces them into the outbox). */

@@ -71,15 +71,15 @@ export interface PersistedScope {
 export interface SerializedInstance {
   instance: PersistedInstance;
   threads: PersistedThread[];
-  scopes: PersistedScope[];
 }
 
-/** Serialise a still-running `core` instance + the scopes it owns into their row shapes. (Only core
- *  instances carry engine state; the `api` root's runs / escalations persist as the audit, not here.) */
+/** Serialise a still-running `core` instance + its threads into their row shapes. Scopes are NOT carried
+ *  here — they are an independent resource persisted by the `ResourcePool` (`serializeScope`), so an
+ *  instance's Layer 2 is just its row + thread tree. (Only core instances carry engine state; the `api`
+ *  root's runs / escalations persist as the edge tables, not here.) */
 export function serializeInstance(
   projectId: ProjectId,
   instance: CoreInstance,
-  ownedScopes: Scope[],
 ): SerializedInstance {
   return {
     instance: {
@@ -105,13 +105,19 @@ export function serializeInstance(
       status: thread.status,
       payload: thread,
     })),
-    scopes: ownedScopes.map((scope) => ({
-      projectId,
-      scopeId: scope.id,
-      parentScopeId: scope.parentId,
-      ownerInstanceId: scope.owner,
-      values: scope.values,
-    })),
+  };
+}
+
+/** Serialise one scope into its row shape — the unit the `ResourcePool` persists (`owner = null` for a scope
+ *  in transit between owners). Scopes are CORE-global, owned by whichever instance (or the api root) holds a
+ *  value that captures them, and live independently of any one instance's Layer 2. */
+export function serializeScope(projectId: ProjectId, scope: Scope): PersistedScope {
+  return {
+    projectId,
+    scopeId: scope.id,
+    parentScopeId: scope.parentId,
+    ownerInstanceId: scope.owner,
+    values: scope.values,
   };
 }
 

@@ -1,10 +1,10 @@
 // Drizzle-backed persistence: one turn = one `transaction`, in which the reacting reactor writes its own
 // state through a `PersistenceTx` and the substrate writes the transactional outbox. A delegation row is
-// upserted by its caller, an escalation by its raiser, a still-running instance's Layer 2 (instance +
-// threads + owned scopes) is replaced wholesale, and a completed instance is dropped (cascade). Writing all
-// of it in a single DB transaction is what keeps an edge's durable row from lagging the engine threads that
-// reference it. Loading returns the engine graph plus the live (running / cancelling) delegation rows and
-// open escalations each reactor reloads as its own.
+// upserted by its caller, an escalation by its raiser, a still-running instance's Layer 2 (instance row +
+// thread tree) is replaced wholesale, scopes are upserted independently by the `ResourcePool` (`putScope`),
+// and a completed instance is dropped (cascade). Writing all of it in a single DB transaction is what keeps
+// an edge's durable row from lagging the engine threads that reference it. Loading returns the engine graph
+// plus the live (running / cancelling) delegation rows and open escalations each reactor reloads as its own.
 
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
@@ -215,19 +215,37 @@ export class DbPersistence implements Persistence {
               ambientGenerics: instance.ambientGenerics ?? undefined,
             },
           });
-        // Replace the instance's thread + owned-scope rows wholesale (the trees are small).
+        // Replace the instance's thread rows wholesale (the trees are small). Scopes are NOT here — they
+        // persist independently through `putScope`.
         await drizzleTx
           .delete(threads)
           .where(and(eq(threads.projectId, projectId), eq(threads.instanceId, instance.id)));
         if (serialized.threads.length > 0)
           await drizzleTx.insert(threads).values(serialized.threads);
+      },
+      putScope: async (scope) => {
         await drizzleTx
-          .delete(scopes)
-          .where(and(eq(scopes.projectId, projectId), eq(scopes.ownerInstanceId, instance.id)));
-        if (serialized.scopes.length > 0) await drizzleTx.insert(scopes).values(serialized.scopes);
+          .insert(scopes)
+          .values({
+            projectId,
+            scopeId: scope.scopeId,
+            parentScopeId: scope.parentScopeId,
+            ownerInstanceId: scope.ownerInstanceId,
+            values: scope.values,
+          })
+          .onConflictDoUpdate({
+            target: [scopes.projectId, scopes.scopeId],
+            set: {
+              parentScopeId: scope.parentScopeId,
+              ownerInstanceId: scope.ownerInstanceId,
+              values: scope.values,
+            },
+          });
       },
       dropInstance: async (instanceId) => {
-        // Cascade removes the instance's threads / scopes / owned delegations + escalations.
+        // Cascade removes the instance's threads / the scopes it still owns / owned delegations + escalations.
+        // A scope its result released to in-transit (`owner = null`) is not owned by it, so it survives; the
+        // pool re-writes it in this same commit (after this drop) with its new owner.
         await drizzleTx
           .delete(instances)
           .where(and(eq(instances.projectId, projectId), eq(instances.id, instanceId)));

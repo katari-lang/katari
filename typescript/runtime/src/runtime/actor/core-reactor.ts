@@ -13,15 +13,13 @@
 // in-core caller (`routeOf`). FFI completions arrive via `reactFfi` until the FFI reactor lands.
 
 import type { QualifiedName } from "@katari-lang/types";
-import { ascendResources, reownResources } from "../engine/ascent.js";
 import { delegateProxyOf, raisePanic, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { readVariable } from "../engine/scope.js";
-import { createProjectStore } from "../engine/store.js";
 import { completeExternalAbort } from "../engine/thread-ops.js";
-import type { CoreInstance, ProjectStore, Scope } from "../engine/types.js";
+import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import type {
   DelegateTarget,
@@ -39,19 +37,19 @@ import type { OpenEscalation } from "./api-reactor.js";
 import type { PersistedOpenEscalation, PersistenceTx, ProjectSnapshot } from "./persistence.js";
 import { serializeInstance } from "./persistence-codec.js";
 import { Reactor } from "./reactor.js";
+import type { ResourcePool } from "./resource-pool.js";
 
 /** Where this turn's engine continuation (Layer 2) goes when the substrate commits: the still-running
- *  instance is persisted with its owned scopes, a completed / torn-down one is dropped (cascade), or the
- *  turn touched no instance (`none`). */
+ *  instance is persisted (its scopes flush separately through the pool), a completed / torn-down one is
+ *  dropped (cascade), or the turn touched no instance (`none`). */
 type TurnLayer2 =
   | { kind: "none" }
-  | { kind: "persist"; instance: CoreInstance; ownedScopes: Scope[] }
+  | { kind: "persist"; instance: CoreInstance }
   | { kind: "drop"; instanceId: InstanceId };
 
 export class CoreReactor extends Reactor {
   readonly name: ReactorName = "core";
 
-  private readonly store: ProjectStore = createProjectStore();
   /** A pending sub-call's caller instance, for routing its delegateAck / escalate home and finding its
    *  proxy. Set when core issues the `delegate`; absent for a run (the api root is the caller), which is
    *  exactly how `routeOf` distinguishes "reply to core" from "reply to api". */
@@ -70,8 +68,12 @@ export class CoreReactor extends Reactor {
     private readonly prims: PrimRunner,
     private readonly blobs: BlobStore,
     private readonly external: ExternalRunner,
+    /** The project's shared scope store (also wrapped by the `ResourcePool` below), so the engine and the
+     *  pool touch the same scopes in place. */
+    private readonly store: ProjectStore,
+    pool: ResourcePool,
   ) {
-    super();
+    super(pool);
   }
 
   /** React to one external event a delegation routes to a core instance: summon a child (`delegate`), resume
@@ -108,7 +110,7 @@ export class CoreReactor extends Reactor {
   async persist(tx: PersistenceTx): Promise<void> {
     const layer2 = this.turnLayer2;
     if (layer2.kind === "persist") {
-      await tx.putInstance(serializeInstance(this.projectId, layer2.instance, layer2.ownedScopes));
+      await tx.putInstance(serializeInstance(this.projectId, layer2.instance));
     }
     await this.flushLayer1(tx);
     if (layer2.kind === "drop") await tx.dropInstance(layer2.instanceId);
@@ -257,9 +259,10 @@ export class CoreReactor extends Reactor {
     if (caller === undefined) return;
     this.transitionDelegation(event.delegation, "done", { result: event.value });
     delete this.delegationCaller[event.delegation];
-    // Claim any resources the returned value carries up (a returned closure's captured scope chain, a
-    // returned blob — set in-transit when the child retired): they now belong to this caller.
-    reownResources(this.store, caller.id, event.value);
+    // Claim the resources the returned value carries up (a returned closure's captured scope chain, a
+    // returned blob — released to in-transit when the child sent its delegateAck): they now belong to this
+    // caller. The caller's resume turn re-flushes its scopes, so the new ownership is persisted.
+    this.reownIncoming(event.value, caller.id);
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) return;
     delete caller.threads[proxy.id];
@@ -409,36 +412,19 @@ export class CoreReactor extends Reactor {
       }
       this.send(body, this.routeOf(body));
     }
-    // DB reflection at the turn boundary: a completed instance is dropped (cascade), a still-running one is
-    // persisted with its owned scopes.
+    // DB reflection at the turn boundary. A completed instance is dropped (the cascade reclaims the scopes it
+    // still owns; the ones its result released to in-transit survive — the receiver reowns them, the pool
+    // re-writes them). A still-running one is persisted, and the pool flushes the scopes it touched (the
+    // engine mutates them in place, so the turn marks the instance's scopes dirty wholesale). The `delegateAck`
+    // result's resources were already released to in-transit by the base-class `send`.
     if (isInstanceComplete(instance)) {
-      // Before dropping, ascend the scopes the returned value captures (set them in-transit) so a core
-      // caller re-owns them in `onDelegateAck`; a run result leaves the engine, so its captures drop.
-      this.ascendReturnedResources(instance, ctx.buffers.outbound);
       if (instance.delegationId !== null) delete this.delegationChild[instance.delegationId];
       teardownInstance(this.store, instance.id);
       this.turnLayer2 = { kind: "drop", instanceId: instance.id };
     } else {
-      const ownedScopes = Object.values(this.store.scopes).filter(
-        (scope) => scope.owner === instance.id,
-      );
-      this.turnLayer2 = { kind: "persist", instance, ownedScopes };
+      this.pool.markOwnedDirty(instance.id);
+      this.turnLayer2 = { kind: "persist", instance };
     }
-  }
-
-  /** Ascend the resources a completing instance's returned value captures — but only when its caller is a
-   *  `core` instance that re-owns them (in `onDelegateAck`). A run result goes to the api root and leaves the
-   *  engine, so its captured resources simply drop with the instance. */
-  private ascendReturnedResources(instance: CoreInstance, outbound: ExternalEventBody[]): void {
-    const delegation = instance.delegationId;
-    if (delegation === null) return;
-    const caller = this.coreInstance(this.delegationCaller[delegation]);
-    if (caller === undefined) return;
-    const ack = outbound.find(
-      (body): body is Extract<ExternalEventBody, { kind: "delegateAck" }> =>
-        body.kind === "delegateAck" && body.delegation === delegation,
-    );
-    if (ack !== undefined) ascendResources(this.store, instance.id, ack.value);
   }
 
   /** The loaded core instance under `id` (the engine store holds only core instances). */

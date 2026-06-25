@@ -25,6 +25,7 @@ import {
 import type { Value } from "../value/types.js";
 import type { PersistedDelegation, PersistenceTx } from "./persistence.js";
 import { Reactor } from "./reactor.js";
+import type { ResourcePool } from "./resource-pool.js";
 
 /** One run-root request the engine could not handle internally, awaiting a user's answer. */
 export interface OpenEscalation {
@@ -70,8 +71,9 @@ export class ApiReactor extends Reactor {
   constructor(
     private readonly apiRootId: InstanceId,
     private readonly commands: CommandSink,
+    pool: ResourcePool,
   ) {
-    super();
+    super(pool);
   }
 
   currentTurnOwner(): InstanceId {
@@ -183,6 +185,11 @@ export class ApiReactor extends Reactor {
   react(event: ExternalEvent): void {
     switch (event.kind) {
       case "delegateAck":
+        // Reown the result's captured resources to the api root (the run-root instance released them to
+        // in-transit as it retired). This is the same two-step reown a core caller does for a sub-call —
+        // the api root is just the local owner here — and is what keeps a run that returns a closure / blob
+        // alive instead of dropping it.
+        this.reownIncoming(event.value, this.apiRootId);
         this.transitionDelegation(event.delegation, "done", { result: event.value });
         break;
       case "terminateAck":

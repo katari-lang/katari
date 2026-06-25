@@ -135,7 +135,9 @@ export class StoringPersistence implements Persistence {
       putInstance: async (serialized) => {
         this.instances.set(serialized.instance.id, serialized.instance);
         this.threads.set(serialized.instance.id, serialized.threads);
-        for (const scope of serialized.scopes) this.scopes.set(scope.scopeId, scope);
+      },
+      putScope: async (scope) => {
+        this.scopes.set(scope.scopeId, scope);
       },
       dropInstance: async (instanceId) => {
         this.dropInstance(instanceId);
