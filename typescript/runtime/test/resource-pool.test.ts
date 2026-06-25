@@ -8,6 +8,7 @@ import { describe, expect, test } from "vitest";
 import type { PersistedScope } from "../src/runtime/actor/persistence-codec.js";
 import type { PersistenceTx } from "../src/runtime/actor/persistence.js";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
+import { rebuildScopeOwnerIndex } from "../src/runtime/engine/scope.js";
 import type { ProjectStore } from "../src/runtime/engine/types.js";
 import {
   type InstanceId,
@@ -23,16 +24,19 @@ const API_ROOT = "api-root" as InstanceId;
 
 /** A store with a closure's scope chain 2 -> 1 -> 0, all owned by `owner`. */
 function storeOwnedBy(owner: InstanceId): ProjectStore {
-  return {
+  const store: ProjectStore = {
     instances: {},
     scopes: {
       0: { id: toScopeId(0), parentId: null, owner, values: {} },
       1: { id: toScopeId(1), parentId: toScopeId(0), owner, values: { 5: { kind: "integer", value: 1 } } },
       2: { id: toScopeId(2), parentId: toScopeId(1), owner, values: {} },
     },
+    scopesByOwner: new Map(),
     nextScopeId: 3,
     blobOwners: {},
   };
+  rebuildScopeOwnerIndex(store);
+  return store;
 }
 
 /** A closure value capturing scope 2 (so its whole chain 2,1,0 is reachable). */

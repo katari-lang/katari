@@ -6,8 +6,8 @@
 // directly in their repositories (the run's outcome is its delegation; an open escalation is an
 // `escalations` row), so a restart never makes them stale.
 //
-// (This is the api root's *issuing* side; in the three-layer plan — docs/2026-06-25-three-layer-runtime.md —
-// it merges with the api root's *reaction* side into the per-project ApiReactor.)
+// (This is the command edge only: it forwards each command to the project's `ApiReactor` — the api root's
+// issuing and reaction sides already live there — and never drives the engine directly.)
 
 import { createAgentName, type Json } from "@katari-lang/types";
 import { eq } from "drizzle-orm";

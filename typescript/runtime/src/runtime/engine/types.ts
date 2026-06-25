@@ -280,9 +280,9 @@ export type InstanceStatus = "running" | "cancelling";
 /** Which structure a Layer 1 instance *entity* carries: `core` runs IR; `api` is the project's permanent
  *  management root. This is a durable, persistence-level distinction (the `instances.kind` column). The
  *  *engine* only ever holds `core` instances in its warm store — the api root runs no IR, so it is a Layer 1
- *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. The actor's single
- *  dispatch peels api-targeted events off by comparing the caller id to the api root id, one layer above the
- *  engine; that is why there is no `ApiInstance` in the engine model below. */
+ *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. Api-targeted events
+ *  route to the `ApiReactor` by the substrate's `event.to`, not by any caller-id comparison here; that is
+ *  why there is no `ApiInstance` in the engine model below. */
 export type InstanceKind = "core" | "api";
 
 /**
@@ -336,6 +336,11 @@ export type ProjectStore = {
   instances: Record<InstanceId, CoreInstance>;
   /** ScopeId -> Scope (CORE-global per project). */
   scopes: Record<number, Scope>;
+  /** A derived index over `scopes[].owner`: the scopes each instance currently owns. Maintained on every
+   *  owner change (allocate / re-own / free) through the `scope.ts` helpers, so the per-owner sweeps
+   *  (`ResourcePool.markOwnedDirty`, the GC sweep, an instance teardown) iterate only that instance's scopes
+   *  instead of scanning the whole store. An in-transit scope (`owner = null`) sits in no bucket. */
+  scopesByOwner: Map<InstanceId, Set<ScopeId>>;
   nextScopeId: number;
   /** BlobId -> the instance that owns the blob's bytes (`null` while in-transit mid-ascent). Drives blob
    *  GC / ascent symmetrically to a scope's `owner`. Warm-store-only today (no producer / no durability —

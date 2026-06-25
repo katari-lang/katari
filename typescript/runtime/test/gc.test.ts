@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "vitest";
 import { unreachableOwnedScopes } from "../src/runtime/engine/gc.js";
+import { rebuildScopeOwnerIndex } from "../src/runtime/engine/scope.js";
 import type { CoreInstance, ProjectStore, Scope, Thread } from "../src/runtime/engine/types.js";
 import {
   type DelegationId,
@@ -64,6 +65,8 @@ const closureCapturing = (scopeId: number): Value => ({
 });
 
 function ownedIds(store: ProjectStore, instance: CoreInstance): number[] {
+  // The fixtures hand-build the `scopes` map, so populate the owner index over it before the sweep reads it.
+  rebuildScopeOwnerIndex(store);
   return unreachableOwnedScopes(store, instance)
     .map((id: ScopeId) => id as number)
     .sort((left, right) => left - right);
@@ -81,6 +84,7 @@ describe("unreachableOwnedScopes", () => {
         2: scope(2, null, INSTANCE),
         3: scope(3, null, "other" as InstanceId),
       },
+      scopesByOwner: new Map(),
       nextScopeId: 4,
       blobOwners: {},
     };
@@ -99,6 +103,7 @@ describe("unreachableOwnedScopes", () => {
         2: scope(2, 1, INSTANCE),
         5: scope(5, null, INSTANCE),
       },
+      scopesByOwner: new Map(),
       nextScopeId: 6,
       blobOwners: {},
     };
@@ -133,6 +138,7 @@ describe("unreachableOwnedScopes", () => {
         9: scope(9, null, INSTANCE, { 7: closureCapturing(8) }),
         10: scope(10, null, INSTANCE),
       },
+      scopesByOwner: new Map(),
       nextScopeId: 11,
       blobOwners: {},
     };

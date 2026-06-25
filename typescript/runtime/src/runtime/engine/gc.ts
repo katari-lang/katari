@@ -16,9 +16,10 @@
 // dropped — bindings are single-assignment) until the child returns. So a scope unreachable from the
 // instance at a quiesced turn boundary is unreachable for good.
 
-import { type ScopeId, toScopeId } from "../ids.js";
+import type { ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import { reachableResources } from "./ascent.js";
+import { scopesOwnedBy } from "./scope.js";
 import type { CancelExit, CoreInstance, ProjectStore, Thread } from "./types.js";
 
 /** The scopes a `core` instance owns but no longer references — safe to free at its turn boundary. */
@@ -53,9 +54,8 @@ export function unreachableOwnedScopes(store: ProjectStore, instance: CoreInstan
 
   // Sweep: this instance's own scopes the mark did not reach.
   const dead: ScopeId[] = [];
-  for (const key of Object.keys(store.scopes)) {
-    const scopeId = toScopeId(Number(key));
-    if (store.scopes[scopeId]?.owner === instance.id && !marked.has(scopeId)) dead.push(scopeId);
+  for (const scopeId of scopesOwnedBy(store, instance.id)) {
+    if (!marked.has(scopeId)) dead.push(scopeId);
   }
   return dead;
 }

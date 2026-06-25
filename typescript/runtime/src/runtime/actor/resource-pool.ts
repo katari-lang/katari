@@ -15,8 +15,9 @@
 // no producer — see `engine/ascent.ts`).
 
 import { reachableResources } from "../engine/ascent.js";
+import { deleteScope, scopesOwnedBy, setScopeOwner } from "../engine/scope.js";
 import type { ProjectStore } from "../engine/types.js";
-import { type InstanceId, type ProjectId, type ScopeId, toScopeId } from "../ids.js";
+import type { InstanceId, ProjectId, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { PersistenceTx } from "./persistence.js";
 import { serializeScope } from "./persistence-codec.js";
@@ -33,15 +34,17 @@ export class ResourcePool {
     private readonly store: ProjectStore,
   ) {}
 
-  /** Free a scope the GC found dead: drop it from the warm store and stage its durable row for deletion. */
+  /** Free a scope the GC found dead: drop it from the warm store (and the owner index) and stage its durable
+   *  row for deletion. */
   free(scopeId: ScopeId): void {
-    delete this.store.scopes[scopeId];
+    deleteScope(this.store, scopeId);
     this.dirty.delete(scopeId);
     this.freed.add(scopeId);
   }
 
-  /** Drop the pool's per-turn staging after a poisoned commit (the scopes themselves are cleared with the
-   *  store by the core reactor's reset, then reloaded). */
+  /** Drop the pool's per-turn staging after a poisoned commit. The scope rows themselves live in the engine's
+   *  `ProjectStore` (the pool is only a view over them), so they — and the owner index — are cleared and
+   *  reloaded by the core reactor's reset, not here; this clears only what the pool itself owns. */
   reset(): void {
     this.dirty.clear();
     this.freed.clear();
@@ -55,7 +58,7 @@ export class ResourcePool {
     for (const scopeId of scopes) {
       const scope = this.store.scopes[scopeId];
       if (scope?.owner === owner) {
-        scope.owner = null;
+        setScopeOwner(this.store, scope, null);
         this.dirty.add(scopeId);
       }
     }
@@ -71,7 +74,7 @@ export class ResourcePool {
     for (const scopeId of scopes) {
       const scope = this.store.scopes[scopeId];
       if (scope?.owner === null) {
-        scope.owner = owner;
+        setScopeOwner(this.store, scope, owner);
         this.dirty.add(scopeId);
       }
     }
@@ -85,10 +88,7 @@ export class ResourcePool {
    *  owner's scopes wholesale after its turn. (A dropping instance does NOT call this: its scopes are freed
    *  by the drop cascade, and the ones its result released are already in the dirty set as in-transit.) */
   markOwnedDirty(owner: InstanceId): void {
-    for (const key of Object.keys(this.store.scopes)) {
-      const scopeId = toScopeId(Number(key));
-      if (this.store.scopes[scopeId]?.owner === owner) this.dirty.add(scopeId);
-    }
+    for (const scopeId of scopesOwnedBy(this.store, owner)) this.dirty.add(scopeId);
   }
 
   /** Write the scopes touched this turn into the transaction: upsert each still-live one (with its current

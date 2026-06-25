@@ -1,9 +1,10 @@
 // Pure serialisation between the engine's in-memory graph and its persisted row shapes. The value model
 // is already JSON (a tagged union of JSON leaves), so this is near-identity: a thread is stored whole in
 // `payload` with its routing/identity columns denormalised for queries; an instance's bookkeeping is its
-// `engine_state` JSON; scopes are row-per-scope. Deserialisation rebuilds the `ProjectSnapshot` (and the
-// actor derives its routing maps from the instances). Kept separate from the DB so the round-trip is
-// unit-testable without Postgres.
+// `engine_state` JSON; scopes are row-per-scope. Deserialisation rebuilds the engine half
+// (`DeserializedEngine` — instances + scopes); each reactor then loads the Layer 1 rows it owns and derives
+// its routing maps from the instances' threads. Kept separate from the DB so the round-trip is unit-testable
+// without Postgres.
 
 import type {
   CoreInstance,
@@ -24,8 +25,8 @@ import {
 } from "../ids.js";
 import type { GenericSubstitution } from "../value/types.js";
 
-/** The engine half of a `ProjectSnapshot` the codec reconstructs from rows. The Layer 1 delegation edges
- *  are added by the persistence implementation (from its own `delegations` storage), not derivable here. */
+/** The engine half a reactor's `load` reconstructs from rows (instances + scopes). The Layer 1 delegation
+ *  edges are loaded by each reactor from its own rows, not derivable here. */
 export interface DeserializedEngine {
   instances: ProjectStore["instances"];
   scopes: ProjectStore["scopes"];

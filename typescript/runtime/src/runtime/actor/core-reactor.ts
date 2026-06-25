@@ -18,7 +18,7 @@ import { makeStepContext, type PrimRunner, type StepContext } from "../engine/co
 import { drive } from "../engine/drive.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
-import { readVariable } from "../engine/scope.js";
+import { readVariable, rebuildScopeOwnerIndex } from "../engine/scope.js";
 import { completeExternalAbort } from "../engine/thread-ops.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
@@ -127,6 +127,7 @@ export class CoreReactor extends Reactor {
     super.reset();
     this.store.instances = {};
     this.store.scopes = {};
+    this.store.scopesByOwner = new Map();
     this.store.nextScopeId = 0;
     this.store.blobOwners = {};
     for (const key of Object.keys(this.delegationCaller)) {
@@ -169,6 +170,8 @@ export class CoreReactor extends Reactor {
     this.store.instances = engine.instances;
     this.store.scopes = engine.scopes;
     this.store.nextScopeId = engine.nextScopeId;
+    // The loaded scopes replaced the map wholesale; rebuild the owner index over them before any sweep reads it.
+    rebuildScopeOwnerIndex(this.store);
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) this.delegationChild[instance.delegationId] = instance.id;
       for (const thread of Object.values(instance.threads)) {

@@ -16,7 +16,7 @@ import {
   toThreadId,
 } from "../ids.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { allocateScope } from "./scope.js";
+import { allocateScope, deleteScope, scopesOwnedBy } from "./scope.js";
 import { allocateThreadId } from "./store.js";
 import type { CoreInstance, ProjectStore } from "./types.js";
 
@@ -81,17 +81,12 @@ export function isInstanceComplete(instance: CoreInstance): boolean {
 }
 
 /** Tear down a finished instance: cascade-drop the scopes (and blob ownerships) it still owns, then drop
- *  the instance. Resources its returned value captured were already lifted to in-transit (`owner = null`)
- *  by `ascendResources`, so they are not owned by this instance here and survive for the caller to re-own.
- *  (Dropping a blob's actual bytes — a `BlobStore.delete` — is a follow-up; `blobOwners` is empty until a
- *  blob producer exists.) */
+ *  the instance. Resources its returned value captured were already released to in-transit (`owner = null`)
+ *  by the base reactor's `send` (`pool.release`), so they are not owned by this instance here and survive
+ *  for the caller to re-own. (Dropping a blob's actual bytes — a `BlobStore.delete` — is a follow-up;
+ *  `blobOwners` is empty until a blob producer exists.) */
 export function teardownInstance(store: ProjectStore, instanceId: InstanceId): void {
-  for (const key of Object.keys(store.scopes)) {
-    const scopeId = Number(key);
-    if (store.scopes[scopeId]?.owner === instanceId) {
-      delete store.scopes[scopeId];
-    }
-  }
+  for (const scopeId of scopesOwnedBy(store, instanceId)) deleteScope(store, scopeId);
   for (const key of Object.keys(store.blobOwners)) {
     const blobId = key as BlobId;
     if (store.blobOwners[blobId] === instanceId) {

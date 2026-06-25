@@ -108,9 +108,7 @@ export function escalateValue(ask: AskKind): Value | null {
   return ask.kind === "request" ? ask.argument : ask.value;
 }
 
-export type EngineEvent = InternalEvent | ExternalEventBody;
-
-// ─── FFI completion + actor mailbox (the "external consumer" input) ───────────────────────────────
+// ─── FFI completion (the external thread's private side channel) ──────────────────────────────────
 
 /**
  * An external (FFI) process result fed back to the suspended `ExternalThread` that dispatched it. FFI is
@@ -127,34 +125,3 @@ export type FfiResult =
   | { kind: "ffiResult"; instance: InstanceId; thread: ThreadId; value: Value }
   | { kind: "ffiError"; instance: InstanceId; thread: ThreadId; message: string }
   | { kind: "ffiCancelled"; instance: InstanceId; thread: ThreadId };
-
-/**
- * The project actor's serial mailbox input (the "external consumer"): inter-instance external events
- * plus FFI completions. The actor pulls one at a time, routes it to the owning instance, drives that
- * instance's internal turn to quiescence, persists, then flushes any newly produced external events
- * back here. API commands (startRun / cancel / answerEscalation) are translated by the façade into the
- * external events above, so they need no separate mailbox variant.
- */
-export type ActorMessage = ExternalEvent | FfiResult;
-
-/** Type guard: is this mailbox message an FFI completion (vs an inter-instance external event)? */
-export function isFfiResult(message: ActorMessage): message is FfiResult {
-  return (
-    message.kind === "ffiResult" || message.kind === "ffiError" || message.kind === "ffiCancelled"
-  );
-}
-
-/** Type guard: is this an engine-internal event (vs an inter-instance one)? */
-export function isInternalEvent(event: EngineEvent): event is InternalEvent {
-  switch (event.kind) {
-    case "create":
-    case "callAck":
-    case "cancel":
-    case "cancelAck":
-    case "ask":
-    case "askAck":
-      return true;
-    default:
-      return false;
-  }
-}

@@ -132,13 +132,20 @@ export abstract class Reactor {
 
   // ─── Layer 1 entity ownership (caller-side delegations, raiser-side escalations) ────────────────
 
+  /** Insert / replace a delegation row, marking it dirty only when this turn changed it. The single seam
+   *  both `openDelegation` (a fresh `running` row — dirty) and `reloadDelegation` (a recovered live row —
+   *  already durable, not dirty) flow through, so the in-memory set and the dirty set never drift. */
+  private putDelegationRow(delegation: DelegationId, row: DelegationRow, dirty: boolean): void {
+    this.delegations.set(delegation, row);
+    if (dirty) this.dirtyDelegations.add(delegation);
+  }
+
   /** Open a delegation this reactor issued as caller (state `running`). `peer` is the callee reactor. */
   protected openDelegation(
     delegation: DelegationId,
     row: { caller: InstanceId; peer: ReactorName; target: DelegateTarget; argument: Value | null },
   ): void {
-    this.delegations.set(delegation, { ...row, state: "running" });
-    this.dirtyDelegations.add(delegation);
+    this.putDelegationRow(delegation, { ...row, state: "running" }, true);
   }
 
   /** Move one of this reactor's delegations to a new state (no-op if it is gone or already terminal — which
@@ -177,11 +184,18 @@ export abstract class Reactor {
       state: DelegationState;
     },
   ): void {
-    this.delegations.set(delegation, row);
+    this.putDelegationRow(delegation, row, false);
+  }
+
+  /** Insert / replace an open escalation row, marking it dirty only when this turn raised it (the seam for
+   *  `openEscalation` and `reloadEscalation`, symmetric to `putDelegationRow`). */
+  private putEscalationRow(escalation: EscalationId, row: EscalationRow, dirty: boolean): void {
+    this.escalations.set(escalation, row);
+    if (dirty) this.dirtyEscalations.add(escalation);
   }
 
   /** Open a request escalation this reactor raised (idempotent — a relay never reaches here with a duplicate
-   *  id since each instance boundary mints a fresh escalation, but the guard keeps reload + open uniform).
+   *  id since each instance boundary mints a fresh escalation, but the guard makes a re-raise a safe no-op).
    *  `peer` is the reactor the escalate was addressed to; `delegation` is the raiser's delegation. */
   protected openEscalation(
     escalation: EscalationId,
@@ -194,8 +208,7 @@ export abstract class Reactor {
     },
   ): void {
     if (this.escalations.has(escalation)) return;
-    this.escalations.set(escalation, { ...row, state: "open" });
-    this.dirtyEscalations.add(escalation);
+    this.putEscalationRow(escalation, { ...row, state: "open" }, true);
   }
 
   /** Mark one of this reactor's open escalations answered (no-op if gone or already answered). */
@@ -218,7 +231,7 @@ export abstract class Reactor {
       argument: Value | null;
     },
   ): void {
-    this.escalations.set(escalation, { ...row, state: "open" });
+    this.putEscalationRow(escalation, { ...row, state: "open" }, false);
   }
 
   /** Flush this turn's dirty Layer 1 rows into the transaction, then evict the terminal / answered ones from
