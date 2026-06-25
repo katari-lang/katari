@@ -146,5 +146,18 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
   (the api root never goes away), so a run that returns a closure leaks its scopes until reclaimed. (2) blob
   ownership is updated in memory but still not persisted, and blob *bytes* are never freed — the same two
   blob follow-ups noted in `engine/ascent.ts`.
-- **P5** — sweep the deferred correctness items (C3/C4/C7/C8, audit wiring) + the GC follow-ups above, on the
-  new shape.
+- **P5 (in progress)** — sweep the deferred correctness items + the GC follow-ups, on the new shape.
+  - **GC (done, `2d5dfdd`)** — intra-instance scope GC (`engine/gc.ts`): per core instance, at its turn
+    boundary, mark the scopes reachable from its threads (scope chains + closures captured in thread values /
+    bindings) and free the ones it OWNS that are unmarked; the pool's `free` + `deleteScope` make the durable
+    delete. Scopes owned by another instance or in transit (incl. a run result reowned to the api root) are
+    never touched — the returned-closure / api-root scopes are intentionally NOT reclaimed for now.
+  - **C4 (done, `90ef251`)** — poison a failed commit, drop the warm state, reactivate from durable (the
+    unconsumed outbox replays); a commit / load error is never an unhandled rejection.
+  - **C7 (done in P4)** — the pool re-writes an in-transit scope after the instance's drop cascade in the same
+    commit, so a crash between the drop turn and the reown turn cannot lose a returned closure's scope.
+  - **C8 — not needed.** Routing recovers from the engine threads, so the outbox replay order only needs to be
+    stable (the seq + `createdAt` ordering already is), not a strict monotonic ordinal.
+  - **Remaining**: C3 (fold the `runs` metadata sidecar into the run's delegate commit — atomic startRun) and
+    the `run_escalations_audit` wiring. Both are API/DB-sidecar writes (C3 touches the façade) with no test
+    coverage today, so they pair naturally with the Postgres test harness.
