@@ -5,13 +5,14 @@
 // `delegation` — the same id core's external proxy thread and the ffi reactor's pending-call use — which the
 // sidecar echoes back, so the transport never needs a separate request-id table.
 //
-// Messages carry the engine's `Value` directly (it is already JSON); converting a `Value` to/from the plain
-// shape a user's FFI function sees is the future `port` library's job, not this transport's. The framing is
-// one JSON object per line; `decodeReply` returns `null` for a line it cannot parse as a reply (so a stray
-// non-protocol line on the channel is skipped, never fatal).
+// Messages carry plain `Json` — the same wire form the HTTP boundary speaks. The engine's tagged `Value`
+// is converted to/from `Json` by the ffi reactor at the transport seam (`valueToJson` / `jsonToValue`), so
+// the sidecar and the user's FFI function only ever see plain values. The framing is one JSON object per
+// line; `decodeReply` returns `null` for a line it cannot parse as a reply (so a stray non-protocol line on
+// the channel is skipped, never fatal).
 
+import type { Json } from "@katari-lang/types";
 import { type DelegationId, toDelegationId } from "../ids.js";
-import type { Value } from "../value/types.js";
 
 /** Runtime → sidecar. `dispatch` runs the handler `key` against `argument` for one external call; `abort`
  *  asks the sidecar to stop an in-flight call. `redispatch` marks a recovery re-dispatch of a call that was
@@ -21,7 +22,7 @@ export type SidecarRequest =
       kind: "dispatch";
       delegation: DelegationId;
       key: string;
-      argument: Value | null;
+      argument: Json | null;
       redispatch: boolean;
     }
   | { kind: "abort"; delegation: DelegationId };
@@ -29,7 +30,7 @@ export type SidecarRequest =
 /** Sidecar → runtime, the outcome of one dispatched call: its `result`, an `error` (becomes a panic), or a
  *  `cancelled` confirmation (the abort completed). */
 export type SidecarReply =
-  | { kind: "result"; delegation: DelegationId; value: Value }
+  | { kind: "result"; delegation: DelegationId; value: Json }
   | { kind: "error"; delegation: DelegationId; message: string }
   | { kind: "cancelled"; delegation: DelegationId };
 
@@ -39,7 +40,7 @@ export function encodeRequest(request: SidecarRequest): string {
 }
 
 /** Parse one channel line as a reply, or `null` if it is not a well-formed reply (the caller skips it). The
- *  `delegation` correlation and a `kind` are validated; the `value` rides through as the trusted wire `Value`
+ *  `delegation` correlation and a `kind` are validated; the `value` rides through as the trusted wire `Json`
  *  (this is the transport boundary, like the DB row codecs). */
 export function decodeReply(line: string): SidecarReply | null {
   let parsed: unknown;
@@ -54,7 +55,7 @@ export function decodeReply(line: string): SidecarReply | null {
   const id = toDelegationId(delegation);
   switch (kind) {
     case "result":
-      return { kind, delegation: id, value: parsed.value as Value };
+      return { kind, delegation: id, value: parsed.value as Json };
     case "error":
       return typeof parsed.message === "string"
         ? { kind, delegation: id, message: parsed.message }

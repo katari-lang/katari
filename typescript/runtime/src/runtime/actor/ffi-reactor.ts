@@ -21,6 +21,7 @@ import {
   newInstanceId,
   type ProjectId,
 } from "../ids.js";
+import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { Reactor } from "./reactor.js";
@@ -126,11 +127,12 @@ export class FfiReactor extends Reactor {
     }
     switch (completion.outcome.kind) {
       case "result":
+        // The sidecar's result is plain Json; lift it back to the engine's Value for the delegateAck.
         this.send(
           {
             kind: "delegateAck",
             delegation: completion.delegation,
-            value: completion.outcome.value,
+            value: jsonToValue(completion.outcome.value),
           },
           call.caller,
         );
@@ -168,7 +170,8 @@ export class FfiReactor extends Reactor {
         projectId: this.projectId,
         delegation: event.delegation,
         key: event.target.key,
-        argument: event.argument,
+        // Lower the engine's Value to plain Json for the sidecar; the reactor keeps the Value for recovery.
+        argument: event.argument === null ? null : valueToJson(event.argument),
       });
     } else if (event.kind === "terminate") {
       if (this.calls.get(event.delegation)?.status === "cancelling") {
@@ -213,7 +216,7 @@ export class FfiReactor extends Reactor {
           projectId: this.projectId,
           delegation: row.delegation,
           key: row.key,
-          argument: row.argument,
+          argument: row.argument === null ? null : valueToJson(row.argument),
           redispatch: true,
         });
       } else if (row.status === "cancelling") {

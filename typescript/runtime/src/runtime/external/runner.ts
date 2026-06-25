@@ -10,16 +10,18 @@
 // durable as the ffi reactor's `ffi_calls` row (key + argument), so recovery re-dispatches from there.
 // Calls are correlated by their `delegation` id — the same id core's external proxy thread holds.
 
+import type { Json } from "@katari-lang/types";
 import type { DelegationId, ProjectId } from "../ids.js";
-import type { Value } from "../value/types.js";
 
-/** One external dispatch: the call's `delegation`, the handler `key`, and the argument. */
+/** One external dispatch: the call's `delegation`, the handler `key`, and the argument. The argument is
+ *  plain `Json` — the ffi reactor converts the engine's `Value` at this seam, so the transport and the
+ *  sidecar only ever see plain values (the same wire form as the HTTP boundary). */
 export interface FfiCall {
   projectId: ProjectId;
   delegation: DelegationId;
   /** The opaque dispatch key the handler interprets (the external block's `key`). */
   key: string;
-  argument: Value | null;
+  argument: Json | null;
   /** True when this is a recovery re-dispatch of a still-in-flight call (the process went down with the call
    *  pending). A handler can treat it as a retry — e.g. dedupe a non-idempotent side effect. */
   redispatch?: boolean;
@@ -32,7 +34,7 @@ export interface FfiCall {
 export interface FfiCompletion {
   delegation: DelegationId;
   outcome:
-    | { kind: "result"; value: Value }
+    | { kind: "result"; value: Json }
     | { kind: "error"; message: string }
     | { kind: "cancelled" };
 }
@@ -63,8 +65,9 @@ export class StubFfiTransport implements FfiTransport {
   }
 }
 
-/** A handler an in-process external call runs against its argument (the test / dev injection point). */
-export type FfiHandler = (argument: Value | null) => Value | Promise<Value>;
+/** A handler an in-process external call runs against its (plain `Json`) argument (the test / dev injection
+ *  point). The same plain-value model the real sidecar's handlers see. */
+export type FfiHandler = (argument: Json | null) => Json | Promise<Json>;
 
 /**
  * An in-process transport backed by a handler map — the injection seam exercised in tests and usable for a

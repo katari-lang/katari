@@ -399,13 +399,17 @@ describe("in-memory core", () => {
       names: {},
     };
 
+    // The FFI handler sees a plain Json argument (the ffi reactor lowers the Value) and returns plain Json.
     const external = new InProcessFfiTransport({
       greet: (argument) => {
         const name =
-          argument?.kind === "record" && argument.fields.name?.kind === "string"
-            ? argument.fields.name.value
+          typeof argument === "object" &&
+          argument !== null &&
+          !Array.isArray(argument) &&
+          typeof argument.name === "string"
+            ? argument.name
             : "stranger";
-        return { kind: "string", value: `Hello, ${name}` };
+        return `Hello, ${name}`;
       },
     });
 

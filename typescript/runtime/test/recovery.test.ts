@@ -45,9 +45,10 @@ function recordingRunner(complete: Record<string, boolean>): {
     dispatch(call: FfiCall) {
       dispatched.push(call.key);
       if (complete[call.key]) {
+        // The completion value is plain Json (the ffi reactor lifts it back to a Value for the delegateAck).
         sink?.({
           delegation: call.delegation,
-          outcome: { kind: "result", value: { kind: "string", value: `${call.key}-done` } },
+          outcome: { kind: "result", value: `${call.key}-done` },
         });
       }
     },
