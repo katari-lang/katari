@@ -206,12 +206,14 @@ packagesFromResolved resolved =
 
 -- | Spawn @katari-bundle@ with one @--package \<name\>=\<path\>@ flag per package and decode its
 -- @{ bundle }@ stdout — the compiled sidecar, or 'Nothing' when no package has one. The binary is found
--- via @KATARI_BUNDLE_BIN@ (a @.js@ value is run through @node@, for a dev checkout) or on @PATH@.
+-- via @KATARI_BUNDLE_BIN@ (a JS file — @.js@ / @.mjs@ / @.cjs@ — is run through @node@, for a dev checkout)
+-- or on @PATH@.
 runKatariBundle :: List BundlePackage -> IO (Maybe Value)
 runKatariBundle packages = do
   binOverride <- lookupEnv "KATARI_BUNDLE_BIN"
-  let (bundleCommand, prefixArguments) = case binOverride of
-        Just path | ".js" `isSuffixOf` path -> ("node", [path])
+  let isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
+      (bundleCommand, prefixArguments) = case binOverride of
+        Just path | isJsFile path -> ("node", [path])
         Just path -> (path, [])
         Nothing -> ("katari-bundle", [])
       arguments =
