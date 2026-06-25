@@ -113,8 +113,9 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
   reactor holds its own delegations/escalations in the base class.
 - **Add**: `from`/`to` on events; the substrate registry + route-by-`to`; the base-class two-step reown on the
   shared pool (fixes the run-result resource drop — see `2026-06-25-reactor-bus-redesign.md` §4.2 / `ascent.ts`).
-- **Keep**: `ExternalThread` / `ExternalRunner` (external stays in CORE); the api root as a permanent durable
-  instance (the FK owner of run delegations + escaped resources); `ensureApiRoot`.
+- **Keep**: the api root as a permanent durable instance (the FK owner of run delegations + escaped
+  resources); `ensureApiRoot`. (`ExternalThread` / `ExternalRunner` were *kept for the staged phases* but are
+  reworked in §11 — the FFI-reactor phase — once landed.)
 
 ## 9. Staged implementation (each ships green; engine internals untouched)
 
@@ -170,7 +171,8 @@ the DB persistence writes. So `tx` is a thin transaction handle the persistence 
     backend and the in-memory twin (which now stores runs + audits for unit tests).
   - **Whole redesign (P1–P5) is landed.** The standing follow-ups (not P5 scope) are: api-root-owned
     run-result scope GC (intentionally deferred — returned-closure scopes are not reclaimed), blob ownership
-    persistence + blob-byte freeing, and the FFI-reactor phase (`ExternalThread` / `reactFfi` stay for now).
+    persistence + blob-byte freeing, and the FFI-reactor phase — **now landed, see §11** (it reverses §3 /
+    §8's "`ExternalThread` stays in CORE" hold).
 
 ## 10. Post-P5: the load-side SoT completion (`ensureApiRoot` fold + per-reactor load)
 
@@ -193,3 +195,43 @@ hydrate → classify for api` barrier). Two follow-ups finished §6's intent (de
   `persist(tx)`. No cross-reactor classification, no apiRoot sentinel at load. (`caller_instance_id` /
   `raiser_instance_id` stay — FK + the proxy-lookup routing rebuilt from `DelegateThread`s; the reactor
   columns are purely additive. The emit-side `routeOf` is unchanged.)
+
+## 11. The FFI-reactor phase (done, `168b82c`)
+
+The staged phases kept FFI as a private side channel on the external thread (`reactFfi` / `ExternalRunner`
+inside CORE). This phase folds it in as a real reactor — the move §3 promised ("ffi / env fold in
+identically") and §8 deferred. **An external (FFI) call is now a `delegate` to the `ffi` reactor**, routed and
+tracked exactly like a core self-delegate; only its `to` differs. No ad-hoc FFI branch survives in core.
+
+- **The event vocabulary.** `ReactorName += "ffi"`; `DelegateTarget += { kind: "external"; key }` (it carries
+  no snapshot — it runs against its key, not the IR; `agentSnapshot` makes reaching for one a loud bug). The
+  old `FfiResult` union is gone — a completion is a normal `delegateAck` / `escalate` / `terminateAck`.
+- **The engine.** `ExternalThread` is no longer a side-channel: it is a **caller-side proxy** (`delegationId`
+  + `relays`) with the *same* mechanics as `DelegateThread`. `createExternal` emits a `delegate` to ffi;
+  dispatch / cancel / answer group external WITH delegate (one `delegateProxyOf`); `StepContext.external` and
+  the in-CORE `reactFfi` / `resumeInFlightExternals` are deleted.
+- **Core routing (unchanged in spirit).** `routeOf` sends a `delegate` to `ffi` iff its target is external,
+  a reply to `instance.callerReactor`, and a `terminate` / `escalateAck` to `peerOf(delegation)` (the callee
+  the delegation was opened against — `ffi` for an ffi call). `recordOutbound` peers an external delegate to
+  `ffi`. `resolveTarget` / `moduleOf` reject an external target (core never summons one as an instance).
+- **The FfiReactor.** ffi is delegated *to*, so each call is its OWN per-delegation callee instance (minted
+  `newInstanceId`, the issuer stamped on the replies it produces) — NOT a shared root. Lifecycle mirrors a
+  core sub-call: `running` (transport in flight) → `result` (→ delegateAck) / `cancelled` (→ terminateAck) /
+  `error` → it escalates a panic and waits (`awaitingAnswer`) for either an `escalateAck` (a handler caught
+  it — the answer becomes the call's result, → delegateAck) or a `terminate` (unhandled — → terminateAck).
+  Its in-flight calls are durable `ffi_calls` rows (its callee-side Layer 1, owned solely by ffi);
+  re-dispatched / re-aborted on recovery by `status`. It owns no delegations / escalations (those are core's).
+- **The transport.** `FfiTransport` (`onComplete` / `dispatch(FfiCall)` / `abort(delegation)`) +
+  `FfiCompletion`, all keyed by `delegation`. `SubprocessFfiTransport` (the long-lived sidecar over the
+  newline-JSON `sidecar-protocol`, crash = panic every in-flight call), `InProcessFfiTransport` (handler map,
+  for tests / pure-JS FFI), `StubFfiTransport` (loud default). A completion re-enters through the actor's
+  serial mailbox as a ffi-reactor turn (durable-first: dispatch / abort is `afterCommit`).
+- **Persistence.** New `ffi_calls` table (delegation PK, its own `instance_id` — NOT an FK, like the outbox
+  issuer — `key`, `argument`, `caller_reactor`, `status`); `PersistenceTx.putFfiCall` / `dropFfiCall` +
+  `Loader.ffiCalls()`, in the Drizzle backend, the storing twin, and the no-op seam. The project actor wires
+  the ffi reactor into the registry, registers its completion sink, and resets + loads it on reactivation.
+
+**Deviations / follow-ups.** The `port` / `bundle` packages (the user-facing FFI authoring + bundling) are
+out of scope here and come next. An FFI result is a plain wire `Value` (it captures no engine scopes), so the
+two-step reown on its `delegateAck` is effectively a no-op today — correct, but untested for an FFI value that
+would reference a blob (not expressible until `port` lands).
