@@ -8,7 +8,6 @@
 import type {
   CoreInstance,
   EngineState,
-  Instance,
   InstanceKind,
   InstanceStatus,
   ProjectStore,
@@ -141,14 +140,11 @@ export function deserializeProject(
     threadsByInstance.set(row.instanceId, tree);
   }
 
-  const instanceMap: Record<InstanceId, Instance> = {};
+  const instanceMap: Record<InstanceId, CoreInstance> = {};
   for (const row of instances) {
-    if (row.kind === "api") {
-      // The management root: no engine state / thread tree — just identity + status.
-      instanceMap[row.id] = { kind: "api", id: row.id, status: row.status };
-      continue;
-    }
-    if (row.engineState === null || row.target === null) continue; // a malformed core row
+    // Only `core` instances carry engine state; the api root (no engine state / target) is a Layer 1 entity,
+    // never an engine instance, so it never appears here (the DB load filters it out by null engine_state).
+    if (row.engineState === null || row.target === null) continue;
     instanceMap[row.id] = {
       kind: "core",
       id: row.id,

@@ -277,18 +277,13 @@ export type CancelExit =
 
 export type InstanceStatus = "running" | "cancelling";
 
-/** Which structure an instance carries: `core` runs IR; `api` is the project's management root. */
+/** Which structure a Layer 1 instance *entity* carries: `core` runs IR; `api` is the project's permanent
+ *  management root. This is a durable, persistence-level distinction (the `instances.kind` column). The
+ *  *engine* only ever holds `core` instances in its warm store — the api root runs no IR, so it is a Layer 1
+ *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. The actor's single
+ *  dispatch peels api-targeted events off by comparing the caller id to the api root id, one layer above the
+ *  engine; that is why there is no `ApiInstance` in the engine model below. */
 export type InstanceKind = "core" | "api";
-
-/**
- * A node in the project's delegation tree. Every instance shares an identity + status + kind; only its
- * engine state differs by `kind` (`docs/2026-06-24-api-core-connection.md`):
- *   - a `core` instance runs IR (an agent activation): a thread tree + the routing bookkeeping below.
- *   - an `api` instance is the project's permanent management root: it runs no IR (no thread tree); its
- *     "state" is the runs (delegations it issued) + open escalations, tracked by the actor / audit.
- * External events route to instances uniformly; the actor dispatches by kind (engine turn vs bookkeeping).
- */
-export type Instance = CoreInstance | ApiInstance;
 
 /**
  * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right
@@ -328,23 +323,12 @@ export type CoreInstance = {
 };
 
 /**
- * The `api` management root (one per project, permanent). It runs no IR — its job is to turn the external
- * events that reach it into durable user-facing records: a `delegate` it issued is a *run*, an `escalate`
- * that bubbles to it is a user-facing *open escalation*. It has no thread tree; the runs / escalations it
- * holds are tracked by the actor (and, once durable, the `runs` / `run_escalations_audit` audit).
- */
-export type ApiInstance = {
-  kind: "api";
-  id: InstanceId;
-  status: InstanceStatus;
-};
-
-/**
  * The warm in-memory state of one project (held by its ProjectActor). Instances load on demand;
- * scopes are the CORE-global store shared across them.
+ * scopes are the CORE-global store shared across them. The engine holds only `core` instances — the api
+ * management root is a Layer 1 entity + a sentinel id, not an engine instance (see `InstanceKind`).
  */
 export type ProjectStore = {
-  instances: Record<InstanceId, Instance>;
+  instances: Record<InstanceId, CoreInstance>;
   /** ScopeId -> Scope (CORE-global per project). */
   scopes: Record<number, Scope>;
   nextScopeId: number;

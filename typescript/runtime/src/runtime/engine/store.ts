@@ -12,15 +12,15 @@ import {
   toCallId,
   toThreadId,
 } from "../ids.js";
-import type { CoreInstance, Instance, ProjectStore } from "./types.js";
+import type { CoreInstance, ProjectStore } from "./types.js";
 
 /** A fresh, empty warm store for a project (scope ids start at 0). */
 export function createProjectStore(): ProjectStore {
   return { instances: {}, scopes: {}, nextScopeId: 0, blobOwners: {} };
 }
 
-/** Look up a loaded instance; throws if absent (the caller routed to an instance not in the store). */
-export function getInstance(store: ProjectStore, instanceId: InstanceId): Instance {
+/** Look up a loaded core instance; throws if absent (the caller routed to an instance not in the store). */
+export function getInstance(store: ProjectStore, instanceId: InstanceId): CoreInstance {
   const instance = store.instances[instanceId];
   if (instance === undefined) {
     throw new Error(`instance not loaded: ${instanceId}`);
@@ -28,8 +28,11 @@ export function getInstance(store: ProjectStore, instanceId: InstanceId): Instan
   return instance;
 }
 
-/** Look up a loaded instance, or `undefined` if it is not in the warm set. */
-export function findInstance(store: ProjectStore, instanceId: InstanceId): Instance | undefined {
+/** Look up a loaded core instance, or `undefined` if it is not in the warm set. */
+export function findInstance(
+  store: ProjectStore,
+  instanceId: InstanceId,
+): CoreInstance | undefined {
   return store.instances[instanceId];
 }
 

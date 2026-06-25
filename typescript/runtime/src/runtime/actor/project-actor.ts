@@ -11,16 +11,11 @@ import { ascendResources, reownResources } from "../engine/ascent.js";
 import { delegateProxyOf, raisePanic, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
-import {
-  createInstance,
-  ensureApiRoot,
-  isInstanceComplete,
-  teardownInstance,
-} from "../engine/instance.js";
+import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { readVariable } from "../engine/scope.js";
 import { createProjectStore } from "../engine/store.js";
 import { completeExternalAbort } from "../engine/thread-ops.js";
-import type { CoreInstance, Instance, ProjectStore } from "../engine/types.js";
+import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import type {
   ActorMessage,
@@ -148,17 +143,16 @@ export class ProjectActor {
     return this.api.startRun(qualifiedName, snapshot, argument);
   }
 
-  /** The loaded instance under `id` if it is a `core` instance (the engine only ever drives core). */
+  /** The loaded core instance under `id` (the engine store holds only core instances). */
   private coreInstance(id: InstanceId | undefined): CoreInstance | undefined {
-    if (id === undefined) return undefined;
-    const instance = this.store.instances[id];
-    return instance !== undefined && instance.kind === "core" ? instance : undefined;
+    return id !== undefined ? this.store.instances[id] : undefined;
   }
 
-  /** The instance that issued `delegation` (its caller) — `api` for a run, `core` for a sub-call. */
-  private callerOf(delegation: DelegationId): Instance | undefined {
-    const id = this.delegationCaller[delegation];
-    return id !== undefined ? this.store.instances[id] : undefined;
+  /** Whether `delegation` was issued by the api management root (a run) rather than a core caller (a
+   *  sub-call). The api root is not an engine instance — it is the sentinel id, so this is a direct
+   *  comparison, not a store lookup. */
+  private isRunDelegation(delegation: DelegationId): boolean {
+    return this.delegationCaller[delegation] === this.apiRootId;
   }
 
   // ─── api root commands (exposed for in-process callers; the logic lives in the ApiReactor) ──────────
@@ -303,7 +297,6 @@ export class ProjectActor {
       this.delegationCaller[delegation as DelegationId] = caller;
     }
     for (const instance of Object.values(this.store.instances)) {
-      if (instance.kind !== "core") continue; // the api root has no engine routing edges to rebuild
       if (instance.delegationId !== null) {
         this.delegationChild[instance.delegationId] = instance.id;
       }
@@ -331,11 +324,10 @@ export class ProjectActor {
         argument: open.argument,
       });
     }
-    // The api management root is a permanent per-project fixture; (re)create it after loading replaced the
-    // store, so a run's delegateAck / escalate / terminateAck can always find it as the delegation's caller.
-    // Durably first (so a run's `delegation-open` caller FK resolves), then in the warm store.
+    // The api management root is a permanent per-project Layer 1 fixture, not an engine instance. Ensure its
+    // durable `instances` row exists (so a run's `delegation-open`, whose caller is the api root, satisfies
+    // the caller FK); routing to it needs no warm-store entry — the dispatch resolves it by sentinel id.
     await this.persistence.ensureApiRoot(this.projectId, this.apiRootId);
-    ensureApiRoot(this.store, this.apiRootId);
     // Replay the undrained outbox into the mailbox: events produced before the crash but not yet consumed
     // (e.g. a completed child's `delegateAck` whose parent never resumed). A replayed `delegate` re-uses its
     // row's issuer as its caller (the event itself does not carry it), exactly as the warm path records it.
@@ -356,7 +348,6 @@ export class ProjectActor {
    *  Completions re-enter through the serial mailbox exactly like a first dispatch. */
   private async resumeInFlightExternals(): Promise<void> {
     for (const instance of Object.values(this.store.instances)) {
-      if (instance.kind !== "core") continue; // the api root has no external (FFI) threads
       const snapshot = instance.target.snapshot;
       await this.ir.preload(snapshot);
       const ir = this.ir.access(snapshot, moduleOf(instance.target));
@@ -420,11 +411,12 @@ export class ProjectActor {
     // delegateAck / terminateAck end the delegation, so its child edge is dropped here (an `escalate` leaves
     // the run running, so it keeps its child — that is how the eventual `escalateAck` finds the raiser).
     if (message.kind !== "escalate") delete this.delegationChild[message.delegation];
-    const caller = this.callerOf(message.delegation);
+    // The single api|core dispatch: a run delegation's caller is the api root (a sentinel id, not an engine
+    // instance), so the boundary is crossed by comparing ids — branch once, here, and never again.
+    if (this.isRunDelegation(message.delegation)) return this.reactApi(message, seq);
+    const caller = this.coreInstance(this.delegationCaller[message.delegation]);
     if (caller === undefined) return this.consumeOnly(seq);
-    return caller.kind === "api"
-      ? this.reactApi(message, seq)
-      : this.reactCore(message, caller, seq);
+    return this.reactCore(message, caller, seq);
   }
 
   /** The api root's reaction to a run's delegateAck / escalate / terminateAck. */
@@ -642,8 +634,10 @@ export class ProjectActor {
   private ascendReturnedResources(instance: CoreInstance, outbound: ExternalEvent[]): void {
     const delegation = instance.delegationId;
     if (delegation === null) return;
-    const caller = this.callerOf(delegation);
-    if (caller === undefined || caller.kind !== "core") return;
+    // Only a core caller re-owns ascended resources. A run result goes to the api root (the sentinel id, not
+    // an engine instance) and leaves the engine, so its captured resources simply drop with the instance.
+    const caller = this.coreInstance(this.delegationCaller[delegation]);
+    if (caller === undefined) return;
     const ack = outbound.find(
       (event): event is Extract<ExternalEvent, { kind: "delegateAck" }> =>
         event.kind === "delegateAck" && event.delegation === delegation,

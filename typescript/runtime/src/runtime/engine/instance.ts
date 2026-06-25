@@ -18,7 +18,7 @@ import {
 import type { GenericSubstitution, Value } from "../value/types.js";
 import { allocateScope } from "./scope.js";
 import { allocateThreadId } from "./store.js";
-import type { ApiInstance, CoreInstance, ProjectStore } from "./types.js";
+import type { CoreInstance, ProjectStore } from "./types.js";
 
 /**
  * Create a fresh `core` instance: its root scope (chained to a captured closure scope, if any) and its
@@ -76,19 +76,6 @@ export function createInstance(
 /** Whether a `core` instance has finished (its thread tree is empty — the agent root completed). */
 export function isInstanceComplete(instance: CoreInstance): boolean {
   return Object.keys(instance.threads).length === 0;
-}
-
-/**
- * Get (or create) the project's permanent `api` management root. It runs no IR — it only holds the runs
- * it issues and the escalations that bubble to it (tracked by the actor / audit). Its id is deterministic
- * per project so a restart recovers the same root.
- */
-export function ensureApiRoot(store: ProjectStore, apiRootId: InstanceId): ApiInstance {
-  const existing = store.instances[apiRootId];
-  if (existing !== undefined && existing.kind === "api") return existing;
-  const root: ApiInstance = { kind: "api", id: apiRootId, status: "running" };
-  store.instances[apiRootId] = root;
-  return root;
 }
 
 /** Tear down a finished instance: cascade-drop the scopes (and blob ownerships) it still owns, then drop
