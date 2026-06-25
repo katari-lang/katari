@@ -45,6 +45,7 @@ library:
     - Katari.Cli.Common
     - Katari.Cli.Build
     - Katari.Cli.Apply
+    - Katari.Cli.Run
 
 executables:
   katari:

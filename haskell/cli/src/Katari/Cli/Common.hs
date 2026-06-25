@@ -10,6 +10,7 @@ module Katari.Cli.Common
   ( dieIn,
     dieInternal,
     resolveProjectRoot,
+    resolveRuntimeUrl,
     assembleSourcesOrExit,
     compileSourcesOrExit,
     writeOrExit,
@@ -30,6 +31,7 @@ import Katari.Project.Discovery (findProjectRoot)
 import Katari.Project.Error (renderProjectError)
 import Katari.Project.Resolve (ResolvedProject, assembleProject, compileInputSources)
 import System.Directory (getCurrentDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 
@@ -56,6 +58,17 @@ resolveProjectRoot subcommand override = do
   case found of
     Just root -> pure root
     Nothing -> dieIn subcommand "no katari.toml found in this or any parent directory"
+
+-- | Resolve the runtime URL the CLI talks to: the @--url@ override, then @KATARI_API_URL@, then the
+-- @[runtime].url@ from @katari.toml@. Shared by every command that reaches the runtime.
+resolveRuntimeUrl :: Maybe Text -> Text -> IO Text
+resolveRuntimeUrl override fallback = case override of
+  Just url -> pure url
+  Nothing -> do
+    environmentUrl <- lookupEnv "KATARI_API_URL"
+    pure $ case environmentUrl of
+      Just environmentValue | not (null environmentValue) -> Text.pack environmentValue
+      _ -> fallback
 
 -- | Flatten a resolved project into the compiler's @module name -> source@ map, exiting with code 2
 -- on any assembly error (a cross-package module collision, an out-of-namespace module, …).

@@ -38,7 +38,7 @@ import Katari.Cli.Api
     newRuntimeClient,
     runtimeAuthFromEnvironment,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, writeOrExit)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, resolveRuntimeUrl, writeOrExit)
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), SidecarSection (..))
@@ -137,16 +137,6 @@ run options = do
       message = fromMaybe "katari apply" options.message
   snapshotId <- deploySnapshot client projectId message sidecarBundle manifest
   TextIO.putStrLn ("Applied snapshot " <> snapshotId <> " to project " <> name)
-
--- | Resolve the runtime URL: the @--url@ override, then @KATARI_API_URL@, then @[runtime].url@.
-resolveRuntimeUrl :: Maybe Text -> Text -> IO Text
-resolveRuntimeUrl override fallback = case override of
-  Just url -> pure url
-  Nothing -> do
-    environmentUrl <- lookupEnv "KATARI_API_URL"
-    pure $ case environmentUrl of
-      Just environmentValue | not (null environmentValue) -> Text.pack environmentValue
-      _ -> fallback
 
 -- | Read the runtime's current head manifest and key it the way 'planUpload' expects.
 runtimeModuleHashes :: RuntimeClient -> Text -> IO (Map ModuleName ModuleHash)

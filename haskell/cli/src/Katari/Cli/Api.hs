@@ -24,11 +24,17 @@ module Katari.Cli.Api
     ModuleUpload (..),
     listHeadModules,
     deploySnapshot,
+
+    -- * Runs
+    StartRunRequest (..),
+    RunView (..),
+    startRun,
+    getRun,
   )
 where
 
 import Control.Exception (Exception, throwIO, try)
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict (Map)
@@ -205,6 +211,65 @@ deploySnapshot client projectId message sidecarBundle modules = do
   SuccessEnvelope (response :: DeployResponse) <-
     requestJson client "POST" ("/projects/" <> projectId <> "/snapshots") (Just (Aeson.encode body))
   pure response.id
+
+-- ===========================================================================
+-- Runs
+-- ===========================================================================
+
+-- | Start an agent run: the agent to run, an optional human label / pinned snapshot, and the run argument
+-- as JSON (the runtime lifts it into a value at its boundary).
+data StartRunRequest = StartRunRequest
+  { qualifiedName :: Text,
+    name :: Maybe Text,
+    snapshotId :: Maybe Text,
+    argument :: Maybe Value
+  }
+  deriving stock (Show)
+
+-- | Drop the optional fields when absent, matching the runtime's @{ qualifiedName, name?, snapshotId?,
+-- argument? }@ schema.
+instance ToJSON StartRunRequest where
+  toJSON request =
+    object
+      ( ["qualifiedName" .= request.qualifiedName]
+          <> maybe [] (\value -> ["name" .= value]) request.name
+          <> maybe [] (\value -> ["snapshotId" .= value]) request.snapshotId
+          <> maybe [] (\value -> ["argument" .= value]) request.argument
+      )
+
+-- | The run's id, returned by the start endpoint.
+newtype RunStarted = RunStarted {id :: Text}
+
+instance FromJSON RunStarted where
+  parseJSON = withObject "RunStarted" $ \object' -> RunStarted <$> object' .: "id"
+
+-- | The slice of a run's view the CLI needs to report its outcome: the lifecycle @state@ (running /
+-- cancelling / done / cancelled / error), the @result@ JSON (present once @done@), and the @errorMessage@
+-- (present once @error@). The other view fields are ignored.
+data RunView = RunView
+  { state :: Text,
+    result :: Maybe Value,
+    errorMessage :: Maybe Text
+  }
+  deriving stock (Show)
+
+instance FromJSON RunView where
+  parseJSON = withObject "RunView" $ \object' ->
+    RunView <$> object' .: "state" <*> object' .:? "result" <*> object' .:? "errorMessage"
+
+-- | Start a run, returning its id (the durable run handle).
+startRun :: RuntimeClient -> Text -> StartRunRequest -> IO Text
+startRun client projectId request = do
+  SuccessEnvelope (started :: RunStarted) <-
+    requestJson client "POST" ("/projects/" <> projectId <> "/runs") (Just (Aeson.encode request))
+  pure started.id
+
+-- | Fetch a run's current view (state + outcome).
+getRun :: RuntimeClient -> Text -> Text -> IO RunView
+getRun client projectId runId = do
+  SuccessEnvelope (view :: RunView) <-
+    requestJson client "GET" ("/projects/" <> projectId <> "/runs/" <> runId) Nothing
+  pure view
 
 -- ===========================================================================
 -- HTTP primitives
