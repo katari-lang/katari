@@ -1,12 +1,14 @@
 // Pure serialisation between the engine's in-memory graph and its persisted row shapes. The value model
 // is already JSON (a tagged union of JSON leaves), so this is near-identity: a thread is stored whole in
 // `payload` with its routing/identity columns denormalised for queries; an instance's bookkeeping is its
-// `engine_state` JSON; scopes are row-per-scope. Deserialisation rebuilds the engine half
-// (`DeserializedEngine` — instances + scopes); each reactor then loads the Layer 1 rows it owns and derives
+// `engine_state` JSON; scopes and blob ownership are row-per-resource. Deserialisation rebuilds the engine
+// half (`DeserializedEngine` — instances + scopes + blobs); each reactor then loads the Layer 1 rows it owns
+// and derives
 // its routing maps from the instances' threads. Kept separate from the DB so the round-trip is unit-testable
 // without Postgres.
 
 import type {
+  BlobEntry,
   CoreInstance,
   EngineState,
   InstanceKind,
@@ -17,19 +19,21 @@ import type {
 } from "../engine/types.js";
 import { agentSnapshot, type DelegateTarget } from "../event/types.js";
 import {
+  type BlobId,
   type DelegationId,
   type InstanceId,
   type ProjectId,
   type SnapshotId,
   toScopeId,
 } from "../ids.js";
-import type { GenericSubstitution } from "../value/types.js";
+import type { GenericSubstitution, SemanticKind } from "../value/types.js";
 
-/** The engine half a reactor's `load` reconstructs from rows (instances + scopes). The Layer 1 delegation
- *  edges are loaded by each reactor from its own rows, not derivable here. */
+/** The engine half a reactor's `load` reconstructs from rows (instances + scopes + blob ownership). The
+ *  Layer 1 delegation edges are loaded by each reactor from its own rows, not derivable here. */
 export interface DeserializedEngine {
   instances: ProjectStore["instances"];
   scopes: ProjectStore["scopes"];
+  blobs: ProjectStore["blobs"];
   nextScopeId: number;
 }
 
@@ -67,6 +71,18 @@ export interface PersistedScope {
   parentScopeId: number | null;
   ownerInstanceId: InstanceId | null;
   values: Scope["values"];
+}
+
+/** A blob's ownership + descriptor row (the bytes live in the `BlobStore`). `ownerInstanceId` is `null` for
+ *  one in transit mid-ascent; it cascades with its owner on teardown. */
+export interface PersistedBlob {
+  projectId: ProjectId;
+  blobId: BlobId;
+  ownerInstanceId: InstanceId | null;
+  hash: string;
+  size: number;
+  contentType: string | null;
+  semanticKind: SemanticKind;
 }
 
 export interface SerializedInstance {
@@ -122,6 +138,24 @@ export function serializeScope(projectId: ProjectId, scope: Scope): PersistedSco
   };
 }
 
+/** Serialise one blob's warm entry into its row shape — the unit the `ResourcePool` persists alongside
+ *  scopes (`owner = null` for one in transit between owners). */
+export function serializeBlob(
+  projectId: ProjectId,
+  blobId: BlobId,
+  blob: BlobEntry,
+): PersistedBlob {
+  return {
+    projectId,
+    blobId,
+    ownerInstanceId: blob.owner,
+    hash: blob.hash,
+    size: blob.size,
+    contentType: blob.contentType ?? null,
+    semanticKind: blob.semanticKind,
+  };
+}
+
 /** The instance bookkeeping that has no dedicated column (its threads live in the threads table). */
 export function engineStateOf(instance: CoreInstance): EngineState {
   return {
@@ -140,6 +174,7 @@ export function deserializeProject(
   instances: PersistedInstance[],
   threads: PersistedThread[],
   scopes: PersistedScope[],
+  blobs: PersistedBlob[],
 ): DeserializedEngine {
   const threadsByInstance = new Map<InstanceId, Record<number, Thread>>();
   for (const row of threads) {
@@ -183,5 +218,16 @@ export function deserializeProject(
     maxScopeId = Math.max(maxScopeId, row.scopeId);
   }
 
-  return { instances: instanceMap, scopes: scopeMap, nextScopeId: maxScopeId + 1 };
+  const blobMap: ProjectStore["blobs"] = {};
+  for (const row of blobs) {
+    blobMap[row.blobId] = {
+      owner: row.ownerInstanceId,
+      hash: row.hash,
+      size: row.size,
+      ...(row.contentType !== null ? { contentType: row.contentType } : {}),
+      semanticKind: row.semanticKind,
+    };
+  }
+
+  return { instances: instanceMap, scopes: scopeMap, blobs: blobMap, nextScopeId: maxScopeId + 1 };
 }

@@ -133,7 +133,7 @@ export class CoreReactor extends Reactor {
     this.store.scopes = {};
     this.store.scopesByOwner = new Map();
     this.store.nextScopeId = 0;
-    this.store.blobOwners = {};
+    this.store.blobs = {};
     for (const key of Object.keys(this.delegationCaller)) {
       delete this.delegationCaller[key as DelegationId];
     }
@@ -179,6 +179,7 @@ export class CoreReactor extends Reactor {
     const engine = await loader.engine();
     this.store.instances = engine.instances;
     this.store.scopes = engine.scopes;
+    this.store.blobs = engine.blobs;
     this.store.nextScopeId = engine.nextScopeId;
     // The loaded scopes replaced the map wholesale; rebuild the owner index over them before any sweep reads it.
     rebuildScopeOwnerIndex(this.store);

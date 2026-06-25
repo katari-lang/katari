@@ -8,7 +8,7 @@
 
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
-import { scopes, threads } from "../../db/tables/engine.js";
+import { blobs, scopes, threads } from "../../db/tables/engine.js";
 import {
   delegations,
   escalations,
@@ -20,6 +20,7 @@ import {
   runs,
 } from "../../db/tables/execution.js";
 import type {
+  BlobId,
   DelegationId,
   EscalationId,
   InstanceId,
@@ -30,6 +31,7 @@ import type {
 import type { Loader, Persistence, PersistenceTx } from "./persistence.js";
 import {
   deserializeProject,
+  type PersistedBlob,
   type PersistedInstance,
   type PersistedScope,
   type PersistedThread,
@@ -47,13 +49,14 @@ export class DbPersistence implements Persistence {
   private loader(projectId: ProjectId): Loader {
     return {
       engine: async () => {
-        const [instanceRows, threadRows, scopeRows] = await Promise.all([
+        const [instanceRows, threadRows, scopeRows, blobRows] = await Promise.all([
           this.db
             .select()
             .from(instances)
             .where(and(eq(instances.projectId, projectId), isNotNull(instances.engineState))),
           this.db.select().from(threads).where(eq(threads.projectId, projectId)),
           this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
+          this.db.select().from(blobs).where(eq(blobs.projectId, projectId)),
         ]);
         const persistedInstances: PersistedInstance[] = instanceRows.flatMap((row) =>
           row.engineState === null
@@ -91,7 +94,21 @@ export class DbPersistence implements Persistence {
           ownerInstanceId: row.ownerInstanceId as InstanceId | null,
           values: row.values,
         }));
-        return deserializeProject(persistedInstances, persistedThreads, persistedScopes);
+        const persistedBlobs: PersistedBlob[] = blobRows.map((row) => ({
+          projectId: row.projectId as ProjectId,
+          blobId: row.blobId as BlobId,
+          ownerInstanceId: row.ownerInstanceId as InstanceId | null,
+          hash: row.hash,
+          size: row.size,
+          contentType: row.contentType,
+          semanticKind: row.semanticKind,
+        }));
+        return deserializeProject(
+          persistedInstances,
+          persistedThreads,
+          persistedScopes,
+          persistedBlobs,
+        );
       },
       delegations: async (from) => {
         // Only live rows carry routing; finished ones (done / gone / failed) are history.
@@ -283,6 +300,28 @@ export class DbPersistence implements Persistence {
         await drizzleTx
           .delete(scopes)
           .where(and(eq(scopes.projectId, projectId), eq(scopes.scopeId, scopeId)));
+      },
+      putBlob: async (blob) => {
+        await drizzleTx
+          .insert(blobs)
+          .values({
+            projectId,
+            blobId: blob.blobId,
+            ownerInstanceId: blob.ownerInstanceId,
+            hash: blob.hash,
+            size: blob.size,
+            contentType: blob.contentType,
+            semanticKind: blob.semanticKind,
+          })
+          .onConflictDoUpdate({
+            target: [blobs.projectId, blobs.blobId],
+            set: { ownerInstanceId: blob.ownerInstanceId },
+          });
+      },
+      dropBlob: async (blobId) => {
+        await drizzleTx
+          .delete(blobs)
+          .where(and(eq(blobs.projectId, projectId), eq(blobs.blobId, blobId)));
       },
       dropInstance: async (instanceId) => {
         // Cascade removes the instance's threads / the scopes it still owns / owned delegations + escalations.

@@ -14,6 +14,7 @@
 import type { DelegationState, EscalationState } from "../../db/tables/execution.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import type {
+  BlobId,
   DelegationId,
   EscalationId,
   InstanceId,
@@ -25,6 +26,7 @@ import type {
 import type { Value } from "../value/types.js";
 import type {
   DeserializedEngine,
+  PersistedBlob,
   PersistedScope,
   SerializedInstance,
 } from "./persistence-codec.js";
@@ -125,6 +127,12 @@ export interface PersistenceTx {
   /** Delete one scope the intra-instance GC reclaimed (it is owned by a still-running instance, so no drop
    *  cascade removes it). */
   deleteScope(scopeId: ScopeId): Promise<void>;
+  /** Upsert one blob's ownership + descriptor row (the `ResourcePool`'s unit; bytes live in the BlobStore).
+   *  `owner` may be `null` (in transit). */
+  putBlob(blob: PersistedBlob): Promise<void>;
+  /** Delete one blob row the GC reclaimed (one owned by a still-running instance; an owner *drop* cascades
+   *  the row instead). The bytes are freed separately, post-commit. */
+  dropBlob(blobId: BlobId): Promise<void>;
   /** Drop a completed / torn-down instance, cascading its threads, the scopes it still owns, its issued
    *  delegations, and its raised escalations (mirrors the tables' ON DELETE CASCADE). A scope its result
    *  released to in-transit (`owner = null`) is no longer owned by it, so it survives the cascade. */
@@ -221,6 +229,8 @@ const NO_OP_TX: PersistenceTx = {
   async putInstance() {},
   async putScope() {},
   async deleteScope() {},
+  async putBlob() {},
+  async dropBlob() {},
   async dropInstance() {},
   async consumeOutbox() {},
   async produceOutbox() {},
@@ -234,7 +244,7 @@ const NO_OP_TX: PersistenceTx = {
 
 const EMPTY_LOADER: Loader = {
   async engine() {
-    return { instances: {}, scopes: {}, nextScopeId: 0 };
+    return { instances: {}, scopes: {}, blobs: {}, nextScopeId: 0 };
   },
   async delegations() {
     return [];

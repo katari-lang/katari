@@ -83,14 +83,15 @@ export function isInstanceComplete(instance: CoreInstance): boolean {
 /** Tear down a finished instance: cascade-drop the scopes (and blob ownerships) it still owns, then drop
  *  the instance. Resources its returned value captured were already released to in-transit (`owner = null`)
  *  by the base reactor's `send` (`pool.release`), so they are not owned by this instance here and survive
- *  for the caller to re-own. (Dropping a blob's actual bytes — a `BlobStore.delete` — is a follow-up;
- *  `blobOwners` is empty until a blob producer exists.) */
+ *  for the caller to re-own. The instance's owned blob ROWS cascade-delete with its `instances` row (the FK);
+ *  freeing their BYTES (a `BlobStore.delete`) is wired separately as a post-commit step. Until a producer
+ *  mints instance-owned blobs, `store.blobs` holds only retained api-root blobs, which this never matches. */
 export function teardownInstance(store: ProjectStore, instanceId: InstanceId): void {
   for (const scopeId of scopesOwnedBy(store, instanceId)) deleteScope(store, scopeId);
-  for (const key of Object.keys(store.blobOwners)) {
+  for (const key of Object.keys(store.blobs)) {
     const blobId = key as BlobId;
-    if (store.blobOwners[blobId] === instanceId) {
-      delete store.blobOwners[blobId];
+    if (store.blobs[blobId]?.owner === instanceId) {
+      delete store.blobs[blobId];
     }
   }
   delete store.instances[instanceId];

@@ -4,11 +4,13 @@
 import { describe, expect, test } from "vitest";
 import {
   deserializeProject,
+  serializeBlob,
   serializeInstance,
   serializeScope,
 } from "../src/runtime/actor/persistence-codec.js";
-import type { Instance, Scope } from "../src/runtime/engine/types.js";
+import type { BlobEntry, Instance, Scope } from "../src/runtime/engine/types.js";
 import {
+  type BlobId,
   type DelegationId,
   type EscalationId,
   type InstanceId,
@@ -24,6 +26,7 @@ const PROJECT = "project-p" as ProjectId;
 const SNAPSHOT = "snapshot-s" as SnapshotId;
 const INSTANCE = "instance-i" as InstanceId;
 const DELEGATION = "delegation-d" as DelegationId;
+const BLOB = "blob-b" as BlobId;
 
 describe("persistence codec", () => {
   test("round-trips a suspended instance, its threads, and its owned scopes", () => {
@@ -98,13 +101,23 @@ describe("persistence codec", () => {
     expect(serialized.instance.snapshotId).toBe(SNAPSHOT);
     expect(serialized.instance.engineState.nextThreadId).toBe(3);
 
-    // Scopes persist independently of the instance Layer 2 now (the ResourcePool's unit), so the codec
-    // serialises them one at a time.
+    // Scopes and blobs persist independently of the instance Layer 2 (the ResourcePool's units), so the
+    // codec serialises each one at a time.
     const serializedScopes = scopes.map((scope) => serializeScope(PROJECT, scope));
-    const snapshot = deserializeProject([serialized.instance], serialized.threads, serializedScopes);
+    const blob: BlobEntry = {
+      owner: INSTANCE,
+      hash: "abc123",
+      size: 4096,
+      contentType: "text/plain",
+      semanticKind: "file",
+    };
+    const snapshot = deserializeProject([serialized.instance], serialized.threads, serializedScopes, [
+      serializeBlob(PROJECT, BLOB, blob),
+    ]);
 
     expect(snapshot.instances[INSTANCE]).toEqual(instance);
     expect(snapshot.scopes[0]).toEqual(scopes[0]);
+    expect(snapshot.blobs[BLOB]).toEqual(blob);
     expect(snapshot.nextScopeId).toBe(1);
   });
 });

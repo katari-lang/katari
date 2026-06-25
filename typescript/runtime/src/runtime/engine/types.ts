@@ -19,7 +19,7 @@ import type {
   ScopeId,
   ThreadId,
 } from "../ids.js";
-import type { GenericSubstitution, Value } from "../value/types.js";
+import type { GenericSubstitution, SemanticKind, Value } from "../value/types.js";
 
 // ─── Scope ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -345,10 +345,21 @@ export type ProjectStore = {
    *  instead of scanning the whole store. An in-transit scope (`owner = null`) sits in no bucket. */
   scopesByOwner: Map<InstanceId, Set<ScopeId>>;
   nextScopeId: number;
-  /** BlobId -> the instance that owns the blob's bytes (`null` while in-transit mid-ascent). Drives blob
-   *  GC / ascent symmetrically to a scope's `owner`. Warm-store-only today (no producer / no durability —
-   *  see `ascent.ts`). */
-  blobOwners: Record<BlobId, InstanceId | null>;
+  /** BlobId -> the blob's ownership + metadata. The bytes live in the `BlobStore` (S3); this holds only the
+   *  owner (`null` while in-transit mid-ascent — drives blob GC / ascent symmetrically to a scope's `owner`)
+   *  and the descriptor a `ref` value / download needs. The warm SoT for blob ownership; persisted to the
+   *  `blobs` table as a snapshot (like scopes) by the `ResourcePool`. */
+  blobs: Record<BlobId, BlobEntry>;
+};
+
+/** A blob's warm-store entry: who owns its bytes, plus the content descriptor (the bytes themselves are in
+ *  the `BlobStore`). Mirrors the `blobs` table row. */
+export type BlobEntry = {
+  owner: InstanceId | null;
+  hash: string;
+  size: number;
+  contentType?: string;
+  semanticKind: SemanticKind;
 };
 
 /**

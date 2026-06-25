@@ -10,7 +10,14 @@
 
 import { type DelegationState, isLiveDelegationState } from "../../db/tables/execution.js";
 import type { DelegateTarget, ReactorName } from "../event/types.js";
-import type { DelegationId, EscalationId, InstanceId, OutboxSeq, ProjectId } from "../ids.js";
+import type {
+  BlobId,
+  DelegationId,
+  EscalationId,
+  InstanceId,
+  OutboxSeq,
+  ProjectId,
+} from "../ids.js";
 import type { Value } from "../value/types.js";
 import type {
   Loader,
@@ -25,6 +32,7 @@ import type {
 } from "./persistence.js";
 import {
   deserializeProject,
+  type PersistedBlob,
   type PersistedInstance,
   type PersistedScope,
   type PersistedThread,
@@ -64,6 +72,8 @@ export class StoringPersistence implements Persistence {
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
   /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
+  /** Blob ownership + descriptor rows — cascaded on the owner's drop, mirroring the `blobs` table's FK. */
+  private readonly blobRows = new Map<BlobId, PersistedBlob>();
   /** Layer 1 entities. Cascaded with their owner on `dropInstance` (a delegation with its caller, an
    *  escalation with its raiser), matching the tables' `ON DELETE CASCADE`. */
   private readonly delegations = new Map<DelegationId, StoredDelegation>();
@@ -85,9 +95,12 @@ export class StoringPersistence implements Persistence {
   private loader(): Loader {
     return {
       engine: async () =>
-        deserializeProject([...this.instances.values()], [...this.threads.values()].flat(), [
-          ...this.scopes.values(),
-        ]),
+        deserializeProject(
+          [...this.instances.values()],
+          [...this.threads.values()].flat(),
+          [...this.scopes.values()],
+          [...this.blobRows.values()],
+        ),
       delegations: async (from) => {
         const result: PersistedDelegation[] = [];
         for (const [delegation, row] of this.delegations) {
@@ -175,6 +188,12 @@ export class StoringPersistence implements Persistence {
       deleteScope: async (scopeId) => {
         this.scopes.delete(scopeId);
       },
+      putBlob: async (blob) => {
+        this.blobRows.set(blob.blobId, blob);
+      },
+      dropBlob: async (blobId) => {
+        this.blobRows.delete(blobId);
+      },
       dropInstance: async (instanceId) => {
         this.dropInstance(instanceId);
       },
@@ -211,6 +230,9 @@ export class StoringPersistence implements Persistence {
     this.threads.delete(instanceId);
     for (const [id, scope] of this.scopes) {
       if (scope.ownerInstanceId === instanceId) this.scopes.delete(id);
+    }
+    for (const [id, blob] of this.blobRows) {
+      if (blob.ownerInstanceId === instanceId) this.blobRows.delete(id);
     }
     // Cascade the entities this instance owns (issued delegations / raised escalations), like the FKs.
     for (const [id, row] of this.delegations) {

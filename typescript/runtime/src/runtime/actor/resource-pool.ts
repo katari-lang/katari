@@ -16,11 +16,11 @@
 
 import { reachableResources } from "../engine/ascent.js";
 import { deleteScope, scopesOwnedBy, setScopeOwner } from "../engine/scope.js";
-import type { ProjectStore } from "../engine/types.js";
-import type { InstanceId, ProjectId, ScopeId } from "../ids.js";
+import type { BlobEntry, ProjectStore } from "../engine/types.js";
+import type { BlobId, InstanceId, ProjectId, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { PersistenceTx } from "./persistence.js";
-import { serializeScope } from "./persistence-codec.js";
+import { serializeBlob, serializeScope } from "./persistence-codec.js";
 
 export class ResourcePool {
   /** Scope ids whose row changed this turn (allocated / mutated / re-owned) — flushed and cleared by
@@ -28,11 +28,23 @@ export class ResourcePool {
   private readonly dirty = new Set<ScopeId>();
   /** Scope ids freed this turn (intra-instance GC) — their durable row is deleted by `persist`. */
   private readonly freed = new Set<ScopeId>();
+  /** Blob ids whose row changed this turn (registered / re-owned) and ids reclaimed this turn — flushed by
+   *  `persist`, symmetric to the scope sets. */
+  private readonly dirtyBlobs = new Set<BlobId>();
+  private readonly freedBlobs = new Set<BlobId>();
 
   constructor(
     private readonly projectId: ProjectId,
     private readonly store: ProjectStore,
   ) {}
+
+  /** Register a freshly produced blob (a file upload, or a future engine string-promotion) — its ownership +
+   *  descriptor, the bytes having already been put to the `BlobStore`. The warm store is the SoT; `persist`
+   *  writes the row. */
+  registerBlob(blobId: BlobId, entry: BlobEntry): void {
+    this.store.blobs[blobId] = entry;
+    this.dirtyBlobs.add(blobId);
+  }
 
   /** Free a scope the GC found dead: drop it from the warm store (and the owner index) and stage its durable
    *  row for deletion. */
@@ -48,6 +60,16 @@ export class ResourcePool {
   reset(): void {
     this.dirty.clear();
     this.freed.clear();
+    this.dirtyBlobs.clear();
+    this.freedBlobs.clear();
+  }
+
+  /** Reclaim a blob (intra-instance GC / teardown): drop it from the warm store and stage its row deletion.
+   *  Freeing the bytes (`BlobStore.delete`) is a separate post-commit step (durable-first). */
+  freeBlob(blobId: BlobId): void {
+    delete this.store.blobs[blobId];
+    this.dirtyBlobs.delete(blobId);
+    this.freedBlobs.add(blobId);
   }
 
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
@@ -63,7 +85,11 @@ export class ResourcePool {
       }
     }
     for (const blobId of blobs) {
-      if (this.store.blobOwners[blobId] === owner) this.store.blobOwners[blobId] = null;
+      const blob = this.store.blobs[blobId];
+      if (blob?.owner === owner) {
+        blob.owner = null;
+        this.dirtyBlobs.add(blobId);
+      }
     }
   }
 
@@ -79,7 +105,11 @@ export class ResourcePool {
       }
     }
     for (const blobId of blobs) {
-      if (this.store.blobOwners[blobId] === null) this.store.blobOwners[blobId] = owner;
+      const blob = this.store.blobs[blobId];
+      if (blob?.owner === null) {
+        blob.owner = owner;
+        this.dirtyBlobs.add(blobId);
+      }
     }
   }
 
@@ -100,7 +130,14 @@ export class ResourcePool {
       if (scope !== undefined) await tx.putScope(serializeScope(this.projectId, scope));
     }
     for (const scopeId of this.freed) await tx.deleteScope(scopeId);
+    for (const blobId of this.dirtyBlobs) {
+      const blob = this.store.blobs[blobId];
+      if (blob !== undefined) await tx.putBlob(serializeBlob(this.projectId, blobId, blob));
+    }
+    for (const blobId of this.freedBlobs) await tx.dropBlob(blobId);
     this.dirty.clear();
     this.freed.clear();
+    this.dirtyBlobs.clear();
+    this.freedBlobs.clear();
   }
 }
