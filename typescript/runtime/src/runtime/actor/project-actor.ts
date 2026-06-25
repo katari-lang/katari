@@ -53,6 +53,8 @@ export class ProjectActor {
   private readonly core: CoreReactor;
   /** The api management root reactor: the user-facing run / escalation logic. */
   private readonly api: ApiReactor;
+  /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
+  private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
   private readonly substrate: Substrate;
 
@@ -63,7 +65,8 @@ export class ProjectActor {
     // The shared scope store + the pool that wraps it: the engine reads / writes scopes in place, while every
     // reactor reowns through the same pool (so a run result crosses from a core instance to the api root).
     const store = createProjectStore();
-    const pool = new ResourcePool(this.projectId, store);
+    this.pool = new ResourcePool(this.projectId, store);
+    const pool = this.pool;
     this.core = new CoreReactor(
       this.projectId,
       dependencies.ir,
@@ -83,6 +86,12 @@ export class ProjectActor {
     const registry: Record<ReactorName, Reactor> = { core: this.core, api: this.api };
     this.substrate = new Substrate(this.projectId, this.persistence, registry, pool, {
       reactivate: () => this.reactivate(),
+      onPoison: (error) =>
+        this.api.poisonRunPromises(
+          error instanceof Error
+            ? new Error(`run tracking reset after a commit failure: ${error.message}`)
+            : new Error("run tracking reset after a commit failure; query the run's durable state"),
+        ),
     });
     // FFI completions re-enter through the same serial mailbox as every other turn, as a core FFI turn.
     dependencies.external.onResult((result) =>
@@ -131,6 +140,11 @@ export class ProjectActor {
    *  user-facing open escalations and its live run delegations; the durable api root row is ensured; the
    *  undrained outbox is replayed into the mailbox; and in-flight external calls are re-dispatched. */
   private async reactivate(): Promise<void> {
+    // Reactivation is idempotent and is the recovery path after a poisoned commit too: drop any warm state
+    // first (a cold start clears empty state — a no-op), so reloading never accumulates stale routing.
+    this.core.reset();
+    this.api.reset();
+    this.pool.reset();
     const snapshot = await this.persistence.loadProject(this.projectId);
     this.core.loadState(snapshot);
     // The core reactor decides which open escalations are user-facing (raised by a run root); the api reactor

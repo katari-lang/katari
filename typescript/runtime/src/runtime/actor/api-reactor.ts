@@ -85,6 +85,28 @@ export class ApiReactor extends Reactor {
     await this.flushLayer1(tx);
   }
 
+  /** Drop the api root's durable-derived warm state so reactivation rebuilds it (idempotent — safe on a cold
+   *  start, where these are already empty). Does NOT touch the in-process run-result promises: those are
+   *  registered synchronously by `startRun` *before* the first reactivation, so clearing them here would
+   *  orphan a freshly-started run. They are handled only on a poison, by `poisonRunPromises`. */
+  reset(): void {
+    super.reset();
+    for (const key of Object.keys(this.openEscalations)) {
+      delete this.openEscalations[key as EscalationId];
+    }
+    for (const key of Object.keys(this.cancelReasons))
+      delete this.cancelReasons[key as DelegationId];
+  }
+
+  /** Reject and drop every in-process run-result promise after a poisoned commit: the run continues durably
+   *  and the API reads its outcome by projection, but this non-SoT notification hook cannot survive the
+   *  reactivation, so its caller is told to re-query rather than left hanging. */
+  poisonRunPromises(error: Error): void {
+    for (const reject of Object.values(this.runRejecters)) reject(error);
+    for (const key of Object.keys(this.runResolvers)) delete this.runResolvers[key as DelegationId];
+    for (const key of Object.keys(this.runRejecters)) delete this.runRejecters[key as DelegationId];
+  }
+
   // ─── commands (the api root issuing external events on a user's behalf) ─────────────────────────
 
   /** Start a run: summon a root instance for `qualifiedName@snapshot`. Returns the run delegation (the handle

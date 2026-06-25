@@ -40,6 +40,13 @@ export class ResourcePool {
     this.freed.add(scopeId);
   }
 
+  /** Drop the pool's per-turn staging after a poisoned commit (the scopes themselves are cleared with the
+   *  store by the core reactor's reset, then reloaded). */
+  reset(): void {
+    this.dirty.clear();
+    this.freed.clear();
+  }
+
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
    *  the value's recipient can re-own them rather than have them dropped with `owner`. Only `owner`'s own
    *  resources move; ancestors / others' are left as they are. */

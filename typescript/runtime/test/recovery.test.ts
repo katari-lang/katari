@@ -6,6 +6,7 @@
 
 import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
+import type { Persistence, PersistenceTx } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
@@ -54,9 +55,31 @@ function recordingRunner(complete: Record<string, boolean>): {
   return { runner, dispatched };
 }
 
+/** A `Persistence` that throws on its `nth` commit, delegating everything else to an inner store — so a
+ *  transient commit failure (and the actor's poison → drop → reactivate recovery) is exercisable. The throw
+ *  happens before the inner transaction runs, so the durable store is untouched for the failed turn. */
+class FailingPersistence implements Persistence {
+  private commits = 0;
+  constructor(
+    private readonly inner: StoringPersistence,
+    private readonly failOnCommit: number,
+  ) {}
+  loadProject(projectId: ProjectId) {
+    return this.inner.loadProject(projectId);
+  }
+  ensureApiRoot(projectId: ProjectId, apiRootId: Parameters<Persistence["ensureApiRoot"]>[1]) {
+    return this.inner.ensureApiRoot(projectId, apiRootId);
+  }
+  async transaction(projectId: ProjectId, body: (tx: PersistenceTx) => Promise<void>): Promise<void> {
+    this.commits += 1;
+    if (this.commits === this.failOnCommit) throw new Error("injected commit failure");
+    await this.inner.transaction(projectId, body);
+  }
+}
+
 function makeActor(
   ir: IRModule,
-  persistence: StoringPersistence,
+  persistence: Persistence,
   external: ExternalRunner = new StubExternalRunner(),
 ): ProjectActor {
   const registry = new SnapshotRegistry();
@@ -399,5 +422,27 @@ describe("recovery", () => {
     });
     expect(done.result).toEqual({ kind: "integer", value: 7 });
     expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("a poisoned commit drops the warm state and reactivates from durable — the run still completes", async () => {
+    // The run's `delegate` commits (turn 1), then the run-root's create + complete turn fails its commit
+    // (turn 2). The actor must not advance on that failure: it drops the warm engine state and reactivates
+    // from durable (the still-running delegation row + the unconsumed delegate in the outbox), replays the
+    // turn — now succeeding — and the run completes. The in-process result promise is rejected on the poison
+    // (a non-SoT hook), so the durable delegation is the proof the run finished.
+    const store = new StoringPersistence();
+    const persistence = new FailingPersistence(store, 2);
+    const actor = makeActor(constantIr(), persistence);
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/reset after a commit failure/);
+
+    const done = await waitUntil(() => {
+      const edge = store.peekDelegation(run);
+      return edge?.state === "done" ? edge : undefined;
+    });
+    expect(done.result).toEqual({ kind: "integer", value: 7 });
+    // Recovery quiesced: the outbox drained and nothing is left suspended.
+    await waitUntil(() => (store.outboxSize() === 0 ? true : undefined));
+    expect(store.instanceCount()).toBe(0);
   });
 });

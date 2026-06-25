@@ -103,6 +103,17 @@ export abstract class Reactor {
     return sends;
   }
 
+  /** Discard all warm state this reactor holds, so reactivation rebuilds it from durable rows. Used when a
+   *  commit fails (the warm store advanced past the durable commit): the actor is dropped and reactivated.
+   *  A concrete reactor overrides to also clear its own state, calling `super.reset()`. */
+  reset(): void {
+    this.sendBuffer.length = 0;
+    this.delegations.clear();
+    this.escalations.clear();
+    this.dirtyDelegations.clear();
+    this.dirtyEscalations.clear();
+  }
+
   // ─── Layer 1 entity ownership (caller-side delegations, raiser-side escalations) ────────────────
 
   /** Open a delegation this reactor issued as caller (state `running`). */

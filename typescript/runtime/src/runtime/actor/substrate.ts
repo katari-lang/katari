@@ -17,10 +17,14 @@ import type { OutboxMessage, Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
 
-/** The substrate's one collaborator on its owner: how to rebuild the project's warm domain state from durable
- *  rows (and replay the undrained outbox) on first use. */
+/** The substrate's collaborators on its owner: how to rebuild the project's warm domain state from durable
+ *  rows (and replay the undrained outbox) on first use, and how to discard the non-durable in-process state
+ *  (the run-result promises) when a commit is poisoned. */
 export interface SubstrateHost {
   reactivate(): Promise<void>;
+  /** Tear down the non-durable in-process notification hooks after a poisoned commit (reject the run-result
+   *  promises). The durable-derived warm state is rebuilt by the following `reactivate`. */
+  onPoison(error: unknown): void;
 }
 
 /** One unit of serial work: run `reactor` (its `react` for an inbound event, or a command / FFI closure),
@@ -105,13 +109,21 @@ export class Substrate {
   }
 
   /** The serial loop: load once, then run + commit one turn at a time. Reentrancy-guarded so only one pump
-   *  drains the mailbox; the events a turn produces are delivered back into the mailbox and drained here too. */
+   *  drains the mailbox; the events a turn produces are delivered back into the mailbox and drained here too.
+   *
+   *  Failure handling (the "warm store advances only when the durable commit advances" rule): a turn runs
+   *  `react` (mutating the warm store) *before* its commit. If that commit fails, the warm store has advanced
+   *  past durable — so the actor is poisoned: reject this turn's awaiter and every other pending command,
+   *  drop the warm state, and reactivate from durable (the unconsumed outbox row replays the lost turn). A
+   *  `reactivate` failure (e.g. the DB is unreachable) is caught the same way — pending commands reject, the
+   *  load is retried on the next call — so a commit / load error is never an unhandled rejection. */
   private async pump(): Promise<void> {
     if (this.pumping) return;
     this.pumping = true;
+    let poisoned = false;
     try {
       await this.ensureLoaded();
-      while (this.mailbox.length > 0) {
+      while (this.mailbox.length > 0 && !poisoned) {
         const turn = this.mailbox.shift();
         if (turn === undefined) break;
         try {
@@ -120,15 +132,38 @@ export class Substrate {
           if (turn.event !== null) turn.reactor.afterCommit(turn.event);
           turn.settle?.resolve();
         } catch (error) {
-          // A command turn rejects its caller's promise; an inbound / FFI turn has no awaiter, so its error
-          // propagates out of the loop (the project is in an inconsistent state — matching the prior model).
-          if (turn.settle !== null) turn.settle.reject(error);
-          else throw error;
+          turn.settle?.reject(error);
+          this.poison(error);
+          poisoned = true;
         }
       }
+    } catch (loadError) {
+      // `ensureLoaded` (reactivate) failed: reject anything queued so callers do not hang; the cleared
+      // `loadingPromise` means the next caller retries the load.
+      this.rejectPending(loadError);
     } finally {
       this.pumping = false;
     }
+    // Re-enter after a poisoned commit: this fresh pump re-runs `ensureLoaded` → reactivate (which drops the
+    // warm state and reloads), then drains the replayed outbox.
+    if (poisoned) void this.pump();
+  }
+
+  /** Poison the actor after a failed commit: reject every other pending command, discard the mailbox (every
+   *  inbound / produced event is still in the durable outbox and replays), and mark the project unloaded so
+   *  the next pump reactivates from durable state. */
+  private poison(error: unknown): void {
+    this.rejectPending(error);
+    this.host.onPoison(error);
+    this.loaded = false;
+    this.loadingPromise = null;
+  }
+
+  /** Reject every queued command's awaiter and clear the mailbox (inbound / produced events have no awaiter
+   *  and replay from the outbox). */
+  private rejectPending(error: unknown): void {
+    for (const pending of this.mailbox) pending.settle?.reject(error);
+    this.mailbox.length = 0;
   }
 
   /** Commit one reactor turn atomically: drain its buffered sends, mint an outbox seq per produced event,

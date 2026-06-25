@@ -121,6 +121,23 @@ export class CoreReactor extends Reactor {
     this.turnLayer2 = { kind: "none" };
   }
 
+  /** Drop all warm engine state (so reactivation rebuilds it from durable rows after a poisoned commit). */
+  reset(): void {
+    super.reset();
+    this.store.instances = {};
+    this.store.scopes = {};
+    this.store.nextScopeId = 0;
+    this.store.blobOwners = {};
+    for (const key of Object.keys(this.delegationCaller)) {
+      delete this.delegationCaller[key as DelegationId];
+    }
+    for (const key of Object.keys(this.delegationChild)) {
+      delete this.delegationChild[key as DelegationId];
+    }
+    this.turnLayer2 = { kind: "none" };
+    this.turnOwnerId = undefined;
+  }
+
   // ─── routing (rederived from the engine graph; the api root is never referenced) ────────────────
 
   /** The destination reactor for an engine-emitted event. A reply (delegateAck / escalate / terminateAck)
