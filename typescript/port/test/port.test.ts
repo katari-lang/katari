@@ -89,6 +89,64 @@ describe("Sidecar dispatch", () => {
     sidecar.handle({ kind: "abort", delegation: "ghost" }, send);
     expect(replies).toEqual([]);
   });
+
+  test("a handler returning undefined replies with an explicit null value, not a dropped field", async () => {
+    const sidecar = new Sidecar();
+    // A handler that returns nothing is out of the `Json` contract, but the runtime must still receive a
+    // well-formed reply (a missing `value` decodes to `undefined`, which crashes the value codec).
+    sidecar.register("ext.void", () => undefined as unknown as Json);
+    const { replies, send } = collector();
+    sidecar.handle(dispatch("d1", "ext.void"), send);
+    await tick();
+    expect(replies).toEqual([{ kind: "result", delegation: "d1", value: null }]);
+  });
+
+  test("a handler returning a non-serialisable value fails only that call (no process crash)", async () => {
+    const sidecar = new Sidecar();
+    // A BigInt makes JSON.stringify throw; without the guard that throw escapes the unawaited promise chain
+    // and crashes the whole sidecar. It must instead become an `error` reply for this one delegation.
+    sidecar.register("ext.bigint", () => 10n as unknown as Json);
+    const { replies, send } = collector();
+    sidecar.handle(dispatch("d1", "ext.bigint"), send);
+    await tick();
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toMatchObject({ kind: "error", delegation: "d1" });
+  });
+
+  test("a duplicate dispatch for an in-flight delegation is ignored (no map corruption)", async () => {
+    const sidecar = new Sidecar();
+    let resolveFirst: (value: string) => void = () => {};
+    sidecar.register("ext.slow", () => new Promise<string>((resolve) => (resolveFirst = resolve)));
+    sidecar.register("ext.other", () => "second");
+    const { replies, send } = collector();
+    sidecar.handle(dispatch("d1", "ext.slow"), send);
+    await tick();
+    // Same delegation id, different handler: must not overwrite the in-flight controller nor reply.
+    sidecar.handle(dispatch("d1", "ext.other"), send);
+    await tick();
+    expect(replies).toEqual([]);
+    // The original is still tracked and settles correctly under its own id.
+    resolveFirst("first");
+    await tick();
+    expect(replies).toEqual([{ kind: "result", delegation: "d1", value: "first" }]);
+  });
+
+  test("a handler that throws after being aborted still confirms cancelled", async () => {
+    const sidecar = new Sidecar();
+    sidecar.register(
+      "ext.failcancel",
+      (_argument, { signal }) =>
+        new Promise<string>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("cleanup failed")));
+        }),
+    );
+    const { replies, send } = collector();
+    sidecar.handle(dispatch("d1", "ext.failcancel"), send);
+    await tick();
+    sidecar.handle({ kind: "abort", delegation: "d1" }, send);
+    await tick();
+    expect(replies).toEqual([{ kind: "cancelled", delegation: "d1" }]);
+  });
 });
 
 describe("katari.agent", () => {

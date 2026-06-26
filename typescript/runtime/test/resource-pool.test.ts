@@ -48,19 +48,41 @@ const closure: Value = {
   module: "",
 };
 
-/** A PersistenceTx that only records the scopes written (the rest are no-ops). */
+/** A PersistenceTx whose `pool` port records the scopes written (the rest of the bundle is no-ops). */
 function recordingTx(): { tx: PersistenceTx; scopes: PersistedScope[] } {
   const scopes: PersistedScope[] = [];
   const tx: PersistenceTx = {
-    async putDelegation() {},
-    async putEscalation() {},
-    async putInstance() {},
-    async putScope(scope) {
-      scopes.push(scope);
+    core: {
+      async putInstanceEnvelope() {},
+      async putCoreInstance() {},
+      async dropInstance() {},
+      async putDelegation() {},
+      async putEscalation() {},
     },
-    async dropInstance() {},
-    async consumeOutbox() {},
-    async produceOutbox() {},
+    api: {
+      async putInstanceEnvelope() {},
+      async putDelegation() {},
+      async putRun() {},
+      async setRunCancelReason() {},
+      async putRunEscalationAudit() {},
+    },
+    ffi: {
+      async putInstanceEnvelope() {},
+      async putFfiInstance() {},
+      async dropInstance() {},
+    },
+    pool: {
+      async putScope(scope) {
+        scopes.push(scope);
+      },
+      async deleteScope() {},
+      async putBlob() {},
+      async dropBlob() {},
+    },
+    outbox: {
+      async consumeOutbox() {},
+      async produceOutbox() {},
+    },
   };
   return { tx, scopes };
 }

@@ -187,7 +187,7 @@ export class ProjectActor {
       // runs only after the load fully succeeds — guarded like the rest of this method.
       await this.ffi.load(loader);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
-      for (const message of await loader.outbox()) {
+      for (const message of await loader.outbox.pending()) {
         this.substrate.enqueueOutbox(message.event, message.seq);
       }
     });

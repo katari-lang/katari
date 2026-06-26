@@ -125,16 +125,17 @@ export class ResourcePool {
    *  owner — possibly `null` for one in transit), then delete each one the GC freed. No-op when nothing was
    *  touched. (A scope freed by an instance *drop* is reclaimed by that cascade instead, not here.) */
   async persist(tx: PersistenceTx): Promise<void> {
+    const pool = tx.pool;
     for (const scopeId of this.dirty) {
       const scope = this.store.scopes[scopeId];
-      if (scope !== undefined) await tx.putScope(serializeScope(this.projectId, scope));
+      if (scope !== undefined) await pool.putScope(serializeScope(this.projectId, scope));
     }
-    for (const scopeId of this.freed) await tx.deleteScope(scopeId);
+    for (const scopeId of this.freed) await pool.deleteScope(scopeId);
     for (const blobId of this.dirtyBlobs) {
       const blob = this.store.blobs[blobId];
-      if (blob !== undefined) await tx.putBlob(serializeBlob(this.projectId, blobId, blob));
+      if (blob !== undefined) await pool.putBlob(serializeBlob(this.projectId, blobId, blob));
     }
-    for (const blobId of this.freedBlobs) await tx.dropBlob(blobId);
+    for (const blobId of this.freedBlobs) await pool.dropBlob(blobId);
     this.dirty.clear();
     this.freed.clear();
     this.dirtyBlobs.clear();

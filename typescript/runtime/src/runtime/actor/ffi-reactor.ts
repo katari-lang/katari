@@ -46,9 +46,11 @@ interface PendingCall {
 export class FfiReactor extends Reactor {
   readonly name: ReactorName = "ffi";
 
-  /** In-flight calls (warm SoT) keyed by their delegation, plus the per-turn dirty set `persist` flushes. */
+  /** In-flight calls (warm SoT) keyed by their delegation, plus the per-turn dirty set `persist` upserts and
+   *  the instance ids of calls resolved this turn (their `instances` rows are dropped, cascading the ext). */
   private readonly calls = new Map<DelegationId, PendingCall>();
   private readonly dirty = new Set<DelegationId>();
+  private droppedInstances: InstanceId[] = [];
   /** The call whose turn this is — its instance is the issuer stamped on the replies it produces. Set by the
    *  handler that produces a reply (a completion, or an answering / terminating react). */
   private turnInstance: InstanceId | undefined;
@@ -76,7 +78,8 @@ export class FfiReactor extends Reactor {
     switch (event.kind) {
       case "delegate": {
         if (event.target.kind !== "external") return; // only external targets route here
-        // A fresh per-delegation callee instance, like core's createInstance for a sub-call.
+        // A fresh per-delegation callee instance, like core's createInstance for a sub-call. `caller` (the
+        // summoner) is where its replies route — stamped as `to` when this reactor emits them.
         this.put(event.delegation, {
           instance: newInstanceId(),
           snapshot: event.target.snapshot,
@@ -93,7 +96,12 @@ export class FfiReactor extends Reactor {
         if (call.status === "awaitingAnswer") {
           // The process call already stopped (it errored); confirm the abort straight away.
           this.turnInstance = call.instance;
-          this.send({ kind: "terminateAck", delegation: event.delegation }, call.caller);
+          this.send({
+            kind: "terminateAck",
+            delegation: event.delegation,
+            from: this.name,
+            to: call.caller,
+          });
           this.drop(event.delegation);
         } else if (call.status === "running") {
           call.status = "cancelling";
@@ -106,10 +114,13 @@ export class FfiReactor extends Reactor {
         const call = this.calls.get(event.delegation);
         if (call === undefined || call.status !== "awaitingAnswer") return;
         this.turnInstance = call.instance;
-        this.send(
-          { kind: "delegateAck", delegation: event.delegation, value: event.value },
-          call.caller,
-        );
+        this.send({
+          kind: "delegateAck",
+          delegation: event.delegation,
+          value: event.value,
+          from: this.name,
+          to: call.caller,
+        });
         this.drop(event.delegation);
         break;
       }
@@ -124,25 +135,34 @@ export class FfiReactor extends Reactor {
     if (call === undefined) return; // a late completion for a call already resolved
     this.turnInstance = call.instance;
     if (call.status === "cancelling") {
-      this.send({ kind: "terminateAck", delegation: completion.delegation }, call.caller);
+      this.send({
+        kind: "terminateAck",
+        delegation: completion.delegation,
+        from: this.name,
+        to: call.caller,
+      });
       this.drop(completion.delegation);
       return;
     }
     switch (completion.outcome.kind) {
       case "result":
         // The sidecar's result is plain Json; lift it back to the engine's Value for the delegateAck.
-        this.send(
-          {
-            kind: "delegateAck",
-            delegation: completion.delegation,
-            value: jsonToValue(completion.outcome.value),
-          },
-          call.caller,
-        );
+        this.send({
+          kind: "delegateAck",
+          delegation: completion.delegation,
+          value: jsonToValue(completion.outcome.value),
+          from: this.name,
+          to: call.caller,
+        });
         this.drop(completion.delegation);
         return;
       case "cancelled":
-        this.send({ kind: "terminateAck", delegation: completion.delegation }, call.caller);
+        this.send({
+          kind: "terminateAck",
+          delegation: completion.delegation,
+          from: this.name,
+          to: call.caller,
+        });
         this.drop(completion.delegation);
         return;
       case "error":
@@ -174,31 +194,47 @@ export class FfiReactor extends Reactor {
     }
   }
 
-  /** Write the calls this turn touched, dropping resolved ones. (The ffi reactor owns no delegations /
-   *  escalations, so there is no base Layer 1 to flush.) */
+  /** Write the calls this turn touched as `ffi`-kind instances (envelope + extension), dropping resolved ones
+   *  (their envelope drop cascades the extension). The ffi reactor owns no delegations / escalations, so there
+   *  is no base Layer 1 to flush. */
   async persist(tx: PersistenceTx): Promise<void> {
-    for (const delegation of this.dirty) {
+    // The base writes each live call's envelope (its status collapses the ffi-specific `awaitingAnswer` to the
+    // instance lifecycle `running` — alive, just waiting) and drops the resolved ones (cascading the ext). The
+    // ffi reactor owns no delegations / escalations, so the base flushes none. The `ffi_instances` ext is its
+    // own data, written after the envelopes (the FK target).
+    const live = [...this.dirty].flatMap((delegation) => {
       const call = this.calls.get(delegation);
-      if (call === undefined) await tx.dropFfiCall(delegation);
-      else
-        await tx.putFfiCall({
-          delegation,
-          instance: call.instance,
-          snapshot: call.snapshot,
-          key: call.key,
-          argument: call.argument,
-          caller: call.caller,
-          status: call.status,
-        });
+      return call === undefined ? [] : [{ delegation, call }];
+    });
+    for (const { delegation, call } of live)
+      this.markInstance(call.instance, {
+        delegationId: delegation,
+        status: call.status === "cancelling" ? "cancelling" : "running",
+      });
+    for (const instanceId of this.droppedInstances) this.markInstanceDropped(instanceId);
+    await this.persistBase(tx.base);
+    for (const { call } of live) {
+      await tx.ffi.putFfiInstance({
+        instanceId: call.instance,
+        snapshotId: call.snapshot,
+        key: call.key,
+        argument: call.argument,
+        callerReactor: call.caller,
+        status: call.status,
+      });
     }
     this.dirty.clear();
+    this.droppedInstances = [];
   }
 
   /** Reload the in-flight calls and resume the transport: a `running` call re-dispatches (its handler may
    *  re-run — `redispatch` lets it dedupe), a `cancelling` call re-aborts, an `awaitingAnswer` call just
    *  waits (its process call already stopped; the core side drives the escalation's resolution). */
   async load(loader: Loader): Promise<void> {
-    for (const row of await loader.ffiCalls()) {
+    // The base reloads any delegations / escalations this reactor owns (none today, but uniform); its own
+    // data is the in-flight calls.
+    await this.loadBase(loader.base);
+    for (const row of await loader.ffi.instances()) {
       this.calls.set(row.delegation, {
         instance: row.instance,
         snapshot: row.snapshot,
@@ -226,6 +262,7 @@ export class FfiReactor extends Reactor {
     super.reset();
     this.calls.clear();
     this.dirty.clear();
+    this.droppedInstances = [];
     this.turnInstance = undefined;
   }
 
@@ -235,7 +272,9 @@ export class FfiReactor extends Reactor {
   }
 
   private drop(delegation: DelegationId): void {
+    const call = this.calls.get(delegation);
+    if (call !== undefined) this.droppedInstances.push(call.instance);
     this.calls.delete(delegation);
-    this.dirty.add(delegation);
+    this.dirty.delete(delegation);
   }
 }

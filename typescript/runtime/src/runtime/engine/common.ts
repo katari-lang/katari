@@ -138,7 +138,8 @@ export function escapeAsk(ctx: StepContext, from: ThreadId, fromAskId: AskId, as
   root.forwardRoutes[askId] = { thread: from, askId: fromAskId };
   const escalation = newEscalationId();
   root.escalations[escalation] = askId;
-  ctx.emit({ kind: "escalate", delegation, escalation, ask });
+  // An escalate rises to this instance's summoner — the reactor that issued the delegation it answers.
+  ctx.emit({ kind: "escalate", delegation, escalation, ask }, ctx.instance.callerReactor);
 }
 
 /**
@@ -202,10 +203,12 @@ function retireInstance(
 ): void {
   const delegation = ctx.instance.delegationId;
   if (delegation !== null) {
+    // A delegateAck / terminateAck returns to this instance's summoner (the reactor that issued its delegation).
     ctx.emit(
       outcome.kind === "return"
         ? { kind: "delegateAck", delegation, value: outcome.value }
         : { kind: "terminateAck", delegation },
+      ctx.instance.callerReactor,
     );
   }
   ctx.instance.threads = {};

@@ -60,6 +60,16 @@ export class Sidecar {
       this.inFlight.get(request.delegation)?.abort();
       return;
     }
+    if (this.inFlight.has(request.delegation)) {
+      // A second dispatch for an already in-flight delegation would overwrite its abort controller and let
+      // one settle delete the other's entry (breaking abort, double-replying). The runtime never does this
+      // within a process — a `redispatch` only follows a crash, i.e. a fresh process with an empty map — so
+      // treat it as protocol drift: keep the original, report it, drop the duplicate.
+      reportDiagnostic(
+        `duplicate dispatch for in-flight delegation ${request.delegation}; ignoring it`,
+      );
+      return;
+    }
     const handler = this.handlers.get(request.key);
     if (handler === undefined) {
       send({
@@ -81,16 +91,22 @@ export class Sidecar {
           send(
             controller.signal.aborted
               ? { kind: "cancelled", delegation: request.delegation }
-              : { kind: "result", delegation: request.delegation, value },
+              : resultReply(request.delegation, value),
           );
         },
         (error: unknown) => {
           this.inFlight.delete(request.delegation);
-          send(
-            controller.signal.aborted
-              ? { kind: "cancelled", delegation: request.delegation }
-              : { kind: "error", delegation: request.delegation, message: errorMessage(error) },
-          );
+          if (controller.signal.aborted) {
+            // The handler threw while it was being cancelled (e.g. a failing cleanup). The caller is already
+            // unwinding and only needs the `cancelled` confirmation, but log the swallowed error so an
+            // operator isn't left guessing why a cancelled call also failed.
+            reportDiagnostic(
+              `handler "${request.key}" threw during cancellation: ${errorMessage(error)}`,
+            );
+            send({ kind: "cancelled", delegation: request.delegation });
+            return;
+          }
+          send({ kind: "error", delegation: request.delegation, message: errorMessage(error) });
         },
       );
   }
@@ -103,6 +119,35 @@ export class Sidecar {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A `result` reply, guarding the user's return value before it reaches the channel: `undefined` becomes
+ *  `null` (otherwise `JSON.stringify` drops the field and the runtime decodes a missing value), and a value
+ *  that cannot be serialised (a `BigInt`, a cycle) fails THIS one call as an `error` rather than throwing
+ *  later in `JSON.stringify` — inside an unawaited promise chain — and taking the whole sidecar process, and
+ *  every other in-flight call with it, down. */
+function resultReply(delegation: string, value: Json): SidecarReply {
+  const normalized = value ?? null;
+  try {
+    JSON.stringify(normalized);
+  } catch (error) {
+    return {
+      kind: "error",
+      delegation,
+      message: `katari: handler result is not JSON-serialisable: ${errorMessage(error)}`,
+    };
+  }
+  return { kind: "result", delegation, value: normalized };
+}
+
+/** A diagnostic line for the operator. Always stderr — never stdout, which is the reply channel — so it
+ *  surfaces in the runtime's inherited logs without corrupting protocol framing. */
+function reportDiagnostic(message: string): void {
+  process.stderr.write(`[katari-port] ${message}\n`);
+}
+
+function detail(value: unknown): string {
+  return value instanceof Error ? (value.stack ?? value.message) : String(value);
 }
 
 // ─── The ambient `katari` API the bundle and user code use ───────────────────────────────────────
@@ -140,9 +185,17 @@ export const katari = {
 
 export default katari;
 
+let sidecarStarted = false;
+
 /** Hand stdio control to the sidecar: read newline-JSON dispatch/abort requests from stdin and write replies
  *  to stdout. The bundle calls this once, after every `katari.agent(...)` registration has run. */
 export function __startSidecar(): void {
+  if (sidecarStarted) return; // The bundle calls this once; guard against a double take-over of stdio.
+  sidecarStarted = true;
+
+  installProcessGuards();
+  redirectConsoleToStderr();
+
   const buffer = new LineBuffer();
   defaultSidecar.serve({
     onRequest: (handler) => {
@@ -150,13 +203,65 @@ export function __startSidecar(): void {
       process.stdin.on("data", (chunk: string) => {
         for (const line of buffer.push(chunk)) {
           const request = decodeRequest(line);
-          if (request !== null) handler(request);
+          if (request === null) {
+            // A line we cannot read as a request is protocol drift or stray input on the request channel.
+            // Surface it on stderr (never stdout) rather than dropping it silently, so a runtime/sidecar
+            // mismatch is diagnosable instead of manifesting as a call that just hangs.
+            reportDiagnostic(`ignoring unrecognised request line: ${line}`);
+            continue;
+          }
+          handler(request);
         }
       });
       process.stdin.resume();
     },
     send: (reply) => void process.stdout.write(encodeReply(reply)),
   });
+}
+
+/** Keep the sidecar alive and observable when async work fails outside a tracked handler call. A rejection
+ *  from a timer / socket / emitter (the subscription pattern FFI delegation will lean on) has no delegation to
+ *  attribute, and on modern Node an unhandled rejection otherwise TERMINATES the process — failing every other
+ *  in-flight call with it. Log to stderr and carry on instead. */
+function installProcessGuards(): void {
+  process.on("unhandledRejection", (reason) => {
+    reportDiagnostic(`unhandled rejection (no delegation to attribute): ${detail(reason)}`);
+  });
+  process.on("uncaughtException", (error) => {
+    reportDiagnostic(`uncaught exception: ${detail(error)}`);
+  });
+  // stdout is the reply channel; once the runtime is gone, a write surfaces EPIPE as an 'error' event, which
+  // without a listener is itself an uncaught exception. The reply is moot on a dead channel — swallow it.
+  process.stdout.on("error", () => {});
+}
+
+/** Route every `console` method to stderr. User handler code (and its dependencies) call `console.log`, which
+ *  writes to stdout — the protocol's reply channel — where a stray line corrupts framing or is silently
+ *  dropped. stderr is inherited by the runtime, so handler logging stays visible without touching the wire. */
+function redirectConsoleToStderr(): void {
+  const toStderr =
+    (tag: string) =>
+    (...args: unknown[]): void => {
+      process.stderr.write(`[${tag}] ${formatConsoleArguments(args)}\n`);
+    };
+  console.log = toStderr("log");
+  console.info = toStderr("info");
+  console.warn = toStderr("warn");
+  console.error = toStderr("error");
+  console.debug = toStderr("debug");
+}
+
+function formatConsoleArguments(args: readonly unknown[]): string {
+  return args
+    .map((arg) => {
+      if (typeof arg === "string") return arg;
+      try {
+        return JSON.stringify(arg);
+      } catch {
+        return String(arg);
+      }
+    })
+    .join(" ");
 }
 
 export type { SidecarReply, SidecarRequest } from "./protocol.js";

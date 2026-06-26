@@ -30,6 +30,7 @@ import type {
   Loader,
   PersistedRun,
   PersistedRunEscalationAudit,
+  PersistedRunOutcome,
   PersistenceTx,
 } from "./persistence.js";
 import { Reactor } from "./reactor.js";
@@ -79,6 +80,9 @@ export class ApiReactor extends Reactor {
    *  with the run's `delegate` / `terminate` / `escalateAck`, so the API never sees a run without metadata).
    *  Flushed and cleared by `persist`. */
   private pendingRunStarts: PersistedRun[] = [];
+  /** This turn's run state / outcome updates — the durable SoT for a run's outcome (the run delegation row is
+   *  deleted on terminal). Written to `runs` in `persist`. */
+  private pendingRunOutcomes: PersistedRunOutcome[] = [];
   private pendingCancelReasons: Array<{ run: DelegationId; reason: string | null }> = [];
   private pendingAudits: PersistedRunEscalationAudit[] = [];
   /** Set when this turn registered an api-root-owned blob (a file upload), so `persist` ensures the api
@@ -97,22 +101,26 @@ export class ApiReactor extends Reactor {
     return this.apiRootId;
   }
 
-  /** The api root runs no engine threads — its turn writes the Layer 1 rows it owns plus the run-metadata
+  /** The api root runs no engine threads — its turn writes the run delegations it owns plus the run-metadata
    *  sidecar / audit it staged this turn (so they commit atomically with the events it produced). Starting a
-   *  run first ensures the api root's own `instances` row, before `flushLayer1` writes the run delegation
-   *  whose caller FK points at it (the api root has no producing `delegate` turn to create it otherwise). */
+   *  run first ensures the api root's own `instances` envelope, before `flushDelegations` writes the run
+   *  delegation whose caller FK points at it (the api root has no producing `delegate` turn to create it). */
   async persist(tx: PersistenceTx): Promise<void> {
-    // Ensure the api root's `instances` row before anything whose owner FK points at it: a run delegation
-    // (flushLayer1) or an api-root-owned blob (the pool, which the substrate flushes after this).
-    if (this.pendingRunStarts.length > 0 || this.pendingBlobRegistration) {
-      await tx.ensureApiRoot(this.apiRootId);
-    }
-    await this.flushLayer1(tx);
-    for (const run of this.pendingRunStarts) await tx.putRun(run);
+    // Stage the api root's envelope when a run / blob this turn needs it as an FK target, then let the base
+    // write the generic half (that envelope + the run delegations it owns). The api root raises no escalations
+    // and drops nothing. The run-metadata sidecar is the api's own data.
+    if (this.pendingRunStarts.length > 0 || this.pendingBlobRegistration)
+      this.markInstance(this.apiRootId, { delegationId: null, status: "running" });
+    await this.persistBase(tx.base);
+    // The run launch row first (a later outcome update targets it); then this turn's state / outcome updates
+    // (the durable SoT, since the run delegation row was just deleted by the base on its terminal).
+    for (const run of this.pendingRunStarts) await tx.api.putRun(run);
+    for (const outcome of this.pendingRunOutcomes) await tx.api.setRunOutcome(outcome);
     for (const { run, reason } of this.pendingCancelReasons)
-      await tx.setRunCancelReason(run, reason);
-    for (const audit of this.pendingAudits) await tx.putRunEscalationAudit(audit);
+      await tx.api.setRunCancelReason(run, reason);
+    for (const audit of this.pendingAudits) await tx.api.putRunEscalationAudit(audit);
     this.pendingRunStarts = [];
+    this.pendingRunOutcomes = [];
     this.pendingCancelReasons = [];
     this.pendingAudits = [];
     this.pendingBlobRegistration = false;
@@ -130,6 +138,7 @@ export class ApiReactor extends Reactor {
     for (const key of Object.keys(this.cancelReasons))
       delete this.cancelReasons[key as DelegationId];
     this.pendingRunStarts = [];
+    this.pendingRunOutcomes = [];
     this.pendingCancelReasons = [];
     this.pendingAudits = [];
     this.pendingBlobRegistration = false;
@@ -189,15 +198,15 @@ export class ApiReactor extends Reactor {
         snapshotId: snapshot,
         argument,
       });
-      this.send(
-        {
-          kind: "delegate",
-          delegation,
-          target: { kind: "named", name: qualifiedName, snapshot },
-          argument,
-        },
-        "core",
-      );
+      // The api root only ever talks to core (a run is a delegate to a core instance), so it stamps `to` here.
+      this.send({
+        kind: "delegate",
+        delegation,
+        target: { kind: "named", name: qualifiedName, snapshot },
+        argument,
+        from: this.name,
+        to: "core",
+      });
     });
     return { run: delegation, result, started };
   }
@@ -214,8 +223,9 @@ export class ApiReactor extends Reactor {
       if (!this.hasLiveDelegation(run)) return;
       if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
       this.transitionDelegation(run, "cancelling");
+      this.pendingRunOutcomes.push({ run, state: "cancelling", result: null, errorMessage: null });
       this.pendingCancelReasons.push({ run, reason: reason ?? null });
-      this.send({ kind: "terminate", delegation: run }, "core");
+      this.send({ kind: "terminate", delegation: run, from: this.name, to: "core" });
     });
   }
 
@@ -228,7 +238,14 @@ export class ApiReactor extends Reactor {
     return this.commands.enqueue(() => {
       const open = this.openEscalations[escalation];
       if (open === undefined) return;
-      this.send({ kind: "escalateAck", delegation: open.run, escalation, value }, "core");
+      this.send({
+        kind: "escalateAck",
+        delegation: open.run,
+        escalation,
+        value,
+        from: this.name,
+        to: "core",
+      });
       this.pendingAudits.push({
         run: open.run,
         escalation,
@@ -248,25 +265,14 @@ export class ApiReactor extends Reactor {
     }));
   }
 
-  /** Reload the api root's own warm state from durable rows: the live run delegations it issued
-   *  (`from = api`), so a recovered run is cancellable and can record its terminal state; and its answerable
-   *  open escalations — those addressed to it (`to = api`, i.e. raised by a run root) that are genuine
-   *  requests (a panic / control escape that reached the run root fails the run, it is not answered). Both
-   *  are self-selected from the loader; `delegation` on a user-facing escalation is the run it belongs to. */
+  /** Reload the api root's warm state from durable rows. The run delegations it issued (`from = api`, so a
+   *  recovered run is cancellable and can record its terminal state) reload through the base. Its *answerable*
+   *  set — escalations addressed to it (`to = api`, raised by a run root) — is its own data: every such row is
+   *  user-facing by construction (core opens a row only for an answerable request; a panic / control escape
+   *  reaching the run root fails the run, it is never an open escalation), so no re-classification is needed. */
   async load(loader: Loader): Promise<void> {
-    for (const row of await loader.delegations("api")) {
-      this.reloadDelegation(row.delegation, {
-        caller: row.caller,
-        peer: row.toReactor,
-        target: row.target,
-        argument: row.argument,
-        state: row.state,
-      });
-    }
-    for (const open of await loader.openEscalations({ to: "api" })) {
-      // Every open escalation addressed to the api root is user-facing by construction — core opens a row
-      // only for an answerable request (a panic / control escape reaching the run root fails the run, it is
-      // never an open escalation), so no re-classification is needed on load.
+    await this.loadBase(loader.base);
+    for (const open of await loader.api.answerableEscalations()) {
       this.openEscalations[open.escalation] = {
         run: open.delegation,
         escalation: open.escalation,
@@ -291,9 +297,21 @@ export class ApiReactor extends Reactor {
         // alive instead of dropping it.
         this.reownIncoming(event.value, this.apiRootId);
         this.transitionDelegation(event.delegation, "done", { result: event.value });
+        this.pendingRunOutcomes.push({
+          run: event.delegation,
+          state: "done",
+          result: event.value,
+          errorMessage: null,
+        });
         break;
       case "terminateAck":
         this.transitionDelegation(event.delegation, "gone");
+        this.pendingRunOutcomes.push({
+          run: event.delegation,
+          state: "cancelled",
+          result: null,
+          errorMessage: null,
+        });
         break;
       case "escalate":
         this.reactEscalate(event);
@@ -340,10 +358,15 @@ export class ApiReactor extends Reactor {
       };
       return;
     }
-    this.transitionDelegation(event.delegation, "failed", {
-      errorMessage: escalationErrorMessage(event),
+    const errorMessage = escalationErrorMessage(event);
+    this.transitionDelegation(event.delegation, "failed", { errorMessage });
+    this.pendingRunOutcomes.push({
+      run: event.delegation,
+      state: "error",
+      result: null,
+      errorMessage,
     });
-    this.send({ kind: "terminate", delegation: event.delegation }, "core");
+    this.send({ kind: "terminate", delegation: event.delegation, from: this.name, to: "core" });
   }
 
   /** Settle a run-root delegation either way and drop its handlers + any of its still-open escalations. */

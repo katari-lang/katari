@@ -37,18 +37,36 @@ export interface DeserializedEngine {
   nextScopeId: number;
 }
 
-export interface PersistedInstance {
+/** The generic instance *envelope* row (the columns every kind shares), written by the base reactor with
+ *  `kind = its own reactor name`. `projectId` is injected by the project-scoped transaction. */
+export interface PersistedInstanceEnvelope {
   id: InstanceId;
-  projectId: ProjectId;
   kind: InstanceKind;
   delegationId: DelegationId | null;
-  /** `null` for the `api` root (which runs no IR). */
-  target: DelegateTarget | null;
-  snapshotId: SnapshotId | null;
+  status: InstanceStatus;
+}
+
+/** The `core` instance extension row (`core_instances`) — what a CORE activation runs plus its engine
+ *  bookkeeping. Written by the CoreReactor; its threads ride alongside in the `threads` table. */
+export interface PersistedCoreInstance {
+  instanceId: InstanceId;
+  target: DelegateTarget;
+  snapshotId: SnapshotId;
+  ambientGenerics: GenericSubstitution | null;
+  engineState: EngineState;
+}
+
+/** The joined core row a reactivation reads (envelope ⋈ `core_instances`) — the shape `deserializeProject`
+ *  rebuilds a `CoreInstance` from. The engine load returns only `core` instances, so every field is present.
+ *  (No `projectId`: the load is already project-scoped and a `CoreInstance` carries none.) */
+export interface PersistedInstance {
+  id: InstanceId;
+  delegationId: DelegationId | null;
+  target: DelegateTarget;
+  snapshotId: SnapshotId;
   status: InstanceStatus;
   ambientGenerics: GenericSubstitution | null;
-  /** `null` for the `api` root. */
-  engineState: EngineState | null;
+  engineState: EngineState;
 }
 
 export interface PersistedThread {
@@ -85,28 +103,25 @@ export interface PersistedBlob {
   semanticKind: SemanticKind;
 }
 
-export interface SerializedInstance {
-  instance: PersistedInstance;
+/** The `core` instance extension write: its `core_instances` row + its thread tree. The generic envelope is
+ *  written separately by the base reactor; scopes are an independent `ResourcePool` resource. */
+export interface SerializedCoreInstance {
+  instance: PersistedCoreInstance;
   threads: PersistedThread[];
 }
 
-/** Serialise a still-running `core` instance + its threads into their row shapes. Scopes are NOT carried
- *  here — they are an independent resource persisted by the `ResourcePool` (`serializeScope`), so an
- *  instance's Layer 2 is just its row + thread tree. (Only core instances carry engine state; the `api`
- *  root's runs / escalations persist as the edge tables, not here.) */
-export function serializeInstance(
+/** Serialise a still-running `core` instance's extension (`core_instances`) + its threads into their row
+ *  shapes. The generic envelope (id / kind / delegation / status) is written by the base reactor; scopes are
+ *  the `ResourcePool`'s. */
+export function serializeCoreInstance(
   projectId: ProjectId,
   instance: CoreInstance,
-): SerializedInstance {
+): SerializedCoreInstance {
   return {
     instance: {
-      id: instance.id,
-      projectId,
-      kind: "core",
-      delegationId: instance.delegationId,
+      instanceId: instance.id,
       target: instance.target,
       snapshotId: agentSnapshot(instance.target),
-      status: instance.status,
       ambientGenerics: instance.ambientGenerics ?? null,
       engineState: engineStateOf(instance),
     },
@@ -125,6 +140,9 @@ export function serializeInstance(
   };
 }
 
+/** Serialise the project's permanent `api` management root as a bare instance row — kind `api`, no IR payload
+ *  (no target / snapshot / engine state / threads). The api root is the only instance with no producing
+ *  `delegate` turn of its own, yet it is the FK target of every run delegation's caller and of a run result's
 /** Serialise one scope into its row shape — the unit the `ResourcePool` persists (`owner = null` for a scope
  *  in transit between owners). Scopes are CORE-global, owned by whichever instance (or the api root) holds a
  *  value that captures them, and live independently of any one instance's Layer 2. */
@@ -185,9 +203,7 @@ export function deserializeProject(
 
   const instanceMap: Record<InstanceId, CoreInstance> = {};
   for (const row of instances) {
-    // Only `core` instances carry engine state; the api root (no engine state / target) is a Layer 1 entity,
-    // never an engine instance, so it never appears here (the DB load filters it out by null engine_state).
-    if (row.engineState === null || row.target === null) continue;
+    // The engine load returns only `core` instances (envelope ⋈ core_instances), so every row is complete.
     instanceMap[row.id] = {
       kind: "core",
       id: row.id,

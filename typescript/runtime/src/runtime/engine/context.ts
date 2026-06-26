@@ -7,7 +7,12 @@
 // drains (domain-model §5: "DB reflection after the internal queue is empty").
 
 import type { BlockId, BlockInformation } from "@katari-lang/types";
-import type { ExternalEventBody, InternalEvent } from "../event/types.js";
+import type {
+  ExternalEvent,
+  ExternalEventBody,
+  InternalEvent,
+  ReactorName,
+} from "../event/types.js";
 import type { ProjectId, SnapshotId } from "../ids.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
@@ -47,9 +52,10 @@ export interface LogEntry {
 export interface StepBuffers {
   /** The internal event queue, drained to empty within the turn. */
   internalQueue: InternalEvent[];
-  /** External events produced this turn (routing-less payloads — the CORE reactor stamps from/to when it
-   *  harvests them), flushed to the actor mailbox after the DB persist. */
-  outbound: ExternalEventBody[];
+  /** External events produced this turn — fully routed `ExternalEvent`s. The engine builds a routing-less
+   *  payload and hands it to `emit`, which stamps `from` / `to` via the reactor's `route` at the emit point,
+   *  so the actor harvests self-describing events (it never re-routes). Flushed to the mailbox after persist. */
+  outbound: ExternalEvent[];
   /** Structured log lines emitted this turn. */
   logs: LogEntry[];
 }
@@ -65,12 +71,17 @@ export interface StepContext {
   readonly buffers: StepBuffers;
   /** Push an internal event onto this turn's queue (processed before the turn ends). */
   enqueue(event: InternalEvent): void;
-  /** Buffer an outbound external event (flushed by the actor after persist). */
-  emit(event: ExternalEventBody): void;
+  /** Buffer an outbound external event: the emitting thread / instance knows the destination reactor (`to`),
+   *  so it supplies it — a downward leg by the callee (a `delegate`'s target, a proxy thread's kind), an
+   *  upward reply by the summoner (`instance.callerReactor`). The context stamps `from` and queues the full
+   *  `ExternalEvent`, so routing lives entirely at the engine edge and the actor never re-routes. */
+  emit(event: ExternalEventBody, to: ReactorName): void;
   log(level: LogLevel, message: string): void;
 }
 
-/** Build a fresh `StepContext` for one instance's turn over empty buffers. */
+/** Build a fresh `StepContext` for one instance's turn over empty buffers. `reactorName` is stamped as the
+ *  `from` of every emitted event (the engine runs as the `core` reactor); the emit sites supply each event's
+ *  `to` from edge knowledge, so the engine produces fully routed, self-describing events. */
 export function makeStepContext(args: {
   projectId: ProjectId;
   store: ProjectStore;
@@ -78,6 +89,7 @@ export function makeStepContext(args: {
   ir: IrAccess;
   prims: PrimRunner;
   blobs: BlobStore;
+  reactorName: ReactorName;
 }): StepContext {
   const buffers: StepBuffers = { internalQueue: [], outbound: [], logs: [] };
   return {
@@ -91,8 +103,8 @@ export function makeStepContext(args: {
     enqueue(event) {
       buffers.internalQueue.push(event);
     },
-    emit(event) {
-      buffers.outbound.push(event);
+    emit(event, to) {
+      buffers.outbound.push({ ...event, from: args.reactorName, to });
     },
     log(level, message) {
       buffers.logs.push({ level, message });

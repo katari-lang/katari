@@ -286,7 +286,7 @@ export type InstanceStatus = "running" | "cancelling";
  *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. Api-targeted events
  *  route to the `ApiReactor` by the substrate's `event.to`, not by any caller-id comparison here; that is
  *  why there is no `ApiInstance` in the engine model below. */
-export type InstanceKind = "core" | "api";
+export type InstanceKind = "core" | "api" | "ffi";
 
 /**
  * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right
@@ -302,9 +302,10 @@ export type CoreInstance = {
    *  of this instance's `delegateAck`. (`null` only defensively — a real core instance is always summoned.) */
   delegationId: DelegationId | null;
   /** The reactor that summoned this instance (the summoning `delegate`'s `from`): `core` for a sub-call,
-   *  `api` for a run root. A reply this instance emits (delegateAck / escalate / terminateAck) routes back
-   *  here — a recorded fact, so core never infers the destination from a routing map's absence and a future
-   *  ffi caller routes the same way. */
+   *  `api` for a run root. This is the callee-side record of the handled delegation's *summoner*: the engine
+   *  never reads it; the reactor base class seeds its handled-delegation routing from it (on accept and on
+   *  load) so the replies this instance emits route back to the summoner. Persisted as instance payload
+   *  because the callee's own rows do not otherwise carry who called it (the issued row is the caller's). */
   callerReactor: ReactorName;
   /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here. */
   target: DelegateTarget;

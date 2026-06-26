@@ -11,7 +11,7 @@
 // implementations: an in-memory no-op (`InMemoryPersistence` — the warm store is the truth), an in-memory
 // *storing* twin (`StoringPersistence`, for recovery tests), and a drizzle-backed one (`DbPersistence`).
 
-import type { DelegationState, EscalationState } from "../../db/tables/execution.js";
+import type { DelegationState, EscalationState, RunState } from "../../db/tables/execution.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
@@ -27,8 +27,9 @@ import type { Value } from "../value/types.js";
 import type {
   DeserializedEngine,
   PersistedBlob,
+  PersistedInstanceEnvelope,
   PersistedScope,
-  SerializedInstance,
+  SerializedCoreInstance,
 } from "./persistence-codec.js";
 
 /** A caller-owned delegation row at one instant (the `delegations` table shape). The caller reactor (core
@@ -74,16 +75,25 @@ export interface OutboxMessage {
   event: ExternalEvent;
 }
 
-/** A run's API metadata sidecar (`runs` row), written by the api root atomically with the run's `delegate`
- *  so a run is never visible without its launch metadata (and vice versa). The run's *outcome* is its
- *  delegation row, not this; this holds only what the delegation does not — the human label + launch
- *  metadata. `run` is the run delegation id (the join key). */
+/** A run's launch record (`runs` row), written by the api root atomically with the run's `delegate` so a run
+ *  is never visible without its launch metadata. `run` is the run delegation id (the run's stable handle).
+ *  The run starts `running`; its outcome is updated later via `setRunOutcome`. */
 export interface PersistedRun {
   run: DelegationId;
   name: string;
   qualifiedName: string;
   snapshotId: SnapshotId;
   argument: Value | null;
+}
+
+/** A run's state / outcome update — the api root writes it as the run advances (`cancelling` on a cancel
+ *  request; `done` / `cancelled` / `error` with its result / error at the terminal). Since the run delegation
+ *  row is deleted on terminal, this is the durable source of truth for the run's outcome. */
+export interface PersistedRunOutcome {
+  run: DelegationId;
+  state: RunState;
+  result: Value | null;
+  errorMessage: string | null;
 }
 
 /** One answered user-facing escalation, recorded for the run's history (`run_escalations_audit`) when the
@@ -96,13 +106,25 @@ export interface PersistedRunEscalationAudit {
   answer: Value;
 }
 
-/** One in-flight FFI call — the `ffi` reactor's per-delegation callee instance (the `ffi_calls` table), keyed
- *  by its delegation. Re-dispatched / re-aborted on recovery by status. `instance` is the call's own id (the
- *  issuer on its replies); `caller` is the reactor to reply to. */
-export interface PersistedFfiCall {
+/** The `ffi` instance extension write (`ffi_instances`) — the call-specific state behind an `ffi`-kind
+ *  instance envelope. The delegation it handles is on the envelope (`delegation_id`), so it is not repeated
+ *  here; `projectId` is injected by the transaction. */
+export interface PersistedFfiInstanceRow {
+  instanceId: InstanceId;
+  /** The snapshot whose sidecar bundle hosts the handler — so a recovery re-dispatch targets the right one. */
+  snapshotId: SnapshotId;
+  key: string;
+  argument: Value | null;
+  callerReactor: ReactorName;
+  status: "running" | "cancelling" | "awaitingAnswer";
+}
+
+/** One in-flight FFI call a reactivation reads (envelope ⋈ `ffi_instances`): the ffi reactor rebuilds its
+ *  warm call keyed by `delegation` (from the envelope). `instance` is the call's own id (the issuer on its
+ *  replies); `caller` is the reactor to reply to. */
+export interface PersistedFfiInstance {
   delegation: DelegationId;
   instance: InstanceId;
-  /** The snapshot whose sidecar bundle hosts the handler — so a recovery re-dispatch targets the right one. */
   snapshot: SnapshotId;
   key: string;
   argument: Value | null;
@@ -110,55 +132,85 @@ export interface PersistedFfiCall {
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
-/** The per-turn write surface a reactor + the substrate use to commit one turn atomically. Method-call order
- *  is the FK order the caller is responsible for: a reactor writes its instance (`putInstance`) before the
- *  Layer 1 rows that reference it, and `dropInstance` (which cascades the rows the instance owns) comes last.
- *  Every method is a no-op-safe write — the in-memory twin mutates its maps, the DB issues one statement. */
-export interface PersistenceTx {
-  /** Upsert a caller-owned delegation row (its current state). */
+/** The base-class write surface: the generic state every reactor's base owns — the instance envelope, the
+ *  caller-owned delegations, the raiser-owned escalations, and the cascade drop. A concrete reactor never
+ *  touches this directly; it goes through `Reactor.persistBase`, so the protocol is uniform (and a reactor
+ *  that issues no delegations, like `ffi` today, can start to without any new wiring). */
+export interface BaseTx {
+  /** Upsert the generic envelope (id / kind / delegation / status), before any FK that points at the instance. */
+  putInstanceEnvelope(envelope: PersistedInstanceEnvelope): Promise<void>;
+  /** Upsert a live caller-owned delegation row (running / cancelling). */
   putDelegation(row: PersistedDelegation): Promise<void>;
-  /** Upsert a raiser-owned escalation row (its current state). */
+  /** Delete a delegation that reached a terminal state (mirroring its in-memory eviction — the row is pure
+   *  live routing, its outcome lives on `runs`). Idempotent. */
+  deleteDelegation(delegation: DelegationId): Promise<void>;
+  /** Upsert an open raiser-owned escalation row. */
   putEscalation(row: PersistedEscalation): Promise<void>;
-  /** Upsert a still-running core instance's Layer 2 (its instance row + thread tree, replaced wholesale).
-   *  Scopes are NOT here — they persist independently through `putScope`. */
-  putInstance(serialized: SerializedInstance): Promise<void>;
-  /** Upsert one scope (the `ResourcePool`'s unit). `owner` may be `null` (in transit between owners). */
-  putScope(scope: PersistedScope): Promise<void>;
-  /** Delete one scope the intra-instance GC reclaimed (it is owned by a still-running instance, so no drop
-   *  cascade removes it). */
-  deleteScope(scopeId: ScopeId): Promise<void>;
-  /** Upsert one blob's ownership + descriptor row (the `ResourcePool`'s unit; bytes live in the BlobStore).
-   *  `owner` may be `null` (in transit). */
-  putBlob(blob: PersistedBlob): Promise<void>;
-  /** Delete one blob row the GC reclaimed (one owned by a still-running instance; an owner *drop* cascades
-   *  the row instead). The bytes are freed separately, post-commit. */
-  dropBlob(blobId: BlobId): Promise<void>;
-  /** Drop a completed / torn-down instance, cascading its threads, the scopes it still owns, its issued
-   *  delegations, and its raised escalations (mirrors the tables' ON DELETE CASCADE). A scope its result
-   *  released to in-transit (`owner = null`) is no longer owned by it, so it survives the cascade. */
+  /** Delete an answered escalation (its in-memory eviction; the answered Q&A lives in the escalations audit).
+   *  Idempotent. */
+  deleteEscalation(escalation: EscalationId): Promise<void>;
+  /** Drop a completed / torn-down instance, cascading its extension / threads / owned scopes / issued
+   *  delegations / raised escalations (mirrors the tables' ON DELETE CASCADE). */
   dropInstance(instanceId: InstanceId): Promise<void>;
+}
+
+/** The `core` reactor's *own-data* write surface — just its `core_instances` extension + thread tree. The
+ *  envelope / delegations / escalations / drop go through `BaseTx`. */
+export interface CoreTx {
+  putCoreInstance(serialized: SerializedCoreInstance): Promise<void>;
+}
+
+/** The `api` reactor's *own-data* write surface — the run-metadata sidecar / audit it owns. */
+export interface ApiTx {
+  /** Insert a run's launch record — written in the same commit as the run's `delegate`, so startRun is atomic
+   *  (a run is never durable without its launch metadata). Starts `running`. Idempotent. */
+  putRun(run: PersistedRun): Promise<void>;
+  /** Update a run's state / outcome (the durable SoT now the delegation row is deleted on terminal): `state`,
+   *  and `result` / `errorMessage` at a terminal, with `completedAt` set then. In the same commit as the
+   *  event that caused it (a `terminate`, or the terminal `delegateAck` / `terminateAck` / `escalate`). */
+  setRunOutcome(outcome: PersistedRunOutcome): Promise<void>;
+  /** Record a user's cancel reason on a run, in the same commit as its `terminate`. */
+  setRunCancelReason(run: DelegationId, reason: string | null): Promise<void>;
+  /** Append a run's answered-escalation history row, in the same commit as the relayed `escalateAck`. */
+  putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
+}
+
+/** The `ffi` reactor's *own-data* write surface — its `ffi_instances` extension (the envelope is base). */
+export interface FfiTx {
+  putFfiInstance(row: PersistedFfiInstanceRow): Promise<void>;
+}
+
+/** The `ResourcePool`'s write surface: the independent scope / blob-ownership resource. `owner` may be `null`
+ *  (a value in transit between owners mid-ascent). */
+export interface PoolTx {
+  putScope(scope: PersistedScope): Promise<void>;
+  /** Delete one scope the intra-instance GC reclaimed (owned by a still-running instance, so no cascade). */
+  deleteScope(scopeId: ScopeId): Promise<void>;
+  putBlob(blob: PersistedBlob): Promise<void>;
+  /** Delete one blob row the GC reclaimed; its bytes are freed separately, post-commit. */
+  dropBlob(blobId: BlobId): Promise<void>;
+}
+
+/** The substrate's transactional-outbox write surface. */
+export interface OutboxTx {
   /** Delete the inbound outbox row this turn consumed (`null` for an originated turn — an api command or an
    *  ephemeral FFI completion — which has no durable row to delete). */
   consumeOutbox(seq: OutboxSeq): Promise<void>;
   /** Insert the events this turn produced as outbox rows (delivered to the mailbox after the commit). */
   produceOutbox(messages: OutboxMessage[]): Promise<void>;
-  /** Insert a run's metadata sidecar — written by the api root in the same commit as the run's `delegate`, so
-   *  startRun is atomic (a run is never durable without its launch metadata). Idempotent. */
-  putRun(run: PersistedRun): Promise<void>;
-  /** Record a user's cancel reason on a run, in the same commit as its `terminate`. */
-  setRunCancelReason(run: DelegationId, reason: string | null): Promise<void>;
-  /** Append a run's answered-escalation history row, in the same commit as the relayed `escalateAck`. */
-  putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
-  /** Idempotently ensure the project's permanent `api` management root `instances` row exists. The api root
-   *  is the only durable instance with no producing `delegate` turn of its own (it has no Layer 2), yet it is
-   *  the FK target of every run delegation's caller and of a run result's escaped scopes — so the api reactor
-   *  ensures it in the same commit as the run's `delegate`, before that delegation's FK. A no-op for the
-   *  in-memory backends (no FK to satisfy). */
-  ensureApiRoot(apiRootId: InstanceId): Promise<void>;
-  /** Upsert an in-flight FFI call (the ffi reactor's callee-side record). */
-  putFfiCall(call: PersistedFfiCall): Promise<void>;
-  /** Drop a resolved FFI call. */
-  dropFfiCall(delegation: DelegationId): Promise<void>;
+}
+
+/** The per-turn write surface over one shared transaction: the base-managed generic rows go through `tx.base`
+ *  (via `Reactor.persistBase`), each reactor's own extension through `tx.<name>`, the pool through `tx.pool`,
+ *  the substrate through `tx.outbox`. So a concrete reactor's `persist` is `persistBase(tx.base, …)` plus its
+ *  own data — the flat god-interface is gone, and the generic half is written in exactly one place. */
+export interface PersistenceTx {
+  base: BaseTx;
+  core: CoreTx;
+  api: ApiTx;
+  ffi: FfiTx;
+  pool: PoolTx;
+  outbox: OutboxTx;
 }
 
 /** A persisted open escalation (an `escalations` row still in the `open` state). Each reactor self-selects
@@ -174,28 +226,54 @@ export interface PersistedOpenEscalation {
   argument: Value | null;
 }
 
-/** The per-reactor read surface, symmetric to `PersistenceTx` on the write side: on reactivation each reactor
- *  pulls only the rows it owns, so there is no central blob nor cross-reactor classification. The engine
- *  graph rebuilds the core reactor's store; routing (which instance issued / handles each delegation) is
- *  rederived from the surviving `DelegateThread`s and instance `delegationId`s, not from a separate edge map.
- *  Every query returns only live (running / cancelling) delegations / open escalations — terminal rows are
- *  history. */
-export interface Loader {
-  /** The core engine graph (instances + their threads + the shared scopes). */
-  engine(): Promise<DeserializedEngine>;
-  /** Live delegations issued by `from` (the caller's reactor) — core takes `core`, the api root takes `api`. */
+/** The `core` reactor's read surface: its engine graph plus the Layer 1 edges it owns. Every query returns
+ *  only live (running / cancelling) delegations / open escalations — terminal rows are history. */
+/** The base-class read surface, symmetric to `BaseTx`: the generic Layer 1 edges a reactor owns, reloaded
+ *  through `Reactor.loadBase` (which passes `this.name`). A reactor reloads the delegations it *issued* and
+ *  the escalations it *raised* — both `from = self`. Uniform across reactors (a reactor that raises / issues
+ *  none just gets an empty set). */
+export interface BaseLoader {
+  /** The live delegations issued by `from` (the caller's reactor). */
   delegations(from: ReactorName): Promise<PersistedDelegation[]>;
-  /** Open escalations matching a reactor filter: `{ from }` for the raiser (core takes all it raised),
-   *  `{ to }` for the addressed reactor (the api root takes `to = "api"`, its answerable set). */
-  openEscalations(filter: {
-    from?: ReactorName;
-    to?: ReactorName;
-  }): Promise<PersistedOpenEscalation[]>;
-  /** Undrained outbox rows (produced but not consumed), replayed into the mailbox so an in-flight event is
-   *  not lost across a restart. */
-  outbox(): Promise<OutboxMessage[]>;
-  /** The ffi reactor's in-flight calls, to re-dispatch / re-abort on recovery. */
-  ffiCalls(): Promise<PersistedFfiCall[]>;
+  /** The open escalations raised by `from` (the raiser's reactor) — so the raiser can mark them answered. */
+  raisedEscalations(from: ReactorName): Promise<PersistedOpenEscalation[]>;
+}
+
+/** The `core` reactor's own-data read surface: just its engine graph (its delegations / escalations come
+ *  through `BaseLoader`). */
+export interface CoreLoader {
+  /** The core engine graph (instances + their threads + the shared scopes / blobs). */
+  engine(): Promise<DeserializedEngine>;
+}
+
+/** The `api` reactor's own-data read surface: the escalations *addressed to* it (`to = api`) — its answerable
+ *  set, a projection of core-raised rows, not edges it owns (those come through `BaseLoader`). */
+export interface ApiLoader {
+  answerableEscalations(): Promise<PersistedOpenEscalation[]>;
+}
+
+/** The `ffi` reactor's own-data read surface: its in-flight instances (calls), to re-dispatch / re-abort. */
+export interface FfiLoader {
+  instances(): Promise<PersistedFfiInstance[]>;
+}
+
+/** The substrate's read surface: the undrained outbox, replayed into the mailbox so an in-flight event is not
+ *  lost across a restart. */
+export interface OutboxLoader {
+  pending(): Promise<OutboxMessage[]>;
+}
+
+/** The per-owner read surface, symmetric to `PersistenceTx`: the base-managed edges through `loader.base`
+ *  (via `Reactor.loadBase`), each reactor's own data through `loader.<name>`, the outbox replay through
+ *  `loader.outbox`. The engine graph rebuilds the core store; routing is rederived from the surviving
+ *  `DelegateThread`s and instance `delegationId`s. (Scopes / blobs ride in `core.engine()` into the shared
+ *  store, which the pool then reads — it has no separate load.) */
+export interface Loader {
+  base: BaseLoader;
+  core: CoreLoader;
+  api: ApiLoader;
+  ffi: FfiLoader;
+  outbox: OutboxLoader;
 }
 
 export interface Persistence {
@@ -224,38 +302,65 @@ export class InMemoryPersistence implements Persistence {
 }
 
 const NO_OP_TX: PersistenceTx = {
-  async putDelegation() {},
-  async putEscalation() {},
-  async putInstance() {},
-  async putScope() {},
-  async deleteScope() {},
-  async putBlob() {},
-  async dropBlob() {},
-  async dropInstance() {},
-  async consumeOutbox() {},
-  async produceOutbox() {},
-  async putRun() {},
-  async setRunCancelReason() {},
-  async putRunEscalationAudit() {},
-  async ensureApiRoot() {},
-  async putFfiCall() {},
-  async dropFfiCall() {},
+  base: {
+    async putInstanceEnvelope() {},
+    async putDelegation() {},
+    async deleteDelegation() {},
+    async putEscalation() {},
+    async deleteEscalation() {},
+    async dropInstance() {},
+  },
+  core: {
+    async putCoreInstance() {},
+  },
+  api: {
+    async putRun() {},
+    async setRunOutcome() {},
+    async setRunCancelReason() {},
+    async putRunEscalationAudit() {},
+  },
+  ffi: {
+    async putFfiInstance() {},
+  },
+  pool: {
+    async putScope() {},
+    async deleteScope() {},
+    async putBlob() {},
+    async dropBlob() {},
+  },
+  outbox: {
+    async consumeOutbox() {},
+    async produceOutbox() {},
+  },
 };
 
 const EMPTY_LOADER: Loader = {
-  async engine() {
-    return { instances: {}, scopes: {}, blobs: {}, nextScopeId: 0 };
+  base: {
+    async delegations() {
+      return [];
+    },
+    async raisedEscalations() {
+      return [];
+    },
   },
-  async delegations() {
-    return [];
+  core: {
+    async engine() {
+      return { instances: {}, scopes: {}, blobs: {}, nextScopeId: 0 };
+    },
   },
-  async openEscalations() {
-    return [];
+  api: {
+    async answerableEscalations() {
+      return [];
+    },
   },
-  async outbox() {
-    return [];
+  ffi: {
+    async instances() {
+      return [];
+    },
   },
-  async ffiCalls() {
-    return [];
+  outbox: {
+    async pending() {
+      return [];
+    },
   },
 };

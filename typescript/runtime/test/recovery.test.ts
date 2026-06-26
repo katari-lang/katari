@@ -226,8 +226,8 @@ describe("recovery", () => {
     await actorTwo.activate();
 
     const done = await waitUntil(() => {
-      const edge = persistence.peekDelegation(run);
-      return edge?.state === "done" ? edge : undefined;
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
     });
     expect(done.result).toEqual({ kind: "string", value: "step1-done" });
   });
@@ -297,8 +297,8 @@ describe("recovery", () => {
     if (escalation === undefined) throw new Error("no recovered open escalation");
     await actorTwo.answerEscalation(escalation, { kind: "integer", value: 42 });
     const done = await waitUntil(() => {
-      const edge = persistence.peekDelegation(run);
-      return edge?.state === "done" ? edge : undefined;
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
     });
     expect(done.result).toEqual({ kind: "integer", value: 42 });
     expect(actorTwo.listOpenEscalations()).toHaveLength(0);
@@ -389,10 +389,11 @@ describe("recovery", () => {
     const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
     await expect(result).rejects.toThrow(/panic.*number/);
-    // The failure is durable in Layer 1 by the time the run settles (recorded before the promise rejects).
-    const edge = persistence.peekDelegation(run);
-    expect(edge?.state).toBe("failed");
-    expect(edge?.errorMessage).toMatch(/panic.*number/);
+    // The failure is durable on the `runs` record by the time the run settles (the run delegation row, pure
+    // live routing, was deleted on its terminal — the outcome lives here now).
+    const record = persistence.peekRun(run);
+    expect(record?.state).toBe("error");
+    expect(record?.errorMessage).toMatch(/panic.*number/);
     // And the run's root instance (and its descendants) were torn down — nothing left suspended.
     await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
   });
@@ -445,6 +446,13 @@ describe("recovery", () => {
       target,
       argument: null,
     });
+    // startRun also writes the `runs` row (the run's durable record); seed it so recovery can record the outcome.
+    persistence.seedRun(run, {
+      name: "main",
+      qualifiedName: createAgentName("main"),
+      snapshotId: SNAPSHOT,
+      argument: null,
+    });
     persistence.seedOutbox({
       seq: newOutboxSeq(),
       issuer: apiRootIdOf(PROJECT),
@@ -455,8 +463,8 @@ describe("recovery", () => {
     await actor.activate();
 
     const done = await waitUntil(() => {
-      const edge = persistence.peekDelegation(run);
-      return edge?.state === "done" ? edge : undefined;
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
     });
     expect(done.result).toEqual({ kind: "integer", value: 7 });
     expect(persistence.outboxSize()).toBe(0);
@@ -467,7 +475,7 @@ describe("recovery", () => {
     // (turn 2). The actor must not advance on that failure: it drops the warm engine state and reactivates
     // from durable (the still-running delegation row + the unconsumed delegate in the outbox), replays the
     // turn — now succeeding — and the run completes. The in-process result promise is rejected on the poison
-    // (a non-SoT hook), so the durable delegation is the proof the run finished.
+    // (a non-SoT hook), so the durable `runs` outcome is the proof the run finished.
     const store = new StoringPersistence();
     const persistence = new FailingPersistence(store, 2);
     const actor = makeActor(constantIr(), persistence);
@@ -475,8 +483,8 @@ describe("recovery", () => {
     await expect(result).rejects.toThrow(/reset after a commit failure/);
 
     const done = await waitUntil(() => {
-      const edge = store.peekDelegation(run);
-      return edge?.state === "done" ? edge : undefined;
+      const record = store.peekRun(run);
+      return record?.state === "done" ? record : undefined;
     });
     expect(done.result).toEqual({ kind: "integer", value: 7 });
     // Recovery quiesced: the outbox drained and nothing is left suspended.

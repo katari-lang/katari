@@ -1,18 +1,21 @@
-// The execution layer: instances (the ownership / cascade / load unit), the request/capability edges
-// (delegations, escalations), and the API's per-run management record (runs + escalations audit).
-// In-flight external (FFI) calls live as `ExternalThread` rows in `threads`, not a separate table.
+// The execution layer: the instance envelope + its per-kind extensions (`core_instances` / `ffi_instances`),
+// the request/capability edges (delegations, escalations), and the API's per-run management record (runs +
+// escalations audit). The instance is class-table inheritance — a generic envelope (the ownership / cascade /
+// load unit) plus a kind-specific extension keyed by it; an in-flight external (FFI) call is an `ffi`-kind
+// instance (`ffi_instances`), not a separate `ffi_calls` table.
 //
 // An instance is ephemeral: it self-deletes at its terminal (the project cascade is only a crash
 // backstop), and terminal outcomes live on `runs`, not here. The parent→child edge is the `delegations`
 // row, not a column on the instance — a child carries only its `delegation_id` (which correlates its
 // `delegateAck`, e.g. when one parent runs several delegates in parallel), and the parent is recovered
-// through `delegations.caller_instance_id`. `target` holds the agent reference `(qname, snapshot) |
-// closure`; `snapshotId` is the version denormalised out of it for the FK.
+// through `delegations.caller_instance_id`. A `core` instance's `target` holds the agent reference
+// `(qname, snapshot) | closure`; its `snapshotId` is the version denormalised out of it for the FK.
 //
-// Snapshot retention: a *running* version is pinned by `instances.snapshotId` (ON DELETE NO ACTION) —
-// that, plus `projects.head_snapshot_id`, is what keeps a live snapshot undeletable. A finished run's
-// `runs.snapshotId` is only audit, so it is ON DELETE SET NULL: it must NOT keep every version a run
-// ever touched alive forever, or future snapshot GC could never reclaim anything.
+// Snapshot retention: a *running* version is pinned by an extension's `snapshotId` (`core_instances` /
+// `ffi_instances`, ON DELETE NO ACTION) — that, plus `projects.head_snapshot_id`, is what keeps a live
+// snapshot undeletable. A finished run's `runs.snapshotId` is only audit, so it is ON DELETE SET NULL: it
+// must NOT keep every version a run ever touched alive forever, or future snapshot GC could never reclaim
+// anything.
 
 import { sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -31,13 +34,27 @@ import type { DelegateTarget, ExternalEvent, ReactorName } from "../../runtime/e
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
-// Persisted lifecycle states of the Layer 1 entities, enforced both at the type level (`$type`) and by
-// the DB CHECK constraints below so recovery can trust the stored value. The terminal states are kept
-// in place (the row is not deleted on completion) so a delegation / escalation row is its own durable
-// history — `runs` and the escalations audit are projections of these, not separate sources of truth.
+// Persisted lifecycle states of the Layer 1 entities, enforced both at the type level (`$type`) and by the
+// DB CHECK constraints below so recovery can trust the stored value. A delegation / escalation row is pure
+// live routing state: it is *deleted* when it reaches a terminal state (mirroring the reactor's in-memory
+// eviction), or cascaded away with its owner instance. The durable outcome of a run lives on the `runs` row
+// (written by the api root on completion); the escalations audit is a separate record. So these tables hold
+// only live rows — there is no terminal history here.
 export type DelegationState = "running" | "cancelling" | "done" | "gone" | "failed";
 export type EscalationState = "open" | "answered";
 export type RunState = "running" | "cancelling" | "done" | "error" | "cancelled";
+
+/** The terminal run states — a run that reached one of these is finished (its `completedAt` is set). */
+export const TERMINAL_RUN_STATES = [
+  "done",
+  "error",
+  "cancelled",
+] as const satisfies readonly RunState[];
+
+/** Whether a run state is terminal (done / error / cancelled). */
+export function isTerminalRunState(state: RunState): boolean {
+  return TERMINAL_RUN_STATES.some((terminal) => terminal === state);
+}
 
 /** The non-terminal delegation states — the ones that still carry routing and still accept a transition.
  *  `done` / `gone` / `failed` are terminal and sticky. This is the single source of truth for "is this
@@ -53,6 +70,11 @@ export function isLiveDelegationState(state: DelegationState): boolean {
   return LIVE_DELEGATION_STATES.some((live) => live === state);
 }
 
+// The instance *envelope*: the generic columns every kind shares (the ownership / cascade / load unit). The
+// kind-specific state lives in a per-kind extension table (`core_instances`, `ffi_instances`) keyed by this
+// id — class-table inheritance, so the envelope carries no nullable subtype columns and a new reactor kind is
+// a new extension table, not an `instances` ALTER. The `api` management root is a bare envelope row (no
+// extension). Each reactor persists this through the base class uniformly (kind = its own reactor name).
 export const instances = pgTable(
   "instances",
   {
@@ -60,29 +82,17 @@ export const instances = pgTable(
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    /** The delegation that summoned this instance; `null` for the project root. It both correlates this
+    /** The delegation that summoned this instance; `null` for the `api` root. It both correlates this
      *  instance's `delegateAck` and, via `delegations.caller_instance_id`, recovers the parent. Set null
      *  if its delegation row is dropped (which only happens after this instance has already self-deleted). */
     delegationId: uuid("delegation_id").references((): AnyPgColumn => delegations.id, {
       onDelete: "set null",
     }),
-    /** Which structure this instance carries: `core` runs IR (target / snapshot / engine_state below);
-     *  `api` is the project's management root (none of those — its runs / escalations are the normalised
-     *  edge tables). */
+    /** Which reactor owns this instance (= the reactor's own name): `core` runs IR, `ffi` runs an external
+     *  handler, `api` is the management root. Its kind-specific state is the matching extension table. */
     kind: text("kind").$type<InstanceKind>().notNull(),
-    /** What a `core` instance runs: `(qname, snapshot)` or a closure reference. `null` for the `api` root. */
-    target: jsonb("target").$type<DelegateTarget>(),
-    /** Version denormalised from `target`, for the FK (NO ACTION; running versions are undeletable). `null`
-     *  for the `api` root, which is not pinned to a version. */
-    snapshotId: uuid("snapshot_id").references(() => snapshots.id),
     /** running | cancelling — an instance is ephemeral, so it has no terminal state (that lives on `runs`). */
     status: text("status").$type<InstanceStatus>().notNull(),
-    /** The generic substitution this activation was summoned with (from the spawning `delegate.generics`).
-     *  Inner scopes inherit it implicitly; not stored on `scopes`. */
-    ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
-    /** The engine bookkeeping with no dedicated column (routing maps, cancel exits, id counters); its
-     *  threads ride in `threads`. The actor's routing maps are rebuilt from these on load. */
-    engineState: jsonb("engine_state").$type<EngineState>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
@@ -94,9 +104,49 @@ export const instances = pgTable(
     // `set null` on delegation delete must find the referencing instances without scanning the table.
     index("instances_delegation_id_idx").on(table.delegationId),
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
-    check("instances_kind_check", sql`${table.kind} in ('core', 'api')`),
+    check("instances_kind_check", sql`${table.kind} in ('core', 'api', 'ffi')`),
   ],
 );
+
+// The `core` instance extension: what a CORE activation runs (its IR target + version) and its engine
+// bookkeeping. Cascades with its envelope; pins its snapshot (NO ACTION — a running version is undeletable).
+export const coreInstances = pgTable("core_instances", {
+  instanceId: uuid("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  /** What this instance runs: `(qname, snapshot)` or a closure reference. */
+  target: jsonb("target").$type<DelegateTarget>().notNull(),
+  /** Version denormalised from `target`, for the FK (NO ACTION; running versions are undeletable). */
+  snapshotId: uuid("snapshot_id")
+    .notNull()
+    .references(() => snapshots.id),
+  /** The generic substitution this activation was summoned with (from the spawning `delegate.generics`). */
+  ambientGenerics: jsonb("ambient_generics").$type<GenericSubstitution>(),
+  /** The engine bookkeeping with no dedicated column (the summoner reactor, cancel exits, id counters); its
+   *  threads ride in `threads`. The actor's routing maps are rebuilt from these on load. */
+  engineState: jsonb("engine_state").$type<EngineState>().notNull(),
+});
+
+// The `ffi` instance extension: an in-flight external call (what was `ffi_calls`). Cascades with its
+// envelope; pins its snapshot (the compiled sidecar bundle hosting the handler). Re-dispatched / re-aborted
+// on recovery by `status`. The delegation it handles is its envelope's `delegation_id`.
+export const ffiInstances = pgTable("ffi_instances", {
+  instanceId: uuid("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  /** The snapshot whose compiled sidecar bundle hosts this handler — pins the version (no cascade). */
+  snapshotId: uuid("snapshot_id")
+    .notNull()
+    .references(() => snapshots.id),
+  /** The handler dispatch key (the external block's `key`). */
+  key: text("key").notNull(),
+  argument: jsonb("argument").$type<Value | null>(),
+  /** The reactor that issued the delegate (its reply goes back there) — `core` in v0.1.0. */
+  callerReactor: text("caller_reactor").$type<ReactorName>().notNull(),
+  /** running (transport in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
+   *  awaiting a caught-panic answer or the run's terminate). */
+  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+});
 
 /** The parent→child edge and recovery outbox: the issuer's durable record of a child it summoned, and
  *  the correlation id its `delegateAck` carries. Cascades with the caller (it is meaningless without it). */
@@ -184,36 +234,6 @@ export const escalations = pgTable(
   ],
 );
 
-/** The `ffi` reactor's in-flight external calls — its callee-side durable record, keyed by the delegation
- *  core's external proxy holds. Re-dispatched / re-aborted on recovery by `status`. Cascades with the
- *  project (the caller-side delegation lives in `delegations`, owned by core). */
-export const ffiCalls = pgTable(
-  "ffi_calls",
-  {
-    delegation: uuid("delegation").primaryKey(),
-    projectId: uuid("project_id")
-      .notNull()
-      .references(() => projects.id, { onDelete: "cascade" }),
-    /** This call's own instance id — the issuer stamped on the replies the ffi reactor produces for it. */
-    instanceId: uuid("instance_id").notNull(),
-    /** The snapshot whose compiled sidecar bundle hosts this handler — pins the version (no cascade) so an
-     *  in-flight call can still re-dispatch to the right bundle after recovery, like a running instance. */
-    snapshotId: uuid("snapshot_id")
-      .notNull()
-      .references(() => snapshots.id),
-    /** The handler dispatch key (the external block's `key`). */
-    key: text("key").notNull(),
-    argument: jsonb("argument").$type<Value | null>(),
-    /** The reactor that issued the delegate (its reply goes back there) — `core` in v0.1.0. */
-    callerReactor: text("caller_reactor").$type<ReactorName>().notNull(),
-    /** running (transport in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
-     *  awaiting a caught-panic answer or the run's terminate). */
-    status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [index("ffi_calls_project_id_idx").on(table.projectId)],
-);
-
 /** Layer 3 — the transactional outbox: external events produced by a turn but not yet consumed. The turn
  *  that *produces* events and the turn that *consumes* one commit in a single tx alongside their Layer 1/2
  *  writes (transactional outbox / consumer), so a crash neither loses an in-flight event nor double-delivers
@@ -241,17 +261,15 @@ export const outbox = pgTable(
   ],
 );
 
-/** The API's per-run metadata sidecar. A run *is* the api root's delegation (`delegations` where
- *  `caller_instance_id = apiRootIdOf(projectId)`), and that Layer 1 row is the single source of truth for
- *  the run's outcome — state (running / cancelling / done→done / gone→cancelled / failed→error), result,
- *  and error. This table holds only what the delegation does not: the run's `id` (= the run delegation id),
- *  the human `name` label, the immediately-known launch metadata (so a run lists the instant it starts, even
- *  before its delegation row is created asynchronously), and the user's cancel reason. The API projects the
- *  two together (this row LEFT JOIN its delegation) — see `run.repository`. */
+/** The API's per-run record — the single source of truth for a run, since the run delegation row is pure
+ *  live routing (deleted on terminal). A run *is* the api root's delegation while live; the api root writes
+ *  this row on launch (id = the run delegation id, the human `name`, launch metadata — so a run lists the
+ *  instant it starts) and updates its outcome (`state` / `result` / `errorMessage` / `completedAt`) and cancel
+ *  reason as it progresses. The API reads it directly — see `run.repository`. */
 export const runs = pgTable(
   "runs",
   {
-    /** The run delegation id — the join key to its Layer 1 outcome row. */
+    /** The run delegation id (the run's stable handle, even after the delegation row is deleted). */
     id: uuid("id").primaryKey(),
     projectId: uuid("project_id")
       .notNull()
@@ -262,13 +280,25 @@ export const runs = pgTable(
     name: text("name").notNull(),
     qualifiedName: text("qualified_name").notNull(),
     argument: jsonb("argument").$type<Value | null>(),
-    /** The reason a user gave when cancelling (the delegation records the `gone` state, not the reason). */
+    /** running → cancelling → done / cancelled / error. The api root advances it (start / cancel / terminal). */
+    state: text("state").$type<RunState>().notNull().default("running"),
+    /** The run's result value once `done`; `null` otherwise. */
+    result: jsonb("result").$type<Value | null>(),
+    /** The failure message once `error`; `null` otherwise. */
+    errorMessage: text("error_message"),
+    /** The reason a user gave when cancelling. */
     cancelReason: text("cancel_reason"),
+    /** When the run reached a terminal state; `null` while still live. */
+    completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     // `GET /projects/:projectId/runs` lists runs by project.
     index("runs_project_id_idx").on(table.projectId),
+    check(
+      "runs_state_check",
+      sql`${table.state} in ('running', 'cancelling', 'done', 'error', 'cancelled')`,
+    ),
   ],
 );
 

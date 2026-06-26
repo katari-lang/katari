@@ -270,7 +270,7 @@ export class Substrate {
    *  (the DB is down), the event survives and replays on the next activation — logged, not looped. */
   private async consumeDeadEvent(seq: OutboxSeq): Promise<void> {
     try {
-      await this.persistence.transaction(this.projectId, (tx) => tx.consumeOutbox(seq));
+      await this.persistence.transaction(this.projectId, (tx) => tx.outbox.consumeOutbox(seq));
       this.commitRetries.delete(seq);
     } catch (error) {
       this.logger.error("could not consume a dead event; it will replay on next activation", {
@@ -314,8 +314,8 @@ export class Substrate {
       // The pool flushes after the reactor so an in-transit scope (released as the run / sub-call result
       // left its instance) is re-written AFTER that instance's drop cascade removed its stale row.
       await this.pool.persist(tx);
-      if (consumed !== null) await tx.consumeOutbox(consumed);
-      if (produced.length > 0) await tx.produceOutbox(produced);
+      if (consumed !== null) await tx.outbox.consumeOutbox(consumed);
+      if (produced.length > 0) await tx.outbox.produceOutbox(produced);
     });
     for (const message of produced) this.mailbox.push(this.eventTurn(message.event, message.seq));
   }

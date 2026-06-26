@@ -1,38 +1,26 @@
-// Unit test for the run projection — the pure mapping from a run's metadata + its Layer 1 delegation row to
-// the API run view. This is the testable heart of the "read run outcome from Layer 1" path (the Drizzle
-// join around it needs Postgres; the mapping is pure).
+// Unit test for the run projection — the pure mapping from a `runs` row to the API run view. The run's
+// durable state / outcome lives on the `runs` row (the run delegation is deleted on terminal), so the
+// projection just reads those columns (the Drizzle query around it needs Postgres; the mapping is pure).
 
 import { describe, expect, test } from "vitest";
-import {
-  delegationToRunState,
-  projectRun,
-  type RunProjectionRow,
-} from "../src/modules/run/run.repository.js";
+import { projectRun, type RunRow } from "../src/modules/run/run.repository.js";
 
-const base: RunProjectionRow = {
+const base: RunRow = {
   id: "run-1",
   name: "nightly",
   qualifiedName: "demo.main",
   snapshotId: "snap-1",
+  state: "running",
   argument: { kind: "integer", value: 3 },
+  result: null,
+  errorMessage: null,
   cancelReason: null,
   createdAt: new Date("2026-06-25T00:00:00Z"),
-  delegationState: null,
-  delegationResult: null,
-  delegationError: null,
-  delegationUpdatedAt: null,
+  completedAt: null,
 };
 
 describe("run projection", () => {
-  test("maps each delegation state to its API run state", () => {
-    expect(delegationToRunState("running")).toBe("running");
-    expect(delegationToRunState("cancelling")).toBe("cancelling");
-    expect(delegationToRunState("done")).toBe("done");
-    expect(delegationToRunState("gone")).toBe("cancelled");
-    expect(delegationToRunState("failed")).toBe("error");
-  });
-
-  test("a run with no delegation row yet is still `running` (the brief post-launch window)", () => {
+  test("a freshly-launched run is `running` with no outcome", () => {
     const view = projectRun(base);
     expect(view.state).toBe("running");
     expect(view.result).toBeNull();
@@ -44,13 +32,13 @@ describe("run projection", () => {
     expect(view.argument).toEqual({ kind: "integer", value: 3 });
   });
 
-  test("a done delegation projects its result + completion time", () => {
+  test("a done run projects its result + completion time", () => {
     const completedAt = new Date("2026-06-25T00:05:00Z");
     const view = projectRun({
       ...base,
-      delegationState: "done",
-      delegationResult: { kind: "string", value: "ok" },
-      delegationUpdatedAt: completedAt,
+      state: "done",
+      result: { kind: "string", value: "ok" },
+      completedAt,
     });
     expect(view.state).toBe("done");
     expect(view.result).toEqual({ kind: "string", value: "ok" });
@@ -58,13 +46,13 @@ describe("run projection", () => {
     expect(view.completedAt).toBe(completedAt);
   });
 
-  test("a failed delegation projects `error` + the message (not a result)", () => {
+  test("an errored run projects `error` + the message (not a result)", () => {
     const view = projectRun({
       ...base,
-      delegationState: "failed",
-      delegationError: "panic: boom",
-      delegationResult: { kind: "string", value: "stale" },
-      delegationUpdatedAt: new Date("2026-06-25T00:06:00Z"),
+      state: "error",
+      errorMessage: "panic: boom",
+      result: { kind: "string", value: "stale" },
+      completedAt: new Date("2026-06-25T00:06:00Z"),
     });
     expect(view.state).toBe("error");
     expect(view.errorMessage).toBe("panic: boom");
@@ -72,20 +60,20 @@ describe("run projection", () => {
     expect(view.completedAt).not.toBeNull();
   });
 
-  test("a gone delegation projects `cancelled` with the user's reason from the metadata sidecar", () => {
+  test("a cancelled run projects `cancelled` with the user's reason", () => {
     const view = projectRun({
       ...base,
+      state: "cancelled",
       cancelReason: "user requested",
-      delegationState: "gone",
-      delegationUpdatedAt: new Date("2026-06-25T00:07:00Z"),
+      completedAt: new Date("2026-06-25T00:07:00Z"),
     });
     expect(view.state).toBe("cancelled");
     expect(view.cancelReason).toBe("user requested");
     expect(view.completedAt).not.toBeNull();
   });
 
-  test("a cancelling delegation is still in flight (no completion time)", () => {
-    const view = projectRun({ ...base, delegationState: "cancelling" });
+  test("a cancelling run is still in flight (no completion time)", () => {
+    const view = projectRun({ ...base, state: "cancelling" });
     expect(view.state).toBe("cancelling");
     expect(view.completedAt).toBeNull();
   });

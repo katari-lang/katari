@@ -55,7 +55,10 @@ export function decodeReply(line: string): SidecarReply | null {
   const id = toDelegationId(delegation);
   switch (kind) {
     case "result":
-      return { kind, delegation: id, value: parsed.value as Json };
+      // Coerce a missing / `undefined` value to `null`: a sidecar that returned nothing must still decode to a
+      // valid `Value` downstream — `jsonToValue(undefined)` runs `"$ref" in undefined` and throws — rather
+      // than poisoning the reactor on a dropped field.
+      return { kind, delegation: id, value: (parsed.value ?? null) as Json };
     case "error":
       return typeof parsed.message === "string"
         ? { kind, delegation: id, message: parsed.message }

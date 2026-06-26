@@ -13,16 +13,16 @@
 import type { DelegationState } from "../../db/tables/execution.js";
 import { isLiveDelegationState } from "../../db/tables/execution.js";
 import { PANIC_REQUEST, panicArgument } from "../engine/common.js";
+import type { InstanceStatus } from "../engine/types.js";
 import {
   type DelegateTarget,
   type ExternalEvent,
-  type ExternalEventBody,
   escalateValue,
   type ReactorName,
 } from "../event/types.js";
 import { type DelegationId, type EscalationId, type InstanceId, newEscalationId } from "../ids.js";
 import type { Value } from "../value/types.js";
-import type { PersistenceTx } from "./persistence.js";
+import type { BaseLoader, BaseTx, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** A caller-owned delegation row in memory (the live source of truth). `peer` is the callee reactor (the
@@ -72,14 +72,32 @@ export abstract class Reactor {
   private readonly dirtyDelegations = new Set<DelegationId>();
   private readonly dirtyEscalations = new Set<EscalationId>();
 
+  /** This turn's instance-envelope changes the next `persistBase` flushes: the envelopes to upsert (the
+   *  concrete owns each instance's live state, so the base only stages its generic row) and the ids to drop
+   *  (cascade). The concrete registers them with `markInstance` / `markInstanceDropped`; the base persists
+   *  them so `persistBase` needs no arguments. */
+  private readonly dirtyInstanceEnvelopes = new Map<
+    InstanceId,
+    { delegationId: DelegationId | null; status: InstanceStatus }
+  >();
+  private readonly droppedInstanceIds = new Set<InstanceId>();
+
+  /** The delegations this reactor *handles* as callee — a receive-side index from a delegation to the local
+   *  instance handling it, so an inbound `terminate` / `escalateAck` finds its target. NOT persisted here: the
+   *  concrete reactor's payload (a core instance) is the source of truth, re-seeded on load via
+   *  `acceptDelegation`. Routing of outbound events is NOT done here — each event carries its `to`, stamped at
+   *  the engine edge where the callee / summoner is known. */
+  private readonly handled = new Map<DelegationId, InstanceId>();
+
   /** React to one inbound external event: mutate this reactor's warm state and `send` any follow-on events.
    *  Persists nothing (the substrate commits the turn), so the same turn can be re-run if its commit fails.
    *  May be async (the core engine awaits the IR); the api root reacts synchronously. */
   abstract react(event: ExternalEvent): void | Promise<void>;
 
-  /** Snapshot what this turn touched into the transaction: the reactor's own Layer 2 (a core instance's
-   *  persist / drop) interleaved with `flushLayer1` at the FK-correct point (instance before the rows that
-   *  reference it; cascade last). The base supplies `flushLayer1`; the concrete reactor orders it. */
+  /** Snapshot what this turn touched into the transaction through this reactor's own port (`tx.<name>`): its
+   *  Layer 2 (an instance's envelope + extension, or its drop) interleaved with `flushDelegations` /
+   *  `flushEscalations` at the FK-correct point (envelope before the rows that reference it; cascade last).
+   *  The base supplies the flush + envelope helpers; the concrete reactor orders them. */
   abstract persist(tx: PersistenceTx): Promise<void>;
 
   /** The instance to stamp as the issuer on this turn's produced outbox rows (the turn's core instance, or
@@ -92,19 +110,20 @@ export abstract class Reactor {
 
   // ─── send / drain (the from/to protocol) ────────────────────────────────────────────────────────
 
-  /** Buffer one follow-on event, stamped `from: this.name`, addressed `to` the target reactor. The first
-   *  step of the two-step reown rides here: a value leaving its instance UP across the boundary RELEASES the
-   *  resources it captures from the turn's owner to in-transit, so the receiver can reown them. The two
+  /** Buffer one fully routed follow-on event (its `from` / `to` already stamped by the emitter — the engine
+   *  edge for a core turn, the concrete reactor for an api / ffi emit), so this never picks a destination. The
+   *  first step of the two-step reown rides here: a value leaving its instance UP across the boundary RELEASES
+   *  the resources it captures from the turn's owner to in-transit, so the receiver can reown them. The two
    *  upward value flows are a sub-call / run result (`delegateAck`) and an escalation's carried value
    *  (`escalate`); the downward legs (`delegate` argument, `escalateAck` answer) stay owned by the still-live
    *  sender and are read in place, so nothing is released for them. */
-  protected send(body: ExternalEventBody, to: ReactorName): void {
-    if (body.kind === "delegateAck") this.pool.release(body.value, this.currentTurnOwner());
-    else if (body.kind === "escalate") {
-      const value = escalateValue(body.ask);
+  protected send(event: ExternalEvent): void {
+    if (event.kind === "delegateAck") this.pool.release(event.value, this.currentTurnOwner());
+    else if (event.kind === "escalate") {
+      const value = escalateValue(event.ask);
       if (value !== null) this.pool.release(value, this.currentTurnOwner());
     }
-    this.sendBuffer.push({ ...body, from: this.name, to });
+    this.sendBuffer.push(event);
   }
 
   /** The second step of the two-step reown: an incoming `delegateAck`'s result lands here — claim the
@@ -144,6 +163,9 @@ export abstract class Reactor {
     this.escalations.clear();
     this.dirtyDelegations.clear();
     this.dirtyEscalations.clear();
+    this.dirtyInstanceEnvelopes.clear();
+    this.droppedInstanceIds.clear();
+    this.handled.clear();
   }
 
   // ─── Layer 1 entity ownership (caller-side delegations, raiser-side escalations) ────────────────
@@ -170,6 +192,96 @@ export abstract class Reactor {
    *  call → `ffi`). */
   protected peerOf(delegation: DelegationId): ReactorName | undefined {
     return this.delegations.get(delegation)?.peer;
+  }
+
+  /** The caller instance of a delegation this reactor *issued* (the issued row's `caller`) — used to locate
+   *  the proxy thread to resume on the delegation's ack. Reads the same row `flushDelegations` persists, so a
+   *  concrete reactor never keeps a parallel caller map. */
+  protected callerInstanceOf(delegation: DelegationId): InstanceId | undefined {
+    return this.delegations.get(delegation)?.caller;
+  }
+
+  // ─── handled delegations (the callee-side receive index) ────────────────────────────────────────
+
+  /** Record a delegation this reactor accepted as callee — a fresh delegate it is about to run, or one
+   *  re-seeded on load from its surviving payload — mapping it to the local `instance` handling it. */
+  protected acceptDelegation(delegation: DelegationId, instance: InstanceId): void {
+    this.handled.set(delegation, instance);
+  }
+
+  /** Forget a handled delegation once its payload retired, so it is not consulted after teardown. */
+  protected dropHandled(delegation: DelegationId): void {
+    this.handled.delete(delegation);
+  }
+
+  /** The local instance handling `delegation` on the callee side — used to route an inbound `terminate` to the
+   *  child and an inbound `escalateAck` to the raiser. */
+  protected handledInstanceOf(delegation: DelegationId): InstanceId | undefined {
+    return this.handled.get(delegation);
+  }
+
+  // ─── base-managed persist / load (the generic half, in one place) ──────────────────────────────
+
+  /** Stage an instance-envelope upsert for the next `persistBase` — the concrete calls this when it creates or
+   *  updates an instance it owns (the concrete is the live SoT; the base only persists the generic envelope). */
+  protected markInstance(
+    id: InstanceId,
+    envelope: { delegationId: DelegationId | null; status: InstanceStatus },
+  ): void {
+    this.dirtyInstanceEnvelopes.set(id, envelope);
+    this.droppedInstanceIds.delete(id);
+  }
+
+  /** Stage an instance drop (cascade) for the next `persistBase` — the concrete calls this when it tears an
+   *  instance down. */
+  protected markInstanceDropped(id: InstanceId): void {
+    this.droppedInstanceIds.add(id);
+    this.dirtyInstanceEnvelopes.delete(id);
+  }
+
+  /** Persist everything the base owns for this turn through `tx.base`, in FK order: the instance envelopes
+   *  staged this turn (`kind` stamped with this reactor's own name — instance kind ≡ reactor name), then the
+   *  dirty delegations, then the dirty escalations, then the cascade drops (last). A concrete reactor calls
+   *  this with no arguments and adds only its own extension via `tx.<name>` — so the generic half is written
+   *  in one place, uniformly (a reactor that owns no delegations stages none, and gets the capability free). */
+  protected async persistBase(tx: BaseTx): Promise<void> {
+    for (const [id, envelope] of this.dirtyInstanceEnvelopes) {
+      await tx.putInstanceEnvelope({
+        id,
+        kind: this.name,
+        delegationId: envelope.delegationId,
+        status: envelope.status,
+      });
+    }
+    await this.flushDelegations(tx);
+    await this.flushEscalations(tx);
+    for (const instanceId of this.droppedInstanceIds) await tx.dropInstance(instanceId);
+    this.dirtyInstanceEnvelopes.clear();
+    this.droppedInstanceIds.clear();
+  }
+
+  /** Reload everything the base owns on reactivation through `loader.base`: the delegations this reactor
+   *  issued and the escalations it raised (both `from = this.name`). The concrete reactor calls this once and
+   *  adds only its own data. Uniform across reactors — a reactor that owns none gets empty sets. */
+  protected async loadBase(loader: BaseLoader): Promise<void> {
+    for (const row of await loader.delegations(this.name)) {
+      this.reloadDelegation(row.delegation, {
+        caller: row.caller,
+        peer: row.toReactor,
+        target: row.target,
+        argument: row.argument,
+        state: row.state,
+      });
+    }
+    for (const open of await loader.raisedEscalations(this.name)) {
+      this.reloadEscalation(open.escalation, {
+        raiser: open.raiser,
+        peer: open.toReactor,
+        delegation: open.delegation,
+        request: open.request,
+        argument: open.argument,
+      });
+    }
   }
 
   /** Move one of this reactor's delegations to a new state (no-op if it is gone or already terminal — which
@@ -258,50 +370,57 @@ export abstract class Reactor {
     this.putEscalationRow(escalation, { ...row, state: "open" }, false);
   }
 
-  /** Flush this turn's dirty Layer 1 rows into the transaction, then evict the terminal / answered ones from
-   *  the live in-memory maps (their history is durable; the maps hold only live rows). Concrete `persist`
-   *  calls this at the FK-correct point — after its instance is written, before any cascade drop. */
-  protected async flushLayer1(tx: PersistenceTx): Promise<void> {
+  /** Flush this turn's dirty delegation rows (the caller-owned edges): upsert the still-live ones, and for the
+   *  terminal ones delete the durable row *and* evict it from the live map (a delegation is pure live routing —
+   *  its outcome lives on `runs`, not here). Called by `persistBase`. */
+  private async flushDelegations(tx: BaseTx): Promise<void> {
     for (const delegation of this.dirtyDelegations) {
       const row = this.delegations.get(delegation);
       if (row === undefined) continue;
-      await tx.putDelegation({
-        delegation,
-        caller: row.caller,
-        fromReactor: this.name,
-        toReactor: row.peer,
-        target: row.target,
-        argument: row.argument,
-        state: row.state,
-        result: row.result ?? null,
-        errorMessage: row.errorMessage ?? null,
-      });
-    }
-    for (const escalation of this.dirtyEscalations) {
-      const row = this.escalations.get(escalation);
-      if (row === undefined) continue;
-      await tx.putEscalation({
-        escalation,
-        raiser: row.raiser,
-        fromReactor: this.name,
-        toReactor: row.peer,
-        delegation: row.delegation,
-        request: row.request,
-        argument: row.argument,
-        state: row.state,
-        answer: row.answer ?? null,
-      });
-    }
-    for (const delegation of this.dirtyDelegations) {
-      const row = this.delegations.get(delegation);
-      if (row !== undefined && !isLiveDelegationState(row.state))
+      if (isLiveDelegationState(row.state)) {
+        await tx.putDelegation({
+          delegation,
+          caller: row.caller,
+          fromReactor: this.name,
+          toReactor: row.peer,
+          target: row.target,
+          argument: row.argument,
+          state: row.state,
+          result: row.result ?? null,
+          errorMessage: row.errorMessage ?? null,
+        });
+      } else {
+        await tx.deleteDelegation(delegation);
         this.delegations.delete(delegation);
-    }
-    for (const escalation of this.dirtyEscalations) {
-      const row = this.escalations.get(escalation);
-      if (row !== undefined && row.state === "answered") this.escalations.delete(escalation);
+      }
     }
     this.dirtyDelegations.clear();
+  }
+
+  /** Flush this turn's dirty escalation rows (the raiser-owned edges — only `core` raises today): upsert the
+   *  open ones, and for the answered ones delete the durable row *and* evict it (the answered Q&A lives in the
+   *  escalations audit). Symmetric to `flushDelegations`; called by `persistBase`. */
+  private async flushEscalations(tx: BaseTx): Promise<void> {
+    for (const escalation of this.dirtyEscalations) {
+      const row = this.escalations.get(escalation);
+      if (row === undefined) continue;
+      if (row.state === "open") {
+        await tx.putEscalation({
+          escalation,
+          raiser: row.raiser,
+          fromReactor: this.name,
+          toReactor: row.peer,
+          delegation: row.delegation,
+          request: row.request,
+          argument: row.argument,
+          state: row.state,
+          answer: row.answer ?? null,
+        });
+      } else {
+        await tx.deleteEscalation(escalation);
+        this.escalations.delete(escalation);
+      }
+    }
     this.dirtyEscalations.clear();
   }
 }

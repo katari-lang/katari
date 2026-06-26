@@ -114,8 +114,12 @@ export function subprocessSidecar(command: string, args: string[] = []): Sidecar
       closed = true;
       handlers.onClose(reason);
     };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      for (const line of buffer.push(chunk.toString("utf8"))) {
+    // Decode stdout as UTF-8 at the stream level: Node's StringDecoder then retains a partial multibyte
+    // codepoint across chunk boundaries, so a non-ASCII reply value isn't corrupted before LineBuffer rejoins
+    // its line. (Decoding each raw Buffer chunk independently would mangle a split codepoint into U+FFFD.)
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      for (const line of buffer.push(chunk)) {
         const reply = decodeReply(line);
         if (reply !== null) handlers.onReply(reply);
       }

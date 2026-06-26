@@ -177,7 +177,12 @@ export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, v
     const escalation = thread.relays[askId];
     if (escalation !== undefined) {
       delete thread.relays[askId];
-      ctx.emit({ kind: "escalateAck", delegation: thread.delegationId, escalation, value });
+      // The escalateAck descends to this proxy's child — a core sub-call (`delegate`) or an ffi call
+      // (`external`); the proxy's own kind names the callee reactor.
+      ctx.emit(
+        { kind: "escalateAck", delegation: thread.delegationId, escalation, value },
+        thread.kind === "external" ? "ffi" : "core",
+      );
       return;
     }
   }
@@ -269,7 +274,11 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
       // callee has really stopped before it acks its parent — graceful, unlike an immediate finish.
       thread.status = "cancelling";
       ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
-      ctx.emit({ kind: "terminate", delegation: thread.delegationId });
+      // The terminate descends to this proxy's child; the proxy's kind names the callee reactor.
+      ctx.emit(
+        { kind: "terminate", delegation: thread.delegationId },
+        thread.kind === "external" ? "ffi" : "core",
+      );
       return;
     case "primitive":
     case "construct":
@@ -437,13 +446,17 @@ function createExternal(ctx: StepContext, thread: ExternalThread): void {
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "external") throw new Error(`thread ${thread.id} is not an external block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? null;
-  ctx.emit({
-    kind: "delegate",
-    delegation: thread.delegationId,
-    // The handler lives in this agent's snapshot bundle, so the ffi transport spawns that bundle.
-    target: { kind: "external", key: block.key, snapshot: ctx.ir.snapshot },
-    argument,
-  });
+  // An external call is a delegate to the `ffi` reactor (its only difference from a core sub-call is `to`).
+  ctx.emit(
+    {
+      kind: "delegate",
+      delegation: thread.delegationId,
+      // The handler lives in this agent's snapshot bundle, so the ffi transport spawns that bundle.
+      target: { kind: "external", key: block.key, snapshot: ctx.ir.snapshot },
+      argument,
+    },
+    "ffi",
+  );
 }
 
 // ─── match ──────────────────────────────────────────────────────────────────────────────────────

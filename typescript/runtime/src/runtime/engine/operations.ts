@@ -169,13 +169,17 @@ function enterDelegate(
     delegationId,
     relays: {},
   };
-  ctx.emit({
-    kind: "delegate",
-    delegation: delegationId,
-    target: resolved.target,
-    argument: resolved.argument,
-    ...(resolved.generics !== undefined ? { generics: resolved.generics } : {}),
-  });
+  // A sub-call's callee runs in `core`; an external target (should one reach here) would route to `ffi`.
+  ctx.emit(
+    {
+      kind: "delegate",
+      delegation: delegationId,
+      target: resolved.target,
+      argument: resolved.argument,
+      ...(resolved.generics !== undefined ? { generics: resolved.generics } : {}),
+    },
+    resolved.target.kind === "external" ? "ffi" : "core",
+  );
 }
 
 /** Resolve a callee reference + its argument variable into a delegate target. A name resolves within

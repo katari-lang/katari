@@ -4,8 +4,9 @@
 import { describe, expect, test } from "vitest";
 import {
   deserializeProject,
+  type PersistedInstance,
   serializeBlob,
-  serializeInstance,
+  serializeCoreInstance,
   serializeScope,
 } from "../src/runtime/actor/persistence-codec.js";
 import type { BlobEntry, Instance, Scope } from "../src/runtime/engine/types.js";
@@ -96,7 +97,7 @@ describe("persistence codec", () => {
       },
     ];
 
-    const serialized = serializeInstance(PROJECT, instance);
+    const serialized = serializeCoreInstance(PROJECT, instance);
     expect(serialized.threads).toHaveLength(3);
     expect(serialized.instance.snapshotId).toBe(SNAPSHOT);
     expect(serialized.instance.engineState.nextThreadId).toBe(3);
@@ -111,7 +112,17 @@ describe("persistence codec", () => {
       contentType: "text/plain",
       semanticKind: "file",
     };
-    const snapshot = deserializeProject([serialized.instance], serialized.threads, serializedScopes, [
+    // Reconstruct the joined core row (envelope ⋈ core_instances) that a reactivation reads back.
+    const joined: PersistedInstance = {
+      id: instance.id,
+      delegationId: instance.delegationId,
+      target: serialized.instance.target,
+      snapshotId: serialized.instance.snapshotId,
+      status: instance.status,
+      ambientGenerics: serialized.instance.ambientGenerics,
+      engineState: serialized.instance.engineState,
+    };
+    const snapshot = deserializeProject([joined], serialized.threads, serializedScopes, [
       serializeBlob(PROJECT, BLOB, blob),
     ]);
 
