@@ -378,7 +378,7 @@ export class DbPersistence implements Persistence {
         },
         setRunOutcome: async (outcome) => {
           // The run's durable outcome (the delegation row is gone on terminal). `completedAt` is stamped only
-          // at a terminal state.
+          // at a terminal state; a `cancelReason` (present only on a cancel's `cancelling` update) rides along.
           await drizzleTx
             .update(runs)
             .set({
@@ -386,14 +386,9 @@ export class DbPersistence implements Persistence {
               result: outcome.result,
               errorMessage: outcome.errorMessage,
               ...(isTerminalRunState(outcome.state) ? { completedAt: new Date() } : {}),
+              ...(outcome.cancelReason !== undefined ? { cancelReason: outcome.cancelReason } : {}),
             })
             .where(and(eq(runs.projectId, projectId), eq(runs.id, outcome.run)));
-        },
-        setRunCancelReason: async (run, reason) => {
-          await drizzleTx
-            .update(runs)
-            .set({ cancelReason: reason })
-            .where(and(eq(runs.projectId, projectId), eq(runs.id, run)));
         },
         putRunEscalationAudit: async (audit) => {
           await drizzleTx

@@ -53,6 +53,12 @@ interface EscalationRow {
   answer?: Value;
 }
 
+/** A staged instance-envelope change for the next `persistBase`: an upsert of the generic envelope, or a
+ *  cascade drop. One per instance id (last-write-wins). */
+type InstanceEnvelopeChange =
+  | { kind: "upsert"; delegationId: DelegationId | null; status: InstanceStatus }
+  | { kind: "drop" };
+
 export abstract class Reactor {
   /** This reactor's routing name — `send` stamps it as the event's `from`, and the substrate routes inbound
    *  events to `registry[event.to]`. */
@@ -72,15 +78,12 @@ export abstract class Reactor {
   private readonly dirtyDelegations = new Set<DelegationId>();
   private readonly dirtyEscalations = new Set<EscalationId>();
 
-  /** This turn's instance-envelope changes the next `persistBase` flushes: the envelopes to upsert (the
-   *  concrete owns each instance's live state, so the base only stages its generic row) and the ids to drop
-   *  (cascade). The concrete registers them with `markInstance` / `markInstanceDropped`; the base persists
-   *  them so `persistBase` needs no arguments. */
-  private readonly dirtyInstanceEnvelopes = new Map<
-    InstanceId,
-    { delegationId: DelegationId | null; status: InstanceStatus }
-  >();
-  private readonly droppedInstanceIds = new Set<InstanceId>();
+  /** This turn's instance-envelope changes the next `persistBase` flushes, one entry per instance: an upsert
+   *  (the concrete owns each instance's live state, so the base only stages its generic row) or a drop
+   *  (cascade). One map keyed by id — so an upsert and a drop of the same instance in one turn resolve by
+   *  last-write-wins, with no mutual-exclusion invariant to maintain. The concrete registers them with
+   *  `markInstance` / `markInstanceDropped`; the base persists them so `persistBase` needs no arguments. */
+  private readonly dirtyInstances = new Map<InstanceId, InstanceEnvelopeChange>();
 
   /** The delegations this reactor *handles* as callee — a receive-side index from a delegation to the local
    *  instance handling it, so an inbound `terminate` / `escalateAck` finds its target. NOT persisted here: the
@@ -163,8 +166,7 @@ export abstract class Reactor {
     this.escalations.clear();
     this.dirtyDelegations.clear();
     this.dirtyEscalations.clear();
-    this.dirtyInstanceEnvelopes.clear();
-    this.droppedInstanceIds.clear();
+    this.dirtyInstances.clear();
     this.handled.clear();
   }
 
@@ -223,41 +225,43 @@ export abstract class Reactor {
   // ─── base-managed persist / load (the generic half, in one place) ──────────────────────────────
 
   /** Stage an instance-envelope upsert for the next `persistBase` — the concrete calls this when it creates or
-   *  updates an instance it owns (the concrete is the live SoT; the base only persists the generic envelope). */
+   *  updates an instance it owns (the concrete is the live SoT; the base only persists the generic envelope).
+   *  A later `markInstanceDropped` for the same id supersedes it (last-write-wins on the single map). */
   protected markInstance(
     id: InstanceId,
     envelope: { delegationId: DelegationId | null; status: InstanceStatus },
   ): void {
-    this.dirtyInstanceEnvelopes.set(id, envelope);
-    this.droppedInstanceIds.delete(id);
+    this.dirtyInstances.set(id, { kind: "upsert", ...envelope });
   }
 
   /** Stage an instance drop (cascade) for the next `persistBase` — the concrete calls this when it tears an
-   *  instance down. */
+   *  instance down. Supersedes any upsert staged for the same id this turn. */
   protected markInstanceDropped(id: InstanceId): void {
-    this.droppedInstanceIds.add(id);
-    this.dirtyInstanceEnvelopes.delete(id);
+    this.dirtyInstances.set(id, { kind: "drop" });
   }
 
   /** Persist everything the base owns for this turn through `tx.base`, in FK order: the instance envelopes
-   *  staged this turn (`kind` stamped with this reactor's own name — instance kind ≡ reactor name), then the
+   *  upserted this turn (`kind` stamped with this reactor's own name — instance kind ≡ reactor name), then the
    *  dirty delegations, then the dirty escalations, then the cascade drops (last). A concrete reactor calls
    *  this with no arguments and adds only its own extension via `tx.<name>` — so the generic half is written
    *  in one place, uniformly (a reactor that owns no delegations stages none, and gets the capability free). */
   protected async persistBase(tx: BaseTx): Promise<void> {
-    for (const [id, envelope] of this.dirtyInstanceEnvelopes) {
-      await tx.putInstanceEnvelope({
-        id,
-        kind: this.name,
-        delegationId: envelope.delegationId,
-        status: envelope.status,
-      });
+    for (const [id, change] of this.dirtyInstances) {
+      if (change.kind === "upsert")
+        await tx.putInstanceEnvelope({
+          id,
+          kind: this.name,
+          delegationId: change.delegationId,
+          status: change.status,
+        });
     }
     await this.flushDelegations(tx);
     await this.flushEscalations(tx);
-    for (const instanceId of this.droppedInstanceIds) await tx.dropInstance(instanceId);
-    this.dirtyInstanceEnvelopes.clear();
-    this.droppedInstanceIds.clear();
+    // Drops last, so an instance's cascade removes the rows that reference it after they are flushed.
+    for (const [id, change] of this.dirtyInstances) {
+      if (change.kind === "drop") await tx.dropInstance(id);
+    }
+    this.dirtyInstances.clear();
   }
 
   /** Reload everything the base owns on reactivation through `loader.base`: the delegations this reactor
@@ -284,21 +288,25 @@ export abstract class Reactor {
     }
   }
 
-  /** Move one of this reactor's delegations to a new state (no-op if it is gone or already terminal — which
-   *  is exactly the sticky-terminal rule: a `failed` is never overwritten by the `gone` of the teardown it
-   *  triggers, because the `failed` row was already evicted). `cancelling` only takes from `running`. */
+  /** Move one of this reactor's delegations to a new state, returning whether the transition actually applied.
+   *  A no-op (returns `false`) when it is gone or already terminal — which is exactly the sticky-terminal rule:
+   *  a `failed` is never overwritten by the `gone` of the teardown it triggers, because the `failed` row was
+   *  already evicted. `cancelling` only takes from `running`. The boolean lets a caller record a parallel
+   *  durable outcome (the `runs` row) only when the transition fired, so that outcome inherits the same
+   *  sticky-terminal protection the delegation row has. */
   protected transitionDelegation(
     delegation: DelegationId,
     state: DelegationState,
     extra: { result?: Value; errorMessage?: string } = {},
-  ): void {
+  ): boolean {
     const row = this.delegations.get(delegation);
-    if (row === undefined || !isLiveDelegationState(row.state)) return;
-    if (state === "cancelling" && row.state !== "running") return;
+    if (row === undefined || !isLiveDelegationState(row.state)) return false;
+    if (state === "cancelling" && row.state !== "running") return false;
     row.state = state;
     if (extra.result !== undefined) row.result = extra.result;
     if (extra.errorMessage !== undefined) row.errorMessage = extra.errorMessage;
     this.dirtyDelegations.add(delegation);
+    return true;
   }
 
   /** Whether this reactor still holds `delegation` as a live (running / cancelling) row. Becomes false once

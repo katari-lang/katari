@@ -28,6 +28,7 @@ function instanceWith(threads: Record<number, Thread>): CoreInstance {
     kind: "core",
     id: INSTANCE,
     delegationId: "d" as DelegationId,
+    callerReactor: "core",
     target: { kind: "named", name: "demo.main" as never, snapshot: "snap" as SnapshotId },
     argument: null,
     status: "running",
@@ -86,7 +87,7 @@ describe("unreachableOwnedScopes", () => {
       },
       scopesByOwner: new Map(),
       nextScopeId: 4,
-      blobOwners: {},
+      blobs: {},
     };
     const instance = instanceWith({ 0: agentThread(0, 1) });
     expect(ownedIds(store, instance)).toEqual([2]);
@@ -105,7 +106,7 @@ describe("unreachableOwnedScopes", () => {
       },
       scopesByOwner: new Map(),
       nextScopeId: 6,
-      blobOwners: {},
+      blobs: {},
     };
     const forThread: Thread = {
       id: toThreadId(1),
@@ -140,7 +141,7 @@ describe("unreachableOwnedScopes", () => {
       },
       scopesByOwner: new Map(),
       nextScopeId: 11,
-      blobOwners: {},
+      blobs: {},
     };
     const instance = instanceWith({ 0: agentThread(0, 0) });
     expect(ownedIds(store, instance)).toEqual([10]);

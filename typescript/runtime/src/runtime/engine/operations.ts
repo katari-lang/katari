@@ -16,7 +16,12 @@ import type {
   Operation,
   VariableId,
 } from "@katari-lang/types";
-import type { AskKind, DelegateTarget, ModifierMap } from "../event/types.js";
+import {
+  type AskKind,
+  calleeReactorForTarget,
+  type DelegateTarget,
+  type ModifierMap,
+} from "../event/types.js";
 import { newDelegationId, type ScopeId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
@@ -178,7 +183,7 @@ function enterDelegate(
       argument: resolved.argument,
       ...(resolved.generics !== undefined ? { generics: resolved.generics } : {}),
     },
-    resolved.target.kind === "external" ? "ffi" : "core",
+    calleeReactorForTarget(resolved.target),
   );
 }
 

@@ -88,12 +88,15 @@ export interface PersistedRun {
 
 /** A run's state / outcome update — the api root writes it as the run advances (`cancelling` on a cancel
  *  request; `done` / `cancelled` / `error` with its result / error at the terminal). Since the run delegation
- *  row is deleted on terminal, this is the durable source of truth for the run's outcome. */
+ *  row is deleted on terminal, this is the durable source of truth for the run's outcome. A `cancelReason`
+ *  rides along on the `cancelling` update (so a cancel's state + reason commit as one write); it is `undefined`
+ *  on every other update, leaving the stored reason untouched. */
 export interface PersistedRunOutcome {
   run: DelegationId;
   state: RunState;
   result: Value | null;
   errorMessage: string | null;
+  cancelReason?: string | null;
 }
 
 /** One answered user-facing escalation, recorded for the run's history (`run_escalations_audit`) when the
@@ -166,11 +169,10 @@ export interface ApiTx {
    *  (a run is never durable without its launch metadata). Starts `running`. Idempotent. */
   putRun(run: PersistedRun): Promise<void>;
   /** Update a run's state / outcome (the durable SoT now the delegation row is deleted on terminal): `state`,
-   *  and `result` / `errorMessage` at a terminal, with `completedAt` set then. In the same commit as the
-   *  event that caused it (a `terminate`, or the terminal `delegateAck` / `terminateAck` / `escalate`). */
+   *  and `result` / `errorMessage` at a terminal, with `completedAt` set then; a `cancelReason` (on a cancel's
+   *  `cancelling` update) rides along here too. In the same commit as the event that caused it (a `terminate`,
+   *  or the terminal `delegateAck` / `terminateAck` / `escalate`). */
   setRunOutcome(outcome: PersistedRunOutcome): Promise<void>;
-  /** Record a user's cancel reason on a run, in the same commit as its `terminate`. */
-  setRunCancelReason(run: DelegationId, reason: string | null): Promise<void>;
   /** Append a run's answered-escalation history row, in the same commit as the relayed `escalateAck`. */
   putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
 }
@@ -301,7 +303,9 @@ export class InMemoryPersistence implements Persistence {
   }
 }
 
-const NO_OP_TX: PersistenceTx = {
+/** A fully no-op `PersistenceTx` — the in-memory backend's write surface (the warm store is the truth), and a
+ *  convenient base a test can spread and override one port of. */
+export const NO_OP_TX: PersistenceTx = {
   base: {
     async putInstanceEnvelope() {},
     async putDelegation() {},
@@ -316,7 +320,6 @@ const NO_OP_TX: PersistenceTx = {
   api: {
     async putRun() {},
     async setRunOutcome() {},
-    async setRunCancelReason() {},
     async putRunEscalationAudit() {},
   },
   ffi: {

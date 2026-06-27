@@ -112,6 +112,13 @@ export function agentSnapshot(target: DelegateTarget): SnapshotId {
   return target.snapshot;
 }
 
+/** The reactor a `delegate` is routed to (its `to`): an `external` handler runs in `ffi`, every other target
+ *  is a core sub-call. The single home of the "external ⟶ ffi, else core" rule, so the callee routing of a
+ *  delegate / its proxy legs lives in one place (used at every `emit` edge and where core records the peer). */
+export function calleeReactorForTarget(target: DelegateTarget): ReactorName {
+  return target.kind === "external" ? "ffi" : "core";
+}
+
 /** The value an `escalate` carries up across the instance boundary: a `request`'s argument, or a control
  *  escape's (`next` / `break` / `return`) carried value. The two-step reown uses it — the raiser releases
  *  the resources this value captures on send, the receiver reowns them on receipt. */

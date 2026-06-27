@@ -9,7 +9,7 @@ import {
   serializeCoreInstance,
   serializeScope,
 } from "../src/runtime/actor/persistence-codec.js";
-import type { BlobEntry, Instance, Scope } from "../src/runtime/engine/types.js";
+import type { BlobEntry, CoreInstance, Scope } from "../src/runtime/engine/types.js";
 import {
   type BlobId,
   type DelegationId,
@@ -32,10 +32,11 @@ const BLOB = "blob-b" as BlobId;
 describe("persistence codec", () => {
   test("round-trips a suspended instance, its threads, and its owned scopes", () => {
     // An instance whose body delegated to a child and is awaiting its delegateAck (a real suspend point).
-    const instance: Instance = {
+    const instance: CoreInstance = {
       kind: "core",
       id: INSTANCE,
       delegationId: DELEGATION,
+      callerReactor: "core",
       target: { kind: "named", name: "demo.main" as never, snapshot: SNAPSHOT },
       argument: null,
       status: "running",

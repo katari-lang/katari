@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "vitest";
 import type { PersistedScope } from "../src/runtime/actor/persistence-codec.js";
-import type { PersistenceTx } from "../src/runtime/actor/persistence.js";
+import { NO_OP_TX, type PersistenceTx } from "../src/runtime/actor/persistence.js";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import { rebuildScopeOwnerIndex } from "../src/runtime/engine/scope.js";
 import type { ProjectStore } from "../src/runtime/engine/types.js";
@@ -33,7 +33,7 @@ function storeOwnedBy(owner: InstanceId): ProjectStore {
     },
     scopesByOwner: new Map(),
     nextScopeId: 3,
-    blobOwners: {},
+    blobs: {},
   };
   rebuildScopeOwnerIndex(store);
   return store;
@@ -48,40 +48,17 @@ const closure: Value = {
   module: "",
 };
 
-/** A PersistenceTx whose `pool` port records the scopes written (the rest of the bundle is no-ops). */
+/** A PersistenceTx whose `pool` port records the scopes written (every other port is a no-op). Built off the
+ *  shared `NO_OP_TX`, so it never drifts from the interface. */
 function recordingTx(): { tx: PersistenceTx; scopes: PersistedScope[] } {
   const scopes: PersistedScope[] = [];
   const tx: PersistenceTx = {
-    core: {
-      async putInstanceEnvelope() {},
-      async putCoreInstance() {},
-      async dropInstance() {},
-      async putDelegation() {},
-      async putEscalation() {},
-    },
-    api: {
-      async putInstanceEnvelope() {},
-      async putDelegation() {},
-      async putRun() {},
-      async setRunCancelReason() {},
-      async putRunEscalationAudit() {},
-    },
-    ffi: {
-      async putInstanceEnvelope() {},
-      async putFfiInstance() {},
-      async dropInstance() {},
-    },
+    ...NO_OP_TX,
     pool: {
+      ...NO_OP_TX.pool,
       async putScope(scope) {
         scopes.push(scope);
       },
-      async deleteScope() {},
-      async putBlob() {},
-      async dropBlob() {},
-    },
-    outbox: {
-      async consumeOutbox() {},
-      async produceOutbox() {},
     },
   };
   return { tx, scopes };

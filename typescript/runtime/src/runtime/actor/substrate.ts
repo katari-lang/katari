@@ -14,6 +14,7 @@
 import type { Logger } from "../../lib/logger.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import { newOutboxSeq, type OutboxSeq, type ProjectId } from "../ids.js";
+import { isTransientError, messageOf } from "./failure.js";
 import type { OutboxMessage, Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
@@ -26,10 +27,6 @@ const MAX_COMMIT_RETRIES = 8;
 /** Exponential backoff (ms) for the nth commit retry, capped — so a repeated commit failure does not spin. */
 function commitBackoffMs(attempt: number): number {
   return Math.min(20 * 2 ** (attempt - 1), 1000);
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function delay(ms: number): Promise<void> {
@@ -70,8 +67,9 @@ export class Substrate {
   /** The in-flight reactivation, so concurrent first-use callers share one load. Loading MUST complete before
    *  any commit — otherwise a just-produced outbox row would be re-read by `reactivate` and replayed. */
   private loadingPromise: Promise<void> | null = null;
-  /** Per durable inbound event (its outbox seq), how many times its commit has failed. Survives reactivation
-   *  (the substrate object persists; only warm reactor state is dropped), so the retry bound spans replays. */
+  /** Per durable inbound event (its outbox seq), how many times its turn has hit a retryable failure (a commit
+   *  throw, or a transient infra throw out of react). Survives reactivation (the substrate object persists;
+   *  only warm reactor state is dropped), so the retry bound spans replays. */
   private readonly commitRetries = new Map<OutboxSeq, number>();
 
   constructor(
@@ -181,18 +179,20 @@ export class Substrate {
     }
   }
 
-  /** The backoff (ms) the next `retry` re-pump waits — set by `onCommitFailure`, consumed by `pump`. */
+  /** The backoff (ms) the next `retry` re-pump waits — set by `onRetryableFailure`, consumed by `pump`. */
   private pendingBackoffMs = 0;
 
   /** Run one turn through its three phases — react / commit / afterCommit — each with its own failure
    *  policy. Returns how `pump` should proceed. */
   private async runOne(turn: Turn): Promise<TurnOutcome> {
-    // Phase 1 — react: compute the reaction (mutate warm state, buffer sends). A failure here is a logic
-    // error, not state divergence (nothing committed yet); deterministic failures are supposed to surface as
-    // a panic, so a *throw* is a bug — never replay-loop it.
+    // Phase 1 — react: compute the reaction (mutate warm state, buffer sends). A *transient* infra failure
+    // here (a `TransientError` — e.g. an IR DB read blip on a resume turn) is retryable exactly like a commit
+    // failure: nothing committed, so drop + reload + replay. Any other throw is a deterministic bug (a
+    // deterministic failure is supposed to surface as a panic, not a throw) — never replay-loop it.
     try {
       await turn.run();
     } catch (reactError) {
+      if (isTransientError(reactError)) return this.onRetryableFailure(turn, reactError, "react");
       return this.onReactFailure(turn, reactError);
     }
     // Phase 2 — commit: the one atomic durable write. A failure here means the warm store advanced past
@@ -200,7 +200,7 @@ export class Substrate {
     try {
       await this.commit(turn.reactor, turn.consumed);
     } catch (commitError) {
-      return this.onCommitFailure(turn, commitError);
+      return this.onRetryableFailure(turn, commitError, "commit");
     }
     if (turn.consumed !== null) this.commitRetries.delete(turn.consumed); // committed → clear its retry count
     // Phase 3 — afterCommit: strictly-post-commit side effects (FFI dispatch, etc.). The turn is already
@@ -234,16 +234,20 @@ export class Substrate {
     return "reload";
   }
 
-  /** A `commit` throw: transient infrastructure (DB unreachable, deadlock, timeout). Drop + reload warm; the
-   *  unconsumed event replays as the retry. Bounded with backoff so a non-transient failure does not spin —
-   *  on exhaustion it stops in-process (the event stays durable, retried on the next activation). An
-   *  originated turn (a command / FFI completion) has nothing durable to replay, so its rejected caller
-   *  retries it. */
-  private async onCommitFailure(turn: Turn, error: unknown): Promise<TurnOutcome> {
+  /** A retryable failure: a `commit` throw, or a *transient* infra throw out of `react` (a `TransientError`).
+   *  Either way the warm store may have advanced past durable, so drop + reload; the unconsumed event replays
+   *  as the retry. Bounded with backoff so a non-transient failure does not spin — on exhaustion it stops
+   *  in-process (the event stays durable, retried on the next activation). An originated turn (a command / FFI
+   *  completion) has nothing durable to replay, so its rejected caller retries it. */
+  private async onRetryableFailure(
+    turn: Turn,
+    error: unknown,
+    phase: "react" | "commit",
+  ): Promise<TurnOutcome> {
     turn.settle?.reject(error);
     this.dropWarm(error);
     if (turn.consumed === null) {
-      this.logger.warn("commit failed for an originated turn; reloading", {
+      this.logger.warn(`${phase} failed for an originated turn; reloading`, {
         error: messageOf(error),
       });
       return "reload";
@@ -252,14 +256,14 @@ export class Substrate {
     if (attempts <= MAX_COMMIT_RETRIES) {
       this.commitRetries.set(turn.consumed, attempts);
       this.pendingBackoffMs = commitBackoffMs(attempts);
-      this.logger.warn("commit failed; will replay the event", {
+      this.logger.warn(`${phase} failed; will replay the event`, {
         attempts,
         error: messageOf(error),
       });
       return "retry";
     }
     this.commitRetries.delete(turn.consumed);
-    this.logger.error("commit kept failing; giving up in-process (retries on next activation)", {
+    this.logger.error(`${phase} kept failing; giving up in-process (retries on next activation)`, {
       attempts,
       error: messageOf(error),
     });

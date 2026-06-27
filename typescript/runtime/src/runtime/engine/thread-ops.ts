@@ -7,7 +7,7 @@
 // inbound ones via the actor.
 
 import type { Block } from "@katari-lang/types";
-import type { AskKind } from "../event/types.js";
+import type { AskKind, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import type { Value } from "../value/types.js";
@@ -41,6 +41,13 @@ import type {
 } from "./types.js";
 
 const NULL_VALUE: Value = { kind: "null" };
+
+/** The reactor a proxy thread's downward leg (a `terminate` or `escalateAck`) descends to — its child's
+ *  reactor. An `external` proxy's child runs in `ffi`; a `delegate` (core sub-call) proxy's in `core`. The
+ *  proxy's kind mirrors its delegate target's kind, so this is the proxy-side twin of `calleeReactorForTarget`. */
+function proxyCalleeReactor(thread: Thread): ReactorName {
+  return thread.kind === "external" ? "ffi" : "core";
+}
 
 // ─── create ───────────────────────────────────────────────────────────────────────────────────
 
@@ -181,7 +188,7 @@ export function dispatchAskAck(ctx: StepContext, thread: Thread, askId: AskId, v
       // (`external`); the proxy's own kind names the callee reactor.
       ctx.emit(
         { kind: "escalateAck", delegation: thread.delegationId, escalation, value },
-        thread.kind === "external" ? "ffi" : "core",
+        proxyCalleeReactor(thread),
       );
       return;
     }
@@ -275,10 +282,7 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
       thread.status = "cancelling";
       ctx.instance.cancelExits[thread.id] = { kind: "ackParent" };
       // The terminate descends to this proxy's child; the proxy's kind names the callee reactor.
-      ctx.emit(
-        { kind: "terminate", delegation: thread.delegationId },
-        thread.kind === "external" ? "ffi" : "core",
-      );
+      ctx.emit({ kind: "terminate", delegation: thread.delegationId }, proxyCalleeReactor(thread));
       return;
     case "primitive":
     case "construct":

@@ -23,6 +23,7 @@ import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import {
   agentSnapshot,
+  calleeReactorForTarget,
   type DelegateTarget,
   type ExternalEvent,
   escalateValue,
@@ -38,6 +39,7 @@ import {
 } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
+import { isTransientError, messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { serializeCoreInstance } from "./persistence-codec.js";
 import { Reactor } from "./reactor.js";
@@ -164,22 +166,20 @@ export class CoreReactor extends Reactor {
 
   private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
     // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
-    // Resolving the target reads the IR; if it cannot resolve (a missing module / unknown agent — e.g. a bad
-    // qualified name from a run command), that is a deterministic program failure, not transient infra. Fail
-    // it as a panic to the caller (an unhandled panic fails the run); never let it throw, which the substrate
-    // would treat as a poisoned commit and replay-loop forever. No instance is born here, so the panic's
+    // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
+    // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it as a panic to the
+    // caller (an unhandled panic fails the run). A *transient* infra failure (a `TransientError` — an IR DB
+    // read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from durable state
+    // (turning it into a panic would wrongly fail the run forever). No instance is born here, so the panic's
     // outbox issuer is a throwaway id (the outbox issuer is not a foreign key).
     let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
     try {
       await this.ir.preload(agentSnapshot(event.target));
       resolved = this.resolveTarget(event.target);
     } catch (error) {
+      if (isTransientError(error)) throw error;
       this.turnOwnerId = newInstanceId();
-      this.raisePanic(
-        event.delegation,
-        error instanceof Error ? error.message : String(error),
-        event.from,
-      );
+      this.raisePanic(event.delegation, messageOf(error), event.from);
       return;
     }
     const instance = createInstance(this.store, {
@@ -353,7 +353,7 @@ export class CoreReactor extends Reactor {
         // single record of who issued it — no parallel caller map.
         this.openDelegation(event.delegation, {
           caller: instance.id,
-          peer: event.target.kind === "external" ? "ffi" : "core",
+          peer: calleeReactorForTarget(event.target),
           target: event.target,
           argument: event.argument,
         });

@@ -389,13 +389,16 @@ describe("recovery", () => {
     const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
     await expect(result).rejects.toThrow(/panic.*number/);
-    // The failure is durable on the `runs` record by the time the run settles (the run delegation row, pure
-    // live routing, was deleted on its terminal — the outcome lives here now).
+    // And the run's root instance (and its descendants) were torn down — nothing left suspended.
+    await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
+    // The failure is durable on the `runs` record AND survives the teardown: failing the run sends a
+    // `terminate` to its still-suspended root, whose `terminateAck` must NOT clobber the durable `error` (and
+    // its message) with `cancelled`. Asserting only after full quiescence — once that terminateAck has landed —
+    // is what makes this catch that regression (the run delegation row, pure live routing, was deleted on its
+    // terminal, so the outcome lives on `runs` now).
     const record = persistence.peekRun(run);
     expect(record?.state).toBe("error");
     expect(record?.errorMessage).toMatch(/panic.*number/);
-    // And the run's root instance (and its descendants) were torn down — nothing left suspended.
-    await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
   });
 
   // agent main() { return 7 }  (no children, completes in its own create turn)

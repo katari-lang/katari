@@ -83,11 +83,7 @@ export class ApiReactor extends Reactor {
   /** This turn's run state / outcome updates — the durable SoT for a run's outcome (the run delegation row is
    *  deleted on terminal). Written to `runs` in `persist`. */
   private pendingRunOutcomes: PersistedRunOutcome[] = [];
-  private pendingCancelReasons: Array<{ run: DelegationId; reason: string | null }> = [];
   private pendingAudits: PersistedRunEscalationAudit[] = [];
-  /** Set when this turn registered an api-root-owned blob (a file upload), so `persist` ensures the api
-   *  root's `instances` row exists before the pool writes the blob whose owner FK points at it. */
-  private pendingBlobRegistration = false;
 
   constructor(
     private readonly apiRootId: InstanceId,
@@ -106,24 +102,22 @@ export class ApiReactor extends Reactor {
    *  run first ensures the api root's own `instances` envelope, before `flushDelegations` writes the run
    *  delegation whose caller FK points at it (the api root has no producing `delegate` turn to create it). */
   async persist(tx: PersistenceTx): Promise<void> {
-    // Stage the api root's envelope when a run / blob this turn needs it as an FK target, then let the base
-    // write the generic half (that envelope + the run delegations it owns). The api root raises no escalations
-    // and drops nothing. The run-metadata sidecar is the api's own data.
-    if (this.pendingRunStarts.length > 0 || this.pendingBlobRegistration)
-      this.markInstance(this.apiRootId, { delegationId: null, status: "running" });
+    // Always stage the api root's envelope (an idempotent upsert), so the generic half is present before any FK
+    // that points at it — a run delegation's caller, or a file-upload blob's owner. The api root is the
+    // project's permanent management root, so ensuring it every turn is correct and needs no per-FK flag; the
+    // base then writes that envelope plus the run delegations it owns. It raises no escalations and drops
+    // nothing; the run-metadata sidecar is the api's own data.
+    this.markInstance(this.apiRootId, { delegationId: null, status: "running" });
     await this.persistBase(tx.base);
     // The run launch row first (a later outcome update targets it); then this turn's state / outcome updates
-    // (the durable SoT, since the run delegation row was just deleted by the base on its terminal).
+    // (the durable SoT, since the run delegation row was just deleted by the base on its terminal). A cancel's
+    // reason rides on its `cancelling` outcome, so the cancel is one UPDATE, not two.
     for (const run of this.pendingRunStarts) await tx.api.putRun(run);
     for (const outcome of this.pendingRunOutcomes) await tx.api.setRunOutcome(outcome);
-    for (const { run, reason } of this.pendingCancelReasons)
-      await tx.api.setRunCancelReason(run, reason);
     for (const audit of this.pendingAudits) await tx.api.putRunEscalationAudit(audit);
     this.pendingRunStarts = [];
     this.pendingRunOutcomes = [];
-    this.pendingCancelReasons = [];
     this.pendingAudits = [];
-    this.pendingBlobRegistration = false;
   }
 
   /** Drop the api root's durable-derived warm state so reactivation rebuilds it (idempotent — safe on a cold
@@ -139,17 +133,15 @@ export class ApiReactor extends Reactor {
       delete this.cancelReasons[key as DelegationId];
     this.pendingRunStarts = [];
     this.pendingRunOutcomes = [];
-    this.pendingCancelReasons = [];
     this.pendingAudits = [];
-    this.pendingBlobRegistration = false;
   }
 
   /** Register a freshly uploaded file as an api-root-owned blob (its bytes already in the BlobStore). Owned
    *  by the api root, it is retained until an explicit user delete — never reclaimed by GC. Resolves when the
-   *  blob row is durably committed (the pool flushes it in the same turn). */
+   *  blob row is durably committed (the pool flushes it in the same turn, after `persist` has ensured the api
+   *  root's envelope the blob's owner FK points at). */
   registerUploadedBlob(blobId: BlobId, entry: Omit<BlobEntry, "owner">): Promise<void> {
     return this.commands.enqueue(() => {
-      this.pendingBlobRegistration = true;
       this.pool.registerBlob(blobId, { owner: this.apiRootId, ...entry });
     });
   }
@@ -223,8 +215,14 @@ export class ApiReactor extends Reactor {
       if (!this.hasLiveDelegation(run)) return;
       if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
       this.transitionDelegation(run, "cancelling");
-      this.pendingRunOutcomes.push({ run, state: "cancelling", result: null, errorMessage: null });
-      this.pendingCancelReasons.push({ run, reason: reason ?? null });
+      // The cancel reason rides on the `cancelling` outcome, so the run's state + reason commit as one UPDATE.
+      this.pendingRunOutcomes.push({
+        run,
+        state: "cancelling",
+        result: null,
+        errorMessage: null,
+        cancelReason: reason ?? null,
+      });
       this.send({ kind: "terminate", delegation: run, from: this.name, to: "core" });
     });
   }
@@ -296,22 +294,30 @@ export class ApiReactor extends Reactor {
         // the api root is just the local owner here — and is what keeps a run that returns a closure / blob
         // alive instead of dropping it.
         this.reownIncoming(event.value, this.apiRootId);
-        this.transitionDelegation(event.delegation, "done", { result: event.value });
-        this.pendingRunOutcomes.push({
-          run: event.delegation,
-          state: "done",
-          result: event.value,
-          errorMessage: null,
-        });
+        // Record `done` only if this actually settled a still-live run. A no-op transition means the run
+        // already reached a terminal state, so its durable outcome stands (never overwrite it).
+        if (this.transitionDelegation(event.delegation, "done", { result: event.value })) {
+          this.pendingRunOutcomes.push({
+            run: event.delegation,
+            state: "done",
+            result: event.value,
+            errorMessage: null,
+          });
+        }
         break;
       case "terminateAck":
-        this.transitionDelegation(event.delegation, "gone");
-        this.pendingRunOutcomes.push({
-          run: event.delegation,
-          state: "cancelled",
-          result: null,
-          errorMessage: null,
-        });
+        // Record `cancelled` only if the terminateAck actually settled a still-live run. A *failed* run already
+        // recorded `error` and evicted its delegation, so the terminateAck from tearing down its still-suspended
+        // root is a sticky no-op here — it must NOT clobber the durable `error` outcome (and its message) with
+        // `cancelled`. Gating the outcome write on the transition gives it the same sticky-terminal protection.
+        if (this.transitionDelegation(event.delegation, "gone")) {
+          this.pendingRunOutcomes.push({
+            run: event.delegation,
+            state: "cancelled",
+            result: null,
+            errorMessage: null,
+          });
+        }
         break;
       case "escalate":
         this.reactEscalate(event);
@@ -359,14 +365,17 @@ export class ApiReactor extends Reactor {
       return;
     }
     const errorMessage = escalationErrorMessage(event);
-    this.transitionDelegation(event.delegation, "failed", { errorMessage });
-    this.pendingRunOutcomes.push({
-      run: event.delegation,
-      state: "error",
-      result: null,
-      errorMessage,
-    });
-    this.send({ kind: "terminate", delegation: event.delegation, from: this.name, to: "core" });
+    // Record `error` and tear the still-suspended root down only if this actually failed a live run; a
+    // second escalate reaching an already-terminal run is a no-op (its outcome is already durable).
+    if (this.transitionDelegation(event.delegation, "failed", { errorMessage })) {
+      this.pendingRunOutcomes.push({
+        run: event.delegation,
+        state: "error",
+        result: null,
+        errorMessage,
+      });
+      this.send({ kind: "terminate", delegation: event.delegation, from: this.name, to: "core" });
+    }
   }
 
   /** Settle a run-root delegation either way and drop its handlers + any of its still-open escalations. */

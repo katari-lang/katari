@@ -5,9 +5,11 @@
 // returned blob readable, after the instance that built them is gone — for a sub-call (a core caller re-owns)
 // and a run alike (the api root re-owns).
 //
-// NOTE: blobs have no producer in the runtime yet (no large-value promotion, no blob prim), so the blob half
-// is currently inert — `store.blobOwners` stays empty, and blob ownership is not yet persisted. The walker is
-// symmetric over scopes and blobs so the moment blobs are produced their reachability is already correct.
+// NOTE: blob ownership is now real and persisted (`store.blobs` → the `blobs` table, via the `ResourcePool`),
+// but the only producer today is a file upload, owned by the api root and retained for its lifetime — so no
+// *engine* instance yet owns a blob whose ownership this walker would hand across a boundary (that arrives
+// with large-value promotion / a blob prim). The walker is symmetric over scopes and blobs, so the moment an
+// engine instance produces one its reachability is already correct.
 
 import type { BlobId, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";

@@ -113,6 +113,9 @@ export class S3BlobStore implements BlobStore {
     start: number,
     end: number,
   ): Promise<Uint8Array> {
+    // An empty half-open range `[n, n)` reads nothing — match `InMemoryBlobStore`'s `slice(start, end)` and
+    // never send S3 a reversed `bytes=n-(n-1)` range (which it rejects with 416 / returns the whole object).
+    if (start >= end) return new Uint8Array(0);
     // HTTP byte ranges are inclusive; the interface's `end` is exclusive.
     const response = await this.client.send(
       new GetObjectCommand({

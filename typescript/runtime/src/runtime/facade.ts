@@ -21,7 +21,6 @@ import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
-  type BlobId,
   type DelegationId,
   type EscalationId,
   newBlobId,

@@ -18,8 +18,9 @@ describe("reachableResources", () => {
         1: { id: toScopeId(1), parentId: toScopeId(0), owner: null, values: {} },
         2: { id: toScopeId(2), parentId: toScopeId(1), owner: null, values: {} },
       },
+      scopesByOwner: new Map(),
       nextScopeId: 3,
-      blobOwners: {},
+      blobs: {},
     };
     const value: Value = {
       kind: "record",
@@ -51,7 +52,13 @@ describe("reachableResources", () => {
   });
 
   test("a scalar captures no resources", () => {
-    const store: ProjectStore = { instances: {}, scopes: {}, nextScopeId: 0, blobOwners: {} };
+    const store: ProjectStore = {
+      instances: {},
+      scopes: {},
+      scopesByOwner: new Map(),
+      nextScopeId: 0,
+      blobs: {},
+    };
     const { scopes, blobs } = reachableResources(store, { kind: "integer", value: 42 });
     expect(scopes.size).toBe(0);
     expect(blobs.size).toBe(0);

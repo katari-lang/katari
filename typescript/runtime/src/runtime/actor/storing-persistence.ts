@@ -11,6 +11,7 @@
 import {
   type DelegationState,
   isLiveDelegationState,
+  isTerminalRunState,
   type RunState,
 } from "../../db/tables/execution.js";
 import type { DelegateTarget, ReactorName } from "../event/types.js";
@@ -283,10 +284,11 @@ export class StoringPersistence implements Persistence {
           stored.state = outcome.state;
           stored.result = outcome.result;
           stored.errorMessage = outcome.errorMessage;
-        },
-        setRunCancelReason: async (run, reason) => {
-          const stored = this.runs.get(run);
-          if (stored !== undefined) stored.cancelReason = reason;
+          // A `cancelReason` rides along on the `cancelling` update; `undefined` elsewhere leaves it untouched.
+          if (outcome.cancelReason !== undefined) stored.cancelReason = outcome.cancelReason;
+          // Stamp `completedAt` at a terminal state, mirroring DbPersistence so the twin is recovery-faithful.
+          if (isTerminalRunState(outcome.state) && stored.completedAt === null)
+            stored.completedAt = new Date();
         },
         putRunEscalationAudit: async (audit) => {
           this.audits.push(audit);
