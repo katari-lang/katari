@@ -5,3 +5,7 @@ import { z } from "zod";
 import { projectIdParamSchema } from "../../lib/params.js";
 
 export const fileParamSchema = projectIdParamSchema.extend({ fileId: z.uuid() });
+
+// The FFI blob-production route is scoped by the producing handler's delegation id, so the runtime can register
+// the blob as owned by that ffi call's instance.
+export const ffiBlobParamSchema = projectIdParamSchema.extend({ delegation: z.uuid() });

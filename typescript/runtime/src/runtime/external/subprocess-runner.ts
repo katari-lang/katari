@@ -104,9 +104,19 @@ export class SubprocessFfiTransport implements FfiTransport {
 
 /** The real channel: spawn the sidecar command and frame the protocol over its stdio — `dispatch` / `abort`
  *  out on stdin, replies in on stdout (one JSON per line), stderr inherited for the sidecar's logs. */
-export function subprocessSidecar(command: string, args: string[] = []): SidecarSpawner {
+export function subprocessSidecar(
+  command: string,
+  args: string[] = [],
+  env?: Record<string, string>,
+): SidecarSpawner {
   return (handlers) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+    // Merge the extra vars over the parent env (so the sidecar still inherits PATH etc.). The extra vars carry
+    // the runtime's own URL + the project id, which let a handler reach the blob side channel (download /
+    // upload) over HTTP — bytes never ride the stdio reply channel.
+    const child = spawn(command, args, {
+      stdio: ["pipe", "pipe", "inherit"],
+      ...(env !== undefined ? { env: { ...process.env, ...env } } : {}),
+    });
     const buffer = new LineBuffer();
     let closed = false;
     const close = (reason: string): void => {

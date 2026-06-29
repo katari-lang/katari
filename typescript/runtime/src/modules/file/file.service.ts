@@ -21,6 +21,12 @@ export const fileService = {
     return facade.uploadFile({ projectId, bytes, contentType });
   },
 
+  /** Store the bytes an FFI handler produced mid-call and register the blob as owned by that call's instance
+   *  (it ascends to the core caller on the call's return); returns its handle. */
+  produceFfiBlob(projectId: string, delegation: string, bytes: Uint8Array, contentType?: string) {
+    return facade.produceFfiBlob({ projectId, delegation, bytes, contentType });
+  },
+
   /** Every file (blob) the project holds. */
   list(projectId: string) {
     return fileRepository.list(db, projectId);

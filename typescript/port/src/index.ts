@@ -7,6 +7,7 @@
 // own edge), so authoring an FFI handler is just `(argument) => result`.
 
 import type { Json } from "@katari-lang/types";
+import { downloadBlob, type FileHandle, type UploadOptions, uploadBlob } from "./blob.js";
 import {
   decodeRequest,
   encodeReply,
@@ -23,6 +24,15 @@ export interface HandlerContext {
   /** True on a recovery re-dispatch (the runtime restarted with this call still in flight). A handler with a
    *  non-idempotent side effect can use it to dedupe. */
   redispatch: boolean;
+  /** Download a blob's bytes from the runtime by its handle (the `{ $ref, ... }` a `File` argument carries) or
+   *  bare blob id. Bytes stream over an HTTP side channel, not the stdio reply, and this call's cancellation is
+   *  honored. Throws outside a runtime-hosted sidecar. */
+  downloadBlob(handle: FileHandle | string): Promise<Uint8Array>;
+  /** Produce a new blob from `bytes` and get its handle — return that handle (or a record containing it) to
+   *  hand the calling agent a `File`. The bytes go over the HTTP side channel; the blob is owned by this call
+   *  and ascends to the caller on return. This call's cancellation is honored. Throws outside a runtime-hosted
+   *  sidecar. */
+  uploadBlob(bytes: Uint8Array, options?: UploadOptions): Promise<FileHandle>;
 }
 
 /** A user's FFI handler: plain `Json` in, plain `Json` (or a promise of it) out. */
@@ -81,7 +91,13 @@ export class Sidecar {
     }
     const controller = new AbortController();
     this.inFlight.set(request.delegation, controller);
-    const context: HandlerContext = { signal: controller.signal, redispatch: request.redispatch };
+    const context: HandlerContext = {
+      signal: controller.signal,
+      redispatch: request.redispatch,
+      downloadBlob: (handle) => downloadBlob(handle, controller.signal),
+      uploadBlob: (bytes, options) =>
+        uploadBlob(request.delegation, bytes, options, controller.signal),
+    };
     // Run off the current tick (and normalise a synchronous throw into a rejected promise).
     Promise.resolve()
       .then(() => handler(request.argument, context))
@@ -264,4 +280,5 @@ function formatConsoleArguments(args: readonly unknown[]): string {
     .join(" ");
 }
 
+export { downloadBlob, type FileHandle, type UploadOptions, uploadBlob } from "./blob.js";
 export type { SidecarReply, SidecarRequest } from "./protocol.js";

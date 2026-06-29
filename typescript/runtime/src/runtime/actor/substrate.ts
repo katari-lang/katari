@@ -13,7 +13,8 @@
 
 import type { Logger } from "../../lib/logger.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
-import { newOutboxSeq, type OutboxSeq, type ProjectId } from "../ids.js";
+import { type BlobId, newOutboxSeq, type OutboxSeq, type ProjectId } from "../ids.js";
+import type { BlobStore } from "../value/blob-store.js";
 import { isTransientError, messageOf } from "./failure.js";
 import type { OutboxMessage, Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
@@ -77,6 +78,9 @@ export class Substrate {
     private readonly persistence: Persistence,
     private readonly registry: Record<ReactorName, Reactor>,
     private readonly pool: ResourcePool,
+    /** The blob byte store — the substrate frees a reclaimed blob's bytes strictly after the turn that dropped
+     *  its rows commits (the pool reports them out of `persist`). */
+    private readonly blobStore: BlobStore,
     private readonly host: SubstrateHost,
     private readonly logger: Logger,
   ) {}
@@ -313,14 +317,29 @@ export class Substrate {
             issuer: reactor.currentTurnOwner(),
             event,
           }));
+    let reclaimedBytes: BlobId[] = [];
     await this.persistence.transaction(this.projectId, async (tx) => {
       await reactor.persist(tx);
       // The pool flushes after the reactor so an in-transit scope (released as the run / sub-call result
-      // left its instance) is re-written AFTER that instance's drop cascade removed its stale row.
-      await this.pool.persist(tx);
+      // left its instance) is re-written AFTER that instance's drop cascade removed its stale row. It reports
+      // the blobs whose rows it dropped, whose bytes are freed below once this commit is durable.
+      reclaimedBytes = await this.pool.persist(tx);
       if (consumed !== null) await tx.outbox.consumeOutbox(consumed);
       if (produced.length > 0) await tx.outbox.produceOutbox(produced);
     });
+    // Strictly post-commit (durable-first): the rows referencing these blobs are now durably gone, so their
+    // bytes are unreferenced and safe to delete. Fire-and-forget — the serial loop must not gate on object-store
+    // latency — and a failed delete is a harmless storage leak, logged (never thrown: the turn is committed, so
+    // throwing here would poison durable state). On a failed commit the transaction throws above and this is
+    // never reached, so live bytes are never orphaned.
+    for (const blobId of reclaimedBytes) {
+      void this.blobStore.delete(this.projectId, blobId).catch((error: unknown) => {
+        this.logger.warn("post-commit blob byte deletion failed (row dropped; bytes leak)", {
+          blobId,
+          error: messageOf(error),
+        });
+      });
+    }
     for (const message of produced) this.mailbox.push(this.eventTurn(message.event, message.seq));
   }
 }

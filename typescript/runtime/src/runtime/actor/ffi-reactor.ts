@@ -11,9 +11,11 @@
 // caught it — the answer becomes the result) or a `terminate` (unhandled — the run is failing). The actual
 // process call has stopped, so that wait needs no transport.
 
+import type { BlobEntry } from "../engine/types.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type { FfiCompletion, FfiTransport } from "../external/runner.js";
 import {
+  type BlobId,
   type DelegationId,
   type InstanceId,
   newInstanceId,
@@ -173,6 +175,22 @@ export class FfiReactor extends Reactor {
         this.dirty.add(completion.delegation);
         return;
     }
+  }
+
+  /** Register a blob a running handler produced mid-call (its bytes already in the `BlobStore`) as owned by
+   *  this call's instance — so the call's `delegateAck` ascends it to the core caller through the base reactor's
+   *  release / reown, exactly like a core sub-call's result blob. Run as an out-of-loop command turn (the blob
+   *  upload's HTTP request), so the ownership row commits durably before the handler's result is processed. A
+   *  no-op if the call is already gone (cancelled / completed): the bytes are then a harmless orphan, and the
+   *  handler — being torn down — never delivers the handle. */
+  registerProducedBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): void {
+    const call = this.calls.get(delegation);
+    if (call === undefined) return;
+    this.pool.registerBlob(blobId, { owner: call.instance, ...entry });
   }
 
   /** Dispatch / abort the transport strictly after the turn commits (durable-first): a freshly opened call is

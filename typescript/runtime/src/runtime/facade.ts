@@ -70,18 +70,24 @@ export interface AnswerEscalationInput {
 
 // The warm registry: one per process, backed by the DB (IR module store + engine-graph persistence). A
 // project's actor is created lazily and kept warm. FFI runs each snapshot's sidecar bundle as a `node`
-// process (per-project transport); env is not wired yet (pure prims).
+// process (per-project transport).
 // The byte store for blobs (file uploads, future engine string-promotion). Shared with the project actors
 // (the same instance the engine reads through), so a blob's bytes are one source of truth. S3 when
 // `BLOB_S3_BUCKET` is configured, else the in-memory dev store.
 export const blobStore = createBlobStore(config.blobS3);
+
+// The URL a sidecar uses to reach this runtime's blob side channel (download / upload). The sidecar is a child
+// process on this same host, so it connects over loopback regardless of the server's bind host (which may be a
+// wildcard such as `0.0.0.0`).
+const runtimeBaseUrl = `http://127.0.0.1:${config.port}`;
 
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
   prims: new PrimRegistry(),
   blobs: blobStore,
-  externalFactory: () => new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize),
+  externalFactory: () =>
+    new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize(runtimeBaseUrl)),
 });
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
@@ -158,6 +164,33 @@ export const facade = {
       semanticKind: "file",
       ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
     });
+    return { id: blobId, hash, size };
+  },
+
+  /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob
+   *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Like
+   *  `uploadFile`, the bytes are put before the (small) registration command, so the actor loop never carries
+   *  the payload; an orphaned put on a failed / vanished registration is a rare, harmless leak. Returns the
+   *  blob handle the sidecar lifts into a `File` value. */
+  async produceFfiBlob(input: {
+    projectId: string;
+    delegation: string;
+    bytes: Uint8Array;
+    contentType?: string;
+  }): Promise<{ id: string; hash: string; size: number }> {
+    const blobId = newBlobId();
+    const hash = createHash("sha256").update(input.bytes).digest("hex");
+    const size = input.bytes.byteLength;
+    const projectId = input.projectId as ProjectId;
+    await blobStore.put(projectId, blobId, input.bytes);
+    await registry
+      .actorFor(projectId)
+      .registerProducedBlob(input.delegation as DelegationId, blobId, {
+        hash,
+        size,
+        semanticKind: "file",
+        ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
+      });
     return { id: blobId, hash, size };
   },
 };

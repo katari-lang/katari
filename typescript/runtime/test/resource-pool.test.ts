@@ -9,8 +9,9 @@ import type { PersistedScope } from "../src/runtime/actor/persistence-codec.js";
 import { NO_OP_TX, type PersistenceTx } from "../src/runtime/actor/persistence.js";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import { rebuildScopeOwnerIndex } from "../src/runtime/engine/scope.js";
-import type { ProjectStore } from "../src/runtime/engine/types.js";
+import type { BlobEntry, ProjectStore } from "../src/runtime/engine/types.js";
 import {
+  type BlobId,
   type InstanceId,
   type ProjectId,
   type SnapshotId,
@@ -121,5 +122,87 @@ describe("ResourcePool", () => {
     const again = recordingTx();
     await pool.persist(again.tx);
     expect(again.scopes).toHaveLength(0);
+  });
+});
+
+describe("ResourcePool blob reclaim", () => {
+  const OWNER = "instance-blob-owner" as InstanceId;
+  const OTHER = "instance-blob-other" as InstanceId;
+  const MINE = "blob-mine" as BlobId;
+  const THEIRS = "blob-theirs" as BlobId;
+  const TRANSIT = "blob-transit" as BlobId;
+
+  const blobEntry = (owner: InstanceId | null): BlobEntry => ({
+    owner,
+    hash: "hash",
+    size: 3,
+    semanticKind: "file",
+  });
+
+  /** A store seeded with blobs only (no scopes); `owners` maps each blob id to its owner. */
+  function storeWithBlobs(owners: Record<string, InstanceId | null>): ProjectStore {
+    const blobs: Record<string, BlobEntry> = {};
+    for (const [blobId, owner] of Object.entries(owners)) blobs[blobId] = blobEntry(owner);
+    return {
+      instances: {},
+      scopes: {},
+      scopesByOwner: new Map(),
+      nextScopeId: 0,
+      blobs,
+    };
+  }
+
+  /** A PersistenceTx whose `pool` port records the blob rows written / dropped. */
+  function recordingBlobTx(): { tx: PersistenceTx; put: BlobId[]; dropped: BlobId[] } {
+    const put: BlobId[] = [];
+    const dropped: BlobId[] = [];
+    const tx: PersistenceTx = {
+      ...NO_OP_TX,
+      pool: {
+        ...NO_OP_TX.pool,
+        async putBlob(blob) {
+          put.push(blob.blobId);
+        },
+        async dropBlob(blobId) {
+          dropped.push(blobId);
+        },
+      },
+    };
+    return { tx, put, dropped };
+  }
+
+  test("reclaimBlobsOwnedBy frees the owner's blobs' bytes (row via cascade), leaving other owners' alone", async () => {
+    const store = storeWithBlobs({ [MINE]: OWNER, [THEIRS]: OTHER, [TRANSIT]: null });
+    const pool = new ResourcePool(PROJECT, store);
+
+    pool.reclaimBlobsOwnedBy(OWNER);
+    // Only the dropping instance's own blob leaves the warm store; another owner's and an in-transit one stay.
+    expect(store.blobs[MINE]).toBeUndefined();
+    expect(store.blobs[THEIRS]).toBeDefined();
+    expect(store.blobs[TRANSIT]).toBeDefined();
+
+    const { tx, put, dropped } = recordingBlobTx();
+    const reclaimed = await pool.persist(tx);
+    // Its bytes are reported for post-commit deletion; its ROW is left to the instance's drop cascade (no
+    // explicit dropBlob), and nothing it owned is re-upserted.
+    expect(reclaimed).toEqual([MINE]);
+    expect(dropped).toEqual([]);
+    expect(put).toEqual([]);
+
+    // The reclaimed-bytes set cleared after the flush.
+    expect(await pool.persist(recordingBlobTx().tx)).toEqual([]);
+  });
+
+  test("freeBlob drops the row AND frees the bytes (intra-instance GC)", async () => {
+    const store = storeWithBlobs({ [MINE]: OWNER });
+    const pool = new ResourcePool(PROJECT, store);
+
+    pool.freeBlob(MINE);
+    expect(store.blobs[MINE]).toBeUndefined();
+
+    const { tx, dropped } = recordingBlobTx();
+    const reclaimed = await pool.persist(tx);
+    expect(reclaimed).toEqual([MINE]);
+    expect(dropped).toEqual([MINE]);
   });
 });

@@ -4,7 +4,7 @@ import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import type { AppEnv } from "../../types/app-env.js";
-import { fileParamSchema } from "./file.schema.js";
+import { ffiBlobParamSchema, fileParamSchema } from "./file.schema.js";
 import { fileService } from "./file.service.js";
 
 export const fileRoutes = new Hono<AppEnv>()
@@ -16,6 +16,22 @@ export const fileRoutes = new Hono<AppEnv>()
     const contentType = c.req.header("content-type");
     return c.json(success(await fileService.upload(projectId, bytes, contentType)), 201);
   })
+  // FFI blob production: a sidecar handler uploads bytes mid-call over this side channel (out of band from the
+  // one-shot stdio reply). The blob is registered as owned by the producing `:delegation`'s ffi call instance,
+  // so it ascends to the core caller on return. Returns the blob handle the sidecar lifts into a `File`.
+  .post(
+    "/projects/:projectId/ffi/:delegation/blobs",
+    zValidator("param", ffiBlobParamSchema),
+    async (c) => {
+      const { projectId, delegation } = c.req.valid("param");
+      const bytes = new Uint8Array(await c.req.arrayBuffer());
+      const contentType = c.req.header("content-type");
+      return c.json(
+        success(await fileService.produceFfiBlob(projectId, delegation, bytes, contentType)),
+        201,
+      );
+    },
+  )
   .get("/projects/:projectId/files", zValidator("param", projectIdParamSchema), async (c) => {
     const { projectId } = c.req.valid("param");
     return c.json(success(await fileService.list(projectId)));

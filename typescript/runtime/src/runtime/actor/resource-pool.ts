@@ -28,10 +28,16 @@ export class ResourcePool {
   private readonly dirty = new Set<ScopeId>();
   /** Scope ids freed this turn (intra-instance GC) — their durable row is deleted by `persist`. */
   private readonly freed = new Set<ScopeId>();
-  /** Blob ids whose row changed this turn (registered / re-owned) and ids reclaimed this turn — flushed by
-   *  `persist`, symmetric to the scope sets. */
+  /** Blob ids whose row changed this turn (registered / re-owned) and ids whose row was explicitly dropped this
+   *  turn (intra-instance GC) — flushed by `persist`, symmetric to the scope sets. */
   private readonly dirtyBlobs = new Set<BlobId>();
   private readonly freedBlobs = new Set<BlobId>();
+  /** Blob ids whose BYTES the substrate must delete from the `BlobStore` strictly AFTER this turn's commit:
+   *  once the rows referencing a reclaimed blob are durably gone, its bytes are unreferenced and safe to free
+   *  (durable-first — deleting inline would orphan live bytes if the commit then rolled back). Populated by a
+   *  reclaim — an intra-instance GC (`freeBlob`) or an owning instance's teardown (`reclaimBlobsOwnedBy`) — and
+   *  returned by `persist` for the substrate to act on once the commit succeeds. */
+  private readonly reclaimedBytes = new Set<BlobId>();
 
   constructor(
     private readonly projectId: ProjectId,
@@ -62,14 +68,34 @@ export class ResourcePool {
     this.freed.clear();
     this.dirtyBlobs.clear();
     this.freedBlobs.clear();
+    this.reclaimedBytes.clear();
   }
 
-  /** Reclaim a blob (intra-instance GC / teardown): drop it from the warm store and stage its row deletion.
-   *  Freeing the bytes (`BlobStore.delete`) is a separate post-commit step (durable-first). */
+  /** Reclaim a single blob found dead by an intra-instance GC: drop it from the warm store, stage its durable
+   *  row deletion, and stage its bytes for post-commit deletion. (The teardown path uses `reclaimBlobsOwnedBy`,
+   *  which leaves the row to the instance's drop cascade.) */
   freeBlob(blobId: BlobId): void {
     delete this.store.blobs[blobId];
     this.dirtyBlobs.delete(blobId);
     this.freedBlobs.add(blobId);
+    this.reclaimedBytes.add(blobId);
+  }
+
+  /** Reclaim every blob a dropping instance still owns — the ones it did NOT ascend out as a result (an
+   *  ascending blob was released to in-transit, `owner = null`, before the drop, so it does not match here).
+   *  Drop each from the warm store and stage its bytes for post-commit deletion; the durable ROW is removed by
+   *  the instance's own drop cascade (the `blobs` FK), so — unlike `freeBlob` — no explicit row delete is
+   *  staged. Called from the base reactor's instance-drop path, so it is uniform for a core instance and an ffi
+   *  call's instance alike (blob ownership is not a core-only concept). */
+  reclaimBlobsOwnedBy(instanceId: InstanceId): void {
+    for (const key of Object.keys(this.store.blobs)) {
+      const blobId = key as BlobId;
+      if (this.store.blobs[blobId]?.owner === instanceId) {
+        delete this.store.blobs[blobId];
+        this.dirtyBlobs.delete(blobId);
+        this.reclaimedBytes.add(blobId);
+      }
+    }
   }
 
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
@@ -121,10 +147,12 @@ export class ResourcePool {
     for (const scopeId of scopesOwnedBy(this.store, owner)) this.dirty.add(scopeId);
   }
 
-  /** Write the scopes touched this turn into the transaction: upsert each still-live one (with its current
-   *  owner — possibly `null` for one in transit), then delete each one the GC freed. No-op when nothing was
-   *  touched. (A scope freed by an instance *drop* is reclaimed by that cascade instead, not here.) */
-  async persist(tx: PersistenceTx): Promise<void> {
+  /** Write the scopes / blobs touched this turn into the transaction: upsert each still-live one (with its
+   *  current owner — possibly `null` for one in transit), then delete each row the GC freed. No-op when nothing
+   *  was touched. (A scope / blob row freed by an instance *drop* is reclaimed by that cascade instead, not
+   *  here.) Returns the blob ids whose BYTES the substrate must delete from the `BlobStore` AFTER the commit —
+   *  the durable-first byte reclaim (rows gone ⇒ bytes unreferenced). */
+  async persist(tx: PersistenceTx): Promise<BlobId[]> {
     const pool = tx.pool;
     for (const scopeId of this.dirty) {
       const scope = this.store.scopes[scopeId];
@@ -136,9 +164,12 @@ export class ResourcePool {
       if (blob !== undefined) await pool.putBlob(serializeBlob(this.projectId, blobId, blob));
     }
     for (const blobId of this.freedBlobs) await pool.dropBlob(blobId);
+    const reclaimedBytes = [...this.reclaimedBytes];
     this.dirty.clear();
     this.freed.clear();
     this.dirtyBlobs.clear();
     this.freedBlobs.clear();
+    this.reclaimedBytes.clear();
+    return reclaimedBytes;
   }
 }

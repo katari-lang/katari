@@ -45,19 +45,15 @@ import { serializeCoreInstance } from "./persistence-codec.js";
 import { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
 
-/** Where this turn's engine continuation (Layer 2) goes when the substrate commits: the still-running
- *  instance is persisted (its scopes flush separately through the pool), a completed / torn-down one is
- *  dropped (cascade), or the turn touched no instance (`none`). */
-type TurnLayer2 =
-  | { kind: "none" }
-  | { kind: "persist"; instance: CoreInstance }
-  | { kind: "drop"; instanceId: InstanceId };
-
 export class CoreReactor extends Reactor {
   readonly name: ReactorName = "core";
 
-  /** This turn's Layer 2 + issuer, set by `runTurnWith` and consumed by `persist`. Reset at each react. */
-  private turnLayer2: TurnLayer2 = { kind: "none" };
+  /** The instances this turn touched (or, if a future substrate ever batches several turns into one commit,
+   *  the turns since the last persist). `runTurnWith` adds each instance it drove; `persist` reconciles them
+   *  against the engine store (the source of truth) — one still present is upserted, one already torn down is
+   *  dropped — then clears the set. Tracking the change as a set + store lookup (rather than a single per-turn
+   *  value) keeps the dirty state from ever drifting from the store. */
+  private readonly touchedInstances = new Set<InstanceId>();
   private turnOwnerId: InstanceId | undefined;
 
   constructor(
@@ -77,7 +73,6 @@ export class CoreReactor extends Reactor {
    *  the proxying `DelegateThread` (`delegateAck` / `terminateAck` from a *core* caller), relay an escalation
    *  inward (`escalate`), answer the raiser (`escalateAck`), or cancel a subtree (`terminate`). */
   async react(event: ExternalEvent): Promise<void> {
-    this.beginTurn();
     switch (event.kind) {
       case "delegate":
         return this.onDelegate(event);
@@ -101,26 +96,27 @@ export class CoreReactor extends Reactor {
     return this.turnOwnerId;
   }
 
-  /** Stage this turn's persistence: write the still-running instance before the Layer 1 rows that reference
-   *  it; for a completed instance, write its terminal Layer 1 rows first, then drop it (the cascade removes
-   *  what it owned). */
+  /** Stage this turn's persistence: reconcile each instance this turn touched against the engine store (the
+   *  source of truth). One still present is upserted — its generic envelope before the Layer 1 rows that
+   *  reference it (the base orders that), its core Layer 2 extension after; one already torn down is dropped
+   *  (the cascade removes what it owned). */
   async persist(tx: PersistenceTx): Promise<void> {
-    const layer2 = this.turnLayer2;
-    // Stage this turn's instance change for the base, then let it write the whole generic half (envelope +
-    // this reactor's delegations / escalations + drop). The core extension is added after, on its own port.
-    if (layer2.kind === "persist")
-      this.markInstance(layer2.instance.id, {
-        delegationId: layer2.instance.delegationId,
-        status: layer2.instance.status,
-      });
-    else if (layer2.kind === "drop") this.markInstanceDropped(layer2.instanceId);
+    // Stage each touched instance's change for the base, then let it write the whole generic half (envelopes +
+    // this reactor's delegations / escalations + drops) in FK order. The core Layer 2 extension is added after,
+    // on its own port, for the instances still present.
+    for (const id of this.touchedInstances) {
+      const instance = this.store.instances[id];
+      if (instance !== undefined)
+        this.markInstance(id, { delegationId: instance.delegationId, status: instance.status });
+      else this.markInstanceDropped(id);
+    }
     await this.persistBase(tx.base);
-    if (layer2.kind === "persist")
-      await tx.core.putCoreInstance(serializeCoreInstance(this.projectId, layer2.instance));
-  }
-
-  private beginTurn(): void {
-    this.turnLayer2 = { kind: "none" };
+    for (const id of this.touchedInstances) {
+      const instance = this.store.instances[id];
+      if (instance !== undefined)
+        await tx.core.putCoreInstance(serializeCoreInstance(this.projectId, instance));
+    }
+    this.touchedInstances.clear();
   }
 
   /** Drop all warm engine state (so reactivation rebuilds it from durable rows after a poisoned commit). */
@@ -131,7 +127,7 @@ export class CoreReactor extends Reactor {
     this.store.scopesByOwner = new Map();
     this.store.nextScopeId = 0;
     this.store.blobs = {};
-    this.turnLayer2 = { kind: "none" };
+    this.touchedInstances.clear();
     this.turnOwnerId = undefined;
   }
 
@@ -327,16 +323,15 @@ export class CoreReactor extends Reactor {
     // re-writes them). A still-running one is persisted, and the pool flushes the scopes it touched (the
     // engine mutates them in place, so the turn marks the instance's scopes dirty wholesale). The `delegateAck`
     // result's resources were already released to in-transit by the base-class `send`.
+    this.touchedInstances.add(instance.id);
     if (isInstanceComplete(instance)) {
       if (instance.delegationId !== null) this.dropHandled(instance.delegationId);
       teardownInstance(this.store, instance.id);
-      this.turnLayer2 = { kind: "drop", instanceId: instance.id };
     } else {
       // Intra-instance GC: reclaim the scopes this instance owns but no longer references (a completed
       // sub-thread's scope, unless its result captured it). Free them before flushing the survivors.
       for (const dead of unreachableOwnedScopes(this.store, instance)) this.pool.free(dead);
       this.pool.markOwnedDirty(instance.id);
-      this.turnLayer2 = { kind: "persist", instance };
     }
   }
 

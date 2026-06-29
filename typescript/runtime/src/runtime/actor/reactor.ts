@@ -235,9 +235,13 @@ export abstract class Reactor {
   }
 
   /** Stage an instance drop (cascade) for the next `persistBase` — the concrete calls this when it tears an
-   *  instance down. Supersedes any upsert staged for the same id this turn. */
+   *  instance down. Supersedes any upsert staged for the same id this turn. Also reclaims the blobs the
+   *  dropping instance still owns (the ones it did not ascend out as a result): a pure resource the pool owns,
+   *  reclaimed here uniformly for a core instance and an ffi call's instance, while its scopes are reclaimed by
+   *  the engine's own teardown. */
   protected markInstanceDropped(id: InstanceId): void {
     this.dirtyInstances.set(id, { kind: "drop" });
+    this.pool.reclaimBlobsOwnedBy(id);
   }
 
   /** Persist everything the base owns for this turn through `tx.base`, in FK order: the instance envelopes

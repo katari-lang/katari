@@ -25,8 +25,13 @@ export type BundleSource = (
 ) => Promise<SidecarBundle | null>;
 
 /** Turn a bundle into a spawner for its sidecar process (write it out, spawn the host). Injected so the
- *  routing is testable with a fake process. */
-export type Materialize = (bundle: SidecarBundle, snapshot: SnapshotId) => Promise<SidecarSpawner>;
+ *  routing is testable with a fake process. `projectId` is passed through so the materialization can hand the
+ *  process its project context (the blob side channel's env). */
+export type Materialize = (
+  bundle: SidecarBundle,
+  snapshot: SnapshotId,
+  projectId: ProjectId,
+) => Promise<SidecarSpawner>;
 
 export class SnapshotFfiTransport implements FfiTransport {
   private sink: ((completion: FfiCompletion) => void) | null = null;
@@ -82,7 +87,9 @@ export class SnapshotFfiTransport implements FfiTransport {
       if (bundle === null) {
         throw new Error(`snapshot ${snapshot} has no FFI sidecar bundle to dispatch to`);
       }
-      const transport = new SubprocessFfiTransport(await this.materialize(bundle, snapshot));
+      const transport = new SubprocessFfiTransport(
+        await this.materialize(bundle, snapshot, projectId),
+      );
       transport.onComplete((completion) => {
         this.delegationSnapshot.delete(completion.delegation);
         this.sink?.(completion);
@@ -104,11 +111,17 @@ export class SnapshotFfiTransport implements FfiTransport {
   }
 }
 
-/** The production materialization: write the bundle's ESM to a per-snapshot temp file and spawn it with
- *  `node`. A snapshot's bundle is immutable, so the file is written once per snapshot per process and the
- *  long-lived sidecar runs from it. */
-export const nodeSidecarMaterialize: Materialize = async (bundle, snapshot) => {
-  const path = join(tmpdir(), `katari-sidecar-${snapshot}.mjs`);
-  await writeFile(path, bundle.entry);
-  return subprocessSidecar("node", [path]);
-};
+/** The production materialization, parameterized by the runtime's own base URL: write the bundle's ESM to a
+ *  per-snapshot temp file and spawn it with `node`, handing the process the env the blob side channel needs
+ *  (the runtime URL to reach, and the project id to scope its blobs). A snapshot's bundle is immutable, so the
+ *  file is written once per snapshot per process and the long-lived sidecar runs from it. */
+export function nodeSidecarMaterialize(runtimeBaseUrl: string): Materialize {
+  return async (bundle, snapshot, projectId) => {
+    const path = join(tmpdir(), `katari-sidecar-${snapshot}.mjs`);
+    await writeFile(path, bundle.entry);
+    return subprocessSidecar("node", [path], {
+      KATARI_RUNTIME_URL: runtimeBaseUrl,
+      KATARI_PROJECT_ID: projectId,
+    });
+  };
+}

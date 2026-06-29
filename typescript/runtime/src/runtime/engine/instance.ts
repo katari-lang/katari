@@ -7,7 +7,6 @@
 import type { BlockId } from "@katari-lang/types";
 import type { DelegateTarget, ReactorName } from "../event/types.js";
 import {
-  type BlobId,
   type DelegationId,
   type InstanceId,
   newInstanceId,
@@ -80,19 +79,13 @@ export function isInstanceComplete(instance: CoreInstance): boolean {
   return Object.keys(instance.threads).length === 0;
 }
 
-/** Tear down a finished instance: cascade-drop the scopes (and blob ownerships) it still owns, then drop
- *  the instance. Resources its returned value captured were already released to in-transit (`owner = null`)
- *  by the base reactor's `send` (`pool.release`), so they are not owned by this instance here and survive
- *  for the caller to re-own. The instance's owned blob ROWS cascade-delete with its `instances` row (the FK);
- *  freeing their BYTES (a `BlobStore.delete`) is wired separately as a post-commit step. Until a producer
- *  mints instance-owned blobs, `store.blobs` holds only retained api-root blobs, which this never matches. */
+/** Tear down a finished instance: cascade-drop the scopes it still owns, then drop the instance. Resources
+ *  its returned value captured were already released to in-transit (`owner = null`) by the base reactor's
+ *  `send` (`pool.release`), so they are not owned by this instance here and survive for the caller to re-own.
+ *  Blobs are NOT touched here: blob ownership is a pure resource the `ResourcePool` manages (not engine-local
+ *  like scopes), so the base reactor's instance-drop path (`markInstanceDropped` → `pool.reclaimBlobsOwnedBy`)
+ *  reclaims a dropping instance's owned blobs uniformly for a core instance and an ffi call alike. */
 export function teardownInstance(store: ProjectStore, instanceId: InstanceId): void {
   for (const scopeId of scopesOwnedBy(store, instanceId)) deleteScope(store, scopeId);
-  for (const key of Object.keys(store.blobs)) {
-    const blobId = key as BlobId;
-    if (store.blobs[blobId]?.owner === instanceId) {
-      delete store.blobs[blobId];
-    }
-  }
   delete store.instances[instanceId];
 }
