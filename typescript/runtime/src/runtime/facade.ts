@@ -78,8 +78,9 @@ export const blobStore = createBlobStore(config.blobS3);
 
 // The URL a sidecar uses to reach this runtime's blob side channel (download / upload). The sidecar is a child
 // process on this same host, so it connects over loopback regardless of the server's bind host (which may be a
-// wildcard such as `0.0.0.0`).
-const runtimeBaseUrl = `http://127.0.0.1:${config.port}`;
+// wildcard such as `0.0.0.0`). It includes the versioned API prefix the routes mount under (see `app.ts`), so
+// the blob client appends only the resource path.
+const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
