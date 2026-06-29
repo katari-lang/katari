@@ -204,7 +204,9 @@ export class FfiReactor extends Reactor {
         snapshot: event.target.snapshot,
         key: event.target.key,
         // Lower the engine's Value to plain Json for the sidecar; the reactor keeps the Value for recovery.
-        argument: event.argument === null ? null : valueToJson(event.argument),
+        // FFI is an allowed sink for secrets (an API key flows to its external call), so private values are
+        // revealed here — unlike the user-facing API, which redacts.
+        argument: event.argument === null ? null : valueToJson(event.argument, "reveal"),
       });
     } else if (event.kind === "terminate") {
       if (this.calls.get(event.delegation)?.status === "cancelling") {
@@ -268,7 +270,8 @@ export class FfiReactor extends Reactor {
           delegation: row.delegation,
           snapshot: row.snapshot,
           key: row.key,
-          argument: row.argument === null ? null : valueToJson(row.argument),
+          // FFI is an allowed sink for secrets, so a private argument is revealed to the sidecar on re-dispatch.
+          argument: row.argument === null ? null : valueToJson(row.argument, "reveal"),
           redispatch: true,
         });
       } else if (row.status === "cancelling") {

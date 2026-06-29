@@ -24,6 +24,7 @@ import {
 } from "../event/types.js";
 import { newDelegationId, type ScopeId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
+import { liftPrivacy } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import { completeThread } from "./common.js";
 import type { StepContext } from "./context.js";
@@ -95,9 +96,11 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
     }
     case "getField": {
       const source = requireVariable(ctx, scope, operation.source);
-      const value =
+      const field =
         source.kind === "record" ? (source.fields[operation.field] ?? NULL_VALUE) : NULL_VALUE;
-      writeVariable(ctx.store, scope, operation.output, value);
+      // Reading through a private handle yields a private value (the comonad's field projection), so the
+      // read inherits the container's marker on top of the field's own.
+      writeVariable(ctx.store, scope, operation.output, liftPrivacy(source.private, field));
       return true;
     }
     case "bindPattern":

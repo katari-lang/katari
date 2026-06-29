@@ -25,6 +25,7 @@ import {
   newDelegationId,
   type SnapshotId,
 } from "../ids.js";
+import { isTainted } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
 import type {
   Loader,
@@ -409,9 +410,14 @@ function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate"
     const argument = event.ask.argument;
     const message =
       argument?.kind === "record" && argument.fields.msg?.kind === "string"
-        ? argument.fields.msg.value
-        : "(no message)";
-    return `panic: ${message}`;
+        ? argument.fields.msg
+        : null;
+    if (message === null) return "panic: (no message)";
+    // The run's error message is neither sealed at rest nor redacted at the wire, so a secret panic message
+    // would leak as plaintext. Redact it when the message — itself, or through its container record — is
+    // private (the same marker the run argument / result boundary honours).
+    const tainted = argument?.private === true || isTainted(message);
+    return tainted ? "panic: [redacted]" : `panic: ${message.value}`;
   }
   return `unhandled request "${event.ask.request}" reached the run root`;
 }

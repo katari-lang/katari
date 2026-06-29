@@ -17,6 +17,8 @@ export const config = {
   // `*` for any origin, otherwise the parsed allowlist Hono's `cors` expects.
   corsOrigin:
     env.CORS_ORIGIN === "*" ? "*" : env.CORS_ORIGIN.split(",").map((origin) => origin.trim()),
+  // The AES-256-GCM key for encrypting secret values at rest, decoded from its base64 form once at boot.
+  secretKey: Buffer.from(env.KATARI_SECRET_KEY, "base64"),
   // The blob byte store: an S3 config when `BLOB_S3_BUCKET` is set, otherwise `null` (in-memory dev store).
   blobS3:
     env.BLOB_S3_BUCKET === undefined

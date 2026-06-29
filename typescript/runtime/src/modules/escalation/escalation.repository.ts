@@ -9,6 +9,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { delegations, escalations, instances } from "../../db/tables/execution.js";
+import { unsealFromStorage } from "../../runtime/actor/seal.js";
 import { apiRootIdOf, type ProjectId } from "../../runtime/ids.js";
 import type { Value } from "../../runtime/value/types.js";
 
@@ -25,7 +26,7 @@ export const escalationRepository = {
    *  caller is the api root). No request filter is needed — core opens a row only for a user-facing request. */
   async listOpen(executor: Executor, projectId: string): Promise<OpenEscalationView[]> {
     const apiRoot = apiRootIdOf(projectId as ProjectId);
-    return executor
+    const rows = await executor
       .select({
         id: escalations.id,
         request: escalations.request,
@@ -41,5 +42,7 @@ export const escalationRepository = {
           eq(delegations.callerInstanceId, apiRoot),
         ),
       );
+    // Decrypt the at-rest question before the service redacts it for the wire (the inverse of seal-on-write).
+    return rows.map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));
   },
 };

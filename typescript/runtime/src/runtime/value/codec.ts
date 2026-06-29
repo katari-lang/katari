@@ -19,6 +19,20 @@ import type { SemanticKind, Value } from "./types.js";
 const CONSTRUCTOR_KEY = "$constructor";
 const AGENT_KEY = "$agent";
 const FILE_KEY = "$ref";
+/** The placeholder a private subtree collapses to when emitted under the `redact` policy (a user-facing
+ *  boundary). A reserved `$`-prefixed sentinel, like the others, so it never collides with real record data. */
+const REDACTED_KEY = "$redacted";
+
+/**
+ * How `valueToJson` treats a private (`value.private`) node:
+ *   - `redact` (the default) — replace the private subtree with `{ "$redacted": true }`. This is the
+ *     fail-closed boundary: a run result, an open escalation's question, anything a user could observe —
+ *     a caller that forgets to choose a policy still does not leak a secret.
+ *   - `reveal` — emit the real value. An explicit opt-in for the one allowed sink, the FFI sidecar (a secret
+ *     API key flows to its external call).
+ * Redaction is structural: a private field inside a public record collapses in place, public siblings survive.
+ */
+export type PrivatePolicy = "reveal" | "redact";
 
 /** Lift an IR literal (the payload of `loadLiteral` / a `PatternLiteral`) into a runtime value. */
 export function literalToValue(literal: Literal): Value {
@@ -85,11 +99,17 @@ function fileFromJson(json: { [key: string]: Json }): Value {
 }
 
 /**
- * Tagged runtime value -> bare wire JSON (façade output boundary). Drops the `private` marker; the
- * caller is responsible for the redaction policy. Blob refs surface as a small descriptor rather than
- * their (potentially large, async-fetched) bytes; a callable value is never run-result data and throws.
+ * Tagged runtime value -> bare wire JSON (façade output boundary). The `policy` decides what happens at a
+ * private node: `redact` (the default, fail-closed) collapses the private subtree to `{ "$redacted": true }`
+ * for any user-facing boundary, while `reveal` emits the real value — an explicit opt-in for the FFI sidecar,
+ * the one allowed sink. The marker itself is not part of the wire shape either way. Blob refs surface as a
+ * small descriptor rather than their (potentially large, async-fetched) bytes; a callable value is never
+ * run-result data and throws.
  */
-export function valueToJson(value: Value): Json {
+export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Json {
+  if (policy === "redact" && value.private === true) {
+    return { [REDACTED_KEY]: true };
+  }
   switch (value.kind) {
     case "null":
       return null;
@@ -99,7 +119,7 @@ export function valueToJson(value: Value): Json {
     case "string":
       return value.value;
     case "array":
-      return value.elements.map(valueToJson);
+      return value.elements.map((element) => valueToJson(element, policy));
     case "record": {
       const out: { [key: string]: Json } = {};
       // A tagged `data` value re-acquires its `$constructor` discriminator; a bare record has none.
@@ -107,7 +127,7 @@ export function valueToJson(value: Value): Json {
         out[CONSTRUCTOR_KEY] = value.ctor;
       }
       for (const [key, child] of Object.entries(value.fields)) {
-        out[key] = valueToJson(child);
+        out[key] = valueToJson(child, policy);
       }
       return out;
     }

@@ -9,7 +9,8 @@ function toEscalationResponse(view: OpenEscalationView) {
   return {
     id: view.id,
     request: view.request,
-    argument: view.argument === null ? null : valueToJson(view.argument),
+    // The user-facing boundary: a secret in an escalation's question is redacted, never observed.
+    argument: view.argument === null ? null : valueToJson(view.argument, "redact"),
   };
 }
 

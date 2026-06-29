@@ -6,6 +6,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { type RunState, runs } from "../../db/tables/execution.js";
+import { unsealFromStorage } from "../../runtime/actor/seal.js";
 import type { Value } from "../../runtime/value/types.js";
 
 /** A run as the API presents it — its metadata plus its durable state / outcome. */
@@ -39,7 +40,8 @@ export interface RunRow {
 }
 
 /** Project a `runs` row into the API view (a pure function — the testable heart of the read path). `result`
- *  is meaningful only for `done`, `errorMessage` only for `error`. */
+ *  is meaningful only for `done`, `errorMessage` only for `error`. The row's `argument` / `result` are the
+ *  decrypted Values (the query unseals them before projecting); the service then redacts secrets at the wire. */
 export function projectRun(row: RunRow): RunView {
   return {
     id: row.id,
@@ -82,7 +84,7 @@ export const runRepository = {
       .from(runs)
       .where(eq(runs.projectId, projectId))
       .orderBy(desc(runs.createdAt));
-    return rows.map(projectRun);
+    return rows.map((row) => projectRun(unsealRow(row)));
   },
 
   async get(executor: Executor, projectId: string, runId: string): Promise<RunView | undefined> {
@@ -91,6 +93,15 @@ export const runRepository = {
       .from(runs)
       .where(and(eq(runs.projectId, projectId), eq(runs.id, runId)))
       .limit(1);
-    return row === undefined ? undefined : projectRun(row);
+    return row === undefined ? undefined : projectRun(unsealRow(row));
   },
 };
+
+/** Decrypt a row's at-rest `argument` / `result` before projection (the inverse of the engine's seal-on-write). */
+function unsealRow(row: RunRow): RunRow {
+  return {
+    ...row,
+    argument: unsealFromStorage(row.argument),
+    result: unsealFromStorage(row.result),
+  };
+}

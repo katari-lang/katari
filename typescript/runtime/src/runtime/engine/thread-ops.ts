@@ -10,6 +10,7 @@ import type { Block } from "@katari-lang/types";
 import type { AskKind, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
+import { isTainted, markPrivate } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
 import {
   childrenOf,
@@ -414,7 +415,10 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
     raisePanic(ctx, thread, error instanceof Error ? error.message : String(error));
     return;
   }
-  completeThread(ctx, thread, value);
+  // Taint is monotonic through a pure primitive: if any part of the argument is private, so is the result
+  // (`concat`-ing a secret yields a secret; comparing one leaks a bit). A source prim (env / secret) marks
+  // its own result private regardless; `markPrivate` is idempotent, so this only ever adds the marker.
+  completeThread(ctx, thread, isTainted(argument) ? markPrivate(value) : value);
 }
 
 function createConstruct(ctx: StepContext, thread: Thread): void {
@@ -533,10 +537,17 @@ function collectParallel(
 
 // ─── for (mapping loop) ─────────────────────────────────────────────────────────────────────────
 
+/** A `for` source's elements, each lifted by the source's privacy: iterating a private array binds each
+ *  element as private (the same projection rule as reading a field of a private record). */
+function forElements(source: Value): Value[] {
+  if (source.kind !== "array") return [];
+  return source.private === true ? source.elements.map(markPrivate) : source.elements;
+}
+
 function createFor(ctx: StepContext, thread: ForThread): void {
   const block = forBlock(ctx, thread);
   const source = readVariable(ctx.store, thread.scopeId, block.source) ?? NULL_VALUE;
-  const elements = source.kind === "array" ? source.elements : [];
+  const elements = forElements(source);
   // Seed the loop state keyed by each state's body variable (so a `with` modifier updates it directly).
   const bodyParameters = ctx.ir.block(block.body).parameters;
   block.initialStates.forEach((initial, index) => {
@@ -614,7 +625,7 @@ function collectIteration(
   }
   // Sequential: start the next element, or finish once the source is exhausted.
   const source = readVariable(ctx.store, thread.scopeId, block.source) ?? NULL_VALUE;
-  const elements = source.kind === "array" ? source.elements : [];
+  const elements = forElements(source);
   thread.cursor += 1;
   const next = elements[thread.cursor];
   if (next !== undefined) {

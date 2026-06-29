@@ -30,6 +30,10 @@ services:
       LOG_LEVEL: info
       # `postgres` is the service hostname on the compose network.
       DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+      # At-rest encryption key for secret values (base64 32 bytes); the runtime refuses to boot without it.
+      # This dev-only default lets the local stack come up. Override it in any shared / production deployment
+      # (export KATARI_SECRET_KEY, or set it in a root `.env`) and generate a real one: openssl rand -base64 32.
+      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:-XAHob6KS/e98OejNFErgNfA8RqiOmI7fLLaNl9dRU5Q=}
     ports:
       - "${APP_PORT:-3000}:3000"
     depends_on:

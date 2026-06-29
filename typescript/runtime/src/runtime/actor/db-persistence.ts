@@ -46,6 +46,7 @@ import {
   type PersistedScope,
   type PersistedThread,
 } from "./persistence-codec.js";
+import { sealForStorage, unsealFromStorage } from "./seal.js";
 
 export class DbPersistence implements Persistence {
   constructor(private readonly db: Database) {}
@@ -81,9 +82,9 @@ export class DbPersistence implements Persistence {
                 fromReactor: row.fromReactor,
                 toReactor: row.toReactor,
                 target: row.target,
-                argument: row.argument,
+                argument: unsealFromStorage(row.argument),
                 state: row.state,
-                result: row.result,
+                result: unsealFromStorage(row.result),
                 errorMessage: row.errorMessage,
               },
             ],
@@ -110,7 +111,7 @@ export class DbPersistence implements Persistence {
         toReactor: row.toReactor,
         delegation: row.delegationId as DelegationId,
         request: row.request,
-        argument: row.argument,
+        argument: unsealFromStorage(row.argument),
       }));
     };
     return {
@@ -146,7 +147,7 @@ export class DbPersistence implements Persistence {
             snapshotId: row.snapshotId as SnapshotId,
             status: row.status,
             ambientGenerics: row.ambientGenerics ?? null,
-            engineState: row.engineState,
+            engineState: unsealFromStorage(row.engineState),
           }));
           const persistedThreads: PersistedThread[] = threadRows.map((row) => ({
             projectId: row.projectId as ProjectId,
@@ -158,14 +159,14 @@ export class DbPersistence implements Persistence {
             scopeId: row.scopeId,
             blockId: row.blockId,
             status: row.status,
-            payload: row.payload,
+            payload: unsealFromStorage(row.payload),
           }));
           const persistedScopes: PersistedScope[] = scopeRows.map((row) => ({
             projectId: row.projectId as ProjectId,
             scopeId: row.scopeId,
             parentScopeId: row.parentScopeId,
             ownerInstanceId: row.ownerInstanceId as InstanceId | null,
-            values: row.values,
+            values: unsealFromStorage(row.values),
           }));
           const persistedBlobs: PersistedBlob[] = blobRows.map((row) => ({
             projectId: row.projectId as ProjectId,
@@ -199,7 +200,7 @@ export class DbPersistence implements Persistence {
           return rows.map((row) => ({
             seq: row.seq as OutboxSeq,
             issuer: row.instanceId as InstanceId,
-            event: row.event,
+            event: unsealFromStorage(row.event),
           }));
         },
       },
@@ -229,7 +230,7 @@ export class DbPersistence implements Persistence {
                     instance: row.instance as InstanceId,
                     snapshot: row.snapshot as SnapshotId,
                     key: row.key,
-                    argument: row.argument,
+                    argument: unsealFromStorage(row.argument),
                     caller: row.caller,
                     status: row.status,
                   },
@@ -278,14 +279,18 @@ export class DbPersistence implements Persistence {
           fromReactor: row.fromReactor,
           toReactor: row.toReactor,
           target: row.target,
-          argument: row.argument,
+          argument: sealForStorage(row.argument),
           state: row.state,
-          result: row.result,
+          result: sealForStorage(row.result),
           errorMessage: row.errorMessage,
         })
         .onConflictDoUpdate({
           target: delegations.id,
-          set: { state: row.state, result: row.result, errorMessage: row.errorMessage },
+          set: {
+            state: row.state,
+            result: sealForStorage(row.result),
+            errorMessage: row.errorMessage,
+          },
         });
     };
     const dropInstance = async (instanceId: InstanceId) => {
@@ -322,13 +327,13 @@ export class DbPersistence implements Persistence {
               toReactor: row.toReactor,
               delegationId: row.delegation,
               request: row.request,
-              argument: row.argument,
+              argument: sealForStorage(row.argument),
               state: row.state,
-              answer: row.answer,
+              answer: sealForStorage(row.answer),
             })
             .onConflictDoUpdate({
               target: escalations.id,
-              set: { state: row.state, answer: row.answer },
+              set: { state: row.state, answer: sealForStorage(row.answer) },
             });
         },
       },
@@ -342,24 +347,30 @@ export class DbPersistence implements Persistence {
               target: instance.target,
               snapshotId: instance.snapshotId,
               ambientGenerics: instance.ambientGenerics ?? undefined,
-              engineState: instance.engineState,
+              // `engineState.cancelExits` can carry private exit values, so it seals like any payload.
+              engineState: sealForStorage(instance.engineState),
             })
             .onConflictDoUpdate({
               target: coreInstances.instanceId,
               set: {
-                engineState: instance.engineState,
+                engineState: sealForStorage(instance.engineState),
                 ambientGenerics: instance.ambientGenerics ?? undefined,
               },
             });
           // Replace the instance's thread rows wholesale (the trees are small). Scopes are NOT here — they
-          // persist independently through `putScope`.
+          // persist independently through `putScope`. A thread payload embeds in-flight values, so it seals.
           await drizzleTx
             .delete(threads)
             .where(
               and(eq(threads.projectId, projectId), eq(threads.instanceId, instance.instanceId)),
             );
           if (serialized.threads.length > 0)
-            await drizzleTx.insert(threads).values(serialized.threads);
+            await drizzleTx.insert(threads).values(
+              serialized.threads.map((thread) => ({
+                ...thread,
+                payload: sealForStorage(thread.payload),
+              })),
+            );
         },
       },
       api: {
@@ -372,7 +383,7 @@ export class DbPersistence implements Persistence {
               snapshotId: run.snapshotId,
               name: run.name,
               qualifiedName: run.qualifiedName,
-              argument: run.argument,
+              argument: sealForStorage(run.argument),
             })
             .onConflictDoNothing();
         },
@@ -383,7 +394,7 @@ export class DbPersistence implements Persistence {
             .update(runs)
             .set({
               state: outcome.state,
-              result: outcome.result,
+              result: sealForStorage(outcome.result),
               errorMessage: outcome.errorMessage,
               ...(isTerminalRunState(outcome.state) ? { completedAt: new Date() } : {}),
               ...(outcome.cancelReason !== undefined ? { cancelReason: outcome.cancelReason } : {}),
@@ -396,8 +407,8 @@ export class DbPersistence implements Persistence {
             .values({
               runId: audit.run,
               escalationId: audit.escalation,
-              question: audit.question,
-              answer: audit.answer,
+              question: sealForStorage(audit.question),
+              answer: sealForStorage(audit.answer),
             })
             .onConflictDoNothing();
         },
@@ -410,7 +421,7 @@ export class DbPersistence implements Persistence {
               instanceId: row.instanceId,
               snapshotId: row.snapshotId,
               key: row.key,
-              argument: row.argument,
+              argument: sealForStorage(row.argument),
               callerReactor: row.callerReactor,
               status: row.status,
             })
@@ -426,14 +437,15 @@ export class DbPersistence implements Persistence {
               scopeId: scope.scopeId,
               parentScopeId: scope.parentScopeId,
               ownerInstanceId: scope.ownerInstanceId,
-              values: scope.values,
+              // The scope's variables are the primary at-rest home of secret values; each private one seals.
+              values: sealForStorage(scope.values),
             })
             .onConflictDoUpdate({
               target: [scopes.projectId, scopes.scopeId],
               set: {
                 parentScopeId: scope.parentScopeId,
                 ownerInstanceId: scope.ownerInstanceId,
-                values: scope.values,
+                values: sealForStorage(scope.values),
               },
             });
         },
@@ -476,7 +488,8 @@ export class DbPersistence implements Persistence {
               seq: message.seq,
               projectId,
               instanceId: message.issuer,
-              event: message.event,
+              // An event carries delegate arguments / ack values, so private ones seal in the outbox too.
+              event: sealForStorage(message.event),
             })),
           );
         },

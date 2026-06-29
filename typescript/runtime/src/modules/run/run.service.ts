@@ -14,8 +14,9 @@ function toRunResponse(view: RunView) {
     qualifiedName: view.qualifiedName,
     snapshotId: view.snapshotId,
     state: view.state,
-    argument: view.argument === null ? null : valueToJson(view.argument),
-    result: view.result === null ? null : valueToJson(view.result),
+    // The user-facing boundary: a secret in a run argument / result is redacted, never observed.
+    argument: view.argument === null ? null : valueToJson(view.argument, "redact"),
+    result: view.result === null ? null : valueToJson(view.result, "redact"),
     errorMessage: view.errorMessage,
     cancelReason: view.cancelReason,
     createdAt: view.createdAt,

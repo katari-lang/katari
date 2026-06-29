@@ -20,6 +20,15 @@ const envSchema = z.object({
    *  unauthenticated, so a wildcard lets any site read responses cross-origin — lock this down in
    *  any shared/production deployment. */
   CORS_ORIGIN: z.string().min(1).default("*"),
+  /** The AES-256-GCM key that encrypts secret (private) values at rest. Required (no default) — the runtime
+   *  refuses to boot without it, since a missing key would silently persist secrets in plaintext. Must be a
+   *  base64-encoded 32 bytes; generate one with `openssl rand -base64 32`. */
+  KATARI_SECRET_KEY: z
+    .string()
+    .refine(
+      (value) => decodesToBytes(value, 32),
+      "must be a base64-encoded 32-byte key (generate with `openssl rand -base64 32`)",
+    ),
   /** Blob byte store: set `BLOB_S3_BUCKET` to use an S3-compatible store (the bytes for file uploads /
    *  promoted blobs), otherwise the in-memory store (dev only — bytes are lost on restart). Credentials come
    *  from the standard AWS chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`); `BLOB_S3_ENDPOINT` +
@@ -32,6 +41,13 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
 });
+
+/** Whether a base64 string decodes to exactly `length` bytes (Node accepts loose base64, so we re-encode and
+ *  compare to reject malformed input rather than silently truncating it). */
+function decodesToBytes(value: string, length: number): boolean {
+  const decoded = Buffer.from(value, "base64");
+  return decoded.length === length && decoded.toString("base64") === value;
+}
 
 export type AppEnvVars = z.infer<typeof envSchema>;
 
