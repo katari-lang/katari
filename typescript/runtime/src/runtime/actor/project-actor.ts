@@ -157,15 +157,19 @@ export class ProjectActor {
   /** Register a blob an FFI handler produced mid-call as owned by that call's instance (bytes already in the
    *  BlobStore) — so the call's return ascends it to the core caller, and a handler that dies before returning
    *  has it reclaimed at teardown. Runs as a serial command turn so the ownership row commits before the
-   *  handler's result is processed; resolves once that commit is durable. */
+   *  handler's result is processed; resolves once that commit is durable. Resolves to whether the blob was
+   *  registered (`false` when the call already vanished, so the caller can delete the orphaned bytes). */
   registerProducedBlob(
     delegation: DelegationId,
     blobId: BlobId,
     entry: Omit<BlobEntry, "owner">,
-  ): Promise<void> {
-    return this.substrate.enqueueCommand(this.ffi, () =>
-      this.ffi.registerProducedBlob(delegation, blobId, entry),
-    );
+  ): Promise<boolean> {
+    let registered = false;
+    return this.substrate
+      .enqueueCommand(this.ffi, () => {
+        registered = this.ffi.registerProducedBlob(delegation, blobId, entry);
+      })
+      .then(() => registered);
   }
 
   /** The run-root escalations currently awaiting an answer. */

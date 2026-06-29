@@ -36,7 +36,15 @@ export const fileService = {
   async download(projectId: string, fileId: string): Promise<DownloadedFile> {
     const row = await fileRepository.get(db, projectId, fileId);
     if (row === undefined) throw new NotFoundError(`file ${fileId} not found`);
-    const bytes = await blobStore.get(projectId as ProjectId, fileId as BlobId);
+    let bytes: Uint8Array;
+    try {
+      bytes = await blobStore.get(projectId as ProjectId, fileId as BlobId);
+    } catch {
+      // The row existed at the read above but the bytes are gone: the owning instance's teardown raced this
+      // download and reclaimed them (the post-commit byte delete). The file no longer exists — a 404, not the
+      // 500 a bare BlobStore "not found" would otherwise become.
+      throw new NotFoundError(`file ${fileId} not found`);
+    }
     return { bytes, contentType: row.contentType, size: row.size };
   },
 };

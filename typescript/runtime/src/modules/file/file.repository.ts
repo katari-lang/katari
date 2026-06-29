@@ -5,6 +5,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { blobs } from "../../db/tables/engine.js";
+import { apiRootIdOf, type ProjectId } from "../../runtime/ids.js";
 
 const columns = {
   id: blobs.blobId,
@@ -25,8 +26,18 @@ export const fileRepository = {
     return row;
   },
 
-  /** Every blob a project holds (the file listing). */
+  /** The api-root-owned blobs a project holds (the file listing). Filtered to the api root's ownership so a
+   *  transient FFI-call-owned blob — a handler's mid-call upload, owned by that call's instance and gone when
+   *  it tears down — never surfaces (and never flickers in and out) in the user's file list. */
   list(executor: Executor, projectId: string) {
-    return executor.select(columns).from(blobs).where(eq(blobs.projectId, projectId));
+    return executor
+      .select(columns)
+      .from(blobs)
+      .where(
+        and(
+          eq(blobs.projectId, projectId),
+          eq(blobs.ownerInstanceId, apiRootIdOf(projectId as ProjectId)),
+        ),
+      );
   },
 };

@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from "vitest";
 import { FfiReactor } from "../src/runtime/actor/ffi-reactor.js";
+import { NO_OP_TX } from "../src/runtime/actor/persistence.js";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import { createProjectStore } from "../src/runtime/engine/store.js";
@@ -21,8 +22,13 @@ const DELEGATION = "delegation-1" as DelegationId;
 const SNAPSHOT = "snapshot-1" as SnapshotId;
 const BLOB = "blob-produced" as BlobId;
 
-/** Open one in-flight ffi call (an external delegate routed from core), returning the reactor + its store. */
-function openCall(): { ffi: FfiReactor; store: ReturnType<typeof createProjectStore> } {
+/** Open one in-flight ffi call (an external delegate routed from core), returning the reactor + its pool +
+ *  store. */
+function openCall(): {
+  ffi: FfiReactor;
+  pool: ResourcePool;
+  store: ReturnType<typeof createProjectStore>;
+} {
   const store = createProjectStore();
   const pool = new ResourcePool(PROJECT, store);
   const ffi = new FfiReactor(PROJECT, new StubFfiTransport(), pool);
@@ -35,7 +41,7 @@ function openCall(): { ffi: FfiReactor; store: ReturnType<typeof createProjectSt
     to: "ffi",
   };
   ffi.react(delegate);
-  return { ffi, store };
+  return { ffi, pool, store };
 }
 
 describe("FFI mid-call blob production", () => {
@@ -43,7 +49,12 @@ describe("FFI mid-call blob production", () => {
     const { ffi, store } = openCall();
 
     // Mid-call: the handler produced a blob (bytes already in the BlobStore); register its ownership.
-    ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
+    const registered = ffi.registerProducedBlob(DELEGATION, BLOB, {
+      hash: "hash",
+      size: 3,
+      semanticKind: "file",
+    });
+    expect(registered).toBe(true);
     const owner = store.blobs[BLOB]?.owner;
     expect(owner).toBeDefined();
     expect(owner).not.toBeNull();
@@ -67,11 +78,30 @@ describe("FFI mid-call blob production", () => {
 
   test("registerProducedBlob is a no-op for an unknown delegation (the call already gone)", () => {
     const { ffi, store } = openCall();
-    ffi.registerProducedBlob("delegation-gone" as DelegationId, BLOB, {
+    const registered = ffi.registerProducedBlob("delegation-gone" as DelegationId, BLOB, {
       hash: "hash",
       size: 3,
       semanticKind: "file",
     });
+    expect(registered).toBe(false);
+    expect(store.blobs[BLOB]).toBeUndefined();
+  });
+
+  test("a produced blob the cancelled call never returned has its bytes reclaimed at the call's drop", async () => {
+    const { ffi, pool, store } = openCall();
+
+    // The handler produced a blob (owned by the call), but the call is cancelled before it could return it:
+    // a `terminate` then the transport's `cancelled` confirmation drop the call, leaving the blob owned.
+    ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
+    ffi.react({ kind: "terminate", delegation: DELEGATION, from: "core", to: "ffi" });
+    ffi.complete({ delegation: DELEGATION, outcome: { kind: "cancelled" } });
+    expect(ffi.drainSends()[0]?.kind).toBe("terminateAck");
+
+    // Persisting the call's drop reclaims the blob it still owned: the base reactor's instance-drop path frees
+    // it from the warm store, and the pool reports its bytes for the post-commit BlobStore delete.
+    await ffi.persist(NO_OP_TX);
+    const reclaimedBytes = await pool.persist(NO_OP_TX);
+    expect(reclaimedBytes).toContain(BLOB);
     expect(store.blobs[BLOB]).toBeUndefined();
   });
 });

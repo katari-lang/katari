@@ -112,14 +112,16 @@ export class SnapshotFfiTransport implements FfiTransport {
 }
 
 /** The production materialization, parameterized by the runtime's own base URL: write the bundle's ESM to a
- *  per-snapshot temp file and spawn it with `node`, handing the process the env the blob side channel needs
- *  (the runtime URL to reach, and the project id to scope its blobs). A snapshot's bundle is immutable, so the
- *  file is written once per snapshot per process and the long-lived sidecar runs from it. */
+ *  per-snapshot temp file and spawn it with `node`, handing the process ONLY the env the blob side channel
+ *  needs (the runtime URL to reach, and the project id to scope its blobs) — the sidecar does not inherit the
+ *  runtime's environment. `node` is spawned by its absolute path (`process.execPath`, the runtime's own
+ *  interpreter), so it resolves without an inherited `PATH` and the sidecar runs the same node version. A
+ *  snapshot's bundle is immutable, so the file is written once per snapshot per process. */
 export function nodeSidecarMaterialize(runtimeBaseUrl: string): Materialize {
   return async (bundle, snapshot, projectId) => {
     const path = join(tmpdir(), `katari-sidecar-${snapshot}.mjs`);
     await writeFile(path, bundle.entry);
-    return subprocessSidecar("node", [path], {
+    return subprocessSidecar(process.execPath, [path], {
       KATARI_RUNTIME_URL: runtimeBaseUrl,
       KATARI_PROJECT_ID: projectId,
     });

@@ -110,12 +110,15 @@ export function subprocessSidecar(
   env?: Record<string, string>,
 ): SidecarSpawner {
   return (handlers) => {
-    // Merge the extra vars over the parent env (so the sidecar still inherits PATH etc.). The extra vars carry
-    // the runtime's own URL + the project id, which let a handler reach the blob side channel (download /
-    // upload) over HTTP — bytes never ride the stdio reply channel.
+    // When `env` is given, the sidecar gets EXACTLY those vars — it does NOT inherit the runtime's environment
+    // (which holds DB / object-store credentials), so user FFI handler code cannot read them. The injected vars
+    // carry only the runtime's own URL + the project id, letting a handler reach the blob side channel over
+    // HTTP. The production materialize spawns `node` by its absolute path (`process.execPath`), so no inherited
+    // `PATH` is needed to resolve it. (`env` omitted — the integration test's own sidecar — keeps the default
+    // inheritance, which is fine for first-party code.)
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "inherit"],
-      ...(env !== undefined ? { env: { ...process.env, ...env } } : {}),
+      ...(env !== undefined ? { env } : {}),
     });
     const buffer = new LineBuffer();
     let closed = false;

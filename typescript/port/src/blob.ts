@@ -7,14 +7,16 @@
 // guessing an endpoint.
 
 /** The handle an FFI handler receives for a `File` argument (and returns to produce one): a content reference,
- *  not the bytes. `$ref` is the blob id; `size` / `hash` describe it. */
-export interface FileHandle {
+ *  not the bytes. `$ref` is the blob id; `size` / `hash` describe it. Declared as a type (not an interface) so
+ *  it is structurally a `Json` object — a handler can `return context.uploadBlob(...)` (or a record containing
+ *  the handle) directly, and the runtime lifts it into a `File` value. */
+export type FileHandle = {
   $ref: string;
   size: number;
   hash: string;
   semanticKind?: string;
   contentType?: string;
-}
+};
 
 /** The runtime endpoint a runtime-hosted sidecar was given, or a thrown error when run outside one. */
 function runtimeEndpoint(): { baseUrl: string; projectId: string } {
@@ -63,13 +65,29 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** Pull the produced blob's `{ id, hash, size }` out of the runtime's `{ ok, data }` envelope. */
-function parseProducedBlob(body: unknown): { id: string; hash: string; size: number } {
-  const data = asRecord(asRecord(body)?.data);
-  if (data === undefined || data.id === undefined || data.hash === undefined) {
+/** Read a response body as JSON, turning a non-JSON body (an off-contract 2xx — e.g. a proxy that stripped it)
+ *  into the same clear shape error a malformed envelope gives, rather than a raw `SyntaxError`. */
+async function readJsonBody(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
     throw new Error("katari: blob upload returned an unexpected response shape");
   }
-  return { id: String(data.id), hash: String(data.hash), size: Number(data.size) };
+}
+
+/** Pull the produced blob's `{ id, hash, size }` out of the runtime's `{ ok, data }` envelope, validating each
+ *  field's type — a missing `size` must fail here rather than silently become `NaN` in the handle. */
+function parseProducedBlob(body: unknown): { id: string; hash: string; size: number } {
+  const data = asRecord(asRecord(body)?.data);
+  if (
+    data === undefined ||
+    typeof data.id !== "string" ||
+    typeof data.hash !== "string" ||
+    typeof data.size !== "number"
+  ) {
+    throw new Error("katari: blob upload returned an unexpected response shape");
+  }
+  return { id: data.id, hash: data.hash, size: data.size };
 }
 
 /** Produce a new blob from `bytes` and return its handle (a `File` value when returned from the handler). The
@@ -94,7 +112,7 @@ export async function uploadBlob(
   if (!response.ok) {
     throw new Error(`katari: blob upload failed (${response.status} ${response.statusText})`);
   }
-  const produced = parseProducedBlob(await response.json());
+  const produced = parseProducedBlob(await readJsonBody(response));
   return {
     $ref: produced.id,
     size: produced.size,

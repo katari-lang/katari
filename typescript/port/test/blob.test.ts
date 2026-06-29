@@ -95,4 +95,20 @@ describe("uploadBlob (blob side channel)", () => {
     vi.stubGlobal("fetch", () => Promise.resolve(new Response("no", { status: 500 })));
     await expect(uploadBlob("deleg-1", new Uint8Array([1]))).rejects.toThrow(/upload failed \(500/);
   });
+
+  test("throws a clear shape error when the reply omits size (rather than a NaN-size handle)", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ ok: true, data: { id: "blob-9", hash: "abc" } }))),
+    );
+    await expect(uploadBlob("deleg-1", new Uint8Array([1]))).rejects.toThrow(
+      /unexpected response shape/,
+    );
+  });
+
+  test("throws a clear shape error on a non-JSON 2xx body (not a raw SyntaxError)", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response("not json", { status: 201 })));
+    await expect(uploadBlob("deleg-1", new Uint8Array([1]))).rejects.toThrow(
+      /unexpected response shape/,
+    );
+  });
 });

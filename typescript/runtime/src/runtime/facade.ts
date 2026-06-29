@@ -15,12 +15,14 @@ import { and, eq } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
 import { projects, snapshots } from "../db/tables/projects.js";
-import { NotFoundError } from "../lib/errors.js";
+import { ConflictError, NotFoundError } from "../lib/errors.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { PrimRegistry } from "./engine/prims.js";
+import type { BlobEntry } from "./engine/types.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
+  type BlobId,
   type DelegationId,
   type EscalationId,
   newBlobId,
@@ -147,51 +149,71 @@ export const facade = {
 
   /** Upload a file as an api-root-owned blob: store the bytes (content-addressed by their hash), then
    *  register the blob through the actor so its ownership row commits durably. Returns the blob handle the
-   *  caller downloads / references. The bytes are put before the (small) registration command, so the actor
-   *  loop never carries the payload; an orphaned put on a failed registration is a rare, harmless leak. */
-  async uploadFile(input: {
+   *  caller downloads / references. */
+  uploadFile(input: {
     projectId: string;
     bytes: Uint8Array;
     contentType?: string;
   }): Promise<{ id: string; hash: string; size: number }> {
-    const blobId = newBlobId();
-    const hash = createHash("sha256").update(input.bytes).digest("hex");
-    const size = input.bytes.byteLength;
     const projectId = input.projectId as ProjectId;
-    await blobStore.put(projectId, blobId, input.bytes);
-    await registry.actorFor(projectId).uploadBlob(blobId, {
-      hash,
-      size,
-      semanticKind: "file",
-      ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
+    return mintAndStoreBlob(projectId, input.bytes, input.contentType, async (blobId, entry) => {
+      await registry.actorFor(projectId).uploadBlob(blobId, entry);
+      return true; // the api root is always present, so an upload always registers.
     });
-    return { id: blobId, hash, size };
   },
 
   /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob
-   *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Like
-   *  `uploadFile`, the bytes are put before the (small) registration command, so the actor loop never carries
-   *  the payload; an orphaned put on a failed / vanished registration is a rare, harmless leak. Returns the
-   *  blob handle the sidecar lifts into a `File` value. */
-  async produceFfiBlob(input: {
+   *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Returns
+   *  the blob handle the sidecar lifts into a `File` value; throws a `ConflictError` (so the upload fails) when
+   *  the call already vanished, after deleting the orphaned bytes. */
+  produceFfiBlob(input: {
     projectId: string;
     delegation: string;
     bytes: Uint8Array;
     contentType?: string;
   }): Promise<{ id: string; hash: string; size: number }> {
-    const blobId = newBlobId();
-    const hash = createHash("sha256").update(input.bytes).digest("hex");
-    const size = input.bytes.byteLength;
     const projectId = input.projectId as ProjectId;
-    await blobStore.put(projectId, blobId, input.bytes);
-    await registry
-      .actorFor(projectId)
-      .registerProducedBlob(input.delegation as DelegationId, blobId, {
-        hash,
-        size,
-        semanticKind: "file",
-        ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
-      });
-    return { id: blobId, hash, size };
+    return mintAndStoreBlob(projectId, input.bytes, input.contentType, (blobId, entry) =>
+      registry
+        .actorFor(projectId)
+        .registerProducedBlob(input.delegation as DelegationId, blobId, entry),
+    );
   },
 };
+
+/** Mint a content-addressed blob, store its bytes, then register ownership through `register`. The bytes are
+ *  put before the (small) registration command so the actor loop never carries the payload. The catch is that
+ *  bytes-then-register is not atomic: if registration never commits (a poisoned commit rejects it) or reports
+ *  the owning call gone (`register` returns `false`), the stored bytes have NO row referencing them, so they
+ *  are deleted inline — closing the orphan rather than leaving it for a (deferred) blob GC. Returns the handle
+ *  on success; rethrows / raises a `ConflictError` otherwise. */
+async function mintAndStoreBlob(
+  projectId: ProjectId,
+  bytes: Uint8Array,
+  contentType: string | undefined,
+  register: (blobId: BlobId, entry: Omit<BlobEntry, "owner">) => Promise<boolean>,
+): Promise<{ id: string; hash: string; size: number }> {
+  const blobId = newBlobId();
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const size = bytes.byteLength;
+  await blobStore.put(projectId, blobId, bytes);
+  let registered: boolean;
+  try {
+    registered = await register(blobId, {
+      hash,
+      size,
+      semanticKind: "file",
+      ...(contentType !== undefined ? { contentType } : {}),
+    });
+  } catch (error) {
+    // Registration never committed, so no row references these bytes — delete them rather than orphan them.
+    await blobStore.delete(projectId, blobId).catch(() => {});
+    throw error;
+  }
+  if (!registered) {
+    // The owning FFI call vanished (cancelled / completed) before its upload landed; same orphan, same fix.
+    await blobStore.delete(projectId, blobId).catch(() => {});
+    throw new ConflictError("the FFI call that produced this blob is no longer in flight");
+  }
+  return { id: blobId, hash, size };
+}
