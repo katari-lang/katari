@@ -1,23 +1,25 @@
-// The `primitive.http` sub-module: a built-in HTTP client modelled as an *effect*. `fetch` is a `request`
-// (an effect definition), not an external — so calling it is impure (it carries the `fetch` effect, which
-// propagates to the run), and the run's api root performs the actual request by default. A program can
-// intercept it with `handle ... with http.fetch(req) => ...` (e.g. to mock it in a test).
+// The `primitive.http` sub-module: a built-in HTTP client. `fetch` is an `external` whose calls route to the
+// runtime's `http` reactor (an in-runtime `fetch`, not an FFI sidecar) via the `from "http"` clause. It is
+// called as `http.fetch`.
 //
-// Information flow: because the call is impure, its arguments are checked strictly — there is no pure-call
-// lifting. `url` / `method` / `body` are public `string`, so a secret cannot be sent in a URL or body (a
-// private value there is a type error — it must not go outbound). Only header *values* are `string of
-// private`, so an API key may be sent as an auth header. The response `{ status, body }` is public (the
-// answer is the server's response, not a function of the secret — declassified).
+// Because it is an external call it performs io: the call is impure (it carries the un-dischargeable `io`
+// effect, which propagates to the run root), so it takes the strict, non-lifting call path. That gives the
+// information-flow rules for free: `url` / `method` / `body` are public `string`, so a secret cannot be sent
+// in a URL or body (a private value there is a type error — a secret must not go outbound); only header
+// *values* are `string of private` (a secret may be sent as an auth header); and the response is public
+// (declassified — it is the server's response, not a function of the secret).
 //
-// Errors as data: a non-2xx response is returned as its `status` for the orchestration logic to branch on;
-// a request that never completes (no response) fails the run with a `panic` raised by the api handler.
+// Errors: a non-2xx response is returned as its `status` to branch on (`match (response.status) { ... }`).
+// A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) fails
+// with a `panic`, which bubbles from the call site to the nearest handler — so a caller can `handle ... with
+// panic(e) => ...` to handle the failure locally and control retry.
 
 @"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
-may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text.
-Handled by the run's api root by default; intercept with `handle ... with http.fetch(request) => ...`."
-request fetch(
+may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text. A
+request that never completes fails with a `panic` (catchable locally with `handle ... with panic(e)`)."
+external agent fetch(
   url: string,
   method: string,
   headers: record[string of private],
   body: string,
-) -> { status: integer, body: string }
+) -> { status: integer, body: string } from "http"

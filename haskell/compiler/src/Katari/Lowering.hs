@@ -22,7 +22,7 @@ import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -452,8 +452,14 @@ lowerDeclaration = \case
   AST.DeclarationExternalAgent declaration ->
     lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
       -- The declaration name is the external's sole handle; its rendered qualified name is the opaque
-      -- dispatch key the runtime's external handler interprets.
-      BlockExternal External {key = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input}
+      -- dispatch key the runtime's external handler interprets. The @from "name"@ clause (default @"ffi"@)
+      -- names the reactor the call routes to.
+      BlockExternal
+        External
+          { key = renderQualifiedName (resolvedQualifiedName declaration.variableReference),
+            input = input,
+            reactor = fromMaybe "ffi" declaration.reactor
+          }
   AST.DeclarationPrimitiveAgent declaration ->
     lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
       -- A primitive's registry key is its fully-qualified name (e.g. @primitive.add@).

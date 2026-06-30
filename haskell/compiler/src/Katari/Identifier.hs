@@ -284,6 +284,7 @@ resolveExternalAgentDeclaration declaration =
           parameters = parameters,
           returnType = returnType,
           effects = effects,
+          reactor = declaration.reactor,
           sourceSpan = declaration.sourceSpan
         }
 

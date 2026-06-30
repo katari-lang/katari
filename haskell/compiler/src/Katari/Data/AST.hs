@@ -271,6 +271,9 @@ data ExternalAgentDeclaration (phase :: Phase) = ExternalAgentDeclaration
     parameters :: List (ParameterSignature phase),
     returnType :: SyntacticTypeExpression phase,
     effects :: Maybe (SyntacticTypeExpression phase), -- Nothing ~> capture
+    -- | The reactor the call routes to, from a @from "name"@ clause (e.g. @from "http"@). 'Nothing'
+    -- defaults to the FFI sidecar; the runtime routes an external @delegate@ to the named reactor.
+    reactor :: Maybe Text,
     sourceSpan :: SourceSpan
   }
 
@@ -1364,6 +1367,7 @@ retagExternalAgentDeclaration declaration =
       parameters = retagParameterSignature <$> declaration.parameters,
       returnType = retagSyntacticTypeExpression declaration.returnType,
       effects = retagSyntacticTypeExpression <$> declaration.effects,
+      reactor = declaration.reactor,
       sourceSpan = declaration.sourceSpan
     }
 

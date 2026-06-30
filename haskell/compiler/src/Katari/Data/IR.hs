@@ -144,10 +144,12 @@ data Request = Request
   deriving stock (Eq, Show)
 
 -- | An external-agent leaf: the external handler dispatches it. 'key' is the opaque dispatch key the
--- handler interprets.
+-- handler interprets; 'reactor' is the reactor the call routes to (@"ffi"@ — the sidecar — by default, or a
+-- @from "name"@ clause's reactor, e.g. @"http"@).
 data External = External
   { key :: Text,
-    input :: VariableId
+    input :: VariableId,
+    reactor :: Text
   }
   deriving stock (Eq, Show)
 
@@ -485,7 +487,7 @@ instance ToJSON Block where
     BlockRequest request ->
       taggedObject "request" ["name" .= request.name, "input" .= request.input]
     BlockExternal external ->
-      taggedObject "external" ["key" .= external.key, "input" .= external.input]
+      taggedObject "external" ["key" .= external.key, "input" .= external.input, "reactor" .= external.reactor]
     BlockMatch match ->
       taggedObject "match" ["subject" .= match.subject, "arms" .= match.arms, "fallback" .= match.fallback]
     BlockFor for ->

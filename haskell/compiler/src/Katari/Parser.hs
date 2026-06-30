@@ -178,7 +178,11 @@ externalAgentDeclarationWith annotation = do
   _ <- symbol "->"
   returnType <- typeExpression
   effects <- optional (keyword "with" *> typeExpression)
-  let endSpan = maybe (sourceSpanOf returnType) sourceSpanOf effects
+  -- An optional @from "reactor"@ clause names the reactor the call routes to (default: the FFI sidecar).
+  reactor <- optional (keyword "from" *> stringLiteral)
+  let endSpan = case reactor of
+        Just located -> located.sourceSpan
+        Nothing -> maybe (sourceSpanOf returnType) sourceSpanOf effects
   pure
     ExternalAgentDeclaration
       { annotation = (.value) <$> annotation,
@@ -188,6 +192,7 @@ externalAgentDeclarationWith annotation = do
         parameters = parameters,
         returnType = returnType,
         effects = effects,
+        reactor = (.value) <$> reactor,
         sourceSpan = mergeSpans (declarationStartSpan annotation externalSpan) endSpan
       }
 
