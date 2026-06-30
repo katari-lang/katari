@@ -361,7 +361,12 @@ synthRecordExpression expression = do
   -- Duplicate field labels are rejected in the identifier phase (K2003), so keying the field map by
   -- name here drops nothing.
   entries <- traverse synthEntry expression.entries
-  let resultType = namedObjectType [(name, fieldType) | (_, name, fieldType) <- entries]
+  -- A literal is a *closed* object: its rest is `never`, not the open `unknown` a written `{...}` /
+  -- `record` type carries. This is what lets a record literal be a subtype of a homogeneous `record[V]`
+  -- (`{Authorization: secret} <: record[string of private]`): the rest check becomes `never <: V`, which
+  -- holds, instead of `unknown <: V`, which would not. Width subtyping is unaffected — an extra field on
+  -- the literal aligns against the *supertype's* rest, never the literal's own.
+  let resultType = namedObjectTypeWithRest bottomType [(name, fieldType) | (_, name, fieldType) <- entries]
   typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionRecord
       RecordExpression

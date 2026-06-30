@@ -235,7 +235,9 @@ recordLiteral = do
 
 recordEntry :: Parser (RecordEntry Parsed)
 recordEntry = do
-  name <- identifier
+  -- A key is a bare identifier (@label = e@) or a quoted string (@"Content-Type" = e@). The string form
+  -- carries field names an identifier cannot spell (hyphens, etc.), e.g. for an http header record.
+  name <- identifier <|> stringLiteral
   assignEquals
   value <- expression
   pure RecordEntry {name = name.value, value = value, sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf value)}

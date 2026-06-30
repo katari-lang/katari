@@ -94,6 +94,16 @@ spec = describe "lowerModule (via compile)" $ do
     it "types `env.get_all` as a `record[string]`" $
       compileErrorCodes "agent f() -> record[string] { env.get_all() }" `shouldBe` []
 
+  describe "record literals" $ do
+    it "accepts a string-literal key an identifier cannot spell" $
+      compileErrorCodes "agent f() -> record[string] { { \"Content-Type\" = \"json\" } }" `shouldBe` []
+
+    it "a closed record literal is a subtype of a homogeneous record[V]" $
+      compileErrorCodes "agent f() -> record[string] { { a = \"x\", b = \"y\" } }" `shouldBe` []
+
+    it "a literal field's privacy flows into the record[V] element (public <: private)" $
+      compileErrorCodes "agent f(s: string of private) -> record[string of private] { { auth = s, accept = \"*\" } }" `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

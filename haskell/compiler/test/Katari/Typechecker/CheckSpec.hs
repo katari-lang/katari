@@ -61,9 +61,9 @@ spec = do
     it "tuple of [int, string] synthesizes to a sequence with two items and a never tail" $
       synthAt (tupleExpression [integerLiteral 1, stringLiteral "a"])
         `shouldBe` tupleNormalized [integerType, stringType]
-    it "record literal becomes an object with required fields and an unknown tail" $
+    it "record literal becomes a closed object (required fields, a never tail)" $
       synthAt (recordExpression [("x", integerLiteral 1), ("y", booleanLiteral True)])
-        `shouldBe` recordNormalized [("x", integerType), ("y", booleanType)]
+        `shouldBe` recordNormalizedClosed [("x", integerType), ("y", booleanType)]
 
   describe "synthExpressionType (if)" $ do
     it "if-then-else unions the branches" $
@@ -913,6 +913,20 @@ recordNormalized fieldList =
             NormalizedObject
               { fields = Map.fromList [(name, NormalizedFieldInformation {normalizedType = fieldType, optional = False}) | (name, fieldType) <- fieldList],
                 rest = unknownType
+              }
+      }
+
+-- | A *closed* record literal's normalized type: like 'recordNormalized' but with a `never` tail — the
+-- shape 'synthRecordExpression' produces, which makes a literal a subtype of a homogeneous `record[V]`.
+recordNormalizedClosed :: List (Text, NormalizedType) -> NormalizedType
+recordNormalizedClosed fieldList =
+  layeredOf
+    neverLayer
+      { objectLayer =
+          Just
+            NormalizedObject
+              { fields = Map.fromList [(name, NormalizedFieldInformation {normalizedType = fieldType, optional = False}) | (name, fieldType) <- fieldList],
+                rest = bottomType
               }
       }
 
