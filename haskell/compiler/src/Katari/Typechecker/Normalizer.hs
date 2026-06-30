@@ -319,6 +319,7 @@ normalizeEffect :: SemanticEffect -> Normalizer NormalizedEffect
 normalizeEffect effect = case effect of
   SemanticEffectPure -> pure bottomEffect
   SemanticEffectAny -> pure topEffect
+  SemanticEffectIo -> pure ioEffect
   SemanticEffectRequest qualifiedName genericArguments -> do
     checkRequestArity qualifiedName genericArguments
     normalizedGenericArguments <- mapM normalizeGenericArgument genericArguments
@@ -473,7 +474,11 @@ instance TypeLattice NormalizedEffect where
     combinedRequests <- combineRequestEffect direction left.requests right.requests
     combinedExits <- keyedMerge direction (\_ -> combine direction) left.exits right.exits
     combinedContinues <- keyedMerge direction (\_ -> combine direction) left.continues right.continues
-    pure NormalizedEffect {requests = combinedRequests, exits = combinedExits, continues = combinedContinues}
+    -- io joins as ∨ (does io if either side does) and meets as ∧, like a one-bit lattice.
+    let combinedIo = case direction of
+          Join -> left.io || right.io
+          Meet -> left.io && right.io
+    pure NormalizedEffect {requests = combinedRequests, exits = combinedExits, continues = combinedContinues, io = combinedIo}
 
   -- The request parts subtype as before; then every escape the left carries must appear on the right
   -- with a covariant value type (independent of the request parts, so @all@ does not cover an escape).
@@ -481,6 +486,9 @@ instance TypeLattice NormalizedEffect where
     subtypeRequestEffect left right
     subtypeEscapes left.exits right.exits
     subtypeEscapes left.continues right.continues
+    -- io cannot be discharged: a left that performs io must flow only where io is also allowed.
+    when (left.io && not right.io) $
+      tellEffectMismatch "Left effect performs io, which the right effect does not allow (io cannot be discharged)" left right
     where
       subtypeEscapes leftMap rightMap =
         mapM_
@@ -1254,7 +1262,8 @@ denormalizeEffect effect = do
   let escapePart =
         [escapeRequest "<escape>" | not (Map.null effect.exits)]
           <> [escapeRequest "<resume>" | not (Map.null effect.continues)]
-  pure $ case requestPart <> escapePart of
+      ioPart = [SemanticEffectIo | effect.io]
+  pure $ case requestPart <> escapePart <> ioPart of
     [] -> SemanticEffectPure
     [single] -> single
     many -> SemanticEffectUnion many

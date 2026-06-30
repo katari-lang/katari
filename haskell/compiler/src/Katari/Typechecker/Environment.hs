@@ -289,6 +289,7 @@ walkEffect context sign = \case
       )
   SemanticEffectPure -> Map.empty
   SemanticEffectAny -> Map.empty
+  SemanticEffectIo -> Map.empty
 
 -- | Walk a nested data / request application's arguments. Both a data type's @SemanticTypeData@ and a
 -- request's @SemanticEffectRequest@ are applications of a declaration's parameters, so each argument is

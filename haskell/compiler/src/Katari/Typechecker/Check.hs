@@ -747,7 +747,7 @@ synthCallArguments sourceSpan arguments = do
 -- replaces the old per-branch jump-escape bookkeeping.
 isPureEffect :: NormalizedEffect -> Bool
 isPureEffect effect =
-  pureRequests effect.requests && not (hasConcreteEscape effect)
+  pureRequests effect.requests && not (hasConcreteEscape effect) && not effect.io
   where
     pureRequests = \case
       RequestEffectAny -> False
@@ -2117,8 +2117,11 @@ signatureValueScheme ::
   List (ParameterSignature Identified) ->
   SyntacticTypeExpression Identified ->
   Maybe (SyntacticTypeExpression Identified) ->
+  -- | Whether the callable performs io: an @external@ does (it makes external IO, so the call is impure
+  -- and never pure-lifted), a @primitive@ does not.
+  Bool ->
   Checker Scheme
-signatureValueScheme genericDeclarations parameters returnType effectExpression = do
+signatureValueScheme genericDeclarations parameters returnType effectExpression performsIo = do
   genericParameters <- boundedGenericParameters genericDeclarations
   withGenerics genericParameters $ do
     fields <-
@@ -2130,14 +2133,18 @@ signatureValueScheme genericDeclarations parameters returnType effectExpression 
         )
         parameters
     returnNormalized <- elaborateAndNormalizeType returnType
-    effectNormalized <- maybe (pure bottomEffect) elaborateAndNormalizeEffect effectExpression
+    declaredEffect <- maybe (pure bottomEffect) elaborateAndNormalizeEffect effectExpression
+    -- An external call carries the un-dischargeable @io@ marker on top of its declared effect: it becomes
+    -- impure (no pure-call lift, so a secret argument is checked strictly and the result is not tainted)
+    -- and the io rides up to the run root.
+    let finalEffect = if performsIo then declaredEffect {io = True} else declaredEffect
     pure
       Scheme
         { genericParameters = genericParameters,
           -- The call shape makes each defaulted parameter omittable at the call site (the runtime fills
           -- the default), exactly as for data constructors and requests — every signature-determined
           -- callable shares the one 'callShape' rule.
-          valueType = assembleAgent bottomAttribute (callShape parameters (namedObjectType fields)) returnNormalized effectNormalized
+          valueType = assembleAgent bottomAttribute (callShape parameters (namedObjectType fields)) returnNormalized finalEffect
         }
 
 -- | The value scheme of a data constructor: @agent(constructorObject) -> Data[generics]@ (pure),

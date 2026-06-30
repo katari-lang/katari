@@ -103,9 +103,11 @@ checkAcyclic node = case node.declaration of
     pure (Map.singleton node.qualifiedName scheme, Map.singleton node.qualifiedName typedDeclaration)
   ValueData declaration -> signatureOnly (dataValueScheme declaration.sourceSpan node.qualifiedName declaration.parameters)
   ValueExternal declaration ->
-    signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects)
+    -- An external call performs io (impure): the strict, non-lifting call path + an un-dischargeable io
+    -- effect that rides to the run root.
+    signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects True)
   ValuePrimitive declaration ->
-    signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects)
+    signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects False)
   ValueRequest declaration -> signatureOnly (requestValueScheme declaration.sourceSpan node.qualifiedName declaration.parameters)
   where
     signatureOnly build = do

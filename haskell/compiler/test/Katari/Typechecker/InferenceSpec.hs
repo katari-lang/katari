@@ -290,7 +290,10 @@ observeDecl = "primitive agent observe[attribute A](value: integer of A) -> inte
 -- so @E@ is inferred from the argument's effect.
 runWithDecls :: Text
 runWithDecls =
-  "request tick() -> integer\nrequest other() -> integer\nexternal agent doTick() -> integer with tick\n"
+  -- `doTick` is a plain agent (not an external) so its effect is exactly `tick`: an external would also
+  -- carry the un-dischargeable `io` marker, which the `f ... with tick` callers below intentionally do not
+  -- allow. These exercise effect-generic inference of a request effect.
+  "request tick() -> integer\nrequest other() -> integer\nagent doTick() -> integer with tick { tick() }\n"
     <> "primitive agent runWith[effect E](action: agent() -> integer with E) -> integer with E\n"
 
 firstDecl :: Text

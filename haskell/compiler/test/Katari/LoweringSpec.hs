@@ -117,6 +117,17 @@ spec = describe "lowerModule (via compile)" $ do
     it "rejects a secret in the url (only header values may be secret)" $
       compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = s, method = \"GET\", headers = {}, body = \"\").status\n}\n" `shouldNotBe` []
 
+  describe "the io effect (external calls are impure)" $ do
+    let ext = "external agent fetch(headers: record[string of private], body: string) -> { status: integer, body: string }\n"
+    it "declassifies an external call's result (impure → no pure-call lift, so a secret header gives a public result)" $
+      compileErrorCodes (ext <> "agent f(key: string of private) -> integer { fetch(headers = { Authorization = key }, body = \"\").status }\n") `shouldBe` []
+
+    it "rejects a secret in a public parameter of an external (a secret must not flow outbound)" $
+      compileErrorCodes (ext <> "agent f(s: string of private) -> integer { fetch(headers = {}, body = s).status }\n") `shouldNotBe` []
+
+    it "infers and propagates io — a caller needs no effect annotation" $
+      compileErrorCodes (ext <> "agent f() -> integer { fetch(headers = {}, body = \"\").status }\n") `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

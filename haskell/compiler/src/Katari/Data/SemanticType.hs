@@ -52,6 +52,12 @@ data SemanticAttribute where
 data SemanticEffect where
   SemanticEffectPure :: SemanticEffect
   SemanticEffectAny :: SemanticEffect
+  -- | The @io@ effect: a function performs external IO (an @external@ call). Unlike a request it is not
+  -- performed / answered and carries no value — it is a propagating, un-dischargeable marker (Haskell's
+  -- @IO@): no handler catches it, so it rides every caller's effect up to the run root, and it makes a
+  -- call impure (so a pure-call attribute lift never applies to an external call). Orthogonal to the
+  -- request row; joined like an effect (io ∨ io).
+  SemanticEffectIo :: SemanticEffect
   SemanticEffectRequest :: QualifiedName -> Map Text SemanticGenericArgument -> SemanticEffect
   SemanticEffectUnion :: List SemanticEffect -> SemanticEffect
   -- | {...(eff expr), req1[generics], req2[generics]}
@@ -138,6 +144,7 @@ renderSemanticEffectLeaves :: SemanticEffect -> List Text
 renderSemanticEffectLeaves = \case
   SemanticEffectPure -> []
   SemanticEffectAny -> ["all"]
+  SemanticEffectIo -> ["io"]
   SemanticEffectRequest qualifiedName arguments -> [qualifiedName.name <> renderSemanticGenericArguments arguments]
   SemanticEffectGeneric genericId -> ["E" <> renderGenericId genericId]
   SemanticEffectUnion effects -> concatMap renderSemanticEffectLeaves effects
@@ -212,6 +219,7 @@ substituteGenerics substitution = substituteType
     substituteEffect effect = case effect of
       SemanticEffectPure -> SemanticEffectPure
       SemanticEffectAny -> SemanticEffectAny
+      SemanticEffectIo -> SemanticEffectIo
       SemanticEffectRequest qualifiedName arguments -> SemanticEffectRequest qualifiedName (substituteArgument <$> arguments)
       SemanticEffectUnion effects -> SemanticEffectUnion (substituteEffect <$> effects)
       SemanticEffectOverwrite baseEffect overwrites ->

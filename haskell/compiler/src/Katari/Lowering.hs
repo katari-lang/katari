@@ -354,6 +354,8 @@ effectRequestSchemas context = go
     go = \case
       SemanticEffectPure -> []
       SemanticEffectAny -> []
+      -- io is not a request, so it contributes no request schema (it is a type-level IO marker only).
+      SemanticEffectIo -> []
       SemanticEffectRequest qualifiedName arguments -> [RequestConcrete (requestDescriptor context qualifiedName arguments)]
       SemanticEffectGeneric genericId -> [RequestGeneric genericId]
       SemanticEffectUnion effects -> concatMap go effects

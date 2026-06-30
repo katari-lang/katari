@@ -113,7 +113,13 @@ data NormalizedEffect = NormalizedEffect
     exits :: Map BoundaryId NormalizedType,
     -- | @CONTINUE(id, T)@ entries: a @next@ (target = handler resume) or a @for@ @next@ (target = for).
     -- Covariant @T@. Discharged at the boundary it names.
-    continues :: Map BoundaryId NormalizedType
+    continues :: Map BoundaryId NormalizedType,
+    -- | The @io@ marker: whether this effect performs external IO. Orthogonal to the request row and the
+    -- escapes; it is never discharged by a handler (no request to catch), so it propagates to the run root.
+    -- Joins as @∨@ (does io if either side does); for subtyping the left's io must be present on the right
+    -- (@io@ cannot be lost). Makes 'Katari.Typechecker.Check.isPureEffect' false, so an external call takes
+    -- the strict, non-lifting call path.
+    io :: Bool
   }
   deriving (Eq, Ord, Show)
 
@@ -139,17 +145,24 @@ data EffectRow = EffectRow
 newtype BoundaryId = BoundaryId Int
   deriving stock (Eq, Ord, Show)
 
--- | An effect with the given request part and no escapes.
+-- | An effect with the given request part, no escapes, and no io.
 fromRequestEffect :: RequestEffect -> NormalizedEffect
-fromRequestEffect requestEffect = NormalizedEffect {requests = requestEffect, exits = mempty, continues = mempty}
+fromRequestEffect requestEffect = NormalizedEffect {requests = requestEffect, exits = mempty, continues = mempty, io = False}
 
 -- | An effect that is exactly one concrete request row, with no escapes.
 effectRow :: EffectRow -> NormalizedEffect
 effectRow = fromRequestEffect . RequestEffectRow
 
--- | The @all@ effect with no escapes.
+-- | The @all@ effect: the request top, and io (so it is the true effect top — an io-performing effect is
+-- a subtype of @all@). A handler over @all@ still cannot catch io (there is no request to catch); io just
+-- rides through.
 anyEffect :: NormalizedEffect
-anyEffect = fromRequestEffect RequestEffectAny
+anyEffect = (fromRequestEffect RequestEffectAny) {io = True}
+
+-- | The bare @io@ effect: external IO, with no concrete requests and no escapes. The normalized form of
+-- 'Katari.Data.SemanticType.SemanticEffectIo'.
+ioEffect :: NormalizedEffect
+ioEffect = (effectRow emptyEffectRow) {io = True}
 
 -- | The empty request row (no requests, no tails).
 emptyEffectRow :: EffectRow
