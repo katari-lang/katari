@@ -135,6 +135,23 @@ export interface PersistedFfiInstance {
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
+/** The `http` instance extension write (`http_instances`) — the call-specific `status` behind an `http`-kind
+ *  instance envelope (the envelope cannot carry `awaitingAnswer`). The delegation it handles is on the
+ *  envelope; the caller is always `core`, so neither is repeated. */
+export interface PersistedHttpInstanceRow {
+  instanceId: InstanceId;
+  status: "running" | "cancelling" | "awaitingAnswer";
+}
+
+/** One in-flight http call a reactivation reads (envelope ⋈ `http_instances`): the http reactor rebuilds its
+ *  warm call keyed by `delegation` (from the envelope), with `instance` the call's own id and the precise
+ *  `status` from the extension (so an `awaitingAnswer` call is not mistaken for a `running` one). */
+export interface PersistedHttpInstance {
+  delegation: DelegationId;
+  instance: InstanceId;
+  status: "running" | "cancelling" | "awaitingAnswer";
+}
+
 /** The base-class write surface: the generic state every reactor's base owns — the instance envelope, the
  *  caller-owned delegations, the raiser-owned escalations, and the cascade drop. A concrete reactor never
  *  touches this directly; it goes through `Reactor.persistBase`, so the protocol is uniform (and a reactor
@@ -182,6 +199,11 @@ export interface FfiTx {
   putFfiInstance(row: PersistedFfiInstanceRow): Promise<void>;
 }
 
+/** The `http` reactor's *own-data* write surface — its `http_instances` extension (the envelope is base). */
+export interface HttpTx {
+  putHttpInstance(row: PersistedHttpInstanceRow): Promise<void>;
+}
+
 /** The `ResourcePool`'s write surface: the independent scope / blob-ownership resource. `owner` may be `null`
  *  (a value in transit between owners mid-ascent). */
 export interface PoolTx {
@@ -211,6 +233,7 @@ export interface PersistenceTx {
   core: CoreTx;
   api: ApiTx;
   ffi: FfiTx;
+  http: HttpTx;
   pool: PoolTx;
   outbox: OutboxTx;
 }
@@ -259,6 +282,12 @@ export interface FfiLoader {
   instances(): Promise<PersistedFfiInstance[]>;
 }
 
+/** The `http` reactor's own-data read surface: its in-flight calls (envelope ⋈ `http_instances`), to fail
+ *  at-most-once on recovery. */
+export interface HttpLoader {
+  instances(): Promise<PersistedHttpInstance[]>;
+}
+
 /** The substrate's read surface: the undrained outbox, replayed into the mailbox so an in-flight event is not
  *  lost across a restart. */
 export interface OutboxLoader {
@@ -275,6 +304,7 @@ export interface Loader {
   core: CoreLoader;
   api: ApiLoader;
   ffi: FfiLoader;
+  http: HttpLoader;
   outbox: OutboxLoader;
 }
 
@@ -325,6 +355,9 @@ export const NO_OP_TX: PersistenceTx = {
   ffi: {
     async putFfiInstance() {},
   },
+  http: {
+    async putHttpInstance() {},
+  },
   pool: {
     async putScope() {},
     async deleteScope() {},
@@ -357,6 +390,11 @@ const EMPTY_LOADER: Loader = {
     },
   },
   ffi: {
+    async instances() {
+      return [];
+    },
+  },
+  http: {
     async instances() {
       return [];
     },

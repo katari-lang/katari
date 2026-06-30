@@ -35,7 +35,7 @@ function openCall(): {
   const delegate: ExternalEvent = {
     kind: "delegate",
     delegation: DELEGATION,
-    target: { kind: "external", key: "greet", snapshot: SNAPSHOT },
+    target: { kind: "external", key: "greet", snapshot: SNAPSHOT, reactor: "ffi" },
     argument: null,
     from: "core",
     to: "ffi",

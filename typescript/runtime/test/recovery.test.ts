@@ -141,9 +141,9 @@ describe("recovery", () => {
           parameters: { parameter: 11 },
         },
         6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
-        7: { block: { kind: "external", key: "step1", input: 8 }, parameters: { parameter: 8 } },
+        7: { block: { kind: "external", key: "step1", input: 8, reactor: "ffi" }, parameters: { parameter: 8 } },
         8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
-        9: { block: { kind: "external", key: "step2", input: 10 }, parameters: { parameter: 10 } },
+        9: { block: { kind: "external", key: "step2", input: 10, reactor: "ffi" }, parameters: { parameter: 10 } },
       },
       entries: {
         [createAgentName("main")]: 0,
@@ -203,7 +203,7 @@ describe("recovery", () => {
           parameters: { parameter: 11 },
         },
         6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
-        7: { block: { kind: "external", key: "step1", input: 8 }, parameters: { parameter: 8 } },
+        7: { block: { kind: "external", key: "step1", input: 8, reactor: "ffi" }, parameters: { parameter: 8 } },
       },
       entries: {
         [createAgentName("main")]: 0,

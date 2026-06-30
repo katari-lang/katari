@@ -72,9 +72,15 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
     case "request":
       return { ...base, kind: "request" };
     case "external":
-      // Born like a delegate proxy: a fresh ffi delegation it will open on `create` when it emits its
-      // `delegate` to the ffi reactor.
-      return { ...base, kind: "external", delegationId: newDelegationId(), relays: {} };
+      // Born like a delegate proxy: a fresh delegation it will open on `create` when it emits its
+      // `delegate` to its reactor (`ffi` by default, or `http` when the leaf is so marked).
+      return {
+        ...base,
+        kind: "external",
+        delegationId: newDelegationId(),
+        relays: {},
+        reactor: block.reactor === "http" ? "http" : "ffi",
+      };
     case "match":
       return { ...base, kind: "match", pending: null };
     case "for":

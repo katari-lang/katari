@@ -31,6 +31,8 @@ import type {
   PersistedDelegation,
   PersistedFfiInstance,
   PersistedFfiInstanceRow,
+  PersistedHttpInstance,
+  PersistedHttpInstanceRow,
   PersistedOpenEscalation,
   PersistedRun,
   PersistedRunEscalationAudit,
@@ -86,6 +88,7 @@ export class StoringPersistence implements Persistence {
   private readonly envelopes = new Map<InstanceId, PersistedInstanceEnvelope>();
   private readonly coreInstanceRows = new Map<InstanceId, PersistedCoreInstance>();
   private readonly ffiInstanceRows = new Map<InstanceId, PersistedFfiInstanceRow>();
+  private readonly httpInstanceRows = new Map<InstanceId, PersistedHttpInstanceRow>();
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
   /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
@@ -203,6 +206,18 @@ export class StoringPersistence implements Persistence {
           return result;
         },
       },
+      http: {
+        instances: async () => {
+          const result: PersistedHttpInstance[] = [];
+          for (const [id, envelope] of this.envelopes) {
+            const ext = this.httpInstanceRows.get(id);
+            if (envelope.kind !== "http" || ext === undefined || envelope.delegationId === null)
+              continue;
+            result.push({ delegation: envelope.delegationId, instance: id, status: ext.status });
+          }
+          return result;
+        },
+      },
       outbox: {
         pending: async () => [...this.outbox.values()],
       },
@@ -299,6 +314,11 @@ export class StoringPersistence implements Persistence {
           this.ffiInstanceRows.set(row.instanceId, row);
         },
       },
+      http: {
+        putHttpInstance: async (row) => {
+          this.httpInstanceRows.set(row.instanceId, row);
+        },
+      },
       pool: {
         putScope: async (scope) => {
           this.scopes.set(scope.scopeId, scope);
@@ -329,6 +349,7 @@ export class StoringPersistence implements Persistence {
     this.envelopes.delete(instanceId);
     this.coreInstanceRows.delete(instanceId);
     this.ffiInstanceRows.delete(instanceId);
+    this.httpInstanceRows.delete(instanceId);
     this.threads.delete(instanceId);
     for (const [id, scope] of this.scopes) {
       if (scope.ownerInstanceId === instanceId) this.scopes.delete(id);

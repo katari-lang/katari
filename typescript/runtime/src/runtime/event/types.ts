@@ -64,13 +64,18 @@ export type InternalEvent =
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
   | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string }
-  | { kind: "external"; key: string; snapshot: SnapshotId };
+  /** An external handler. `reactor` is the reactor it runs in — `ffi` (the sidecar) or `http` (the built-in
+   *  in-runtime fetch) — chosen by the leaf's `reactor` marker (the declaration's `from "name"` clause). Core
+   *  routes the delegate and its proxy legs there. `snapshot` is the calling agent's (the ffi sidecar bundle;
+   *  unused by http). */
+  | { kind: "external"; key: string; snapshot: SnapshotId; reactor: "ffi" | "http" };
 
 /** Which reactor an external event originates from / is destined for. An event is self-routing: the
  *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
- *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. `ffi` runs external
- *  (FFI) handlers — an external call is a `delegate` to it, exactly like a core sub-call. */
-export type ReactorName = "core" | "api" | "ffi";
+ *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. `ffi` runs FFI
+ *  (sidecar) handlers, `http` the built-in http client — an external call is a `delegate` to one of them,
+ *  exactly like a core sub-call. */
+export type ReactorName = "core" | "api" | "ffi" | "http";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =
@@ -116,7 +121,7 @@ export function agentSnapshot(target: DelegateTarget): SnapshotId {
  *  is a core sub-call. The single home of the "external ⟶ ffi, else core" rule, so the callee routing of a
  *  delegate / its proxy legs lives in one place (used at every `emit` edge and where core records the peer). */
 export function calleeReactorForTarget(target: DelegateTarget): ReactorName {
-  return target.kind === "external" ? "ffi" : "core";
+  return target.kind === "external" ? target.reactor : "core";
 }
 
 /** The value an `escalate` carries up across the instance boundary: a `request`'s argument, or a control

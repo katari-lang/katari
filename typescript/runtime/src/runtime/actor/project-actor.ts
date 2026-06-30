@@ -29,6 +29,7 @@ import type { Value } from "../value/types.js";
 import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
 import { FfiReactor } from "./ffi-reactor.js";
+import { HttpReactor } from "./http-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { ResourcePool } from "./resource-pool.js";
@@ -45,7 +46,7 @@ export interface ProjectActorDependencies {
   blobs: BlobStore;
   /** The FFI transport the `ffi` reactor dispatches external handlers through. */
   external: FfiTransport;
-  /** The http transport the api root performs built-in `http.fetch` requests through (the default port). */
+  /** The transport the `http` reactor performs built-in `http.fetch` requests through (an in-runtime fetch). */
   http: HttpTransport;
   persistence: Persistence;
 }
@@ -63,6 +64,8 @@ export class ProjectActor {
   private readonly api: ApiReactor;
   /** The ffi reactor: external (FFI) calls — a `delegate` to it, the transport, its in-flight call records. */
   private readonly ffi: FfiReactor;
+  /** The http reactor: built-in `http.fetch` calls — a `delegate` to it, an in-runtime fetch, its records. */
+  private readonly http: HttpReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -88,18 +91,21 @@ export class ProjectActor {
     // The ffi reactor runs external (FFI) handlers through the injected transport; an external call reaches
     // it as a `delegate` from core's external proxy.
     this.ffi = new FfiReactor(this.projectId, dependencies.external, pool);
+    // The http reactor performs built-in `http.fetch` calls through the injected transport (an in-runtime
+    // fetch); an http call reaches it as a `delegate` from core's external proxy, exactly like ffi.
+    this.http = new HttpReactor(dependencies.http, pool);
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
       this.apiRootId,
       { enqueue: (thunk) => this.substrate.enqueueCommand(this.api, thunk) },
-      dependencies.http,
       pool,
     );
     const registry: Record<ReactorName, Reactor> = {
       core: this.core,
       api: this.api,
       ffi: this.ffi,
+      http: this.http,
     };
     this.substrate = new Substrate(
       this.projectId,
@@ -125,10 +131,10 @@ export class ProjectActor {
     dependencies.external.onComplete((completion) =>
       this.substrate.submit(this.ffi, () => this.ffi.complete(completion)),
     );
-    // An http transport completion re-enters the same way, as an api reactor turn that answers the fetch's
-    // escalation (or fails the run on a no-response error).
+    // An http transport completion re-enters the same way, as an http reactor turn that turns it into the
+    // call's delegateAck / escalate / terminateAck.
     dependencies.http.onComplete((completion) =>
-      this.substrate.submit(this.api, () => this.api.completeFetch(completion)),
+      this.substrate.submit(this.http, () => this.http.complete(completion)),
     );
   }
 
@@ -207,6 +213,7 @@ export class ProjectActor {
     this.core.reset();
     this.api.reset();
     this.ffi.reset();
+    this.http.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       await this.core.load(loader);
@@ -214,6 +221,8 @@ export class ProjectActor {
       // The ffi reactor's load re-dispatches its in-flight calls through the transport (a side effect), so it
       // runs only after the load fully succeeds — guarded like the rest of this method.
       await this.ffi.load(loader);
+      // The http reactor's load re-dispatches its in-flight calls too — the transport fails them (at-most-once).
+      await this.http.load(loader);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {
         this.substrate.enqueueOutbox(message.event, message.seq);

@@ -14,6 +14,7 @@ import {
   delegations,
   escalations,
   ffiInstances,
+  httpInstances,
   instances,
   isTerminalRunState,
   LIVE_DELEGATION_STATES,
@@ -238,6 +239,32 @@ export class DbPersistence implements Persistence {
           );
         },
       },
+      http: {
+        instances: async () => {
+          // The in-flight http calls are the `http` instances: the envelope (its `delegation_id` is the
+          // call's delegation) joined to its `http_instances` extension (which carries the precise status).
+          const rows = await this.db
+            .select({
+              delegation: instances.delegationId,
+              instance: instances.id,
+              status: httpInstances.status,
+            })
+            .from(instances)
+            .innerJoin(httpInstances, eq(instances.id, httpInstances.instanceId))
+            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "http")));
+          return rows.flatMap((row) =>
+            row.delegation === null
+              ? []
+              : [
+                  {
+                    delegation: row.delegation as DelegationId,
+                    instance: row.instance as InstanceId,
+                    status: row.status,
+                  },
+                ],
+          );
+        },
+      },
     };
   }
 
@@ -426,6 +453,14 @@ export class DbPersistence implements Persistence {
               status: row.status,
             })
             .onConflictDoUpdate({ target: ffiInstances.instanceId, set: { status: row.status } });
+        },
+      },
+      http: {
+        putHttpInstance: async (row) => {
+          await drizzleTx
+            .insert(httpInstances)
+            .values({ instanceId: row.instanceId, status: row.status })
+            .onConflictDoUpdate({ target: httpInstances.instanceId, set: { status: row.status } });
         },
       },
       pool: {

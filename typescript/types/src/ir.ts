@@ -134,11 +134,14 @@ export type RequestBlock = {
   input: VariableId;
 };
 
-/** Leaf body — an external agent dispatched by the external handler via `key`, with `input` as the argument. */
+/** Leaf body — an external agent dispatched by the external handler via `key`, with `input` as the argument.
+ *  `reactor` names the reactor the call routes to (`"ffi"` — the sidecar — by default, or e.g. `"http"` for
+ *  the built-in http reactor), from the declaration's `from "name"` clause. */
 export type ExternalBlock = {
   kind: "external";
   key: string;
   input: VariableId;
+  reactor: string;
 };
 
 /** `match subject { ... }`: try `arms` in order, run the first match's body (or `fallback`). */

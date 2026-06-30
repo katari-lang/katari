@@ -390,7 +390,7 @@ describe("in-memory core", () => {
         // greet external agent + its external leaf body
         6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
         7: {
-          block: { kind: "external", key: "greet", input: 8 },
+          block: { kind: "external", key: "greet", input: 8, reactor: "ffi" },
           parameters: { parameter: 8 },
         },
       },
@@ -470,7 +470,7 @@ describe("in-memory core", () => {
           parameters: {},
         },
         6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
-        7: { block: { kind: "external", key: "greet", input: 8 }, parameters: { parameter: 8 } },
+        7: { block: { kind: "external", key: "greet", input: 8, reactor: "ffi" }, parameters: { parameter: 8 } },
       },
       entries: {
         [createAgentName("main")]: 0,

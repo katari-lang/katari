@@ -104,7 +104,7 @@ export const instances = pgTable(
     // `set null` on delegation delete must find the referencing instances without scanning the table.
     index("instances_delegation_id_idx").on(table.delegationId),
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
-    check("instances_kind_check", sql`${table.kind} in ('core', 'api', 'ffi')`),
+    check("instances_kind_check", sql`${table.kind} in ('core', 'api', 'ffi', 'http')`),
   ],
 );
 
@@ -145,6 +145,20 @@ export const ffiInstances = pgTable("ffi_instances", {
   callerReactor: text("caller_reactor").$type<ReactorName>().notNull(),
   /** running (transport in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
    *  awaiting a caught-panic answer or the run's terminate). */
+  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+});
+
+// The `http` instance extension: an in-flight http call. Cascades with its envelope. Unlike `ffi`, it pins no
+// snapshot and stores no request (recovery never re-sends an http request — see `HttpReactor`), so it carries
+// only the call-specific `status` the envelope cannot (the envelope collapses `awaitingAnswer` to `running`).
+// The delegation it handles is its envelope's `delegation_id`; its caller is always `core`.
+export const httpInstances = pgTable("http_instances", {
+  instanceId: uuid("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  /** running (request in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
+   *  awaiting a caught-panic answer or the run's terminate). On recovery a running / cancelling call is
+   *  re-dispatched (which the transport fails — at-most-once), an awaitingAnswer one just waits. */
   status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
 });
 

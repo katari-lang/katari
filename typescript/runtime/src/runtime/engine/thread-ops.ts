@@ -47,7 +47,7 @@ const NULL_VALUE: Value = { kind: "null" };
  *  reactor. An `external` proxy's child runs in `ffi`; a `delegate` (core sub-call) proxy's in `core`. The
  *  proxy's kind mirrors its delegate target's kind, so this is the proxy-side twin of `calleeReactorForTarget`. */
 function proxyCalleeReactor(thread: Thread): ReactorName {
-  return thread.kind === "external" ? "ffi" : "core";
+  return thread.kind === "external" ? thread.reactor : "core";
 }
 
 // ─── create ───────────────────────────────────────────────────────────────────────────────────
@@ -454,16 +454,23 @@ function createExternal(ctx: StepContext, thread: ExternalThread): void {
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "external") throw new Error(`thread ${thread.id} is not an external block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? null;
-  // An external call is a delegate to the `ffi` reactor (its only difference from a core sub-call is `to`).
+  // An external call is a delegate to its reactor (`ffi` or `http`) — its only difference from a core
+  // sub-call is `to`. The proxy carries the same `reactor`, so its later legs route consistently.
   ctx.emit(
     {
       kind: "delegate",
       delegation: thread.delegationId,
-      // The handler lives in this agent's snapshot bundle, so the ffi transport spawns that bundle.
-      target: { kind: "external", key: block.key, snapshot: ctx.ir.snapshot },
+      // The (ffi) handler lives in this agent's snapshot bundle, so the ffi transport spawns that bundle;
+      // http ignores the snapshot.
+      target: {
+        kind: "external",
+        key: block.key,
+        snapshot: ctx.ir.snapshot,
+        reactor: thread.reactor,
+      },
       argument,
     },
-    "ffi",
+    thread.reactor,
   );
 }
 
