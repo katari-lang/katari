@@ -1,5 +1,6 @@
 module Katari.LoweringSpec (spec) where
 
+import Data.Foldable (toList)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
@@ -9,7 +10,9 @@ import Katari.Data.IR
 import Katari.Data.JSONSchema (JSONSchema (..), ObjectSchema (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
+import Katari.Data.SourceSpan (Located (..))
 import Katari.Diagnostics (hasErrors)
+import Katari.Error (compilerErrorCode)
 import Test.Hspec
 
 spec :: Spec
@@ -81,6 +84,16 @@ spec = describe "lowerModule (via compile)" $ do
       danglingReferences irModule `shouldBe` []
       nonAgentEntries irModule `shouldBe` []
 
+  describe "the env stdlib (primitive.env)" $ do
+    it "types `env.get_secret` as a `string of private` (assignable to a private return)" $
+      compileErrorCodes "agent f() -> string of private { env.get_secret(key = \"K\") }" `shouldBe` []
+
+    it "rejects leaking a secret into a public `string` return (the secret-flow invariant)" $
+      compileErrorCodes "agent f() -> string { env.get_secret(key = \"K\") }" `shouldNotBe` []
+
+    it "types `env.get_all` as a `record[string]`" $
+      compileErrorCodes "agent f() -> record[string] { env.get_all() }" `shouldBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------
@@ -90,6 +103,13 @@ testModuleName = ModuleName "test"
 
 testName :: Text -> QualifiedName
 testName name = QualifiedName {moduleName = testModuleName, name = name}
+
+-- | The error codes of every diagnostic a single-module @test@ program emits through the whole pipeline
+-- (stdlib spliced in). @== []@ asserts a clean compile; @shouldNotBe []@ asserts it was rejected.
+compileErrorCodes :: Text -> List Text
+compileErrorCodes source =
+  let result = compile CompileInput {sources = Map.singleton testModuleName source}
+   in [compilerErrorCode located.value | located <- toList result.diagnostics]
 
 -- | Compile a single-module @test@ program through the whole pipeline (stdlib spliced in) and return
 -- its lowered IR, failing loudly if any phase reported an error.

@@ -7,9 +7,9 @@
 
 import { valueEquals } from "../value/codec.js";
 import type { Value } from "../value/types.js";
-import type { PrimRunner } from "./context.js";
+import type { PrimContext, PrimRunner } from "./context.js";
 
-export type PrimImplementation = (argument: Value) => Value | Promise<Value>;
+export type PrimImplementation = (argument: Value, context: PrimContext) => Value | Promise<Value>;
 
 /** A `PrimRunner` over a name -> implementation map; unknown names throw. The pure built-ins are
  *  preloaded; a host adds stateful ones (env / file) via `register` before serving. */
@@ -27,12 +27,12 @@ export class PrimRegistry implements PrimRunner {
     this.implementations.set(name, implementation);
   }
 
-  async run(name: string, argument: Value): Promise<Value> {
+  async run(name: string, argument: Value, context: PrimContext): Promise<Value> {
     const implementation = this.implementations.get(name);
     if (implementation === undefined) {
       throw new Error(`unknown primitive: ${name}`);
     }
-    return implementation(argument);
+    return implementation(argument, context);
   }
 }
 

@@ -16,8 +16,10 @@ import { config } from "../config/index.js";
 import { db } from "../db/client.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { ConflictError, NotFoundError } from "../lib/errors.js";
+import { envReader } from "../modules/env/env.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
+import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry } from "./engine/types.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
@@ -84,10 +86,16 @@ export const blobStore = createBlobStore(config.blobS3);
 // the blob client appends only the resource path.
 const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 
+// The shared prim runner: the pure built-ins (preloaded) plus the host-registered effectful ones (env
+// reads the project's `env_entries` store). One registry serves every project actor; the per-call
+// `PrimContext` supplies the project a given env read runs for.
+const prims = new PrimRegistry();
+registerHostPrims(prims, { env: envReader });
+
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
-  prims: new PrimRegistry(),
+  prims,
   blobs: blobStore,
   externalFactory: () =>
     new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize(runtimeBaseUrl)),

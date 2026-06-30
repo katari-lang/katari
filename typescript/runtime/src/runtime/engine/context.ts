@@ -33,13 +33,21 @@ export interface IrAccess {
   block(blockId: BlockId): BlockInformation;
 }
 
+/** The per-call context a primitive runs against. A host (effectful) prim — `env.get_secret` reads the
+ *  project's `env_entries` store — needs the project it is running for; the engine supplies it from the
+ *  turn's instance. Pure built-ins ignore it. */
+export interface PrimContext {
+  readonly projectId: ProjectId;
+}
+
 /**
- * Runs a built-in primitive. The implementation bakes in everything a prim needs (the project's blob
- * store, the env / secret store for `get_env` / `set_env`); the engine only hands it the name and
- * argument. A prim may be async (a bounded env / blob fetch), which the internal consumer awaits inline.
+ * Runs a built-in primitive. The implementation bakes in everything a prim needs that is process-global
+ * (the DB handle for the env store, the crypto key); the engine hands it the name, argument, and the
+ * per-call `PrimContext` (the project it runs for). A prim may be async (a bounded env / blob fetch),
+ * which the internal consumer awaits inline.
  */
 export interface PrimRunner {
-  run(name: string, argument: Value): Promise<Value>;
+  run(name: string, argument: Value, context: PrimContext): Promise<Value>;
 }
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
