@@ -12,11 +12,12 @@
 // captured synchronously (so a fast run cannot settle before they exist); the durable outcome is the
 // delegation row the API reads by projection — the promise is only an in-process notification hook.
 
-import type { QualifiedName } from "@katari-lang/types";
-import { PANIC_REQUEST } from "../engine/common.js";
+import type { Json, QualifiedName } from "@katari-lang/types";
+import { HTTP_FETCH_REQUEST, PANIC_REQUEST } from "../engine/common.js";
 import type { BlobEntry } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
+import type { HttpCompletion, HttpTransport } from "../external/http-transport.js";
 import {
   type BlobId,
   type DelegationId,
@@ -25,6 +26,7 @@ import {
   newDelegationId,
   type SnapshotId,
 } from "../ids.js";
+import { valueToJson } from "../value/codec.js";
 import { isTainted } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
 import type {
@@ -85,10 +87,18 @@ export class ApiReactor extends Reactor {
    *  deleted on terminal). Written to `runs` in `persist`. */
   private pendingRunOutcomes: PersistedRunOutcome[] = [];
   private pendingAudits: PersistedRunEscalationAudit[] = [];
+  /** In-flight `http.fetch` requests the api root is performing on the run's behalf (the default http port),
+   *  keyed by the fetch's escalation id. NOT persisted — rebuilt on load from the (core-owned) open escalation
+   *  rows. The api answers each with the response, or fails the run on a no-response error. */
+  private readonly pendingFetches = new Map<
+    string,
+    { escalation: EscalationId; run: DelegationId; argument: Value | null }
+  >();
 
   constructor(
     private readonly apiRootId: InstanceId,
     private readonly commands: CommandSink,
+    private readonly httpTransport: HttpTransport,
     pool: ResourcePool,
   ) {
     super(pool);
@@ -132,6 +142,7 @@ export class ApiReactor extends Reactor {
     }
     for (const key of Object.keys(this.cancelReasons))
       delete this.cancelReasons[key as DelegationId];
+    this.pendingFetches.clear();
     this.pendingRunStarts = [];
     this.pendingRunOutcomes = [];
     this.pendingAudits = [];
@@ -272,6 +283,18 @@ export class ApiReactor extends Reactor {
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
     for (const open of await loader.api.answerableEscalations()) {
+      if (open.request === HTTP_FETCH_REQUEST) {
+        // An in-flight fetch the api root was performing: re-dispatch it, which the transport refuses to
+        // re-send (at-most-once) and reports as an error — so the completion fails the run. Track it so that
+        // completion finds it.
+        this.pendingFetches.set(open.escalation, {
+          escalation: open.escalation,
+          run: open.delegation,
+          argument: open.argument,
+        });
+        this.httpTransport.dispatch({ id: open.escalation, argument: null, redispatch: true });
+        continue;
+      }
       this.openEscalations[open.escalation] = {
         run: open.delegation,
         escalation: open.escalation,
@@ -340,10 +363,64 @@ export class ApiReactor extends Reactor {
         });
         break;
       case "escalate":
-        if (isRunFailure(event)) {
+        // A fetch is dispatched to the transport strictly post-commit (durable-first — the open escalation
+        // row is on disk). A genuine run failure settles the in-process promise; an open escalation / fetch
+        // settles nothing (the run stays suspended).
+        if (this.pendingFetches.has(event.escalation)) {
+          this.dispatchFetch(event.escalation);
+        } else if (isRunFailure(event)) {
           this.settleRun(event.delegation, { error: new Error(escalationErrorMessage(event)) });
         }
         break;
+    }
+  }
+
+  /** Dispatch a tracked `http.fetch` to the transport. http is an allowed sink for secrets, so the request's
+   *  (possibly private) header values are revealed here — unlike the user-facing API, which redacts. */
+  private dispatchFetch(escalation: EscalationId): void {
+    const pending = this.pendingFetches.get(escalation);
+    if (pending === undefined) return;
+    this.httpTransport.dispatch({
+      id: escalation,
+      argument: pending.argument === null ? null : valueToJson(pending.argument, "reveal"),
+    });
+  }
+
+  /** A transport completion for one in-flight fetch (fed through the substrate as an api turn). A result
+   *  answers the escalation with the public `{ status, body }` response; an error (no response) fails the run
+   *  (the same terminal path as a panic reaching the root); a cancelled completion just drops it. */
+  completeFetch(completion: HttpCompletion): void {
+    const pending = this.pendingFetches.get(completion.id);
+    if (pending === undefined) return; // a late completion for a fetch already resolved / its run gone
+    this.pendingFetches.delete(completion.id);
+    switch (completion.outcome.kind) {
+      case "result":
+        this.send({
+          kind: "escalateAck",
+          delegation: pending.run,
+          escalation: pending.escalation,
+          value: httpResponseValue(completion.outcome.value),
+          from: this.name,
+          to: "core",
+        });
+        return;
+      case "cancelled":
+        return;
+      case "error": {
+        // No response: fail the run, recording `error` and tearing the still-suspended root down — the same
+        // terminal handling as an unhandled panic reaching the root.
+        const errorMessage = `http: ${completion.outcome.message}`;
+        if (this.transitionDelegation(pending.run, "failed", { errorMessage })) {
+          this.pendingRunOutcomes.push({
+            run: pending.run,
+            state: "error",
+            result: null,
+            errorMessage,
+          });
+          this.send({ kind: "terminate", delegation: pending.run, from: this.name, to: "core" });
+        }
+        return;
+      }
     }
   }
 
@@ -353,6 +430,19 @@ export class ApiReactor extends Reactor {
    *  terminate its still-suspended root (the teardown's eventual `gone` is a sticky no-op). */
   private reactEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
     const ask = event.ask;
+    if (ask.kind === "request" && ask.request === HTTP_FETCH_REQUEST) {
+      // The built-in http effect: the api root is the default port — it performs the request itself and
+      // answers the escalation, rather than surfacing it to the user. Reown the args (the raiser released
+      // them on send), track the fetch by its escalation id, and dispatch it strictly post-commit
+      // (`afterCommit`) — the open escalation row is its durable record.
+      if (ask.argument !== null) this.reownIncoming(ask.argument, this.apiRootId);
+      this.pendingFetches.set(event.escalation, {
+        escalation: event.escalation,
+        run: event.delegation,
+        argument: ask.argument,
+      });
+      return;
+    }
     if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
       // Reown the question's resources to the api root: the raiser released them on send, and the root now
       // holds the open escalation across an arbitrary wait for the user's answer.
@@ -389,9 +479,35 @@ export class ApiReactor extends Reactor {
     for (const [escalation, open] of Object.entries(this.openEscalations)) {
       if (open.run === delegation) delete this.openEscalations[escalation as EscalationId];
     }
+    // Abort any in-flight fetch this finished run was still performing (a cancel / failure races the request).
+    for (const [id, pending] of this.pendingFetches) {
+      if (pending.run === delegation) {
+        this.httpTransport.abort(id);
+        this.pendingFetches.delete(id);
+      }
+    }
     if ("value" in outcome) resolver?.(outcome.value);
     else rejecter?.(outcome.error);
   }
+}
+
+/** Build the public `{ status: integer, body: string }` response value from the transport's Json result. */
+function httpResponseValue(json: Json): Value {
+  let status = 0;
+  let body = "";
+  if (json !== null && typeof json === "object" && !Array.isArray(json)) {
+    const rawStatus = json.status;
+    if (typeof rawStatus === "number") status = rawStatus;
+    const rawBody = json.body;
+    if (typeof rawBody === "string") body = rawBody;
+  }
+  return {
+    kind: "record",
+    fields: {
+      status: { kind: "integer", value: status },
+      body: { kind: "string", value: body },
+    },
+  };
 }
 
 /** Whether an escalation reaching the run root *fails* the run (rather than opening a user-facing request):

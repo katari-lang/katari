@@ -22,6 +22,7 @@ import { DbPersistence } from "./actor/db-persistence.js";
 import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry } from "./engine/types.js";
+import { FetchHttpTransport } from "./external/http-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
   type BlobId,
@@ -99,6 +100,9 @@ const registry = new ProjectRegistry({
   blobs: blobStore,
   externalFactory: () =>
     new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize(runtimeBaseUrl)),
+  // The built-in http client: a fresh in-runtime `fetch` transport per project actor (its own completion
+  // sink). The api root performs `http.fetch` requests through it.
+  httpFactory: () => new FetchHttpTransport(),
 });
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */

@@ -104,6 +104,19 @@ spec = describe "lowerModule (via compile)" $ do
     it "a literal field's privacy flows into the record[V] element (public <: private)" $
       compileErrorCodes "agent f(s: string of private) -> record[string of private] { { auth = s, accept = \"*\" } }" `shouldBe` []
 
+  describe "the http stdlib (primitive.http)" $ do
+    it "types `http.fetch` as an effect returning { status: integer, body: string }" $
+      compileErrorCodes "agent f() -> string {\n  http.fetch(url = \"https://x\", method = \"GET\", headers = {}, body = \"\").body\n}\n" `shouldBe` []
+
+    it "allows a secret header and declassifies the response (the call is impure, so no result lift)" $
+      compileErrorCodes "agent f(key: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = { Authorization = key }, body = \"\").status\n}\n" `shouldBe` []
+
+    it "rejects a secret in the body (a secret must not be sent outbound)" $
+      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = s).status\n}\n" `shouldNotBe` []
+
+    it "rejects a secret in the url (only header values may be secret)" $
+      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = s, method = \"GET\", headers = {}, body = \"\").status\n}\n" `shouldNotBe` []
+
 ------------------------------------------------------------------------------------------------
 -- Driver
 ------------------------------------------------------------------------------------------------

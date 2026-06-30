@@ -9,6 +9,7 @@ import { describe, expect, test } from "vitest";
 import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
@@ -53,6 +54,7 @@ function run(ir: IRModule, entry: string, argument: Value | null): Promise<Value
     prims: secretPrims(),
     blobs: new InMemoryBlobStore(),
     external: new StubFfiTransport(),
+    http: new StubHttpTransport(),
     persistence: new InMemoryPersistence(),
   });
   return actor.startRun(createAgentName(entry), SNAPSHOT, argument).result;

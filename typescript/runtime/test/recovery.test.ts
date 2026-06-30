@@ -16,6 +16,7 @@ import {
   type FfiTransport,
   StubFfiTransport,
 } from "../src/runtime/external/runner.js";
+import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import {
   apiRootIdOf,
   newDelegationId,
@@ -91,6 +92,7 @@ function makeActor(
     prims: new PrimRegistry(),
     blobs: new InMemoryBlobStore(),
     external,
+    http: new StubHttpTransport(),
     persistence,
   });
 }

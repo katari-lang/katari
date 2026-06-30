@@ -54,6 +54,11 @@ export function delegateProxyOf(
  *  Matches the stdlib `primitive.panic` declaration. */
 export const PANIC_REQUEST = "primitive.panic" as QualifiedName;
 
+/** The qualified name of the built-in `http.fetch` request (the http effect). A `fetch` request that
+ *  bubbles unhandled to the run root is performed by the api root (the default http port) rather than
+ *  surfaced to the user. Matches the stdlib `primitive.http.fetch` declaration. */
+export const HTTP_FETCH_REQUEST = "primitive.http.fetch" as QualifiedName;
+
 /** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
  *  reactor-level panic (an ffi error, an unresolvable delegate target). */
 export function panicArgument(message: string): Value {

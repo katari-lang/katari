@@ -13,6 +13,7 @@ import {
   InProcessFfiTransport,
   StubFfiTransport,
 } from "../src/runtime/external/runner.js";
+import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import { ProjectRegistry } from "../src/runtime/registry.js";
 import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
@@ -54,6 +55,7 @@ function makeActor(ir: IRModule, external: FfiTransport = new StubFfiTransport()
     prims: new PrimRegistry(),
     blobs: new InMemoryBlobStore(),
     external,
+    http: new StubHttpTransport(),
     persistence: new InMemoryPersistence(),
   });
 }

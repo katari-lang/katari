@@ -1,0 +1,23 @@
+// The `primitive.http` sub-module: a built-in HTTP client modelled as an *effect*. `fetch` is a `request`
+// (an effect definition), not an external — so calling it is impure (it carries the `fetch` effect, which
+// propagates to the run), and the run's api root performs the actual request by default. A program can
+// intercept it with `handle ... with http.fetch(req) => ...` (e.g. to mock it in a test).
+//
+// Information flow: because the call is impure, its arguments are checked strictly — there is no pure-call
+// lifting. `url` / `method` / `body` are public `string`, so a secret cannot be sent in a URL or body (a
+// private value there is a type error — it must not go outbound). Only header *values* are `string of
+// private`, so an API key may be sent as an auth header. The response `{ status, body }` is public (the
+// answer is the server's response, not a function of the secret — declassified).
+//
+// Errors as data: a non-2xx response is returned as its `status` for the orchestration logic to branch on;
+// a request that never completes (no response) fails the run with a `panic` raised by the api handler.
+
+@"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
+may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text.
+Handled by the run's api root by default; intercept with `handle ... with http.fetch(request) => ...`."
+request fetch(
+  url: string,
+  method: string,
+  headers: record[string of private],
+  body: string,
+) -> { status: integer, body: string }

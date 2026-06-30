@@ -12,6 +12,7 @@ import type { PrimRunner } from "../engine/context.js";
 import { createProjectStore } from "../engine/store.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
+import type { HttpTransport } from "../external/http-transport.js";
 import type { FfiTransport } from "../external/runner.js";
 import {
   apiRootIdOf,
@@ -44,6 +45,8 @@ export interface ProjectActorDependencies {
   blobs: BlobStore;
   /** The FFI transport the `ffi` reactor dispatches external handlers through. */
   external: FfiTransport;
+  /** The http transport the api root performs built-in `http.fetch` requests through (the default port). */
+  http: HttpTransport;
   persistence: Persistence;
 }
 
@@ -90,6 +93,7 @@ export class ProjectActor {
     this.api = new ApiReactor(
       this.apiRootId,
       { enqueue: (thunk) => this.substrate.enqueueCommand(this.api, thunk) },
+      dependencies.http,
       pool,
     );
     const registry: Record<ReactorName, Reactor> = {
@@ -120,6 +124,11 @@ export class ProjectActor {
     // reactor turn that turns it into the call's delegateAck / escalate / terminateAck.
     dependencies.external.onComplete((completion) =>
       this.substrate.submit(this.ffi, () => this.ffi.complete(completion)),
+    );
+    // An http transport completion re-enters the same way, as an api reactor turn that answers the fetch's
+    // escalation (or fails the run on a no-response error).
+    dependencies.http.onComplete((completion) =>
+      this.substrate.submit(this.api, () => this.api.completeFetch(completion)),
     );
   }
 

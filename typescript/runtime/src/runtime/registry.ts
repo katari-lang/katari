@@ -12,6 +12,7 @@ import { InMemoryPersistence, type Persistence } from "./actor/persistence.js";
 import { ProjectActor } from "./actor/project-actor.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
+import { type HttpTransport, StubHttpTransport } from "./external/http-transport.js";
 import { type FfiTransport, StubFfiTransport } from "./external/runner.js";
 import type { ProjectId, SnapshotId } from "./ids.js";
 import { type IrSource, SnapshotRegistry } from "./ir.js";
@@ -29,6 +30,9 @@ export interface ProjectRegistryDependencies {
   /** Builds a fresh `FfiTransport` per project actor (each needs its own completion sink). Defaults to
    *  the stub (FFI fails loudly until a real subprocess-backed runner is injected). */
   externalFactory?: () => FfiTransport;
+  /** Builds a fresh `HttpTransport` per project actor (each needs its own completion sink). Defaults to the
+   *  stub (http fails loudly until a real `fetch`-backed transport is injected). */
+  httpFactory?: () => HttpTransport;
 }
 
 export class ProjectRegistry {
@@ -39,6 +43,7 @@ export class ProjectRegistry {
   private readonly persistence: Persistence;
   private readonly prims: PrimRunner;
   private readonly externalFactory: () => FfiTransport;
+  private readonly httpFactory: () => HttpTransport;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
     this.ir = dependencies.ir ?? new SnapshotRegistry();
@@ -46,6 +51,7 @@ export class ProjectRegistry {
     this.persistence = dependencies.persistence ?? new InMemoryPersistence();
     this.prims = dependencies.prims ?? new PrimRegistry();
     this.externalFactory = dependencies.externalFactory ?? (() => new StubFfiTransport());
+    this.httpFactory = dependencies.httpFactory ?? (() => new StubHttpTransport());
   }
 
   /** Register one module's IR within a snapshot — only on the default in-memory source (tests); the
@@ -68,6 +74,7 @@ export class ProjectRegistry {
       prims: this.prims,
       blobs: this.blobs,
       external: this.externalFactory(),
+      http: this.httpFactory(),
       persistence: this.persistence,
     });
     this.actors.set(projectId, actor);
