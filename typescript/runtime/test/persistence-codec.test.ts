@@ -117,6 +117,8 @@ describe("persistence codec", () => {
     const joined: PersistedInstance = {
       id: instance.id,
       delegationId: instance.delegationId,
+      // The summoner rides on the generic envelope now (not in engineState); the join reads it back.
+      callerReactor: instance.callerReactor,
       target: serialized.instance.target,
       snapshotId: serialized.instance.snapshotId,
       status: instance.status,

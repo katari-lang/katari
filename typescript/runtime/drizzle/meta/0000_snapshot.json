@@ -1,5 +1,5 @@
 {
-  "id": "5bf46746-d884-4e96-9918-e76538b4202c",
+  "id": "1d59a6ac-3f37-42b1-aca6-a732ed6b6851",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -324,9 +324,79 @@
         },
         "threads_kind_check": {
           "name": "threads_kind_check",
-          "value": "\"threads\".\"kind\" in ('sequence', 'match', 'for', 'handle', 'parallel', 'delegate', 'external')"
+          "value": "\"threads\".\"kind\" in ('agent', 'sequence', 'primitive', 'construct', 'request', 'match', 'for', 'handle', 'parallel', 'delegate', 'external')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.core_instances": {
+      "name": "core_instances",
+      "schema": "",
+      "columns": {
+        "instance_id": {
+          "name": "instance_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "target": {
+          "name": "target",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "snapshot_id": {
+          "name": "snapshot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ambient_generics": {
+          "name": "ambient_generics",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "engine_state": {
+          "name": "engine_state",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "core_instances_instance_id_instances_id_fk": {
+          "name": "core_instances_instance_id_instances_id_fk",
+          "tableFrom": "core_instances",
+          "tableTo": "instances",
+          "columnsFrom": [
+            "instance_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "core_instances_snapshot_id_snapshots_id_fk": {
+          "name": "core_instances_snapshot_id_snapshots_id_fk",
+          "tableFrom": "core_instances",
+          "tableTo": "snapshots",
+          "columnsFrom": [
+            "snapshot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.delegations": {
@@ -352,17 +422,17 @@
           "primaryKey": false,
           "notNull": false
         },
-        "target": {
-          "name": "target",
-          "type": "jsonb",
+        "from_reactor": {
+          "name": "from_reactor",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "argument": {
-          "name": "argument",
-          "type": "jsonb",
+        "to_reactor": {
+          "name": "to_reactor",
+          "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "state": {
           "name": "state",
@@ -464,6 +534,24 @@
           "primaryKey": false,
           "notNull": true
         },
+        "delegation_id": {
+          "name": "delegation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "from_reactor": {
+          "name": "from_reactor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "to_reactor": {
+          "name": "to_reactor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "request": {
           "name": "request",
           "type": "text",
@@ -476,14 +564,15 @@
           "primaryKey": false,
           "notNull": false
         },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -553,12 +642,116 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "escalations_state_check": {
-          "name": "escalations_state_check",
-          "value": "\"escalations\".\"state\" in ('open')"
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ffi_instances": {
+      "name": "ffi_instances",
+      "schema": "",
+      "columns": {
+        "instance_id": {
+          "name": "instance_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "snapshot_id": {
+          "name": "snapshot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "argument": {
+          "name": "argument",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
         }
       },
+      "indexes": {},
+      "foreignKeys": {
+        "ffi_instances_instance_id_instances_id_fk": {
+          "name": "ffi_instances_instance_id_instances_id_fk",
+          "tableFrom": "ffi_instances",
+          "tableTo": "instances",
+          "columnsFrom": [
+            "instance_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ffi_instances_snapshot_id_snapshots_id_fk": {
+          "name": "ffi_instances_snapshot_id_snapshots_id_fk",
+          "tableFrom": "ffi_instances",
+          "tableTo": "snapshots",
+          "columnsFrom": [
+            "snapshot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.http_instances": {
+      "name": "http_instances",
+      "schema": "",
+      "columns": {
+        "instance_id": {
+          "name": "instance_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "http_instances_instance_id_instances_id_fk": {
+          "name": "http_instances_instance_id_instances_id_fk",
+          "tableFrom": "http_instances",
+          "tableTo": "instances",
+          "columnsFrom": [
+            "instance_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.instances": {
@@ -584,29 +777,23 @@
           "primaryKey": false,
           "notNull": false
         },
-        "target": {
-          "name": "target",
-          "type": "jsonb",
+        "kind": {
+          "name": "kind",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "snapshot_id": {
-          "name": "snapshot_id",
-          "type": "uuid",
+        "caller_reactor": {
+          "name": "caller_reactor",
+          "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "status": {
           "name": "status",
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "ambient_generics": {
-          "name": "ambient_generics",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -681,19 +868,6 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
-        },
-        "instances_snapshot_id_snapshots_id_fk": {
-          "name": "instances_snapshot_id_snapshots_id_fk",
-          "tableFrom": "instances",
-          "tableTo": "snapshots",
-          "columnsFrom": [
-            "snapshot_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -703,8 +877,81 @@
         "instances_status_check": {
           "name": "instances_status_check",
           "value": "\"instances\".\"status\" in ('running', 'cancelling')"
+        },
+        "instances_kind_check": {
+          "name": "instances_kind_check",
+          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.outbox": {
+      "name": "outbox",
+      "schema": "",
+      "columns": {
+        "seq": {
+          "name": "seq",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event": {
+          "name": "event",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "outbox_project_id_idx": {
+          "name": "outbox_project_id_idx",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "outbox_project_id_projects_id_fk": {
+          "name": "outbox_project_id_projects_id_fk",
+          "tableFrom": "outbox",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.run_escalations_audit": {
@@ -781,20 +1028,13 @@
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
+          "notNull": true
         },
         "project_id": {
           "name": "project_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
-        },
-        "instance_id": {
-          "name": "instance_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "snapshot_id": {
           "name": "snapshot_id",
@@ -824,7 +1064,8 @@
           "name": "state",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": "'running'"
         },
         "result": {
           "name": "result",
@@ -844,25 +1085,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "completed_at": {
-          "name": "completed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -896,19 +1130,6 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "runs_instance_id_instances_id_fk": {
-          "name": "runs_instance_id_instances_id_fk",
-          "tableFrom": "runs",
-          "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
         "runs_snapshot_id_snapshots_id_fk": {
           "name": "runs_snapshot_id_snapshots_id_fk",
           "tableFrom": "runs",
@@ -929,7 +1150,7 @@
       "checkConstraints": {
         "runs_state_check": {
           "name": "runs_state_check",
-          "value": "\"runs\".\"state\" in ('running', 'cancelling', 'done', 'error')"
+          "value": "\"runs\".\"state\" in ('running', 'cancelling', 'done', 'error', 'cancelled')"
         }
       },
       "isRLSEnabled": false

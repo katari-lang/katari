@@ -308,8 +308,9 @@ export type CoreInstance = {
   /** The reactor that summoned this instance (the summoning `delegate`'s `from`): `core` for a sub-call,
    *  `api` for a run root. This is the callee-side record of the handled delegation's *summoner*: the engine
    *  never reads it; the reactor base class seeds its handled-delegation routing from it (on accept and on
-   *  load) so the replies this instance emits route back to the summoner. Persisted as instance payload
-   *  because the callee's own rows do not otherwise carry who called it (the issued row is the caller's). */
+   *  load) so the replies this instance emits route back to the summoner. Persisted on the generic instance
+   *  *envelope* (`instances.caller_reactor`, base-owned) — the callee's ambient, uniform across reactor kinds
+   *  — and seeded back onto this in-memory field on load. */
   callerReactor: ReactorName;
   /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here. */
   target: DelegateTarget;
@@ -376,12 +377,11 @@ export type BlobEntry = {
  */
 export type EngineState = {
   rootThreadId: ThreadId;
-  /** The reactor that summoned this instance — persisted so reply routing survives a restart without
-   *  re-inferring it from the engine graph (see `CoreInstance.callerReactor`). */
-  callerReactor: ReactorName;
-  // Outbound-delegation routing no longer lives here: a `DelegateThread`'s `delegationId` is its source of
-  // truth. Answer routing rides per-thread in `Thread.forwardRoutes`. The actor needs no escalation mirror
-  // (a returning `escalateAck` routes to the raiser via the existing `delegationChild` map).
+  // The summoner (`callerReactor`) is NOT here: it is the instance's ambient, persisted on the generic
+  // envelope (`instances.caller_reactor`, base-owned) uniformly for every reactor kind — not in this core-
+  // only payload. Outbound-delegation routing no longer lives here either: a `DelegateThread`'s
+  // `delegationId` is its source of truth. Answer routing rides per-thread in `Thread.forwardRoutes`. The
+  // actor needs no escalation mirror (a returning `escalateAck` routes to the raiser via `delegationChild`).
   cancelExits: Record<number, CancelExit>;
   nextThreadId: number;
   nextCallId: number;

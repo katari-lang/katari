@@ -17,7 +17,7 @@ import type {
   Scope,
   Thread,
 } from "../engine/types.js";
-import { agentSnapshot, type DelegateTarget } from "../event/types.js";
+import { agentSnapshot, type DelegateTarget, type ReactorName } from "../event/types.js";
 import {
   type BlobId,
   type DelegationId,
@@ -43,6 +43,9 @@ export interface PersistedInstanceEnvelope {
   id: InstanceId;
   kind: InstanceKind;
   delegationId: DelegationId | null;
+  /** The reactor that summoned this instance (its reply-to), the instance's ambient — `null` only for the
+   *  `api` management root, which nothing delegates to. Base-owned, uniform across reactor kinds. */
+  callerReactor: ReactorName | null;
   status: InstanceStatus;
 }
 
@@ -62,6 +65,9 @@ export interface PersistedCoreInstance {
 export interface PersistedInstance {
   id: InstanceId;
   delegationId: DelegationId | null;
+  /** The summoner, read from the generic envelope (`instances.caller_reactor`). A `core` instance is always
+   *  summoned, so this is non-null here (the engine load guards a corrupt null). */
+  callerReactor: ReactorName;
   target: DelegateTarget;
   snapshotId: SnapshotId;
   status: InstanceStatus;
@@ -174,11 +180,11 @@ export function serializeBlob(
   };
 }
 
-/** The instance bookkeeping that has no dedicated column (its threads live in the threads table). */
+/** The instance bookkeeping that has no dedicated column (its threads live in the threads table). The
+ *  summoner (`callerReactor`) is NOT here — it is the instance's ambient on the generic envelope. */
 export function engineStateOf(instance: CoreInstance): EngineState {
   return {
     rootThreadId: instance.rootThreadId,
-    callerReactor: instance.callerReactor,
     cancelExits: instance.cancelExits,
     nextThreadId: instance.nextThreadId,
     nextCallId: instance.nextCallId,
@@ -208,7 +214,7 @@ export function deserializeProject(
       kind: "core",
       id: row.id,
       delegationId: row.delegationId,
-      callerReactor: row.engineState.callerReactor,
+      callerReactor: row.callerReactor,
       target: row.target,
       argument: null,
       status: row.status,

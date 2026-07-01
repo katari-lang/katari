@@ -11,8 +11,8 @@
 // implementations: an in-memory no-op (`InMemoryPersistence` — the warm store is the truth), an in-memory
 // *storing* twin (`StoringPersistence`, for recovery tests), and a drizzle-backed one (`DbPersistence`).
 
-import type { DelegationState, EscalationState, RunState } from "../../db/tables/execution.js";
-import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
+import type { DelegationState, RunState } from "../../db/tables/execution.js";
+import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
   DelegationId,
@@ -32,28 +32,24 @@ import type {
   SerializedCoreInstance,
 } from "./persistence-codec.js";
 
-/** A caller-owned delegation row at one instant (the `delegations` table shape). The caller reactor (core
- *  for a sub-call, the api root for a run) is the source of truth and writes this each time the row's state
- *  changes — `running → done` (result set) / `cancelling → gone` / `failed` (errorMessage set). `fromReactor`
- *  (the caller's reactor) and `toReactor` (the callee's) let each reactor reload its own delegations on
- *  restart without classifying by the caller's identity. */
+/** A caller-owned delegation row at one instant (the `delegations` table shape) — pure live routing. Only the
+ *  running / cancelling rows exist; a terminal one is deleted (its outcome lives on `runs`). `fromReactor` (the
+ *  caller's reactor) / `toReactor` (the callee's) let each reactor reload its own delegations on restart
+ *  without classifying by the caller's identity. Nothing beyond routing is stored: the target / argument ride
+ *  on the (undelivered) `delegate` in the outbox, and the result flows on the `delegateAck` event. */
 export interface PersistedDelegation {
   delegation: DelegationId;
   caller: InstanceId;
   fromReactor: ReactorName;
   toReactor: ReactorName;
-  target: DelegateTarget;
-  argument: Value | null;
   state: DelegationState;
-  result: Value | null;
-  errorMessage: string | null;
 }
 
-/** A raiser-owned escalation row at one instant (the `escalations` table shape). The raiser is always a
- *  `core` instance; the row moves `open → answered` (answer set) when the raiser receives the `escalateAck`.
- *  `fromReactor` (the raiser's reactor) / `toReactor` (the reactor the escalate was addressed to) let each
- *  reactor self-select on restart — `toReactor = "api"` ⟺ the raiser is a run root (a user-facing
- *  escalation). `delegation` is the raiser's delegation (the run, for a user-facing escalation). */
+/** A raiser-owned (open) escalation row (the `escalations` table shape). The raiser is a `core` instance today;
+ *  the row exists only while open (answering deletes it — the Q&A lives in the audit). `fromReactor` (the
+ *  raiser's reactor) / `toReactor` (the reactor the escalate was addressed to) let each reactor self-select on
+ *  restart — `toReactor = "api"` ⟺ the raiser is a run root (a user-facing escalation). `delegation` is the
+ *  raiser's delegation (the run, for a user-facing escalation). */
 export interface PersistedEscalation {
   escalation: EscalationId;
   raiser: InstanceId;
@@ -62,16 +58,12 @@ export interface PersistedEscalation {
   delegation: DelegationId;
   request: string;
   argument: Value | null;
-  state: EscalationState;
-  answer: Value | null;
 }
 
-/** One produced external event awaiting delivery — a durable outbox row. `issuer` is the instance that
- *  produced it (the api root for an api operation), kept only to satisfy the row's non-null column; routing
- *  is recovered from the engine threads, not from this. */
+/** One produced external event awaiting delivery — a durable outbox row. Routing is carried on the event
+ *  itself (`from` / `to`) and recovered from the engine threads, so no issuer is stored. */
 export interface OutboxMessage {
   seq: OutboxSeq;
-  issuer: InstanceId;
   event: ExternalEvent;
 }
 
@@ -118,7 +110,6 @@ export interface PersistedFfiInstanceRow {
   snapshotId: SnapshotId;
   key: string;
   argument: Value | null;
-  callerReactor: ReactorName;
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
@@ -135,13 +126,12 @@ export interface PersistedFfiInstance {
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
-/** The `http` instance extension write (`http_instances`) — the call-specific `status` (the envelope cannot
- *  carry `awaitingAnswer`) and the caller reactor its reply routes to, behind an `http`-kind instance
- *  envelope. The delegation it handles is on the envelope. Mirrors 'PersistedFfiInstanceRow' minus the
+/** The `http` instance extension write (`http_instances`) — just the call-specific `status` (the envelope
+ *  cannot carry `awaitingAnswer`), behind an `http`-kind instance envelope. The delegation it handles and the
+ *  caller reactor its reply routes to are both on the envelope. Mirrors 'PersistedFfiInstanceRow' minus the
  *  snapshot/key/argument an http recovery never re-sends. */
 export interface PersistedHttpInstanceRow {
   instanceId: InstanceId;
-  callerReactor: ReactorName;
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 

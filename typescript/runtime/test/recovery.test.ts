@@ -448,8 +448,6 @@ describe("recovery", () => {
       caller: apiRootIdOf(PROJECT),
       fromReactor: "api",
       toReactor: "core",
-      target,
-      argument: null,
     });
     // startRun also writes the `runs` row (the run's durable record); seed it so recovery can record the outcome.
     persistence.seedRun(run, {
@@ -460,7 +458,6 @@ describe("recovery", () => {
     });
     persistence.seedOutbox({
       seq: newOutboxSeq(),
-      issuer: apiRootIdOf(PROJECT),
       event: { kind: "delegate", from: "api", to: "core", delegation: run, target, argument: null },
     });
 

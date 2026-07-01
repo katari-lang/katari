@@ -34,7 +34,7 @@ import type {
   PersistedRunOutcome,
   PersistenceTx,
 } from "./persistence.js";
-import { Reactor } from "./reactor.js";
+import { type AckContext, Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** One run-root request the engine could not handle internally, awaiting a user's answer. */
@@ -108,7 +108,12 @@ export class ApiReactor extends Reactor {
     // project's permanent management root, so ensuring it every turn is correct and needs no per-FK flag; the
     // base then writes that envelope plus the run delegations it owns. It raises no escalations and drops
     // nothing; the run-metadata sidecar is the api's own data.
-    this.markInstance(this.apiRootId, { delegationId: null, status: "running" });
+    // The api root is summoned by nobody, so its ambient summoner is `null`.
+    this.markInstance(this.apiRootId, {
+      delegationId: null,
+      callerReactor: null,
+      status: "running",
+    });
     await this.persistBase(tx.base);
     // The run launch row first (a later outcome update targets it); then this turn's state / outcome updates
     // (the durable SoT, since the run delegation row was just deleted by the base on its terminal). A cancel's
@@ -176,14 +181,9 @@ export class ApiReactor extends Reactor {
       this.runRejecters[delegation] = reject;
     });
     const started = this.commands.enqueue(() => {
-      // The api root owns this run delegation (it is the caller) and its metadata sidecar; recording both
-      // here, before the delegate is produced, means the run survives a crash before its root is even created.
-      this.openDelegation(delegation, {
-        caller: this.apiRootId,
-        peer: "core",
-        target: { kind: "named", name: qualifiedName, snapshot },
-        argument,
-      });
+      // Record the run's metadata sidecar before the delegate is produced, so the run survives a crash before
+      // its root is even created. The run delegation row itself is opened by the base from the `send` below (the
+      // api root is its caller), atomically in the same commit — so metadata and delegation land together.
       this.pendingRunStarts.push({
         run: delegation,
         name,
@@ -215,7 +215,7 @@ export class ApiReactor extends Reactor {
       // gone from the live map, so do not stamp a cancel reason or emit a redundant terminate for it.
       if (!this.hasLiveDelegation(run)) return;
       if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
-      this.transitionDelegation(run, "cancelling");
+      // The run delegation is moved to `cancelling` by the base from the `send(terminate)` below.
       // The cancel reason rides on the `cancelling` outcome, so the run's state + reason commit as one UPDATE.
       this.pendingRunOutcomes.push({
         run,
@@ -283,46 +283,76 @@ export class ApiReactor extends Reactor {
 
   // ─── reactions (a run's delegateAck / escalate / terminateAck reaching the management root) ──────
 
-  /** React to one event a run's delegation routes back to the management root, recording the run delegation's
-   *  terminal state (it owns the row). The in-process result promise settles strictly post-commit in
-   *  `afterCommit`. The api root never receives a `delegate` (nobody delegates *to* it), an `escalateAck` (it
-   *  never raises), or a `terminate` (nothing cancels the root). */
-  react(event: ExternalEvent): void {
-    switch (event.kind) {
-      case "delegateAck":
-        // Reown the result's captured resources to the api root (the run-root instance released them to
-        // in-transit as it retired). This is the same two-step reown a core caller does for a sub-call —
-        // the api root is just the local owner here — and is what keeps a run that returns a closure / blob
-        // alive instead of dropping it.
-        this.reownIncoming(event.value, this.apiRootId);
-        // Record `done` only if this actually settled a still-live run. A no-op transition means the run
-        // already reached a terminal state, so its durable outcome stands (never overwrite it).
-        if (this.transitionDelegation(event.delegation, "done", { result: event.value })) {
-          this.pendingRunOutcomes.push({
-            run: event.delegation,
-            state: "done",
-            result: event.value,
-            errorMessage: null,
-          });
-        }
-        break;
-      case "terminateAck":
-        // Record `cancelled` only if the terminateAck actually settled a still-live run. A *failed* run already
-        // recorded `error` and evicted its delegation, so the terminateAck from tearing down its still-suspended
-        // root is a sticky no-op here — it must NOT clobber the durable `error` outcome (and its message) with
-        // `cancelled`. Gating the outcome write on the transition gives it the same sticky-terminal protection.
-        if (this.transitionDelegation(event.delegation, "gone")) {
-          this.pendingRunOutcomes.push({
-            run: event.delegation,
-            state: "cancelled",
-            result: null,
-            errorMessage: null,
-          });
-        }
-        break;
-      case "escalate":
-        this.reactEscalate(event);
-        break;
+  // The api root never receives a `delegate` (nobody delegates *to* it), an `escalateAck` (it never raises),
+  // or a `terminate` (nothing cancels the root); those hooks stay the base no-op. The base retires the run
+  // delegation before these hooks run and passes `settled` — whether that retirement fired — so a parallel run
+  // outcome inherits the same sticky-terminal protection (a second ack for an already-terminal run records
+  // nothing). The in-process result promise settles strictly post-commit in `afterCommit`.
+
+  /** A run finished: reown its result to the api root and record the `done` outcome (only if the retirement
+   *  fired — a no-op means the run already reached a terminal state, whose durable outcome stands). */
+  protected onDelegateAck(
+    event: Extract<ExternalEvent, { kind: "delegateAck" }>,
+    context: AckContext,
+  ): void {
+    // The same two-step reown a core caller does for a sub-call — keeps a run that returns a closure / blob
+    // alive instead of dropping it (the run-root instance released it to in-transit as it retired).
+    this.reownIncoming(event.value, this.apiRootId);
+    if (context.settled) {
+      this.pendingRunOutcomes.push({
+        run: event.delegation,
+        state: "done",
+        result: event.value,
+        errorMessage: null,
+      });
+    }
+  }
+
+  /** A run's cancel cascade confirmed: record `cancelled` only if the retirement fired. A *failed* run already
+   *  recorded `error` and retired its delegation, so the terminateAck from tearing down its still-suspended root
+   *  is a sticky no-op here — it must NOT clobber the durable `error` outcome with `cancelled`. */
+  protected onTerminateAck(
+    event: Extract<ExternalEvent, { kind: "terminateAck" }>,
+    context: AckContext,
+  ): void {
+    if (context.settled) {
+      this.pendingRunOutcomes.push({
+        run: event.delegation,
+        state: "cancelled",
+        result: null,
+        errorMessage: null,
+      });
+    }
+  }
+
+  /** A run's escalation reaching the root: a genuine request is kept open (the run stays suspended awaiting a
+   *  user's answer — the durable row was already opened by core, the raiser, so this only tracks the answerable
+   *  in memory); a panic / unhandled escape fails the run — retire the run delegation and, if that fired, record
+   *  `error` and terminate its still-suspended root (the teardown's eventual terminateAck is a sticky no-op). */
+  protected onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
+    const ask = event.ask;
+    if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
+      // Reown the question's resources to the api root: the raiser released them on send, and the root now
+      // holds the open escalation across an arbitrary wait for the user's answer.
+      if (ask.argument !== null) this.reownIncoming(ask.argument, this.apiRootId);
+      this.openEscalations[event.escalation] = {
+        run: event.delegation,
+        escalation: event.escalation,
+        request: ask.request,
+        argument: ask.argument,
+      };
+      return;
+    }
+    // Fail the run: retire its delegation (the policy retirement the base exposes). A second escalate reaching
+    // an already-terminal run retires nothing (its outcome is already durable), so guard the outcome + teardown.
+    if (this.retireDelegation(event.delegation)) {
+      this.pendingRunOutcomes.push({
+        run: event.delegation,
+        state: "error",
+        result: null,
+        errorMessage: escalationErrorMessage(event),
+      });
+      this.send({ kind: "terminate", delegation: event.delegation, from: this.name, to: "core" });
     }
   }
 
@@ -344,38 +374,6 @@ export class ApiReactor extends Reactor {
           this.settleRun(event.delegation, { error: new Error(escalationErrorMessage(event)) });
         }
         break;
-    }
-  }
-
-  /** A run's escalation reaching the root: a genuine request is kept open (the run stays suspended awaiting a
-   *  user's answer — the durable row was already opened by core, the raiser, so this only tracks the
-   *  answerable in memory); a panic / unhandled escape fails the run — record the delegation `failed` and
-   *  terminate its still-suspended root (the teardown's eventual `gone` is a sticky no-op). */
-  private reactEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
-    const ask = event.ask;
-    if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
-      // Reown the question's resources to the api root: the raiser released them on send, and the root now
-      // holds the open escalation across an arbitrary wait for the user's answer.
-      if (ask.argument !== null) this.reownIncoming(ask.argument, this.apiRootId);
-      this.openEscalations[event.escalation] = {
-        run: event.delegation,
-        escalation: event.escalation,
-        request: ask.request,
-        argument: ask.argument,
-      };
-      return;
-    }
-    const errorMessage = escalationErrorMessage(event);
-    // Record `error` and tear the still-suspended root down only if this actually failed a live run; a
-    // second escalate reaching an already-terminal run is a no-op (its outcome is already durable).
-    if (this.transitionDelegation(event.delegation, "failed", { errorMessage })) {
-      this.pendingRunOutcomes.push({
-        run: event.delegation,
-        state: "error",
-        result: null,
-        errorMessage,
-      });
-      this.send({ kind: "terminate", delegation: event.delegation, from: this.name, to: "core" });
     }
   }
 

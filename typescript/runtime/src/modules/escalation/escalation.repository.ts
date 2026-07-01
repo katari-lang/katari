@@ -8,9 +8,8 @@
 
 import { and, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
-import { delegations, escalations, instances } from "../../db/tables/execution.js";
+import { escalations } from "../../db/tables/execution.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
-import { apiRootIdOf, type ProjectId } from "../../runtime/ids.js";
 import type { Value } from "../../runtime/value/types.js";
 
 /** An open escalation as the API presents it (its `argument` rendered to Json by the service). */
@@ -21,11 +20,11 @@ export interface OpenEscalationView {
 }
 
 export const escalationRepository = {
-  /** The open escalations awaiting an answer for a project. Joins each open escalation to its raiser instance
-   *  and that instance's summoning delegation, keeping only those raised by a run root (the delegation's
-   *  caller is the api root). No request filter is needed — core opens a row only for a user-facing request. */
+  /** The open escalations awaiting an answer for a project — the ones addressed to the api root
+   *  (`to_reactor = 'api'`), which are exactly the user-facing run-root escalations (core opens a row only for a
+   *  user-facing request, and stamps its `to`). An escalation row exists only while open, so presence alone
+   *  selects the open ones — no state filter, no join. */
   async listOpen(executor: Executor, projectId: string): Promise<OpenEscalationView[]> {
-    const apiRoot = apiRootIdOf(projectId as ProjectId);
     const rows = await executor
       .select({
         id: escalations.id,
@@ -33,15 +32,7 @@ export const escalationRepository = {
         argument: escalations.argument,
       })
       .from(escalations)
-      .innerJoin(instances, eq(instances.id, escalations.raiserInstanceId))
-      .innerJoin(delegations, eq(delegations.id, instances.delegationId))
-      .where(
-        and(
-          eq(escalations.projectId, projectId),
-          eq(escalations.state, "open"),
-          eq(delegations.callerInstanceId, apiRoot),
-        ),
-      );
+      .where(and(eq(escalations.projectId, projectId), eq(escalations.toReactor, "api")));
     // Decrypt the at-rest question before the service redacts it for the wire (the inverse of seal-on-write).
     return rows.map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));
   },

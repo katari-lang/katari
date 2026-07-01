@@ -10,11 +10,10 @@
 
 import {
   type DelegationState,
-  isLiveDelegationState,
   isTerminalRunState,
   type RunState,
 } from "../../db/tables/execution.js";
-import type { DelegateTarget, ReactorName } from "../event/types.js";
+import type { ReactorName } from "../event/types.js";
 import type {
   BlobId,
   DelegationId,
@@ -49,27 +48,22 @@ import {
   type PersistedThread,
 } from "./persistence-codec.js";
 
-/** A stored Layer 1 delegation row (the durable caller→child record + its lifecycle + its from/to reactors). */
+/** A stored Layer 1 delegation row — pure live routing (running / cancelling); a terminal one is deleted. */
 interface StoredDelegation {
   caller: InstanceId;
   fromReactor: ReactorName;
   toReactor: ReactorName;
-  target: DelegateTarget;
-  argument: Value | null;
   state: DelegationState;
-  result: Value | null;
-  errorMessage: string | null;
 }
 
+/** A stored Layer 1 (open) escalation row — an answered one is deleted (the Q&A lives in the audit). */
 interface StoredEscalation {
   raiser: InstanceId;
   fromReactor: ReactorName;
   toReactor: ReactorName;
   delegation: DelegationId;
-  state: "open" | "answered";
   request: string;
   argument: Value | null;
-  answer: Value | null;
 }
 
 /** A stored run record: its launch metadata plus its durable state / outcome (the run delegation row is
@@ -114,19 +108,15 @@ export class StoringPersistence implements Persistence {
   private loader(): Loader {
     const delegationsFrom = (from: ReactorName): PersistedDelegation[] => {
       const result: PersistedDelegation[] = [];
+      // Every stored delegation is live (a terminal one is deleted), so existence alone selects them.
       for (const [delegation, row] of this.delegations) {
-        // Only live (running / cancelling) rows carry routing; finished ones are history.
-        if (row.fromReactor === from && isLiveDelegationState(row.state)) {
+        if (row.fromReactor === from) {
           result.push({
             delegation,
             caller: row.caller,
             fromReactor: row.fromReactor,
             toReactor: row.toReactor,
-            target: row.target,
-            argument: row.argument,
             state: row.state,
-            result: row.result,
-            errorMessage: row.errorMessage,
           });
         }
       }
@@ -137,8 +127,8 @@ export class StoringPersistence implements Persistence {
       to?: ReactorName;
     }): PersistedOpenEscalation[] => {
       const result: PersistedOpenEscalation[] = [];
+      // Every stored escalation is open (an answered one is deleted).
       for (const [escalation, row] of this.escalations) {
-        if (row.state !== "open") continue;
         if (filter.from !== undefined && row.fromReactor !== filter.from) continue;
         if (filter.to !== undefined && row.toReactor !== filter.to) continue;
         result.push({
@@ -165,9 +155,14 @@ export class StoringPersistence implements Persistence {
           for (const [id, envelope] of this.envelopes) {
             const ext = this.coreInstanceRows.get(id);
             if (envelope.kind !== "core" || ext === undefined) continue;
+            // A core instance is always summoned, so its envelope caller is non-null (guarded loudly).
+            if (envelope.callerReactor === null) {
+              throw new Error(`core instance ${id} has no callerReactor (corrupt envelope)`);
+            }
             coreInstances.push({
               id,
               delegationId: envelope.delegationId,
+              callerReactor: envelope.callerReactor,
               target: ext.target,
               snapshotId: ext.snapshotId,
               status: envelope.status,
@@ -191,7 +186,12 @@ export class StoringPersistence implements Persistence {
           const result: PersistedFfiInstance[] = [];
           for (const [id, envelope] of this.envelopes) {
             const ext = this.ffiInstanceRows.get(id);
-            if (envelope.kind !== "ffi" || ext === undefined || envelope.delegationId === null)
+            if (
+              envelope.kind !== "ffi" ||
+              ext === undefined ||
+              envelope.delegationId === null ||
+              envelope.callerReactor === null
+            )
               continue;
             result.push({
               delegation: envelope.delegationId,
@@ -199,7 +199,7 @@ export class StoringPersistence implements Persistence {
               snapshot: ext.snapshotId,
               key: ext.key,
               argument: ext.argument,
-              caller: ext.callerReactor,
+              caller: envelope.callerReactor,
               status: ext.status,
             });
           }
@@ -211,12 +211,17 @@ export class StoringPersistence implements Persistence {
           const result: PersistedHttpInstance[] = [];
           for (const [id, envelope] of this.envelopes) {
             const ext = this.httpInstanceRows.get(id);
-            if (envelope.kind !== "http" || ext === undefined || envelope.delegationId === null)
+            if (
+              envelope.kind !== "http" ||
+              ext === undefined ||
+              envelope.delegationId === null ||
+              envelope.callerReactor === null
+            )
               continue;
             result.push({
               delegation: envelope.delegationId,
               instance: id,
-              caller: ext.callerReactor,
+              caller: envelope.callerReactor,
               status: ext.status,
             });
           }
@@ -247,11 +252,7 @@ export class StoringPersistence implements Persistence {
         caller: row.caller,
         fromReactor: row.fromReactor,
         toReactor: row.toReactor,
-        target: row.target,
-        argument: row.argument,
         state: row.state,
-        result: row.result,
-        errorMessage: row.errorMessage,
       });
     };
     const dropInstance = async (instanceId: InstanceId) => {
@@ -274,10 +275,8 @@ export class StoringPersistence implements Persistence {
             fromReactor: row.fromReactor,
             toReactor: row.toReactor,
             delegation: row.delegation,
-            state: row.state,
             request: row.request,
             argument: row.argument,
-            answer: row.answer,
           });
         },
       },
@@ -397,23 +396,13 @@ export class StoringPersistence implements Persistence {
    *  actor sees both — the row in `liveDelegations`, the event in the outbox). */
   seedDelegation(
     delegation: DelegationId,
-    row: {
-      caller: InstanceId;
-      fromReactor: ReactorName;
-      toReactor: ReactorName;
-      target: DelegateTarget;
-      argument: Value | null;
-    },
+    row: { caller: InstanceId; fromReactor: ReactorName; toReactor: ReactorName },
   ): void {
     this.delegations.set(delegation, {
       caller: row.caller,
       fromReactor: row.fromReactor,
       toReactor: row.toReactor,
-      target: row.target,
-      argument: row.argument,
       state: "running",
-      result: null,
-      errorMessage: null,
     });
   }
 

@@ -6,7 +6,7 @@
 // an edge's durable row from lagging the engine threads that reference it. Loading returns the engine graph
 // plus the live (running / cancelling) delegation rows and open escalations each reactor reloads as its own.
 
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
 import { blobs, scopes, threads } from "../../db/tables/engine.js";
 import {
@@ -17,7 +17,6 @@ import {
   httpInstances,
   instances,
   isTerminalRunState,
-  LIVE_DELEGATION_STATES,
   outbox,
   runEscalationsAudit,
   runs,
@@ -62,17 +61,17 @@ export class DbPersistence implements Persistence {
     // Shared, reactor-parameterized queries — core / api both read live delegations + open escalations, each
     // self-selecting by reactor.
     const delegationsFrom = async (from: ReactorName): Promise<PersistedDelegation[]> => {
-      // Only live rows carry routing; finished ones (done / gone / failed) are history.
+      // Every stored delegation is live (running / cancelling) — a terminal one is deleted — so no state filter.
       const rows = await this.db
-        .select()
+        .select({
+          id: delegations.id,
+          callerInstanceId: delegations.callerInstanceId,
+          fromReactor: delegations.fromReactor,
+          toReactor: delegations.toReactor,
+          state: delegations.state,
+        })
         .from(delegations)
-        .where(
-          and(
-            eq(delegations.projectId, projectId),
-            eq(delegations.fromReactor, from),
-            inArray(delegations.state, LIVE_DELEGATION_STATES),
-          ),
-        );
+        .where(and(eq(delegations.projectId, projectId), eq(delegations.fromReactor, from)));
       return rows.flatMap((row) =>
         row.callerInstanceId === null
           ? []
@@ -82,11 +81,7 @@ export class DbPersistence implements Persistence {
                 caller: row.callerInstanceId as InstanceId,
                 fromReactor: row.fromReactor,
                 toReactor: row.toReactor,
-                target: row.target,
-                argument: unsealFromStorage(row.argument),
                 state: row.state,
-                result: unsealFromStorage(row.result),
-                errorMessage: row.errorMessage,
               },
             ],
       );
@@ -95,10 +90,8 @@ export class DbPersistence implements Persistence {
       from?: ReactorName;
       to?: ReactorName;
     }): Promise<PersistedOpenEscalation[]> => {
-      const conditions = [
-        eq(escalations.projectId, projectId),
-        eq(escalations.state, "open" as const),
-      ];
+      // Every stored escalation is open (answering deletes it), so existence alone selects the open ones.
+      const conditions = [eq(escalations.projectId, projectId)];
       if (filter.from !== undefined) conditions.push(eq(escalations.fromReactor, filter.from));
       if (filter.to !== undefined) conditions.push(eq(escalations.toReactor, filter.to));
       const rows = await this.db
@@ -128,6 +121,7 @@ export class DbPersistence implements Persistence {
               .select({
                 id: instances.id,
                 delegationId: instances.delegationId,
+                callerReactor: instances.callerReactor,
                 status: instances.status,
                 target: coreInstances.target,
                 snapshotId: coreInstances.snapshotId,
@@ -141,15 +135,23 @@ export class DbPersistence implements Persistence {
             this.db.select().from(scopes).where(eq(scopes.projectId, projectId)),
             this.db.select().from(blobs).where(eq(blobs.projectId, projectId)),
           ]);
-          const persistedInstances: PersistedInstance[] = instanceRows.map((row) => ({
-            id: row.id as InstanceId,
-            delegationId: row.delegationId as PersistedInstance["delegationId"],
-            target: row.target,
-            snapshotId: row.snapshotId as SnapshotId,
-            status: row.status,
-            ambientGenerics: row.ambientGenerics ?? null,
-            engineState: unsealFromStorage(row.engineState),
-          }));
+          const persistedInstances: PersistedInstance[] = instanceRows.map((row) => {
+            // A core instance is always summoned, so its envelope `caller_reactor` is non-null; a null here is
+            // a corrupt row, surfaced loudly rather than papered over with a default.
+            if (row.callerReactor === null) {
+              throw new Error(`core instance ${row.id} has no caller_reactor (corrupt envelope)`);
+            }
+            return {
+              id: row.id as InstanceId,
+              delegationId: row.delegationId as PersistedInstance["delegationId"],
+              callerReactor: row.callerReactor,
+              target: row.target,
+              snapshotId: row.snapshotId as SnapshotId,
+              status: row.status,
+              ambientGenerics: row.ambientGenerics ?? null,
+              engineState: unsealFromStorage(row.engineState),
+            };
+          });
           const persistedThreads: PersistedThread[] = threadRows.map((row) => ({
             projectId: row.projectId as ProjectId,
             instanceId: row.instanceId as InstanceId,
@@ -200,7 +202,6 @@ export class DbPersistence implements Persistence {
             .orderBy(asc(outbox.createdAt));
           return rows.map((row) => ({
             seq: row.seq as OutboxSeq,
-            issuer: row.instanceId as InstanceId,
             event: unsealFromStorage(row.event),
           }));
         },
@@ -213,17 +214,19 @@ export class DbPersistence implements Persistence {
             .select({
               delegation: instances.delegationId,
               instance: instances.id,
+              caller: instances.callerReactor,
               snapshot: ffiInstances.snapshotId,
               key: ffiInstances.key,
               argument: ffiInstances.argument,
-              caller: ffiInstances.callerReactor,
               status: ffiInstances.status,
             })
             .from(instances)
             .innerJoin(ffiInstances, eq(instances.id, ffiInstances.instanceId))
             .where(and(eq(instances.projectId, projectId), eq(instances.kind, "ffi")));
+          // The caller (reply-to) rides on the envelope now; both it and the delegation are non-null for a
+          // live call (written together at delegate-receive), so a null in either is a dropped/corrupt row.
           return rows.flatMap((row) =>
-            row.delegation === null
+            row.delegation === null || row.caller === null
               ? []
               : [
                   {
@@ -247,14 +250,15 @@ export class DbPersistence implements Persistence {
             .select({
               delegation: instances.delegationId,
               instance: instances.id,
-              caller: httpInstances.callerReactor,
+              caller: instances.callerReactor,
               status: httpInstances.status,
             })
             .from(instances)
             .innerJoin(httpInstances, eq(instances.id, httpInstances.instanceId))
             .where(and(eq(instances.projectId, projectId), eq(instances.kind, "http")));
+          // The caller (reply-to) rides on the envelope now; non-null with the delegation for a live call.
           return rows.flatMap((row) =>
-            row.delegation === null
+            row.delegation === null || row.caller === null
               ? []
               : [
                   {
@@ -294,8 +298,10 @@ export class DbPersistence implements Persistence {
           projectId,
           kind: envelope.kind,
           delegationId: envelope.delegationId,
+          callerReactor: envelope.callerReactor,
           status: envelope.status,
         })
+        // `caller_reactor` is immutable (the summoner never changes), so only `status` is updated on re-upsert.
         .onConflictDoUpdate({ target: instances.id, set: { status: envelope.status } });
     };
     const putDelegation: BaseTx["putDelegation"] = async (row) => {
@@ -307,20 +313,10 @@ export class DbPersistence implements Persistence {
           callerInstanceId: row.caller,
           fromReactor: row.fromReactor,
           toReactor: row.toReactor,
-          target: row.target,
-          argument: sealForStorage(row.argument),
           state: row.state,
-          result: sealForStorage(row.result),
-          errorMessage: row.errorMessage,
         })
-        .onConflictDoUpdate({
-          target: delegations.id,
-          set: {
-            state: row.state,
-            result: sealForStorage(row.result),
-            errorMessage: row.errorMessage,
-          },
-        });
+        // The only mutable field is `state` (running → cancelling); everything else is immutable at open.
+        .onConflictDoUpdate({ target: delegations.id, set: { state: row.state } });
     };
     const dropInstance = async (instanceId: InstanceId) => {
       // Cascade removes the instance's extension / threads / the scopes it still owns / owned delegations +
@@ -357,13 +353,9 @@ export class DbPersistence implements Persistence {
               delegationId: row.delegation,
               request: row.request,
               argument: sealForStorage(row.argument),
-              state: row.state,
-              answer: sealForStorage(row.answer),
             })
-            .onConflictDoUpdate({
-              target: escalations.id,
-              set: { state: row.state, answer: sealForStorage(row.answer) },
-            });
+            // An open escalation row is immutable (answering deletes it), so a re-open is a no-op.
+            .onConflictDoNothing();
         },
       },
       core: {
@@ -451,7 +443,6 @@ export class DbPersistence implements Persistence {
               snapshotId: row.snapshotId,
               key: row.key,
               argument: sealForStorage(row.argument),
-              callerReactor: row.callerReactor,
               status: row.status,
             })
             .onConflictDoUpdate({ target: ffiInstances.instanceId, set: { status: row.status } });
@@ -463,7 +454,6 @@ export class DbPersistence implements Persistence {
             .insert(httpInstances)
             .values({
               instanceId: row.instanceId,
-              callerReactor: row.callerReactor,
               status: row.status,
             })
             .onConflictDoUpdate({ target: httpInstances.instanceId, set: { status: row.status } });
@@ -528,7 +518,6 @@ export class DbPersistence implements Persistence {
             messages.map((message) => ({
               seq: message.seq,
               projectId,
-              instanceId: message.issuer,
               // An event carries delegate arguments / ack values, so private ones seal in the outbox too.
               event: sealForStorage(message.event),
             })),

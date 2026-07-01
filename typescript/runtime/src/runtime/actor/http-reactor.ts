@@ -62,7 +62,6 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
   protected async persistCallRow(tx: PersistenceTx, row: CallRow<HttpPayload>): Promise<void> {
     await tx.http.putHttpInstance({
       instanceId: row.instance,
-      callerReactor: row.caller,
       status: row.status,
     });
   }

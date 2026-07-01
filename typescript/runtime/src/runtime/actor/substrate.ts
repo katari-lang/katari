@@ -309,14 +309,7 @@ export class Substrate {
    *  sends) in one transaction. Deliver the produced events back into the mailbox after the commit. */
   private async commit(reactor: Reactor, consumed: OutboxSeq | null): Promise<void> {
     const sends = reactor.drainSends();
-    const produced: OutboxMessage[] =
-      sends.length === 0
-        ? []
-        : sends.map((event) => ({
-            seq: newOutboxSeq(),
-            issuer: reactor.currentTurnOwner(),
-            event,
-          }));
+    const produced: OutboxMessage[] = sends.map((event) => ({ seq: newOutboxSeq(), event }));
     let reclaimedBytes: BlobId[] = [];
     await this.persistence.transaction(this.projectId, async (tx) => {
       await reactor.persist(tx);

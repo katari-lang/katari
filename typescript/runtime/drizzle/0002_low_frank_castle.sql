@@ -1,2 +1,0 @@
-ALTER TABLE "runs" DROP CONSTRAINT "runs_state_check";--> statement-breakpoint
-ALTER TABLE "runs" ADD CONSTRAINT "runs_state_check" CHECK ("runs"."state" in ('running', 'cancelling', 'done', 'error', 'cancelled'));

@@ -1,63 +1,83 @@
 // Reactor: one module on the substrate (the bus) and the *single* place the external-event delegation /
-// escalation protocol is implemented, uniformly for every reactor. A reactor reacts to inbound external
-// events by mutating its own warm state and `send`ing follow-on events (buffered, drained by the substrate);
-// it holds the Layer 1 entity rows it owns (the delegations it issued as caller, the escalations it raised)
-// as the in-memory source of truth, and snapshots the ones a turn touched in `persist(tx)`. Reactors hold no
-// DB — the substrate opens the turn's single transaction (see docs/2026-06-25-reactor-persist-redesign.md).
+// escalation protocol is implemented, uniformly for every reactor. The base owns the ENTIRE Layer 1 lifecycle
+// (the delegation / escalation rows), derived from the events that flow through it:
 //
-// Ownership: a delegation row is owned by its *caller* (core for a sub-call, the api root for a run); an
-// escalation row by its *raiser* (always a core instance). Each reactor therefore tracks and persists only
-// its own rows — there is no cross-reactor injection. A live row stays in memory; a terminal one is written
-// once and evicted (its history lives in the DB, read by the API projection).
+//   - `send` (final) is the one edge on the way out: as a reactor emits an event, the base records the
+//     owned-edge change it implies — a `delegate` opens the caller-owned delegation, a `terminate` moves it to
+//     cancelling, an `escalate` opens the raiser-owned escalation (when user-facing). A concrete reactor just
+//     emits; it never opens / transitions a row itself.
+//   - `react` (final) is the one edge on the way in: it resolves the edge's endpoint (caller / callee /
+//     raiser), applies the owned-edge deletion an ack implies (a `delegateAck` / `terminateAck` retires the
+//     caller's delegation, an `escalateAck` retires the raiser's escalation), then dispatches to the concrete's
+//     per-event hook with that resolved context. The concrete's hooks only resume their payload / manage their
+//     instance lifecycle — they hold no delegation / escalation state.
+//
+// Ownership: a delegation is owned by its *caller* (core for a sub-call, the api root for a run); an escalation
+// by its *raiser* (a core instance today). Each reactor persists only its own rows (self-selected on load by
+// `from = this.name`). A row lives in memory only while live; retiring it evicts it and stages a durable delete
+// (a delegation is pure live routing — its outcome lives on `runs`; an answered escalation lives in the audit).
+// Reactors hold no DB — the substrate opens the turn's single transaction (see the redesign doc).
 
 import type { DelegationState } from "../../db/tables/execution.js";
-import { isLiveDelegationState } from "../../db/tables/execution.js";
 import { PANIC_REQUEST, panicArgument } from "../engine/common.js";
 import type { InstanceStatus } from "../engine/types.js";
-import {
-  type DelegateTarget,
-  type ExternalEvent,
-  escalateValue,
-  type ReactorName,
-} from "../event/types.js";
+import { isUserFacingRequest } from "../escalation-filter.js";
+import { type ExternalEvent, escalateValue, type ReactorName } from "../event/types.js";
 import { type DelegationId, type EscalationId, type InstanceId, newEscalationId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import type { BaseLoader, BaseTx, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** A caller-owned delegation row in memory (the live source of truth). `peer` is the callee reactor (the
- *  delegation's `to`); the issuer's own reactor (its `from`) is `this.name`. The pair lets each reactor
- *  reload its own rows on restart without any cross-reactor classification. */
+ *  delegation's `to`); the caller's own reactor (its `from`) is `this.name`. `state` is `running` | `cancelling`
+ *  — a delegation in the map is always live; retiring it evicts the row (its outcome lives on `runs`, not here).
+ *  Nothing beyond routing is kept: the target / argument ride on the (undelivered) `delegate` in the outbox,
+ *  and the result flows on the `delegateAck` event, never through this row. */
 interface DelegationRow {
   caller: InstanceId;
   peer: ReactorName;
-  target: DelegateTarget;
-  argument: Value | null;
   state: DelegationState;
-  result?: Value;
-  errorMessage?: string;
 }
 
-/** A raiser-owned escalation row in memory (the live source of truth). `peer` is the reactor the escalate was
- *  addressed to (its `to` — the caller of the raiser's delegation; `api` ⟺ the raiser is a run root, i.e.
- *  the escalation is user-facing); the raiser's own reactor (its `from`) is `this.name`. `delegation` is the
- *  raiser's delegation, which for a user-facing escalation is the run — so the api root can rebuild its
- *  answerable list (run + question) from the row alone. */
+/** A raiser-owned (open) escalation row in memory. `peer` is the reactor the escalate was addressed to (its
+ *  `to`; `api` ⟺ the raiser is a run root, i.e. the escalation is user-facing). `delegation` is the raiser's
+ *  delegation (the run, for a user-facing escalation), so the api root rebuilds its answerable list from the
+ *  row alone. An escalation in the map is always open; answering it evicts the row (the Q&A lives in the audit). */
 interface EscalationRow {
   raiser: InstanceId;
   peer: ReactorName;
   delegation: DelegationId;
   request: string;
   argument: Value | null;
-  state: "open" | "answered";
-  answer?: Value;
 }
 
 /** A staged instance-envelope change for the next `persistBase`: an upsert of the generic envelope, or a
  *  cascade drop. One per instance id (last-write-wins). */
 type InstanceEnvelopeChange =
-  | { kind: "upsert"; delegationId: DelegationId | null; status: InstanceStatus }
+  | {
+      kind: "upsert";
+      delegationId: DelegationId | null;
+      callerReactor: ReactorName | null;
+      status: InstanceStatus;
+    }
   | { kind: "drop" };
+
+/** A received (callee-side) delegation edge: the local instance handling it, and the reactor that summoned it
+ *  (the reply-to). Both are the summoned instance's ambient — rebuilt on load from its envelope
+ *  (`delegationId` + `callerReactor`), so this is a derived index, not an independent source of truth. */
+interface HandledDelegation {
+  instance: InstanceId;
+  caller: ReactorName;
+}
+
+/** The caller-side context the base resolves for a reply event before dispatching to the concrete hook: the
+ *  caller instance the delegation was issued by (to locate the proxy to resume), and whether the base's
+ *  owned-edge retirement actually fired (`settled` — false when the delegation was already terminal, so a hook
+ *  recording a parallel outcome inherits the same sticky-terminal protection). */
+export interface AckContext {
+  caller: InstanceId | undefined;
+  settled: boolean;
+}
 
 export abstract class Reactor {
   /** This reactor's routing name — `send` stamps it as the event's `from`, and the substrate routes inbound
@@ -71,62 +91,155 @@ export abstract class Reactor {
   /** The follow-on events this turn produced, buffered until the substrate drains them into the outbox. */
   private readonly sendBuffer: ExternalEvent[] = [];
 
-  /** The Layer 1 rows this reactor owns, the live in-memory source of truth, plus the per-turn dirty set the
-   *  next `persist` flushes. */
+  /** The Layer 1 rows this reactor owns, the live in-memory source of truth, plus the per-turn dirty (upsert)
+   *  and retired (delete) sets the next `persist` flushes. */
   private readonly delegations = new Map<DelegationId, DelegationRow>();
   private readonly escalations = new Map<EscalationId, EscalationRow>();
   private readonly dirtyDelegations = new Set<DelegationId>();
   private readonly dirtyEscalations = new Set<EscalationId>();
+  private readonly retiredDelegations = new Set<DelegationId>();
+  private readonly retiredEscalations = new Set<EscalationId>();
 
   /** This turn's instance-envelope changes the next `persistBase` flushes, one entry per instance: an upsert
    *  (the concrete owns each instance's live state, so the base only stages its generic row) or a drop
    *  (cascade). One map keyed by id — so an upsert and a drop of the same instance in one turn resolve by
-   *  last-write-wins, with no mutual-exclusion invariant to maintain. The concrete registers them with
-   *  `markInstance` / `markInstanceDropped`; the base persists them so `persistBase` needs no arguments. */
+   *  last-write-wins. The concrete registers them with `markInstance` / `markInstanceDropped`. */
   private readonly dirtyInstances = new Map<InstanceId, InstanceEnvelopeChange>();
 
-  /** The delegations this reactor *handles* as callee — a receive-side index from a delegation to the local
-   *  instance handling it, so an inbound `terminate` / `escalateAck` finds its target. NOT persisted here: the
-   *  concrete reactor's payload (a core instance) is the source of truth, re-seeded on load via
-   *  `acceptDelegation`. Routing of outbound events is NOT done here — each event carries its `to`, stamped at
-   *  the engine edge where the callee / summoner is known. */
-  private readonly handled = new Map<DelegationId, InstanceId>();
-
-  /** React to one inbound external event: mutate this reactor's warm state and `send` any follow-on events.
-   *  Persists nothing (the substrate commits the turn), so the same turn can be re-run if its commit fails.
-   *  May be async (the core engine awaits the IR); the api root reacts synchronously. */
-  abstract react(event: ExternalEvent): void | Promise<void>;
+  /** The delegations this reactor *handles* as callee — the receive-side index from a delegation to the local
+   *  instance handling it AND the reactor that summoned it (the reply-to). NOT persisted here: the summoned
+   *  instance's envelope (its `delegationId` + `callerReactor`) is the source of truth, re-seeded on load via
+   *  `acceptDelegation`. */
+  private readonly handled = new Map<DelegationId, HandledDelegation>();
 
   /** Snapshot what this turn touched into the transaction through this reactor's own port (`tx.<name>`): its
-   *  Layer 2 (an instance's envelope + extension, or its drop) interleaved with `flushDelegations` /
-   *  `flushEscalations` at the FK-correct point (envelope before the rows that reference it; cascade last).
-   *  The base supplies the flush + envelope helpers; the concrete reactor orders them. */
+   *  Layer 2 (an instance's envelope + extension, or its drop). The base writes the generic half (envelopes +
+   *  delegations + escalations + drops) via `persistBase`; the concrete adds its own extension. */
   abstract persist(tx: PersistenceTx): Promise<void>;
 
-  /** The instance to stamp as the issuer on this turn's produced outbox rows (the turn's core instance, or
-   *  the api root). Only read when the turn actually produced events. */
+  /** The owner instance for the Layer 1 rows this turn's sends open (the delegation's caller / the escalation's
+   *  raiser) and for the resources they release. The turn's core instance, the api root, or the ffi call. Only
+   *  read when a send actually opens a row / releases a value. */
   abstract currentTurnOwner(): InstanceId;
 
   /** Strictly-post-commit side effects (durable-first): settle an in-process promise, dispatch an FFI call.
    *  Runs only after the turn is durably committed, so recovery is always possible from durable state alone. */
   afterCommit(_event: ExternalEvent): void {}
 
-  // ─── send / drain (the from/to protocol) ────────────────────────────────────────────────────────
+  // ─── react (final): resolve the edge, retire the owned row, dispatch to the concrete hook ────────
 
-  /** Buffer one fully routed follow-on event (its `from` / `to` already stamped by the emitter — the engine
-   *  edge for a core turn, the concrete reactor for an api / ffi emit), so this never picks a destination. The
-   *  first step of the two-step reown rides here: a value leaving its instance UP across the boundary RELEASES
-   *  the resources it captures from the turn's owner to in-transit, so the receiver can reown them. The two
-   *  upward value flows are a sub-call / run result (`delegateAck`) and an escalation's carried value
-   *  (`escalate`); the downward legs (`delegate` argument, `escalateAck` answer) stay owned by the still-live
-   *  sender and are read in place, so nothing is released for them. */
+  /** React to one inbound external event. The base resolves the edge endpoint and applies the owned-edge
+   *  deletion an ack implies (retiring the caller's delegation / the raiser's escalation), then dispatches to
+   *  the concrete's hook with that context. Persists nothing (the substrate commits the turn), so a failed
+   *  commit can re-run the same turn. */
+  react(event: ExternalEvent): void | Promise<void> {
+    switch (event.kind) {
+      case "delegate":
+        return this.onDelegate(event);
+      case "delegateAck": {
+        const caller = this.callerInstanceOf(event.delegation);
+        const settled = this.retireDelegation(event.delegation);
+        return this.onDelegateAck(event, { caller, settled });
+      }
+      case "terminate":
+        return this.onTerminate(event, { callee: this.handledInstanceOf(event.delegation) });
+      case "terminateAck": {
+        const caller = this.callerInstanceOf(event.delegation);
+        const settled = this.retireDelegation(event.delegation);
+        return this.onTerminateAck(event, { caller, settled });
+      }
+      case "escalate":
+        return this.onEscalate(event, { caller: this.callerInstanceOf(event.delegation) });
+      case "escalateAck": {
+        const raiser = this.handledInstanceOf(event.delegation);
+        this.retireEscalation(event.escalation);
+        return this.onEscalateAck(event, { raiser });
+      }
+    }
+  }
+
+  // ─── per-event concrete hooks (default no-op; each reactor overrides what it handles) ─────────────
+
+  /** A `delegate` reached this reactor as callee: create the instance handling it (and `acceptDelegation`). */
+  protected onDelegate(
+    _event: Extract<ExternalEvent, { kind: "delegate" }>,
+  ): void | Promise<void> {}
+
+  /** A sub-call / run returned: `context.caller` is the delegation's caller (resume its proxy), `settled` is
+   *  whether the base's delegation retirement fired (so a parallel outcome record is sticky-terminal safe). */
+  protected onDelegateAck(
+    _event: Extract<ExternalEvent, { kind: "delegateAck" }>,
+    _context: AckContext,
+  ): void | Promise<void> {}
+
+  /** A child's escalation reached this reactor as the caller of that child (`context.caller`): re-raise it
+   *  inward (core), or handle / fail it (the api run root). The escalation row is raiser-owned, not touched. */
+  protected onEscalate(
+    _event: Extract<ExternalEvent, { kind: "escalate" }>,
+    _context: { caller: InstanceId | undefined },
+  ): void | Promise<void> {}
+
+  /** The answer to an escalation this reactor raised reached it (`context.raiser` is the raiser instance): the
+   *  base has already retired the escalation row; resume the raiser with the value. */
+  protected onEscalateAck(
+    _event: Extract<ExternalEvent, { kind: "escalateAck" }>,
+    _context: { raiser: InstanceId | undefined },
+  ): void | Promise<void> {}
+
+  /** A `terminate` reached this reactor as callee (`context.callee` handles the delegation): cancel it. */
+  protected onTerminate(
+    _event: Extract<ExternalEvent, { kind: "terminate" }>,
+    _context: { callee: InstanceId | undefined },
+  ): void | Promise<void> {}
+
+  /** A cancel cascade confirmed: the base has retired the caller's delegation (`settled`); resume the caller's
+   *  proxy (`context.caller`). */
+  protected onTerminateAck(
+    _event: Extract<ExternalEvent, { kind: "terminateAck" }>,
+    _context: AckContext,
+  ): void | Promise<void> {}
+
+  // ─── send (final): record the owned-edge change the outgoing event implies, then buffer ──────────
+
+  /** Emit one fully routed follow-on event (its `from` / `to` already stamped by the emitter). The base records
+   *  the owned-edge change it implies — a `delegate` opens the caller's delegation, a `terminate` cancels it, a
+   *  user-facing `escalate` opens the raiser's escalation — so a concrete reactor never opens / transitions a
+   *  row itself. The first step of the two-step reown also rides here: a value leaving its instance UP across
+   *  the boundary (a `delegateAck` result, an `escalate`'s carried value) RELEASES the resources it captures
+   *  from the turn's owner to in-transit, so the receiver can reown them. */
   protected send(event: ExternalEvent): void {
+    this.applySendEdge(event);
     if (event.kind === "delegateAck") this.pool.release(event.value, this.currentTurnOwner());
     else if (event.kind === "escalate") {
       const value = escalateValue(event.ask);
       if (value !== null) this.pool.release(value, this.currentTurnOwner());
     }
     this.sendBuffer.push(event);
+  }
+
+  /** Record the Layer 1 edge change the outgoing event implies on the side this reactor owns. */
+  private applySendEdge(event: ExternalEvent): void {
+    switch (event.kind) {
+      case "delegate":
+        this.openDelegation(event.delegation, { caller: this.currentTurnOwner(), peer: event.to });
+        break;
+      case "terminate":
+        this.toCancelling(event.delegation);
+        break;
+      case "escalate":
+        // A durable row only for a user-facing request (one the API can list / answer). A panic / control
+        // escape gets none — its raiser's suspended state (a core thread, an ffi `awaitingAnswer`) is the SoT.
+        if (event.ask.kind === "request" && isUserFacingRequest(event.ask.request)) {
+          this.openEscalation(event.escalation, {
+            raiser: this.currentTurnOwner(),
+            peer: event.to,
+            delegation: event.delegation,
+            request: event.ask.request,
+            argument: event.ask.argument,
+          });
+        }
+        break;
+    }
   }
 
   /** The second step of the two-step reown: an incoming `delegateAck`'s result lands here — claim the
@@ -136,9 +249,9 @@ export abstract class Reactor {
   }
 
   /** Fail a delegation with a `panic` escalation addressed to its caller (`to`). A panic is the deterministic
-   *  failure channel — an unhandled one fails the run (no recovery, no retry); it never rides the substrate's
-   *  poison/replay path. Used when a delegate cannot be fulfilled (an unresolvable target, an FFI error). The
-   *  `{ msg }` it carries captures no resources, so unlike `send` it needs no owner / release. */
+   *  failure channel — an unhandled one fails the run (no recovery, no retry). It carries a `{ msg }` that
+   *  captures no resources and it opens no escalation row (not user-facing), so it bypasses `send`'s edge /
+   *  release entirely — which also means it needs no turn owner (an unresolvable delegate has no instance). */
   protected raisePanic(delegation: DelegationId, message: string, to: ReactorName): void {
     this.sendBuffer.push({
       kind: "escalate",
@@ -166,49 +279,92 @@ export abstract class Reactor {
     this.escalations.clear();
     this.dirtyDelegations.clear();
     this.dirtyEscalations.clear();
+    this.retiredDelegations.clear();
+    this.retiredEscalations.clear();
     this.dirtyInstances.clear();
     this.handled.clear();
   }
 
-  // ─── Layer 1 entity ownership (caller-side delegations, raiser-side escalations) ────────────────
+  // ─── Layer 1 edges: caller-owned delegations, raiser-owned escalations (base-internal lifecycle) ──
 
-  /** Insert / replace a delegation row, marking it dirty only when this turn changed it. The single seam
-   *  both `openDelegation` (a fresh `running` row — dirty) and `reloadDelegation` (a recovered live row —
-   *  already durable, not dirty) flow through, so the in-memory set and the dirty set never drift. */
-  private putDelegationRow(delegation: DelegationId, row: DelegationRow, dirty: boolean): void {
-    this.delegations.set(delegation, row);
-    if (dirty) this.dirtyDelegations.add(delegation);
-  }
-
-  /** Open a delegation this reactor issued as caller (state `running`). `peer` is the callee reactor. */
-  protected openDelegation(
+  /** Open a delegation this reactor issues as caller (state `running`) — from `send` on a `delegate`. */
+  private openDelegation(
     delegation: DelegationId,
-    row: { caller: InstanceId; peer: ReactorName; target: DelegateTarget; argument: Value | null },
+    row: { caller: InstanceId; peer: ReactorName },
   ): void {
-    this.putDelegationRow(delegation, { ...row, state: "running" }, true);
+    this.delegations.set(delegation, { ...row, state: "running" });
+    this.dirtyDelegations.add(delegation);
   }
 
-  /** The callee reactor of one of this reactor's delegations (its `to`), or `undefined` if not held. Used to
-   *  route a request leg this reactor emits *to* the callee — a `terminate` (cancel the child) or an
-   *  `escalateAck` (answer the child's escalation) — to the right reactor (a core sub-call → `core`, an ffi
-   *  call → `ffi`). */
-  protected peerOf(delegation: DelegationId): ReactorName | undefined {
-    return this.delegations.get(delegation)?.peer;
+  /** Move a live delegation to `cancelling` (only from `running`) — from `send` on a `terminate`. A no-op when
+   *  it is already gone / cancelling, so a terminate that races the delegation's retirement is harmless. */
+  private toCancelling(delegation: DelegationId): void {
+    const row = this.delegations.get(delegation);
+    if (row === undefined || row.state !== "running") return;
+    row.state = "cancelling";
+    this.dirtyDelegations.add(delegation);
   }
 
-  /** The caller instance of a delegation this reactor *issued* (the issued row's `caller`) — used to locate
-   *  the proxy thread to resume on the delegation's ack. Reads the same row `flushDelegations` persists, so a
-   *  concrete reactor never keeps a parallel caller map. */
-  protected callerInstanceOf(delegation: DelegationId): InstanceId | undefined {
+  /** Retire a delegation this reactor owns: evict the live row and stage its durable delete. Returns whether it
+   *  was live (the sticky-terminal signal) — false when already retired, so a second ack / a teardown that
+   *  races the first is a no-op and never resurrects or re-records it. Called by `react` on a
+   *  `delegateAck` / `terminateAck`, and by a concrete for a policy retirement (the api run root failing a run). */
+  protected retireDelegation(delegation: DelegationId): boolean {
+    if (!this.delegations.has(delegation)) return false;
+    this.delegations.delete(delegation);
+    this.dirtyDelegations.delete(delegation);
+    this.retiredDelegations.add(delegation);
+    return true;
+  }
+
+  /** Whether this reactor still holds `delegation` as a live row — a command guards on it (a `cancel` racing
+   *  the run's completion must not act on an already-finished run). */
+  protected hasLiveDelegation(delegation: DelegationId): boolean {
+    return this.delegations.has(delegation);
+  }
+
+  /** The caller instance of a delegation this reactor issued — used only by `react` to resolve the caller it
+   *  hands a reply's hook (`onDelegateAck` / `onTerminateAck` / `onEscalate`); a concrete never reads it. */
+  private callerInstanceOf(delegation: DelegationId): InstanceId | undefined {
     return this.delegations.get(delegation)?.caller;
+  }
+
+  /** Open an escalation this reactor raised — from `send` on a user-facing `escalate` (idempotent). */
+  private openEscalation(
+    escalation: EscalationId,
+    row: {
+      raiser: InstanceId;
+      peer: ReactorName;
+      delegation: DelegationId;
+      request: string;
+      argument: Value | null;
+    },
+  ): void {
+    if (this.escalations.has(escalation)) return;
+    this.escalations.set(escalation, row);
+    this.dirtyEscalations.add(escalation);
+  }
+
+  /** Retire (answer) an escalation this reactor raised: evict the open row and stage its delete. A no-op when
+   *  there is no row (a caught panic answered — panics open none). Called by `react` on an `escalateAck`. */
+  private retireEscalation(escalation: EscalationId): void {
+    if (!this.escalations.has(escalation)) return;
+    this.escalations.delete(escalation);
+    this.dirtyEscalations.delete(escalation);
+    this.retiredEscalations.add(escalation);
   }
 
   // ─── handled delegations (the callee-side receive index) ────────────────────────────────────────
 
   /** Record a delegation this reactor accepted as callee — a fresh delegate it is about to run, or one
-   *  re-seeded on load from its surviving payload — mapping it to the local `instance` handling it. */
-  protected acceptDelegation(delegation: DelegationId, instance: InstanceId): void {
-    this.handled.set(delegation, instance);
+   *  re-seeded on load from its surviving envelope — mapping it to the local `instance` handling it and the
+   *  `caller` reactor that summoned it (the reply-to). */
+  protected acceptDelegation(
+    delegation: DelegationId,
+    instance: InstanceId,
+    caller: ReactorName,
+  ): void {
+    this.handled.set(delegation, { instance, caller });
   }
 
   /** Forget a handled delegation once its payload retired, so it is not consulted after teardown. */
@@ -219,36 +375,42 @@ export abstract class Reactor {
   /** The local instance handling `delegation` on the callee side — used to route an inbound `terminate` to the
    *  child and an inbound `escalateAck` to the raiser. */
   protected handledInstanceOf(delegation: DelegationId): InstanceId | undefined {
-    return this.handled.get(delegation);
+    return this.handled.get(delegation)?.instance;
+  }
+
+  /** The reactor that summoned a delegation this reactor handles as callee (its reply-to) — so a callee reactor
+   *  routes the replies it emits (`delegateAck` / `terminateAck`) back to the summoner without a parallel map. */
+  protected handledCallerOf(delegation: DelegationId): ReactorName | undefined {
+    return this.handled.get(delegation)?.caller;
   }
 
   // ─── base-managed persist / load (the generic half, in one place) ──────────────────────────────
 
   /** Stage an instance-envelope upsert for the next `persistBase` — the concrete calls this when it creates or
-   *  updates an instance it owns (the concrete is the live SoT; the base only persists the generic envelope).
-   *  A later `markInstanceDropped` for the same id supersedes it (last-write-wins on the single map). */
+   *  updates an instance it owns (the concrete is the live SoT; the base only persists the generic envelope). */
   protected markInstance(
     id: InstanceId,
-    envelope: { delegationId: DelegationId | null; status: InstanceStatus },
+    envelope: {
+      delegationId: DelegationId | null;
+      callerReactor: ReactorName | null;
+      status: InstanceStatus;
+    },
   ): void {
     this.dirtyInstances.set(id, { kind: "upsert", ...envelope });
   }
 
-  /** Stage an instance drop (cascade) for the next `persistBase` — the concrete calls this when it tears an
-   *  instance down. Supersedes any upsert staged for the same id this turn. Also reclaims the blobs the
-   *  dropping instance still owns (the ones it did not ascend out as a result): a pure resource the pool owns,
-   *  reclaimed here uniformly for a core instance and an ffi call's instance, while its scopes are reclaimed by
-   *  the engine's own teardown. */
+  /** Stage an instance drop (cascade) for the next `persistBase`. Supersedes any upsert staged for the same id
+   *  this turn. Also reclaims the blobs the dropping instance still owns (the ones it did not ascend out as a
+   *  result), uniformly for a core instance and an ffi call's instance. */
   protected markInstanceDropped(id: InstanceId): void {
     this.dirtyInstances.set(id, { kind: "drop" });
     this.pool.reclaimBlobsOwnedBy(id);
   }
 
   /** Persist everything the base owns for this turn through `tx.base`, in FK order: the instance envelopes
-   *  upserted this turn (`kind` stamped with this reactor's own name — instance kind ≡ reactor name), then the
-   *  dirty delegations, then the dirty escalations, then the cascade drops (last). A concrete reactor calls
-   *  this with no arguments and adds only its own extension via `tx.<name>` — so the generic half is written
-   *  in one place, uniformly (a reactor that owns no delegations stages none, and gets the capability free). */
+   *  upserted this turn (`kind` = this reactor's own name), then the dirty delegations / escalations (upserts +
+   *  deletes), then the cascade drops (last). A concrete reactor calls this and adds only its own extension via
+   *  `tx.<name>`. */
   protected async persistBase(tx: BaseTx): Promise<void> {
     for (const [id, change] of this.dirtyInstances) {
       if (change.kind === "upsert")
@@ -256,6 +418,7 @@ export abstract class Reactor {
           id,
           kind: this.name,
           delegationId: change.delegationId,
+          callerReactor: change.callerReactor,
           status: change.status,
         });
     }
@@ -268,21 +431,19 @@ export abstract class Reactor {
     this.dirtyInstances.clear();
   }
 
-  /** Reload everything the base owns on reactivation through `loader.base`: the delegations this reactor
-   *  issued and the escalations it raised (both `from = this.name`). The concrete reactor calls this once and
-   *  adds only its own data. Uniform across reactors — a reactor that owns none gets empty sets. */
+  /** Reload everything the base owns on reactivation through `loader.base`: the live delegations this reactor
+   *  issued and the open escalations it raised (both `from = this.name`). The concrete calls this once and adds
+   *  only its own data. */
   protected async loadBase(loader: BaseLoader): Promise<void> {
     for (const row of await loader.delegations(this.name)) {
-      this.reloadDelegation(row.delegation, {
+      this.delegations.set(row.delegation, {
         caller: row.caller,
         peer: row.toReactor,
-        target: row.target,
-        argument: row.argument,
         state: row.state,
       });
     }
     for (const open of await loader.raisedEscalations(this.name)) {
-      this.reloadEscalation(open.escalation, {
+      this.escalations.set(open.escalation, {
         raiser: open.raiser,
         peer: open.toReactor,
         delegation: open.delegation,
@@ -292,147 +453,41 @@ export abstract class Reactor {
     }
   }
 
-  /** Move one of this reactor's delegations to a new state, returning whether the transition actually applied.
-   *  A no-op (returns `false`) when it is gone or already terminal — which is exactly the sticky-terminal rule:
-   *  a `failed` is never overwritten by the `gone` of the teardown it triggers, because the `failed` row was
-   *  already evicted. `cancelling` only takes from `running`. The boolean lets a caller record a parallel
-   *  durable outcome (the `runs` row) only when the transition fired, so that outcome inherits the same
-   *  sticky-terminal protection the delegation row has. */
-  protected transitionDelegation(
-    delegation: DelegationId,
-    state: DelegationState,
-    extra: { result?: Value; errorMessage?: string } = {},
-  ): boolean {
-    const row = this.delegations.get(delegation);
-    if (row === undefined || !isLiveDelegationState(row.state)) return false;
-    if (state === "cancelling" && row.state !== "running") return false;
-    row.state = state;
-    if (extra.result !== undefined) row.result = extra.result;
-    if (extra.errorMessage !== undefined) row.errorMessage = extra.errorMessage;
-    this.dirtyDelegations.add(delegation);
-    return true;
-  }
-
-  /** Whether this reactor still holds `delegation` as a live (running / cancelling) row. Becomes false once
-   *  the row reaches a terminal state and is evicted — a command guards on this so an already-finished entity
-   *  is not acted on (e.g. a `cancel` racing the run's completion must not stamp a cancel reason on it). */
-  protected hasLiveDelegation(delegation: DelegationId): boolean {
-    const row = this.delegations.get(delegation);
-    return row !== undefined && isLiveDelegationState(row.state);
-  }
-
-  /** Reload a live delegation row this reactor owns on reactivation (the in-memory SoT, not dirty). */
-  protected reloadDelegation(
-    delegation: DelegationId,
-    row: {
-      caller: InstanceId;
-      peer: ReactorName;
-      target: DelegateTarget;
-      argument: Value | null;
-      state: DelegationState;
-    },
-  ): void {
-    this.putDelegationRow(delegation, row, false);
-  }
-
-  /** Insert / replace an open escalation row, marking it dirty only when this turn raised it (the seam for
-   *  `openEscalation` and `reloadEscalation`, symmetric to `putDelegationRow`). */
-  private putEscalationRow(escalation: EscalationId, row: EscalationRow, dirty: boolean): void {
-    this.escalations.set(escalation, row);
-    if (dirty) this.dirtyEscalations.add(escalation);
-  }
-
-  /** Open a request escalation this reactor raised (idempotent — a relay never reaches here with a duplicate
-   *  id since each instance boundary mints a fresh escalation, but the guard makes a re-raise a safe no-op).
-   *  `peer` is the reactor the escalate was addressed to; `delegation` is the raiser's delegation. */
-  protected openEscalation(
-    escalation: EscalationId,
-    row: {
-      raiser: InstanceId;
-      peer: ReactorName;
-      delegation: DelegationId;
-      request: string;
-      argument: Value | null;
-    },
-  ): void {
-    if (this.escalations.has(escalation)) return;
-    this.putEscalationRow(escalation, { ...row, state: "open" }, true);
-  }
-
-  /** Mark one of this reactor's open escalations answered (no-op if gone or already answered). */
-  protected answerEscalation(escalation: EscalationId, answer: Value): void {
-    const row = this.escalations.get(escalation);
-    if (row === undefined || row.state !== "open") return;
-    row.state = "answered";
-    row.answer = answer;
-    this.dirtyEscalations.add(escalation);
-  }
-
-  /** Reload an open escalation row this reactor owns on reactivation (the in-memory SoT, not dirty). */
-  protected reloadEscalation(
-    escalation: EscalationId,
-    row: {
-      raiser: InstanceId;
-      peer: ReactorName;
-      delegation: DelegationId;
-      request: string;
-      argument: Value | null;
-    },
-  ): void {
-    this.putEscalationRow(escalation, { ...row, state: "open" }, false);
-  }
-
-  /** Flush this turn's dirty delegation rows (the caller-owned edges): upsert the still-live ones, and for the
-   *  terminal ones delete the durable row *and* evict it from the live map (a delegation is pure live routing —
-   *  its outcome lives on `runs`, not here). Called by `persistBase`. */
+  /** Flush this turn's delegation changes: upsert the still-live dirty ones, delete the retired ones. */
   private async flushDelegations(tx: BaseTx): Promise<void> {
     for (const delegation of this.dirtyDelegations) {
       const row = this.delegations.get(delegation);
       if (row === undefined) continue;
-      if (isLiveDelegationState(row.state)) {
-        await tx.putDelegation({
-          delegation,
-          caller: row.caller,
-          fromReactor: this.name,
-          toReactor: row.peer,
-          target: row.target,
-          argument: row.argument,
-          state: row.state,
-          result: row.result ?? null,
-          errorMessage: row.errorMessage ?? null,
-        });
-      } else {
-        await tx.deleteDelegation(delegation);
-        this.delegations.delete(delegation);
-      }
+      await tx.putDelegation({
+        delegation,
+        caller: row.caller,
+        fromReactor: this.name,
+        toReactor: row.peer,
+        state: row.state,
+      });
     }
     this.dirtyDelegations.clear();
+    for (const delegation of this.retiredDelegations) await tx.deleteDelegation(delegation);
+    this.retiredDelegations.clear();
   }
 
-  /** Flush this turn's dirty escalation rows (the raiser-owned edges — only `core` raises today): upsert the
-   *  open ones, and for the answered ones delete the durable row *and* evict it (the answered Q&A lives in the
-   *  escalations audit). Symmetric to `flushDelegations`; called by `persistBase`. */
+  /** Flush this turn's escalation changes: upsert the still-open dirty ones, delete the retired ones. */
   private async flushEscalations(tx: BaseTx): Promise<void> {
     for (const escalation of this.dirtyEscalations) {
       const row = this.escalations.get(escalation);
       if (row === undefined) continue;
-      if (row.state === "open") {
-        await tx.putEscalation({
-          escalation,
-          raiser: row.raiser,
-          fromReactor: this.name,
-          toReactor: row.peer,
-          delegation: row.delegation,
-          request: row.request,
-          argument: row.argument,
-          state: row.state,
-          answer: row.answer ?? null,
-        });
-      } else {
-        await tx.deleteEscalation(escalation);
-        this.escalations.delete(escalation);
-      }
+      await tx.putEscalation({
+        escalation,
+        raiser: row.raiser,
+        fromReactor: this.name,
+        toReactor: row.peer,
+        delegation: row.delegation,
+        request: row.request,
+        argument: row.argument,
+      });
     }
     this.dirtyEscalations.clear();
+    for (const escalation of this.retiredEscalations) await tx.deleteEscalation(escalation);
+    this.retiredEscalations.clear();
   }
 }

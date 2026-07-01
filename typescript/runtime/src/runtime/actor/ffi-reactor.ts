@@ -66,7 +66,6 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
       snapshotId: row.payload.snapshot,
       key: row.payload.key,
       argument: row.payload.argument,
-      callerReactor: row.caller,
       status: row.status,
     });
   }

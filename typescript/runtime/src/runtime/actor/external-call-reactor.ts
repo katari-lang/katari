@@ -40,12 +40,11 @@ export interface ExternalCompletion {
     | { kind: "cancelled" };
 }
 
-/** One in-flight call — a per-delegation callee instance (the transport analogue of a core child instance).
- *  `instance` is its own id (the issuer stamped on the replies it produces); `caller` is the reactor that
- *  issued the delegate (its reply routes back there). `payload` is the concrete reactor's transport data. */
+/** One in-flight call's transport-specific state, keyed by its delegation. Its instance id (the issuer of its
+ *  replies) and its caller (the reply-to) are NOT here — they are the received-delegation edge, held once in
+ *  the base `handled` index (added / dropped alongside this entry). This holds only the transport `status` and
+ *  the concrete reactor's `payload`. */
 interface Call<Payload> {
-  instance: InstanceId;
-  caller: ReactorName;
   status: CallStatus;
   payload: Payload;
 }
@@ -59,12 +58,12 @@ export interface LoadedCall<Payload> {
   payload: Payload;
 }
 
-/** The fields a concrete reactor persists for one call (its ext row), supplied by the base so the caller /
- *  status bookkeeping is written the same way for every call reactor. */
+/** The fields a concrete reactor persists for one call (its ext row), supplied by the base. The caller
+ *  (reply-to) is NOT here — it is the instance's ambient on the generic envelope; the ext row is only the
+ *  transport payload + status. */
 export interface CallRow<Payload> {
   instance: InstanceId;
   delegation: DelegationId;
-  caller: ReactorName;
   status: CallStatus;
   payload: Payload;
 }
@@ -109,64 +108,71 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   protected abstract loadCallRows(loader: Loader): Promise<Array<LoadedCall<Payload>>>;
 
   /** The instance handling `delegation`, or `undefined` — for a concrete reactor that owns per-call resources
-   *  (an ffi call's produced blob) to attribute them to the right instance. */
+   *  (an ffi call's produced blob) to attribute them to the right instance. Reads the base received edge. */
   protected callInstance(delegation: DelegationId): InstanceId | undefined {
-    return this.calls.get(delegation)?.instance;
+    return this.handledInstanceOf(delegation);
   }
 
-  // ─── the shared lifecycle ────────────────────────────────────────────────────────────────────────
-
-  /** React to one event a delegation routes here: a `delegate` opens a call, a `terminate` aborts one, an
-   *  `escalateAck` is a caught panic's answer (→ the call's result). It never receives a `delegateAck` /
-   *  `escalate` / `terminateAck` (those are the replies it sends). The transport dispatch / abort is a
-   *  strictly-post-commit side effect (`afterCommit`). */
-  react(event: ExternalEvent): void {
-    switch (event.kind) {
-      case "delegate": {
-        if (event.target.kind !== "external") return; // only external targets route here
-        this.put(event.delegation, {
-          instance: newInstanceId(),
-          caller: event.from,
-          status: "running",
-          payload: this.openPayload(event.target, event.argument),
-        });
-        break;
-      }
-      case "terminate": {
-        const call = this.calls.get(event.delegation);
-        if (call === undefined) return;
-        if (call.status === "awaitingAnswer") {
-          // The request already stopped (it errored); confirm the abort straight away.
-          this.turnInstance = call.instance;
-          this.send({
-            kind: "terminateAck",
-            delegation: event.delegation,
-            from: this.name,
-            to: call.caller,
-          });
-          this.drop(event.delegation);
-        } else if (call.status === "running") {
-          call.status = "cancelling";
-          this.dirty.add(event.delegation);
-        }
-        break;
-      }
-      case "escalateAck": {
-        // A handler caught the error's panic and answered: the answer becomes the call's result.
-        const call = this.calls.get(event.delegation);
-        if (call === undefined || call.status !== "awaitingAnswer") return;
-        this.turnInstance = call.instance;
-        this.send({
-          kind: "delegateAck",
-          delegation: event.delegation,
-          value: event.value,
-          from: this.name,
-          to: call.caller,
-        });
-        this.drop(event.delegation);
-        break;
-      }
+  /** The instance + caller (reply-to) of a live call, read from the base received-delegation edge. Present for
+   *  any delegation this reactor still holds a `calls` entry for — the edge and the entry are added (delegate)
+   *  and dropped (resolve) together, so a missing edge here is a bug, surfaced loudly rather than papered over. */
+  private routeOf(delegation: DelegationId): { instance: InstanceId; caller: ReactorName } {
+    const instance = this.handledInstanceOf(delegation);
+    const caller = this.handledCallerOf(delegation);
+    if (instance === undefined || caller === undefined) {
+      throw new Error(`${this.name} holds a call for ${delegation} with no received edge (bug)`);
     }
+    return { instance, caller };
+  }
+
+  // ─── the shared lifecycle (per-event hooks; it never receives a delegateAck / escalate / terminateAck) ──
+
+  /** A `delegate` opened a call: record the received-delegation edge (instance + summoner) in the base, then
+   *  hold only the transport status + payload locally. The transport dispatch is a post-commit side effect. */
+  protected onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): void {
+    if (event.target.kind !== "external") return; // only external targets route here
+    this.acceptDelegation(event.delegation, newInstanceId(), event.from);
+    this.put(event.delegation, {
+      status: "running",
+      payload: this.openPayload(event.target, event.argument),
+    });
+  }
+
+  /** A `terminate` reached the call: confirm the abort straight away when the request already stopped
+   *  (`awaitingAnswer`), else move a running call to `cancelling` (the transport abort runs post-commit). */
+  protected onTerminate(event: Extract<ExternalEvent, { kind: "terminate" }>): void {
+    const call = this.calls.get(event.delegation);
+    if (call === undefined) return;
+    if (call.status === "awaitingAnswer") {
+      const { instance, caller } = this.routeOf(event.delegation);
+      this.turnInstance = instance;
+      this.send({
+        kind: "terminateAck",
+        delegation: event.delegation,
+        from: this.name,
+        to: caller,
+      });
+      this.drop(event.delegation);
+    } else if (call.status === "running") {
+      call.status = "cancelling";
+      this.dirty.add(event.delegation);
+    }
+  }
+
+  /** A handler caught the error's panic and answered: the answer becomes the call's result. */
+  protected onEscalateAck(event: Extract<ExternalEvent, { kind: "escalateAck" }>): void {
+    const call = this.calls.get(event.delegation);
+    if (call === undefined || call.status !== "awaitingAnswer") return;
+    const { instance, caller } = this.routeOf(event.delegation);
+    this.turnInstance = instance;
+    this.send({
+      kind: "delegateAck",
+      delegation: event.delegation,
+      value: event.value,
+      from: this.name,
+      to: caller,
+    });
+    this.drop(event.delegation);
   }
 
   /** A transport completion for one call (the reactor's ephemeral inbound, fed through the substrate). For a
@@ -175,13 +181,14 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   complete(completion: ExternalCompletion): void {
     const call = this.calls.get(completion.delegation);
     if (call === undefined) return; // a late completion for a call already resolved
-    this.turnInstance = call.instance;
+    const { instance, caller } = this.routeOf(completion.delegation);
+    this.turnInstance = instance;
     if (call.status === "cancelling") {
       this.send({
         kind: "terminateAck",
         delegation: completion.delegation,
         from: this.name,
-        to: call.caller,
+        to: caller,
       });
       this.drop(completion.delegation);
       return;
@@ -193,7 +200,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
           delegation: completion.delegation,
           value: jsonToValue(completion.outcome.value),
           from: this.name,
-          to: call.caller,
+          to: caller,
         });
         this.drop(completion.delegation);
         return;
@@ -202,14 +209,14 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
           kind: "terminateAck",
           delegation: completion.delegation,
           from: this.name,
-          to: call.caller,
+          to: caller,
         });
         this.drop(completion.delegation);
         return;
       case "error":
         // A no-result error is a panic: escalate it to the caller. Unhandled, it fails the run; if a handler
         // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer).
-        this.raisePanic(completion.delegation, completion.outcome.message, call.caller);
+        this.raisePanic(completion.delegation, completion.outcome.message, caller);
         call.status = "awaitingAnswer";
         this.dirty.add(completion.delegation);
         return;
@@ -234,20 +241,23 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   async persist(tx: PersistenceTx): Promise<void> {
     const live = [...this.dirty].flatMap((delegation) => {
       const call = this.calls.get(delegation);
-      return call === undefined ? [] : [{ delegation, call }];
+      // Instance + caller come from the base received edge (present alongside a live call).
+      return call === undefined ? [] : [{ delegation, call, route: this.routeOf(delegation) }];
     });
-    for (const { delegation, call } of live)
-      this.markInstance(call.instance, {
+    for (const { delegation, call, route } of live)
+      this.markInstance(route.instance, {
         delegationId: delegation,
+        // The caller (reply-to) is the instance's ambient, written on the generic envelope here — not
+        // repeated in the concrete ext row.
+        callerReactor: route.caller,
         status: call.status === "cancelling" ? "cancelling" : "running",
       });
     for (const instanceId of this.droppedInstances) this.markInstanceDropped(instanceId);
     await this.persistBase(tx.base);
-    for (const { delegation, call } of live)
+    for (const { delegation, call, route } of live)
       await this.persistCallRow(tx, {
-        instance: call.instance,
+        instance: route.instance,
         delegation,
-        caller: call.caller,
         status: call.status,
         payload: call.payload,
       });
@@ -262,12 +272,9 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
     for (const row of await this.loadCallRows(loader)) {
-      this.calls.set(row.delegation, {
-        instance: row.instance,
-        caller: row.caller,
-        status: row.status,
-        payload: row.payload,
-      });
+      // Re-seed the base received edge (instance + summoner) and the local transport status + payload.
+      this.acceptDelegation(row.delegation, row.instance, row.caller);
+      this.calls.set(row.delegation, { status: row.status, payload: row.payload });
       if (row.status === "running") this.dispatch(row.delegation, row.payload, true);
       else if (row.status === "cancelling") this.abort(row.delegation);
     }
@@ -287,9 +294,10 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   }
 
   private drop(delegation: DelegationId): void {
-    const call = this.calls.get(delegation);
-    if (call !== undefined) this.droppedInstances.push(call.instance);
+    const instance = this.handledInstanceOf(delegation);
+    if (instance !== undefined) this.droppedInstances.push(instance);
     this.calls.delete(delegation);
+    this.dropHandled(delegation);
     this.dirty.delete(delegation);
   }
 }

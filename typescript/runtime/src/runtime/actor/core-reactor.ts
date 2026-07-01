@@ -5,13 +5,13 @@
 // Each `react` drives one instance's internal turn to quiescence, `send`s the events it produced, and stages
 // the turn's persistence (the instance's Layer 2 + the Layer 1 rows it owns) for the substrate to commit.
 //
-// Ownership is caller-side: core owns a *sub-call* delegation row (it is the caller) and *all* escalation
-// rows (it is always the raiser); it records each row's transitions at the point it acts as caller / raiser
-// (open when it issues a delegate, cancelling when it issues a terminate, done / gone when it receives the
-// ack, escalation-open when it escalates, answered when the answer returns). A *run* delegation is owned by
-// the api root — core never inspects it; a run-root instance records `callerReactor = api` (the summoning
-// delegate's `from`), so a reply it emits routes to `api` without core inferring it. FFI completions arrive
-// via `reactFfi` until the FFI reactor lands.
+// Ownership is caller-side, but the base now derives every Layer 1 edge change from the events core emits /
+// receives: core just emits (a sub-call `delegate`, a `terminate`, a user-facing `escalate`) and the base
+// opens / cancels / retires the row. So core holds no delegation / escalation bookkeeping — it only creates /
+// tears down instances, drives their turns, and implements the per-event hooks (`onDelegate` etc.) that resume
+// the proxying `DelegateThread` from the base-resolved caller / callee / raiser. A *run* delegation is owned by
+// the api root — a run-root instance records `callerReactor = api` (the summoning delegate's `from`), so a
+// reply it emits routes to `api` without core inferring it.
 
 import { delegateProxyOf, relayEscalate, resumeEscalation } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
@@ -20,23 +20,15 @@ import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { rebuildScopeOwnerIndex } from "../engine/scope.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
-import { isUserFacingRequest } from "../escalation-filter.js";
 import {
   agentSnapshot,
-  calleeReactorForTarget,
   type DelegateTarget,
   type ExternalEvent,
   escalateValue,
   type InternalEvent,
   type ReactorName,
 } from "../event/types.js";
-import {
-  type InstanceId,
-  newInstanceId,
-  type ProjectId,
-  type ScopeId,
-  type SnapshotId,
-} from "../ids.js";
+import type { InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import { isTransientError, messageOf } from "./failure.js";
@@ -69,26 +61,6 @@ export class CoreReactor extends Reactor {
     super(pool);
   }
 
-  /** React to one external event a delegation routes to a core instance: summon a child (`delegate`), resume
-   *  the proxying `DelegateThread` (`delegateAck` / `terminateAck` from a *core* caller), relay an escalation
-   *  inward (`escalate`), answer the raiser (`escalateAck`), or cancel a subtree (`terminate`). */
-  async react(event: ExternalEvent): Promise<void> {
-    switch (event.kind) {
-      case "delegate":
-        return this.onDelegate(event);
-      case "delegateAck":
-        return this.onDelegateAck(event);
-      case "escalate":
-        return this.onEscalate(event);
-      case "escalateAck":
-        return this.onEscalateAck(event);
-      case "terminate":
-        return this.onTerminate(event);
-      case "terminateAck":
-        return this.onTerminateAck(event);
-    }
-  }
-
   currentTurnOwner(): InstanceId {
     if (this.turnOwnerId === undefined) {
       throw new Error("CoreReactor.currentTurnOwner read with no turn instance (engine bug)");
@@ -107,7 +79,11 @@ export class CoreReactor extends Reactor {
     for (const id of this.touchedInstances) {
       const instance = this.store.instances[id];
       if (instance !== undefined)
-        this.markInstance(id, { delegationId: instance.delegationId, status: instance.status });
+        this.markInstance(id, {
+          delegationId: instance.delegationId,
+          callerReactor: instance.callerReactor,
+          status: instance.status,
+        });
       else this.markInstanceDropped(id);
     }
     await this.persistBase(tx.base);
@@ -136,7 +112,7 @@ export class CoreReactor extends Reactor {
   /** Reload core's own warm state from durable rows: the engine store + routing (each surviving
    *  `DelegateThread` names its delegation's caller; each instance's `delegationId` names its child), the
    *  live delegations it issued (`from = core`, its sub-calls), and the open escalations it raised
-   *  (`from = core` — it is the raiser of all of them, so it can mark them answered). Each set is
+   *  (`from = core` — so the base can retire them when their `escalateAck` returns). Each set is
    *  self-selected from the loader; no cross-reactor classification. */
   async load(loader: Loader): Promise<void> {
     const engine = await loader.core.engine();
@@ -151,7 +127,7 @@ export class CoreReactor extends Reactor {
     // an ack) needs no rebuild here: it reads the issued delegations reloaded just below (`callerInstanceOf`).
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) {
-        this.acceptDelegation(instance.delegationId, instance.id);
+        this.acceptDelegation(instance.delegationId, instance.id, instance.callerReactor);
       }
     }
     // The delegations core issued and the escalations it raised reload through the base, uniformly.
@@ -160,21 +136,20 @@ export class CoreReactor extends Reactor {
 
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
-  private async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
+  protected async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
     // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
     // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it as a panic to the
     // caller (an unhandled panic fails the run). A *transient* infra failure (a `TransientError` — an IR DB
     // read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from durable state
-    // (turning it into a panic would wrongly fail the run forever). No instance is born here, so the panic's
-    // outbox issuer is a throwaway id (the outbox issuer is not a foreign key).
+    // (turning it into a panic would wrongly fail the run forever). A panic opens no row and needs no turn
+    // owner, so the failure path births no instance.
     let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
     try {
       await this.ir.preload(agentSnapshot(event.target));
       resolved = this.resolveTarget(event.target);
     } catch (error) {
       if (isTransientError(error)) throw error;
-      this.turnOwnerId = newInstanceId();
       this.raisePanic(event.delegation, messageOf(error), event.from);
       return;
     }
@@ -190,22 +165,23 @@ export class CoreReactor extends Reactor {
       snapshotId: resolved.snapshot,
       ...(event.generics !== undefined ? { ambientGenerics: event.generics } : {}),
     });
-    // Record the handled delegation (the callee-side index → this child instance), so an inbound terminate /
-    // escalateAck for it finds the child. The caller-side delegation row was already opened by its caller
-    // (core's issuing turn, or the api root's startRun); this turn only summons the child and runs it.
-    this.acceptDelegation(event.delegation, instance.id);
+    // Record the handled delegation (the callee-side index → this child instance + its summoner), so an inbound
+    // terminate / escalateAck for it finds the child and its replies route back. The caller-side delegation row
+    // was already opened by its caller (core's issuing turn, or the api root's startRun); this turn only summons
+    // the child and runs it.
+    this.acceptDelegation(event.delegation, instance.id, event.from);
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
   }
 
-  /** A core sub-call returned: record the delegation `done`, then hand its value to the caller's pending
-   *  proxy slot. The caller is resolved from the routing graph (gone ⇒ the delegation already cascaded away,
-   *  so there is nothing to record or resume). */
-  private async onDelegateAck(
+  /** A core sub-call returned: the base has already retired the delegation; hand its value to the caller's
+   *  pending proxy slot. `context.caller` is the delegation's caller (undefined ⇒ it already cascaded away,
+   *  so there is nothing to resume). */
+  protected async onDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
+    context: { caller: InstanceId | undefined },
   ): Promise<void> {
-    const caller = this.coreInstance(this.callerInstanceOf(event.delegation));
+    const caller = this.coreInstance(context.caller);
     if (caller === undefined) return;
-    this.transitionDelegation(event.delegation, "done", { result: event.value });
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) return;
     // Claim the resources the returned value carries up (a returned closure's captured scope chain, a
@@ -224,9 +200,13 @@ export class CoreReactor extends Reactor {
   // ─── escalate / escalateAck (a request / control ask crossing the instance boundary) ────────────
 
   /** A sub-call's escalation reached a core caller: re-raise it inside the caller from the proxy's position
-   *  so it bubbles toward a handle (or escapes again as a fresh escalate). */
-  private async onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): Promise<void> {
-    const caller = this.coreInstance(this.callerInstanceOf(event.delegation));
+   *  so it bubbles toward a handle (or escapes again as a fresh escalate). `context.caller` is the escalating
+   *  child's caller. */
+  protected async onEscalate(
+    event: Extract<ExternalEvent, { kind: "escalate" }>,
+    context: { caller: InstanceId | undefined },
+  ): Promise<void> {
+    const caller = this.coreInstance(context.caller);
     const proxy = caller !== undefined ? delegateProxyOf(caller, event.delegation) : undefined;
     if (caller === undefined || proxy === undefined) return;
     // The escalation's carried value (a request argument, or a control escape's value) was released to
@@ -239,38 +219,40 @@ export class CoreReactor extends Reactor {
     });
   }
 
-  /** The answer to a core-raised escalation reached its raiser: mark the escalation answered and hand the
-   *  value to the raiser's Agent root in external vocabulary `(escalation, value)`; the Agent maps it back to
-   *  the internal askId and re-enters it. (The raiser is always a `core` instance — the api root never
-   *  raises.) */
-  private async onEscalateAck(
+  /** The answer to a core-raised escalation reached its raiser: the base has already retired the escalation
+   *  row; hand the value to the raiser's Agent root in external vocabulary `(escalation, value)`, which maps it
+   *  back to the internal askId and re-enters it. `context.raiser` is the raiser instance. */
+  protected async onEscalateAck(
     event: Extract<ExternalEvent, { kind: "escalateAck" }>,
+    context: { raiser: InstanceId | undefined },
   ): Promise<void> {
-    const instance = this.coreInstance(this.handledInstanceOf(event.delegation));
+    const instance = this.coreInstance(context.raiser);
     if (instance === undefined) return;
-    this.answerEscalation(event.escalation, event.value);
     await this.runTurnWith(instance, (ctx) => resumeEscalation(ctx, event.escalation, event.value));
   }
 
   // ─── terminate / terminateAck (graceful cross-instance cancel) ──────────────────────────────────
 
-  private async onTerminate(event: Extract<ExternalEvent, { kind: "terminate" }>): Promise<void> {
-    const child = this.coreInstance(this.handledInstanceOf(event.delegation));
+  protected async onTerminate(
+    _event: Extract<ExternalEvent, { kind: "terminate" }>,
+    context: { callee: InstanceId | undefined },
+  ): Promise<void> {
+    const child = this.coreInstance(context.callee);
     if (child === undefined) return;
     child.status = "cancelling";
-    // The delegation's `cancelling` state is recorded by the caller (the core caller's cancel turn that
-    // emitted this terminate, or the api root's cancelRun), not here on the callee side.
+    // The delegation's `cancelling` state is recorded by the base on the caller's `send(terminate)`, not here
+    // on the callee side.
     await this.runTurn(child, [{ kind: "cancel", target: child.rootThreadId }]);
   }
 
-  /** A core sub-call's terminate cascade confirmed: record the delegation `gone`, retire the proxy, and
-   *  cancelAck the caller's parent so the cancel cascade continues. */
-  private async onTerminateAck(
+  /** A core sub-call's terminate cascade confirmed: the base has retired the delegation; retire the proxy and
+   *  cancelAck the caller's parent so the cancel cascade continues. `context.caller` is the delegation's caller. */
+  protected async onTerminateAck(
     event: Extract<ExternalEvent, { kind: "terminateAck" }>,
+    context: { caller: InstanceId | undefined },
   ): Promise<void> {
-    const caller = this.coreInstance(this.callerInstanceOf(event.delegation));
+    const caller = this.coreInstance(context.caller);
     if (caller === undefined) return;
-    this.transitionDelegation(event.delegation, "gone");
     const proxy = delegateProxyOf(caller, event.delegation);
     if (proxy === undefined || proxy.parent === null || proxy.parentCallId === null) return;
     delete caller.threads[proxy.id];
@@ -311,13 +293,9 @@ export class CoreReactor extends Reactor {
     seed(ctx);
     await drive(ctx);
     this.turnOwnerId = instance.id;
-    // Route each routing-less engine outbound (a reply to its summoner, a request to its callee) and record
-    // the Layer 1 row core owns as caller / raiser — the receiving side (done / gone / answered) is recorded
-    // in the react handlers.
-    for (const event of ctx.buffers.outbound) {
-      this.recordOutbound(event, instance);
-      this.send(event);
-    }
+    // Emit each engine outbound (already routed by the emit edge); the base `send` derives the Layer 1 edge it
+    // implies — opening this instance's delegation, cancelling it, or opening a user-facing escalation.
+    for (const event of ctx.buffers.outbound) this.send(event);
     // DB reflection at the turn boundary. A completed instance is dropped (the cascade reclaims the scopes it
     // still owns; the ones its result released to in-transit survive — the receiver reowns them, the pool
     // re-writes them). A still-running one is persisted, and the pool flushes the scopes it touched (the
@@ -332,46 +310,6 @@ export class CoreReactor extends Reactor {
       // sub-thread's scope, unless its result captured it). Free them before flushing the survivors.
       for (const dead of unreachableOwnedScopes(this.store, instance)) this.pool.free(dead);
       this.pool.markOwnedDirty(instance.id);
-    }
-  }
-
-  /** Record the Layer 1 transition an engine outbound implies on the side core owns — caller for a `delegate`
-   *  it issues / `terminate` it sends, raiser for a user-facing `escalate`. The escalation row's `peer` is the
-   *  escalate's already-routed destination (`event.to`). (done / gone / answered are recorded by the receiving
-   *  caller / raiser in the react handlers.) */
-  private recordOutbound(event: ExternalEvent, instance: CoreInstance): void {
-    switch (event.kind) {
-      case "delegate":
-        // The callee: a core sub-call, or — for an `external` target — the ffi reactor (an external call is a
-        // delegate to ffi, owned by core just like a sub-call). The run path delegates from the api root, not
-        // here, so `from` is always core. The issued row's `caller` (read back via `callerInstanceOf`) is the
-        // single record of who issued it — no parallel caller map.
-        this.openDelegation(event.delegation, {
-          caller: instance.id,
-          peer: calleeReactorForTarget(event.target),
-          target: event.target,
-          argument: event.argument,
-        });
-        break;
-      case "terminate":
-        this.transitionDelegation(event.delegation, "cancelling");
-        break;
-      case "escalate":
-        // Open a durable escalation row only for a user-facing request — one a user can answer. A panic /
-        // control escape reaching the run root fails the run (recorded on the run delegation, not as an
-        // answerable escalation), so it gets no row: an open escalation addressed to `api` is then answerable
-        // by construction, and the api root needs no re-classification on load. `delegation` is the raiser's
-        // (the run, when `to` is api).
-        if (event.ask.kind === "request" && isUserFacingRequest(event.ask.request)) {
-          this.openEscalation(event.escalation, {
-            raiser: instance.id,
-            peer: event.to,
-            delegation: event.delegation,
-            request: event.ask.request,
-            argument: event.ask.argument,
-          });
-        }
-        break;
     }
   }
 
