@@ -247,6 +247,7 @@ export class DbPersistence implements Persistence {
             .select({
               delegation: instances.delegationId,
               instance: instances.id,
+              caller: httpInstances.callerReactor,
               status: httpInstances.status,
             })
             .from(instances)
@@ -259,6 +260,7 @@ export class DbPersistence implements Persistence {
                   {
                     delegation: row.delegation as DelegationId,
                     instance: row.instance as InstanceId,
+                    caller: row.caller,
                     status: row.status,
                   },
                 ],
@@ -459,7 +461,11 @@ export class DbPersistence implements Persistence {
         putHttpInstance: async (row) => {
           await drizzleTx
             .insert(httpInstances)
-            .values({ instanceId: row.instanceId, status: row.status })
+            .values({
+              instanceId: row.instanceId,
+              callerReactor: row.callerReactor,
+              status: row.status,
+            })
             .onConflictDoUpdate({ target: httpInstances.instanceId, set: { status: row.status } });
         },
       },

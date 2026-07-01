@@ -79,6 +79,9 @@ export type FfiHandler = (argument: Json | null) => Json | Promise<Json>;
 export class InProcessFfiTransport implements FfiTransport {
   private sink: ((completion: FfiCompletion) => void) | null = null;
   private readonly aborted = new Set<DelegationId>();
+  /** Delegations with a handler currently running — so `abort` can tell a live call (drop its outcome) from
+   *  one with no live work (a recovery abort of a call whose in-process work is gone → confirm straight away). */
+  private readonly live = new Set<DelegationId>();
 
   constructor(private readonly handlers: Record<string, FfiHandler>) {}
 
@@ -92,6 +95,7 @@ export class InProcessFfiTransport implements FfiTransport {
     if (sink === null) {
       throw new Error("InProcessFfiTransport.dispatch called before onComplete registered a sink");
     }
+    this.live.add(call.delegation);
     void (async () => {
       try {
         const value =
@@ -99,12 +103,14 @@ export class InProcessFfiTransport implements FfiTransport {
             ? Promise.reject(new Error(`no external handler for key "${call.key}"`))
             : handler(call.argument);
         const resolved = await value;
+        this.live.delete(call.delegation);
         if (this.aborted.delete(call.delegation)) {
           sink({ delegation: call.delegation, outcome: { kind: "cancelled" } });
           return;
         }
         sink({ delegation: call.delegation, outcome: { kind: "result", value: resolved } });
       } catch (error) {
+        this.live.delete(call.delegation);
         if (this.aborted.delete(call.delegation)) {
           sink({ delegation: call.delegation, outcome: { kind: "cancelled" } });
           return;
@@ -121,8 +127,14 @@ export class InProcessFfiTransport implements FfiTransport {
   }
 
   abort(delegation: DelegationId): void {
-    // In-process handlers cannot truly be interrupted, so "abort" means: drop whatever the handler returns
-    // and report `cancelled` instead. The confirmation re-enters serially through the sink.
-    this.aborted.add(delegation);
+    if (this.live.has(delegation)) {
+      // In-process handlers cannot truly be interrupted, so "abort" means: drop whatever the handler returns
+      // and report `cancelled` instead. The confirmation re-enters serially through the sink when it resolves.
+      this.aborted.add(delegation);
+      return;
+    }
+    // No live handler — a recovery abort of a call whose in-process work is gone. Confirm the teardown at once
+    // (harmless if a real completion also lands: the reactor drops the call on the first, ignores the rest).
+    this.sink?.({ delegation, outcome: { kind: "cancelled" } });
   }
 }

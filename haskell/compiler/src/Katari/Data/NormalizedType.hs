@@ -164,6 +164,12 @@ anyEffect = (fromRequestEffect RequestEffectAny) {io = True}
 ioEffect :: NormalizedEffect
 ioEffect = (effectRow emptyEffectRow) {io = True}
 
+-- | Mark an effect as performing io — its join with 'ioEffect'. io is a one-bit lattice, so the join
+-- reduces to setting the bit; centralised here (rather than hand-written at call sites) so a future
+-- richer io representation changes only this definition, never the callers.
+withIo :: NormalizedEffect -> NormalizedEffect
+withIo effect = effect {io = True}
+
 -- | The empty request row (no requests, no tails).
 emptyEffectRow :: EffectRow
 emptyEffectRow = EffectRow {request = mempty, tails = mempty}

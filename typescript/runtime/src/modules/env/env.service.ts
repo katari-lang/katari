@@ -56,7 +56,10 @@ export const envService = {
       .values({ projectId, key, value, isSecret })
       .onConflictDoUpdate({
         target: [envEntries.projectId, envEntries.key],
-        set: { value, isSecret },
+        // `updatedAt` must be set explicitly: the column's `$onUpdate` callback fires only for `.update()`
+        // statements, not for an `onConflictDoUpdate` set-clause, so without this an overwrite keeps the
+        // original insert timestamp.
+        set: { value, isSecret, updatedAt: new Date() },
       });
   },
 
@@ -86,7 +89,9 @@ export const envReader: EnvReader = {
       .select({ key: envEntries.key, value: envEntries.value })
       .from(envEntries)
       .where(and(eq(envEntries.projectId, projectId), eq(envEntries.isSecret, false)));
-    const result: Record<string, string> = {};
+    // A null-prototype map so an env key literally named `__proto__` / `constructor` is a real own entry,
+    // not a prototype write that silently drops it (env key names are admin-chosen, so not trusted).
+    const result: Record<string, string> = Object.create(null);
     for (const row of rows) {
       result[row.key] = row.value;
     }

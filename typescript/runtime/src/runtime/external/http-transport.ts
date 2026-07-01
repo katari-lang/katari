@@ -83,7 +83,16 @@ export class FetchHttpTransport implements HttpTransport {
   }
 
   abort(delegation: DelegationId): void {
-    this.controllers.get(delegation)?.abort();
+    const controller = this.controllers.get(delegation);
+    if (controller !== undefined) {
+      // An in-flight request: aborting the signal makes `perform` throw AbortError → a `cancelled` outcome.
+      controller.abort();
+      return;
+    }
+    // No live request to abort — the request already finished, or this is a recovery abort of a call whose
+    // request died with the process. Confirm the teardown straight away so the reactor can `terminateAck`.
+    // (Harmless if a real completion also lands: the reactor drops the call on the first, ignores the rest.)
+    this.emit({ delegation, outcome: { kind: "cancelled" } });
   }
 
   private emit(completion: HttpCompletion): void {
@@ -97,8 +106,10 @@ export class FetchHttpTransport implements HttpTransport {
       const request = parseRequest(call.argument);
       const headers = new Headers(request.headers);
       const init: RequestInit = { method: request.method, headers, signal };
-      // A body-less method must not carry a body; otherwise send it only when non-empty.
-      if (!BODYLESS_METHODS.has(request.method.toUpperCase()) && request.body !== "") {
+      // A body-less method (GET / HEAD) must not carry a body; every other method sends exactly the `body`
+      // string the program supplied — including an explicit empty body (Content-Length: 0), which some APIs
+      // distinguish from a bodyless request.
+      if (!BODYLESS_METHODS.has(request.method.toUpperCase())) {
         init.body = request.body;
       }
       const response = await fetch(request.url, init);

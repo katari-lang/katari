@@ -63,7 +63,14 @@ export class SnapshotFfiTransport implements FfiTransport {
 
   abort(delegation: DelegationId): void {
     const snapshot = this.delegationSnapshot.get(delegation);
-    if (snapshot === undefined) return; // unknown / already completed — the reactor no-ops a late terminate
+    if (snapshot === undefined) {
+      // No in-flight call for this delegation — a recovery abort of a call whose sidecar died with the process
+      // (its request is gone), so there is nothing to signal. Confirm the teardown straight away so the reactor
+      // can terminateAck. (A late terminate for an already-completed call also lands here; the reactor drops
+      // the call on the first completion and ignores any that follow, so a spurious confirmation is harmless.)
+      this.sink?.({ delegation, outcome: { kind: "cancelled" } });
+      return;
+    }
     // Only abort if the process is up; if its spawn is still pending, the dispatch has not gone out yet.
     void this.perSnapshot.get(snapshot)?.then((transport) => transport.abort(delegation));
   }

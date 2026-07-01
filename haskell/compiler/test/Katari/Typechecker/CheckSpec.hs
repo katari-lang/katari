@@ -860,6 +860,18 @@ spec = do
           (_, diagnostics) = runChecker environment (synthExpressionType (qualifiedVariableExpression topLevelName))
        in hasErrorCode "K3015" diagnostics `shouldBe` True
 
+  describe "checkExternalReactor (a `from` clause names a real reactor)" $ do
+    it "accepts an absent clause (defaults to ffi)" $
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan Nothing)
+       in toList diagnostics `shouldBe` []
+    it "accepts the known reactors ffi and http" $
+      let (_, ffiDiagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "ffi"))
+          (_, httpDiagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "http"))
+       in (toList ffiDiagnostics, toList httpDiagnostics) `shouldBe` ([], [])
+    it "rejects an unknown reactor name (K3018)" $
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "grpc"))
+       in hasErrorCode "K3018" diagnostics `shouldBe` True
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------

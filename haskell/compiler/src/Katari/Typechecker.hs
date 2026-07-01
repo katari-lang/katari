@@ -28,7 +28,7 @@ import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
-import Katari.Typechecker.Check (checkAgentBody, dataValueScheme, prepareAgent, requestValueScheme, seedAgentType, signatureValueScheme, synthAgent)
+import Katari.Typechecker.Check (checkAgentBody, checkExternalReactor, dataValueScheme, prepareAgent, requestValueScheme, seedAgentType, signatureValueScheme, synthAgent)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment,
@@ -102,7 +102,10 @@ checkAcyclic node = case node.declaration of
     (typedDeclaration, scheme) <- synthAgent declaration
     pure (Map.singleton node.qualifiedName scheme, Map.singleton node.qualifiedName typedDeclaration)
   ValueData declaration -> signatureOnly (dataValueScheme declaration.sourceSpan node.qualifiedName declaration.parameters)
-  ValueExternal declaration ->
+  ValueExternal declaration -> do
+    -- Reject an unknown `from "reactor"` name up front (a typo / unimplemented reactor), rather than
+    -- letting it silently default to the FFI reactor at runtime.
+    checkExternalReactor declaration.sourceSpan declaration.reactor
     -- An external call performs io (impure): the strict, non-lifting call path + an un-dischargeable io
     -- effect that rides to the run root.
     signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects True)

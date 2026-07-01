@@ -135,20 +135,24 @@ export interface PersistedFfiInstance {
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
-/** The `http` instance extension write (`http_instances`) — the call-specific `status` behind an `http`-kind
- *  instance envelope (the envelope cannot carry `awaitingAnswer`). The delegation it handles is on the
- *  envelope; the caller is always `core`, so neither is repeated. */
+/** The `http` instance extension write (`http_instances`) — the call-specific `status` (the envelope cannot
+ *  carry `awaitingAnswer`) and the caller reactor its reply routes to, behind an `http`-kind instance
+ *  envelope. The delegation it handles is on the envelope. Mirrors 'PersistedFfiInstanceRow' minus the
+ *  snapshot/key/argument an http recovery never re-sends. */
 export interface PersistedHttpInstanceRow {
   instanceId: InstanceId;
+  callerReactor: ReactorName;
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
 /** One in-flight http call a reactivation reads (envelope ⋈ `http_instances`): the http reactor rebuilds its
- *  warm call keyed by `delegation` (from the envelope), with `instance` the call's own id and the precise
- *  `status` from the extension (so an `awaitingAnswer` call is not mistaken for a `running` one). */
+ *  warm call keyed by `delegation` (from the envelope), with `instance` the call's own id, the precise
+ *  `status` from the extension (so an `awaitingAnswer` call is not mistaken for a `running` one), and the
+ *  `caller` reactor its reply routes to. */
 export interface PersistedHttpInstance {
   delegation: DelegationId;
   instance: InstanceId;
+  caller: ReactorName;
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 

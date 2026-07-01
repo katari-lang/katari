@@ -216,13 +216,13 @@ export class ProjectActor {
     this.http.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
-      await this.core.load(loader);
-      await this.api.load(loader);
-      // The ffi reactor's load re-dispatches its in-flight calls through the transport (a side effect), so it
-      // runs only after the load fully succeeds — guarded like the rest of this method.
-      await this.ffi.load(loader);
-      // The http reactor's load re-dispatches its in-flight calls too — the transport fails them (at-most-once).
-      await this.http.load(loader);
+      // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
+      await Promise.all([this.core.load(loader), this.api.load(loader)]);
+      // The ffi / http loads re-dispatch their in-flight calls through their transports (a side effect), so
+      // they run only after the pure reads have succeeded — but concurrently with each other. ffi re-runs its
+      // handler (dedupe on `redispatch`); http fails at-most-once (the transport turns a re-dispatch into an
+      // error / confirms an abort).
+      await Promise.all([this.ffi.load(loader), this.http.load(loader)]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {
         this.substrate.enqueueOutbox(message.event, message.seq);

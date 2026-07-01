@@ -112,6 +112,11 @@ renderTypeError typeError =
         <> Text.intercalate ", " info.parameters
         <> "])"
     TypeErrorWrongReferenceKind info -> "`" <> info.name <> "` is not " <> info.expected
+    TypeErrorUnknownReactor info ->
+      "Unknown reactor `"
+        <> info.reactor
+        <> "` in a `from` clause; the external reactors are "
+        <> Text.intercalate ", " info.known
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -149,6 +154,10 @@ data TypeError where
   -- is an agent / request / local rather than a data type. (Namespaces overlap, so resolution alone
   -- cannot rule this out; the checker reports it instead of crashing.)
   TypeErrorWrongReferenceKind :: WrongReferenceKindErrorInfo -> TypeError
+  -- | An @external ... from "name"@ clause names a reactor the runtime does not host external calls on
+  -- (a typo, or an unimplemented reactor). Rejected at compile time rather than silently defaulting to
+  -- the FFI reactor at runtime.
+  TypeErrorUnknownReactor :: UnknownReactorErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -167,6 +176,7 @@ typeErrorCode = \case
   TypeErrorGenericNotApplied _ -> "K3015"
   TypeErrorCannotInferGeneric _ -> "K3016"
   TypeErrorWrongReferenceKind _ -> "K3017"
+  TypeErrorUnknownReactor _ -> "K3018"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -186,6 +196,7 @@ typeErrorSeverity = \case
   TypeErrorGenericNotApplied _ -> SeverityError
   TypeErrorCannotInferGeneric _ -> SeverityError
   TypeErrorWrongReferenceKind _ -> SeverityError
+  TypeErrorUnknownReactor _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -282,6 +293,14 @@ newtype CannotInferGenericErrorInfo = CannotInferGenericErrorInfo
 data WrongReferenceKindErrorInfo = WrongReferenceKindErrorInfo
   { name :: Text,
     expected :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @reactor@ is the name written in the @from@ clause; @known@ lists the reactors external calls may
+-- route to (the surface-visible external reactors).
+data UnknownReactorErrorInfo = UnknownReactorErrorInfo
+  { reactor :: Text,
+    known :: List Text
   }
   deriving (Eq, Ord, Show)
 

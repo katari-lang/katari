@@ -85,6 +85,13 @@
       "when": 1782839294417,
       "tag": "0011_regular_scrambler",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1782868839184,
+      "tag": "0012_zippy_ironclad",
+      "breakpoints": true
     }
   ]
 }

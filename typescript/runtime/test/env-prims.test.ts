@@ -71,4 +71,24 @@ describe("env host primitives", () => {
     // The result is public: no `private` marker anywhere (a non-secret entry must not be tainted).
     expect(result.private).toBeUndefined();
   });
+
+  test("get_all keeps an env key literally named __proto__ as a real field (no silent drop)", async () => {
+    // `Object.fromEntries` defines own properties, so `__proto__` is a real key here (an object literal
+    // would set the prototype instead) — modelling a DB row whose key is `__proto__`.
+    const publics = Object.fromEntries([
+      ["__proto__", "danger"],
+      ["HOST", "example.com"],
+    ]);
+    const prims = primsWith(reader({}, publics));
+    const result = await prims.run("primitive.env.get_all", recordArgument({}), {
+      projectId: PROJECT,
+    });
+    expect(result.kind).toBe("record");
+    if (result.kind === "record") {
+      // The `__proto__` entry survives as an own field rather than corrupting the prototype / vanishing.
+      expect(Object.hasOwn(result.fields, "__proto__")).toBe(true);
+      expect(result.fields.__proto__).toEqual({ kind: "string", value: "danger" });
+      expect(result.fields.HOST).toEqual({ kind: "string", value: "example.com" });
+    }
+  });
 });

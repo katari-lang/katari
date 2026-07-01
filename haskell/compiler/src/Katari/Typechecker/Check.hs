@@ -36,6 +36,7 @@ import Katari.Error
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     TypeError (..),
+    UnknownReactorErrorInfo (..),
     WrongReferenceKindErrorInfo (..),
   )
 import Katari.Panic (panic)
@@ -2121,6 +2122,26 @@ signatureValueScheme ::
   -- and never pure-lifted), a @primitive@ does not.
   Bool ->
   Checker Scheme
+
+-- | The reactors an @external ... from "name"@ clause may name — the runtime hosts external calls only
+-- on these. Kept in one place so adding a reactor is a single edit here; the runtime's routing must stay
+-- in step with this set.
+externalReactorNames :: List Text
+externalReactorNames = ["ffi", "http"]
+
+-- | Reject an @external@'s @from "name"@ clause when it names a reactor that does not exist (a typo, or an
+-- unimplemented reactor) — K3018, at compile time rather than a silent runtime fallback to the FFI reactor.
+-- An absent clause ('Nothing') defaults to the FFI reactor and is always valid.
+checkExternalReactor :: SourceSpan -> Maybe Text -> Checker ()
+checkExternalReactor sourceSpan = \case
+  Nothing -> pure ()
+  Just reactor
+    | reactor `elem` externalReactorNames -> pure ()
+    | otherwise ->
+        reportType
+          sourceSpan
+          (TypeErrorUnknownReactor UnknownReactorErrorInfo {reactor = reactor, known = externalReactorNames})
+
 signatureValueScheme genericDeclarations parameters returnType effectExpression performsIo = do
   genericParameters <- boundedGenericParameters genericDeclarations
   withGenerics genericParameters $ do
@@ -2137,7 +2158,7 @@ signatureValueScheme genericDeclarations parameters returnType effectExpression 
     -- An external call carries the un-dischargeable @io@ marker on top of its declared effect: it becomes
     -- impure (no pure-call lift, so a secret argument is checked strictly and the result is not tainted)
     -- and the io rides up to the run root.
-    let finalEffect = if performsIo then declaredEffect {io = True} else declaredEffect
+    let finalEffect = if performsIo then withIo declaredEffect else declaredEffect
     pure
       Scheme
         { genericParameters = genericParameters,

@@ -150,15 +150,18 @@ export const ffiInstances = pgTable("ffi_instances", {
 
 // The `http` instance extension: an in-flight http call. Cascades with its envelope. Unlike `ffi`, it pins no
 // snapshot and stores no request (recovery never re-sends an http request — see `HttpReactor`), so it carries
-// only the call-specific `status` the envelope cannot (the envelope collapses `awaitingAnswer` to `running`).
-// The delegation it handles is its envelope's `delegation_id`; its caller is always `core`.
+// only the call-specific `status` the envelope cannot (the envelope collapses `awaitingAnswer` to `running`)
+// plus the caller reactor its reply routes to. The delegation it handles is its envelope's `delegation_id`.
 export const httpInstances = pgTable("http_instances", {
   instanceId: uuid("instance_id")
     .primaryKey()
     .references(() => instances.id, { onDelete: "cascade" }),
+  /** The reactor that issued the delegate (its reply goes back there) — `core` in v0.1.0, but persisted (not
+   *  hardcoded on recovery) so the callee-side routing is uniform with `ffi`. */
+  callerReactor: text("caller_reactor").$type<ReactorName>().notNull(),
   /** running (request in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
-   *  awaiting a caught-panic answer or the run's terminate). On recovery a running / cancelling call is
-   *  re-dispatched (which the transport fails — at-most-once), an awaitingAnswer one just waits. */
+   *  awaiting a caught-panic answer or the run's terminate). On recovery a running call is re-dispatched
+   *  (which the transport fails — at-most-once), a cancelling call is aborted, an awaitingAnswer one waits. */
   status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
 });
 

@@ -44,7 +44,9 @@ export function registerHostPrims(prims: PrimRegistry, stores: HostPrimStores): 
 
   prims.register("primitive.env.get_all", async (_argument, context) => {
     const entries = await stores.env.readPublic(context.projectId);
-    const fields: Record<string, Value> = {};
+    // A null-prototype map so an env key literally named `__proto__` / `constructor` becomes a real record
+    // field rather than a silently-dropped prototype write (env key names are admin-chosen, so not trusted).
+    const fields: Record<string, Value> = Object.create(null);
     for (const [key, value] of Object.entries(entries)) {
       fields[key] = { kind: "string", value };
     }

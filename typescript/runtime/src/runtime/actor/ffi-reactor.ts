@@ -1,61 +1,35 @@
-// FfiReactor: the `ffi` reactor — the external (FFI) world as a reactor sibling to core / api. An external
-// call reaches it as a `delegate` (target `{ external, key }`) routed from core's `ExternalThread` proxy,
-// exactly like a core sub-call's delegate; it dispatches the handler through its transport and turns the
-// transport's completion into the call's `delegateAck` (result), an `escalate` (an FFI error → a panic), or
-// a `terminateAck` (an abort confirmed). It owns its in-flight calls as durable `ffi_calls` records (its
-// callee-side warm state), re-dispatched on recovery — symmetric to core owning its instances.
-//
-// A call's lifecycle mirrors a core sub-call's: running (transport in flight) → result / error / cancel.
-// On an FFI *error* the call does not finish: like a panicking sub-call instance that stays suspended on the
-// panic ask, it escalates the panic and waits (`awaitingAnswer`) for either an `escalateAck` (a handler
-// caught it — the answer becomes the result) or a `terminate` (unhandled — the run is failing). The actual
-// process call has stopped, so that wait needs no transport.
+// FfiReactor: the `ffi` reactor — the external (FFI) world as a call reactor (see 'ExternalCallReactor' for
+// the shared callee-call lifecycle). An external call reaches it as a `delegate` routed from core's
+// `ExternalThread` proxy; it dispatches the handler through its subprocess transport and the base turns the
+// completion into the call's `delegateAck` / `escalate` / `terminateAck`. It owns its in-flight calls as
+// durable `ffi_instances` rows (its callee-side warm state), re-dispatched on recovery so an interrupted
+// handler re-runs (deduping on the `redispatch` flag) — symmetric to core owning its instances.
 
 import type { BlobEntry } from "../engine/types.js";
-import type { ExternalEvent, ReactorName } from "../event/types.js";
-import type { FfiCompletion, FfiTransport } from "../external/runner.js";
-import {
-  type BlobId,
-  type DelegationId,
-  type InstanceId,
-  newInstanceId,
-  type ProjectId,
-  type SnapshotId,
-} from "../ids.js";
-import { jsonToValue, valueToJson } from "../value/codec.js";
+import type { ReactorName } from "../event/types.js";
+import type { FfiTransport } from "../external/runner.js";
+import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../ids.js";
+import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
+import {
+  type CallRow,
+  ExternalCallReactor,
+  type ExternalTarget,
+  type LoadedCall,
+} from "./external-call-reactor.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
-import { Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
 
-/** One in-flight external call — the ffi reactor's per-delegation callee instance (the ffi analogue of a
- *  core child instance: ffi is delegated *to*, so each delegation gets its own instance, not a shared root).
- *  `instance` is its own id (the issuer stamped on the replies it produces); `caller` is the reactor that
- *  issued the delegate (its reply goes back there — `core` in v0.1.0). `status`: `running` (transport in
- *  flight), `cancelling` (aborting, awaiting the transport's stop), or `awaitingAnswer` (transport errored,
- *  panic escalated, awaiting a caught-panic answer or the run's terminate). */
-interface PendingCall {
-  instance: InstanceId;
-  /** The snapshot whose sidecar bundle hosts this handler — passed to the transport so it spawns the
-   *  right bundle, and persisted so a recovery re-dispatch still targets it. */
+/** The transport data an ffi call recovers from: the snapshot whose sidecar bundle hosts the handler, the
+ *  dispatch key, and the argument (re-sent on a recovery re-dispatch). */
+interface FfiPayload {
   snapshot: SnapshotId;
   key: string;
   argument: Value | null;
-  caller: ReactorName;
-  status: "running" | "cancelling" | "awaitingAnswer";
 }
 
-export class FfiReactor extends Reactor {
+export class FfiReactor extends ExternalCallReactor<FfiPayload> {
   readonly name: ReactorName = "ffi";
-
-  /** In-flight calls (warm SoT) keyed by their delegation, plus the per-turn dirty set `persist` upserts and
-   *  the instance ids of calls resolved this turn (their `instances` rows are dropped, cascading the ext). */
-  private readonly calls = new Map<DelegationId, PendingCall>();
-  private readonly dirty = new Set<DelegationId>();
-  private droppedInstances: InstanceId[] = [];
-  /** The call whose turn this is — its instance is the issuer stamped on the replies it produces. Set by the
-   *  handler that produces a reply (a completion, or an answering / terminating react). */
-  private turnInstance: InstanceId | undefined;
 
   constructor(
     private readonly projectId: ProjectId,
@@ -65,116 +39,46 @@ export class FfiReactor extends Reactor {
     super(pool);
   }
 
-  currentTurnOwner(): InstanceId {
-    if (this.turnInstance === undefined) {
-      throw new Error("FfiReactor.currentTurnOwner read with no call instance (engine bug)");
-    }
-    return this.turnInstance;
+  protected openPayload(target: ExternalTarget, argument: Value | null): FfiPayload {
+    return { snapshot: target.snapshot, key: target.key, argument };
   }
 
-  /** React to one event a delegation routes to ffi: a `delegate` opens a call, a `terminate` aborts one, an
-   *  `escalateAck` is a caught panic's answer (→ the call's result). It never receives a `delegateAck` /
-   *  `escalate` / `terminateAck` (those are the replies it sends). The transport dispatch / abort is a
-   *  strictly-post-commit side effect (`afterCommit`). */
-  react(event: ExternalEvent): void {
-    switch (event.kind) {
-      case "delegate": {
-        if (event.target.kind !== "external") return; // only external targets route here
-        // A fresh per-delegation callee instance, like core's createInstance for a sub-call. `caller` (the
-        // summoner) is where its replies route — stamped as `to` when this reactor emits them.
-        this.put(event.delegation, {
-          instance: newInstanceId(),
-          snapshot: event.target.snapshot,
-          key: event.target.key,
-          argument: event.argument,
-          caller: event.from,
-          status: "running",
-        });
-        break;
-      }
-      case "terminate": {
-        const call = this.calls.get(event.delegation);
-        if (call === undefined) return;
-        if (call.status === "awaitingAnswer") {
-          // The process call already stopped (it errored); confirm the abort straight away.
-          this.turnInstance = call.instance;
-          this.send({
-            kind: "terminateAck",
-            delegation: event.delegation,
-            from: this.name,
-            to: call.caller,
-          });
-          this.drop(event.delegation);
-        } else if (call.status === "running") {
-          call.status = "cancelling";
-          this.dirty.add(event.delegation);
-        }
-        break;
-      }
-      case "escalateAck": {
-        // A handler caught the FFI error's panic and answered: the answer becomes the call's result.
-        const call = this.calls.get(event.delegation);
-        if (call === undefined || call.status !== "awaitingAnswer") return;
-        this.turnInstance = call.instance;
-        this.send({
-          kind: "delegateAck",
-          delegation: event.delegation,
-          value: event.value,
-          from: this.name,
-          to: call.caller,
-        });
-        this.drop(event.delegation);
-        break;
-      }
-    }
+  protected dispatch(delegation: DelegationId, payload: FfiPayload, redispatch: boolean): void {
+    this.transport.dispatch({
+      projectId: this.projectId,
+      delegation,
+      snapshot: payload.snapshot,
+      key: payload.key,
+      // FFI is an allowed sink for secrets (an API key flows to its external call), so a private argument is
+      // revealed to the sidecar here — unlike the user-facing API, which redacts.
+      argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
+      redispatch,
+    });
   }
 
-  /** A transport completion for one call (the ffi reactor's ephemeral inbound, fed through the substrate).
-   *  For a cancelling call any completion confirms the abort; otherwise a result acks it, and an error
-   *  escalates a panic and waits for the answer / the run's terminate. */
-  complete(completion: FfiCompletion): void {
-    const call = this.calls.get(completion.delegation);
-    if (call === undefined) return; // a late completion for a call already resolved
-    this.turnInstance = call.instance;
-    if (call.status === "cancelling") {
-      this.send({
-        kind: "terminateAck",
-        delegation: completion.delegation,
-        from: this.name,
-        to: call.caller,
-      });
-      this.drop(completion.delegation);
-      return;
-    }
-    switch (completion.outcome.kind) {
-      case "result":
-        // The sidecar's result is plain Json; lift it back to the engine's Value for the delegateAck.
-        this.send({
-          kind: "delegateAck",
-          delegation: completion.delegation,
-          value: jsonToValue(completion.outcome.value),
-          from: this.name,
-          to: call.caller,
-        });
-        this.drop(completion.delegation);
-        return;
-      case "cancelled":
-        this.send({
-          kind: "terminateAck",
-          delegation: completion.delegation,
-          from: this.name,
-          to: call.caller,
-        });
-        this.drop(completion.delegation);
-        return;
-      case "error":
-        // An FFI error is a panic: escalate it to the caller. Unhandled, it fails the run; if a handler
-        // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer).
-        this.raisePanic(completion.delegation, completion.outcome.message, call.caller);
-        call.status = "awaitingAnswer";
-        this.dirty.add(completion.delegation);
-        return;
-    }
+  protected abort(delegation: DelegationId): void {
+    this.transport.abort(delegation);
+  }
+
+  protected async persistCallRow(tx: PersistenceTx, row: CallRow<FfiPayload>): Promise<void> {
+    await tx.ffi.putFfiInstance({
+      instanceId: row.instance,
+      snapshotId: row.payload.snapshot,
+      key: row.payload.key,
+      argument: row.payload.argument,
+      callerReactor: row.caller,
+      status: row.status,
+    });
+  }
+
+  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<FfiPayload>>> {
+    return (await loader.ffi.instances()).map((row) => ({
+      delegation: row.delegation,
+      instance: row.instance,
+      caller: row.caller,
+      status: row.status,
+      payload: { snapshot: row.snapshot, key: row.key, argument: row.argument },
+    }));
   }
 
   /** Register a blob a running handler produced mid-call (its bytes already in the `BlobStore`) as owned by
@@ -188,115 +92,9 @@ export class FfiReactor extends Reactor {
     blobId: BlobId,
     entry: Omit<BlobEntry, "owner">,
   ): boolean {
-    const call = this.calls.get(delegation);
-    if (call === undefined) return false;
-    this.pool.registerBlob(blobId, { owner: call.instance, ...entry });
+    const instance = this.callInstance(delegation);
+    if (instance === undefined) return false;
+    this.pool.registerBlob(blobId, { owner: instance, ...entry });
     return true;
-  }
-
-  /** Dispatch / abort the transport strictly after the turn commits (durable-first): a freshly opened call is
-   *  dispatched, a now-cancelling one is aborted. A call that resolved this turn (dropped) does neither. */
-  afterCommit(event: ExternalEvent): void {
-    if (event.kind === "delegate" && event.target.kind === "external") {
-      this.transport.dispatch({
-        projectId: this.projectId,
-        delegation: event.delegation,
-        snapshot: event.target.snapshot,
-        key: event.target.key,
-        // Lower the engine's Value to plain Json for the sidecar; the reactor keeps the Value for recovery.
-        // FFI is an allowed sink for secrets (an API key flows to its external call), so private values are
-        // revealed here — unlike the user-facing API, which redacts.
-        argument: event.argument === null ? null : valueToJson(event.argument, "reveal"),
-      });
-    } else if (event.kind === "terminate") {
-      if (this.calls.get(event.delegation)?.status === "cancelling") {
-        this.transport.abort(event.delegation);
-      }
-    }
-  }
-
-  /** Write the calls this turn touched as `ffi`-kind instances (envelope + extension), dropping resolved ones
-   *  (their envelope drop cascades the extension). The ffi reactor owns no delegations / escalations, so there
-   *  is no base Layer 1 to flush. */
-  async persist(tx: PersistenceTx): Promise<void> {
-    // The base writes each live call's envelope (its status collapses the ffi-specific `awaitingAnswer` to the
-    // instance lifecycle `running` — alive, just waiting) and drops the resolved ones (cascading the ext). The
-    // ffi reactor owns no delegations / escalations, so the base flushes none. The `ffi_instances` ext is its
-    // own data, written after the envelopes (the FK target).
-    const live = [...this.dirty].flatMap((delegation) => {
-      const call = this.calls.get(delegation);
-      return call === undefined ? [] : [{ delegation, call }];
-    });
-    for (const { delegation, call } of live)
-      this.markInstance(call.instance, {
-        delegationId: delegation,
-        status: call.status === "cancelling" ? "cancelling" : "running",
-      });
-    for (const instanceId of this.droppedInstances) this.markInstanceDropped(instanceId);
-    await this.persistBase(tx.base);
-    for (const { call } of live) {
-      await tx.ffi.putFfiInstance({
-        instanceId: call.instance,
-        snapshotId: call.snapshot,
-        key: call.key,
-        argument: call.argument,
-        callerReactor: call.caller,
-        status: call.status,
-      });
-    }
-    this.dirty.clear();
-    this.droppedInstances = [];
-  }
-
-  /** Reload the in-flight calls and resume the transport: a `running` call re-dispatches (its handler may
-   *  re-run — `redispatch` lets it dedupe), a `cancelling` call re-aborts, an `awaitingAnswer` call just
-   *  waits (its process call already stopped; the core side drives the escalation's resolution). */
-  async load(loader: Loader): Promise<void> {
-    // The base reloads any delegations / escalations this reactor owns (none today, but uniform); its own
-    // data is the in-flight calls.
-    await this.loadBase(loader.base);
-    for (const row of await loader.ffi.instances()) {
-      this.calls.set(row.delegation, {
-        instance: row.instance,
-        snapshot: row.snapshot,
-        key: row.key,
-        argument: row.argument,
-        caller: row.caller,
-        status: row.status,
-      });
-      if (row.status === "running") {
-        this.transport.dispatch({
-          projectId: this.projectId,
-          delegation: row.delegation,
-          snapshot: row.snapshot,
-          key: row.key,
-          // FFI is an allowed sink for secrets, so a private argument is revealed to the sidecar on re-dispatch.
-          argument: row.argument === null ? null : valueToJson(row.argument, "reveal"),
-          redispatch: true,
-        });
-      } else if (row.status === "cancelling") {
-        this.transport.abort(row.delegation);
-      }
-    }
-  }
-
-  reset(): void {
-    super.reset();
-    this.calls.clear();
-    this.dirty.clear();
-    this.droppedInstances = [];
-    this.turnInstance = undefined;
-  }
-
-  private put(delegation: DelegationId, call: PendingCall): void {
-    this.calls.set(delegation, call);
-    this.dirty.add(delegation);
-  }
-
-  private drop(delegation: DelegationId): void {
-    const call = this.calls.get(delegation);
-    if (call !== undefined) this.droppedInstances.push(call.instance);
-    this.calls.delete(delegation);
-    this.dirty.delete(delegation);
   }
 }

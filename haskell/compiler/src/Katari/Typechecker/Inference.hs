@@ -138,6 +138,10 @@ asEffectMetavar :: Set GenericId -> NormalizedEffect -> Maybe GenericId
 asEffectMetavar flexible effect
   | Map.null effect.exits,
     Map.null effect.continues,
+    -- A bare metavariable is genuinely io-free (the shape 'singleTailEffect' builds, io = False). Excluding
+    -- io here keeps this exact: an @{E, io}@ parameter is matched structurally and its io is enforced by the
+    -- dispose-step subtype check, never silently absorbed into the metavar's lower bound.
+    not effect.io,
     RequestEffectRow row <- effect.requests,
     Map.null row.request,
     [(metavar, lacks)] <- Map.toList row.tails,

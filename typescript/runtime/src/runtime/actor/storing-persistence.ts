@@ -213,7 +213,12 @@ export class StoringPersistence implements Persistence {
             const ext = this.httpInstanceRows.get(id);
             if (envelope.kind !== "http" || ext === undefined || envelope.delegationId === null)
               continue;
-            result.push({ delegation: envelope.delegationId, instance: id, status: ext.status });
+            result.push({
+              delegation: envelope.delegationId,
+              instance: id,
+              caller: ext.callerReactor,
+              status: ext.status,
+            });
           }
           return result;
         },

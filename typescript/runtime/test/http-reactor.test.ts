@@ -103,6 +103,74 @@ const FETCH_IR: IRModule = {
   names: {},
 };
 
+// agent main() { par [ fetch({url,method,headers,body}), return 7 ] }
+// The `return 7` cancels the par, terminating the in-flight fetch. The cancel is graceful: the reactor
+// `terminate`s the http call, the transport confirms with a `cancelled`, and the run resolves to 7 only after
+// that terminateAck — so the terminateAck follows the terminate (never a redispatch error).
+const CANCELLING_FETCH_IR: IRModule = {
+  metadata: { schemaVersion: 1 },
+  blocks: {
+    0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+    1: {
+      block: { kind: "sequence", result: null, operations: [{ kind: "call", target: 2, output: 10 }] },
+      parameters: { parameter: 11 },
+    },
+    2: { block: { kind: "parallel", elements: [3, 4] }, parameters: {} },
+    // element 0: fetch(...) — an http call that never completes (the test never feeds it a result).
+    3: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "makeRecord", entries: [], output: 30 },
+          { kind: "loadLiteral", output: 31, value: { kind: "string", value: "https://example.test/x" } },
+          { kind: "loadLiteral", output: 32, value: { kind: "string", value: "GET" } },
+          { kind: "loadLiteral", output: 33, value: { kind: "string", value: "" } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 31],
+              ["method", 32],
+              ["headers", 30],
+              ["body", 33],
+            ],
+            output: 34,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("primitive.http.fetch") },
+            argument: 34,
+            output: 35,
+          },
+        ],
+      },
+      parameters: {},
+    },
+    // element 1: return 7 (cancels the par, and with it the in-flight fetch).
+    4: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadLiteral", output: 40, value: { kind: "integer", value: 7 } },
+          { kind: "exit", target: 0, value: 40 },
+        ],
+      },
+      parameters: {},
+    },
+    8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+    9: {
+      block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+      parameters: { parameter: 90 },
+    },
+  },
+  entries: {
+    [createAgentName("main")]: 0,
+    [createAgentName("primitive.http.fetch")]: 8,
+  },
+  names: {},
+};
+
 /** A fixed env exposing one secret, so `get_secret("API_KEY")` yields a private `"sk-123"`. */
 const ENV: EnvReader = {
   async readSecret(_projectId, key) {
@@ -137,6 +205,11 @@ class ControlledHttpTransport implements HttpTransport {
 
   abort(delegation: DelegationId): void {
     this.aborted.push(delegation);
+    if (this.confirmsAbort) {
+      // Mirror the real transport: with no separate live request to interrupt (completions are test-driven),
+      // an abort confirms the teardown straight away with a `cancelled`.
+      this.feed({ delegation, outcome: { kind: "cancelled" } });
+    }
   }
 
   /** Feed a completion back to the reactor (the test's hook for a finished initial dispatch). */
@@ -144,12 +217,19 @@ class ControlledHttpTransport implements HttpTransport {
     if (this.sink === null) throw new Error("ControlledHttpTransport: no sink registered");
     this.sink(completion);
   }
+
+  /** When false, an abort is recorded but never confirmed — modelling a crash before the `cancelled` lands. */
+  constructor(private readonly confirmsAbort: boolean = true) {}
 }
 
-function makeActor(http: HttpTransport, persistence: Persistence = new InMemoryPersistence()): ProjectActor {
+function makeActor(
+  http: HttpTransport,
+  persistence: Persistence = new InMemoryPersistence(),
+  ir: IRModule = FETCH_IR,
+): ProjectActor {
   const registry = new SnapshotRegistry();
-  for (const name of Object.keys(FETCH_IR.entries)) {
-    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), FETCH_IR);
+  for (const name of Object.keys(ir.entries)) {
+    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
   }
   const prims = new PrimRegistry();
   registerHostPrims(prims, { env: ENV });
@@ -251,5 +331,46 @@ describe("http reactor", () => {
       return record?.state === "error" ? record : undefined;
     });
     expect(failed.errorMessage).toMatch(/interrupted by a runtime restart/);
+  });
+
+  test("cancels an in-flight fetch via abort and resolves once the transport confirms (terminateAck)", async () => {
+    // The `return 7` cancels the par → the reactor `terminate`s the fetch → the transport confirms the abort
+    // with a `cancelled` → terminateAck. The run resolves to 7 ONLY after that confirmation (it would hang if
+    // the abort path were not wired), so this proves the terminateAck follows the terminate — no redispatch.
+    const transport = new ControlledHttpTransport();
+    const actor = makeActor(transport, new InMemoryPersistence(), CANCELLING_FETCH_IR);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await waitUntil(() => transport.dispatched[0]);
+    const value = await result;
+    expect(value).toEqual({ kind: "integer", value: 7 });
+    // The reactor aborted the in-flight call rather than re-dispatching it.
+    expect(transport.aborted).toHaveLength(1);
+  });
+
+  test("recovers a cancelling fetch: abort confirms at-most-once (no re-send) and the run completes", async () => {
+    const persistence = new StoringPersistence();
+
+    // First actor: dispatch the fetch, then `return 7` cancels it → the call is `cancelling`. Its transport
+    // never confirms the abort (a crash before the `cancelled` lands), so the project persists at cancelling.
+    const firstTransport = new ControlledHttpTransport(false);
+    const actorOne = makeActor(firstTransport, persistence, CANCELLING_FETCH_IR);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    await waitUntil(() => (firstTransport.aborted.length > 0 ? true : undefined));
+
+    // Recover in a fresh actor: the base's uniform recovery aborts the cancelling call (it does NOT
+    // re-dispatch), and this transport confirms the abort with a `cancelled` → terminateAck → the run resolves.
+    const secondTransport = new ControlledHttpTransport();
+    const actorTwo = makeActor(secondTransport, persistence, CANCELLING_FETCH_IR);
+    await actorTwo.activate();
+
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "integer", value: 7 });
+    // Recovery aborted the cancelling call; it never re-dispatched (no request re-sent).
+    expect(secondTransport.aborted).toHaveLength(1);
+    expect(secondTransport.dispatched).toHaveLength(0);
   });
 });
