@@ -181,6 +181,17 @@ runNormalizer sourceSpan action = do
   tell (foldMap (diagnosticAt sourceSpan . CompilerErrorType) errors)
   pure result
 
+-- | Run a 'Normalizer' sub-action as a /probe/: report only whether it succeeded (produced no errors)
+-- without emitting its diagnostics. Lets the checker ask "would this check pass?" — e.g. does an
+-- argument already fit an unlifted parameter? — before running the authoritative, error-emitting check.
+-- Runs against the same (world-aware) environment as 'runNormalizer', so the probe answers the question
+-- in the current world.
+probeNormalizer :: Normalizer a -> Checker Bool
+probeNormalizer action = do
+  environment <- normalizerEnvironment
+  let (_, _, errors) = runRWS action environment ()
+  pure (null errors)
+
 -- | Run an 'Elaborate' sub-action with the checker's elaborate context, forwarding its already
 -- located diagnostics. The two-step pattern is "elaborate to semantic, then normalize through
 -- 'runNormalizer'".

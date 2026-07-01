@@ -839,6 +839,41 @@ spec = do
        in -- The nested private attribute lifts: the return is observed as private.
           (result, toList diagnostics) `shouldBe` (ofPrivate integerType, [])
 
+    it "pure call does not taint the return when the parameter absorbs the private argument" $
+      -- The regression this guards: passing a secret to a parameter that already expects a secret
+      -- (a sink @agent(x: integer of private) -> integer@) must not leak private-ness into the
+      -- otherwise-public return — the private argument is absorbed, not observed.
+      let calleeType = pureAgentType (paramObject [("x", ofPrivate integerType)]) integerType
+          localBindings =
+            Map.fromList
+              [ (LocalVariableId 0, monoScheme calleeType),
+                (LocalVariableId 1, monoScheme (ofPrivate integerType))
+              ]
+          privateArg = variableExpression (LocalVariableId 1)
+          call = callExpression (variableExpression (LocalVariableId 0)) [("x", privateArg)]
+          (result, diagnostics) = runAt localBindings mempty (synthExpressionType call)
+       in (result, toList diagnostics) `shouldBe` (integerType, [])
+
+    it "pure call still taints the return when only one of several parameters absorbs the private argument" $
+      -- A private argument absorbed at one position must still taint the return when another position
+      -- feeds the same private value into a public parameter — absorption is per-position, not global.
+      let calleeType =
+            pureAgentType
+              (paramObject [("absorbed", ofPrivate integerType), ("leaked", integerType)])
+              integerType
+          localBindings =
+            Map.fromList
+              [ (LocalVariableId 0, monoScheme calleeType),
+                (LocalVariableId 1, monoScheme (ofPrivate integerType))
+              ]
+          privateArg = variableExpression (LocalVariableId 1)
+          call =
+            callExpression
+              (variableExpression (LocalVariableId 0))
+              [("absorbed", privateArg), ("leaked", privateArg)]
+          (result, diagnostics) = runAt localBindings mempty (synthExpressionType call)
+       in (result, toList diagnostics) `shouldBe` (ofPrivate integerType, [])
+
   describe "explicit generic application" $ do
     it "instantiates a generic value's scheme by explicit type argument" $
       -- A top-level `agent[a](x: a) -> a` applied as `topAgent[integer]` instantiates to

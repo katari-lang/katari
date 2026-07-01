@@ -171,13 +171,22 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects a record pattern with duplicate field labels (K2003)" $
     allErrorCodes [("test", "agent f(r: {x: integer}) -> integer { match (r) { case {x => a, x => b} -> a } }")] `shouldContain` ["K2003"]
 
-  -- @lift@ considers covariant positions only: a value private only in a /contravariant/ data position
-  -- does not taint what a pure observation of it yields, but a /covariant/ one does.
-  it "accepts a pure call observing a value private in a contravariant data position" $
-    typeErrorCodes [("test", "data Sink[T](consume: agent(x: T) -> null)\nagent observe(s: Sink[integer of private]) -> integer { 0 }\nagent caller(s: Sink[integer of private]) -> integer { observe(s = s) }")] `shouldBe` []
+  -- A pure call lifts by the argument's /excess/ over the parameter: a private the parameter does not
+  -- expect (a private value reaching a public position) leaks and taints the result, while one the
+  -- parameter already expects is absorbed. Passing a private-carrying argument to a /public/ parameter
+  -- is what exposes this, and it happens only at covariant positions: a private in a contravariant data
+  -- position is read out at a public type (contravariance flips the check), so it never leaks.
+  it "accepts a pure call passing a value private in a contravariant data position to a public parameter" $
+    typeErrorCodes [("test", "data Sink[T](consume: agent(x: T) -> null)\nagent observe(s: Sink[integer]) -> integer { 0 }\nagent caller(s: Sink[integer of private]) -> integer { observe(s = s) }")] `shouldBe` []
 
-  it "rejects a pure call observing a value private in a covariant data position (K3001)" $
-    typeErrorCodes [("test", "data Box[T](value: T)\nagent observe(b: Box[integer of private]) -> integer { 0 }\nagent caller(b: Box[integer of private]) -> integer { observe(b = b) }")] `shouldContain` ["K3001"]
+  it "rejects a pure call passing a value private in a covariant data position to a public parameter (K3001)" $
+    typeErrorCodes [("test", "data Box[T](value: T)\nagent observe(b: Box[integer]) -> integer { 0 }\nagent caller(b: Box[integer of private]) -> integer { observe(b = b) }")] `shouldContain` ["K3001"]
+
+  -- A pure call whose parameter /expects/ the private (a sink @agent(value: string of private)@) absorbs
+  -- the secret argument: nothing leaks, so the return stays at its declared public type. Guards the
+  -- regression where any private argument tainted the result even when the parameter already required it.
+  it "accepts a pure call passing a private argument to a parameter that expects private" $
+    allErrorCodes [("test", "agent sink(value: string of private) -> integer { 0 }\nagent f(key: string of private) -> integer { sink(value = key) }")] `shouldBe` []
 
   -- A shape inspector (field read / iteration / destructure) requires the value to be /solely/ the
   -- shape it reads: a @... | null@ (or otherwise mixed) union is rejected (K3014), so the dropped

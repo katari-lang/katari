@@ -53,6 +53,7 @@ import Katari.Typechecker.Context
     enterRequestHandler,
     freshBoundaryId,
     freshGenericId,
+    probeNormalizer,
     runElaborator,
     runNormalizer,
     withEffectInference,
@@ -764,17 +765,30 @@ liftByAttribute attribute normalizedType =
 
 -- | Apply an agent value to an argument, enforcing the world rules shared by every application site (a
 -- @call@ expression, a @use@ provider). A /pure/ agent may cross attribute worlds by lifting: the
--- agent's own handle attribute and the argument's observable attribute join into the world the result
--- is observed through, so both the expected parameter and the result are lifted by it (a pure private
--- agent applied in a public context yields a private result; a private argument is accepted by an
--- otherwise public pure parameter). A non-pure (monadic) agent cannot be lifted across worlds, so its
--- types are used as-is, the agent must already be callable in the current world
--- (@functionAttribute <: public@), and its effect is re-emitted into the enclosing scope. Returns the
--- (possibly lifted) result type.
+-- agent's own handle attribute and the argument's /excess/ over the parameter join into the world the
+-- result is observed through, so both the expected parameter and the result are lifted by it (a pure
+-- private agent applied in a public context yields a private result; a private argument is accepted by
+-- an otherwise public pure parameter). The excess is the part of the argument's attribute the parameter
+-- does /not/ already absorb: a private argument passed to a private-expecting parameter is absorbed and
+-- does not taint the result, while a private argument passed to a public parameter leaks and lifts the
+-- return. The two are told apart by probing the argument against the /unlifted/ parameter — a clean fit
+-- means the parameter absorbs everything, so nothing beyond the agent's own handle attribute lifts. A
+-- non-pure (monadic) agent cannot be lifted across worlds, so its types are used as-is, the agent must
+-- already be callable in the current world (@functionAttribute <: public@), and its effect is re-emitted
+-- into the enclosing scope. Returns the (possibly lifted) result type.
 applyAgent :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
 applyAgent sourceSpan functionAttribute function argumentType argumentAttribute = do
   let pureCall = isPureEffect function.effect
-      liftAttribute = joinAttribute functionAttribute argumentAttribute
+  -- The argument's excess over the parameter: nothing when the argument already fits the unlifted
+  -- parameter (the parameter absorbs the argument's attribute), otherwise the argument's full observable
+  -- attribute. Only computed for a pure call, where the excess lifts both the parameter and the result.
+  excess <-
+    if pureCall
+      then do
+        argumentFits <- probeNormalizer (subtype argumentType function.argumentType)
+        pure (if argumentFits then bottomAttribute else argumentAttribute)
+      else pure bottomAttribute
+  let liftAttribute = joinAttribute functionAttribute excess
       (effectiveParameter, effectiveReturn) =
         if pureCall
           then (liftByAttribute liftAttribute function.argumentType, liftByAttribute liftAttribute function.returnType)
