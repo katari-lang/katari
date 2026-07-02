@@ -2,7 +2,7 @@
 // Each takes an `Executor` so the deploy can run them all inside one transaction.
 
 import type { IRModule, SidecarBundle } from "@katari-lang/types";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { modules, projects, snapshots } from "../../db/tables/projects.js";
 import type { ModuleHash } from "../../runtime/ids.js";
@@ -30,6 +30,15 @@ export const snapshotRepository = {
   /** Insert one module IR under its content hash; a no-op if an identical hash already exists. */
   insertModule(executor: Executor, projectId: string, hash: ModuleHash, ir: IRModule) {
     return executor.insert(modules).values({ projectId, hash, ir }).onConflictDoNothing();
+  },
+
+  /** The stored IR of every given hash, for materialising a snapshot manifest's modules in one read
+   *  (the agent-schema reader resolves a manifest's hashes through this). */
+  findModulesByHashes(executor: Executor, projectId: string, hashes: ModuleHash[]) {
+    return executor
+      .select({ hash: modules.hash, ir: modules.ir })
+      .from(modules)
+      .where(and(eq(modules.projectId, projectId), inArray(modules.hash, hashes)));
   },
 
   /** The IR already stored under a held hash. Used to verify an inlined upload of an already-held

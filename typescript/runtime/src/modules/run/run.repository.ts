@@ -3,7 +3,7 @@
 // run delegation row is pure live routing (deleted on terminal), so the read side never touches it; the API
 // reads `runs` directly, and a run reflects the engine's durable state even after a crash + recovery.
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { type RunState, runs } from "../../db/tables/execution.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
@@ -78,12 +78,21 @@ export const runRepository = {
   // with the run's events (see `ApiReactor` / `PersistenceTx.putRun` / `setRunOutcome`), not here — this
   // module is the read side only (the projection + the list / get queries).
 
-  async list(executor: Executor, projectId: string): Promise<RunView[]> {
-    const rows = await executor
+  async list(
+    executor: Executor,
+    projectId: string,
+    filter: { state?: RunState; limit?: number } = {},
+  ): Promise<RunView[]> {
+    const conditions: SQL[] = [eq(runs.projectId, projectId)];
+    if (filter.state !== undefined) {
+      conditions.push(eq(runs.state, filter.state));
+    }
+    const query = executor
       .select(projectionColumns)
       .from(runs)
-      .where(eq(runs.projectId, projectId))
+      .where(and(...conditions))
       .orderBy(desc(runs.createdAt));
+    const rows = await (filter.limit === undefined ? query : query.limit(filter.limit));
     return rows.map((row) => projectRun(unsealRow(row)));
   },
 

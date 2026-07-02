@@ -3,7 +3,7 @@ import { NotFoundError } from "../../lib/errors.js";
 import { facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
 import { type RunView, runRepository } from "./run.repository.js";
-import type { StartRunBody } from "./run.schema.js";
+import type { ListRunsQuery, StartRunBody } from "./run.schema.js";
 
 /** The wire shape of a run: its projected view with the tagged `argument` / `result` `Value`s rendered
  *  back to Json. (The view's state / result / error are projected from the run's Layer 1 delegation.) */
@@ -33,8 +33,8 @@ export const runService = {
     return facade.cancel({ projectId, runId, reason });
   },
 
-  async list(projectId: string) {
-    const views = await runRepository.list(db, projectId);
+  async list(projectId: string, query: ListRunsQuery = {}) {
+    const views = await runRepository.list(db, projectId, query);
     return views.map(toRunResponse);
   },
 
