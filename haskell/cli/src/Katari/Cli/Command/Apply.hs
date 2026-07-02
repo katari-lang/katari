@@ -7,7 +7,7 @@
 --   3. Hash each module and read the runtime's current snapshot head to diff against.
 --   4. Send the /complete/ desired manifest: every module's hash, inlining the IR only for the ones
 --      the runtime does not already hold. Modules absent from the manifest are dropped from head.
-module Katari.Cli.Apply
+module Katari.Cli.Command.Apply
   ( Options (..),
     optionsParser,
     run,
@@ -25,7 +25,6 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Cli.Api
   ( ModuleUpload (..),
@@ -37,8 +36,11 @@ import Katari.Cli.Api
     listProjects,
     newRuntimeClient,
     runtimeAuthFromEnvironment,
+    withTrace,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, resolveRuntimeUrl, writeOrExit)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
+import Katari.Cli.Options (GlobalOptions (..), globalOptionsParser)
+import Katari.Cli.Output (OutputContext, newOutputContext, printText, progress, verboseLog)
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
 import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), SidecarSection (..))
@@ -54,17 +56,18 @@ import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
 
 data Options = Options
-  { projectRoot :: Maybe FilePath,
+  { global :: GlobalOptions,
+    projectRoot :: Maybe FilePath,
     projectName :: Maybe Text,
-    message :: Maybe Text,
-    runtimeUrl :: Maybe Text
+    message :: Maybe Text
   }
   deriving stock (Show)
 
 optionsParser :: Parser Options
 optionsParser =
   Options
-    <$> optional
+    <$> globalOptionsParser
+    <*> optional
       ( strOption
           ( long "project"
               <> short 'p'
@@ -87,16 +90,10 @@ optionsParser =
               <> help "Label for this snapshot (default: \"katari apply\")"
           )
       )
-    <*> optional
-      ( strOption
-          ( long "url"
-              <> metavar "URL"
-              <> help "Runtime URL. Overrides KATARI_API_URL and [runtime].url from katari.toml."
-          )
-      )
 
 run :: Options -> IO ()
 run options = do
+  context <- newOutputContext options.global
   root <- resolveProjectRoot "apply" options.projectRoot
 
   -- 1. Resolve the closure over the network and persist the lockfile.
@@ -104,9 +101,10 @@ run options = do
   resolved <-
     resolveProject manager root >>= \case
       Left projectError -> dieIn "apply" (renderProjectError projectError)
-      Right resolved -> pure resolved
+      Right loaded -> pure loaded
   writeOrExit "apply" "could not write lockfile" $
     writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
+  warnCompilerMismatch context resolved
 
   -- 2. Compile.
   sources <- assembleSourcesOrExit "apply" resolved
@@ -115,28 +113,30 @@ run options = do
 
   -- 3. Connect to the runtime and diff the build against its current head.
   let config = resolved.rootPackage.config :: ProjectConfig
-  url <- resolveRuntimeUrl options.runtimeUrl config.runtime.url
+  url <- resolveRuntimeUrl options.global.url config.runtime.url
   token <- runtimeAuthFromEnvironment
   -- Reuse the resolution manager so a single apply opens one TLS connection pool, not two.
-  let client = newRuntimeClient manager url token
+  let client = withTrace (verboseLog context) (newRuntimeClient manager url token)
   let name = fromMaybe config.package.name options.projectName
   (_, projects) <- listProjects client
   projectId <- case filter (\project -> project.name == name) projects of
     (existing : _) -> pure existing.id
     [] -> do
-      TextIO.putStrLn ("Creating project " <> name)
+      progress context ("Creating project " <> name)
       created <- createProject client name config.package.description
       pure created.id
   runtimeHashes <- runtimeModuleHashes client projectId
   let plan = planUpload loweredModules runtimeHashes
-  reportPlan url name plan
+  reportPlan context url name plan
 
   -- 4. Bundle the FFI sidecars (reusing the resolved closure) and send the complete desired manifest.
   sidecarBundle <- runKatariBundle (packagesFromResolved resolved)
   let manifest = buildManifest loweredModules plan
       message = fromMaybe "katari apply" options.message
   snapshotId <- deploySnapshot client projectId message sidecarBundle manifest
-  TextIO.putStrLn ("Applied snapshot " <> snapshotId <> " to project " <> name)
+  progress context ("Applied snapshot " <> snapshotId <> " to project " <> name)
+  -- The new snapshot id is the invocation's result; scripts read it off stdout.
+  printText snapshotId
 
 -- | Read the runtime's current head manifest and key it the way 'planUpload' expects.
 runtimeModuleHashes :: RuntimeClient -> Text -> IO (Map ModuleName ModuleHash)
@@ -161,10 +161,11 @@ buildManifest loweredModules plan =
             }
 
 -- | Print a short summary of what the deploy will change.
-reportPlan :: Text -> Text -> UploadPlan -> IO ()
-reportPlan url name plan = do
-  TextIO.putStrLn ("Deploying " <> name <> " to " <> url)
-  TextIO.putStrLn
+reportPlan :: OutputContext -> Text -> Text -> UploadPlan -> IO ()
+reportPlan context url name plan = do
+  progress context ("Deploying " <> name <> " to " <> url)
+  progress
+    context
     ( "  "
         <> Text.pack (show (Map.size plan.changed))
         <> " changed, "
@@ -173,8 +174,8 @@ reportPlan url name plan = do
         <> Text.pack (show (Set.size plan.removed))
         <> " removed"
     )
-  mapM_ (\moduleName -> TextIO.putStrLn ("  + " <> renderModuleName moduleName)) (Map.keys plan.changed)
-  mapM_ (\moduleName -> TextIO.putStrLn ("  - " <> renderModuleName moduleName)) (Set.toList plan.removed)
+  mapM_ (\moduleName -> progress context ("  + " <> renderModuleName moduleName)) (Map.keys plan.changed)
+  mapM_ (\moduleName -> progress context ("  - " <> renderModuleName moduleName)) (Set.toList plan.removed)
 
 -- ---------------------------------------------------------------------------
 -- FFI sidecar bundling

@@ -52,9 +52,19 @@ library:
     - Katari.Cli.Options
     - Katari.Cli.Output
     - Katari.Cli.Prompt
-    - Katari.Cli.Build
-    - Katari.Cli.Apply
-    - Katari.Cli.Run
+    - Katari.Cli.Pick
+    - Katari.Cli.Command.Check
+    - Katari.Cli.Command.Build
+    - Katari.Cli.Command.Apply
+    - Katari.Cli.Command.Add
+    - Katari.Cli.Command.Run
+    - Katari.Cli.Command.Status
+    - Katari.Cli.Command.Cancel
+    - Katari.Cli.Command.Answer
+    - Katari.Cli.Command.Ls
+    - Katari.Cli.Command.Env
+    - Katari.Cli.Command.File
+    - Katari.Cli.Command.Project
 
 executables:
   katari:

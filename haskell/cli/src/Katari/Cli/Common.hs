@@ -10,7 +10,8 @@
 --   * @70@ — an internal invariant was violated (@EX_SOFTWARE@); a bug in @katari@ itself.
 --   * @130@ — interrupted by Ctrl-C (@128 + SIGINT@), e.g. while waiting on a run.
 module Katari.Cli.Common
-  ( dieIn,
+  ( cliVersion,
+    dieIn,
     dieProgram,
     dieInternal,
     exitInterrupted,
@@ -20,12 +21,18 @@ module Katari.Cli.Common
     resolveIdPrefix,
     PrefixError (..),
     renderPrefixError,
+    RuntimeContext (..),
+    withRuntimeContext,
+    makeRuntimeClient,
+    tryLoadNearestConfig,
+    warnCompilerMismatch,
     assembleSourcesOrExit,
     compileSourcesOrExit,
     writeOrExit,
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Exception (IOException, catch)
 import Control.Monad (unless, when)
 import Data.Map.Strict (Map)
@@ -33,18 +40,27 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
-import Katari.Cli.Api (ProjectRow (..), RuntimeClient, listProjects)
+import Katari.Cli.Api (ProjectRow (..), RuntimeClient, listProjects, newRuntimeClient, runtimeAuthFromEnvironment, withTrace)
+import Katari.Cli.Options (GlobalOptions (..))
+import Katari.Cli.Output (OutputContext (..), newOutputContext, verboseLog, warn)
 import Katari.Compile qualified as Compile
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Diagnostics (hasErrors, renderDiagnostics)
-import Katari.Project.Discovery (findProjectRoot)
+import Katari.Project.Config (PackageSection (..), ProjectConfig (..), RuntimeSection (..), loadKatariToml)
+import Katari.Project.Discovery (configFilename, findProjectRoot)
 import Katari.Project.Error (renderProjectError)
-import Katari.Project.Resolve (ResolvedProject, assembleProject, compileInputSources)
+import Katari.Project.Resolve (ResolvedProject (..), assembleProject, compileInputSources)
+import Network.HTTP.Client.TLS (newTlsManager)
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
+import System.FilePath ((</>))
 import System.IO (stderr)
+
+-- | The CLI's own version, singly sourced for @--version@ and the registry compiler-pin warning.
+cliVersion :: Text
+cliVersion = "0.1.0.0"
 
 -- | Standard CLI bail: print @katari \<subcommand>: \<message>@ to stderr and exit with code 2
 -- (setup / usage error).
@@ -123,6 +139,77 @@ resolveIdPrefix prefix identifiers
       [only] -> Right only
       [] -> Left PrefixNotFound
       candidates -> Left (PrefixAmbiguous candidates)
+
+-- | The wired-up state every management command starts from: the client, the resolved project, and
+-- the output contract.
+data RuntimeContext = RuntimeContext
+  { client :: RuntimeClient,
+    projectId :: Text,
+    projectName :: Text,
+    output :: OutputContext
+  }
+
+-- | Wire up a management command: detect the terminal, find the project name (the @--project@
+-- override, else the surrounding @katari.toml@), resolve the runtime URL and auth, and translate the
+-- name into the runtime's project id. Every failure is a specific exit-2 message.
+withRuntimeContext :: Text -> GlobalOptions -> Maybe Text -> IO RuntimeContext
+withRuntimeContext subcommand global projectOverride = do
+  output <- newOutputContext global
+  config <- tryLoadNearestConfig subcommand
+  projectName <- case projectOverride <|> fmap (\projectConfig -> projectConfig.package.name) config of
+    Just name -> pure name
+    Nothing -> dieIn subcommand "no --project given and no katari.toml found in this or any parent directory"
+  client <- makeRuntimeClient subcommand global output config
+  projectId <- requireProjectId subcommand client projectName
+  pure RuntimeContext {client = client, projectId = projectId, projectName = projectName, output = output}
+
+-- | Build the runtime client from the URL chain (@--url@, then @KATARI_API_URL@, then the config's
+-- @[runtime].url@) and the environment's auth token, with @--verbose@ tracing attached.
+makeRuntimeClient :: Text -> GlobalOptions -> OutputContext -> Maybe ProjectConfig -> IO RuntimeClient
+makeRuntimeClient subcommand global output config = do
+  environmentUrl <- lookupEnv "KATARI_API_URL"
+  let fromEnvironment = case environmentUrl of
+        Just value | not (null value) -> Just (Text.pack value)
+        _ -> Nothing
+  url <- case global.url <|> fromEnvironment <|> fmap (\projectConfig -> projectConfig.runtime.url) config of
+    Just resolved -> pure resolved
+    Nothing -> dieIn subcommand "no --url given, KATARI_API_URL unset, and no surrounding katari.toml's [runtime].url found"
+  token <- runtimeAuthFromEnvironment
+  manager <- newTlsManager
+  pure (withTrace (verboseLog output) (newRuntimeClient manager url token))
+
+-- | The nearest @katari.toml@ walking up from the current directory, when there is one. A present
+-- but broken config is a loud exit-2 — silently ignoring it would send the command at the wrong
+-- project or URL.
+tryLoadNearestConfig :: Text -> IO (Maybe ProjectConfig)
+tryLoadNearestConfig subcommand = do
+  start <- getCurrentDirectory
+  found <- findProjectRoot start
+  case found of
+    Nothing -> pure Nothing
+    Just root ->
+      loadKatariToml (root </> configFilename) >>= \case
+        Left projectError -> dieIn subcommand (renderProjectError projectError)
+        Right config -> pure (Just config)
+
+-- | Warn (never fail) when the registry snapshot declares a @katari_compiler@ that disagrees with
+-- this CLI's compiler. Versions compare on their first three dotted components, so the CLI's
+-- four-component Cabal version matches the registry's three-component pin.
+warnCompilerMismatch :: OutputContext -> ResolvedProject -> IO ()
+warnCompilerMismatch output resolved = case resolved.snapshotCompilerVersion of
+  Just pinned
+    | releaseComponents pinned /= releaseComponents cliVersion ->
+        warn
+          output
+          ( "the registry snapshot targets katari_compiler "
+              <> pinned
+              <> " but this CLI compiles with "
+              <> cliVersion
+              <> "; the set may not build"
+          )
+  _ -> pure ()
+  where
+    releaseComponents version = take 3 (Text.splitOn "." version)
 
 -- | Flatten a resolved project into the compiler's @module name -> source@ map, exiting with code 2
 -- on any assembly error (a cross-package module collision, an out-of-namespace module, …).
