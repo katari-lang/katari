@@ -236,6 +236,10 @@ export type DelegateOperation = {
   target: CalleeReference;
   argument: VariableId;
   output: VariableId | null;
+  /** The call site's generic instantiation (explicit or inferred) as runtime schemas, keyed by the
+   *  callee's declared parameter names — same encoding as `ApplyGenericsOperation.generics`. Merged at
+   *  run time with the substitution the callee VALUE carries; omitted for a non-generic callee. */
+  generics?: Array<[string, GenericArgumentSchema]>;
 };
 
 export type LoadLiteralOperation = { kind: "loadLiteral"; output: VariableId; value: Literal };

@@ -180,6 +180,88 @@ describe("call_agent dispatch", () => {
   });
 });
 
+describe("call-site generics on the delegate operation", () => {
+  // agent pick[T](x: T) -> T  — input schema { x: $generic 7 }, bindings { T: 7 }.
+  // main delegates to it BY NAME with the operation-stamped instantiation [T -> integer] (what the
+  // compiler emits for an inferred call), so the acceptance surface validates x against integer.
+  function genericFixture(argumentLiteral: { kind: "integer"; value: number } | { kind: "string"; value: string }): IRModule {
+    return {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: {
+          block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+          parameters: {},
+        },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 11, value: argumentLiteral },
+              { kind: "makeRecord", entries: [["x", 11]], output: 12 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("pick") },
+                argument: 12,
+                output: 13,
+                generics: [["T", { kind: "type", schema: { type: "integer" } }]],
+              },
+              { kind: "exit", target: 0, value: 13 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        2: {
+          block: {
+            kind: "agent",
+            body: 3,
+            schema: {
+              input: {
+                type: "object",
+                properties: { x: { $generic: 7 } },
+                required: ["x"],
+                additionalProperties: true,
+              },
+              output: { $generic: 7 },
+              requests: [],
+              genericBindings: { T: 7 },
+            },
+            description: "",
+            defaults: {},
+          },
+          parameters: {},
+        },
+        3: {
+          block: {
+            kind: "sequence",
+            result: 21,
+            operations: [{ kind: "getField", source: 20, field: "x", output: 21 }],
+          },
+          parameters: { parameter: 20 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("pick")]: 2,
+      },
+      names: {},
+    };
+  }
+
+  test("fills the callee's $generic input schema and accepts a conforming argument", async () => {
+    await expect(runMain(genericFixture({ kind: "integer", value: 7 }), null)).resolves.toEqual({
+      kind: "integer",
+      value: 7,
+    });
+  });
+
+  test("rejects an argument violating the instantiated schema", async () => {
+    await expect(runMain(genericFixture({ kind: "string", value: "seven" }), null)).rejects.toThrow(
+      /pick.*\$\.x: expected a value of type integer/,
+    );
+  });
+});
+
 describe("delegate argument validation", () => {
   test("a static delegate with a conforming argument runs (and an open schema stays permissive)", async () => {
     // Covered broadly by the untouched engine-smoke suite (every prim call passes `{}` schemas); this

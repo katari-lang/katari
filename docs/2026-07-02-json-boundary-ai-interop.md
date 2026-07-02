@@ -93,10 +93,48 @@ lives in `primitive.ai`:
 
 ## Known gaps / deferred
 
-- `primitive.panic` is *declared* in the root module, which user code cannot reference — a panic
-  can be caught only via IR-level handlers today. Reachability of root-module names (or moving
-  `panic`) is its own decision.
+- ~~`primitive.panic` is *declared* in the root module, which user code cannot reference~~ →
+  resolved by the `prelude` rename (addendum below): `prelude.panic` raises and handles from source.
 - Escalation *answers* are not yet schema-validated (`deriveAnswerSchema` exists; wiring the
   check into the answer surface is a small follow-up).
 - `json_integer` vs `json_number` splits on `Number.isInteger` at parse time (JSON has one number
   type); `1.0` round-trips as `1`.
+
+## Addendum (same day): `prelude`, inferred instantiation in the IR, the typed JSON boundary
+
+Follow-up slice, superseding some names above (`primitive.*` → `prelude.*`).
+
+1. **The stdlib root is now `prelude`.** `primitive` is a declaration keyword, so the root module's
+   own name could never be referenced from source — neither `primitive.panic` nor
+   `import ... from primitive.x` parsed. As `prelude`, the root resolves like any default-import
+   qualifier; `prelude.panic(msg = ...)` raises and `use handler { request prelude.panic(...) }`
+   recovers (both live-verified). Every wired-in qualified name follows: `prelude.add`,
+   `prelude.json.parse`, `prelude.ai.call_agent`, ...
+
+2. **Inferred generic instantiations reach the IR.** The checker already solved a generic call's
+   substitution; now it records it on the typed `CallExpression` (composing the scheme's
+   metavar-opening with the solver's answer — exactly what an explicit `callee[T]` writes), and
+   lowering stamps it on the `delegate` operation as runtime schemas
+   (`DelegateOperation.generics`, the `applyGenerics` encoding). The runtime merges it with the
+   substitution the callee value carries; the acceptance surface therefore validates against
+   *instantiated* schemas (`pick[T](x: T)` called with an integer now rejects a string argument),
+   and schema-directed prims read their own `[T]` from `PrimContext.generics`.
+
+3. **The JSON boundary is typed.** `json.decode` is now `decode[T](value: json) -> T` — validated
+   against T's schema, `panic` on mismatch; the untyped `-> unknown` form is gone (T appears only
+   in the result, so an uninstantiated call is already a K3016 compile error). `json.parse_as[T]
+   (text: string) -> T` is the fused text boundary: `JSON.parse -> value lift -> conform`, with no
+   intermediate tagged `json` tree (cheaper than `decode(parse(text))`, which builds and then
+   flattens one). `json.stringify` generalised to `stringify[T](value: T) -> string` (embed first;
+   a `json` value passes through, so it subsumes the old form and fuses `stringify(encode(x))`).
+
+4. **A latent `use`-provider convention mismatch, exposed by validation and fixed.** The provider's
+   *type* (and schema) says its argument is `{ continuation: agent ... }`, but `use` lowering
+   delegated the bare continuation closure — the acceptance check rejected it at the first live
+   `use handler`. Lowering now wraps (`{continuation = k}`) and the provider body reads the field,
+   so the convention matches the type — which also makes a provider callable directly
+   (`p(continuation = f)`) coherent with `use p`.
+
+Also fixed en route: a panic raised at the acceptance surface births no instance, so a later
+`terminate` for that delegation found no callee and the cancel cascade hung; `onTerminate` now acks
+an instance-less delegation (see §2 of the main text).

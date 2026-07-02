@@ -56,6 +56,20 @@ spec = describe "lowerModule (via compile)" $ do
               "agent identity(x: integer) -> integer { x }\nagent useValue() -> agent (x: integer) -> integer { identity }"
       loadedAgentNames irModule `shouldContain` [testName "identity"]
 
+    it "stamps an INFERRED generic instantiation onto the delegate as a runtime schema" $ do
+      let irModule =
+            loweredTestModule
+              "agent pick[T](x: T) -> T { x }\nagent caller() -> integer { pick(x = 1) }"
+      case delegateGenericsTo irModule (testName "pick") of
+        Just [("T", GenericArgumentType schema)] -> schema `shouldBe` SchemaInteger
+        other -> expectationFailure ("expected an inferred [T -> integer] on the delegate, got " <> show other)
+
+    it "leaves a non-generic call's delegate without generics" $ do
+      let irModule =
+            loweredTestModule
+              "agent helper(x: integer) -> integer { x }\nagent caller(y: integer) -> integer { helper(x = y) }"
+      delegateGenericsTo irModule (testName "helper") `shouldBe` Just []
+
   describe "control-flow constructs" $ do
     it "lowers `if` to a match structural node" $
       shouldLowerWithNode "agent pick(b: boolean) -> integer { if (b) { 1 } else { 2 } }" "match"
@@ -196,6 +210,19 @@ calleeNames irModule =
       OperationDelegate operation <- sequence'.operations,
       CalleeName name <- [operation.target]
   ]
+
+-- | The generics stamped on the first @delegate@ targeting @name@ (Nothing when no such delegate).
+delegateGenericsTo :: IRModule -> QualifiedName -> Maybe (List (Text, GenericArgumentSchema))
+delegateGenericsTo irModule name =
+  case [ operation.generics
+         | information <- Map.elems irModule.blocks,
+           BlockSequence sequence' <- [information.block],
+           OperationDelegate operation <- sequence'.operations,
+           CalleeName target <- [operation.target],
+           target == name
+       ] of
+    (generics : _) -> Just generics
+    [] -> Nothing
 
 -- | The names every 'OperationLoadAgent' materialises.
 loadedAgentNames :: IRModule -> List QualifiedName

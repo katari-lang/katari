@@ -155,6 +155,19 @@ function enterDelegate(
   operation: DelegateOperation,
 ): void {
   const resolved = resolveCallee(ctx, thread.scopeId, operation.target, operation.argument);
+  // The delegate merges two substitution sources: what the callee VALUE carries (an explicit
+  // `callee[T]` applied earlier via `applyGenerics`) and what THIS call site instantiated (inferred
+  // by the checker, stamped on the operation). They are disjoint in practice — an already-applied
+  // callee is no longer generic at the call — but the call site wins on overlap (it is the more
+  // specific record).
+  let generics = resolved.generics;
+  if (operation.generics !== undefined && operation.generics.length > 0) {
+    const merged: GenericSubstitution = { ...(generics ?? {}) };
+    for (const [name, schema] of operation.generics) {
+      merged[name] = schema;
+    }
+    generics = merged;
+  }
   const callId = allocateCallId(ctx.instance);
   thread.pending = { callId, output: operation.output };
 
@@ -180,7 +193,7 @@ function enterDelegate(
       delegation: delegationId,
       target: resolved.target,
       argument: resolved.argument,
-      ...(resolved.generics !== undefined ? { generics: resolved.generics } : {}),
+      ...(generics !== undefined ? { generics } : {}),
     },
     "core",
   );

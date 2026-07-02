@@ -8,8 +8,8 @@
 //
 // `encodeValue` composes with `jsonValueFromJson` over the value codec's wire conventions: a `data`
 // value keeps its `$constructor` as an entry, a file ref becomes its `$ref` handle object, an agent
-// its `$agent` reference object — so `json.decode` (which is `jsonValueToJson` piped through
-// `jsonToValue`) inverts it. A value that is ALREADY a `json` data value passes through unchanged,
+// its `$agent` reference object — so `json.decode` (which flattens through `jsonValueToJson`, then lifts
+// and conforms) inverts it. A value that is ALREADY a `json` data value passes through unchanged,
 // which is what lets `json.encode({ name = ..., input_schema = m.input })` mix plain fields with
 // schema values from `get_metadata` without double-tagging.
 //
@@ -19,7 +19,6 @@
 // caller-supplied reader (the prims hand in a `BlobStore`-bound one).
 
 import { createAgentName, type Json } from "@katari-lang/types";
-import { jsonToValue } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 
 export const JSON_NULL = "prelude.json.json_null";
@@ -203,11 +202,4 @@ export async function encodeValue(value: Value, readString: StringReader): Promi
       return tagged(JSON_OBJECT, { entries: { kind: "record", fields: entries } });
     }
   }
-}
-
-/** Read a `json` value back into a plain value (`json.decode`): flatten to bare JSON, then lift
- *  through the standard codec — so `$constructor` entries re-tag data values, `$ref` handles
- *  reconstruct blob refs, and a `$agent` reference throws (a callable cannot be built from JSON). */
-export async function decodeValue(value: Value, readString: StringReader): Promise<Value> {
-  return jsonToValue(await jsonValueToJson(value, readString));
 }

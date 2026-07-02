@@ -1,9 +1,12 @@
 // Agents as AI tools, end to end — without a real AI, so the whole loop is deterministic:
 //
 //   1. `tool_list` derives each tool's schema with `ai.get_metadata` and builds the JSON an AI
-//      tool-calling API would receive (`json.encode` mixes plain fields with schema values).
-//   2. A canned "AI reply" (a tool pick + arguments, as JSON text) is parsed with `json.parse`
-//      and taken apart with `match` / `record.get`.
+//      tool-calling API would receive (`json.encode` mixes plain fields with schema values, and
+//      `json.stringify` is generic — it renders any value as its document).
+//   2. A canned "AI reply" (a tool pick + arguments, as JSON text) is read with the TYPED text
+//      boundary `json.parse_as[T]`: parsed and validated against T's schema in one step, so the
+//      reply's shape is pinned by a type instead of a match dance. (The untyped `json.parse` +
+//      `match` traversal remains available for exploring documents of unknown shape.)
 //   3. `dispatch` finds the picked tool by its metadata name and invokes it with `ai.call_agent`;
 //      the runtime validates the AI-built arguments against the tool's input schema at the
 //      delegation boundary (a mismatch fails the dispatch with a `panic`).
@@ -11,7 +14,7 @@
 // With a real AI, step 2's canned reply becomes an `http.fetch` of the tool-calling API with
 // step 1's body — the rest is unchanged.
 
-@"Raised when the canned AI reply does not fit the tool-calling contract (never, in this demo)."
+@"Raised when the AI reply names a tool that is not in the list (never, in this demo)."
 request bad_reply(message: string) -> never
 
 @"Adds two integers."
@@ -55,22 +58,12 @@ agent main() -> string {
   // 1. What the AI receives: the tool list as JSON text (the tool-call request body).
   let body = json.stringify(value = tool_list(tools = tools))
 
-  // 2. What the AI replies: a tool pick plus arguments, as JSON text.
+  // 2. What the AI replies, read through the typed text boundary: `parse_as[T]` validates the
+  //    document against T's schema and panics (naming the offending path) if it does not fit.
   let reply = "{\"tool\":\"main.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
-  let entries = match (json.parse(text = reply)) {
-    case json.json_object(entries => e) -> e
-    case _ -> bad_reply(message = "the AI reply is not a JSON object")
-  }
-  let picked = match (record.get(target = entries, key = "tool")) {
-    case json.json_string(value => s) -> s
-    case _ -> bad_reply(message = "the AI reply picked no tool")
-  }
-  let args = match (record.get(target = entries, key = "arguments")) {
-    case json.json_object(entries => o) -> json.decode(value = json.json_object(entries = o))
-    case _ -> bad_reply(message = "the AI reply carries no arguments object")
-  }
+  let picked = json.parse_as[{ tool: string, arguments: record[unknown] }](text = reply)
 
   // 3. Dispatch the pick; the result goes back to the AI as JSON text.
-  let result = json.stringify(value = dispatch(tools = tools, picked = picked, args = args))
+  let result = json.stringify(value = dispatch(tools = tools, picked = picked.tool, args = picked.arguments))
   f"tools=${body}; result=${result}"
 }

@@ -7,6 +7,7 @@ import {
   createAgentName,
   type IRModule,
   type Json,
+  type JSONSchema,
   type SchemaInfo,
 } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
@@ -25,6 +26,11 @@ const prims = new PrimRegistry();
 
 function contextWith(ir: SnapshotRegistry = new SnapshotRegistry()): PrimContext {
   return { projectId: PROJECT, ir, blobs: new InMemoryBlobStore() };
+}
+
+/** A context whose delegate carried a `[T]` instantiation (what a call site stamps for `decode[T]`). */
+function contextWithT(schema: JSONSchema): PrimContext {
+  return { ...contextWith(), generics: { T: { kind: "type", schema } } };
 }
 
 function run(name: string, fields: Record<string, Value>, context = contextWith()): Promise<Value> {
@@ -98,7 +104,7 @@ describe("prelude.json", () => {
     };
     const encoded = await run("prelude.json.encode", { value: data });
     await expect(asJson(encoded)).resolves.toEqual({ $constructor: "main.box", value: 3 });
-    const decoded = await run("prelude.json.decode", { value: encoded });
+    const decoded = await run("prelude.json.decode", { value: encoded }, contextWithT({}));
     expect(decoded).toEqual(data);
   });
 
@@ -106,7 +112,9 @@ describe("prelude.json", () => {
     const agent: Value = { kind: "agent", name: createAgentName("main.tool"), snapshot: SNAPSHOT };
     const encoded = await run("prelude.json.encode", { value: agent });
     await expect(asJson(encoded)).resolves.toEqual({ $agent: "main.tool" });
-    await expect(run("prelude.json.decode", { value: encoded })).rejects.toThrow(/callable/);
+    await expect(
+      run("prelude.json.decode", { value: encoded }, contextWithT({})),
+    ).rejects.toThrow(/callable/);
   });
 
   test("encode refuses a closure", async () => {
@@ -122,7 +130,7 @@ describe("prelude.json", () => {
 
   test("decode flattens nested json values into plain values", async () => {
     const parsed = await run("prelude.json.parse", { text: str('{"xs":[1,"two"],"n":null}') });
-    const decoded = await run("prelude.json.decode", { value: parsed });
+    const decoded = await run("prelude.json.decode", { value: parsed }, contextWithT({}));
     expect(decoded).toEqual({
       kind: "record",
       fields: {
@@ -130,6 +138,52 @@ describe("prelude.json", () => {
         n: { kind: "null" },
       },
     });
+  });
+
+  const POINT: JSONSchema = {
+    type: "object",
+    properties: { x: { type: "integer" }, y: { type: "integer" } },
+    required: ["x", "y"],
+    additionalProperties: true,
+  };
+
+  test("decode[T] validates against T's schema and panics on a mismatch", async () => {
+    const parsed = await run("prelude.json.parse", { text: str('{"x":1,"y":2}') });
+    await expect(run("prelude.json.decode", { value: parsed }, contextWithT(POINT))).resolves.toEqual({
+      kind: "record",
+      fields: { x: int(1), y: int(2) },
+    });
+    const bad = await run("prelude.json.parse", { text: str('{"x":"one"}') });
+    await expect(run("prelude.json.decode", { value: bad }, contextWithT(POINT))).rejects.toThrow(
+      /json\.decode: .*\$\.x/,
+    );
+  });
+
+  test("decode without a carried [T] fails loud instead of skipping validation", async () => {
+    const parsed = await run("prelude.json.parse", { text: str("1") });
+    await expect(run("prelude.json.decode", { value: parsed })).rejects.toThrow(
+      /json\.decode: .*instantiation/,
+    );
+  });
+
+  test("parse_as[T] fuses parse + typed decode (no intermediate json tree)", async () => {
+    await expect(
+      run("prelude.json.parse_as", { text: str('{"x":1,"y":2}') }, contextWithT(POINT)),
+    ).resolves.toEqual({ kind: "record", fields: { x: int(1), y: int(2) } });
+    await expect(
+      run("prelude.json.parse_as", { text: str('{"y":2}') }, contextWithT(POINT)),
+    ).rejects.toThrow(/json\.parse_as: .*missing required field "x"/);
+    await expect(
+      run("prelude.json.parse_as", { text: str("{oops") }, contextWithT(POINT)),
+    ).rejects.toThrow(/json\.parse_as: malformed JSON/);
+  });
+
+  test("stringify is generic: a plain record renders as its document (json still passes through)", async () => {
+    await expect(
+      run("prelude.json.stringify", {
+        value: { kind: "record", fields: { a: int(1), b: str("x") } },
+      }),
+    ).resolves.toEqual(str('{"a":1,"b":"x"}'));
   });
 });
 

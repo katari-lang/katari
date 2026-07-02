@@ -717,12 +717,20 @@ buildElementBlock element = do
   pure blockId
 
 -- | A call delegates to the callee with the single argument record built from its labelled arguments.
+-- The call's inferred generic instantiation (recorded by the checker; an explicit @callee[T]@ rides on
+-- the callee value via 'lowerTypeApplication' instead) is stamped onto the delegate as runtime schemas,
+-- exactly like an 'OperationApplyGenerics' would carry them.
 lowerCall :: AST.CallExpression AST.Typed -> Lower VariableId
 lowerCall callExpression = do
   target <- calleeReference callExpression.callee
   argumentVariable <- buildArgumentRecord callExpression.arguments
+  context <- asks (.context)
+  let generics =
+        mapMaybe
+          (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
+          (Map.toList callExpression.instantiation)
   output <- freshVariableId
-  emit (OperationDelegate DelegateOperation {target = target, argument = argumentVariable, output = Just output})
+  emit (OperationDelegate DelegateOperation {target = target, argument = argumentVariable, output = Just output, generics = generics})
   pure output
 
 calleeReference :: AST.Expression AST.Typed -> Lower CalleeReference
@@ -768,7 +776,7 @@ concatTemplate left right = do
   argumentVariable <- freshVariableId
   emit (OperationMakeRecord MakeRecordOperation {entries = [("left", left), ("right", right)], output = argumentVariable})
   output <- freshVariableId
-  emit (OperationDelegate DelegateOperation {target = CalleeName concatName, argument = argumentVariable, output = Just output})
+  emit (OperationDelegate DelegateOperation {target = CalleeName concatName, argument = argumentVariable, output = Just output, generics = mempty})
   pure output
   where
     concatName = QualifiedName {moduleName = preludeModuleName, name = "concat"}
@@ -950,9 +958,15 @@ buildThenClause stateParameters stateLocals thenClause = do
 lowerHandlerExpression :: AST.HandlerExpression AST.Typed -> Lower VariableId
 lowerHandlerExpression handlerExpression = do
   providerBlock <- freshBlockId
+  argumentVariable <- freshVariableId
   continuationVariable <- freshVariableId
   handleBlock <- freshBlockId
   (handleOutput, operations) <- withFreshOperations $ do
+    -- The provider is an ordinary callable, so its argument follows the calling convention its type
+    -- declares: a record carrying the continuation under the protocol field @continuation@ (what the
+    -- checker types, the schema documents, and the delegate boundary validates). The body reads the
+    -- continuation out of it first.
+    emit (OperationGetField GetFieldOperation {source = argumentVariable, field = "continuation", output = continuationVariable})
     (initialStates, stateParameters, stateLocals) <- lowerStateBindings handlerExpression.stateVariables
     handleBody <- buildHandleBody continuationVariable stateParameters
     handlers <- withLocals stateLocals (mapM (lowerRequestHandler handleBlock stateParameters stateLocals) handlerExpression.handlers)
@@ -969,7 +983,7 @@ lowerHandlerExpression handlerExpression = do
   recordBlock
     providerBodyBlock
     (BlockSequence Sequence {operations = operations, result = Just handleOutput})
-    (Map.singleton "parameter" continuationVariable)
+    (Map.singleton "parameter" argumentVariable)
     (Just "handler.body")
   context <- asks (.context)
   recordBlock providerBlock (BlockAgent Agent {body = providerBodyBlock, schema = providerSchema context handlerExpression.typeOf, description = "", defaults = mempty}) mempty (Just "handler")
@@ -991,7 +1005,7 @@ buildHandleBody continuationVariable stateParameters = do
   resultVariable <- freshVariableId
   let operations =
         [ OperationMakeRecord MakeRecordOperation {entries = [], output = argumentVariable},
-          OperationDelegate DelegateOperation {target = CalleeValue continuationVariable, argument = argumentVariable, output = Just resultVariable}
+          OperationDelegate DelegateOperation {target = CalleeValue continuationVariable, argument = argumentVariable, output = Just resultVariable, generics = mempty}
         ]
   blockId <- freshBlockId
   recordBlock blockId (BlockSequence Sequence {operations = operations, result = Just resultVariable}) (Map.fromList stateParameters) Nothing
@@ -1042,8 +1056,12 @@ lowerUse useStatement = do
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = continuationBlock})
   provider <- lowerExpression useStatement.provider
+  -- The provider is called like any agent: its argument record carries the continuation under the
+  -- protocol field @continuation@ (matching its declared type, which the delegate boundary validates).
+  wrappedVariable <- freshVariableId
+  emit (OperationMakeRecord MakeRecordOperation {entries = [("continuation", closureVariable)], output = wrappedVariable})
   output <- freshVariableId
-  emit (OperationDelegate DelegateOperation {target = CalleeValue provider, argument = closureVariable, output = Just output})
+  emit (OperationDelegate DelegateOperation {target = CalleeValue provider, argument = wrappedVariable, output = Just output, generics = mempty})
   pure output
 
 ---------------------------------------------------------------------------------------------------

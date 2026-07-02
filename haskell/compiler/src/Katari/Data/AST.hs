@@ -946,6 +946,12 @@ instance HasSourceSpan (RecordEntry phase) where
 data CallExpression (phase :: Phase) = CallExpression
   { callee :: Expression phase,
     arguments :: List (CallArgument phase),
+    -- | The generic substitution this call instantiates the callee with — INFERRED from the arguments
+    -- when the callee is an unapplied generic (an explicit @callee[T](...)@ instantiates through
+    -- 'TypeApplicationExpression' instead, leaving this empty). Filled by the checker at 'Typed' so
+    -- lowering can stamp the runtime schemas onto the delegate — the runtime needs them to validate
+    -- against, and to fill, the callee's @$generic@ schema placeholders.
+    instantiation :: GenericInstantiation phase,
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }

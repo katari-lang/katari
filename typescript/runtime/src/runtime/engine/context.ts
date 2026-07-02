@@ -17,7 +17,7 @@ import type { ProjectId, SnapshotId } from "../ids.js";
 // A type-only cycle with `../ir.js` (which imports `IrAccess` from here) — erased at runtime.
 import type { IrSource } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
-import type { Value } from "../value/types.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
 import type { CoreInstance, ProjectStore } from "./types.js";
 
 /**
@@ -43,6 +43,9 @@ export interface PrimContext {
   readonly projectId: ProjectId;
   readonly ir: IrSource;
   readonly blobs: BlobStore;
+  /** The running instance's ambient generic substitution (the call site stamped it on the delegate) —
+   *  how a schema-directed prim (`json.decode[T]` / `json.parse_as[T]`) sees its own instantiation. */
+  readonly generics?: GenericSubstitution;
 }
 
 /**

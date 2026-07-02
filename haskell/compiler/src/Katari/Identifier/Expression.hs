@@ -57,7 +57,7 @@ resolveExpression = \case
     callee <- resolveExpression node.callee
     reportDuplicateLabels [(argument.name, argument.sourceSpan) | argument <- node.arguments]
     arguments <- traverse resolveCallArgument node.arguments
-    pure (ExpressionCall CallExpression {callee = callee, arguments = arguments, sourceSpan = node.sourceSpan, typeOf = ()})
+    pure (ExpressionCall CallExpression {callee = callee, arguments = arguments, instantiation = (), sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionBinaryOperator node -> resolveBinaryOperator node
   ExpressionUnaryOperator node -> resolveUnaryOperator node
   ExpressionIf node -> do
@@ -186,6 +186,7 @@ primitiveCall sourceSpan member arguments =
     CallExpression
       { callee = callee,
         arguments = buildArgument <$> arguments,
+        instantiation = (),
         sourceSpan = sourceSpan,
         typeOf = ()
       }

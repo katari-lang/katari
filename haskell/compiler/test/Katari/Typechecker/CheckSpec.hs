@@ -1105,6 +1105,7 @@ callExpression callee arguments =
               }
             | (name, value) <- arguments
           ],
+        instantiation = (),
         sourceSpan = testSpan,
         typeOf = ()
       }

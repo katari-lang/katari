@@ -592,12 +592,13 @@ synthCallExpression expression = do
   -- rejected as an unapplied generic.
   (typedCallee, scheme) <- synthApplicationCallee expression.callee
   (typedArgs, argumentObject, argumentAttribute) <- synthCallArguments expression.sourceSpan expression.arguments
-  effectiveReturn <- applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
+  (effectiveReturn, instantiation) <- applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
   typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
     ExpressionCall
       CallExpression
         { callee = typedCallee,
           arguments = typedArgs,
+          instantiation = instantiation,
           sourceSpan = expression.sourceSpan,
           typeOf = semantic
         }
@@ -608,10 +609,14 @@ synthCallExpression expression = do
 -- 'handleUseStatement', so a @use@ provider gets the same inference as a direct call — in particular a
 -- provider generic in its continuation's result @R@ (e.g. @foo[R](continuation: agent(value: A) -> R)
 -- -> R@) infers @R@ from the continuation argument's return type.
-applyCallee :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+--
+-- Returns the effective return type together with the resolved instantiation (declared parameter name
+-- -> inferred argument; empty for a non-generic callee), which the call node records so lowering can
+-- stamp the runtime schemas onto the delegate.
+applyCallee :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
 applyCallee sourceSpan scheme argumentObject argumentAttribute =
   if null scheme.genericParameters.parameterNames
-    then applyMonomorphicCallee sourceSpan scheme.valueType argumentObject argumentAttribute
+    then (,mempty) <$> applyMonomorphicCallee sourceSpan scheme.valueType argumentObject argumentAttribute
     else applyGenericValue sourceSpan scheme argumentObject argumentAttribute
 
 -- | Apply a non-generic callee: it must already be a callable agent (no inference). A non-callable
@@ -841,26 +846,37 @@ instantiateToMetavars sourceSpan parameters = do
 
 -- | Apply a generic callee by inferring its type arguments from the argument object. Falls back to
 -- 'bottomType' (after a diagnostic) when the scheme is not a callable agent or a type argument cannot
--- be inferred.
-applyGenericValue :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+-- be inferred. Also yields the resolved instantiation (declared name -> inferred argument) — the same
+-- record an explicit @callee[T]@ leaves on its 'TypeApplicationExpression' — so an inferred
+-- instantiation reaches the IR (and thereby the runtime's schema validation) all the same.
+applyGenericValue :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
 applyGenericValue sourceSpan scheme argumentObject argumentAttribute = do
   (substitution, registry) <- instantiateToMetavars sourceSpan scheme.genericParameters
   openType <- runNormalizer sourceSpan (substituteType substitution scheme.valueType)
   case openFunctionLayer openType of
     Nothing -> do
       reportExpectedShape sourceSpan "a callable agent" scheme.valueType
-      pure bottomType
+      pure (bottomType, mempty)
     Just openFunction -> do
       -- Infer the type arguments from the argument against the open parameter, then substitute the
       -- solution into the open scheme and dispose by applying it through the trusted 'applyAgent'.
       solveResult <- inferGenericArguments sourceSpan registry argumentObject openFunction.argumentType
       solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
+      -- The instantiation by declared parameter: the scheme opened each parameter to a metavariable
+      -- (`substitution`), and the solver bound the metavariables (`solveResult.substitution`) — their
+      -- composition is exactly what an explicit application would have written.
+      solvedByParameter <-
+        traverse
+          (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution)
+          substitution
+      instantiation <- instantiationOf sourceSpan scheme.genericParameters solvedByParameter
       maybeFunction <- extractFunction sourceSpan solvedType
       case maybeFunction of
-        Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+        Just (functionAttribute, function) ->
+          (,instantiation) <$> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
         Nothing -> do
           reportExpectedShape sourceSpan "a callable agent" solvedType
-          pure bottomType
+          pure (bottomType, mempty)
 
 -- | The propose / solve / dispose core of generic-argument inference, shared by a generic call
 -- ('applyGenericValue') and a request handler ('inferRequestHandlerSubstitution'). Given the

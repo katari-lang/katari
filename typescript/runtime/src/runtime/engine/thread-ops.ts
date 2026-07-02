@@ -414,6 +414,9 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
       projectId: ctx.projectId,
       ir: ctx.irSource,
       blobs: ctx.blobs,
+      ...(ctx.instance.ambientGenerics !== undefined
+        ? { generics: ctx.instance.ambientGenerics }
+        : {}),
     });
   } catch (error) {
     raisePanic(ctx, thread, error instanceof Error ? error.message : String(error));

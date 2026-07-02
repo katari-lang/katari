@@ -126,6 +126,7 @@ callPostfix = do
           CallExpression
             { callee = callee,
               arguments = arguments,
+              instantiation = (),
               sourceSpan = mergeSpans (sourceSpanOf callee) parenSpan,
               typeOf = ()
             }

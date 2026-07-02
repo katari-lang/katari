@@ -23,10 +23,15 @@ import {
 } from "@katari-lang/types";
 import type { IrSource } from "../ir.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { fillGenericSchema, typeSubstitutionOf } from "../value/validation.js";
+import {
+  type ConformResult,
+  fillGenericSchema,
+  parseJson,
+  renderConformFailures,
+  typeSubstitutionOf,
+} from "../value/validation.js";
 import type { PrimContext, PrimImplementation } from "./context.js";
 import {
-  decodeValue,
   encodeValue,
   jsonValueFromJson,
   jsonValueToJson,
@@ -68,13 +73,37 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return jsonValueFromJson(json);
   },
   "prelude.json.stringify": async (argument, context) => {
-    const json = await jsonValueToJson(field(argument, "value"), stringReaderOf(context));
+    // Generic over the value: embed first (a `json` value passes through unchanged), then flatten —
+    // so `stringify[T]` is `stringify(encode(x))` in one step and the identity on `json`.
+    const reader = stringReaderOf(context);
+    const embedded = await encodeValue(field(argument, "value"), reader);
+    const json = await jsonValueToJson(embedded, reader);
     return { kind: "string", value: JSON.stringify(json) };
   },
   "prelude.json.encode": (argument, context) =>
     encodeValue(field(argument, "value"), stringReaderOf(context)),
-  "prelude.json.decode": (argument, context) =>
-    decodeValue(field(argument, "value"), stringReaderOf(context)),
+  "prelude.json.decode": async (argument, context) => {
+    // Schema-directed: the call site's [T] instantiation carried T's schema here; flatten the tree
+    // to bare JSON, then lift-and-conform against it (`$constructor` entries re-tag data values).
+    const schema = instantiatedSchema(context, "json.decode");
+    const json = await jsonValueToJson(field(argument, "value"), stringReaderOf(context));
+    return conformed(parseJson(json, schema), "json.decode");
+  },
+  "prelude.json.parse_as": async (argument, context) => {
+    // The fused typed text boundary: JSON.parse -> value lift -> conform, with no intermediate
+    // tagged `json` tree (the whole point of fusing over `decode(parse(text))`).
+    const schema = instantiatedSchema(context, "json.parse_as");
+    const text = await readStringField(argument, "text", context);
+    let json: Json;
+    try {
+      json = JSON.parse(text) as Json;
+    } catch (error) {
+      throw new Error(
+        `json.parse_as: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return conformed(parseJson(json, schema), "json.parse_as");
+  },
 
   // ─── prelude.record ───────────────────────────────────────────────────────────────────────
   "prelude.record.get": (argument) =>
@@ -211,6 +240,32 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
 
 function sortedKeys(fields: Record<string, Value>): string[] {
   return Object.keys(fields).sort();
+}
+
+/** The schema the call site's `[T]` instantiation carried (a schema-directed prim's contract: T is
+ *  its only generic). Absent means the delegate carried no substitution — IR from a compiler
+ *  predating inferred-instantiation stamping — so fail loud rather than skip validation. */
+function instantiatedSchema(context: PrimContext, label: string): JSONSchema {
+  const bound = context.generics?.T;
+  if (bound === undefined) {
+    throw new Error(
+      `${label}: the [T] instantiation did not reach the runtime (recompile the program with a current compiler)`,
+    );
+  }
+  if (bound.kind !== "type") {
+    throw new Error(`${label}: the [T] instantiation is not a type argument`);
+  }
+  return bound.schema;
+}
+
+/** Unwrap a conform result, turning a mismatch into the panic the typed readers promise. */
+function conformed(result: ConformResult, label: string): Value {
+  if (!result.ok) {
+    throw new Error(
+      `${label}: the document does not conform to T — ${renderConformFailures(result.failures)}`,
+    );
+  }
+  return result.value;
 }
 
 /** Resolve a callable value to its agent block's schema / description (following the value's own

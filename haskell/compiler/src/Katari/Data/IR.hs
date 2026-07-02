@@ -282,7 +282,13 @@ data CallOperation = CallOperation
 data DelegateOperation = DelegateOperation
   { target :: CalleeReference,
     argument :: VariableId,
-    output :: Maybe VariableId
+    output :: Maybe VariableId,
+    -- | The call site's generic instantiation — explicit or inferred, the checker records both — as
+    -- runtime schemas keyed by the callee's declared parameter names (the encoding of
+    -- 'ApplyGenericsOperation.generics'). The runtime merges it with the substitution the callee VALUE
+    -- itself carries and uses the result to fill the callee's @$generic@ schema placeholders (argument
+    -- validation, @get_metadata@, typed @json.decode@). Empty for a non-generic callee.
+    generics :: List (Text, GenericArgumentSchema)
   }
   deriving stock (Eq, Show)
 
@@ -532,7 +538,12 @@ instance ToJSON Operation where
   toJSON operation = case operation of
     OperationCall op -> taggedObject "call" ["target" .= op.target, "output" .= op.output]
     OperationDelegate op ->
-      taggedObject "delegate" ["target" .= op.target, "argument" .= op.argument, "output" .= op.output]
+      taggedObject
+        "delegate"
+        ( ["target" .= op.target, "argument" .= op.argument, "output" .= op.output]
+            -- Omitted when empty: most delegates are non-generic and the wire stays lean.
+            <> ["generics" .= op.generics | not (null op.generics)]
+        )
     OperationLoadLiteral op -> taggedObject "loadLiteral" ["output" .= op.output, "value" .= op.value]
     OperationLoadAgent op -> taggedObject "loadAgent" ["output" .= op.output, "name" .= op.name]
     OperationMakeClosure op -> taggedObject "makeClosure" ["output" .= op.output, "agent" .= op.agent]
