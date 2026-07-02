@@ -1,0 +1,6 @@
+# Local runtime credentials / keys.
+.env
+# CLI build artifacts and caches.
+.katari/
+# Sidecar (FFI) dependencies, when the project grows TypeScript handlers.
+node_modules/

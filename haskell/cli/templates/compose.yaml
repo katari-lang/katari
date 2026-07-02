@@ -1,0 +1,45 @@
+# A local Katari stack: Postgres + the runtime.
+#
+# The runtime image is not on a public registry yet — build it once from a katari checkout
+# (`docker compose build` in the katari repository produces `katari-runtime:local`), then
+# `docker compose up -d` here.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: katari
+      POSTGRES_PASSWORD: katari
+      POSTGRES_DB: katari
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - katari-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U katari -d katari"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  runtime:
+    image: katari-runtime:local
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      # `postgres` is the service hostname on the compose network.
+      DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+      # At-rest encryption key for secret values (base64 32 bytes); the runtime refuses to boot
+      # without it. This dev-only default lets the local stack come up — override it in `.env`
+      # for anything shared (see env.example).
+      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:-XAHob6KS/e98OejNFErgNfA8RqiOmI7fLLaNl9dRU5Q=}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  katari-pgdata:

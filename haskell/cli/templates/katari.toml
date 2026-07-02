@@ -1,0 +1,11 @@
+[package]
+name = "{{name}}"
+description = "A new Katari project."
+
+[runtime]
+url = "http://localhost:3000"
+
+[dependencies]
+registry = "https://raw.githubusercontent.com/yukikurage/katari-registry/main"
+snapshot = "staging"
+packages = []

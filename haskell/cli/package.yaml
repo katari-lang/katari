@@ -27,6 +27,9 @@ dependencies:
   - scientific
   # Building aeson arrays from prompted elements.
   - vector
+  # Embedding the `init` scaffolding templates at build time (the compiler embeds its stdlib the
+  # same way), so they are maintained as real files while the binary stays self-contained.
+  - file-embed
   # The compiler driver and the IR / module-name / diagnostics types it produces.
   - katari-compiler
   # Project discovery, dependency resolution, the lockfile, and the per-module upload plan.
@@ -53,6 +56,8 @@ library:
     - Katari.Cli.Output
     - Katari.Cli.Prompt
     - Katari.Cli.Pick
+    - Katari.Cli.Templates
+    - Katari.Cli.Command.Init
     - Katari.Cli.Command.Check
     - Katari.Cli.Command.Build
     - Katari.Cli.Command.Apply
@@ -89,6 +94,10 @@ tests:
       - katari-cli
       - katari-compiler
       - hspec
+      - directory
+      - filepath
+      - temporary
+      - text
     build-tools:
       - hspec-discover
 

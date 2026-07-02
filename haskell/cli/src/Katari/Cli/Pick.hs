@@ -9,7 +9,6 @@ module Katari.Cli.Pick
 where
 
 import Data.Aeson qualified as Aeson
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Cli.Api

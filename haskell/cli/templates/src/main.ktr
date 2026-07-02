@@ -1,0 +1,11 @@
+// Your first Katari program. `main` asks its operator a question: the `ask_name` request
+// escalates out of the run, and `katari run` prompts you for the answer right in the
+// terminal (or answer later with `katari answer`). Delete the request once you have real
+// inputs — it is here to show the human-in-the-loop flow end to end.
+
+request ask_name(prompt: string) -> string
+
+agent main() -> string with ask_name {
+  let name = ask_name(prompt = "What is your name?")
+  f"Hello, ${name}!"
+}

@@ -15,6 +15,7 @@ import Katari.Cli.Command.Cancel qualified as Cancel
 import Katari.Cli.Command.Check qualified as Check
 import Katari.Cli.Command.Env qualified as Env
 import Katari.Cli.Command.File qualified as File
+import Katari.Cli.Command.Init qualified as Init
 import Katari.Cli.Command.Ls qualified as Ls
 import Katari.Cli.Command.Project qualified as Project
 import Katari.Cli.Command.Run qualified as Run
@@ -23,7 +24,8 @@ import Katari.Cli.Common (cliVersion, dieIn, exitInterrupted)
 import Options.Applicative
 
 data Command
-  = CommandCheck Check.Options
+  = CommandInit Init.Options
+  | CommandCheck Check.Options
   | CommandBuild Build.Options
   | CommandApply Apply.Options
   | CommandAdd Add.Options
@@ -40,7 +42,8 @@ data Command
 commandParser :: Parser Command
 commandParser =
   hsubparser
-    ( command "check" (info (CommandCheck <$> Check.optionsParser) (progDesc "Compile the project and report diagnostics"))
+    ( command "init" (info (CommandInit <$> Init.optionsParser) (progDesc "Scaffold a new Katari project"))
+        <> command "check" (info (CommandCheck <$> Check.optionsParser) (progDesc "Compile the project and report diagnostics"))
         <> command "build" (info (CommandBuild <$> Build.optionsParser) (progDesc "Compile the project to IR JSON"))
         <> command "apply" (info (CommandApply <$> Apply.optionsParser) (progDesc "Compile and deploy the project to the runtime as a new snapshot"))
         <> command "add" (info (CommandAdd <$> Add.optionsParser) (progDesc "Add dependencies to katari.toml and refresh katari.lock"))
@@ -73,8 +76,8 @@ main = do
               <> progDesc "Use `katari <command> --help` for per-command options."
           )
       )
-  let (subcommand, action) = dispatch command'
-  action
+  let (subcommand, runCommand) = dispatch command'
+  runCommand
     -- A runtime failure (network / HTTP / decode) surfaces as a 'RuntimeError'; turn it into a
     -- friendly `katari <cmd>:` line with exit 2 instead of an uncaught-exception stack trace.
     `catch` (\(runtimeError :: RuntimeError) -> dieIn subcommand (renderRuntimeError runtimeError))
@@ -87,6 +90,7 @@ main = do
 
 dispatch :: Command -> (Text, IO ())
 dispatch = \case
+  CommandInit options -> ("init", Init.run options)
   CommandCheck options -> ("check", Check.run options)
   CommandBuild options -> ("build", Build.run options)
   CommandApply options -> ("apply", Apply.run options)
