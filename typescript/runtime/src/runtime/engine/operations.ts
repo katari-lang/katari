@@ -16,12 +16,7 @@ import type {
   Operation,
   VariableId,
 } from "@katari-lang/types";
-import {
-  type AskKind,
-  calleeReactorForTarget,
-  type DelegateTarget,
-  type ModifierMap,
-} from "../event/types.js";
+import type { AskKind, DelegateTarget, ModifierMap } from "../event/types.js";
 import { newDelegationId, type ScopeId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { liftPrivacy } from "../value/privacy.js";
@@ -177,7 +172,8 @@ function enterDelegate(
     delegationId,
     relays: {},
   };
-  // A sub-call's callee runs in `core`; an external target (should one reach here) would route to `ffi`.
+  // A delegate emitted here is always a core sub-call: `resolveCallee` only yields `named` / `closure`
+  // targets, never `external` (external calls emit their own `delegate` to `ffi` / `http` from `createExternal`).
   ctx.emit(
     {
       kind: "delegate",
@@ -186,7 +182,7 @@ function enterDelegate(
       argument: resolved.argument,
       ...(resolved.generics !== undefined ? { generics: resolved.generics } : {}),
     },
-    calleeReactorForTarget(resolved.target),
+    "core",
   );
 }
 

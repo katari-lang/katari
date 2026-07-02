@@ -44,8 +44,8 @@ import type {
 const NULL_VALUE: Value = { kind: "null" };
 
 /** The reactor a proxy thread's downward leg (a `terminate` or `escalateAck`) descends to — its child's
- *  reactor. An `external` proxy's child runs in `ffi`; a `delegate` (core sub-call) proxy's in `core`. The
- *  proxy's kind mirrors its delegate target's kind, so this is the proxy-side twin of `calleeReactorForTarget`. */
+ *  reactor. An `external` proxy's child runs in its `reactor` (`ffi` / `http`); a `delegate` (core sub-call)
+ *  proxy's in `core`. This is the proxy-side companion of the `to` an external `delegate` was emitted with. */
 function proxyCalleeReactor(thread: Thread): ReactorName {
   return thread.kind === "external" ? thread.reactor : "core";
 }
@@ -466,10 +466,11 @@ function createExternal(ctx: StepContext, thread: ExternalThread): void {
         kind: "external",
         key: block.key,
         snapshot: ctx.ir.snapshot,
-        reactor: thread.reactor,
       },
       argument,
     },
+    // `to` is the call reactor this routes to (`ffi` / `http`), from the block's marker via the proxy thread;
+    // the target does not repeat it.
     thread.reactor,
   );
 }

@@ -57,18 +57,17 @@ export type InternalEvent =
 // ─── External (inter-instance) ──────────────────────────────────────────────────────────────────
 
 /** What a `delegate` summons: a top-level named agent, a closure (block + captured scope), or an `external`
- *  (FFI) handler. The external handler runs in the `ffi` reactor against its `key` (not the IR), but its
- *  `snapshot` still matters — the handler lives in that snapshot's compiled sidecar bundle, so the ffi
- *  transport spawns the right one. It is the calling agent's snapshot (an agent and its FFI handler deploy
- *  together). An external delegate behaves like any sub-call; only its `to` (the ffi reactor) differs. */
+ *  (FFI / http) handler. The target says *what* the callee runs, not *where* — which call reactor handles an
+ *  external delegate (`ffi` or `http`) is the event's `to`, stamped from the block's `reactor` marker at the
+ *  emit site (see `createExternal`), so the target does not repeat it. The external handler runs against its
+ *  `key` (a sidecar-registry name, not the IR); its `snapshot` still matters — the handler lives in that
+ *  snapshot's compiled sidecar bundle, so the ffi transport spawns the right one. It is the calling agent's
+ *  snapshot (an agent and its FFI handler deploy together; http ignores it). An external delegate behaves
+ *  like any sub-call; only its `to` differs. */
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
   | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string }
-  /** An external handler. `reactor` is the reactor it runs in — `ffi` (the sidecar) or `http` (the built-in
-   *  in-runtime fetch) — chosen by the leaf's `reactor` marker (the declaration's `from "name"` clause). Core
-   *  routes the delegate and its proxy legs there. `snapshot` is the calling agent's (the ffi sidecar bundle;
-   *  unused by http). */
-  | { kind: "external"; key: string; snapshot: SnapshotId; reactor: "ffi" | "http" };
+  | { kind: "external"; key: string; snapshot: SnapshotId };
 
 /** Which reactor an external event originates from / is destined for. An event is self-routing: the
  *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
@@ -115,13 +114,6 @@ export type ExternalEvent = ExternalEventBody & { from: ReactorName; to: Reactor
  *  compiled sidecar bundle hosts an `external` handler. Every target carries one. */
 export function agentSnapshot(target: DelegateTarget): SnapshotId {
   return target.snapshot;
-}
-
-/** The reactor a `delegate` is routed to (its `to`): an `external` handler runs in `ffi`, every other target
- *  is a core sub-call. The single home of the "external ⟶ ffi, else core" rule, so the callee routing of a
- *  delegate / its proxy legs lives in one place (used at every `emit` edge and where core records the peer). */
-export function calleeReactorForTarget(target: DelegateTarget): ReactorName {
-  return target.kind === "external" ? target.reactor : "core";
 }
 
 /** The value an `escalate` carries up across the instance boundary: a `request`'s argument, or a control
