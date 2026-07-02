@@ -50,9 +50,10 @@ import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), lockf
 import Katari.Project.Upload (ModuleHash (..), UploadPlan (..), hashModule, planUpload)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Options.Applicative
+import System.Directory (doesFileExist)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.Process (readProcessWithExitCode)
 
 data Options = Options
@@ -130,7 +131,7 @@ run options = do
   reportPlan context url name plan
 
   -- 4. Bundle the FFI sidecars (reusing the resolved closure) and send the complete desired manifest.
-  sidecarBundle <- runKatariBundle (packagesFromResolved resolved)
+  sidecarBundle <- runKatariBundle root (packagesFromResolved resolved)
   let manifest = buildManifest loweredModules plan
       message = fromMaybe "katari apply" options.message
   snapshotId <- deploySnapshot client projectId message sidecarBundle manifest
@@ -206,18 +207,11 @@ packagesFromResolved resolved =
       _ -> config.package.src
 
 -- | Spawn @katari-bundle@ with one @--package \<name\>=\<path\>@ flag per package and decode its
--- @{ bundle }@ stdout — the compiled sidecar, or 'Nothing' when no package has one. The binary is found
--- via @KATARI_BUNDLE_BIN@ (a JS file — @.js@ / @.mjs@ / @.cjs@ — is run through @node@, for a dev checkout)
--- or on @PATH@.
-runKatariBundle :: List BundlePackage -> IO (Maybe Value)
-runKatariBundle packages = do
-  binOverride <- lookupEnv "KATARI_BUNDLE_BIN"
-  let isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
-      (bundleCommand, prefixArguments) = case binOverride of
-        Just path | isJsFile path -> ("node", [path])
-        Just path -> (path, [])
-        Nothing -> ("katari-bundle", [])
-      arguments =
+-- @{ bundle }@ stdout — the compiled sidecar, or 'Nothing' when no package has one.
+runKatariBundle :: FilePath -> List BundlePackage -> IO (Maybe Value)
+runKatariBundle root packages = do
+  (bundleCommand, prefixArguments) <- resolveBundleInvocation root
+  let arguments =
         prefixArguments
           <> concatMap
             (\package -> ["--package", Text.unpack package.packageName <> "=" <> package.sourceRoot])
@@ -234,6 +228,43 @@ runKatariBundle packages = do
     ExitSuccess -> case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 (Text.pack output)) of
       Left decodeError -> dieIn "apply" ("katari-bundle returned unparseable JSON: " <> Text.pack decodeError)
       Right (response :: BundleResponse) -> pure response.bundle
+
+-- | Where the bundler comes from, in npm-convention order (a local install beats a global one):
+--
+--   1. @KATARI_BUNDLE_BIN@ — the explicit override; a JS file (@.js@ \/ @.mjs@ \/ @.cjs@) runs
+--      through @node@ (a dev checkout's @dist\/cli.mjs@), anything else spawns directly.
+--   2. A project-local npm install: @node_modules\/.bin\/katari-bundle@, walking up from the project
+--      root like node's own resolution (the katari project may sit inside a workspace whose
+--      @node_modules@ lives higher). Run through @node@ so it works regardless of the shim's
+--      executable bit — this also covers running the CLI directly, where npx would otherwise have
+--      been needed to put the local @.bin@ on PATH.
+--   3. @katari-bundle@ on PATH (a global install, or an npx\/npm-script parent that prepended the
+--      local @.bin@ itself).
+resolveBundleInvocation :: FilePath -> IO (String, List String)
+resolveBundleInvocation root = do
+  binOverride <- lookupEnv "KATARI_BUNDLE_BIN"
+  case binOverride of
+    Just path
+      | isJsFile path -> pure ("node", [path])
+      | otherwise -> pure (path, [])
+    Nothing -> do
+      localBin <- findLocalBundleBin root
+      pure $ case localBin of
+        Just path -> ("node", [path])
+        Nothing -> ("katari-bundle", [])
+  where
+    isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
+
+-- | The nearest @node_modules\/.bin\/katari-bundle@ at or above the directory, if any.
+findLocalBundleBin :: FilePath -> IO (Maybe FilePath)
+findLocalBundleBin directory = do
+  let candidate = directory </> "node_modules" </> ".bin" </> "katari-bundle"
+  exists <- doesFileExist candidate
+  if exists
+    then pure (Just candidate)
+    else
+      let parent = takeDirectory directory
+       in if parent == directory then pure Nothing else findLocalBundleBin parent
 
 -- | The wire shape of @katari-bundle@'s stdout: @{ "bundle": SidecarBundle | null }@. The bundle is kept
 -- opaque (a 'Value') — it is produced by our own bundler and stored verbatim by the runtime, so the CLI
