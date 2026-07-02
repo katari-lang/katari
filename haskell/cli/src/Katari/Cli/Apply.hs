@@ -120,7 +120,7 @@ run options = do
   -- Reuse the resolution manager so a single apply opens one TLS connection pool, not two.
   let client = newRuntimeClient manager url token
   let name = fromMaybe config.package.name options.projectName
-  projects <- listProjects client
+  (_, projects) <- listProjects client
   projectId <- case filter (\project -> project.name == name) projects of
     (existing : _) -> pure existing.id
     [] -> do

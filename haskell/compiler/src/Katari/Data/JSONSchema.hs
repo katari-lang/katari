@@ -7,10 +7,17 @@
 -- This is the representation only. The conversion from a 'Katari.Data.SemanticType' to a 'JSONSchema'
 -- — @file@ / @agent@ / @data@ / @private@-attributed types are not obvious — lives in "Katari.Schema";
 -- "Katari.Lowering" then threads its results into each callable's 'Katari.Data.IR.SchemaInformation'.
+--
+-- The 'FromJSON' instance is the wire's inverse, for consumers that read schemas back out of a
+-- deployed IR (the CLI walks them to prompt for agent arguments). One lossy spot: JSON object keys
+-- are unordered, so a decoded 'ObjectSchema' holds its properties in key order, not declaration
+-- order — readers must not rely on the written order.
 module Katari.Data.JSONSchema where
 
-import Data.Aeson (ToJSON (..), Value, object, (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withObject, (.:), (.:?), (.=))
 import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.Id (GenericId)
@@ -97,3 +104,76 @@ instance ToJSON AdditionalProperties where
   toJSON additionalProperties = case additionalProperties of
     AdditionalPropertiesBoolean allowed -> toJSON allowed
     AdditionalPropertiesSchema valueSchema -> toJSON valueSchema
+
+-- | The inverse of 'ToJSON', classifying by the discriminating keyword. The order mirrors emission:
+-- the sentinel and structural keywords are checked before @type@, and an object carrying none of the
+-- modelled keywords decodes as 'SchemaAny' (the empty schema admits extra keys by design).
+instance FromJSON JSONSchema where
+  parseJSON = withObject "JSONSchema" $ \schemaObject -> do
+    generic <- schemaObject .:? "$generic"
+    notKeyword <- schemaObject .:? "not"
+    -- @const@ is looked up by key membership, not @.:?@ — a @{"const": null}@ pins the literal null,
+    -- which @.:?@ would conflate with the key being absent.
+    let constant = KeyMap.lookup "const" schemaObject
+    anyOfBranches <- schemaObject .:? "anyOf"
+    typeName <- schemaObject .:? "type"
+    case (generic, notKeyword :: Maybe Value, constant, anyOfBranches) of
+      (Just genericId, _, _, _) -> pure (SchemaGeneric genericId)
+      (_, Just _, _, _) -> pure SchemaNever
+      (_, _, Just value, _) -> pure (SchemaConst value)
+      (_, _, _, Just branches) -> pure (SchemaAnyOf branches)
+      _ -> case typeName :: Maybe Text of
+        Just "null" -> pure SchemaNull
+        Just "boolean" -> pure SchemaBoolean
+        Just "integer" -> pure SchemaInteger
+        Just "number" -> pure SchemaNumber
+        Just "string" -> pure SchemaString
+        Just "array" -> do
+          prefixItems <- schemaObject .:? "prefixItems"
+          case prefixItems of
+            Just itemSchemas -> pure (SchemaTuple itemSchemas)
+            Nothing -> do
+              items <- schemaObject .:? "items"
+              pure (SchemaArray (resolveOptionalSchema items))
+        Just "object" -> SchemaObject <$> parseObjectSchema schemaObject
+        Just other -> fail ("unsupported schema type: " <> show other)
+        Nothing -> pure SchemaAny
+
+-- | Decode the object-schema keywords off an already-opened @{"type": "object", ...}@ document.
+-- JSON object keys are unordered, so properties come back in key order.
+parseObjectSchema :: KeyMap.KeyMap Value -> Parser ObjectSchema
+parseObjectSchema schemaObject = do
+  propertiesMap <- schemaObject .:? "properties"
+  properties <- case propertiesMap of
+    Nothing -> pure []
+    Just keyMap ->
+      traverse
+        (\(key, value) -> (Key.toText key,) <$> parseJSON value)
+        (KeyMap.toAscList keyMap)
+  required <- schemaObject .:? "required"
+  additionalProperties <- schemaObject .:? "additionalProperties"
+  pure
+    ObjectSchema
+      { properties = properties,
+        required = resolveOptionalList required,
+        -- JSON Schema's default: absent means additional keys are admitted.
+        additionalProperties = resolveOptionalAdditional additionalProperties
+      }
+  where
+    resolveOptionalList = \case
+      Just names -> names
+      Nothing -> []
+    resolveOptionalAdditional = \case
+      Just value -> value
+      Nothing -> AdditionalPropertiesBoolean True
+
+-- | @{"type": "array"}@ with no @items@ constrains its elements not at all.
+resolveOptionalSchema :: Maybe JSONSchema -> JSONSchema
+resolveOptionalSchema = \case
+  Just schema -> schema
+  Nothing -> SchemaAny
+
+instance FromJSON AdditionalProperties where
+  parseJSON value = case value of
+    Bool allowed -> pure (AdditionalPropertiesBoolean allowed)
+    _ -> AdditionalPropertiesSchema <$> parseJSON value

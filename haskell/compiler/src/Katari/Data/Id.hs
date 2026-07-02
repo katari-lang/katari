@@ -1,6 +1,6 @@
 module Katari.Data.Id where
 
-import Data.Aeson (ToJSON (..))
+import Data.Aeson (FromJSON (..), ToJSON (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName)
 
@@ -25,6 +25,17 @@ inferenceModuleName = ModuleName "<infer>"
 -- callable's @genericBindings@ both serialize through this, so they always agree.
 instance ToJSON GenericId where
   toJSON (GenericId _ index) = toJSON index
+
+-- | The reserved module a 'GenericId' decoded back off the wire carries: the wire holds only the raw
+-- index, and the declaring module cannot be recovered. Like 'inferenceModuleName' it can never
+-- collide with a real declaration's module. Decoded ids stay mutually consistent — every id read
+-- from one document carries this same module, so index equality is id equality, which is all a
+-- wire-side reader (e.g. the CLI matching a schema's @$generic@ against @genericBindings@) needs.
+wireModuleName :: ModuleName
+wireModuleName = ModuleName "<wire>"
+
+instance FromJSON GenericId where
+  parseJSON value = GenericId wireModuleName <$> parseJSON value
 
 newtype LocalVariableId = LocalVariableId Int
   deriving stock (Eq, Ord, Show)

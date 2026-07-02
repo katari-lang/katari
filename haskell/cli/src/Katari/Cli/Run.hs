@@ -96,7 +96,7 @@ run options = do
   token <- runtimeAuthFromEnvironment
   let client = newRuntimeClient manager url token
       projectName = config.package.name
-  projects <- listProjects client
+  (_, projects) <- listProjects client
   projectId <- case filter (\project -> project.name == projectName) projects of
     (existing : _) -> pure existing.id
     [] -> dieIn "run" ("project " <> projectName <> " is not deployed; run `katari apply` first")

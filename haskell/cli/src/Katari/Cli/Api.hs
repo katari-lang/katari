@@ -5,13 +5,15 @@
 -- hides both of those conventions: callers see plain decoded payloads, and a non-2xx response or a
 -- network failure is raised as a 'RuntimeError' rather than crashing with a raw 'HttpException'.
 --
--- Only the surface @katari apply@ needs is implemented: list / create projects, read a project's
--- snapshot head, and deploy a new snapshot. The per-module deploy protocol it speaks to is described
--- in @docs\/2026-06-19-per-module-snapshot.md@.
+-- Reads that back a @--json@ flag come as a pair via 'getWithRaw' — the raw envelope payload for
+-- verbatim machine output next to the typed view the human rendering uses — so one request serves
+-- both output modes. The file download is the one endpoint outside the envelope (raw bytes); it gets
+-- its own streaming primitive.
 module Katari.Cli.Api
   ( RuntimeClient (..),
     RuntimeError (..),
     newRuntimeClient,
+    withTrace,
     runtimeAuthFromEnvironment,
     renderRuntimeError,
 
@@ -19,23 +21,57 @@ module Katari.Cli.Api
     ProjectRow (..),
     listProjects,
     createProject,
+    deleteProject,
 
     -- * Snapshots
     ModuleUpload (..),
+    SnapshotRow (..),
     listHeadModules,
+    listSnapshots,
     deploySnapshot,
+
+    -- * Agents
+    AgentView (..),
+    AgentsResponse (..),
+    listAgents,
+    getAgent,
 
     -- * Runs
     StartRunRequest (..),
     RunView (..),
+    RunDetail (..),
+    RunListQuery (..),
     startRun,
     getRun,
+    getRunDetail,
+    listRuns,
+    cancelRun,
+
+    -- * Escalations
+    EscalationView (..),
+    listEscalations,
+    answerEscalation,
+
+    -- * Env entries
+    EnvEntry (..),
+    listEnv,
+    getEnv,
+    setEnv,
+    unsetEnv,
+
+    -- * Files
+    FileRow (..),
+    UploadedFile (..),
+    listFiles,
+    uploadFile,
+    downloadFileTo,
   )
 where
 
 import Control.Exception (Exception, throwIO, try)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
+import Data.ByteString qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
@@ -48,6 +84,7 @@ import Network.HTTP.Client
     Manager,
     Request,
     RequestBody (..),
+    brRead,
     httpLbs,
     method,
     parseRequest,
@@ -55,21 +92,26 @@ import Network.HTTP.Client
     requestHeaders,
     responseBody,
     responseStatus,
+    streamFile,
+    withResponse,
   )
 import Network.HTTP.Client qualified as HttpClient
 import Network.HTTP.Types.Status (statusCode)
 import System.Environment (lookupEnv)
+import System.IO (Handle)
 
 -- ===========================================================================
 -- Client + errors
 -- ===========================================================================
 
 -- | Everything one runtime call needs: the @[runtime].url@ base (trailing slash stripped), the
--- optional bearer token, and a shared connection manager.
+-- optional bearer token, a shared connection manager, and the @--verbose@ trace sink (a no-op by
+-- default).
 data RuntimeClient = RuntimeClient
   { baseUrl :: Text,
     authToken :: Maybe Text,
-    manager :: Manager
+    manager :: Manager,
+    trace :: Text -> IO ()
   }
 
 -- | A runtime call that did not return a decodable 2xx payload.
@@ -101,11 +143,15 @@ apiPrefix = "/api/v1"
 -- dropped so paths join cleanly.
 newRuntimeClient :: Manager -> Text -> Maybe Text -> RuntimeClient
 newRuntimeClient manager base token =
-  RuntimeClient {baseUrl = stripTrailingSlash base, authToken = token, manager = manager}
+  RuntimeClient {baseUrl = stripTrailingSlash base, authToken = token, manager = manager, trace = \_ -> pure ()}
   where
     stripTrailingSlash text = case Text.unsnoc text of
       Just (rest, '/') -> rest
       _ -> text
+
+-- | Attach a @--verbose@ trace sink; every request and response status flows through it.
+withTrace :: (Text -> IO ()) -> RuntimeClient -> RuntimeClient
+withTrace sink client = client {trace = sink}
 
 -- | Read the bearer token from @KATARI_API_KEY@, treating unset / empty as 'Nothing'. The runtime
 -- does not require auth today, so this is sent only when present.
@@ -127,26 +173,46 @@ newtype SuccessEnvelope a = SuccessEnvelope a
 instance (FromJSON a) => FromJSON (SuccessEnvelope a) where
   parseJSON = withObject "SuccessEnvelope" $ \object' -> SuccessEnvelope <$> object' .: "data"
 
+-- | A GET whose payload both machine output (@--json@, verbatim) and human rendering (typed) read:
+-- one request, decoded twice.
+getWithRaw :: (FromJSON a) => RuntimeClient -> Text -> IO (Value, a)
+getWithRaw client path = do
+  SuccessEnvelope raw <- requestJson client "GET" path Nothing
+  case Aeson.fromJSON raw of
+    Aeson.Success typed -> pure (raw, typed)
+    Aeson.Error message -> throwIO (RuntimeDecodeError (Text.pack message))
+
+-- | Render optional query parameters, dropping the absent ones. Values here are ids, enum words and
+-- numbers — nothing needing percent-escaping.
+queryString :: List (Text, Maybe Text) -> Text
+queryString parameters = case [name <> "=" <> value | (name, Just value) <- parameters] of
+  [] -> ""
+  pairs -> "?" <> Text.intercalate "&" pairs
+
 -- ===========================================================================
 -- Projects
 -- ===========================================================================
 
--- | One project as returned by the runtime. Other columns (description, readme, head, timestamps)
--- exist on the wire but are not needed here, so they are ignored.
+-- | One project as returned by the runtime. @readme@ / @head@ exist on the wire but are not needed
+-- here, so they are ignored.
 data ProjectRow = ProjectRow
   { id :: Text,
-    name :: Text
+    name :: Text,
+    description :: Maybe Text,
+    createdAt :: Maybe Text
   }
   deriving stock (Show)
 
 instance FromJSON ProjectRow where
   parseJSON = withObject "ProjectRow" $ \object' ->
-    ProjectRow <$> object' .: "id" <*> object' .: "name"
+    ProjectRow
+      <$> object' .: "id"
+      <*> object' .: "name"
+      <*> object' .:? "description"
+      <*> object' .:? "createdAt"
 
-listProjects :: RuntimeClient -> IO (List ProjectRow)
-listProjects client = do
-  SuccessEnvelope projects <- requestJson client "GET" "/projects" Nothing
-  pure projects
+listProjects :: RuntimeClient -> IO (Value, List ProjectRow)
+listProjects client = getWithRaw client "/projects"
 
 -- | Create a project with the given name and optional description. Fails with a 'RuntimeHttpError'
 -- (409) if a project of that name already exists.
@@ -155,6 +221,11 @@ createProject client name description = do
   let body = object (["name" .= name] <> maybe [] (\value -> ["description" .= value]) description)
   SuccessEnvelope project <- requestJson client "POST" "/projects" (Just (Aeson.encode body))
   pure project
+
+deleteProject :: RuntimeClient -> Text -> IO ()
+deleteProject client projectId = do
+  SuccessEnvelope (_ :: Value) <- requestJson client "DELETE" ("/projects/" <> projectId) Nothing
+  pure ()
 
 -- ===========================================================================
 -- Snapshots
@@ -171,6 +242,18 @@ data ModuleUpload = ModuleUpload
 -- | Drop the @ir@ field entirely when absent, matching the runtime's @{ hash, ir? }@ schema.
 instance ToJSON ModuleUpload where
   toJSON upload = object (["hash" .= upload.hash] <> maybe [] (\value -> ["ir" .= value]) upload.ir)
+
+-- | One deployed snapshot's listing row.
+data SnapshotRow = SnapshotRow
+  { id :: Text,
+    message :: Maybe Text,
+    createdAt :: Text
+  }
+  deriving stock (Show)
+
+instance FromJSON SnapshotRow where
+  parseJSON = withObject "SnapshotRow" $ \object' ->
+    SnapshotRow <$> object' .: "id" <*> object' .:? "message" <*> object' .: "createdAt"
 
 -- | The snapshot head's manifest: module name -> the content hash the runtime currently holds for
 -- it. Only @modules@ is read from the head response (the placeholder head, before any deploy, is an
@@ -198,6 +281,9 @@ listHeadModules client projectId = do
     requestJson client "GET" ("/projects/" <> projectId <> "/snapshots/head") Nothing
   pure head'.modules
 
+listSnapshots :: RuntimeClient -> Text -> IO (Value, List SnapshotRow)
+listSnapshots client projectId = getWithRaw client ("/projects/" <> projectId <> "/snapshots")
+
 -- | Deploy a new snapshot from the complete desired manifest, returning the new snapshot's id. The
 -- compiled FFI sidecar bundle (the bundler's opaque JSON, or 'Nothing' when the project has no external
 -- handlers) rides along; it is omitted from the body when absent, matching the runtime's optional field.
@@ -211,6 +297,49 @@ deploySnapshot client projectId message sidecarBundle modules = do
   SuccessEnvelope (response :: DeployResponse) <-
     requestJson client "POST" ("/projects/" <> projectId <> "/snapshots") (Just (Aeson.encode body))
   pure response.id
+
+-- ===========================================================================
+-- Agents
+-- ===========================================================================
+
+-- | One callable's schema slice, as the runtime reads it out of the snapshot IR. The schemas stay
+-- raw 'Value's here; the prompt layer decodes them into the compiler's typed 'JSONSchema' when it
+-- actually walks them.
+data AgentView = AgentView
+  { qualifiedName :: Text,
+    input :: Value,
+    output :: Value
+  }
+  deriving stock (Show)
+
+instance FromJSON AgentView where
+  parseJSON = withObject "AgentView" $ \object' ->
+    AgentView <$> object' .: "qualifiedName" <*> object' .: "input" <*> object' .: "output"
+
+-- | The agents listing: which snapshot was read (the head, unless pinned) and its callables.
+data AgentsResponse = AgentsResponse
+  { snapshotId :: Text,
+    agents :: List AgentView
+  }
+  deriving stock (Show)
+
+instance FromJSON AgentsResponse where
+  parseJSON = withObject "AgentsResponse" $ \object' ->
+    AgentsResponse <$> object' .: "snapshotId" <*> object' .: "agents"
+
+listAgents :: RuntimeClient -> Text -> Maybe Text -> IO (Value, AgentsResponse)
+listAgents client projectId snapshotId =
+  getWithRaw client ("/projects/" <> projectId <> "/agents" <> queryString [("snapshotId", snapshotId)])
+
+getAgent :: RuntimeClient -> Text -> Text -> Maybe Text -> IO AgentView
+getAgent client projectId qualifiedName snapshotId = do
+  SuccessEnvelope agent <-
+    requestJson
+      client
+      "GET"
+      ("/projects/" <> projectId <> "/agents/" <> qualifiedName <> queryString [("snapshotId", snapshotId)])
+      Nothing
+  pure agent
 
 -- ===========================================================================
 -- Runs
@@ -243,9 +372,9 @@ newtype RunStarted = RunStarted {id :: Text}
 instance FromJSON RunStarted where
   parseJSON = withObject "RunStarted" $ \object' -> RunStarted <$> object' .: "id"
 
--- | The slice of a run's view the CLI needs to report its outcome: the lifecycle @state@ (running /
--- cancelling / done / cancelled / error), the @result@ JSON (present once @done@), and the @errorMessage@
--- (present once @error@). The other view fields are ignored.
+-- | The slice of a run's view the wait loop needs: the lifecycle @state@ (running / cancelling / done /
+-- cancelled / error), the @result@ JSON (present once @done@), and the @errorMessage@ (present once
+-- @error@). The other view fields are ignored.
 data RunView = RunView
   { state :: Text,
     result :: Maybe Value,
@@ -257,6 +386,44 @@ instance FromJSON RunView where
   parseJSON = withObject "RunView" $ \object' ->
     RunView <$> object' .: "state" <*> object' .:? "result" <*> object' .:? "errorMessage"
 
+-- | A run's full management view, for @status@ and the runs listing.
+data RunDetail = RunDetail
+  { id :: Text,
+    name :: Text,
+    qualifiedName :: Text,
+    snapshotId :: Maybe Text,
+    state :: Text,
+    argument :: Maybe Value,
+    result :: Maybe Value,
+    errorMessage :: Maybe Text,
+    cancelReason :: Maybe Text,
+    createdAt :: Text,
+    completedAt :: Maybe Text
+  }
+  deriving stock (Show)
+
+instance FromJSON RunDetail where
+  parseJSON = withObject "RunDetail" $ \object' ->
+    RunDetail
+      <$> object' .: "id"
+      <*> object' .: "name"
+      <*> object' .: "qualifiedName"
+      <*> object' .:? "snapshotId"
+      <*> object' .: "state"
+      <*> object' .:? "argument"
+      <*> object' .:? "result"
+      <*> object' .:? "errorMessage"
+      <*> object' .:? "cancelReason"
+      <*> object' .: "createdAt"
+      <*> object' .:? "completedAt"
+
+-- | Listing filters, mirroring the runtime's query parameters.
+data RunListQuery = RunListQuery
+  { state :: Maybe Text,
+    limit :: Maybe Int
+  }
+  deriving stock (Show)
+
 -- | Start a run, returning its id (the durable run handle).
 startRun :: RuntimeClient -> Text -> StartRunRequest -> IO Text
 startRun client projectId request = do
@@ -264,12 +431,206 @@ startRun client projectId request = do
     requestJson client "POST" ("/projects/" <> projectId <> "/runs") (Just (Aeson.encode request))
   pure started.id
 
--- | Fetch a run's current view (state + outcome).
+-- | Fetch a run's current view (state + outcome), for the wait loop.
 getRun :: RuntimeClient -> Text -> Text -> IO RunView
 getRun client projectId runId = do
   SuccessEnvelope (view :: RunView) <-
     requestJson client "GET" ("/projects/" <> projectId <> "/runs/" <> runId) Nothing
   pure view
+
+getRunDetail :: RuntimeClient -> Text -> Text -> IO (Value, RunDetail)
+getRunDetail client projectId runId = getWithRaw client ("/projects/" <> projectId <> "/runs/" <> runId)
+
+listRuns :: RuntimeClient -> Text -> RunListQuery -> IO (Value, List RunDetail)
+listRuns client projectId query =
+  getWithRaw
+    client
+    ( "/projects/"
+        <> projectId
+        <> "/runs"
+        <> queryString [("state", query.state), ("limit", fmap (Text.pack . show) query.limit)]
+    )
+
+-- | Ask the runtime to cancel a run (it transitions to @cancelling@ and winds down asynchronously).
+cancelRun :: RuntimeClient -> Text -> Text -> Maybe Text -> IO ()
+cancelRun client projectId runId reason = do
+  let body = object (maybe [] (\text -> ["reason" .= text]) reason)
+  SuccessEnvelope (_ :: Value) <-
+    requestJson client "POST" ("/projects/" <> projectId <> "/runs/" <> runId <> "/cancel") (Just (Aeson.encode body))
+  pure ()
+
+-- ===========================================================================
+-- Escalations
+-- ===========================================================================
+
+-- | One open escalation: which request is being asked, its question (already secret-redacted by the
+-- runtime), the run waiting on it, and the schema an answer must satisfy ('Nothing' when the runtime
+-- could not derive one — the prompt falls back to raw JSON input).
+data EscalationView = EscalationView
+  { id :: Text,
+    request :: Text,
+    argument :: Maybe Value,
+    runId :: Text,
+    createdAt :: Text,
+    answerSchema :: Maybe Value
+  }
+  deriving stock (Show)
+
+instance FromJSON EscalationView where
+  parseJSON = withObject "EscalationView" $ \object' ->
+    EscalationView
+      <$> object' .: "id"
+      <*> object' .: "request"
+      <*> object' .:? "argument"
+      <*> object' .: "runId"
+      <*> object' .: "createdAt"
+      <*> object' .:? "answerSchema"
+
+listEscalations :: RuntimeClient -> Text -> IO (Value, List EscalationView)
+listEscalations client projectId = getWithRaw client ("/projects/" <> projectId <> "/escalations")
+
+answerEscalation :: RuntimeClient -> Text -> Text -> Value -> IO ()
+answerEscalation client projectId escalationId value = do
+  SuccessEnvelope (_ :: Value) <-
+    requestJson
+      client
+      "POST"
+      ("/projects/" <> projectId <> "/escalations/" <> escalationId <> "/answer")
+      (Just (Aeson.encode (object ["value" .= value])))
+  pure ()
+
+-- ===========================================================================
+-- Env entries
+-- ===========================================================================
+
+-- | One env entry. The runtime withholds a secret's value on every read (it is write-only over the
+-- API; programs read it via @env.get_secret@), so @value@ is present only for non-secret entries.
+data EnvEntry = EnvEntry
+  { key :: Text,
+    isSecret :: Bool,
+    value :: Maybe Text,
+    updatedAt :: Maybe Text
+  }
+  deriving stock (Show)
+
+instance FromJSON EnvEntry where
+  parseJSON = withObject "EnvEntry" $ \object' ->
+    EnvEntry
+      <$> object' .: "key"
+      <*> object' .: "isSecret"
+      <*> object' .:? "value"
+      <*> object' .:? "updatedAt"
+
+listEnv :: RuntimeClient -> Text -> IO (Value, List EnvEntry)
+listEnv client projectId = getWithRaw client ("/projects/" <> projectId <> "/env")
+
+getEnv :: RuntimeClient -> Text -> Text -> IO EnvEntry
+getEnv client projectId key = do
+  SuccessEnvelope entry <- requestJson client "GET" ("/projects/" <> projectId <> "/env/" <> key) Nothing
+  pure entry
+
+setEnv :: RuntimeClient -> Text -> Text -> Text -> Bool -> IO ()
+setEnv client projectId key value isSecret = do
+  let body = object ["value" .= value, "isSecret" .= isSecret]
+  SuccessEnvelope (_ :: Value) <-
+    requestJson client "PUT" ("/projects/" <> projectId <> "/env/" <> key) (Just (Aeson.encode body))
+  pure ()
+
+unsetEnv :: RuntimeClient -> Text -> Text -> IO ()
+unsetEnv client projectId key = do
+  SuccessEnvelope (_ :: Value) <-
+    requestJson client "DELETE" ("/projects/" <> projectId <> "/env/" <> key) Nothing
+  pure ()
+
+-- ===========================================================================
+-- Files
+-- ===========================================================================
+
+-- | One stored file's metadata row.
+data FileRow = FileRow
+  { id :: Text,
+    hash :: Text,
+    size :: Int,
+    contentType :: Maybe Text,
+    semanticKind :: Maybe Text
+  }
+  deriving stock (Show)
+
+instance FromJSON FileRow where
+  parseJSON = withObject "FileRow" $ \object' ->
+    FileRow
+      <$> object' .: "id"
+      <*> object' .: "hash"
+      <*> object' .: "size"
+      <*> object' .:? "contentType"
+      <*> object' .:? "semanticKind"
+
+-- | The upload response: the stored blob's handle.
+data UploadedFile = UploadedFile
+  { id :: Text,
+    hash :: Text,
+    size :: Int
+  }
+  deriving stock (Show)
+
+instance FromJSON UploadedFile where
+  parseJSON = withObject "UploadedFile" $ \object' ->
+    UploadedFile <$> object' .: "id" <*> object' .: "hash" <*> object' .: "size"
+
+listFiles :: RuntimeClient -> Text -> IO (Value, List FileRow)
+listFiles client projectId = getWithRaw client ("/projects/" <> projectId <> "/files")
+
+-- | Upload a file's bytes (streamed from disk, not buffered) under the given content type.
+uploadFile :: RuntimeClient -> Text -> FilePath -> Text -> IO UploadedFile
+uploadFile client projectId path contentType = do
+  streamedBody <- streamFile path
+  request <- buildRequest client "POST" ("/projects/" <> projectId <> "/files") Nothing
+  let uploadRequest =
+        request
+          { requestBody = streamedBody,
+            requestHeaders =
+              ("Content-Type", TextEncoding.encodeUtf8 contentType)
+                : [header | header <- requestHeaders request, fst header /= "Content-Type"]
+          }
+  client.trace ("POST /projects/" <> projectId <> "/files (streaming " <> Text.pack path <> ")")
+  response <- httpLbs uploadRequest client.manager
+  let status = statusCode (responseStatus response)
+      responseBytes = responseBody response
+  client.trace ("-> " <> Text.pack (show status))
+  if status >= 200 && status < 300
+    then case Aeson.eitherDecode responseBytes of
+      Right (SuccessEnvelope uploaded) -> pure uploaded
+      Left message -> throwIO (RuntimeDecodeError (Text.pack message))
+    else throwIO (RuntimeHttpError status (extractErrorMessage responseBytes))
+
+-- | Stream a file's bytes to the given handle. This endpoint returns raw bytes with no envelope, so
+-- it bypasses 'requestJson'; a non-2xx still carries the JSON error envelope and is raised as usual.
+downloadFileTo :: RuntimeClient -> Text -> Text -> Handle -> IO ()
+downloadFileTo client projectId fileId sink = do
+  request <- buildRequest client "GET" ("/projects/" <> projectId <> "/files/" <> fileId) Nothing
+  client.trace ("GET /projects/" <> projectId <> "/files/" <> fileId <> " (streaming)")
+  withResponse request client.manager $ \response -> do
+    let status = statusCode (responseStatus response)
+    client.trace ("-> " <> Text.pack (show status))
+    if status >= 200 && status < 300
+      then
+        let copyChunks = do
+              chunk <- brRead (responseBody response)
+              if ByteString.null chunk
+                then pure ()
+                else ByteString.hPut sink chunk >> copyChunks
+         in copyChunks
+      else do
+        body <- brReadAll (responseBody response)
+        throwIO (RuntimeHttpError status (extractErrorMessage (LazyByteString.fromStrict body)))
+  where
+    brReadAll reader = go []
+      where
+        go accumulated = do
+          chunk <- brRead reader
+          if ByteString.null chunk
+            then pure (ByteString.concat (reverse accumulated))
+            else go (chunk : accumulated)
 
 -- ===========================================================================
 -- HTTP primitives
@@ -279,6 +640,7 @@ getRun client projectId runId = do
 -- 'RuntimeError'.
 requestJson :: (FromJSON a) => RuntimeClient -> Text -> Text -> Maybe LazyByteString.ByteString -> IO a
 requestJson client httpMethod path body = do
+  client.trace (httpMethod <> " " <> path)
   -- 'buildRequest' runs inside the 'try': 'parseRequest' throws an 'HttpException' (InvalidUrlException)
   -- on a malformed URL, and we want that surfaced as a 'RuntimeError' too — not as an uncaught crash.
   result <- try $ do
@@ -289,6 +651,7 @@ requestJson client httpMethod path body = do
     Right response -> pure response
   let status = statusCode (responseStatus response)
       responseBytes = responseBody response
+  client.trace ("-> " <> Text.pack (show status) <> " (" <> Text.pack (show (LazyByteString.length responseBytes)) <> " bytes)")
   if status >= 200 && status < 300
     then case Aeson.eitherDecode responseBytes of
       Right value -> pure value

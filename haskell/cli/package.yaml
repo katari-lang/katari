@@ -21,6 +21,12 @@ dependencies:
   - http-client
   - http-client-tls
   - http-types
+  # ANSI styling + cursor control for the interactive prompts and coloured human output.
+  - ansi-terminal
+  # Distinguishing integer from fractional JSON numbers when coercing typed prompt input.
+  - scientific
+  # Building aeson arrays from prompted elements.
+  - vector
   # The compiler driver and the IR / module-name / diagnostics types it produces.
   - katari-compiler
   # Project discovery, dependency resolution, the lockfile, and the per-module upload plan.
@@ -43,6 +49,9 @@ library:
   exposed-modules:
     - Katari.Cli.Api
     - Katari.Cli.Common
+    - Katari.Cli.Options
+    - Katari.Cli.Output
+    - Katari.Cli.Prompt
     - Katari.Cli.Build
     - Katari.Cli.Apply
     - Katari.Cli.Run
@@ -57,6 +66,21 @@ executables:
       - -with-rtsopts=-N
     dependencies:
       - katari-cli
+
+tests:
+  katari-cli-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-cli
+      - katari-compiler
+      - hspec
+    build-tools:
+      - hspec-discover
 
 default-extensions:
   - LambdaCase
