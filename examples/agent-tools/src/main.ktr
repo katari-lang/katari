@@ -1,8 +1,8 @@
 // Agents as AI tools, end to end — without a real AI, so the whole loop is deterministic:
 //
 //   1. `tool_list` derives each tool's schema with `ai.get_metadata` and builds the JSON an AI
-//      tool-calling API would receive (`json.encode` mixes plain fields with schema values, and
-//      `json.stringify` is generic — it renders any value as its document).
+//      tool-calling API would receive — explicit `json` tree construction (`json.json_object` /
+//      `json.json_string`), embedding each schema (already a `json` value) as a subtree.
 //   2. A canned "AI reply" (a tool pick + arguments, as JSON text) is read with the TYPED text
 //      boundary `json.parse_as[T]`: parsed and validated against T's schema in one step, so the
 //      reply's shape is pinned by a type instead of a match dance. (The untyped `json.parse` +
@@ -31,18 +31,25 @@ agent greet(name: string) -> string {
 agent tool_list(tools: array[agent never -> unknown with all]) -> json.json {
   let specs = for (tool in tools) {
     let m = ai.get_metadata(value = tool)
-    next json.encode(value = { name = m.name, description = m.description, input_schema = m.input })
+    next json.json_object(entries = {
+      name = json.json_string(value = m.name),
+      description = json.json_string(value = m.description),
+      input_schema = m.input,
+    })
   }
-  json.encode(value = specs)
+  json.json_array(items = specs)
 }
 
-@"Find the tool whose qualified name is @picked@ and call it with the AI-built @args@. The
-delegation boundary validates @args@ against the tool's input schema; a mismatch panics."
-agent dispatch(tools: array[agent never -> unknown with all], picked: string, args: unknown) -> json.json {
+@"Find the tool whose qualified name is @picked@, call it with the AI-built @args@, and render the
+result as the JSON text sent back to the AI. The delegation boundary validates @args@ against the
+tool's input schema; a mismatch panics."
+agent dispatch(tools: array[agent never -> unknown with all], picked: string, args: unknown) -> string {
   for (tool in tools) {
     let m = ai.get_metadata(value = tool)
     if (m.name == picked) {
-      return json.encode(value = ai.call_agent(target = tool, args = args))
+      // The tool's result is an arbitrary value; `to_text` renders its wire form as JSON text
+      // (`stringify(encode(...))` fused).
+      return json.to_text(value = ai.call_agent(target = tool, args = args))
     } else {
       null
     }
@@ -64,6 +71,6 @@ agent main() -> string {
   let picked = json.parse_as[{ tool: string, arguments: record[unknown] }](text = reply)
 
   // 3. Dispatch the pick; the result goes back to the AI as JSON text.
-  let result = json.stringify(value = dispatch(tools = tools, picked = picked.tool, args = picked.arguments))
+  let result = dispatch(tools = tools, picked = picked.tool, args = picked.arguments)
   f"tools=${body}; result=${result}"
 }

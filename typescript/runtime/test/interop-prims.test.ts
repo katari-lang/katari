@@ -82,18 +82,25 @@ describe("prelude.json", () => {
     expect(text).toEqual(str('{"a":[1,2],"b":"x"}'));
   });
 
-  test("encode embeds a plain record and passes an existing json value through unchanged", async () => {
-    const schema = jsonValueFromJson({ type: "string" });
+  test("encode embeds a plain record by its wire form", async () => {
     const encoded = await run("prelude.json.encode", {
-      value: {
-        kind: "record",
-        fields: { name: str("tool"), input_schema: schema },
-      },
+      value: { kind: "record", fields: { name: str("tool"), n: int(1) } },
     });
+    await expect(asJson(encoded)).resolves.toEqual({ name: "tool", n: 1 });
+  });
+
+  test("encode treats a json value like any data value (no special case) and decode inverts it", async () => {
+    // `json` is an ordinary data type: encoding a json value yields its tagged wire form, and
+    // decode[T] re-tags it back — the round-trip law decode(encode(x)) == x, uniform in T.
+    const original = jsonValueFromJson("hi");
+    const encoded = await run("prelude.json.encode", { value: original });
     await expect(asJson(encoded)).resolves.toEqual({
-      name: "tool",
-      input_schema: { type: "string" },
+      $constructor: "prelude.json.json_string",
+      value: "hi",
     });
+    await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(
+      original,
+    );
   });
 
   test("encode keeps a data value's constructor and decode re-tags it", async () => {
@@ -178,12 +185,47 @@ describe("prelude.json", () => {
     ).rejects.toThrow(/json\.parse_as: malformed JSON/);
   });
 
-  test("stringify is generic: a plain record renders as its document (json still passes through)", async () => {
+  test("to_text fuses stringify(encode(x)) and inverts parse_as", async () => {
+    const mixed: Value = {
+      kind: "record",
+      fields: {
+        a: int(1),
+        box: { kind: "record", ctor: createAgentName("main.box"), fields: { value: int(3) } },
+        j: jsonValueFromJson("hi"),
+      },
+    };
+    const fused = await run("prelude.json.to_text", { value: mixed });
+    const composed = await run("prelude.json.stringify", {
+      value: await run("prelude.json.encode", { value: mixed }),
+    });
+    expect(fused).toEqual(composed);
+    if (fused.kind !== "string") throw new Error("expected a string");
+    // parse_as[unknown] of to_text(x) round-trips x (the $constructor entries re-tag).
+    await expect(
+      run("prelude.json.parse_as", { text: fused }, contextWithT({})),
+    ).resolves.toEqual(mixed);
+    const closure: Value = {
+      kind: "closure",
+      blockId: 1,
+      scopeId: 0 as ScopeId,
+      snapshot: SNAPSHOT,
+      module: "main",
+    };
+    await expect(run("prelude.json.to_text", { value: closure })).rejects.toThrow(/closure/);
+  });
+
+  test("stringify takes json only; the generic pipe is stringify(encode(x))", async () => {
     await expect(
       run("prelude.json.stringify", {
-        value: { kind: "record", fields: { a: int(1), b: str("x") } },
+        value: { kind: "record", fields: { a: int(1) } },
       }),
-    ).resolves.toEqual(str('{"a":1,"b":"x"}'));
+    ).rejects.toThrow(/expected a json value/);
+    const embedded = await run("prelude.json.encode", {
+      value: { kind: "record", fields: { a: int(1), b: str("x") } },
+    });
+    await expect(run("prelude.json.stringify", { value: embedded })).resolves.toEqual(
+      str('{"a":1,"b":"x"}'),
+    );
   });
 });
 

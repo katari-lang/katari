@@ -6,12 +6,12 @@
 //   - `jsonValueToJson`:    tagged `json` value  ->  bare `Json`   (stringify / decode)
 //   - `encodeValue`:        any runtime `Value`  ->  tagged `json` value   (`json.encode`)
 //
-// `encodeValue` composes with `jsonValueFromJson` over the value codec's wire conventions: a `data`
-// value keeps its `$constructor` as an entry, a file ref becomes its `$ref` handle object, an agent
-// its `$agent` reference object — so `json.decode` (which flattens through `jsonValueToJson`, then lifts
-// and conforms) inverts it. A value that is ALREADY a `json` data value passes through unchanged,
-// which is what lets `json.encode({ name = ..., input_schema = m.input })` mix plain fields with
-// schema values from `get_metadata` without double-tagging.
+// `encodeValue` embeds by the value codec's wire conventions: a `data` value keeps its
+// `$constructor` as an entry, a file ref becomes its `$ref` handle object, an agent its `$agent`
+// reference object — so `json.decode[T]` (which flattens through `jsonValueToJson`, then lifts and
+// conforms) inverts it. `json` is an ordinary data type and gets NO special case: a `json` value
+// embeds as its tagged wire form like any other data value, which is exactly what keeps the law
+// `decode[T](encode(x)) == x` uniform — including for a T that contains `json` itself.
 //
 // Privacy: these walks keep private subtree *content* (nothing here crosses a user boundary — the
 // result is an ordinary in-engine value), and the primitive layer's monotonic taint rule marks the
@@ -34,23 +34,6 @@ export type StringReader = (value: Value) => Promise<string>;
 
 function tagged(ctor: string, fields: Record<string, Value>): Value {
   return { kind: "record", fields, ctor: createAgentName(ctor) };
-}
-
-/** Whether a value is one of the seven `prelude.json` data values (by its constructor tag). */
-export function isJsonValue(value: Value): boolean {
-  if (value.kind !== "record" || value.ctor === undefined) return false;
-  switch (String(value.ctor)) {
-    case JSON_NULL:
-    case JSON_BOOLEAN:
-    case JSON_INTEGER:
-    case JSON_NUMBER:
-    case JSON_STRING:
-    case JSON_ARRAY:
-    case JSON_OBJECT:
-      return true;
-    default:
-      return false;
-  }
 }
 
 /** Lift bare JSON into the tagged `json` data tree. A fraction-less number becomes `json_integer`
@@ -146,14 +129,12 @@ function scalarField(
 }
 
 /**
- * Embed any runtime value into the tagged `json` tree (`json.encode`). A value that is already
- * `json` passes through unchanged; otherwise the value codec's wire conventions apply — a `data`
- * value keeps its `$constructor` as an entry, a blob-backed string is materialised, a file ref
- * becomes its `$ref` handle object, an agent value its `$agent` reference object. A closure captures
- * engine-local scope and cannot be encoded.
+ * Embed any runtime value into the tagged `json` tree (`json.encode`), by the value codec's wire
+ * conventions: a `data` value — a `json` value included, uniformly — keeps its `$constructor` as an
+ * entry, a blob-backed string is materialised, a file ref becomes its `$ref` handle object, an agent
+ * value its `$agent` reference object. A closure captures engine-local scope and cannot be encoded.
  */
 export async function encodeValue(value: Value, readString: StringReader): Promise<Value> {
-  if (isJsonValue(value)) return value;
   switch (value.kind) {
     case "null":
       return tagged(JSON_NULL, {});
@@ -200,6 +181,53 @@ export async function encodeValue(value: Value, readString: StringReader): Promi
         entries[key] = await encodeValue(child, readString);
       }
       return tagged(JSON_OBJECT, { entries: { kind: "record", fields: entries } });
+    }
+  }
+}
+
+/**
+ * Render a runtime value directly as bare wire JSON (`json.to_text` — the fused inverse of
+ * `parse_as[T]`): the same wire conventions as `encodeValue`, emitting the document without
+ * building the intermediate tagged `json` tree, so `to_text(x) == stringify(encode(x))` with one
+ * walk instead of a build-then-flatten. (Kept as its own walk rather than composing the two: the
+ * tagged tree distinguishes `json_integer` / `json_number`, which bare JSON cannot, so deriving
+ * `encodeValue` from this walk would lose that split.)
+ */
+export async function valueToWireJson(value: Value, readString: StringReader): Promise<Json> {
+  switch (value.kind) {
+    case "null":
+      return null;
+    case "boolean":
+    case "integer":
+    case "number":
+    case "string":
+      return value.value;
+    case "ref":
+      if (value.semanticKind === "string") return readString(value);
+      return {
+        $ref: value.blobId,
+        semanticKind: value.semanticKind,
+        size: value.size,
+        hash: value.hash,
+      };
+    case "agent":
+      return { $agent: String(value.name) };
+    case "closure":
+      throw new Error("a closure value cannot cross the JSON boundary");
+    case "array": {
+      const out: Json[] = [];
+      for (const element of value.elements) {
+        out.push(await valueToWireJson(element, readString));
+      }
+      return out;
+    }
+    case "record": {
+      const out: { [key: string]: Json } = {};
+      if (value.ctor !== undefined) out.$constructor = String(value.ctor);
+      for (const [key, child] of Object.entries(value.fields)) {
+        out[key] = await valueToWireJson(child, readString);
+      }
+      return out;
     }
   }
 }

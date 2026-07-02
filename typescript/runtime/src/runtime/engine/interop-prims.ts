@@ -36,6 +36,7 @@ import {
   jsonValueFromJson,
   jsonValueToJson,
   type StringReader,
+  valueToWireJson,
 } from "./json-value.js";
 import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
 
@@ -73,15 +74,18 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return jsonValueFromJson(json);
   },
   "prelude.json.stringify": async (argument, context) => {
-    // Generic over the value: embed first (a `json` value passes through unchanged), then flatten —
-    // so `stringify[T]` is `stringify(encode(x))` in one step and the identity on `json`.
-    const reader = stringReaderOf(context);
-    const embedded = await encodeValue(field(argument, "value"), reader);
-    const json = await jsonValueToJson(embedded, reader);
+    // json -> its document text (`json` is the argument's declared type; the tree flattens to the
+    // document it stands for). The generic value-to-text pipe is `stringify(encode(x))` in source.
+    const json = await jsonValueToJson(field(argument, "value"), stringReaderOf(context));
     return { kind: "string", value: JSON.stringify(json) };
   },
   "prelude.json.encode": (argument, context) =>
     encodeValue(field(argument, "value"), stringReaderOf(context)),
+  "prelude.json.to_text": async (argument, context) => ({
+    // The fused inverse of parse_as[T]: value -> wire JSON -> text, with no intermediate tree.
+    kind: "string",
+    value: JSON.stringify(await valueToWireJson(field(argument, "value"), stringReaderOf(context))),
+  }),
   "prelude.json.decode": async (argument, context) => {
     // Schema-directed: the call site's [T] instantiation carried T's schema here; flatten the tree
     // to bare JSON, then lift-and-conform against it (`$constructor` entries re-tag data values).

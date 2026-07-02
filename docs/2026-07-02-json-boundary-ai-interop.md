@@ -120,13 +120,20 @@ Follow-up slice, superseding some names above (`primitive.*` → `prelude.*`).
    *instantiated* schemas (`pick[T](x: T)` called with an integer now rejects a string argument),
    and schema-directed prims read their own `[T]` from `PrimContext.generics`.
 
-3. **The JSON boundary is typed.** `json.decode` is now `decode[T](value: json) -> T` — validated
-   against T's schema, `panic` on mismatch; the untyped `-> unknown` form is gone (T appears only
-   in the result, so an uninstantiated call is already a K3016 compile error). `json.parse_as[T]
-   (text: string) -> T` is the fused text boundary: `JSON.parse -> value lift -> conform`, with no
-   intermediate tagged `json` tree (cheaper than `decode(parse(text))`, which builds and then
-   flattens one). `json.stringify` generalised to `stringify[T](value: T) -> string` (embed first;
-   a `json` value passes through, so it subsumes the old form and fuses `stringify(encode(x))`).
+3. **The JSON boundary is typed — and `json` is treated as an ordinary data type throughout.**
+   `json.decode` is now `decode[T](value: json) -> T` — validated against T's schema, `panic` on
+   mismatch; the untyped `-> unknown` form is gone (T appears only in the result, so an
+   uninstantiated call is already a K3016 compile error). Two fused primitives complete the pairs:
+   `parse_as[T](text) -> T` (= `decode[T]` of `parse` without the intermediate tree) and
+   `to_text[T](value) -> string` (= `stringify` of `encode` without the tree). `stringify` itself
+   stays `json -> string` (the tree's document text). An earlier draft made `stringify` generic
+   with a `json` pass-through in `encode`; that special case broke the uniform round-trip law —
+   `decode[T](encode(x)) == x` failed for any T containing `json` (the pass-through emitted a
+   *document* where the schema expects the tagged wire form). `encode` therefore embeds a `json`
+   value like any other data value (`$constructor` entry), the laws hold for every T, and the
+   fused pair provably agrees with the composed one. Composing documents out of existing `json`
+   values (a tool list embedding `get_metadata` schemas) is explicit tree construction:
+   `json_object(entries = { input_schema = m.input, ... })`.
 
 4. **A latent `use`-provider convention mismatch, exposed by validation and fixed.** The provider's
    *type* (and schema) says its argument is `{ continuation: agent ... }`, but `use` lowering
