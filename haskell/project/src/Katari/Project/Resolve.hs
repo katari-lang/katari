@@ -112,10 +112,14 @@ data ResolvedPackage = ResolvedPackage
   deriving (Show)
 
 -- | The full transitive closure starting from the root @katari.toml@. 'depPackages' is keyed by the
--- dependency name (the @import@ name) and excludes the root.
+-- dependency name (the @import@ name) and excludes the root. 'snapshotCompilerVersion' is the
+-- @katari_compiler@ the registry snapshot declares, when resolution loaded one — the CLI compares it
+-- against its own version to warn about a set built for a different compiler ('Nothing' when
+-- resolution never touched the registry, including every offline load).
 data ResolvedProject = ResolvedProject
   { rootPackage :: ResolvedPackage,
-    depPackages :: Map Text ResolvedPackage
+    depPackages :: Map Text ResolvedPackage,
+    snapshotCompilerVersion :: Maybe Text
   }
   deriving (Show)
 
@@ -223,7 +227,8 @@ resolveProjectM manager rootDir = do
   pure
     ResolvedProject
       { rootPackage = ResolvedPackage {root = canonicalRoot, config = rootConfig, sources = rootSources, provenance = Nothing},
-        depPackages = finalState.resolved
+        depPackages = finalState.resolved,
+        snapshotCompilerVersion = finalState.snapshotCache >>= \snapshot -> snapshot.compilerVersion
       }
 
 -- | Resolve one dependency name (and, transitively, its own dependencies) into resolution state.
@@ -327,7 +332,8 @@ loadProjectOfflineM overlay rootDir = do
   pure
     ResolvedProject
       { rootPackage = ResolvedPackage {root = canonicalRoot, config = rootConfig, sources = rootSources, provenance = Nothing},
-        depPackages = Map.fromList dependencyPackages
+        depPackages = Map.fromList dependencyPackages,
+        snapshotCompilerVersion = Nothing
       }
   where
     requireLocked lockfile name =

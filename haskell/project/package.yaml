@@ -52,6 +52,7 @@ library:
     - Katari.Project.Http
     - Katari.Project.Config
     - Katari.Project.Discovery
+    - Katari.Project.Edit
     - Katari.Project.Cache
     - Katari.Project.Fetch
     - Katari.Project.Snapshot

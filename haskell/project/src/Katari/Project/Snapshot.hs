@@ -1,26 +1,29 @@
--- | Registry snapshot files — the curated @(url, rev, sha256)@ pins for each package in a set.
+-- | Registry snapshot files — the curated @(repo, ref, sha256)@ pins for each package in a set.
 --
--- A snapshot is an enumeration of pinned git sources, so its entries are 'GitSource' values (the
--- same type the lockfile records); the snapshot file is just their wire format.
+-- The wire format is owned by the @katari-registry@ repository (its README is the source of truth);
+-- this module conforms to it. A snapshot is an enumeration of pinned git sources, so its entries
+-- decode to 'GitSource' values (the same type the lockfile records).
 --
 -- Two concerns:
 --
---   1. Parse a snapshot TOML file (one @package-sets/\<version>.toml@):
+--   1. Parse a snapshot TOML file:
 --
 --      @
---      # compiler = "0.1.0"   # optional
+--      katari_compiler = "0.1.0"   # optional
 --      [packages.list_utils]
---      url    = "https://github.com/katari-lang/list_utils"
---      rev    = "v0.2.1"
---      sha256 = "abc..."
+--      version = "1.0.0"           # informational; ignored here
+--      repo    = "https://github.com/katari-lang/list_utils"
+--      ref     = "v0.2.1"
+--      sha256  = "abc..."
 --      @
 --
 --   2. Resolve a URL (from @[dependencies].registry@ + @[dependencies].snapshot@) into the snapshot
---      bytes, supporting @file://@ and @https://@ plus the "URL points at the registry root, the
---      version is the filename" convention (@\<root>/package-sets/\<version>.toml@).
+--      bytes, supporting @file://@ and @https://@ plus the registry's layout convention: the mutable
+--      candidate set lives at @\<root>/package-sets/staging.toml@, every immutable cut lives under
+--      @\<root>/package-sets/snapshots/\<name>.toml@.
 --
 -- Downstream ("Katari.Project.Resolve") looks up each dep, fetches the tarball at the pinned
--- @(url, rev)@ via "Katari.Project.Fetch", and verifies the download against the @sha256@ pin.
+-- @(repo, ref)@ via "Katari.Project.Fetch", and verifies the download against the @sha256@ pin.
 module Katari.Project.Snapshot
   ( Snapshot (..),
     parseSnapshot,
@@ -61,40 +64,43 @@ data Snapshot = Snapshot
   deriving (Show, Eq)
 
 -- | URL scheme prefixes and the registry-root path convention.
-schemeFile, schemeHttps, packageSetsDir, tomlSuffix :: Text
+schemeFile, schemeHttps, packageSetsDir, snapshotsDir, stagingName, tomlSuffix :: Text
 schemeFile = "file://"
 schemeHttps = "https://"
 packageSetsDir = "package-sets"
+snapshotsDir = "snapshots"
+stagingName = "staging"
 tomlSuffix = ".toml"
 
 -- ===========================================================================
 -- Parsing
 -- ===========================================================================
 
--- | The decode target, with @sha256@ named as the TOML spells it; 'parseSnapshot' maps it to the
--- 'GitSource' the rest of the package speaks.
+-- | The decode target, with fields named as the registry spells them; 'parseSnapshot' maps them to
+-- the 'GitSource' the rest of the package speaks. Keys the registry writes but resolution does not
+-- need (@version@, @published_time@) are simply not decoded — toml-reader ignores unknown keys.
 data RawSnapshot = RawSnapshot
-  { compiler :: Maybe Text,
+  { katariCompiler :: Maybe Text,
     packages :: Map Text RawGitSource
   }
 
 data RawGitSource = RawGitSource
-  { url :: Text,
-    rev :: Text,
+  { repo :: Text,
+    ref :: Text,
     sha256 :: Text
   }
 
 instance DecodeTOML RawSnapshot where
   tomlDecoder =
     RawSnapshot
-      <$> getFieldOpt "compiler"
+      <$> getFieldOpt "katari_compiler"
       <*> (fromMaybe Map.empty <$> getFieldOpt "packages")
 
 instance DecodeTOML RawGitSource where
   tomlDecoder =
     RawGitSource
-      <$> getField "url"
-      <*> getField "rev"
+      <$> getField "repo"
+      <*> getField "ref"
       <*> getField "sha256"
 
 -- | Parse the textual contents of a snapshot file.
@@ -103,7 +109,7 @@ parseSnapshot path text = case decodeWith tomlDecoder text of
   Left tomlError -> validationError SnapshotParseError path (renderTOMLError tomlError)
   Right (raw :: RawSnapshot) -> do
     validatedPackages <- traverse (validateSnapshotPackage path) (Map.toList raw.packages)
-    pure Snapshot {compilerVersion = raw.compiler, packages = Map.fromList validatedPackages}
+    pure Snapshot {compilerVersion = raw.katariCompiler, packages = Map.fromList validatedPackages}
 
 -- | Map one decoded snapshot entry to a 'GitSource', rejecting a name that is not a valid identifier
 -- (it becomes a cache-directory path) or a malformed @sha256@ (it keys the content-addressed cache and
@@ -113,15 +119,16 @@ validateSnapshotPackage :: FilePath -> (Text, RawGitSource) -> Either ProjectErr
 validateSnapshotPackage path (name, rawSource) = do
   requireValidPackageName SnapshotValidationError path name
   sha <- requireSha256Hex SnapshotValidationError path name rawSource.sha256
-  Right (name, GitSource {url = rawSource.url, rev = rawSource.rev, sha = sha})
+  Right (name, GitSource {url = rawSource.repo, rev = rawSource.ref, sha = sha})
 
 -- ===========================================================================
 -- Loading
 -- ===========================================================================
 
--- | Load a snapshot from a registry URL. The @Maybe Text@ is the @snapshot@ version, used to build
--- the @\<root>/package-sets/\<version>.toml@ path when the URL is a registry root rather than a
--- direct @.toml@ file.
+-- | Load a snapshot from a registry URL. The @Maybe Text@ is the @snapshot@ name, used to build the
+-- registry-layout path when the URL is a registry root rather than a direct @.toml@ file: the mutable
+-- @staging@ set lives at @package-sets/staging.toml@, every immutable cut under
+-- @package-sets/snapshots/\<name>.toml@.
 loadSnapshotFromUrl :: Manager -> Text -> Maybe Text -> IO (Either ProjectError Snapshot)
 loadSnapshotFromUrl manager baseUrl maybeVersion = case snapshotUrl of
   Left projectError -> pure (Left projectError)
@@ -130,23 +137,27 @@ loadSnapshotFromUrl manager baseUrl maybeVersion = case snapshotUrl of
     | schemeHttps `Text.isPrefixOf` url -> loadFromHttps url
     | otherwise -> pure (Left (SnapshotUnsupportedUrl UrlInfo {url = url}))
   where
-    -- A direct @.toml@ URL is used as-is; a registry root is extended by the package-sets
-    -- convention, which requires the snapshot version.
+    -- A direct @.toml@ URL is used as-is; a registry root is extended by the registry's layout
+    -- convention, which requires the snapshot name.
     snapshotUrl :: Either ProjectError Text
     snapshotUrl =
       let trimmed = Text.dropWhileEnd (== '/') baseUrl
        in if tomlSuffix `Text.isSuffixOf` trimmed
             then Right trimmed
             else case maybeVersion of
-              -- The version becomes a path segment of the registry URL, so it must not smuggle in a
+              -- The name becomes a path segment of the registry URL, so it must not smuggle in a
               -- separator: '..' or '/' here would escape the registry root (a traversal read for a
               -- file:// registry, a different URL for an https one).
               Just version
                 | isSafeSnapshotVersion version ->
-                    Right (Text.intercalate "/" [trimmed, packageSetsDir, version <> tomlSuffix])
+                    Right (Text.intercalate "/" (trimmed : snapshotPathSegments version))
                 | otherwise ->
                     invalid ("snapshot version '" <> version <> "' must contain only [A-Za-z0-9._-] (no path separators)")
               Nothing -> invalid "registry URL is a directory but no snapshot version was given"
+
+    snapshotPathSegments version
+      | version == stagingName = [packageSetsDir, version <> tomlSuffix]
+      | otherwise = [packageSetsDir, snapshotsDir, version <> tomlSuffix]
 
     invalid = validationError SnapshotValidationError (Text.unpack baseUrl)
 

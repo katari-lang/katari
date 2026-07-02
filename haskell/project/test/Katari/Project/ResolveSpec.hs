@@ -65,7 +65,7 @@ dependencyPackage name moduleNames provenance =
 
 projectWith :: ResolvedPackage -> List (Text, ResolvedPackage) -> ResolvedProject
 projectWith rootPackage deps =
-  ResolvedProject {rootPackage = rootPackage, depPackages = Map.fromList deps}
+  ResolvedProject {rootPackage = rootPackage, depPackages = Map.fromList deps, snapshotCompilerVersion = Nothing}
 
 rootPackageWith :: List Text -> ResolvedPackage
 rootPackageWith moduleNames =
