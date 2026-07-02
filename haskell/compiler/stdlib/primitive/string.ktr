@@ -1,0 +1,23 @@
+// The `primitive.string` sub-module: operations over `string` beyond concatenation (`++` /
+// templates). Called qualified — `string.length`, `string.split` — via the default import. Indices
+// are Unicode code points, not UTF-16 units, so a character outside the BMP counts once.
+
+@"The number of Unicode code points."
+primitive agent length(value: string) -> integer
+
+@"The substrings between occurrences of @separator@. An empty separator splits into single
+code points."
+primitive agent split(value: string, separator: string) -> array[string]
+
+@"The parts joined with @separator@ between them."
+primitive agent join(parts: array[string], separator: string) -> string
+
+@"The code points from @start@ (inclusive) to @end@ (exclusive), 0-based, clamped to the bounds."
+primitive agent slice(value: string, start: integer, end: integer) -> string
+
+@"Whether @search@ occurs in the string."
+primitive agent contains(value: string, search: string) -> boolean
+
+@"Render a scalar as its string form (an integer prints without a decimal point). For a composite
+value use `json.stringify(value = json.encode(value = ...))` instead."
+primitive agent to_string(value: null | boolean | number | string) -> string

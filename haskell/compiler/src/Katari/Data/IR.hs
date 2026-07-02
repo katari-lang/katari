@@ -112,6 +112,9 @@ data Block where
 data Agent = Agent
   { body :: BlockId,
     schema :: SchemaInformation,
+    -- | The declaration's @\@"..."@ annotation (empty when undocumented). Carried into the IR so the
+    -- runtime's @get_metadata@ can hand an AI the callable's human description next to its schema.
+    description :: Text,
     -- | Default values for omittable (optional) parameters, keyed by parameter name. Before running
     -- the body, the runtime fills any parameter absent from the argument record with its default. This
     -- is the single defaults mechanism for every callable — user agents, data constructors, requests,
@@ -477,7 +480,13 @@ instance ToJSON BlockInformation where
 instance ToJSON Block where
   toJSON block = case block of
     BlockAgent agent ->
-      taggedObject "agent" ["body" .= agent.body, "schema" .= agent.schema, "defaults" .= agent.defaults]
+      taggedObject
+        "agent"
+        [ "body" .= agent.body,
+          "schema" .= agent.schema,
+          "description" .= agent.description,
+          "defaults" .= agent.defaults
+        ]
     BlockSequence body ->
       taggedObject "sequence" ["operations" .= body.operations, "result" .= body.result]
     BlockPrimitive primitive ->

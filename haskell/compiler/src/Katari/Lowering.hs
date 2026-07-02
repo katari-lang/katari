@@ -439,18 +439,19 @@ lowerDeclaration = \case
       True
       agentBlock
       declaration.name
+      (descriptionOf declaration.annotation)
       (genericBindingsOfDeclaration declaration.genericParameters)
       declaration.typeOf
       declaration.parameters
       declaration.body
   AST.DeclarationData declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.annotation declaration.parameters $ \input ->
       BlockConstruct Construct {name = resolvedQualifiedName declaration.variableReference, input = input}
   AST.DeclarationRequest declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.annotation declaration.parameters $ \input ->
       BlockRequest Request {name = resolvedQualifiedName declaration.variableReference, input = input}
   AST.DeclarationExternalAgent declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.annotation declaration.parameters $ \input ->
       -- The declaration name is the external's sole handle; its rendered qualified name is the opaque
       -- dispatch key the runtime's external handler interprets. The @from "name"@ clause (default @"ffi"@)
       -- names the reactor the call routes to.
@@ -461,12 +462,16 @@ lowerDeclaration = \case
             reactor = fromMaybe "ffi" declaration.reactor
           }
   AST.DeclarationPrimitiveAgent declaration ->
-    lowerSignatureCallable declaration.variableReference declaration.name declaration.parameters $ \input ->
+    lowerSignatureCallable declaration.variableReference declaration.name declaration.annotation declaration.parameters $ \input ->
       -- A primitive's registry key is its fully-qualified name (e.g. @primitive.add@).
       BlockPrimitive Primitive {name = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input}
   AST.DeclarationImport _ -> pure ()
   AST.DeclarationTypeSynonym _ -> pure ()
   AST.DeclarationError _ -> pure ()
+
+-- | A declaration's user-facing description: its @\@"..."@ annotation, or empty when undocumented.
+descriptionOf :: Maybe Text -> Text
+descriptionOf = fromMaybe ""
 
 -- | Lower one of the four signature-determined callables (data constructor / request / external /
 -- primitive): a 'BlockAgent' wrapper whose body is the leaf block @makeLeaf@ builds. The leaf reads the
@@ -475,10 +480,11 @@ lowerDeclaration = \case
 lowerSignatureCallable ::
   AST.Reference AST.Typed AST.VariableReference ->
   Text ->
+  Maybe Text ->
   List (AST.ParameterSignature AST.Typed) ->
   (VariableId -> Block) ->
   Lower ()
-lowerSignatureCallable reference name parameters makeLeaf = do
+lowerSignatureCallable reference name annotation parameters makeLeaf = do
   let qualifiedName = resolvedQualifiedName reference
   agentBlock <- freshBlockId
   registerEntry qualifiedName agentBlock
@@ -489,7 +495,7 @@ lowerSignatureCallable reference name parameters makeLeaf = do
   leafBlock <- freshBlockId
   recordBlock leafBlock (makeLeaf inputVariable) (Map.singleton "parameter" inputVariable) (Just (name <> ".leaf"))
   context <- asks (.context)
-  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = callableSchema context qualifiedName, defaults = defaults}) mempty (Just name)
+  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = callableSchema context qualifiedName, description = descriptionOf annotation, defaults = defaults}) mempty (Just name)
 
 ---------------------------------------------------------------------------------------------------
 -- Agents
@@ -503,12 +509,13 @@ buildAgent ::
   Bool ->
   BlockId ->
   Text ->
+  Text ->
   Map Text GenericId ->
   SemanticType ->
   List (AST.ParameterBinding AST.Typed) ->
   AST.Block AST.Typed ->
   Lower ()
-buildAgent catchesReturn agentBlock name genericBindings functionType parameters body = do
+buildAgent catchesReturn agentBlock name description genericBindings functionType parameters body = do
   argumentVariable <- freshVariableId
   (completion, operations) <- withFreshOperations $ do
     parameterLocals <- concat <$> mapM (bindAgentParameter argumentVariable) parameters
@@ -526,7 +533,7 @@ buildAgent catchesReturn agentBlock name genericBindings functionType parameters
   let defaults =
         Map.fromList
           [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, AST.BindVariable _ _ (Just parameterDefault) <- [parameter.binder]]
-  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context genericBindings functionType, defaults = defaults}) mempty (Just name)
+  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context genericBindings functionType, description = description, defaults = defaults}) mempty (Just name)
 
 -- | Read one declared parameter out of the incoming argument record and bind it, returning the locals
 -- it introduces. A plain variable parameter binds the field variable directly; a destructuring
@@ -567,6 +574,7 @@ lowerBlockValue block = go block.statements
             True
             agentBlock
             agentDeclaration.name
+            (descriptionOf agentDeclaration.annotation)
             (genericBindingsOfDeclaration agentDeclaration.genericParameters)
             agentDeclaration.typeOf
             agentDeclaration.parameters
@@ -964,7 +972,7 @@ lowerHandlerExpression handlerExpression = do
     (Map.singleton "parameter" continuationVariable)
     (Just "handler.body")
   context <- asks (.context)
-  recordBlock providerBlock (BlockAgent Agent {body = providerBodyBlock, schema = providerSchema context handlerExpression.typeOf, defaults = mempty}) mempty (Just "handler")
+  recordBlock providerBlock (BlockAgent Agent {body = providerBodyBlock, schema = providerSchema context handlerExpression.typeOf, description = "", defaults = mempty}) mempty (Just "handler")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = providerBlock})
   pure closureVariable
@@ -1030,7 +1038,7 @@ lowerUse useStatement = do
     (BlockSequence Sequence {operations = operations, result = completionResult completion})
     (Map.singleton "parameter" argumentVariable)
     (Just "use.continuation.body")
-  recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema, defaults = mempty}) mempty (Just "use.continuation")
+  recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema, description = "", defaults = mempty}) mempty (Just "use.continuation")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = continuationBlock})
   provider <- lowerExpression useStatement.provider

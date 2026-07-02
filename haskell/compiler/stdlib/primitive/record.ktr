@@ -1,0 +1,28 @@
+// The `primitive.record` sub-module: operations over the homogeneous string-keyed map `record[T]`
+// (the shape of a parsed JSON object's entries, an env listing, ...). Called qualified —
+// `record.get`, `record.keys` — via the default import. The parameter is named `target` throughout
+// (uniform with `primitive.array`).
+
+@"Read the value under @key@, or `null` when the key is absent."
+primitive agent get[T](target: record[T], key: string) -> T | null
+
+@"A copy of the record with @value@ under @key@ (replacing an existing entry)."
+primitive agent set[T](target: record[T], key: string, value: T) -> record[T]
+
+@"A copy of the record without @key@ (unchanged when the key is absent)."
+primitive agent remove[T](target: record[T], key: string) -> record[T]
+
+@"Every key, in sorted order."
+primitive agent keys(target: record[unknown]) -> array[string]
+
+@"Whether @key@ is present."
+primitive agent has(target: record[unknown], key: string) -> boolean
+
+@"The number of entries."
+primitive agent size(target: record[unknown]) -> integer
+
+@"Every entry as a @[key, value]@ pair, in sorted key order — the record's `for`-iterable view."
+primitive agent entries[T](target: record[T]) -> array[[string, T]]
+
+@"The empty record."
+primitive agent empty() -> record[never]

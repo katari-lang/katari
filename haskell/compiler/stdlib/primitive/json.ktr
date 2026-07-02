@@ -1,0 +1,61 @@
+// The `primitive.json` sub-module: the `json` data type and its four conversions. `json` is the
+// tagged mirror of a JSON document — one `data` constructor per JSON shape, closed into the union
+// synonym `json` — so a program can traverse an AI's reply with ordinary `match` arms. Referenced
+// from user code by the default-import qualifier: type `json.json`, constructor patterns
+// `json.json_object(...)`, conversions `json.parse(...)` (or brought in bare with
+// `import { type json, json_object, ... } from primitive.json`).
+//
+// The four conversions form two inverse pairs across the two boundaries:
+//
+//   - text boundary:  `parse`  (string -> json, a malformed document `panic`s)  /  `stringify`
+//     (json -> string).
+//   - value boundary: `encode` (any value -> json)  /  `decode` (json -> unknown).
+//
+// `encode` embeds a value into its wire form: a record becomes `json_object` (a `data` value keeps
+// its `$constructor` entry), an array `json_array`, a `file` its `$ref` handle object, an agent its
+// `$agent` reference object; a value that is ALREADY `json` passes through unchanged, so a tool list
+// mixing plain fields with schemas from `get_metadata` encodes correctly. A closure cannot be
+// encoded (`panic`). A secret operand taints the whole result, which then may not cross a
+// user-facing boundary — the usual monotonic information-flow rule.
+//
+// `decode` is the checked way back into typed values: the result is `unknown`, so it is narrowed by
+// `match`, or handed to `call_agent` whose delegation boundary validates it against the target's
+// input schema.
+
+@"A JSON null."
+data json_null()
+@"A JSON boolean."
+data json_boolean(value: boolean)
+@"A JSON number without a fractional part."
+data json_integer(value: integer)
+@"A JSON number."
+data json_number(value: number)
+@"A JSON string."
+data json_string(value: string)
+@"A JSON array."
+data json_array(items: array[json])
+@"A JSON object."
+data json_object(entries: record[json])
+
+// A JSON document: exactly one of the seven JSON shapes. (A `type` synonym carries no `@"..."`
+// annotation; this comment is its documentation.)
+type json = json_null | json_boolean | json_integer | json_number | json_string | json_array | json_object
+
+@"Parse a JSON document from text. A malformed document raises `panic` (catchable with
+`handle ... with panic(e) => ...`). A number without a fractional part parses as `json_integer`."
+primitive agent parse(text: string) -> json
+
+@"Render a `json` value as its (compact) JSON text."
+primitive agent stringify(value: json) -> string
+
+@"Embed any value into `json`: records become `json_object` (a `data` value keeps its `$constructor`
+entry), arrays `json_array`, scalars their JSON shape; a `file` becomes its `$ref` handle object and
+an agent its `$agent` reference object. A value that is already `json` passes through unchanged. A
+closure cannot cross the JSON boundary and raises `panic`."
+primitive agent encode[T](value: T) -> json
+
+@"Read a `json` value back into a plain value (`json_object` -> record — a `$constructor` entry
+re-tags the `data` value —, `json_array` -> array, scalars -> scalars). The result is `unknown`:
+narrow it with `match`, or pass it to `call_agent`, whose delegation boundary validates it against
+the target's input schema. A `$agent` reference cannot be turned back into a callable (`panic`)."
+primitive agent decode(value: json) -> unknown

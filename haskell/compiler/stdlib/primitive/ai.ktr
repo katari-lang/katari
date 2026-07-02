@@ -1,0 +1,33 @@
+// The `primitive.ai` sub-module: the bridge that lets an AI treat agents as tools. Called qualified
+// via the default import — `ai.get_metadata`, `ai.call_agent`, type `ai.agent_metadata`.
+//
+// `get_metadata` derives a callable value's public signature — its qualified name, its `@"..."`
+// description, and the JSON Schemas of its input / output / requests, each schema a `json` value
+// ready to embed in a tool list (`json.encode` passes `json` values through unchanged, so
+// `json.encode(value = { name = m.name, input_schema = m.input })` composes directly).
+//
+// `call_agent` dispatches a callable VALUE with a runtime-built argument record — the
+// dynamic-dispatch counterpart of a static call, for a target an AI picked out of a tool list. The
+// runtime validates every delegation's argument against the callee's input schema, so malformed args
+// fail as a `panic` at the call site rather than corrupting the callee.
+
+@"The public metadata of one callable: its (qualified) name, its `@\"...\"` description, and the JSON
+Schemas of its input, output and requests — each schema a `json` value, ready to embed in an AI tool
+list. A local (closure) callable has an empty name."
+data agent_metadata(
+  name: string,
+  description: string,
+  input: json.json,
+  output: json.json,
+  requests: json.json,
+)
+
+@"Derive `agent_metadata` from a callable value (a top-level agent, a data constructor, a request, an
+external, or a local closure). A generic callable instantiated with `[T]` yields schemas specialised
+to the instantiation."
+primitive agent get_metadata(value: agent never -> unknown with all) -> agent_metadata
+
+@"Invoke a callable VALUE with a runtime-built argument record — dynamic dispatch for a target an AI
+picked out of a tool list. `args` is validated against the target's input schema at the delegation
+boundary; a mismatch raises a `panic` at this call site. The target's effects flow through unchanged."
+primitive agent call_agent[R, effect E](target: agent never -> R with E, args: unknown) -> R with E

@@ -1,23 +1,28 @@
 // The primitive registry: the built-in leaf operations the compiler desugars operators into (the
-// `primitive.*` names) plus a few core helpers. A primitive receives the whole argument record and
-// returns a value; binary ops read `left` / `right`, unary ops read `value` (the shape lowering emits).
-// Implementations may be async (the env / blob primitives hit a store) — `PrimRunner.run` always returns
-// a promise so the engine awaits uniformly. This registry is the seam: env / secret / file primitives
-// are registered by the host with their stores; the pure arithmetic / string / logic set lives here.
+// `primitive.*` names) plus the stdlib sub-module prims (`interop-prims.ts` — json / record / array /
+// string / get_metadata). Implementations may be async (the env / blob prims hit a store) —
+// `PrimRunner.run` always returns a promise so the engine awaits uniformly. This registry is the
+// seam: env / secret / file primitives are registered by the host with their stores; everything
+// wired-in lives here or in `interop-prims.ts`.
 
 import { valueEquals } from "../value/codec.js";
 import type { Value } from "../value/types.js";
-import type { PrimContext, PrimRunner } from "./context.js";
+import type { PrimContext, PrimImplementation, PrimRunner } from "./context.js";
+import { INTEROP_PRIMITIVES } from "./interop-prims.js";
+import { boolOf, field, numberOf, stringOf } from "./prim-helpers.js";
 
-export type PrimImplementation = (argument: Value, context: PrimContext) => Value | Promise<Value>;
+export type { PrimImplementation } from "./context.js";
 
-/** A `PrimRunner` over a name -> implementation map; unknown names throw. The pure built-ins are
+/** A `PrimRunner` over a name -> implementation map; unknown names throw. The wired-in built-ins are
  *  preloaded; a host adds stateful ones (env / file) via `register` before serving. */
 export class PrimRegistry implements PrimRunner {
   private readonly implementations = new Map<string, PrimImplementation>();
 
   constructor() {
     for (const [name, implementation] of Object.entries(BUILTIN_PRIMITIVES)) {
+      this.implementations.set(name, implementation);
+    }
+    for (const [name, implementation] of Object.entries(INTEROP_PRIMITIVES)) {
       this.implementations.set(name, implementation);
     }
   }
@@ -73,10 +78,15 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
     kind: "string",
     value: stringOf(field(argument, "left")) + stringOf(field(argument, "right")),
   }),
-  "primitive.to_string": (argument) => ({
-    kind: "string",
-    value: renderString(field(argument, "value")),
-  }),
+  "primitive.string.to_string": async (argument, context) => {
+    const value = field(argument, "value");
+    // A blob-backed string renders as its content, like every other string-accepting prim.
+    if (value.kind === "ref" && value.semanticKind === "string") {
+      const bytes = await context.blobs.get(context.projectId, value.blobId);
+      return { kind: "string", value: new TextDecoder().decode(bytes) };
+    }
+    return { kind: "string", value: renderString(value) };
+  },
 };
 
 // ─── shape helpers ────────────────────────────────────────────────────────────────────────────
@@ -108,33 +118,9 @@ function makeNumber(result: number, like: Value): Value {
     : { kind: "number", value: result };
 }
 
-function field(argument: Value, name: string): Value {
-  if (argument.kind !== "record") {
-    throw new Error(`primitive expected a record argument, got ${argument.kind}`);
-  }
-  const value = argument.fields[name];
-  if (value === undefined) {
-    throw new Error(`primitive argument is missing field "${name}"`);
-  }
-  return value;
-}
-
-function numberOf(value: Value): number {
-  if (value.kind === "integer" || value.kind === "number") return value.value;
-  throw new Error(`expected a number, got ${value.kind}`);
-}
-
-function boolOf(value: Value): boolean {
-  if (value.kind === "boolean") return value.value;
-  throw new Error(`expected a boolean, got ${value.kind}`);
-}
-
-function stringOf(value: Value): string {
-  if (value.kind === "string") return value.value;
-  throw new Error(`expected a string, got ${value.kind}`);
-}
-
-/** A display rendering for `to_string` — exact for scalars, a compact form for composites. */
+/** The `to_string` rendering: exact for scalars; a composite is a type error upstream (the declared
+ *  parameter is `null | boolean | number | string`) — for one, `json.stringify(json.encode(...))` is
+ *  the supported path. */
 function renderString(value: Value): string {
   switch (value.kind) {
     case "null":
@@ -146,6 +132,8 @@ function renderString(value: Value): string {
     case "string":
       return value.value;
     default:
-      return JSON.stringify(value);
+      throw new Error(
+        `to_string takes a scalar (null / boolean / number / string), got ${value.kind}`,
+      );
   }
 }

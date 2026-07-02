@@ -4,12 +4,22 @@
 // (deterministic) failure the engine turns into a `panic`.
 
 import { describe, expect, test } from "vitest";
+import type { PrimContext } from "../src/runtime/engine/context.js";
 import { type EnvReader, registerHostPrims } from "../src/runtime/engine/host-prims.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import type { ProjectId } from "../src/runtime/ids.js";
+import { SnapshotRegistry } from "../src/runtime/ir.js";
+import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const PROJECT = "project-env" as ProjectId;
+
+/** A minimal `PrimContext` for direct `prims.run` calls (env prims read neither IR nor blobs). */
+const CONTEXT: PrimContext = {
+  projectId: PROJECT,
+  ir: new SnapshotRegistry(),
+  blobs: new InMemoryBlobStore(),
+};
 
 /** A stub `EnvReader` over fixed secret / non-secret maps. */
 function reader(secrets: Record<string, string>, publics: Record<string, string>): EnvReader {
@@ -40,7 +50,7 @@ describe("env host primitives", () => {
     const result = await prims.run(
       "primitive.env.get_secret",
       recordArgument({ key: { kind: "string", value: "API_KEY" } }),
-      { projectId: PROJECT },
+      CONTEXT,
     );
     expect(result).toEqual({ kind: "string", value: "sk-123", private: true });
   });
@@ -51,16 +61,14 @@ describe("env host primitives", () => {
       prims.run(
         "primitive.env.get_secret",
         recordArgument({ key: { kind: "string", value: "API_KEY" } }),
-        { projectId: PROJECT },
+        CONTEXT,
       ),
     ).rejects.toThrow(/API_KEY/);
   });
 
   test("get_all returns a public record of the non-secret entries", async () => {
     const prims = primsWith(reader({ SECRET: "sk-123" }, { HOST: "example.com", PORT: "443" }));
-    const result = await prims.run("primitive.env.get_all", recordArgument({}), {
-      projectId: PROJECT,
-    });
+    const result = await prims.run("primitive.env.get_all", recordArgument({}), CONTEXT);
     expect(result).toEqual({
       kind: "record",
       fields: {
@@ -80,9 +88,7 @@ describe("env host primitives", () => {
       ["HOST", "example.com"],
     ]);
     const prims = primsWith(reader({}, publics));
-    const result = await prims.run("primitive.env.get_all", recordArgument({}), {
-      projectId: PROJECT,
-    });
+    const result = await prims.run("primitive.env.get_all", recordArgument({}), CONTEXT);
     expect(result.kind).toBe("record");
     if (result.kind === "record") {
       // The `__proto__` entry survives as an own field rather than corrupting the prototype / vanishing.

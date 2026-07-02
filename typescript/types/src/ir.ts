@@ -99,6 +99,9 @@ export type AgentBlock = {
   kind: "agent";
   body: BlockId;
   schema: SchemaInfo;
+  /** The declaration's `@"..."` annotation (empty when undocumented; absent in pre-description IR).
+   *  Surfaced by `get_metadata` so an AI sees the callable's description next to its schema. */
+  description?: string;
   defaults: Record<string, Literal>;
 };
 

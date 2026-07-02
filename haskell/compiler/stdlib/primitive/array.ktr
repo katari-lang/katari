@@ -1,0 +1,21 @@
+// The `primitive.array` sub-module: operations over `array[T]` beyond what the language gives
+// directly (literals, `for` mapping). Called qualified — `array.get`, `array.length` — via the
+// default import. The parameter is named `target` throughout (uniform with `primitive.record`).
+
+@"The element at @index@ (0-based), or `null` when the index is out of bounds."
+primitive agent get[T](target: array[T], index: integer) -> T | null
+
+@"The number of elements."
+primitive agent length(target: array[unknown]) -> integer
+
+@"A copy of the array with @value@ appended."
+primitive agent append[T](target: array[T], value: T) -> array[T]
+
+@"The left array followed by the right."
+primitive agent concat[T](left: array[T], right: array[T]) -> array[T]
+
+@"The elements from @start@ (inclusive) to @end@ (exclusive), 0-based, clamped to the bounds."
+primitive agent slice[T](target: array[T], start: integer, end: integer) -> array[T]
+
+@"The empty array."
+primitive agent empty() -> array[never]

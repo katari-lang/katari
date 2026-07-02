@@ -1,0 +1,76 @@
+// Agents as AI tools, end to end — without a real AI, so the whole loop is deterministic:
+//
+//   1. `tool_list` derives each tool's schema with `ai.get_metadata` and builds the JSON an AI
+//      tool-calling API would receive (`json.encode` mixes plain fields with schema values).
+//   2. A canned "AI reply" (a tool pick + arguments, as JSON text) is parsed with `json.parse`
+//      and taken apart with `match` / `record.get`.
+//   3. `dispatch` finds the picked tool by its metadata name and invokes it with `ai.call_agent`;
+//      the runtime validates the AI-built arguments against the tool's input schema at the
+//      delegation boundary (a mismatch fails the dispatch with a `panic`).
+//
+// With a real AI, step 2's canned reply becomes an `http.fetch` of the tool-calling API with
+// step 1's body — the rest is unchanged.
+
+@"Raised when the canned AI reply does not fit the tool-calling contract (never, in this demo)."
+request bad_reply(message: string) -> never
+
+@"Adds two integers."
+agent add_numbers(x: integer, y: integer) -> integer {
+  x + y
+}
+
+@"Greets someone by name."
+agent greet(name: string) -> string {
+  f"hello, ${name}"
+}
+
+@"The AI-facing tool list: one { name, description, input_schema } object per tool, as json."
+agent tool_list(tools: array[agent never -> unknown with all]) -> json.json {
+  let specs = for (tool in tools) {
+    let m = ai.get_metadata(value = tool)
+    next json.encode(value = { name = m.name, description = m.description, input_schema = m.input })
+  }
+  json.encode(value = specs)
+}
+
+@"Find the tool whose qualified name is @picked@ and call it with the AI-built @args@. The
+delegation boundary validates @args@ against the tool's input schema; a mismatch panics."
+agent dispatch(tools: array[agent never -> unknown with all], picked: string, args: unknown) -> json.json {
+  for (tool in tools) {
+    let m = ai.get_metadata(value = tool)
+    if (m.name == picked) {
+      return json.encode(value = ai.call_agent(target = tool, args = args))
+    } else {
+      null
+    }
+  }
+  bad_reply(message = f"unknown tool: ${picked}")
+}
+
+@"One tool-calling turn over a canned AI reply. Returns what would be sent back to the AI:
+the tool list request body and the dispatched tool's result, both as JSON text."
+agent main() -> string {
+  let tools = [add_numbers, greet]
+
+  // 1. What the AI receives: the tool list as JSON text (the tool-call request body).
+  let body = json.stringify(value = tool_list(tools = tools))
+
+  // 2. What the AI replies: a tool pick plus arguments, as JSON text.
+  let reply = "{\"tool\":\"main.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
+  let entries = match (json.parse(text = reply)) {
+    case json.json_object(entries => e) -> e
+    case _ -> bad_reply(message = "the AI reply is not a JSON object")
+  }
+  let picked = match (record.get(target = entries, key = "tool")) {
+    case json.json_string(value => s) -> s
+    case _ -> bad_reply(message = "the AI reply picked no tool")
+  }
+  let args = match (record.get(target = entries, key = "arguments")) {
+    case json.json_object(entries => o) -> json.decode(value = json.json_object(entries = o))
+    case _ -> bad_reply(message = "the AI reply carries no arguments object")
+  }
+
+  // 3. Dispatch the pick; the result goes back to the AI as JSON text.
+  let result = json.stringify(value = dispatch(tools = tools, picked = picked, args = args))
+  f"tools=${body}; result=${result}"
+}

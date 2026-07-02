@@ -31,6 +31,13 @@ import {
 import type { InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
+import {
+  conformValue,
+  fillGenericSchema,
+  renderConformFailures,
+  typeSubstitutionOf,
+} from "../value/validation.js";
 import { isTransientError, messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { serializeCoreInstance } from "./persistence-codec.js";
@@ -137,6 +144,23 @@ export class CoreReactor extends Reactor {
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
   protected async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
+    // A `call_agent` delegate is pure indirection: unwrap it to the callable its argument carries and run
+    // *that*, under the same delegation (so the caller's proxy, escalation relays and cancel cascade see an
+    // ordinary sub-call). The loop unwraps a nested `call_agent(target = call_agent, ...)` too; each round
+    // descends into the argument record, so it terminates. A malformed argument is a program failure — panic.
+    let target = event.target;
+    let argument = event.argument;
+    let generics = event.generics;
+    while (target.kind === "named" && target.name === CALL_AGENT_NAME) {
+      const unwrapped = unwrapCallAgent(argument);
+      if ("error" in unwrapped) {
+        this.raisePanic(event.delegation, unwrapped.error, event.from);
+        return;
+      }
+      target = unwrapped.target;
+      argument = unwrapped.argument;
+      generics = unwrapped.generics;
+    }
     // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
     // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it as a panic to the
@@ -146,24 +170,46 @@ export class CoreReactor extends Reactor {
     // owner, so the failure path births no instance.
     let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
     try {
-      await this.ir.preload(agentSnapshot(event.target));
-      resolved = this.resolveTarget(event.target);
+      await this.ir.preload(agentSnapshot(target));
+      resolved = this.resolveTarget(target);
     } catch (error) {
       if (isTransientError(error)) throw error;
       this.raisePanic(event.delegation, messageOf(error), event.from);
       return;
+    }
+    // The delegate acceptance check: the argument must conform to the target's input schema. Statically
+    // checked call sites conform by construction; this is the enforcement point for every *dynamic* entry —
+    // a run command's JSON argument, a `call_agent` args record — and a violation is a program failure
+    // (panic), exactly like an unresolvable name above. The conformed value is what runs (its only possible
+    // rewrite is a repaired `$constructor` tag).
+    const targetBlock = this.ir
+      .access(resolved.snapshot, moduleOf(target))
+      .block(resolved.agentBlockId).block;
+    if (targetBlock.kind === "agent") {
+      const substitution = typeSubstitutionOf(targetBlock.schema.genericBindings, generics);
+      const inputSchema = fillGenericSchema(substitution, targetBlock.schema.input);
+      const conformed = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
+      if (!conformed.ok) {
+        this.raisePanic(
+          event.delegation,
+          `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(conformed.failures)}`,
+          event.from,
+        );
+        return;
+      }
+      if (argument !== null) argument = conformed.value;
     }
     const instance = createInstance(this.store, {
       delegationId: event.delegation,
       // The summoner's reactor: a reply this instance emits routes back here (core for a sub-call, api for a
       // run root) — recorded now from the delegate's `from`, never re-inferred.
       callerReactor: event.from,
-      target: event.target,
-      argument: event.argument,
+      target: target,
+      argument: argument,
       agentBlockId: resolved.agentBlockId,
       capturedScopeId: resolved.capturedScopeId,
       snapshotId: resolved.snapshot,
-      ...(event.generics !== undefined ? { ambientGenerics: event.generics } : {}),
+      ...(generics !== undefined ? { ambientGenerics: generics } : {}),
     });
     // Record the handled delegation (the callee-side index → this child instance + its summoner), so an inbound
     // terminate / escalateAck for it finds the child and its replies route back. The caller-side delegation row
@@ -234,11 +280,23 @@ export class CoreReactor extends Reactor {
   // ─── terminate / terminateAck (graceful cross-instance cancel) ──────────────────────────────────
 
   protected async onTerminate(
-    _event: Extract<ExternalEvent, { kind: "terminate" }>,
+    event: Extract<ExternalEvent, { kind: "terminate" }>,
     context: { callee: InstanceId | undefined },
   ): Promise<void> {
     const child = this.coreInstance(context.callee);
-    if (child === undefined) return;
+    if (child === undefined) {
+      // No instance handles this delegation — its delegate failed at the acceptance surface (an
+      // unresolvable name, a schema violation: the panic path births no instance), or it is already
+      // gone. Confirm the terminate anyway so the caller's cancel cascade completes; a caller whose
+      // proxy has meanwhile resolved ignores a stray ack.
+      this.send({
+        kind: "terminateAck",
+        delegation: event.delegation,
+        from: this.name,
+        to: event.from,
+      });
+      return;
+    }
     child.status = "cancelling";
     // The delegation's `cancelling` state is recorded by the base on the caller's `send(terminate)`, not here
     // on the callee side.
@@ -284,6 +342,7 @@ export class CoreReactor extends Reactor {
       store: this.store,
       instance,
       ir: this.ir.access(snapshot, moduleOf(instance.target)),
+      irSource: this.ir,
       prims: this.prims,
       blobs: this.blobs,
       // Stamped as `from` on every event the engine emits; each emit site supplies its own `to` from edge
@@ -341,6 +400,60 @@ export class CoreReactor extends Reactor {
         // only the named / closure agents it runs.
         throw new Error("core cannot summon an external (ffi) target as an instance");
     }
+  }
+}
+
+/** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the acceptance surface, never
+ *  summoned as an instance (its `BlockPrimitive` body exists only as a schema carrier). */
+const CALL_AGENT_NAME = "primitive.ai.call_agent";
+
+/** Read a `call_agent` argument record into the delegate it stands for: `target` (a callable value)
+ *  becomes the delegate target (carrying its own generics), `args` becomes the argument. */
+function unwrapCallAgent(
+  argument: Value | null,
+):
+  | { target: DelegateTarget; argument: Value | null; generics?: GenericSubstitution }
+  | { error: string } {
+  if (argument === null || argument.kind !== "record") {
+    return { error: "call_agent: expected an argument record carrying { target, args }" };
+  }
+  const callable = argument.fields.target;
+  const args = argument.fields.args ?? null;
+  if (callable === undefined) {
+    return { error: 'call_agent: the argument record is missing "target"' };
+  }
+  if (callable.kind === "agent") {
+    return {
+      target: { kind: "named", name: callable.name, snapshot: callable.snapshot },
+      argument: args,
+      ...(callable.generics !== undefined ? { generics: callable.generics } : {}),
+    };
+  }
+  if (callable.kind === "closure") {
+    return {
+      target: {
+        kind: "closure",
+        blockId: callable.blockId,
+        scopeId: callable.scopeId,
+        snapshot: callable.snapshot,
+        module: callable.module,
+      },
+      argument: args,
+      ...(callable.generics !== undefined ? { generics: callable.generics } : {}),
+    };
+  }
+  return { error: `call_agent: "target" is not a callable value (got ${callable.kind})` };
+}
+
+/** A target's user-facing label for a panic message (a closure has no qualified name). */
+function describeTarget(target: DelegateTarget): string {
+  switch (target.kind) {
+    case "named":
+      return String(target.name);
+    case "closure":
+      return `closure (block ${target.blockId} of module "${target.module}")`;
+    case "external":
+      return `external "${target.key}"`;
   }
 }
 

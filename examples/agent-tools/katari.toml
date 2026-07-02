@@ -1,0 +1,9 @@
+[package]
+name = "agent_tools"
+description = "Agents as AI tools: schema derivation (get_metadata), the json boundary, and dynamic dispatch (call_agent)."
+
+[runtime]
+url = "http://localhost:3000"
+
+[dependencies]
+packages = []

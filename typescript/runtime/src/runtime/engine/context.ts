@@ -14,6 +14,8 @@ import type {
   ReactorName,
 } from "../event/types.js";
 import type { ProjectId, SnapshotId } from "../ids.js";
+// A type-only cycle with `../ir.js` (which imports `IrAccess` from here) — erased at runtime.
+import type { IrSource } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
 import type { CoreInstance, ProjectStore } from "./types.js";
@@ -34,10 +36,13 @@ export interface IrAccess {
 }
 
 /** The per-call context a primitive runs against. A host (effectful) prim — `env.get_secret` reads the
- *  project's `env_entries` store — needs the project it is running for; the engine supplies it from the
- *  turn's instance. Pure built-ins ignore it. */
+ *  project's `env_entries` store — needs the project it is running for; `get_metadata` reads a callable
+ *  value's schema out of its snapshot's IR; the string / json prims materialise blob-backed strings.
+ *  The engine supplies all three from the turn's context. Pure built-ins ignore them. */
 export interface PrimContext {
   readonly projectId: ProjectId;
+  readonly ir: IrSource;
+  readonly blobs: BlobStore;
 }
 
 /**
@@ -49,6 +54,10 @@ export interface PrimContext {
 export interface PrimRunner {
   run(name: string, argument: Value, context: PrimContext): Promise<Value>;
 }
+
+/** One primitive: the whole argument record in, a value out (binary ops read `left` / `right`,
+ *  unary ops read `value` — the shape lowering emits). */
+export type PrimImplementation = (argument: Value, context: PrimContext) => Value | Promise<Value>;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export interface LogEntry {
@@ -74,6 +83,9 @@ export interface StepContext {
   /** The single instance this turn drives. */
   readonly instance: CoreInstance;
   readonly ir: IrAccess;
+  /** The whole IR source behind `ir`, for the prims that read *another* callable's IR (`get_metadata`
+   *  follows the callable value's own snapshot / module, which need not be this instance's). */
+  readonly irSource: IrSource;
   readonly prims: PrimRunner;
   readonly blobs: BlobStore;
   readonly buffers: StepBuffers;
@@ -95,6 +107,7 @@ export function makeStepContext(args: {
   store: ProjectStore;
   instance: CoreInstance;
   ir: IrAccess;
+  irSource: IrSource;
   prims: PrimRunner;
   blobs: BlobStore;
   reactorName: ReactorName;
@@ -105,6 +118,7 @@ export function makeStepContext(args: {
     store: args.store,
     instance: args.instance,
     ir: args.ir,
+    irSource: args.irSource,
     prims: args.prims,
     blobs: args.blobs,
     buffers,

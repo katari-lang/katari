@@ -410,7 +410,11 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
   // A prim failure (e.g. division by zero) is a `panic`, not a crash — it bubbles to a handler / the run.
   let value: Value;
   try {
-    value = await ctx.prims.run(block.name, argument, { projectId: ctx.projectId });
+    value = await ctx.prims.run(block.name, argument, {
+      projectId: ctx.projectId,
+      ir: ctx.irSource,
+      blobs: ctx.blobs,
+    });
   } catch (error) {
     raisePanic(ctx, thread, error instanceof Error ? error.message : String(error));
     return;
