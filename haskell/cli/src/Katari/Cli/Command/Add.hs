@@ -29,7 +29,7 @@ import GHC.List (List)
 import Katari.Cli.Common (dieIn, dieInternal, resolveProjectRoot, warnCompilerMismatch, writeOrExit)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (newOutputContext, progress)
-import Katari.Project.Config (DependenciesSection (..), ProjectConfig (..), loadKatariToml, parseKatariToml)
+import Katari.Project.Config (DependenciesSection (..), ProjectConfig (..), loadKatariTomlLenient, parseKatariToml)
 import Katari.Project.Discovery (configFilename)
 import Katari.Project.Edit (renderEditError, rewritePackages)
 import Katari.Project.Error (renderProjectError)
@@ -74,8 +74,10 @@ run mode options = do
   context <- newOutputContext options.global
   root <- resolveProjectRoot subcommand options.projectRoot
   let configPath = root </> configFilename
+  -- The lenient load accepts an [overrides.X] whose X is not declared yet — the natural state right
+  -- before `katari add X` declares it. Every other path (check/build/apply/resolve) stays strict.
   config <-
-    loadKatariToml configPath >>= \case
+    loadKatariTomlLenient configPath >>= \case
       Left projectError -> dieIn subcommand (renderProjectError projectError)
       Right loaded -> pure loaded
 

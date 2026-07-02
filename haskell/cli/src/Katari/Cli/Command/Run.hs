@@ -21,7 +21,7 @@ where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (AsyncException (..), catch, throwIO)
-import Control.Monad (foldM)
+import Control.Monad (foldM, when)
 import Data.Aeson (Value (..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -131,13 +131,12 @@ resolveAgentAndArgument context options = do
       pure (qualifiedName, Just parsed)
     Nothing -> do
       schema <- decodeInputSchema inputSchema
-      chosenArgument <- argumentForSchema context qualifiedName schema
-      -- Echo the scriptable form whenever anything was answered interactively.
-      case (picked, chosenArgument) of
-        (False, Nothing) -> pure ()
-        _ ->
-          hint context.output $
-            "katari run " <> qualifiedName <> maybe "" (\chosen -> " --arg '" <> compactJson chosen <> "'") chosenArgument
+      (chosenArgument, prompted) <- argumentForSchema context qualifiedName schema
+      -- Echo the scriptable form only when something was actually answered interactively (an
+      -- auto-filled empty record is not an interaction worth teaching).
+      when (picked || prompted) $
+        hint context.output $
+          "katari run " <> qualifiedName <> maybe "" (\chosen -> " --arg '" <> compactJson chosen <> "'") chosenArgument
       pure (qualifiedName, chosenArgument)
 
 -- | The chosen agent's name and input schema; the 'Bool' notes whether a picker ran (for the echo).
@@ -168,18 +167,18 @@ resolveAgent context options = case options.agent of
 
 -- | Decide the argument from the input schema alone (no @--arg@ was given): an agent whose
 -- parameters are all optional runs on its defaults; required parameters start the interview on a
--- terminal and are a hard error off one.
-argumentForSchema :: RuntimeContext -> Text -> JSONSchema -> IO (Maybe Value)
+-- terminal and are a hard error off one. The 'Bool' says whether an interview actually ran.
+argumentForSchema :: RuntimeContext -> Text -> JSONSchema -> IO (Maybe Value, Bool)
 argumentForSchema context qualifiedName schema = case schema of
   SchemaObject objectSchema
     | null objectSchema.required ->
         -- All parameters have defaults; an explicit empty record lets the runtime fill them.
-        pure (Just (Object KeyMap.empty))
+        pure (Just (Object KeyMap.empty), False)
   _
     | context.output.interactive -> do
         answered <- promptFromSchema context.output ["arg"] schema
         case answered of
-          Just answeredArgument -> pure (Just answeredArgument)
+          Just answeredArgument -> pure (Just answeredArgument, True)
           Nothing -> dieIn "run" "cancelled"
     | otherwise ->
         dieIn "run" (qualifiedName <> " has required parameters; pass --arg '<json>'")

@@ -47,7 +47,9 @@ module Katari.Project.Config
     PathOverride (..),
     GitOverride (..),
     loadKatariToml,
+    loadKatariTomlLenient,
     parseKatariToml,
+    parseKatariTomlLenient,
     isValidPackageName,
     requireValidPackageName,
   )
@@ -210,25 +212,47 @@ instance DecodeTOML RawOverride where
 -- Loaders
 -- ===========================================================================
 
+-- | How strictly an @[overrides.\<name>]@ entry must bind to the declared dependency list.
+data OverrideBinding
+  = -- | Every override must name a declared dependency — the normal rule; catches a typo'd override
+    -- that would otherwise silently never apply.
+    OverridesBindDeclared
+  | -- | An override may name a not-yet-declared dependency. Only for config /editors/ mid-flight:
+    -- @katari add X@ must load a config in which @[overrides.X]@ already exists but @X@ is not yet in
+    -- @packages@ — the exact inconsistency the command is about to fix.
+    OverridesFloat
+
 -- | Read @katari.toml@ from disk, parse, and validate.
 loadKatariToml :: FilePath -> IO (Either ProjectError ProjectConfig)
 loadKatariToml = loadAndParse ConfigIOError parseKatariToml
 
+-- | 'loadKatariToml' under 'OverridesFloat' (see there for the one legitimate caller shape).
+loadKatariTomlLenient :: FilePath -> IO (Either ProjectError ProjectConfig)
+loadKatariTomlLenient = loadAndParse ConfigIOError parseKatariTomlLenient
+
 -- | Parse the textual contents of @katari.toml@.
 parseKatariToml :: FilePath -> Text -> Either ProjectError ProjectConfig
-parseKatariToml path text = case decodeWith tomlDecoder text of
+parseKatariToml = parseKatariTomlWith OverridesBindDeclared
+
+-- | 'parseKatariToml' under 'OverridesFloat'.
+parseKatariTomlLenient :: FilePath -> Text -> Either ProjectError ProjectConfig
+parseKatariTomlLenient = parseKatariTomlWith OverridesFloat
+
+parseKatariTomlWith :: OverrideBinding -> FilePath -> Text -> Either ProjectError ProjectConfig
+parseKatariTomlWith binding path text = case decodeWith tomlDecoder text of
   Left tomlError -> validationError ConfigParseError path (renderTOMLError tomlError)
-  Right (rawConfig :: RawConfig) -> validateConfig path rawConfig
+  Right (rawConfig :: RawConfig) -> validateConfig binding path rawConfig
 
 -- | Apply the cross-field rules a 'Decoder' cannot express: the source dir stays inside the project,
 -- every declared dependency name is a valid identifier (so it is safe to use as a cache-directory and
--- import name), and each override names a declared dependency and is path XOR git.
-validateConfig :: FilePath -> RawConfig -> Either ProjectError ProjectConfig
-validateConfig path rawConfig = do
+-- import name), and each override names a declared dependency (under 'OverridesBindDeclared') and is
+-- path XOR git.
+validateConfig :: OverrideBinding -> FilePath -> RawConfig -> Either ProjectError ProjectConfig
+validateConfig binding path rawConfig = do
   validateSourceDir path rawConfig.package.src
   mapM_ (requireValidPackageName ConfigValidationError path) rawConfig.dependencies.packages
   validatedOverrides <-
-    traverse (validateOverride path rawConfig.dependencies.packages) (Map.toList rawConfig.overrides)
+    traverse (validateOverride binding path rawConfig.dependencies.packages) (Map.toList rawConfig.overrides)
   pure
     ProjectConfig
       { package = rawConfig.package,
@@ -256,10 +280,13 @@ requireValidPackageName toError path name =
     validationError toError path ("package name " <> name <> " is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")
 
 -- | Resolve one @[overrides.\<name>]@ entry into its 'OverrideSource', or report why it is malformed:
--- it must target a declared dependency and set path XOR git (with rev only on git).
-validateOverride :: FilePath -> List Text -> (Text, RawOverride) -> Either ProjectError (Text, OverrideSource)
-validateOverride path declared (name, rawOverride)
-  | name `notElem` declared = invalid ("override '" <> name <> "' names no dependency in [dependencies].packages")
+-- it must target a declared dependency (unless the binding floats) and set path XOR git (with rev
+-- only on git).
+validateOverride :: OverrideBinding -> FilePath -> List Text -> (Text, RawOverride) -> Either ProjectError (Text, OverrideSource)
+validateOverride binding path declared (name, rawOverride)
+  | OverridesBindDeclared <- binding,
+    name `notElem` declared =
+      invalid ("override '" <> name <> "' names no dependency in [dependencies].packages")
   | otherwise = case (rawOverride.path, rawOverride.git) of
       (Just _, Just _) -> invalid ("override '" <> name <> "' sets both path and git; choose one")
       (Just pathValue, Nothing) -> case rawOverride.rev of

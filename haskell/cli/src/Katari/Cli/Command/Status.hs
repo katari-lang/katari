@@ -17,7 +17,7 @@ import Data.Text qualified as Text
 import Katari.Cli.Api (EscalationView (..), RunDetail (..), getRunDetail, listEscalations)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
-import Katari.Cli.Output (compactTimestamp, printJson, printText, progress)
+import Katari.Cli.Output (compactTimestamp, printJson, printText)
 import Katari.Cli.Pick (resolveRunId)
 import Katari.Cli.Prompt (compactJson)
 import Options.Applicative
@@ -66,7 +66,6 @@ run options = do
                 <> "  — answer with: katari answer "
                 <> Text.take 8 escalation.id
             )
-      progress context.output ""
 
 renderDetail :: RunDetail -> IO ()
 renderDetail detail = do
