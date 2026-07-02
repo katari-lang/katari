@@ -1,7 +1,7 @@
 // A DB-backed IrSource: load a snapshot's modules (its manifest + each module's content-addressed IR)
 // from the module store on first use, caching them in an in-memory registry the engine then reads
 // synchronously. The runtime receives the stdlib (`primitive`) as a normal uploaded module, so nothing
-// is special-cased here — `primitive.add` resolves like any callable.
+// is special-cased here — `prelude.add` resolves like any callable.
 
 import type { BlockId, QualifiedName } from "@katari-lang/types";
 import { and, eq, inArray } from "drizzle-orm";

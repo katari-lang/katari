@@ -39,7 +39,7 @@ function primitiveWrapper(agentId: number, leafId: number, inputVar: number, nam
 }
 
 /** Register one hand-built IRModule under every module its entries name (so a cross-module name like
- *  `primitive.add` resolves to module `primitive`, `main` to the empty user module — both point here). */
+ *  `prelude.add` resolves to module `primitive`, `main` to the empty user module — both point here). */
 function registerModules(registry: SnapshotRegistry, ir: IRModule): void {
   for (const name of Object.keys(ir.entries)) {
     registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
@@ -81,7 +81,7 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
 
 describe("in-memory core", () => {
   test("returns an arithmetic result through the uniform delegate model", async () => {
-    // agent main() { return 1 + 2 }   (every `+` is a delegate to a `primitive.add` child instance)
+    // agent main() { return 1 + 2 }   (every `+` is a delegate to a `prelude.add` child instance)
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -103,7 +103,7 @@ describe("in-memory core", () => {
               },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.add") },
+                target: { kind: "name", name: createAgentName("prelude.add") },
                 argument: 4,
                 output: 5,
               },
@@ -112,11 +112,11 @@ describe("in-memory core", () => {
           },
           parameters: { parameter: 1 },
         },
-        ...primitiveWrapper(6, 7, 8, "primitive.add"),
+        ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
         [createAgentName("main")]: 0,
-        [createAgentName("primitive.add")]: 6,
+        [createAgentName("prelude.add")]: 6,
       },
       names: {},
     };
@@ -172,7 +172,7 @@ describe("in-memory core", () => {
               },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.multiply") },
+                target: { kind: "name", name: createAgentName("prelude.multiply") },
                 argument: 23,
                 output: 22,
               },
@@ -180,11 +180,11 @@ describe("in-memory core", () => {
           },
           parameters: { iterator: 20 },
         },
-        ...primitiveWrapper(6, 7, 8, "primitive.multiply"),
+        ...primitiveWrapper(6, 7, 8, "prelude.multiply"),
       },
       entries: {
         [createAgentName("triple")]: 0,
-        [createAgentName("primitive.multiply")]: 6,
+        [createAgentName("prelude.multiply")]: 6,
       },
       names: {},
     };
@@ -813,7 +813,7 @@ describe("in-memory core", () => {
               },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.add") },
+                target: { kind: "name", name: createAgentName("prelude.add") },
                 argument: 4,
                 output: 5,
               },
@@ -822,11 +822,11 @@ describe("in-memory core", () => {
           },
           parameters: { parameter: 1 },
         },
-        ...primitiveWrapper(6, 7, 8, "primitive.add"),
+        ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
         [createAgentName("main")]: 0,
-        [createAgentName("primitive.add")]: 6,
+        [createAgentName("prelude.add")]: 6,
       },
       names: {},
     };
@@ -881,7 +881,7 @@ describe("in-memory core", () => {
             parallel: false,
             initialStates: [],
             body: 3,
-            handlers: [{ request: createAgentName("primitive.panic"), body: 4 }],
+            handlers: [{ request: createAgentName("prelude.panic"), body: 4 }],
             thenClause: null,
           },
           parameters: {},
@@ -903,7 +903,7 @@ describe("in-memory core", () => {
               },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.add") },
+                target: { kind: "name", name: createAgentName("prelude.add") },
                 argument: 22,
                 output: 23,
               },
@@ -923,11 +923,11 @@ describe("in-memory core", () => {
           },
           parameters: { parameter: 41 },
         },
-        ...primitiveWrapper(6, 7, 8, "primitive.add"),
+        ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
         [createAgentName("main")]: 0,
-        [createAgentName("primitive.add")]: 6,
+        [createAgentName("prelude.add")]: 6,
       },
       names: {},
     };

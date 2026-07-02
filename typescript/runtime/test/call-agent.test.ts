@@ -1,5 +1,5 @@
 // The delegate acceptance surface: schema validation of every delegation's argument, and the
-// `call_agent` unwrap (a delegate to `primitive.call_agent` re-targets, under the same delegation, the
+// `call_agent` unwrap (a delegate to `prelude.call_agent` re-targets, under the same delegation, the
 // callable its argument carries — so the dynamically dispatched args hit the same validation). Driven
 // through the actor over hand-built IR, like `engine-smoke.test.ts`.
 
@@ -36,7 +36,7 @@ const GREETER_SCHEMA: SchemaInfo = {
  *   agent greeter(name: string) -> string { name }        (input schema pins `name`)
  *   agent main(args) { call_agent(target = greeter, args = args) }
  * `main` loads `greeter` as a VALUE, wraps it with the caller-supplied `args` record, and delegates to
- * `primitive.call_agent` — whose leaf body must never run (the acceptance surface unwraps it).
+ * `prelude.call_agent` — whose leaf body must never run (the acceptance surface unwraps it).
  */
 function fixture(): IRModule {
   return {
@@ -63,7 +63,7 @@ function fixture(): IRModule {
             },
             {
               kind: "delegate",
-              target: { kind: "name", name: createAgentName("primitive.ai.call_agent") },
+              target: { kind: "name", name: createAgentName("prelude.ai.call_agent") },
               argument: 13,
               output: 14,
             },
@@ -85,20 +85,20 @@ function fixture(): IRModule {
         },
         parameters: { parameter: 20 },
       },
-      // primitive.call_agent: the leaf the stdlib lowers — reachable only if the unwrap fails.
+      // prelude.call_agent: the leaf the stdlib lowers — reachable only if the unwrap fails.
       4: {
         block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
       },
       5: {
-        block: { kind: "primitive", name: "primitive.ai.call_agent", input: 50 },
+        block: { kind: "primitive", name: "prelude.ai.call_agent", input: 50 },
         parameters: { parameter: 50 },
       },
     },
     entries: {
       [createAgentName("main")]: 0,
       [createAgentName("greeter")]: 2,
-      [createAgentName("primitive.ai.call_agent")]: 4,
+      [createAgentName("prelude.ai.call_agent")]: 4,
     },
     names: {},
   };
@@ -167,7 +167,7 @@ describe("call_agent dispatch", () => {
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("primitive.ai.call_agent") },
+            target: { kind: "name", name: createAgentName("prelude.ai.call_agent") },
             argument: 13,
             output: 14,
           },
@@ -210,7 +210,7 @@ describe("delegate argument validation", () => {
         parallel: false,
         initialStates: [],
         body: 7,
-        handlers: [{ request: createAgentName("primitive.panic"), body: 8 }],
+        handlers: [{ request: createAgentName("prelude.panic"), body: 8 }],
         thenClause: null,
       },
       parameters: {},
@@ -232,7 +232,7 @@ describe("delegate argument validation", () => {
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("primitive.ai.call_agent") },
+            target: { kind: "name", name: createAgentName("prelude.ai.call_agent") },
             argument: 73,
             output: 74,
           },

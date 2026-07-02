@@ -405,7 +405,7 @@ export class CoreReactor extends Reactor {
 
 /** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the acceptance surface, never
  *  summoned as an instance (its `BlockPrimitive` body exists only as a schema carrier). */
-const CALL_AGENT_NAME = "primitive.ai.call_agent";
+const CALL_AGENT_NAME = "prelude.ai.call_agent";
 
 /** Read a `call_agent` argument record into the delegate it stands for: `target` (a callable value)
  *  becomes the delegate target (carrying its own generics), `args` becomes the argument. */

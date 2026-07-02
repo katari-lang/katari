@@ -35,11 +35,11 @@ function primitiveWrapper(agentId: number, leafId: number, inputVar: number, nam
   } as const;
 }
 
-/** A prim registry with a `primitive.secret` source that returns a fixed private string (mirrors how a real
+/** A prim registry with a `prelude.secret` source that returns a fixed private string (mirrors how a real
  *  env / secret source would be registered by the host). */
 function secretPrims(): PrimRegistry {
   const prims = new PrimRegistry();
-  prims.register("primitive.secret", () => ({ kind: "string", value: "sk-123", private: true }));
+  prims.register("prelude.secret", () => ({ kind: "string", value: "sk-123", private: true }));
   return prims;
 }
 
@@ -75,7 +75,7 @@ describe("secret information flow", () => {
               { kind: "makeRecord", entries: [], output: 2 },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.secret") },
+                target: { kind: "name", name: createAgentName("prelude.secret") },
                 argument: 2,
                 output: 3,
               },
@@ -90,7 +90,7 @@ describe("secret information flow", () => {
               },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.concat") },
+                target: { kind: "name", name: createAgentName("prelude.concat") },
                 argument: 5,
                 output: 6,
               },
@@ -99,13 +99,13 @@ describe("secret information flow", () => {
           },
           parameters: { parameter: 1 },
         },
-        ...primitiveWrapper(10, 11, 12, "primitive.secret"),
-        ...primitiveWrapper(20, 21, 22, "primitive.concat"),
+        ...primitiveWrapper(10, 11, 12, "prelude.secret"),
+        ...primitiveWrapper(20, 21, 22, "prelude.concat"),
       },
       entries: {
         [createAgentName("main")]: 0,
-        [createAgentName("primitive.secret")]: 10,
-        [createAgentName("primitive.concat")]: 20,
+        [createAgentName("prelude.secret")]: 10,
+        [createAgentName("prelude.concat")]: 20,
       },
       names: {},
     };
@@ -242,7 +242,7 @@ describe("secret information flow", () => {
   test("a panic carrying a secret redacts the run error message (no plaintext at the wire / at rest)", async () => {
     // agent main() { panic({ msg: secret() }) }  — unhandled, the panic fails the run. Its message becomes
     // the run's errorMessage, which is neither redacted at the wire nor sealed at rest, so the secret must be
-    // redacted at the source. `primitive.panic` is a request (an agent wrapping a request leaf), not a prim.
+    // redacted at the source. `prelude.panic` is a request (an agent wrapping a request leaf), not a prim.
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -255,14 +255,14 @@ describe("secret information flow", () => {
               { kind: "makeRecord", entries: [], output: 2 },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.secret") },
+                target: { kind: "name", name: createAgentName("prelude.secret") },
                 argument: 2,
                 output: 3,
               },
               { kind: "makeRecord", entries: [["msg", 3]], output: 4 },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.panic") },
+                target: { kind: "name", name: createAgentName("prelude.panic") },
                 argument: 4,
                 output: 5,
               },
@@ -271,17 +271,17 @@ describe("secret information flow", () => {
           },
           parameters: { parameter: 1 },
         },
-        ...primitiveWrapper(10, 11, 12, "primitive.secret"),
+        ...primitiveWrapper(10, 11, 12, "prelude.secret"),
         20: { block: { kind: "agent", body: 21, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
         21: {
-          block: { kind: "request", name: createAgentName("primitive.panic"), input: 22 },
+          block: { kind: "request", name: createAgentName("prelude.panic"), input: 22 },
           parameters: { parameter: 22 },
         },
       },
       entries: {
         [createAgentName("main")]: 0,
-        [createAgentName("primitive.secret")]: 10,
-        [createAgentName("primitive.panic")]: 20,
+        [createAgentName("prelude.secret")]: 10,
+        [createAgentName("prelude.panic")]: 20,
       },
       names: {},
     };

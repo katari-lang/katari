@@ -1,5 +1,5 @@
-// The stdlib sub-module prims (`primitive.json.*`, `primitive.record.*`, `primitive.array.*`,
-// `primitive.string.*`) and `primitive.get_metadata`, exercised directly through the registry (no
+// The stdlib sub-module prims (`prelude.json.*`, `prelude.record.*`, `prelude.array.*`,
+// `prelude.string.*`) and `prelude.get_metadata`, exercised directly through the registry (no
 // actor). JSON round-trips cover the wire conventions ($constructor / $agent / $ref) and the
 // pass-through that lets `json.encode` mix plain fields with already-`json` values.
 
@@ -47,13 +47,13 @@ function int(value: number): Value {
   return { kind: "integer", value };
 }
 
-describe("primitive.json", () => {
+describe("prelude.json", () => {
   test("parse lifts a document into tagged json values (integers split from numbers)", async () => {
-    const parsed = await run("primitive.json.parse", {
+    const parsed = await run("prelude.json.parse", {
       text: str('{"name":"alice","age":30,"score":1.5,"tags":["x"],"ok":true,"nothing":null}'),
     });
     expect(parsed.kind).toBe("record");
-    if (parsed.kind === "record") expect(parsed.ctor).toBe("primitive.json.json_object");
+    if (parsed.kind === "record") expect(parsed.ctor).toBe("prelude.json.json_object");
     await expect(asJson(parsed)).resolves.toEqual({
       name: "alice",
       age: 30,
@@ -65,20 +65,20 @@ describe("primitive.json", () => {
   });
 
   test("parse panics (throws) on malformed JSON", async () => {
-    await expect(run("primitive.json.parse", { text: str("{oops") })).rejects.toThrow(
+    await expect(run("prelude.json.parse", { text: str("{oops") })).rejects.toThrow(
       /json\.parse: malformed JSON/,
     );
   });
 
   test("stringify inverts parse", async () => {
-    const parsed = await run("primitive.json.parse", { text: str('{"a":[1,2],"b":"x"}') });
-    const text = await run("primitive.json.stringify", { value: parsed });
+    const parsed = await run("prelude.json.parse", { text: str('{"a":[1,2],"b":"x"}') });
+    const text = await run("prelude.json.stringify", { value: parsed });
     expect(text).toEqual(str('{"a":[1,2],"b":"x"}'));
   });
 
   test("encode embeds a plain record and passes an existing json value through unchanged", async () => {
     const schema = jsonValueFromJson({ type: "string" });
-    const encoded = await run("primitive.json.encode", {
+    const encoded = await run("prelude.json.encode", {
       value: {
         kind: "record",
         fields: { name: str("tool"), input_schema: schema },
@@ -96,17 +96,17 @@ describe("primitive.json", () => {
       fields: { value: int(3) },
       ctor: createAgentName("main.box"),
     };
-    const encoded = await run("primitive.json.encode", { value: data });
+    const encoded = await run("prelude.json.encode", { value: data });
     await expect(asJson(encoded)).resolves.toEqual({ $constructor: "main.box", value: 3 });
-    const decoded = await run("primitive.json.decode", { value: encoded });
+    const decoded = await run("prelude.json.decode", { value: encoded });
     expect(decoded).toEqual(data);
   });
 
   test("encode renders an agent value as its $agent reference and decode refuses it", async () => {
     const agent: Value = { kind: "agent", name: createAgentName("main.tool"), snapshot: SNAPSHOT };
-    const encoded = await run("primitive.json.encode", { value: agent });
+    const encoded = await run("prelude.json.encode", { value: agent });
     await expect(asJson(encoded)).resolves.toEqual({ $agent: "main.tool" });
-    await expect(run("primitive.json.decode", { value: encoded })).rejects.toThrow(/callable/);
+    await expect(run("prelude.json.decode", { value: encoded })).rejects.toThrow(/callable/);
   });
 
   test("encode refuses a closure", async () => {
@@ -117,12 +117,12 @@ describe("primitive.json", () => {
       snapshot: SNAPSHOT,
       module: "main",
     };
-    await expect(run("primitive.json.encode", { value: closure })).rejects.toThrow(/closure/);
+    await expect(run("prelude.json.encode", { value: closure })).rejects.toThrow(/closure/);
   });
 
   test("decode flattens nested json values into plain values", async () => {
-    const parsed = await run("primitive.json.parse", { text: str('{"xs":[1,"two"],"n":null}') });
-    const decoded = await run("primitive.json.decode", { value: parsed });
+    const parsed = await run("prelude.json.parse", { text: str('{"xs":[1,"two"],"n":null}') });
+    const decoded = await run("prelude.json.decode", { value: parsed });
     expect(decoded).toEqual({
       kind: "record",
       fields: {
@@ -133,35 +133,35 @@ describe("primitive.json", () => {
   });
 });
 
-describe("primitive.record / primitive.array / primitive.string", () => {
+describe("prelude.record / prelude.array / prelude.string", () => {
   const target: Value = { kind: "record", fields: { b: int(2), a: int(1) } };
 
   test("record.get / has / size / keys / entries / set / remove", async () => {
-    await expect(run("primitive.record.get", { target, key: str("a") })).resolves.toEqual(int(1));
-    await expect(run("primitive.record.get", { target, key: str("zz") })).resolves.toEqual({
+    await expect(run("prelude.record.get", { target, key: str("a") })).resolves.toEqual(int(1));
+    await expect(run("prelude.record.get", { target, key: str("zz") })).resolves.toEqual({
       kind: "null",
     });
-    await expect(run("primitive.record.has", { target, key: str("b") })).resolves.toEqual({
+    await expect(run("prelude.record.has", { target, key: str("b") })).resolves.toEqual({
       kind: "boolean",
       value: true,
     });
-    await expect(run("primitive.record.size", { target })).resolves.toEqual(int(2));
-    await expect(run("primitive.record.keys", { target })).resolves.toEqual({
+    await expect(run("prelude.record.size", { target })).resolves.toEqual(int(2));
+    await expect(run("prelude.record.keys", { target })).resolves.toEqual({
       kind: "array",
       elements: [str("a"), str("b")],
     });
-    await expect(run("primitive.record.entries", { target })).resolves.toEqual({
+    await expect(run("prelude.record.entries", { target })).resolves.toEqual({
       kind: "array",
       elements: [
         { kind: "array", elements: [str("a"), int(1)] },
         { kind: "array", elements: [str("b"), int(2)] },
       ],
     });
-    await expect(run("primitive.record.set", { target, key: str("c"), value: int(3) })).resolves.toEqual({
+    await expect(run("prelude.record.set", { target, key: str("c"), value: int(3) })).resolves.toEqual({
       kind: "record",
       fields: { a: int(1), b: int(2), c: int(3) },
     });
-    await expect(run("primitive.record.remove", { target, key: str("a") })).resolves.toEqual({
+    await expect(run("prelude.record.remove", { target, key: str("a") })).resolves.toEqual({
       kind: "record",
       fields: { b: int(2) },
     });
@@ -169,50 +169,50 @@ describe("primitive.record / primitive.array / primitive.string", () => {
 
   test("array.get / length / append / concat / slice", async () => {
     const xs: Value = { kind: "array", elements: [int(1), int(2), int(3)] };
-    await expect(run("primitive.array.get", { target: xs, index: int(1) })).resolves.toEqual(int(2));
-    await expect(run("primitive.array.get", { target: xs, index: int(9) })).resolves.toEqual({
+    await expect(run("prelude.array.get", { target: xs, index: int(1) })).resolves.toEqual(int(2));
+    await expect(run("prelude.array.get", { target: xs, index: int(9) })).resolves.toEqual({
       kind: "null",
     });
-    await expect(run("primitive.array.length", { target: xs })).resolves.toEqual(int(3));
-    await expect(run("primitive.array.append", { target: xs, value: int(4) })).resolves.toEqual({
+    await expect(run("prelude.array.length", { target: xs })).resolves.toEqual(int(3));
+    await expect(run("prelude.array.append", { target: xs, value: int(4) })).resolves.toEqual({
       kind: "array",
       elements: [int(1), int(2), int(3), int(4)],
     });
     await expect(
-      run("primitive.array.concat", {
+      run("prelude.array.concat", {
         left: { kind: "array", elements: [int(1)] },
         right: { kind: "array", elements: [int(2)] },
       }),
     ).resolves.toEqual({ kind: "array", elements: [int(1), int(2)] });
-    await expect(run("primitive.array.slice", { target: xs, start: int(1), end: int(9) })).resolves.toEqual(
+    await expect(run("prelude.array.slice", { target: xs, start: int(1), end: int(9) })).resolves.toEqual(
       { kind: "array", elements: [int(2), int(3)] },
     );
   });
 
   test("string.length / split / join / slice / contains count code points", async () => {
-    await expect(run("primitive.string.length", { value: str("a👍b") })).resolves.toEqual(int(3));
-    await expect(run("primitive.string.split", { value: str("a👍b"), separator: str("") })).resolves.toEqual(
+    await expect(run("prelude.string.length", { value: str("a👍b") })).resolves.toEqual(int(3));
+    await expect(run("prelude.string.split", { value: str("a👍b"), separator: str("") })).resolves.toEqual(
       { kind: "array", elements: [str("a"), str("👍"), str("b")] },
     );
-    await expect(run("primitive.string.split", { value: str("a,b"), separator: str(",") })).resolves.toEqual(
+    await expect(run("prelude.string.split", { value: str("a,b"), separator: str(",") })).resolves.toEqual(
       { kind: "array", elements: [str("a"), str("b")] },
     );
     await expect(
-      run("primitive.string.join", {
+      run("prelude.string.join", {
         parts: { kind: "array", elements: [str("a"), str("b")] },
         separator: str("-"),
       }),
     ).resolves.toEqual(str("a-b"));
     await expect(
-      run("primitive.string.slice", { value: str("a👍b"), start: int(1), end: int(2) }),
+      run("prelude.string.slice", { value: str("a👍b"), start: int(1), end: int(2) }),
     ).resolves.toEqual(str("👍"));
     await expect(
-      run("primitive.string.contains", { value: str("hello"), search: str("ell") }),
+      run("prelude.string.contains", { value: str("hello"), search: str("ell") }),
     ).resolves.toEqual({ kind: "boolean", value: true });
   });
 });
 
-describe("primitive.ai.get_metadata", () => {
+describe("prelude.ai.get_metadata", () => {
   const GREETER_SCHEMA: SchemaInfo = {
     input: {
       type: "object",
@@ -272,13 +272,13 @@ describe("primitive.ai.get_metadata", () => {
   test("derives name / description / schemas as json values", async () => {
     const context = contextWith(irWith());
     const metadata = await run(
-      "primitive.ai.get_metadata",
+      "prelude.ai.get_metadata",
       { value: { kind: "agent", name: createAgentName("main.greeter"), snapshot: SNAPSHOT } },
       context,
     );
     expect(metadata.kind).toBe("record");
     if (metadata.kind !== "record") return;
-    expect(metadata.ctor).toBe("primitive.ai.agent_metadata");
+    expect(metadata.ctor).toBe("prelude.ai.agent_metadata");
     expect(metadata.fields.name).toEqual(str("main.greeter"));
     expect(metadata.fields.description).toEqual(str("Returns a greeting."));
     const input = metadata.fields.input;
@@ -300,7 +300,7 @@ describe("primitive.ai.get_metadata", () => {
   test("specialises a generic callable's schemas through its carried substitution", async () => {
     const context = contextWith(irWith());
     const metadata = await run(
-      "primitive.ai.get_metadata",
+      "prelude.ai.get_metadata",
       {
         value: {
           kind: "agent",
@@ -318,7 +318,7 @@ describe("primitive.ai.get_metadata", () => {
   });
 
   test("refuses a non-callable value", async () => {
-    await expect(run("primitive.ai.get_metadata", { value: int(1) }, contextWith(irWith()))).rejects.toThrow(
+    await expect(run("prelude.ai.get_metadata", { value: int(1) }, contextWith(irWith()))).rejects.toThrow(
       /callable/,
     );
   });

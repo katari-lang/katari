@@ -1,4 +1,4 @@
-// The env host primitives (`primitive.env.get_secret` / `primitive.env.get_all`) registered on the prim
+// The env host primitives (`prelude.env.get_secret` / `prelude.env.get_all`) registered on the prim
 // registry by `registerHostPrims`, exercised over a stubbed `EnvReader`. These assert the privacy contract
 // at the source: a secret read is tainted `private`, a non-secret read is public, and a missing secret is a
 // (deterministic) failure the engine turns into a `panic`.
@@ -48,7 +48,7 @@ describe("env host primitives", () => {
   test("get_secret returns the decrypted value tainted private", async () => {
     const prims = primsWith(reader({ API_KEY: "sk-123" }, {}));
     const result = await prims.run(
-      "primitive.env.get_secret",
+      "prelude.env.get_secret",
       recordArgument({ key: { kind: "string", value: "API_KEY" } }),
       CONTEXT,
     );
@@ -59,7 +59,7 @@ describe("env host primitives", () => {
     const prims = primsWith(reader({}, { API_KEY: "not-a-secret" }));
     await expect(
       prims.run(
-        "primitive.env.get_secret",
+        "prelude.env.get_secret",
         recordArgument({ key: { kind: "string", value: "API_KEY" } }),
         CONTEXT,
       ),
@@ -68,7 +68,7 @@ describe("env host primitives", () => {
 
   test("get_all returns a public record of the non-secret entries", async () => {
     const prims = primsWith(reader({ SECRET: "sk-123" }, { HOST: "example.com", PORT: "443" }));
-    const result = await prims.run("primitive.env.get_all", recordArgument({}), CONTEXT);
+    const result = await prims.run("prelude.env.get_all", recordArgument({}), CONTEXT);
     expect(result).toEqual({
       kind: "record",
       fields: {
@@ -88,7 +88,7 @@ describe("env host primitives", () => {
       ["HOST", "example.com"],
     ]);
     const prims = primsWith(reader({}, publics));
-    const result = await prims.run("primitive.env.get_all", recordArgument({}), CONTEXT);
+    const result = await prims.run("prelude.env.get_all", recordArgument({}), CONTEXT);
     expect(result.kind).toBe("record");
     if (result.kind === "record") {
       // The `__proto__` entry survives as an own field rather than corrupting the prototype / vanishing.

@@ -1,10 +1,10 @@
-// The stdlib sub-module primitives beyond arithmetic: `primitive.json.*` (the JSON boundary),
-// `primitive.record.*` / `primitive.array.*` / `primitive.string.*` (collection and text access —
-// what a program needs to traverse a parsed AI reply), and `primitive.get_metadata` (a callable
+// The stdlib sub-module primitives beyond arithmetic: `prelude.json.*` (the JSON boundary),
+// `prelude.record.*` / `prelude.array.*` / `prelude.string.*` (collection and text access —
+// what a program needs to traverse a parsed AI reply), and `prelude.get_metadata` (a callable
 // value's name / description / schemas, as `json` values ready for an AI tool list). Preloaded into
 // every `PrimRegistry` next to the arithmetic built-ins.
 //
-// `primitive.call_agent` deliberately has NO runnable implementation: a delegate to it is unwrapped
+// `prelude.call_agent` deliberately has NO runnable implementation: a delegate to it is unwrapped
 // at the core reactor's acceptance surface (`CoreReactor.onDelegate`) into a delegation to the
 // callable its argument carries, so its body block is never summoned. The throwing stub below only
 // guards the invariant.
@@ -54,8 +54,8 @@ function readStringField(argument: Value, name: string, context: PrimContext): P
 }
 
 export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
-  // ─── primitive.json ─────────────────────────────────────────────────────────────────────────
-  "primitive.json.parse": async (argument, context) => {
+  // ─── prelude.json ─────────────────────────────────────────────────────────────────────────
+  "prelude.json.parse": async (argument, context) => {
     const text = await readStringField(argument, "text", context);
     let json: Json;
     try {
@@ -67,44 +67,44 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     }
     return jsonValueFromJson(json);
   },
-  "primitive.json.stringify": async (argument, context) => {
+  "prelude.json.stringify": async (argument, context) => {
     const json = await jsonValueToJson(field(argument, "value"), stringReaderOf(context));
     return { kind: "string", value: JSON.stringify(json) };
   },
-  "primitive.json.encode": (argument, context) =>
+  "prelude.json.encode": (argument, context) =>
     encodeValue(field(argument, "value"), stringReaderOf(context)),
-  "primitive.json.decode": (argument, context) =>
+  "prelude.json.decode": (argument, context) =>
     decodeValue(field(argument, "value"), stringReaderOf(context)),
 
-  // ─── primitive.record ───────────────────────────────────────────────────────────────────────
-  "primitive.record.get": (argument) =>
+  // ─── prelude.record ───────────────────────────────────────────────────────────────────────
+  "prelude.record.get": (argument) =>
     recordOf(field(argument, "target"))[stringOf(field(argument, "key"))] ?? NULL_VALUE,
-  "primitive.record.set": (argument) => {
+  "prelude.record.set": (argument) => {
     const fields = { ...recordOf(field(argument, "target")) };
     fields[stringOf(field(argument, "key"))] = field(argument, "value");
     return { kind: "record", fields };
   },
-  "primitive.record.remove": (argument) => {
+  "prelude.record.remove": (argument) => {
     const fields = { ...recordOf(field(argument, "target")) };
     delete fields[stringOf(field(argument, "key"))];
     return { kind: "record", fields };
   },
-  "primitive.record.keys": (argument) => ({
+  "prelude.record.keys": (argument) => ({
     kind: "array",
     elements: sortedKeys(recordOf(field(argument, "target"))).map((key) => ({
       kind: "string",
       value: key,
     })),
   }),
-  "primitive.record.has": (argument) => ({
+  "prelude.record.has": (argument) => ({
     kind: "boolean",
     value: recordOf(field(argument, "target"))[stringOf(field(argument, "key"))] !== undefined,
   }),
-  "primitive.record.size": (argument) => ({
+  "prelude.record.size": (argument) => ({
     kind: "integer",
     value: Object.keys(recordOf(field(argument, "target"))).length,
   }),
-  "primitive.record.entries": (argument) => {
+  "prelude.record.entries": (argument) => {
     const fields = recordOf(field(argument, "target"));
     return {
       kind: "array",
@@ -114,38 +114,38 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       })),
     };
   },
-  "primitive.record.empty": () => ({ kind: "record", fields: {} }),
+  "prelude.record.empty": () => ({ kind: "record", fields: {} }),
 
-  // ─── primitive.array ────────────────────────────────────────────────────────────────────────
-  "primitive.array.get": (argument) =>
+  // ─── prelude.array ────────────────────────────────────────────────────────────────────────
+  "prelude.array.get": (argument) =>
     arrayOf(field(argument, "target"))[integerOf(field(argument, "index"))] ?? NULL_VALUE,
-  "primitive.array.length": (argument) => ({
+  "prelude.array.length": (argument) => ({
     kind: "integer",
     value: arrayOf(field(argument, "target")).length,
   }),
-  "primitive.array.append": (argument) => ({
+  "prelude.array.append": (argument) => ({
     kind: "array",
     elements: [...arrayOf(field(argument, "target")), field(argument, "value")],
   }),
-  "primitive.array.concat": (argument) => ({
+  "prelude.array.concat": (argument) => ({
     kind: "array",
     elements: [...arrayOf(field(argument, "left")), ...arrayOf(field(argument, "right"))],
   }),
-  "primitive.array.slice": (argument) => ({
+  "prelude.array.slice": (argument) => ({
     kind: "array",
     elements: arrayOf(field(argument, "target")).slice(
       Math.max(0, integerOf(field(argument, "start"))),
       Math.max(0, integerOf(field(argument, "end"))),
     ),
   }),
-  "primitive.array.empty": () => ({ kind: "array", elements: [] }),
+  "prelude.array.empty": () => ({ kind: "array", elements: [] }),
 
-  // ─── primitive.string (indices are Unicode code points, per the declared contract) ───────────
-  "primitive.string.length": async (argument, context) => ({
+  // ─── prelude.string (indices are Unicode code points, per the declared contract) ───────────
+  "prelude.string.length": async (argument, context) => ({
     kind: "integer",
     value: Array.from(await readStringField(argument, "value", context)).length,
   }),
-  "primitive.string.split": async (argument, context) => {
+  "prelude.string.split": async (argument, context) => {
     const value = await readStringField(argument, "value", context);
     const separator = await readStringField(argument, "separator", context);
     // An empty separator splits into code points (JS `split("")` would cut surrogate pairs apart).
@@ -155,7 +155,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       elements: parts.map((part) => ({ kind: "string", value: part })),
     };
   },
-  "primitive.string.join": async (argument, context) => {
+  "prelude.string.join": async (argument, context) => {
     const read = stringReaderOf(context);
     const parts: string[] = [];
     for (const part of arrayOf(field(argument, "parts"))) {
@@ -164,13 +164,13 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     const separator = await readStringField(argument, "separator", context);
     return { kind: "string", value: parts.join(separator) };
   },
-  "primitive.string.slice": async (argument, context) => {
+  "prelude.string.slice": async (argument, context) => {
     const points = Array.from(await readStringField(argument, "value", context));
     const start = Math.max(0, integerOf(field(argument, "start")));
     const end = Math.max(0, integerOf(field(argument, "end")));
     return { kind: "string", value: points.slice(start, end).join("") };
   },
-  "primitive.string.contains": async (argument, context) => ({
+  "prelude.string.contains": async (argument, context) => ({
     kind: "boolean",
     value: (await readStringField(argument, "value", context)).includes(
       await readStringField(argument, "search", context),
@@ -178,7 +178,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   }),
 
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────
-  "primitive.ai.get_metadata": async (argument, context) => {
+  "prelude.ai.get_metadata": async (argument, context) => {
     const value = field(argument, "value");
     const callable = await locateCallable(value, context.ir);
     const typeSubstitution = typeSubstitutionOf(callable.schema.genericBindings, callable.generics);
@@ -190,7 +190,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     const output = fillGenericSchema(typeSubstitution, callable.schema.output);
     return {
       kind: "record",
-      ctor: createAgentName("primitive.ai.agent_metadata"),
+      ctor: createAgentName("prelude.ai.agent_metadata"),
       fields: {
         name: { kind: "string", value: callable.name },
         description: { kind: "string", value: callable.description },
@@ -202,7 +202,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       },
     };
   },
-  "primitive.ai.call_agent": () => {
+  "prelude.ai.call_agent": () => {
     // Unreachable by construction: `CoreReactor.onDelegate` unwraps a `call_agent` delegate before
     // any instance is summoned, so this body block never runs.
     throw new Error("call_agent must be dispatched at the delegation boundary (engine bug)");

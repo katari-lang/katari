@@ -1,5 +1,5 @@
-// The `json` data type's runtime bridge. `primitive.json` models a JSON document as tagged `data`
-// values (`json_object` / `json_array` / ... — see `stdlib/primitive/json.ktr`); this module converts
+// The `json` data type's runtime bridge. `prelude.json` models a JSON document as tagged `data`
+// values (`json_object` / `json_array` / ... — see `stdlib/prelude/json.ktr`); this module converts
 // between three shapes:
 //
 //   - `jsonValueFromJson`:  bare `Json`  ->  tagged `json` value   (parse / schema embedding)
@@ -22,13 +22,13 @@ import { createAgentName, type Json } from "@katari-lang/types";
 import { jsonToValue } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 
-export const JSON_NULL = "primitive.json.json_null";
-export const JSON_BOOLEAN = "primitive.json.json_boolean";
-export const JSON_INTEGER = "primitive.json.json_integer";
-export const JSON_NUMBER = "primitive.json.json_number";
-export const JSON_STRING = "primitive.json.json_string";
-export const JSON_ARRAY = "primitive.json.json_array";
-export const JSON_OBJECT = "primitive.json.json_object";
+export const JSON_NULL = "prelude.json.json_null";
+export const JSON_BOOLEAN = "prelude.json.json_boolean";
+export const JSON_INTEGER = "prelude.json.json_integer";
+export const JSON_NUMBER = "prelude.json.json_number";
+export const JSON_STRING = "prelude.json.json_string";
+export const JSON_ARRAY = "prelude.json.json_array";
+export const JSON_OBJECT = "prelude.json.json_object";
 
 /** Reads a string value's content: inline directly, a semantic-string blob through the store. */
 export type StringReader = (value: Value) => Promise<string>;
@@ -37,7 +37,7 @@ function tagged(ctor: string, fields: Record<string, Value>): Value {
   return { kind: "record", fields, ctor: createAgentName(ctor) };
 }
 
-/** Whether a value is one of the seven `primitive.json` data values (by its constructor tag). */
+/** Whether a value is one of the seven `prelude.json` data values (by its constructor tag). */
 export function isJsonValue(value: Value): boolean {
   if (value.kind !== "record" || value.ctor === undefined) return false;
   switch (String(value.ctor)) {

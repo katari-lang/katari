@@ -51,8 +51,8 @@ export function delegateProxyOf(
 /** The built-in request a runtime error becomes (a prim failure, a non-exhaustive match, an FFI error).
  *  Errors are modelled as this `panic` request rather than a thrown effect: it bubbles like any request,
  *  so a `handle … with panic(e) => …` can catch it, and an unhandled one fails the run with its message.
- *  Matches the stdlib `primitive.panic` declaration. */
-export const PANIC_REQUEST = "primitive.panic" as QualifiedName;
+ *  Matches the stdlib `prelude.panic` declaration. */
+export const PANIC_REQUEST = "prelude.panic" as QualifiedName;
 
 /** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
  *  reactor-level panic (an ffi error, an unresolvable delegate target). */

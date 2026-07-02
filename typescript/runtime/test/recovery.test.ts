@@ -364,7 +364,7 @@ describe("recovery", () => {
               },
               {
                 kind: "delegate",
-                target: { kind: "name", name: createAgentName("primitive.add") },
+                target: { kind: "name", name: createAgentName("prelude.add") },
                 argument: 4,
                 output: 5,
               },
@@ -375,13 +375,13 @@ describe("recovery", () => {
         },
         6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
         7: {
-          block: { kind: "primitive", name: "primitive.add", input: 8 },
+          block: { kind: "primitive", name: "prelude.add", input: 8 },
           parameters: { parameter: 8 },
         },
       },
       entries: {
         [createAgentName("main")]: 0,
-        [createAgentName("primitive.add")]: 6,
+        [createAgentName("prelude.add")]: 6,
       },
       names: {},
     };

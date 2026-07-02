@@ -1,15 +1,15 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 -- | The compiler-blessed stdlib sources, embedded into the binary at build time so a single
--- self-contained executable ships them. These are ordinary Katari modules (the @primitive@ root and
+-- self-contained executable ships them. These are ordinary Katari modules (the @prelude@ root and
 -- any submodules under @stdlib/@); the compiler runs them through the usual pipeline like user code.
 -- The driver splices them into every compile and default-imports the 'defaultImports' roots (see
 -- 'Katari.Compile.compile').
 --
 -- Embedding (rather than reading at runtime) keeps the compiler IO-free: 'stdlibSources' is a
 -- compile-time constant. The @stdlib/@ file layout maps to module names by dropping the @.ktr@
--- extension and joining path segments with dots — @stdlib/primitive.ktr@ -> @primitive@,
--- @stdlib/primitive/array.ktr@ -> @primitive.array@ — matching the project-wide module-name rule, so a
+-- extension and joining path segments with dots — @stdlib/prelude.ktr@ -> @prelude@,
+-- @stdlib/prelude/array.ktr@ -> @prelude.array@ — matching the project-wide module-name rule, so a
 -- new stdlib module is added by dropping in a @.ktr@ file with no code change.
 module Katari.Stdlib where
 
@@ -23,7 +23,7 @@ import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
 import GHC.List (List)
 import Katari.Data.ModuleName (ModuleName, covers, moduleNameFromSegments)
-import Katari.Primitive (primitiveModuleName)
+import Katari.Primitive (preludeModuleName)
 import System.FilePath (dropExtension, splitDirectories, takeExtension)
 
 -- | Every embedded stdlib source, keyed by the module name it is spliced under.
@@ -47,21 +47,21 @@ allEmbeddedFiles = $(makeRelativeToProject "stdlib" >>= embedDir)
 decodeStdlib :: ByteString -> Text
 decodeStdlib = decodeUtf8With lenientDecode
 
--- | @"primitive/array.ktr"@ -> @primitive.array@; @"primitive.ktr"@ -> @primitive@.
+-- | @"prelude/array.ktr"@ -> @prelude.array@; @"prelude.ktr"@ -> @prelude@.
 filePathToModuleName :: FilePath -> ModuleName
 filePathToModuleName path = moduleNameFromSegments (Text.pack <$> splitDirectories (dropExtension path))
 
 -- | The default-import roots spliced into every user module's scope (see
--- 'Katari.Identifier.defaultImportScope'). Currently just the @primitive@ root, which covers it and
--- every @primitive.*@ submodule.
+-- 'Katari.Identifier.defaultImportScope'). Currently just the @prelude@ root, which covers it and
+-- every @prelude.*@ submodule.
 defaultImports :: List ModuleName
-defaultImports = [primitiveModuleName]
+defaultImports = [preludeModuleName]
 
 -- | Whether a module name is reserved by the compiler: an embedded stdlib module, or anything under a
--- default-import root (the @primitive.*@ namespace). The driver rejects a user module on a reserved
+-- default-import root (the @prelude.*@ namespace). The driver rejects a user module on a reserved
 -- name (see 'Katari.Compile.compile') instead of letting it silently shadow the stdlib (an exact
 -- clash) or be globally default-imported (a name under a reserved root). Module names come from file
--- paths, not the lexer, so the @primitive@ keyword does not protect the namespace — this does.
+-- paths, not the lexer, so a keyword does not protect the namespace — this does.
 isReservedModuleName :: ModuleName -> Bool
 isReservedModuleName moduleName =
   Map.member moduleName stdlibSources || any (`covers` moduleName) defaultImports

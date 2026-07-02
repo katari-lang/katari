@@ -88,7 +88,7 @@ optionsParser =
     <*> switch (long "json" <> help "Print the runtime's JSON payload instead of a table")
     <*> optional (strOption (long "state" <> metavar "STATE" <> help "runs: only this state (running|cancelling|done|error|cancelled)"))
     <*> optional (option auto (long "limit" <> metavar "N" <> help "runs: show at most N, newest first (default 20)"))
-    <*> switch (long "all" <> help "agents: include primitive.* callables")
+    <*> switch (long "all" <> help "agents: include prelude.* callables")
     <*> optional (strOption (long "snapshot" <> short 's' <> metavar "ID" <> help "agents: read this snapshot instead of the head"))
 
 run :: Options -> IO ()
@@ -120,7 +120,7 @@ run options = do
               ]
         TargetAgents -> do
           (raw, response) <- listAgents context.client context.projectId options.snapshotId
-          let visible view = options.includePrimitives || not ("primitive." `Text.isPrefixOf` view.qualifiedName)
+          let visible view = options.includePrimitives || not ("prelude." `Text.isPrefixOf` view.qualifiedName)
           emit options raw $
             table
               ["AGENT", "INPUT", "OUTPUT"]

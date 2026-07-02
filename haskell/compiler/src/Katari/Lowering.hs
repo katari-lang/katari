@@ -47,7 +47,7 @@ import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), substituteGenerics)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
-import Katari.Primitive (primitiveModuleName)
+import Katari.Primitive (preludeModuleName)
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
@@ -771,7 +771,7 @@ concatTemplate left right = do
   emit (OperationDelegate DelegateOperation {target = CalleeName concatName, argument = argumentVariable, output = Just output})
   pure output
   where
-    concatName = QualifiedName {moduleName = primitiveModuleName, name = "concat"}
+    concatName = QualifiedName {moduleName = preludeModuleName, name = "concat"}
 
 lowerTemplateElement :: AST.TemplateElement AST.Typed -> Lower VariableId
 lowerTemplateElement = \case

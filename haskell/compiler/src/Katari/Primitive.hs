@@ -1,11 +1,12 @@
--- | The wired-in @primitive@ module: the names the compiler hardcodes about it, and the
--- operator → primitive-function desugar table.
+-- | The wired-in @prelude@ module (the operator / panic home): the names the compiler hardcodes
+-- about it, and the operator → prelude-function desugar table. (The module is named @prelude@, not
+-- @primitive@: @primitive@ is a declaration keyword, so it could never be referenced from source.)
 --
 -- Operators are not a distinct construct past the Identifier pass: @a \<op\> b@ is desugared into a
--- call to the matching @primitive@ function (see "Katari.Identifier.Expression"), so the checker and
+-- call to the matching @prelude@ function (see "Katari.Identifier.Expression"), so the checker and
 -- everything downstream see one uniform call form. This module owns the lexical half of that — which
 -- function each operator maps to and the argument labels the desugar emits. The semantic half (the
--- function's actual signature) lives in the embedded @primitive@ source ('Katari.Stdlib'); the two are
+-- function's actual signature) lives in the embedded @prelude@ source ('Katari.Stdlib'); the two are
 -- kept in agreement by "Katari.StdlibSpec".
 module Katari.Primitive where
 
@@ -15,11 +16,11 @@ import Katari.Data.ModuleName (ModuleName (..))
 
 -- | The module every operator desugars into, and the default-import root spliced into every user
 -- module's scope ('Katari.Stdlib.defaultImports').
-primitiveModuleName :: ModuleName
-primitiveModuleName = ModuleName "primitive"
+preludeModuleName :: ModuleName
+preludeModuleName = ModuleName "prelude"
 
--- | The primitive function a binary operator desugars to: @a \<op\> b@ becomes
--- @primitive.\<name\>(left = a, right = b)@. Every name here must be exported by the @primitive@
+-- | The prelude function a binary operator desugars to: @a \<op\> b@ becomes
+-- @prelude.\<name\>(left = a, right = b)@. Every name here must be exported by the @prelude@
 -- module (enforced by "Katari.StdlibSpec").
 binaryOperatorName :: BinaryOperator -> Text
 binaryOperatorName = \case
@@ -38,15 +39,15 @@ binaryOperatorName = \case
   BinaryOperatorOr -> "or"
   BinaryOperatorConcat -> "concat"
 
--- | The primitive function a unary operator desugars to: @\<op\> x@ becomes
--- @primitive.\<name\>(value = x)@.
+-- | The prelude function a unary operator desugars to: @\<op\> x@ becomes
+-- @prelude.\<name\>(value = x)@.
 unaryOperatorName :: UnaryOperator -> Text
 unaryOperatorName = \case
   UnaryOperatorNegate -> "negate"
   UnaryOperatorNot -> "not"
 
 -- | The argument labels the operator desugar emits — they must match the parameter names of the
--- primitive signatures ("Katari.StdlibSpec" checks this).
+-- prelude signatures ("Katari.StdlibSpec" checks this).
 binaryOperatorLeftLabel :: Text
 binaryOperatorLeftLabel = "left"
 

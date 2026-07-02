@@ -1,6 +1,6 @@
 // Host primitives: the effectful built-ins the runtime registers on the `PrimRegistry` at boot, bound to
 // the stores only the host process has (today the project's `env_entries` store). They are the runtime
-// half of the `primitive.env.*` declarations in the compiler's stdlib — the engine resolves the leaf by
+// half of the `prelude.env.*` declarations in the compiler's stdlib — the engine resolves the leaf by
 // its qualified name and calls the implementation registered here.
 //
 // Unlike the pure built-ins (arithmetic / string / logic, in `prims.ts`), these touch external state and
@@ -31,7 +31,7 @@ export interface HostPrimStores {
 /** Register the effectful host primitives on `prims`, bound to `stores`. Called once at boot, after the
  *  registry is built with its pure built-ins. */
 export function registerHostPrims(prims: PrimRegistry, stores: HostPrimStores): void {
-  prims.register("primitive.env.get_secret", async (argument, context) => {
+  prims.register("prelude.env.get_secret", async (argument, context) => {
     const key = stringArgument(argument, "key");
     const value = await stores.env.readSecret(context.projectId, key);
     if (value === null) {
@@ -42,7 +42,7 @@ export function registerHostPrims(prims: PrimRegistry, stores: HostPrimStores): 
     return markPrivate({ kind: "string", value });
   });
 
-  prims.register("primitive.env.get_all", async (_argument, context) => {
+  prims.register("prelude.env.get_all", async (_argument, context) => {
     const entries = await stores.env.readPublic(context.projectId);
     // A null-prototype map so an env key literally named `__proto__` / `constructor` becomes a real record
     // field rather than a silently-dropped prototype write (env key names are admin-chosen, so not trusted).

@@ -9,8 +9,8 @@ import type { BlockId, BlockInformation, IRModule, QualifiedName } from "@katari
 import type { IrAccess } from "./engine/context.js";
 import type { SnapshotId } from "./ids.js";
 
-/** The module a qualified name belongs to: everything before its final segment (`"primitive.add"` ->
- *  `"primitive"`, `"foo.bar.baz"` -> `"foo.bar"`). A bare name (no dot) belongs to the empty module. */
+/** The module a qualified name belongs to: everything before its final segment (`"prelude.add"` ->
+ *  `"prelude"`, `"foo.bar.baz"` -> `"foo.bar"`). A bare name (no dot) belongs to the empty module. */
 export function moduleOfName(name: QualifiedName): string {
   const segments = String(name).split(".");
   return segments.slice(0, -1).join(".");

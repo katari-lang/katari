@@ -86,7 +86,7 @@ optionsParser =
     <*> optional (strOption (long "name" <> metavar "NAME" <> help "A human label for the run record (default: the agent name)"))
     <*> optional (strOption (long "snapshot" <> short 's' <> metavar "ID" <> help "Pin the run to a snapshot id (default: the project head)"))
     <*> switch (long "detach" <> help "Start the run and print its id instead of waiting for the result")
-    <*> switch (long "all" <> help "Include primitive.* callables in the interactive agent picker")
+    <*> switch (long "all" <> help "Include prelude.* callables in the interactive agent picker")
 
 run :: Options -> IO ()
 run options = do
@@ -163,7 +163,7 @@ resolveAgent context options = case options.agent of
               Nothing -> dieIn "run" "cancelled"
     | otherwise -> dieIn "run" "no agent given (pass AGENT, or run interactively)"
   where
-    visible view = options.includePrimitives || not ("primitive." `Text.isPrefixOf` view.qualifiedName)
+    visible view = options.includePrimitives || not ("prelude." `Text.isPrefixOf` view.qualifiedName)
 
 -- | Decide the argument from the input schema alone (no @--arg@ was given): an agent whose
 -- parameters are all optional runs on its defaults; required parameters start the interview on a

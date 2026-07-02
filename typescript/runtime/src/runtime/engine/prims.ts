@@ -1,5 +1,5 @@
 // The primitive registry: the built-in leaf operations the compiler desugars operators into (the
-// `primitive.*` names) plus the stdlib sub-module prims (`interop-prims.ts` — json / record / array /
+// `prelude.*` names) plus the stdlib sub-module prims (`interop-prims.ts` — json / record / array /
 // string / get_metadata). Implementations may be async (the env / blob prims hit a store) —
 // `PrimRunner.run` always returns a promise so the engine awaits uniformly. This registry is the
 // seam: env / secret / file primitives are registered by the host with their stores; everything
@@ -27,7 +27,7 @@ export class PrimRegistry implements PrimRunner {
     }
   }
 
-  /** Register (or override) a primitive — e.g. a host-supplied `primitive.get_env` bound to its store. */
+  /** Register (or override) a primitive — e.g. a host-supplied `prelude.get_env` bound to its store. */
   register(name: string, implementation: PrimImplementation): void {
     this.implementations.set(name, implementation);
   }
@@ -44,41 +44,41 @@ export class PrimRegistry implements PrimRunner {
 // ─── built-in pure primitives ─────────────────────────────────────────────────────────────────
 
 const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
-  "primitive.add": numeric((left, right) => left + right),
-  "primitive.subtract": numeric((left, right) => left - right),
-  "primitive.multiply": numeric((left, right) => left * right),
-  "primitive.divide": numeric((left, right) => left / right),
-  "primitive.modulo": numeric((left, right) => left % right),
-  "primitive.negate": (argument) => {
+  "prelude.add": numeric((left, right) => left + right),
+  "prelude.subtract": numeric((left, right) => left - right),
+  "prelude.multiply": numeric((left, right) => left * right),
+  "prelude.divide": numeric((left, right) => left / right),
+  "prelude.modulo": numeric((left, right) => left % right),
+  "prelude.negate": (argument) => {
     const value = numberOf(field(argument, "value"));
     return makeNumber(-value, field(argument, "value"));
   },
-  "primitive.equal": (argument) => ({
+  "prelude.equal": (argument) => ({
     kind: "boolean",
     value: valueEquals(field(argument, "left"), field(argument, "right")),
   }),
-  "primitive.not_equal": (argument) => ({
+  "prelude.not_equal": (argument) => ({
     kind: "boolean",
     value: !valueEquals(field(argument, "left"), field(argument, "right")),
   }),
-  "primitive.less_than": comparison((left, right) => left < right),
-  "primitive.less_or_equal": comparison((left, right) => left <= right),
-  "primitive.greater_than": comparison((left, right) => left > right),
-  "primitive.greater_or_equal": comparison((left, right) => left >= right),
-  "primitive.and": (argument) => ({
+  "prelude.less_than": comparison((left, right) => left < right),
+  "prelude.less_or_equal": comparison((left, right) => left <= right),
+  "prelude.greater_than": comparison((left, right) => left > right),
+  "prelude.greater_or_equal": comparison((left, right) => left >= right),
+  "prelude.and": (argument) => ({
     kind: "boolean",
     value: boolOf(field(argument, "left")) && boolOf(field(argument, "right")),
   }),
-  "primitive.or": (argument) => ({
+  "prelude.or": (argument) => ({
     kind: "boolean",
     value: boolOf(field(argument, "left")) || boolOf(field(argument, "right")),
   }),
-  "primitive.not": (argument) => ({ kind: "boolean", value: !boolOf(field(argument, "value")) }),
-  "primitive.concat": (argument) => ({
+  "prelude.not": (argument) => ({ kind: "boolean", value: !boolOf(field(argument, "value")) }),
+  "prelude.concat": (argument) => ({
     kind: "string",
     value: stringOf(field(argument, "left")) + stringOf(field(argument, "right")),
   }),
-  "primitive.string.to_string": async (argument, context) => {
+  "prelude.string.to_string": async (argument, context) => {
     const value = field(argument, "value");
     // A blob-backed string renders as its content, like every other string-accepting prim.
     if (value.kind === "ref" && value.semanticKind === "string") {

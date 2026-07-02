@@ -1,9 +1,9 @@
-// The `primitive.json` sub-module: the `json` data type and its four conversions. `json` is the
+// The `prelude.json` sub-module: the `json` data type and its four conversions. `json` is the
 // tagged mirror of a JSON document — one `data` constructor per JSON shape, closed into the union
 // synonym `json` — so a program can traverse an AI's reply with ordinary `match` arms. Referenced
 // from user code by the default-import qualifier: type `json.json`, constructor patterns
 // `json.json_object(...)`, conversions `json.parse(...)` (or brought in bare with
-// `import { type json, json_object, ... } from primitive.json`).
+// `import { type json, json_object, ... } from prelude.json`).
 //
 // The four conversions form two inverse pairs across the two boundaries:
 //

@@ -1,4 +1,4 @@
-// The `primitive.string` sub-module: operations over `string` beyond concatenation (`++` /
+// The `prelude.string` sub-module: operations over `string` beyond concatenation (`++` /
 // templates). Called qualified — `string.length`, `string.split` — via the default import. Indices
 // are Unicode code points, not UTF-16 units, so a character outside the BMP counts once.
 

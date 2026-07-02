@@ -1,4 +1,4 @@
-// The `primitive.http` sub-module: a built-in HTTP client. `fetch` is an `external` whose calls route to the
+// The `prelude.http` sub-module: a built-in HTTP client. `fetch` is an `external` whose calls route to the
 // runtime's `http` reactor (an in-runtime `fetch`, not an FFI sidecar) via the `from "http"` clause. It is
 // called as `http.fetch`.
 //

@@ -28,8 +28,8 @@ const SNAPSHOT = "snapshot-http" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
 // agent main() {
-//   let key = primitive.env.get_secret({ key: "API_KEY" })     // a private string
-//   return primitive.http.fetch({
+//   let key = prelude.env.get_secret({ key: "API_KEY" })     // a private string
+//   return prelude.http.fetch({
 //     url: "https://example.test/ping", method: "GET",
 //     headers: { authorization: key }, body: "",
 //   })
@@ -49,7 +49,7 @@ const FETCH_IR: IRModule = {
           { kind: "makeRecord", entries: [["key", 20]], output: 21 },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("primitive.env.get_secret") },
+            target: { kind: "name", name: createAgentName("prelude.env.get_secret") },
             argument: 21,
             output: 22,
           },
@@ -73,7 +73,7 @@ const FETCH_IR: IRModule = {
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("primitive.http.fetch") },
+            target: { kind: "name", name: createAgentName("prelude.http.fetch") },
             argument: 27,
             output: 28,
           },
@@ -85,7 +85,7 @@ const FETCH_IR: IRModule = {
     // get_secret host-primitive agent + its leaf.
     6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
     7: {
-      block: { kind: "primitive", name: "primitive.env.get_secret", input: 70 },
+      block: { kind: "primitive", name: "prelude.env.get_secret", input: 70 },
       parameters: { parameter: 70 },
     },
     // fetch external agent + its external leaf, routed to the http reactor.
@@ -97,8 +97,8 @@ const FETCH_IR: IRModule = {
   },
   entries: {
     [createAgentName("main")]: 0,
-    [createAgentName("primitive.env.get_secret")]: 6,
-    [createAgentName("primitive.http.fetch")]: 8,
+    [createAgentName("prelude.env.get_secret")]: 6,
+    [createAgentName("prelude.http.fetch")]: 8,
   },
   names: {},
 };
@@ -138,7 +138,7 @@ const CANCELLING_FETCH_IR: IRModule = {
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("primitive.http.fetch") },
+            target: { kind: "name", name: createAgentName("prelude.http.fetch") },
             argument: 34,
             output: 35,
           },
@@ -166,7 +166,7 @@ const CANCELLING_FETCH_IR: IRModule = {
   },
   entries: {
     [createAgentName("main")]: 0,
-    [createAgentName("primitive.http.fetch")]: 8,
+    [createAgentName("prelude.http.fetch")]: 8,
   },
   names: {},
 };

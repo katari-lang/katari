@@ -1,6 +1,6 @@
-// The `primitive.array` sub-module: operations over `array[T]` beyond what the language gives
+// The `prelude.array` sub-module: operations over `array[T]` beyond what the language gives
 // directly (literals, `for` mapping). Called qualified — `array.get`, `array.length` — via the
-// default import. The parameter is named `target` throughout (uniform with `primitive.record`).
+// default import. The parameter is named `target` throughout (uniform with `prelude.record`).
 
 @"The element at @index@ (0-based), or `null` when the index is out of bounds."
 primitive agent get[T](target: array[T], index: integer) -> T | null

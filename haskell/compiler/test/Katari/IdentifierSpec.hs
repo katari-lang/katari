@@ -197,9 +197,9 @@ identifySpec = do
       codesOf (identify emptyContext "data point(x: integer)\nagent main() -> point.field { 1 }") `shouldBe` ["K2004"]
 
   describe "identifyModule (operator desugar)" $ do
-    it "desugars a binary operator to a qualified primitive call (no primitive context needed)" $
+    it "desugars a binary operator to a qualified prelude call (no primitive context needed)" $
       case operatorCall "agent main() -> integer { 1 + 2 }" of
-        Just (callee, _) -> calleeQualifiedName callee `shouldBe` Just (ModuleName "primitive", "add")
+        Just (callee, _) -> calleeQualifiedName callee `shouldBe` Just (ModuleName "prelude", "add")
         Nothing -> expectationFailure "binary operator did not desugar to a call"
 
     it "passes the operands as left / right arguments" $
@@ -207,10 +207,10 @@ identifySpec = do
         Just (_, arguments) -> ((.name) <$> arguments) `shouldBe` ["left", "right"]
         Nothing -> expectationFailure "binary operator did not desugar to a call"
 
-    it "desugars a unary operator to a qualified primitive call" $
+    it "desugars a unary operator to a qualified prelude call" $
       case operatorCall "agent main() -> integer { -x }" of
         Just (callee, arguments) -> do
-          calleeQualifiedName callee `shouldBe` Just (ModuleName "primitive", "negate")
+          calleeQualifiedName callee `shouldBe` Just (ModuleName "prelude", "negate")
           ((.name) <$> arguments) `shouldBe` ["value"]
         Nothing -> expectationFailure "unary operator did not desugar to a call"
 
@@ -219,7 +219,7 @@ identifySpec = do
 
     it "is immune to a user binding that shadows the operator's name" $
       case operatorCall "agent main() -> integer { let add = 5\n 1 + 2 }" of
-        Just (callee, _) -> calleeQualifiedName callee `shouldBe` Just (ModuleName "primitive", "add")
+        Just (callee, _) -> calleeQualifiedName callee `shouldBe` Just (ModuleName "prelude", "add")
         Nothing -> expectationFailure "binary operator did not desugar to a call"
 
 ---------------------------------------------------------------------------------------------------

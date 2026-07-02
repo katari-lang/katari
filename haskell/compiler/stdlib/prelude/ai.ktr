@@ -1,4 +1,4 @@
-// The `primitive.ai` sub-module: the bridge that lets an AI treat agents as tools. Called qualified
+// The `prelude.ai` sub-module: the bridge that lets an AI treat agents as tools. Called qualified
 // via the default import — `ai.get_metadata`, `ai.call_agent`, type `ai.agent_metadata`.
 //
 // `get_metadata` derives a callable value's public signature — its qualified name, its `@"..."`

@@ -18,7 +18,7 @@ import Katari.Primitive
   ( binaryOperatorLeftLabel,
     binaryOperatorName,
     binaryOperatorRightLabel,
-    primitiveModuleName,
+    preludeModuleName,
     unaryOperatorName,
     unaryOperatorOperandLabel,
   )
@@ -28,34 +28,34 @@ import Test.Hspec
 spec :: Spec
 spec = do
   describe "stdlibSources" $ do
-    it "embeds the primitive module" $
-      Map.member primitiveModuleName stdlibSources `shouldBe` True
+    it "embeds the prelude module" $
+      Map.member preludeModuleName stdlibSources `shouldBe` True
 
-    it "default-imports the primitive root" $
-      defaultImports `shouldBe` [primitiveModuleName]
+    it "default-imports the prelude root" $
+      defaultImports `shouldBe` [preludeModuleName]
 
     it "parses and identifies every stdlib module without diagnostics" $
       stdlibDiagnosticCodes `shouldBe` []
 
   describe "operator desugar table" $ do
-    it "maps every binary operator to a primitive export with matching labels" $
+    it "maps every binary operator to a prelude export with matching labels" $
       mapMaybe checkBinary [minBound .. maxBound] `shouldBe` []
 
-    it "maps every unary operator to a primitive export with matching labels" $
+    it "maps every unary operator to a prelude export with matching labels" $
       mapMaybe checkUnary [minBound .. maxBound] `shouldBe` []
 
   describe "isReservedModuleName" $ do
-    it "reserves the primitive root" $
-      isReservedModuleName (ModuleName "primitive") `shouldBe` True
+    it "reserves the prelude root" $
+      isReservedModuleName (ModuleName "prelude") `shouldBe` True
 
-    it "reserves a name under the primitive namespace" $
-      isReservedModuleName (ModuleName "primitive.array") `shouldBe` True
+    it "reserves a name under the prelude namespace" $
+      isReservedModuleName (ModuleName "prelude.array") `shouldBe` True
 
     it "does not reserve an unrelated user module" $
       isReservedModuleName (ModuleName "my_module") `shouldBe` False
 
     it "does not reserve a mere name-prefix sibling of a reserved root" $
-      isReservedModuleName (ModuleName "primitivex") `shouldBe` False
+      isReservedModuleName (ModuleName "preludex") `shouldBe` False
 
   describe "default-import expansion" $
     it "maps the default-import-covered stdlib modules to distinct last-segment qualifiers" $
@@ -94,13 +94,13 @@ stdlibContext =
     }
 
 ---------------------------------------------------------------------------------------------------
--- Operator table ↔ primitive exports
+-- Operator table ↔ prelude exports
 ---------------------------------------------------------------------------------------------------
 
--- | The parameter names of each @primitive@ agent, keyed by agent name — the source of truth the
+-- | The parameter names of each @prelude@ agent, keyed by agent name — the source of truth the
 -- desugar's emitted argument labels must match.
 primitiveParameters :: Map Text [Text]
-primitiveParameters = case Map.lookup primitiveModuleName parsedStdlib of
+primitiveParameters = case Map.lookup preludeModuleName parsedStdlib of
   Nothing -> Map.empty
   Just (parsed, _) ->
     Map.fromList
@@ -114,7 +114,7 @@ checkBinary operator = checkOperator (binaryOperatorName operator) [binaryOperat
 checkUnary :: UnaryOperator -> Maybe Text
 checkUnary operator = checkOperator (unaryOperatorName operator) [unaryOperatorOperandLabel]
 
--- | A mismatch message between an operator's desugar target and the @primitive@ module, or 'Nothing'
+-- | A mismatch message between an operator's desugar target and the @prelude@ module, or 'Nothing'
 -- when they agree on both the function name and the argument labels.
 checkOperator :: Text -> [Text] -> Maybe Text
 checkOperator name expectedLabels = case Map.lookup name primitiveParameters of

@@ -153,8 +153,8 @@ spec = do
       let project = projectWith (rootPackageWith ["lib"]) [("lib", dependencyPackage "lib" ["lib"] Nothing)]
       assembleProject project `shouldSatisfy` either isModuleCollision (const False)
 
-    it "rejects a dependency on the compiler-reserved primitive namespace" $ do
-      let project = projectWith (rootPackageWith ["main"]) [("primitive", dependencyPackage "primitive" ["primitive"] Nothing)]
+    it "rejects a dependency on the compiler-reserved prelude namespace" $ do
+      let project = projectWith (rootPackageWith ["main"]) [("prelude", dependencyPackage "prelude" ["prelude"] Nothing)]
       assembleProject project `shouldSatisfy` either isReservedName (const False)
 
   describe "compileInputSources" $

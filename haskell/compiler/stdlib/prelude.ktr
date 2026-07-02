@@ -1,5 +1,5 @@
-// The wired-in `primitive` module. Every operator desugars to one of these functions, and the module
-// is default-imported into every user module (so `primitive.add` and stdlib submodules resolve).
+// The wired-in `prelude` module. Every operator desugars to one of these functions, and the module
+// is default-imported into every user module (so `prelude.add` and stdlib submodules resolve).
 //
 // Generic bounds give operators precise typing: an arithmetic operator over `T extends number`
 // preserves `integer` when both operands are integers, and widens to `number` otherwise.

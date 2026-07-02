@@ -30,7 +30,7 @@ import Katari.Primitive
   ( binaryOperatorLeftLabel,
     binaryOperatorName,
     binaryOperatorRightLabel,
-    primitiveModuleName,
+    preludeModuleName,
     unaryOperatorName,
     unaryOperatorOperandLabel,
   )
@@ -195,12 +195,12 @@ primitiveCall sourceSpan member arguments =
         QualifiedReferenceExpression
           { moduleQualifier =
               ModuleQualifier
-                { name = renderModuleName primitiveModuleName,
-                  moduleReference = identifiedReference sourceSpan (Just primitiveModuleName),
+                { name = renderModuleName preludeModuleName,
+                  moduleReference = identifiedReference sourceSpan (Just preludeModuleName),
                   sourceSpan = sourceSpan
                 },
             name = member,
-            variableReference = identifiedReference sourceSpan (Just (qualifiedVariableResolution primitiveModuleName member)),
+            variableReference = identifiedReference sourceSpan (Just (qualifiedVariableResolution preludeModuleName member)),
             sourceSpan = sourceSpan,
             typeOf = ()
           }

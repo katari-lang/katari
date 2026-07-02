@@ -1,6 +1,6 @@
 // The agent resource: callable schemas read from a snapshot's IR (see agent.reader.ts for why the IR
 // is the source of truth). `list` serves every entry — including data constructors, requests and the
-// stdlib's `primitive.*` — without filtering; presentation choices (e.g. hiding primitives from an
+// stdlib's `prelude.*` — without filtering; presentation choices (e.g. hiding primitives from an
 // interactive picker) belong to clients.
 
 import { NotFoundError } from "../../lib/errors.js";
