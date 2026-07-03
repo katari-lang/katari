@@ -46,6 +46,10 @@ export const runRoutes = new Hono<AppEnv>()
       return c.json(success(await runService.listEscalationAudit(projectId, runId)));
     },
   )
+  .get("/projects/:projectId/runs/:runId/tree", zValidator("param", runParamSchema), async (c) => {
+    const { projectId, runId } = c.req.valid("param");
+    return c.json(success(await runService.getDelegationTree(projectId, runId)));
+  })
   .post(
     "/projects/:projectId/runs/:runId/cancel",
     requireJsonBody,

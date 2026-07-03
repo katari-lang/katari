@@ -4,6 +4,7 @@ import { facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
 import { type RunView, runRepository } from "./run.repository.js";
 import type { ListRunsQuery, StartRunBody } from "./run.schema.js";
+import { runTreeRepository } from "./run-tree.repository.js";
 
 /** The wire shape of a run: its projected view with the tagged `argument` / `result` `Value`s rendered
  *  back to Json. (The view's state / result / error are projected from the run's Layer 1 delegation.) */
@@ -44,6 +45,16 @@ export const runService = {
       throw new NotFoundError(`run ${runId} not found`);
     }
     return toRunResponse(view);
+  },
+
+  /** A run's live delegation tree — `null` once the run is terminal (the routing rows are deleted with
+   *  it). The nodes carry no argument / result values, so there is nothing to redact at this boundary. */
+  async getDelegationTree(projectId: string, runId: string) {
+    const view = await runRepository.get(db, projectId, runId);
+    if (view === undefined) {
+      throw new NotFoundError(`run ${runId} not found`);
+    }
+    return { state: view.state, tree: await runTreeRepository.get(db, projectId, runId) };
   },
 
   /** A run's answered-escalation transcript. Open escalations are the escalation resource's concern;
