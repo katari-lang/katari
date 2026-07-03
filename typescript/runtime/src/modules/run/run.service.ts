@@ -45,4 +45,21 @@ export const runService = {
     }
     return toRunResponse(view);
   },
+
+  /** A run's answered-escalation transcript. Open escalations are the escalation resource's concern;
+   *  this is the durable history the audit table keeps after each answer. */
+  async listEscalationAudit(projectId: string, runId: string) {
+    const view = await runRepository.get(db, projectId, runId);
+    if (view === undefined) {
+      throw new NotFoundError(`run ${runId} not found`);
+    }
+    const entries = await runRepository.listEscalationAudit(db, runId);
+    return entries.map((entry) => ({
+      escalationId: entry.escalationId,
+      // The user-facing boundary: a secret in a question / answer is redacted, never observed.
+      question: entry.question === null ? null : valueToJson(entry.question, "redact"),
+      answer: entry.answer === null ? null : valueToJson(entry.answer, "redact"),
+      answeredAt: entry.answeredAt,
+    }));
+  },
 };

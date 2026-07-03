@@ -3,9 +3,9 @@
 // run delegation row is pure live routing (deleted on terminal), so the read side never touches it; the API
 // reads `runs` directly, and a run reflects the engine's durable state even after a crash + recovery.
 
-import { and, desc, eq, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
-import { type RunState, runs } from "../../db/tables/execution.js";
+import { type RunState, runEscalationsAudit, runs } from "../../db/tables/execution.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
 import type { Value } from "../../runtime/value/types.js";
 
@@ -104,7 +104,37 @@ export const runRepository = {
       .limit(1);
     return row === undefined ? undefined : projectRun(unsealRow(row));
   },
+
+  /** A run's answered-escalation history, oldest first (a Q&A transcript). The caller scopes the run to
+   *  its project first (the audit table keys by run alone), and the at-rest seal is undone here like a
+   *  run's own argument / result. */
+  async listEscalationAudit(executor: Executor, runId: string): Promise<RunEscalationAuditView[]> {
+    const rows = await executor
+      .select({
+        escalationId: runEscalationsAudit.escalationId,
+        question: runEscalationsAudit.question,
+        answer: runEscalationsAudit.answer,
+        answeredAt: runEscalationsAudit.answeredAt,
+      })
+      .from(runEscalationsAudit)
+      .where(eq(runEscalationsAudit.runId, runId))
+      .orderBy(asc(runEscalationsAudit.answeredAt));
+    return rows.map((row) => ({
+      escalationId: row.escalationId,
+      question: unsealFromStorage(row.question),
+      answer: unsealFromStorage(row.answer),
+      answeredAt: row.answeredAt,
+    }));
+  },
 };
+
+/** One answered escalation of a run, as the API presents it. */
+export interface RunEscalationAuditView {
+  escalationId: string;
+  question: Value | null;
+  answer: Value | null;
+  answeredAt: Date;
+}
 
 /** Decrypt a row's at-rest `argument` / `result` before projection (the inverse of the engine's seal-on-write). */
 function unsealRow(row: RunRow): RunRow {

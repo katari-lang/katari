@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+/* Semantic color tokens. Components use `bg-surface` / `text-fg-muted` / `border-edge` etc. — one
+ * class per property, resolved through CSS variables — so theming never needs `dark:` twins on
+ * every call site. */
+@theme inline {
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-sunken: var(--sunken);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-edge: var(--edge);
+  --color-edge-strong: var(--edge-strong);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+}
+
+:root {
+  --surface: oklch(0.985 0.002 250);
+  --raised: oklch(1 0 0);
+  --sunken: oklch(0.955 0.004 250);
+  --fg: oklch(0.25 0.02 260);
+  --fg-muted: oklch(0.5 0.02 260);
+  --fg-faint: oklch(0.65 0.015 260);
+  --edge: oklch(0.9 0.006 250);
+  --edge-strong: oklch(0.82 0.01 250);
+  --accent: oklch(0.55 0.18 275);
+  --accent-hover: oklch(0.5 0.19 275);
+  --accent-fg: oklch(0.99 0 0);
+  --accent-soft: oklch(0.94 0.04 275);
+  --danger: oklch(0.55 0.2 25);
+  --danger-soft: oklch(0.94 0.04 25);
+  --success: oklch(0.55 0.15 155);
+  --success-soft: oklch(0.94 0.05 155);
+  --warning: oklch(0.6 0.14 80);
+  --warning-soft: oklch(0.95 0.06 90);
+}
+
+[data-theme="dark"] {
+  --surface: oklch(0.19 0.012 265);
+  --raised: oklch(0.23 0.014 265);
+  --sunken: oklch(0.16 0.012 265);
+  --fg: oklch(0.93 0.008 260);
+  --fg-muted: oklch(0.7 0.015 260);
+  --fg-faint: oklch(0.55 0.015 260);
+  --edge: oklch(0.31 0.015 265);
+  --edge-strong: oklch(0.4 0.02 265);
+  --accent: oklch(0.68 0.16 275);
+  --accent-hover: oklch(0.73 0.15 275);
+  --accent-fg: oklch(0.15 0.02 275);
+  --accent-soft: oklch(0.3 0.06 275);
+  --danger: oklch(0.68 0.18 25);
+  --danger-soft: oklch(0.3 0.07 25);
+  --success: oklch(0.7 0.13 155);
+  --success-soft: oklch(0.29 0.06 155);
+  --warning: oklch(0.75 0.13 85);
+  --warning-soft: oklch(0.3 0.06 90);
+}
+
+body {
+  @apply bg-surface text-fg antialiased;
+}

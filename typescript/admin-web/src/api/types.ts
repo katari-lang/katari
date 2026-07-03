@@ -1,0 +1,104 @@
+// Wire types of the runtime API (base /api/v1). These mirror the runtime's module services; the
+// envelope is `{ ok: true, data } | { ok: false, error }` and is unwrapped by the client.
+
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+/** A JSON Schema document as the runtime serves it (Draft 2020-12 canonical shapes). */
+export type JsonSchema = { [keyword: string]: Json };
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  readme: string | null;
+  headSnapshotId: string | null;
+  createdAt: string;
+}
+
+/** The list endpoint serves summary rows; the module manifest travels only on head / detail reads. */
+export interface SnapshotSummary {
+  id: string;
+  message: string;
+  createdAt: string;
+}
+
+/** `snapshots/head` degrades to all-null fields while the project has no deploy yet. */
+export interface HeadSnapshot {
+  id: string | null;
+  message: string | null;
+  modules: Record<string, string>;
+  createdAt: string | null;
+}
+
+export type RunState = "running" | "cancelling" | "done" | "error" | "cancelled";
+
+export interface Run {
+  id: string;
+  name: string;
+  qualifiedName: string;
+  snapshotId: string | null;
+  state: RunState;
+  argument: Json;
+  result: Json;
+  errorMessage: string | null;
+  cancelReason: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface Escalation {
+  id: string;
+  request: string;
+  argument: Json;
+  runId: string;
+  createdAt: string;
+  answerSchema: JsonSchema | null;
+}
+
+export interface RunEscalationAudit {
+  escalationId: string;
+  question: Json;
+  answer: Json;
+  answeredAt: string;
+}
+
+export interface AgentEntry {
+  qualifiedName: string;
+  input: JsonSchema;
+  output: JsonSchema;
+}
+
+export interface AgentList {
+  snapshotId: string;
+  agents: AgentEntry[];
+}
+
+export interface AgentDetail {
+  snapshotId: string;
+  qualifiedName: string;
+  input: JsonSchema;
+  output: JsonSchema;
+}
+
+export interface FileEntry {
+  id: string;
+  hash: string;
+  size: number;
+  contentType: string | null;
+  semanticKind: string;
+}
+
+export interface EnvEntry {
+  key: string;
+  isSecret: boolean;
+  updatedAt: string;
+}
+
+export type EnvEntryDetail =
+  | { key: string; isSecret: true; updatedAt: string }
+  | { key: string; isSecret: false; value: string; updatedAt: string };
+
+export interface Health {
+  status: string;
+  uptimeSeconds: number;
+}
