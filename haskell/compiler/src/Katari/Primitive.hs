@@ -13,11 +13,21 @@ module Katari.Primitive where
 import Data.Text (Text)
 import Katari.Data.AST (BinaryOperator (..), UnaryOperator (..))
 import Katari.Data.ModuleName (ModuleName (..))
+import Katari.Data.QualifiedName (QualifiedName (..))
 
 -- | The module every operator desugars into, and the default-import root spliced into every user
 -- module's scope ('Katari.Stdlib.defaultImports').
 preludeModuleName :: ModuleName
 preludeModuleName = ModuleName "prelude"
+
+-- | The wired-in @panic@ request. It is deliberately NOT declared in prelude source — a program can
+-- neither raise a panic nor list it in an effect row — but a handler may catch one with a special ambient
+-- clause @request panic(msg) { ... }@. The checker recognizes that bare clause structurally (it never
+-- resolves, being undeclared), types it as @panic(msg: string) -> never@ kept OUT of the continuation's
+-- effect row (so it is addable to any handler), and lowers it to this name — matching the runtime's
+-- @prelude.panic@ ask.
+panicRequestName :: QualifiedName
+panicRequestName = QualifiedName {moduleName = preludeModuleName, name = "panic"}
 
 -- | The prelude function a binary operator desugars to: @a \<op\> b@ becomes
 -- @prelude.\<name\>(left = a, right = b)@. Every name here must be exported by the @prelude@

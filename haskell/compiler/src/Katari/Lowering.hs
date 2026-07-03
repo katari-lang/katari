@@ -22,7 +22,7 @@ import Control.Monad.RWS.CPS (RWS, runRWS)
 import Control.Monad.RWS.Class (asks, gets, local, modify)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32)
@@ -47,7 +47,7 @@ import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), substituteGenerics)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
-import Katari.Primitive (preludeModuleName)
+import Katari.Primitive (panicRequestName, preludeModuleName)
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
@@ -1022,7 +1022,13 @@ lowerRequestHandler ::
   AST.RequestHandler AST.Typed ->
   Lower Handler
 lowerRequestHandler handleBlock stateParameters stateLocals requestHandler = do
-  let requestName = resolvedRequestName requestHandler.typeReference
+  -- The ambient @panic@ clause is undeclared, so its reference never resolves; lower it to the wired-in
+  -- @prelude.panic@ name directly (recognized structurally, as in the checker), rather than reading a
+  -- resolution that is not there.
+  let requestName =
+        if isNothing requestHandler.moduleQualifier && requestHandler.name == panicRequestName.name
+          then panicRequestName
+          else resolvedRequestName requestHandler.typeReference
   argumentVariable <- freshVariableId
   (completion, operations) <- withFreshOperations $ do
     parameterLocals <- concat <$> mapM (bindAgentParameter argumentVariable) requestHandler.parameters

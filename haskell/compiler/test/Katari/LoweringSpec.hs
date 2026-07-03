@@ -91,6 +91,16 @@ spec = describe "lowerModule (via compile)" $ do
               )
       handledRequestNames irModule `shouldContain` [preludeName "throw"]
 
+    it "lowers an ambient `request panic(msg: string)` handler to the wired-in `prelude.panic` name" $ do
+      let irModule =
+            loweredTestModule
+              ( "agent f() -> integer {\n"
+                  <> "  use handler { request panic(msg: string) { break 0 } }\n"
+                  <> "  42\n"
+                  <> "}"
+              )
+      handledRequestNames irModule `shouldContain` [preludeName "panic"]
+
     it "checks a stdlib throw effect end to end: an unhandled `json.parse` propagates its throw" $
       compileErrorCodes "agent f(t: string) -> json.json { json.parse(text = t) }" `shouldBe` []
 

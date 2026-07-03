@@ -20,7 +20,7 @@ import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.Id (TypeResolution (..), VariableResolution (..))
 import Katari.Data.ModuleName (ModuleName, renderModuleName)
-import Katari.Data.QualifiedName (renderQualifiedName)
+import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SourceSpan (SourceSpan (..))
 import Katari.Identifier.Monad
 import Katari.Identifier.Pattern (resolveParameterBinding, resolvePattern)
@@ -30,6 +30,7 @@ import Katari.Primitive
   ( binaryOperatorLeftLabel,
     binaryOperatorName,
     binaryOperatorRightLabel,
+    panicRequestName,
     preludeModuleName,
     unaryOperatorName,
     unaryOperatorOperandLabel,
@@ -315,7 +316,15 @@ resolveHandler node = do
 -- also the @with@-modifier target set within the body).
 resolveRequestHandler :: List Binding -> RequestHandler Parsed -> Identifier (RequestHandler Identified)
 resolveRequestHandler stateScope handler = do
-  (moduleQualifier, typeReference) <- resolveRequestReference handler.moduleQualifier handler.name handler.typeReference
+  -- The ambient @panic@ clause (bare @request panic(...)@) names the undeclared @prelude.panic@ on purpose,
+  -- so it never resolves — leave its reference unresolved WITHOUT reporting an undefined name (K2001). The
+  -- checker recognizes it structurally and types it from its synthetic signature; lowering maps it to
+  -- @prelude.panic@. A qualified or differently-named clause resolves normally.
+  (moduleQualifier, typeReference) <- case handler.moduleQualifier of
+    Nothing
+      | handler.name == panicRequestName.name ->
+          pure (Nothing, identifiedReference handler.typeReference.sourceSpan (Nothing :: Maybe TypeResolution))
+    _ -> resolveRequestReference handler.moduleQualifier handler.name handler.typeReference
   genericArguments <- traverse resolveType handler.genericArguments
   (parameters, parameterBindings) <- resolveParameterBindings handler.parameters
   returnType <- traverse resolveType handler.returnType

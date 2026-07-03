@@ -18,7 +18,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
-import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), instantiationByName, monoScheme, reKeyByGenericId)
+import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), emptyGenericParameters, instantiationByName, monoScheme, reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
 import Katari.Data.NormalizedType
@@ -40,6 +40,7 @@ import Katari.Error
     WrongReferenceKindErrorInfo (..),
   )
 import Katari.Panic (panic)
+import Katari.Primitive (panicRequestName)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
@@ -1633,7 +1634,11 @@ checkHandlerScheme expression = do
   -- leaked / misplaced jump.
   when (hasConcreteEscape bodyEffect) $
     reportMisplacedJump expression.sourceSpan "a `next` / `break` / `return`" "an enclosing `for`, handler, or agent that is still in scope"
-  let handledRequests = Map.fromList handled
+  -- The ambient @panic@ clause is excluded from the continuation's overwrite row: a program never lists
+  -- @panic@ in an effect, so requiring the continuation to "produce" it would be wrong — a panic can arise
+  -- from any continuation and this clause catches it regardless. Its @break@ and body effect still fold in
+  -- above; only the effect-row footprint is dropped. This is what makes a panic clause addable to any handler.
+  let handledRequests = Map.fromList (filter ((/= panicRequestName) . fst) handled)
       continuationEffect =
         effectRow EffectRow {request = handledRequests, tails = Map.singleton effectId (Map.keysSet handledRequests)}
       effectVariable = singleTailEffect effectId
@@ -1743,16 +1748,41 @@ walkThenClause barrier matchedType = \case
 walkRequestHandler ::
   RequestHandler Identified ->
   Checker (Maybe (QualifiedName, Map Text NormalizedKindedType, NormalizedType, RequestHandler Typed))
-walkRequestHandler handler = do
-  requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
-  let resolvedRequest = case handler.typeReference.resolution of
-        Just (TypeResolutionQualifiedName name) -> (,) name <$> Map.lookup name requestEnv
-        _ -> Nothing
-  case resolvedRequest of
-    Nothing -> do
-      reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a request"}))
-      pure Nothing
-    Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
+walkRequestHandler handler =
+  -- The ambient @panic@ clause is recognized structurally: @panic@ is not a declared request (a program
+  -- cannot raise it), so it never resolves — but a bare @request panic(...)@ is the special catch, typed
+  -- from its synthetic signature rather than the request environment. 'checkHandlerScheme' then keeps it
+  -- out of the continuation's effect row, which is what makes it addable to any handler.
+  if isPanicHandler handler
+    then Just <$> walkResolvedRequestHandler handler panicRequestName panicRequestInformation
+    else do
+      requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
+      let resolvedRequest = case handler.typeReference.resolution of
+            Just (TypeResolutionQualifiedName name) -> (,) name <$> Map.lookup name requestEnv
+            _ -> Nothing
+      case resolvedRequest of
+        Nothing -> do
+          reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a request"}))
+          pure Nothing
+        Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
+
+-- | Whether a handler clause is the ambient @panic@ catch: the bare (unqualified) name @panic@. Panic is
+-- undeclared, so the clause is recognized structurally here rather than by name resolution.
+isPanicHandler :: RequestHandler phase -> Bool
+isPanicHandler handler = isNothing handler.moduleQualifier && handler.name == panicRequestName.name
+
+-- | The synthetic signature of the ambient @panic@ handler: @panic(msg: string) -> never@. Panic has no
+-- declaration, so its 'RequestInformation' is built here rather than read from the request environment. It
+-- carries no generics; its parameter object is @{ msg: string }@ and, like @throw@, it returns @never@ (so
+-- only an explicit @break@ recovers — a @next@ / body tail would have to be a @never@).
+panicRequestInformation :: RequestInformation
+panicRequestInformation =
+  RequestInformation
+    { name = panicRequestName,
+      genericParameters = emptyGenericParameters,
+      parameterType = namedObjectType [("msg", stringType)],
+      returnType = bottomType
+    }
 
 -- | Walk a request handler whose handled request has been resolved (see 'walkRequestHandler'). Returns
 -- the handled request name, its inferred generic arguments, the @break@ value it discharges (a value the
