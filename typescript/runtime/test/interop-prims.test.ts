@@ -53,6 +53,20 @@ function int(value: number): Value {
   return { kind: "integer", value };
 }
 
+/** The `$constructor` tag of one entry of a parsed `json_object` tree. */
+function constructorOfEntry(parsed: Value, key: string): string | undefined {
+  if (parsed.kind !== "record") throw new Error(`expected a record, got ${parsed.kind}`);
+  const entries = parsed.fields.entries;
+  if (entries === undefined || entries.kind !== "record") {
+    throw new Error("expected a json_object with an entries record");
+  }
+  const entry = entries.fields[key];
+  if (entry === undefined || entry.kind !== "record") {
+    throw new Error(`expected a tagged entry at "${key}"`);
+  }
+  return entry.ctor === undefined ? undefined : String(entry.ctor);
+}
+
 describe("prelude.json", () => {
   test("parse lifts a document into tagged json values (integers split from numbers)", async () => {
     const parsed = await run("prelude.json.parse", {
@@ -68,6 +82,16 @@ describe("prelude.json", () => {
       ok: true,
       nothing: null,
     });
+  });
+
+  test("parse tags a fraction-less number json_integer, a fractional one json_number", async () => {
+    const parsed = await run("prelude.json.parse", { text: str('{"a":30,"b":1.5,"c":1.0}') });
+    // Assert the tags themselves (a round-trip comparison would pass even without the split).
+    // `1.0` collapses to json_integer by design: JSON has one number type, so integer-ness of the
+    // parsed value is all the boundary can split on.
+    expect(constructorOfEntry(parsed, "a")).toBe("prelude.json.json_integer");
+    expect(constructorOfEntry(parsed, "b")).toBe("prelude.json.json_number");
+    expect(constructorOfEntry(parsed, "c")).toBe("prelude.json.json_integer");
   });
 
   test("parse panics (throws) on malformed JSON", async () => {
