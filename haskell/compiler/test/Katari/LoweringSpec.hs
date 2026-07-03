@@ -70,6 +70,39 @@ spec = describe "lowerModule (via compile)" $ do
               "agent helper(x: integer) -> integer { x }\nagent caller(y: integer) -> integer { helper(x = y) }"
       delegateGenericsTo irModule (testName "helper") `shouldBe` Just []
 
+  -- The typed error model: `prelude.throw` is an ordinary generic request, so a raise lowers to a
+  -- request leaf and a handler to a handle node carrying the qualified name — the runtime matches
+  -- handlers by exactly this name (the payload type is erased; the payload value carries its ctor tag).
+  describe "the throw error model (prelude.throw)" $ do
+    it "lowers a raise of `prelude.throw` to a delegate naming it (the request wrapper lives in the prelude)" $ do
+      let irModule =
+            loweredTestModule
+              "data oops(message: string)\nagent boom() -> integer { prelude.throw(error = oops(message = \"x\")) }"
+      calleeNames irModule `shouldContain` [preludeName "throw"]
+
+    it "lowers a `prelude.throw` handler with the qualified name on the handler entry" $ do
+      let irModule =
+            loweredTestModule
+              ( "data oops(message: string)\n"
+                  <> "agent f() -> integer {\n"
+                  <> "  use handler { request prelude.throw(error: oops) -> never { break 0 } }\n"
+                  <> "  prelude.throw(error = oops(message = \"x\"))\n"
+                  <> "}"
+              )
+      handledRequestNames irModule `shouldContain` [preludeName "throw"]
+
+    it "checks a stdlib throw effect end to end: an unhandled `json.parse` propagates its throw" $
+      compileErrorCodes "agent f(t: string) -> json.json { json.parse(text = t) }" `shouldBe` []
+
+    it "discharges a stdlib throw with a handler at the domain error type" $
+      compileErrorCodes
+        ( "agent f(t: string) -> json.json {\n"
+            <> "  use handler { request prelude.throw(error: json.parse_error) -> never { break json.json_null() } }\n"
+            <> "  json.parse(text = t)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
   describe "control-flow constructs" $ do
     it "lowers `if` to a match structural node" $
       shouldLowerWithNode "agent pick(b: boolean) -> integer { if (b) { 1 } else { 2 } }" "match"
@@ -223,6 +256,19 @@ delegateGenericsTo irModule name =
        ] of
     (generics : _) -> Just generics
     [] -> Nothing
+
+-- | The request names every handle node's handlers match, across the module.
+handledRequestNames :: IRModule -> List QualifiedName
+handledRequestNames irModule =
+  [ handler.request
+    | information <- Map.elems irModule.blocks,
+      BlockHandle handle <- [information.block],
+      handler <- handle.handlers
+  ]
+
+-- | A prelude root member's qualified name (the wired-in stdlib root module).
+preludeName :: Text -> QualifiedName
+preludeName name = QualifiedName {moduleName = ModuleName "prelude", name = name}
 
 -- | The names every 'OperationLoadAgent' materialises.
 loadedAgentNames :: IRModule -> List QualifiedName

@@ -19,6 +19,7 @@ import {
   escapeAsk,
   proxyAsk,
   raisePanic,
+  raiseThrow,
   removeThread,
   terminateInstance,
 } from "./common.js";
@@ -28,6 +29,7 @@ import { matchPattern } from "./pattern.js";
 import { readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
 import { allocateAskId, allocateCallId } from "./store.js";
+import { KatariThrow } from "./throw-signal.js";
 import type {
   AgentThread,
   CancelExit,
@@ -407,7 +409,9 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "primitive") throw new Error(`thread ${thread.id} is not a primitive block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
-  // A prim failure (e.g. division by zero) is a `panic`, not a crash — it bubbles to a handler / the run.
+  // A prim failure is never a crash: an anticipated, typed failure (`KatariThrow` — malformed JSON, a
+  // schema mismatch) raises `prelude.throw` with its payload; any other JS error is a `panic` (a zero
+  // divisor, an engine backstop). Both bubble toward a handler / the run — only the throw is catchable.
   let value: Value;
   try {
     value = await ctx.prims.run(block.name, argument, {
@@ -419,7 +423,12 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
         : {}),
     });
   } catch (error) {
-    raisePanic(ctx, thread, error instanceof Error ? error.message : String(error));
+    if (error instanceof KatariThrow) {
+      // Taint is monotonic through the failure path too: a private argument makes the payload private.
+      raiseThrow(ctx, thread, isTainted(argument) ? markPrivate(error.payload) : error.payload);
+    } else {
+      raisePanic(ctx, thread, error instanceof Error ? error.message : String(error));
+    }
     return;
   }
   // Taint is monotonic through a pure primitive: if any part of the argument is private, so is the result
@@ -779,7 +788,18 @@ function handleAsk(
 ): void {
   const block = handleBlock(ctx, thread);
   if (ask.kind === "request") {
-    const handler = block.handlers.find((entry) => entry.request === ask.request);
+    // A request from one of our OWN handler bodies is a rethrow, not a new occurrence: statically the
+    // handler's effects belong to the enclosing scope (they ride the handler type's generic `E`), so it
+    // must escape past this handle — re-matching it here would catch it forever (self-catch loop).
+    const sender = ctx.instance.threads[from];
+    const fromOwnHandler =
+      sender !== undefined &&
+      sender.parent === thread.id &&
+      sender.parentCallId !== null &&
+      thread.handlers[sender.parentCallId] !== undefined;
+    const handler = fromOwnHandler
+      ? undefined
+      : block.handlers.find((entry) => entry.request === ask.request);
     if (handler === undefined) {
       proxyAsk(ctx, thread, ask, from, askId); // not ours
       return;

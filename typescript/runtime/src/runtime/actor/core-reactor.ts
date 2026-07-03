@@ -19,6 +19,7 @@ import { drive } from "../engine/drive.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { rebuildScopeOwnerIndex } from "../engine/scope.js";
+import { errorData } from "../engine/throw-signal.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import {
   agentSnapshot,
@@ -28,7 +29,7 @@ import {
   type InternalEvent,
   type ReactorName,
 } from "../event/types.js";
-import type { InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
+import type { DelegationId, InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
@@ -147,14 +148,17 @@ export class CoreReactor extends Reactor {
     // A `call_agent` delegate is pure indirection: unwrap it to the callable its argument carries and run
     // *that*, under the same delegation (so the caller's proxy, escalation relays and cancel cascade see an
     // ordinary sub-call). The loop unwraps a nested `call_agent(target = call_agent, ...)` too; each round
-    // descends into the argument record, so it terminates. A malformed argument is a program failure — panic.
+    // descends into the argument record, so it terminates. A malformed argument throws `ai.call_error` —
+    // the dynamic dispatch failed before the target ran, which a tool loop anticipates (and may retry).
     let target = event.target;
     let argument = event.argument;
     let generics = event.generics;
+    let dynamicDispatch = false;
     while (target.kind === "named" && target.name === CALL_AGENT_NAME) {
+      dynamicDispatch = true;
       const unwrapped = unwrapCallAgent(argument);
       if ("error" in unwrapped) {
-        this.raisePanic(event.delegation, unwrapped.error, event.from);
+        this.raiseThrow(event.delegation, errorData(CALL_ERROR, unwrapped.error), event.from);
         return;
       }
       target = unwrapped.target;
@@ -163,25 +167,27 @@ export class CoreReactor extends Reactor {
     }
     // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
-    // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it as a panic to the
-    // caller (an unhandled panic fails the run). A *transient* infra failure (a `TransientError` — an IR DB
-    // read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from durable state
-    // (turning it into a panic would wrongly fail the run forever). A panic opens no row and needs no turn
-    // owner, so the failure path births no instance.
+    // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it to the caller:
+    // a panic for a static entry, `ai.call_error` when the name arrived through a `call_agent` unwrap (the
+    // AI-supplied target is the anticipated failure). A *transient* infra failure (a `TransientError` — an
+    // IR DB read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from
+    // durable state (failing it would wrongly fail the run forever). Neither failure path opens a row or
+    // needs a turn owner, so it births no instance.
     let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
     try {
       await this.ir.preload(agentSnapshot(target));
       resolved = this.resolveTarget(target);
     } catch (error) {
       if (isTransientError(error)) throw error;
-      this.raisePanic(event.delegation, messageOf(error), event.from);
+      this.failDelegate(dynamicDispatch, event.delegation, messageOf(error), event.from);
       return;
     }
     // The delegate acceptance check: the argument must conform to the target's input schema. Statically
     // checked call sites conform by construction; this is the enforcement point for every *dynamic* entry —
-    // a run command's JSON argument, a `call_agent` args record — and a violation is a program failure
-    // (panic), exactly like an unresolvable name above. The argument is passed through unchanged: the codec
-    // already decoded it, and this is a pure check, never a rewrite.
+    // a run command's JSON argument (violation = panic; there is no handler above the root anyway) or a
+    // `call_agent` args record (violation = `ai.call_error`, so the tool loop can catch it and retry).
+    // The argument is passed through unchanged: the codec already decoded it, and this is a pure check,
+    // never a rewrite.
     const targetBlock = this.ir
       .access(resolved.snapshot, moduleOf(target))
       .block(resolved.agentBlockId).block;
@@ -190,10 +196,11 @@ export class CoreReactor extends Reactor {
       const inputSchema = fillGenericSchema(substitution, targetBlock.schema.input);
       // Strict acceptance: the codec already decoded the argument (a total, blind bijection); this only
       // checks it against the input schema, never rewrites it. A missing argument is checked as an empty
-      // record — an agent with no required input accepts it, a data / required-field input rightly panics.
+      // record — an agent with no required input accepts it, a data / required-field input rightly fails.
       const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
       if (!check.ok) {
-        this.raisePanic(
+        this.failDelegate(
+          dynamicDispatch,
           event.delegation,
           `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
           event.from,
@@ -219,6 +226,22 @@ export class CoreReactor extends Reactor {
     // the child and runs it.
     this.acceptDelegation(event.delegation, instance.id, event.from);
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
+  }
+
+  /** Fail a delegate at the acceptance surface: `ai.call_error` when the target arrived through a
+   *  `call_agent` unwrap (a dynamic dispatch a tool loop anticipates and may catch), a panic otherwise
+   *  (a static call site conforms by construction, so reaching here means the program is broken). */
+  private failDelegate(
+    dynamicDispatch: boolean,
+    delegation: DelegationId,
+    message: string,
+    to: ReactorName,
+  ): void {
+    if (dynamicDispatch) {
+      this.raiseThrow(delegation, errorData(CALL_ERROR, message), to);
+    } else {
+      this.raisePanic(delegation, message, to);
+    }
   }
 
   /** A core sub-call returned: the base has already retired the delegation; hand its value to the caller's
@@ -408,6 +431,9 @@ export class CoreReactor extends Reactor {
 /** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the acceptance surface, never
  *  summoned as an instance (its `BlockPrimitive` body exists only as a schema carrier). */
 const CALL_AGENT_NAME = "prelude.ai.call_agent";
+
+/** The domain error ctor a failed dynamic dispatch throws (`prelude/ai.ktr` declares it). */
+const CALL_ERROR = "prelude.ai.call_error";
 
 /** Read a `call_agent` argument record into the delegate it stands for: `target` (a callable value)
  *  becomes the delegate target (carrying its own generics), `args` becomes the argument. */

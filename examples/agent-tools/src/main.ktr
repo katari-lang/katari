@@ -9,7 +9,7 @@
 //      `match` traversal remains available for exploring documents of unknown shape.)
 //   3. `dispatch` finds the picked tool by its metadata name and invokes it with `ai.call_agent`;
 //      the runtime validates the AI-built arguments against the tool's input schema at the
-//      delegation boundary (a mismatch fails the dispatch with a `panic`).
+//      delegation boundary (a mismatch throws `ai.call_error` — catch it to let the model retry).
 //
 // With a real AI, step 2's canned reply becomes an `http.fetch` of the tool-calling API with
 // step 1's body — the rest is unchanged.
@@ -42,7 +42,7 @@ agent tool_list(tools: array[agent never -> unknown with all]) -> json.json {
 
 @"Find the tool whose qualified name is @picked@, call it with the AI-built @args@, and render the
 result as the JSON text sent back to the AI. The delegation boundary validates @args@ against the
-tool's input schema; a mismatch panics."
+tool's input schema; a mismatch throws `ai.call_error`."
 agent dispatch(tools: array[agent never -> unknown with all], picked: string, args: unknown) -> string {
   for (tool in tools) {
     let m = ai.get_metadata(value = tool)
@@ -66,7 +66,8 @@ agent main() -> string {
   let body = json.stringify(value = tool_list(tools = tools))
 
   // 2. What the AI replies, read through the typed text boundary: `parse_as[T]` validates the
-  //    document against T's schema and panics (naming the offending path) if it does not fit.
+  //    document against T's schema and throws `json.decode_error` (naming the offending path) if
+  //    it does not fit (malformed text is `json.parse_error`).
   let reply = "{\"tool\":\"main.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
   let picked = json.parse_as[{ tool: string, arguments: record[unknown] }](text = reply)
 

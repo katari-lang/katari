@@ -25,9 +25,15 @@
 //
 // The typed readers (`parse_as[T]` / `decode[T]`) are schema-directed: the call site's instantiation
 // carries T's JSON Schema to the runtime (an inferred instantiation is stamped just like an explicit
-// one), the decoded value is validated against it, and a mismatch raises `panic` naming the offending
-// path. T appears only in the result, so it is never inferable from the arguments — instantiate
-// explicitly (`json.decode[my_type](...)`); an uninstantiated call is a compile error (K3016).
+// one), the decoded value is validated against it, and a mismatch throws `decode_error` naming the
+// offending path. T appears only in the result, so it is never inferable from the arguments —
+// instantiate explicitly (`json.decode[my_type](...)`); an uninstantiated call is a compile error
+// (K3016).
+//
+// Errors: malformed text throws `parse_error`, a schema mismatch throws `decode_error` — ordinary
+// `throw` payloads, caught with `use handler { request throw(error: json.parse_error) -> never {
+// break ... } }`. (A non-finite number reaching `stringify` / `encode` / `to_text` is a numeric
+// invariant violation and panics — it has no JSON representation.)
 //
 // `encode` embeds by wire form: a bare record becomes `json_object` (a key beginning with `$` is
 // escaped by doubling it, so it never collides with a discriminator); a `data` value nests its fields
@@ -56,15 +62,22 @@ data json_object(entries: record[json])
 // annotation; this comment is its documentation.)
 type json = json_null | json_boolean | json_integer | json_number | json_string | json_array | json_object
 
+@"A JSON document failed to parse: the text is not JSON. Thrown by `parse` / `parse_as`."
+data parse_error(message: string)
+
+@"A parsed document does not conform to the requested type's schema. Thrown by `decode` /
+`parse_as`; `message` names the offending path."
+data decode_error(message: string)
+
 @"Parse a JSON document from text into the `json` tree (traverse it with `match`). A malformed
-document raises `panic`. A number without a fractional part parses as `json_integer`."
-primitive agent parse(text: string) -> json
+document throws `parse_error`. A number without a fractional part parses as `json_integer`."
+primitive agent parse(text: string) -> json with prelude.throw[parse_error]
 
 @"Parse a JSON document from text directly as a T, validated against T's schema — the typed text
 boundary, with no intermediate `json` tree. Instantiate T explicitly (it appears only in the result,
-so it cannot be inferred). A malformed document or a schema mismatch raises `panic` naming the
-offending path."
-primitive agent parse_as[T](text: string) -> T
+so it cannot be inferred). A malformed document throws `parse_error`; a schema mismatch throws
+`decode_error` naming the offending path."
+primitive agent parse_as[T](text: string) -> T with prelude.throw[parse_error | decode_error]
 
 @"Render a `json` tree as its (compact) document text; inverts `parse`. For an arbitrary value,
 compose with the embedding: `stringify(value = encode(value = x))`."
@@ -84,5 +97,5 @@ primitive agent to_text[T](value: T) -> string
 `data` value, an `$agent` / `$closure` / `$ref` object reconstructs the callable / file), then
 validate the result against T's schema as a separate strict check. Instantiate T explicitly (it
 appears only in the result, so it cannot be inferred) — `json.decode[unknown]` reads without a
-shape. A schema mismatch raises `panic` naming the offending path."
-primitive agent decode[T](value: json) -> T
+shape. A schema mismatch throws `decode_error` naming the offending path."
+primitive agent decode[T](value: json) -> T with prelude.throw[decode_error]

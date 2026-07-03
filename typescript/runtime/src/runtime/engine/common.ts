@@ -28,6 +28,7 @@ import {
 import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateAskId } from "./store.js";
+import { THROW_REQUEST, throwArgument } from "./throw-signal.js";
 import type { CoreInstance, DelegateThread, ExternalThread, Thread } from "./types.js";
 
 /** The proxy thread for an outbound `delegation` in `instance`, found by its own `delegationId`
@@ -49,9 +50,9 @@ export function delegateProxyOf(
 }
 
 /** The built-in request a runtime error becomes (a prim failure, a non-exhaustive match, an FFI error).
- *  Errors are modelled as this `panic` request rather than a thrown effect: it bubbles like any request,
- *  so a `handle … with panic(e) => …` can catch it, and an unhandled one fails the run with its message.
- *  Matches the stdlib `prelude.panic` declaration. */
+ *  It bubbles like any request, but the prelude deliberately does not declare it — a program can neither
+ *  raise nor handle a panic (anticipated errors are `prelude.throw`, see `throw-signal.ts`); reaching the
+ *  run root unhandled, it fails the run with its message. */
 export const PANIC_REQUEST = "prelude.panic" as QualifiedName;
 
 /** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
@@ -73,6 +74,23 @@ export function raisePanic(ctx: StepContext, thread: Thread, message: string): v
     from: thread.id,
     askId,
     ask: { kind: "request", request: PANIC_REQUEST, argument: panicArgument(message) },
+  });
+}
+
+/** Raise a `prelude.throw` from a thread whose prim met an anticipated failure: an ask carrying
+ *  `{ error: payload }` to its parent, escalating outward toward the nearest `throw` handler (or the
+ *  run root, where it fails the run with the payload). */
+export function raiseThrow(ctx: StepContext, thread: Thread, payload: Value): void {
+  if (thread.parent === null) {
+    throw new Error("throw at the instance root (engine bug)");
+  }
+  const askId = allocateAskId(ctx.instance);
+  ctx.enqueue({
+    kind: "ask",
+    target: thread.parent,
+    from: thread.id,
+    askId,
+    ask: { kind: "request", request: THROW_REQUEST, argument: throwArgument(payload) },
   });
 }
 

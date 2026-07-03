@@ -36,6 +36,7 @@
 
 import type { Json } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
+import { THROW_REQUEST } from "../engine/throw-signal.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import {
   type DelegationId,
@@ -45,7 +46,7 @@ import {
   newEscalationId,
   newInstanceId,
 } from "../ids.js";
-import { jsonToValue } from "../value/codec.js";
+import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { Reactor } from "./reactor.js";
@@ -273,10 +274,11 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.maybeSettle(parent);
   }
 
-  /** An inner delegation escalated. A PANIC is the inner call *failing*: the callee's handler — the call's
-   *  immediate caller — handles it with its own try/catch (core's `handle … with panic` analog), so it
-   *  settles the inner call as an error and the dead callee is cancelled (caught panics never resume, like
-   *  a handle that catches-and-breaks); an uncaught error then re-raises through the handler's own failure.
+  /** An inner delegation escalated. A PANIC or a `prelude.throw` is the inner call *failing*: the callee's
+   *  handler — the call's immediate caller — handles it with its own try/catch (core's throw handler
+   *  analog), so it settles the inner call as an error and the dead callee is cancelled (a caught failure
+   *  never resumes, like a handle that catches-and-breaks); an uncaught error then re-raises through the
+   *  handler's own failure.
    *  Any other ask (a user-facing request, a control escape) is beyond the handler — it is proxied UP under
    *  the call's own delegation with a fresh escalation id, bridged in `relays` so the answer descends the
    *  same path; the transport never sees it. A cancelling call drops the ask (its children are being torn
@@ -292,12 +294,18 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     if (call === undefined || call.status === "cancelling") return;
     const { instance, caller } = this.routeOf(parent);
     this.turnInstance = instance;
-    if (event.ask.kind === "request" && event.ask.request === PANIC_REQUEST) {
+    if (
+      event.ask.kind === "request" &&
+      (event.ask.request === PANIC_REQUEST || event.ask.request === THROW_REQUEST)
+    ) {
       this.stageInnerDelivery(parent, event.delegation, {
         kind: "error",
-        message: panicMessageOf(event.ask.argument),
+        message:
+          event.ask.request === PANIC_REQUEST
+            ? panicMessageOf(event.ask.argument)
+            : throwMessageOf(event.ask.argument),
       });
-      // Cancel the panicking callee (its delegation row is still live — an acceptance-surface panic never
+      // Cancel the failing callee (its delegation row is still live — an acceptance-surface failure never
       // acks, a raised one suspends awaiting an answer that will never come). One already cancelling (or
       // already retired) needs no second terminate.
       const child = this.issuedDelegationsOf(instance).find(
@@ -479,13 +487,21 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         this.drop(delegation);
         return;
       case "error":
-        // A no-result error is a panic: escalate it to the caller. Unhandled, it fails the run; if a handler
+        // A no-result error escalates to the caller (panic by default; a reactor whose errors a program
+        // anticipates — http — overrides with a typed throw). Unhandled, it fails the run; if a handler
         // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer).
-        this.raisePanic(delegation, outcome.message, caller);
+        this.escalateError(delegation, outcome.message, caller);
         call.status = "awaitingAnswer";
         this.dirty.add(delegation);
         return;
     }
+  }
+
+  /** The escalation a no-result error becomes. Panic by default — an external process / infrastructure
+   *  failure is not a program-anticipatable error (typed sidecar throws are a port follow-up); the http
+   *  reactor overrides with `throw[http.fetch_error]`, which a program catches to control retry. */
+  protected escalateError(delegation: DelegationId, message: string, caller: ReactorName): void {
+    this.raisePanic(delegation, message, caller);
   }
 
   /** Bridge a settled inner delegation to its transport token and stage the post-commit delivery. A missing
@@ -635,4 +651,14 @@ function panicMessageOf(argument: Value | null): string {
     if (message !== undefined && message.kind === "string") return message.value;
   }
   return "the callee panicked";
+}
+
+/** The `{ error }` payload a `prelude.throw` escalation carries, serialized as the inner call's error
+ *  message. The FFI boundary is the allowed information-flow sink, so this reveals (like arguments do). */
+function throwMessageOf(argument: Value | null): string {
+  if (argument !== null && argument.kind === "record") {
+    const payload = argument.fields.error;
+    if (payload !== undefined) return `throw: ${JSON.stringify(valueToJson(payload, "reveal"))}`;
+  }
+  return "the callee threw";
 }

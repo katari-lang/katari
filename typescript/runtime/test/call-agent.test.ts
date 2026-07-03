@@ -135,9 +135,11 @@ describe("call_agent dispatch", () => {
     ).resolves.toEqual({ kind: "string", value: "alice" });
   });
 
-  test("panics when the args do not conform to the target's input schema", async () => {
+  test("throws a typed `ai.call_error` when the args do not conform to the target's input schema", async () => {
+    // A dynamic dispatch fails as `throw[ai.call_error]`; unhandled, the run's error carries the
+    // payload serialized through the codec (so the quotes inside the message arrive JSON-escaped).
     await expect(runMain(fixture(), argsOf({ wrong: { kind: "string", value: "oops" } }))).rejects.toThrow(
-      /greeter.*input schema.*missing required field "name"/,
+      /throw: .*prelude\.ai\.call_error.*greeter.*input schema.*missing required field/,
     );
   });
 
@@ -283,8 +285,8 @@ describe("delegate argument validation", () => {
     ).rejects.toThrow(/greeter.*input schema/);
   });
 
-  test("the panic is catchable by a handle around the call_agent call site", async () => {
-    // main: handle { call_agent(greeter, {}) } with panic(e) => break -1
+  test("the call_error is catchable by a throw handle around the call_agent call site", async () => {
+    // main: handle { call_agent(greeter, {}) } with throw(e) => break -1
     const ir = fixture();
     ir.blocks[6] = {
       block: {
@@ -292,7 +294,7 @@ describe("delegate argument validation", () => {
         parallel: false,
         initialStates: [],
         body: 7,
-        handlers: [{ request: createAgentName("prelude.panic"), body: 8 }],
+        handlers: [{ request: createAgentName("prelude.throw"), body: 8 }],
         thenClause: null,
       },
       parameters: {},

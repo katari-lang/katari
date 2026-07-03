@@ -20,6 +20,7 @@
 
 import type { DelegationState } from "../../db/tables/execution.js";
 import { PANIC_REQUEST, panicArgument } from "../engine/common.js";
+import { THROW_REQUEST, throwArgument } from "../engine/throw-signal.js";
 import type { InstanceStatus } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import { type ExternalEvent, escalateValue, type ReactorName } from "../event/types.js";
@@ -258,6 +259,21 @@ export abstract class Reactor {
       delegation,
       escalation: newEscalationId(),
       ask: { kind: "request", request: PANIC_REQUEST, argument: panicArgument(message) },
+      from: this.name,
+      to,
+    });
+  }
+
+  /** Fail a delegation with a typed `prelude.throw` escalation addressed to its caller (`to`) — the
+   *  reactor-level twin of a prim's `KatariThrow`, for failures a program anticipates and may handle (an
+   *  http no-response, a bad dynamic dispatch). Like a panic it opens no escalation row (a throw answers
+   *  with `never`, so it is not user-facing) and its runtime-built payload captures no resources. */
+  protected raiseThrow(delegation: DelegationId, payload: Value, to: ReactorName): void {
+    this.sendBuffer.push({
+      kind: "escalate",
+      delegation,
+      escalation: newEscalationId(),
+      ask: { kind: "request", request: THROW_REQUEST, argument: throwArgument(payload) },
       from: this.name,
       to,
     });

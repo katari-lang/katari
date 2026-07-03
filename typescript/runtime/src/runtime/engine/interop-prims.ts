@@ -40,6 +40,11 @@ import {
   treeToValue,
 } from "./json-value.js";
 import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
+import { errorData, KatariThrow } from "./throw-signal.js";
+
+// The domain error ctors the json prims throw (`prelude/json.ktr` declares them).
+const PARSE_ERROR = "prelude.json.parse_error";
+const DECODE_ERROR = "prelude.json.decode_error";
 
 const NULL_VALUE: Value = { kind: "null" };
 
@@ -68,8 +73,11 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     try {
       json = JSON.parse(text) as Json;
     } catch (error) {
-      throw new Error(
-        `json.parse: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
+      throw new KatariThrow(
+        errorData(
+          PARSE_ERROR,
+          `json.parse: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
+        ),
       );
     }
     return jsonValueFromJson(json);
@@ -93,7 +101,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     // total codec), then check it against T as a *separate* pass.
     const schema = instantiatedSchema(context, "json.decode");
     const value = await treeToValue(field(argument, "value"), stringReaderOf(context));
-    return conformedOrPanic(value, schema, "json.decode");
+    return conformedOrThrow(value, schema, "json.decode");
   },
   "prelude.json.parse_as": async (argument, context) => {
     // The fused typed text boundary: `decode[T](parse(text))` — JSON.parse -> value lift -> check.
@@ -103,11 +111,14 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     try {
       value = jsonToValue(JSON.parse(text) as Json);
     } catch (error) {
-      throw new Error(
-        `json.parse_as: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
+      throw new KatariThrow(
+        errorData(
+          PARSE_ERROR,
+          `json.parse_as: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
+        ),
       );
     }
-    return conformedOrPanic(value, schema, "json.parse_as");
+    return conformedOrThrow(value, schema, "json.parse_as");
   },
 
   // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //
@@ -277,11 +288,14 @@ function instantiatedSchema(context: PrimContext, label: string): JSONSchema {
 
 /** Check a decoded value against T, turning a mismatch into the panic the typed readers promise. The
  *  value itself is returned unchanged (the codec already produced it; validation only checks). */
-function conformedOrPanic(value: Value, schema: JSONSchema, label: string): Value {
+function conformedOrThrow(value: Value, schema: JSONSchema, label: string): Value {
   const result = conformValue(value, schema);
   if (!result.ok) {
-    throw new Error(
-      `${label}: the document does not conform to T — ${renderConformFailures(result.failures)}`,
+    throw new KatariThrow(
+      errorData(
+        DECODE_ERROR,
+        `${label}: the document does not conform to T — ${renderConformFailures(result.failures)}`,
+      ),
     );
   }
   return value;

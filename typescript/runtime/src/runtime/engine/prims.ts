@@ -47,8 +47,16 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
   "prelude.add": numeric((left, right) => left + right),
   "prelude.subtract": numeric((left, right) => left - right),
   "prelude.multiply": numeric((left, right) => left * right),
-  "prelude.divide": numeric((left, right) => left / right),
-  "prelude.modulo": numeric((left, right) => left % right),
+  // A zero divisor panics (fail fast) rather than minting Infinity / NaN — a non-finite number has no
+  // JSON representation, so letting it through only defers the failure to a far-away encode.
+  "prelude.divide": numeric((left, right) => {
+    if (right === 0) throw new Error("division by zero");
+    return left / right;
+  }),
+  "prelude.modulo": numeric((left, right) => {
+    if (right === 0) throw new Error("modulo by zero");
+    return left % right;
+  }),
   "prelude.negate": (argument) => {
     const value = numberOf(field(argument, "value"));
     return makeNumber(-value, field(argument, "value"));

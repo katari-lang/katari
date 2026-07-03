@@ -12,9 +12,11 @@ primitive agent add[T extends number](left: T, right: T) -> T
 primitive agent subtract[T extends number](left: T, right: T) -> T
 @"Multiply two numbers; preserves integer when both operands are integers."
 primitive agent multiply[T extends number](left: T, right: T) -> T
-@"Floor-modulo two numbers; preserves integer when both operands are integers."
+@"Floor-modulo two numbers; preserves integer when both operands are integers. A zero divisor
+panics (guard with a comparison first)."
 primitive agent modulo[T extends number](left: T, right: T) -> T
-@"Divide two numbers; always yields a number."
+@"Divide two numbers; always yields a number. A zero divisor panics (guard with a comparison
+first) — division never yields Infinity / NaN."
 primitive agent divide(left: number, right: number) -> number
 @"Negate a number; preserves integer."
 primitive agent negate[T extends number](value: T) -> T
@@ -49,8 +51,24 @@ primitive agent not(value: boolean) -> boolean
 primitive agent concat(left: string, right: string) -> string
 
 // Errors -----------------------------------------------------------------------------------------
+//
+// The two error channels:
+//
+//   - `throw[T]` (below) is the error channel for programs: anticipated, domain-specific failures a
+//     caller may recover from. The payload type is an error `data` declared next to the operation
+//     that fails (`json.parse_error`, `http.fetch_error`, ...). Raises in one scope join to the
+//     payload union (`throw[a] | throw[b]` is `throw[a | b]`), and a handler discharges exactly the
+//     payload its parameter annotation names — handle the whole union, or rethrow the rest.
+//
+//   - `panic` is the runtime's own failure signal and has no declaration here on purpose: a program
+//     can neither raise it nor handle it. The runtime panics on invariant violations (a
+//     non-exhaustive match, a zero divisor, an FFI infrastructure error, an engine backstop), and an
+//     unhandled panic fails the run. Recovery from a broken invariant is not a program-level
+//     concern; re-running is.
 
-@"Raise a runtime error. A `panic` is a request, so a `handle ... with panic(e) => ...` can recover
-from it (by `break`ing out of the handle); an unhandled panic fails the run. The runtime raises this
-same request on a primitive failure, a non-exhaustive match, or an external (FFI) error."
-request panic(msg: string) -> never
+@"Signal a typed error the caller may recover from. The payload is a domain-specific error `data`
+(e.g. `json.parse_error`); a handler at that payload type catches it — `use handler { request
+throw(error: my_error) -> never { break fallback } }` — and an unhandled throw fails the run with
+the payload. `-> never` means a throw cannot be resumed: a handler recovers by `break`ing out of
+the handle (or rethrows)."
+request throw[T](error: T) -> never

@@ -14,6 +14,7 @@ import { describe, expect, test } from "vitest";
 import type { PrimContext } from "../src/runtime/engine/context.js";
 import { jsonValueFromJson, jsonValueToJson } from "../src/runtime/engine/json-value.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
 import type { ProjectId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
 import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
@@ -35,6 +36,27 @@ function contextWithT(schema: JSONSchema): PrimContext {
 
 function run(name: string, fields: Record<string, Value>, context = contextWith()): Promise<Value> {
   return prims.run(name, { kind: "record", fields }, context);
+}
+
+/** Assert a prim rejects with a typed `KatariThrow` whose payload is the given error data ctor carrying
+ *  a `{ message }` matching `pattern` — the shape the engine raises `prelude.throw` with. */
+async function expectThrows(promise: Promise<Value>, ctor: string, pattern: RegExp): Promise<void> {
+  const error = await promise.then(
+    () => {
+      throw new Error("expected the prim to throw");
+    },
+    (thrown: unknown) => thrown,
+  );
+  expect(error).toBeInstanceOf(KatariThrow);
+  if (error instanceof KatariThrow) {
+    expect(error.payload.kind).toBe("record");
+    if (error.payload.kind === "record") {
+      expect(error.payload.ctor).toBe(ctor);
+      const message = error.payload.fields.message;
+      expect(message?.kind).toBe("string");
+      if (message?.kind === "string") expect(message.value).toMatch(pattern);
+    }
+  }
 }
 
 /** Round-trip helper: the prim result (a tagged `json` value) flattened back to bare JSON. */
@@ -94,8 +116,10 @@ describe("prelude.json", () => {
     expect(constructorOfEntry(parsed, "c")).toBe("prelude.json.json_integer");
   });
 
-  test("parse panics (throws) on malformed JSON", async () => {
-    await expect(run("prelude.json.parse", { text: str("{oops") })).rejects.toThrow(
+  test("parse throws a typed `parse_error` on malformed JSON", async () => {
+    await expectThrows(
+      run("prelude.json.parse", { text: str("{oops") }),
+      "prelude.json.parse_error",
       /json\.parse: malformed JSON/,
     );
   });
@@ -183,14 +207,16 @@ describe("prelude.json", () => {
     additionalProperties: true,
   };
 
-  test("decode[T] validates against T's schema and panics on a mismatch", async () => {
+  test("decode[T] validates against T's schema and throws a typed `decode_error` on a mismatch", async () => {
     const parsed = await run("prelude.json.parse", { text: str('{"x":1,"y":2}') });
     await expect(run("prelude.json.decode", { value: parsed }, contextWithT(POINT))).resolves.toEqual({
       kind: "record",
       fields: { x: int(1), y: int(2) },
     });
     const bad = await run("prelude.json.parse", { text: str('{"x":"one"}') });
-    await expect(run("prelude.json.decode", { value: bad }, contextWithT(POINT))).rejects.toThrow(
+    await expectThrows(
+      run("prelude.json.decode", { value: bad }, contextWithT(POINT)),
+      "prelude.json.decode_error",
       /json\.decode: .*\$\.x/,
     );
   });
@@ -206,12 +232,16 @@ describe("prelude.json", () => {
     await expect(
       run("prelude.json.parse_as", { text: str('{"x":1,"y":2}') }, contextWithT(POINT)),
     ).resolves.toEqual({ kind: "record", fields: { x: int(1), y: int(2) } });
-    await expect(
+    await expectThrows(
       run("prelude.json.parse_as", { text: str('{"y":2}') }, contextWithT(POINT)),
-    ).rejects.toThrow(/json\.parse_as: .*missing required field "x"/);
-    await expect(
+      "prelude.json.decode_error",
+      /json\.parse_as: .*missing required field "x"/,
+    );
+    await expectThrows(
       run("prelude.json.parse_as", { text: str("{oops") }, contextWithT(POINT)),
-    ).rejects.toThrow(/json\.parse_as: malformed JSON/);
+      "prelude.json.parse_error",
+      /json\.parse_as: malformed JSON/,
+    );
   });
 
   test("to_text fuses stringify(encode(x)) and inverts parse_as", async () => {

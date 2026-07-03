@@ -35,9 +35,11 @@ snapshot** (an agent and its FFI handlers deploy together) and converts JSON↔V
   instance (reclaimed at its drop unless the call's own result ascends them — `markInstanceDropped` now also
   reclaims scopes via `ResourcePool.reclaimScopesOwnedBy`), and stages the post-commit delivery through the
   `innerCalls` bridge (child delegation → transport token).
-- **Escalations** (`onEscalate`): a child's **panic settles the inner call as an error** — the handler's own
-  try/catch is its panic handle (core's `handle … with panic` analog); the dead callee is terminated (caught
-  panics never resume — catch-and-break semantics), and an uncaught JS error re-raises through the handler's
+- **Escalations** (`onEscalate`): a child's **panic — or, since the throw model (doc
+  `2026-07-03-throw-error-model.md`), a `prelude.throw` — settles the inner call as an error** — the
+  handler's own try/catch is its failure handle (core's throw-handler analog); the dead callee is
+  terminated (a caught failure never resumes — catch-and-break semantics), and an uncaught JS error
+  re-raises through the handler's
   own failure. Every **other** ask (a user-facing request, a control escape) is proxied **up** under the
   call's own delegation with a fresh escalation id, bridged in `relays`; the answering `escalateAck` is
   proxied back **down** the same bridge. The transport never sees escalations — a handler needs no

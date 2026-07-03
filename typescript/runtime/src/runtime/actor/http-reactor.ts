@@ -3,14 +3,19 @@
 // `reactor: "http"`) routed from core's `ExternalThread` proxy, exactly like an FFI call; it performs the
 // request through its transport (an in-runtime `fetch`) and the base turns the outcome into the call's
 // `delegateAck` (the `{ status, body }` response), an `escalate` (a request that produced no response → a
-// panic that bubbles to the caller's handler), or a `terminateAck` (an abort confirmed).
+// `throw[http.fetch_error]` that bubbles to the caller's handler), or a `terminateAck` (an abort confirmed).
 //
 // It owns its in-flight calls durably as `http`-kind instances (`http_instances` — the call's status + caller),
 // and on recovery it does NOT re-send (an http request is not idempotent): the transport's `recover` leaves a
-// surviving request alone and reports an error for a gone one, so an interrupted running call fails with a
-// `panic` the caller can catch and retry. This at-most-once guarantee is the whole reason http is a reactor
-// rather than a core-inline primitive.
+// surviving request alone and reports an error for a gone one, so an interrupted running call fails like any
+// other no-response. This at-most-once guarantee is the whole reason http is a reactor rather than a
+// core-inline primitive.
+//
+// A no-response error (DNS failure, refused connection, timeout, restart interruption) is a *program-
+// anticipatable* failure, so it escalates as `throw[http.fetch_error]` (the stdlib `prelude/http.ktr`
+// declares the effect) — a caller handles it to control retry; unhandled, it fails the run with the payload.
 
+import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { HttpTransport } from "../external/http-transport.js";
 import type { DelegationId } from "../ids.js";
@@ -58,6 +63,16 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     this.transport.recover(delegation);
   }
 
+  /** An http no-response is program-anticipatable: escalate `throw[http.fetch_error]` (not a panic), so a
+   *  caller's throw handler controls retry. */
+  protected override escalateError(
+    delegation: DelegationId,
+    message: string,
+    caller: ReactorName,
+  ): void {
+    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller);
+  }
+
   protected abort(delegation: DelegationId): void {
     this.transport.abort(delegation);
   }
@@ -84,3 +99,6 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     }));
   }
 }
+
+/** The domain error ctor an http no-response throws (`prelude/http.ktr` declares it). */
+const FETCH_ERROR = "prelude.http.fetch_error";

@@ -12,7 +12,8 @@
 // `call_agent` dispatches a callable VALUE with a runtime-built argument record — the
 // dynamic-dispatch counterpart of a static call, for a target an AI picked out of a tool list. The
 // runtime validates every delegation's argument against the callee's input schema, so malformed args
-// fail as a `panic` at the call site rather than corrupting the callee.
+// throw `call_error` at the call site rather than corrupting the callee — an AI-driven tool loop can
+// catch it and let the model retry with corrected arguments.
 
 @"The public metadata of one callable: its (qualified) name, its `@\"...\"` description, and the JSON
 Schemas of its input, output and requests — each schema a `json` value, ready to embed in an AI tool
@@ -30,7 +31,12 @@ external, or a local closure). A generic callable instantiated with `[T]` yields
 to the instantiation."
 primitive agent get_metadata(value: agent never -> unknown with all) -> agent_metadata
 
+@"A dynamic dispatch failed before the target ran: the target is not a callable, or `args` does not
+conform to its input schema (`message` names the offending path). Thrown by `call_agent`."
+data call_error(message: string)
+
 @"Invoke a callable VALUE with a runtime-built argument record — dynamic dispatch for a target an AI
 picked out of a tool list. `args` is validated against the target's input schema at the delegation
-boundary; a mismatch raises a `panic` at this call site. The target's effects flow through unchanged."
-primitive agent call_agent[R, effect E](target: agent never -> R with E, args: unknown) -> R with E
+boundary; a mismatch throws `call_error` at this call site (catch it to let the model retry). The
+target's effects flow through unchanged."
+primitive agent call_agent[R, effect E](target: agent never -> R with E, args: unknown) -> R with E | prelude.throw[call_error]

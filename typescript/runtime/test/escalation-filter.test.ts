@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "vitest";
 import { PANIC_REQUEST } from "../src/runtime/engine/common.js";
+import { THROW_REQUEST } from "../src/runtime/engine/throw-signal.js";
 import { isUserFacingRequest } from "../src/runtime/escalation-filter.js";
 
 describe("isUserFacingRequest", () => {
@@ -14,6 +15,10 @@ describe("isUserFacingRequest", () => {
 
   test("a panic is not user-facing (it fails the run)", () => {
     expect(isUserFacingRequest(PANIC_REQUEST)).toBe(false);
+  });
+
+  test("a `prelude.throw` is not user-facing (it answers with `never`, so it fails the run)", () => {
+    expect(isUserFacingRequest(THROW_REQUEST)).toBe(false);
   });
 
   test("control-flow escapes crossing a boundary are not user-facing", () => {

@@ -3,8 +3,8 @@
 // reactor receives that as a `delegate` (an external leaf marked `reactor: "http"`), reveals the secret at the
 // boundary, dispatches through a controllable transport, and lifts the response back to a public
 // `{ status, body }`. The three tests cover the happy path (with the secret declassified into a public
-// response), the unhandled-error path (→ a run-failing panic), and the at-most-once recovery contract (an
-// interrupted request is never re-sent — it fails on restart).
+// response), the unhandled-error path (→ a run-failing `throw[http.fetch_error]`), and the at-most-once
+// recovery contract (an interrupted request is never re-sent — it fails on restart).
 
 import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
@@ -295,7 +295,7 @@ describe("http reactor", () => {
     }
   });
 
-  test("fails the run with a panic when the request errors with no handler", async () => {
+  test("fails the run with a typed `throw[http.fetch_error]` when the request errors with no handler", async () => {
     const transport = new ControlledHttpTransport();
     const actor = makeActor(transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -306,8 +306,11 @@ describe("http reactor", () => {
       outcome: { kind: "error", message: "connection refused" },
     });
 
-    // A request that produced no response escalates a panic; unhandled, it fails the run.
-    await expect(result).rejects.toThrow(/connection refused/);
+    // A request that produced no response escalates `throw[http.fetch_error]` (program-anticipatable, a
+    // handler could catch it to retry); unhandled, it fails the run with the serialized payload.
+    await expect(result).rejects.toThrow(
+      /throw: .*prelude\.http\.fetch_error.*connection refused/,
+    );
   });
 
   test("never re-sends an interrupted request on recovery — it fails at-most-once", async () => {

@@ -10,16 +10,22 @@
 // (declassified — it is the server's response, not a function of the secret).
 //
 // Errors: a non-2xx response is returned as its `status` to branch on (`match (response.status) { ... }`).
-// A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) fails
-// with a `panic`, which bubbles from the call site to the nearest handler — so a caller can `handle ... with
-// panic(e) => ...` to handle the failure locally and control retry.
+// A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) throws
+// `fetch_error`, which bubbles from the call site to the nearest handler — so a caller can `use handler {
+// request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
+// control retry.
+
+@"An HTTP request never completed: DNS failure, refused connection, timeout, or a mid-flight runtime
+restart. Thrown by `fetch`. (A response that did arrive is never an error — branch on its `status`.)"
+data fetch_error(message: string)
 
 @"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
 may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text. A
-request that never completes fails with a `panic` (catchable locally with `handle ... with panic(e)`)."
+request that never completes throws `fetch_error` (catchable with `use handler { request throw(error:
+http.fetch_error) -> never { ... } }`)."
 external agent fetch(
   url: string,
   method: string,
   headers: record[string of private],
   body: string,
-) -> { status: integer, body: string } from "http"
+) -> { status: integer, body: string } with prelude.throw[fetch_error] from "http"

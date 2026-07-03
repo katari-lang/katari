@@ -14,6 +14,7 @@
 
 import type { QualifiedName } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
+import { THROW_REQUEST } from "../engine/throw-signal.js";
 import type { BlobEntry } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
@@ -25,7 +26,8 @@ import {
   newDelegationId,
   type SnapshotId,
 } from "../ids.js";
-import { isTainted } from "../value/privacy.js";
+import { valueToJson } from "../value/codec.js";
+import { isTainted, markPrivate } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
 import type {
   Loader,
@@ -399,10 +401,21 @@ function isRunFailure(event: Extract<ExternalEvent, { kind: "escalate" }>): bool
 }
 
 /** A human message for an escalation that reached the run root unhandled (it fails the run). A panic reports
- *  its `{ msg }`; any other unhandled request / control escape reports its name. */
+ *  its `{ msg }`, a `prelude.throw` its serialized payload; any other unhandled request / control escape
+ *  reports its name. */
 function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate" }>): string {
   if (event.ask.kind !== "request") {
     return `unhandled "${event.ask.kind}" reached the run root`;
+  }
+  if (event.ask.request === THROW_REQUEST) {
+    const argument = event.ask.argument;
+    const payload = argument?.kind === "record" ? argument.fields.error : undefined;
+    if (payload === undefined) return "throw: (no payload)";
+    // The run's error message is neither sealed at rest nor redacted at the wire, so serialize through
+    // the redacting codec: a tainted payload (itself, or through its container record) degrades to
+    // `$redacted` subtrees rather than leaking — the same fail-closed boundary as run results.
+    const effective = argument?.private === true ? markPrivate(payload) : payload;
+    return `throw: ${JSON.stringify(valueToJson(effective, "redact"))}`;
   }
   if (event.ask.request === PANIC_REQUEST) {
     const argument = event.ask.argument;
