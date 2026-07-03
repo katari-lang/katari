@@ -1,7 +1,13 @@
 name: katari-cli
+# Build-system placeholder (cabal versions cannot carry a pre-release suffix); the version users
+# see is the VERSION file, embedded into `cliVersion` and stamped by scripts/stamp-version.mjs.
 version: 0.1.0.0
 license: MIT
 author: "yukikurage"
+
+# The one-line version file `cliVersion` embeds at build time.
+extra-source-files:
+  - VERSION
 
 language: GHC2021
 

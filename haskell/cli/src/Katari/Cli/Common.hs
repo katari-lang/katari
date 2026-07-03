@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 -- | Helpers shared by the CLI subcommands: locating the project root, the compile step, id-prefix
 -- resolution, and the exit-code convention.
 --
@@ -35,6 +37,7 @@ where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, catch)
 import Control.Monad (unless, when)
+import Data.FileEmbed (embedStringFile, makeRelativeToProject)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -59,8 +62,11 @@ import System.FilePath ((</>))
 import System.IO (stderr)
 
 -- | The CLI's own version, singly sourced for @--version@ and the registry compiler-pin warning.
+-- Embedded from @haskell\/cli\/VERSION@ at build time — a one-line file the release pipeline's
+-- @scripts\/stamp-version.mjs@ rewrites before tagging (the cabal @version:@ field cannot carry a
+-- pre-release suffix, so it is a build-system placeholder, not what users see).
 cliVersion :: Text
-cliVersion = "0.1.0.0"
+cliVersion = Text.strip $(makeRelativeToProject "VERSION" >>= embedStringFile)
 
 -- | Standard CLI bail: print @katari \<subcommand>: \<message>@ to stderr and exit with code 2
 -- (setup / usage error).
@@ -209,7 +215,9 @@ warnCompilerMismatch output resolved = case resolved.snapshotCompilerVersion of
           )
   _ -> pure ()
   where
-    releaseComponents version = take 3 (Text.splitOn "." version)
+    -- Compare on the release triple only: strip a pre-release suffix (@0.1.0-rc6@ -> @0.1.0@)
+    -- before splitting, so an rc build still matches the registry's three-component pin.
+    releaseComponents version = take 3 (Text.splitOn "." (Text.takeWhile (/= '-') version))
 
 -- | Flatten a resolved project into the compiler's @module name -> source@ map, exiting with code 2
 -- on any assembly error (a cross-package module collision, an out-of-namespace module, …).
