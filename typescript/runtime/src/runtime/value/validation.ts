@@ -153,8 +153,12 @@ function conform(value: Value, schema: JSONSchema, path: string, failures: Confo
   }
 
   if (schema.const !== undefined) {
-    // A blob-backed string's content is not readable synchronously; a string const may accept it (a
-    // >4KB literal is degenerate). A non-string const cannot be a blob-string.
+    // A blob-backed string's content is not readable synchronously (this walk is sync). A non-string
+    // const can never equal a string, so reject. A *string* const, though, we accept unconditionally —
+    // a KNOWN HOLE: a >4KB string satisfies any string `const` regardless of content. Left deliberately:
+    // a >4KB literal-type const is degenerate, and the `$constructor` discriminator no longer routes
+    // through here (it is checked via `value.ctor`, see `conformData`). Closing it would mean hashing the
+    // const with the blob's algorithm and comparing to `ref.hash`.
     if (value.kind === "ref" && value.semanticKind === "string") {
       if (typeof schema.const !== "string") {
         failures.push({
