@@ -1,6 +1,7 @@
 // One run: metadata, argument, live open escalations (answerable in place), the answered Q&A
 // transcript, and the outcome. Polls while live and goes quiet on terminal.
 
+import { REDACTED_KEY } from "@katari-lang/types";
 import { ChevronLeft, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -10,9 +11,11 @@ import {
   useEscalations,
   useRun,
   useRunEscalationAudit,
+  useRunTree,
   useStartRun,
 } from "../api/queries";
 import { EscalationCard } from "../components/escalations/EscalationCard";
+import { DelegationTree } from "../components/runs/DelegationTree";
 import { RunStateBadge } from "../components/runs/RunStateBadge";
 import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -30,6 +33,7 @@ export function RunDetailPage() {
   const run = useRun(projectId, runId);
   const escalations = useEscalations(projectId);
   const live = run.data !== undefined && isLiveRun(run.data);
+  const tree = useRunTree(projectId, runId, live);
   const audit = useRunEscalationAudit(projectId, runId, live);
   const cancelMutation = useCancelRun(projectId);
   const rerunMutation = useStartRun(projectId);
@@ -96,6 +100,22 @@ export function RunDetailPage() {
             showRunLink={false}
           />
         ))}
+
+        {/* The delegation rows are live routing, deleted on terminal — so the tree only exists while
+            the run does. A live run whose tree has not landed yet (the delegate is between commits)
+            shows a quiet placeholder instead of flashing the card in and out. */}
+        {live && (
+          <Card>
+            <CardHeader title="Delegation tree" />
+            <CardBody>
+              {tree.data?.tree != null ? (
+                <DelegationTree root={tree.data.tree} />
+              ) : (
+                <p className="text-sm text-fg-faint">Waiting for the first delegation to land…</p>
+              )}
+            </CardBody>
+          </Card>
+        )}
 
         {current.state === "error" && current.errorMessage !== null && (
           <Card className="border-danger">
@@ -211,6 +231,8 @@ export function RunDetailPage() {
 
 function containsRedaction(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  if (!Array.isArray(value) && (value as { $redacted?: unknown }).$redacted === true) return true;
+  if (!Array.isArray(value) && (value as { [key: string]: unknown })[REDACTED_KEY] === true) {
+    return true;
+  }
   return Object.values(value).some(containsRedaction);
 }

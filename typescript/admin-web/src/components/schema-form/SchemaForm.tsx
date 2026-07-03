@@ -2,6 +2,15 @@
 // typed fields and assembles the Json argument. Every branch the pretty fields cannot express
 // falls back to a raw-JSON editor, so any schema stays fillable.
 
+import {
+  AGENT_KEY,
+  CONSTRUCTOR_KEY,
+  CONTENT_TYPE_KEY,
+  FILE_KEY,
+  HASH_KEY,
+  SIZE_KEY,
+  SNAPSHOT_KEY,
+} from "@katari-lang/types";
 import { Plus, Trash2, Upload } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { api } from "../../api/client";
@@ -44,8 +53,8 @@ function SchemaField(props: FieldProps) {
   }
   const node = schema as JsonSchema;
 
-  if (isReferenceSchema(node, "$ref")) return <FileField {...props} />;
-  if (isReferenceSchema(node, "$agent")) return <AgentField {...props} />;
+  if (isReferenceSchema(node, FILE_KEY)) return <FileField {...props} />;
+  if (isReferenceSchema(node, AGENT_KEY)) return <AgentField {...props} />;
   if (node.const !== undefined) return <ConstField {...props} constant={node.const} />;
   if (Array.isArray(node.enum)) return <EnumField {...props} options={node.enum} />;
   if (Array.isArray(node.anyOf)) return <UnionField {...props} branches={node.anyOf} />;
@@ -85,7 +94,7 @@ function SchemaField(props: FieldProps) {
 }
 
 /** The `$ref` / `$agent` reference schemas are objects requiring exactly that discriminator key. */
-function isReferenceSchema(node: JsonSchema, key: "$ref" | "$agent"): boolean {
+function isReferenceSchema(node: JsonSchema, key: typeof FILE_KEY | typeof AGENT_KEY): boolean {
   return Array.isArray(node.required) && node.required.includes(key);
 }
 
@@ -326,9 +335,9 @@ function branchLabel(branch: Json): string {
     typeof properties === "object" &&
     properties !== null &&
     !Array.isArray(properties) &&
-    typeof (properties as { [key: string]: Json }).$constructor === "object"
+    typeof (properties as { [key: string]: Json })[CONSTRUCTOR_KEY] === "object"
   ) {
-    const tag = (properties as { [key: string]: JsonSchema }).$constructor;
+    const tag = (properties as { [key: string]: JsonSchema })[CONSTRUCTOR_KEY];
     if (tag !== undefined && typeof tag.const === "string") return tag.const;
   }
   if (node.const !== undefined) return JSON.stringify(node.const);
@@ -344,13 +353,13 @@ function FileField({ value, onChange, context }: FieldProps) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const current =
-    typeof value === "object" && value !== null && !Array.isArray(value) && "$ref" in value
+    typeof value === "object" && value !== null && !Array.isArray(value) && FILE_KEY in value
       ? value
       : null;
   return (
     <div className="flex items-center gap-2">
       {current !== null && (
-        <span className="font-mono text-xs text-fg-muted">file {String(current.$ref)}</span>
+        <span className="font-mono text-xs text-fg-muted">file {String(current[FILE_KEY])}</span>
       )}
       <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-edge-strong bg-raised px-2.5 py-1 text-xs text-fg hover:bg-sunken">
         <Upload className="size-3.5" />
@@ -367,10 +376,10 @@ function FileField({ value, onChange, context }: FieldProps) {
               .uploadFile(context.projectId, file)
               .then((handle) =>
                 onChange({
-                  $ref: handle.id,
-                  size: handle.size,
-                  hash: handle.hash,
-                  contentType: file.type || "application/octet-stream",
+                  [FILE_KEY]: handle.id,
+                  [SIZE_KEY]: handle.size,
+                  [HASH_KEY]: handle.hash,
+                  [CONTENT_TYPE_KEY]: file.type || "application/octet-stream",
                 }),
               )
               .catch(() => toast("Upload failed.", "error"))
@@ -384,8 +393,8 @@ function FileField({ value, onChange, context }: FieldProps) {
 
 function AgentField({ value, onChange, context }: FieldProps) {
   const current =
-    typeof value === "object" && value !== null && !Array.isArray(value) && "$agent" in value
-      ? String(value.$agent)
+    typeof value === "object" && value !== null && !Array.isArray(value) && AGENT_KEY in value
+      ? String(value[AGENT_KEY])
       : "";
   return (
     <Input
@@ -395,7 +404,7 @@ function AgentField({ value, onChange, context }: FieldProps) {
         onChange(
           event.target.value === ""
             ? undefined
-            : { $agent: event.target.value, snapshot: context.snapshotId },
+            : { [AGENT_KEY]: event.target.value, [SNAPSHOT_KEY]: context.snapshotId },
         )
       }
     />

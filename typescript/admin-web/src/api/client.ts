@@ -17,6 +17,7 @@ import type {
   Run,
   RunEscalationAudit,
   RunState,
+  RunTree,
   SnapshotSummary,
 } from "./types";
 
@@ -113,6 +114,8 @@ export const api = {
     }),
   listRunEscalationAudit: (projectId: string, runId: string) =>
     get<RunEscalationAudit[]>(`/projects/${projectId}/runs/${runId}/escalations`),
+  getRunTree: (projectId: string, runId: string) =>
+    get<RunTree>(`/projects/${projectId}/runs/${runId}/tree`),
 
   listEscalations: (projectId: string) => get<Escalation[]>(`/projects/${projectId}/escalations`),
   answerEscalation: (projectId: string, escalationId: string, value: Json) =>

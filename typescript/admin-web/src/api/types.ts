@@ -62,6 +62,45 @@ export interface RunEscalationAudit {
   answeredAt: string;
 }
 
+/** What a delegation-tree node's instance runs, as the runtime projects it for display. */
+export type TreeTarget =
+  | { kind: "agent"; name: string }
+  | { kind: "closure"; blockId: number; module: string }
+  | { kind: "external"; key: string };
+
+export interface TreeEscalation {
+  id: string;
+  request: string;
+  /** Whether this leg is the api-addressed one (the answer surface accepts it) or a relay hop. */
+  answerable: boolean;
+  createdAt: string;
+}
+
+export interface TreeInstance {
+  id: string;
+  kind: "core" | "api" | "ffi" | "http";
+  status: "running" | "cancelling" | "awaitingAnswer";
+  target: TreeTarget | null;
+  snapshotId: string | null;
+  openEscalations: TreeEscalation[];
+  children: DelegationTreeNode[];
+}
+
+/** One live delegation edge; `instance` is null while the delegate is still in flight. */
+export interface DelegationTreeNode {
+  delegationId: string;
+  state: "running" | "cancelling";
+  reactor: "core" | "api" | "ffi" | "http";
+  createdAt: string;
+  instance: TreeInstance | null;
+}
+
+/** The tree endpoint's payload — the rows are live routing, so a terminal run's tree is null. */
+export interface RunTree {
+  state: RunState;
+  tree: DelegationTreeNode | null;
+}
+
 export interface AgentEntry {
   qualifiedName: string;
   input: JsonSchema;

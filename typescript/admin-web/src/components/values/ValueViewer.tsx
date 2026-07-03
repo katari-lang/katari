@@ -1,8 +1,19 @@
-// Read-only renderer for wire Json values. Understands the runtime's reserved discriminators —
-// `$constructor` (tagged data), `$ref` (file handle, downloadable), `$agent` / `$closure`
-// (callable references), `$redacted` (a secret withheld at the wire) — and unescapes `$$`-prefixed
-// record keys back to their `$` originals.
+// Read-only renderer for wire Json values. The variant dispatch and key unescaping come from
+// `@katari-lang/types/wire` — the same single definition the runtime codec and the FFI port encode
+// against — so this viewer can never drift from what the runtime actually emits.
 
+import {
+  AGENT_KEY,
+  CLOSURE_KEY,
+  CONSTRUCTOR_KEY,
+  CONTENT_TYPE_KEY,
+  FILE_KEY,
+  MODULE_KEY,
+  SIZE_KEY,
+  unescapeRecordKey,
+  VALUE_KEY,
+  wireKindOf,
+} from "@katari-lang/types";
 import { Braces, Download, EyeOff, FileIcon, FunctionSquare } from "lucide-react";
 import { useState } from "react";
 import { api } from "../../api/client";
@@ -69,7 +80,7 @@ function ObjectNode({ fields, projectId }: { fields: { [key: string]: Json }; pr
       <div className="flex flex-col border-l border-edge pl-4">
         {entries.map(([key, child]) => (
           <div key={key} className="flex gap-2">
-            <span className="text-fg-muted">{unescapeKey(key)}:</span>
+            <span className="text-fg-muted">{unescapeRecordKey(key)}:</span>
             <Node value={child} projectId={projectId} />
           </div>
         ))}
@@ -78,55 +89,50 @@ function ObjectNode({ fields, projectId }: { fields: { [key: string]: Json }; pr
   );
 }
 
-/** One leading `$` of a `$$…` key is the wire escape; a lone `$…` key is a literal. */
-function unescapeKey(key: string): string {
-  return key.startsWith("$$") ? key.slice(1) : key;
-}
-
 function specialNode(fields: { [key: string]: Json }, projectId: string) {
-  if (fields.$redacted === true) {
-    return (
-      <Badge tone="danger">
-        <EyeOff className="size-3" /> redacted
-      </Badge>
-    );
-  }
-  if (typeof fields.$constructor === "string") {
-    return (
-      <span className="inline-flex items-start gap-2">
-        <Badge tone="info">
-          <Braces className="size-3" /> {fields.$constructor}
+  switch (wireKindOf((key) => key in fields)) {
+    case "redacted":
+      return (
+        <Badge tone="danger">
+          <EyeOff className="size-3" /> redacted
         </Badge>
-        <Node value={fields.value ?? null} projectId={projectId} />
-      </span>
-    );
+      );
+    case "data":
+      return (
+        <span className="inline-flex items-start gap-2">
+          <Badge tone="info">
+            <Braces className="size-3" /> {String(fields[CONSTRUCTOR_KEY])}
+          </Badge>
+          <Node value={fields[VALUE_KEY] ?? null} projectId={projectId} />
+        </span>
+      );
+    case "file":
+      return (
+        <FileChip
+          projectId={projectId}
+          blobId={String(fields[FILE_KEY])}
+          size={typeof fields[SIZE_KEY] === "number" ? fields[SIZE_KEY] : null}
+          contentType={
+            typeof fields[CONTENT_TYPE_KEY] === "string" ? fields[CONTENT_TYPE_KEY] : null
+          }
+        />
+      );
+    case "agent":
+      return (
+        <Badge tone="info">
+          <FunctionSquare className="size-3" /> agent {String(fields[AGENT_KEY])}
+        </Badge>
+      );
+    case "closure":
+      return (
+        <Badge tone="info">
+          <FunctionSquare className="size-3" /> closure {String(fields[MODULE_KEY] ?? "")}#
+          {String(fields[CLOSURE_KEY])}
+        </Badge>
+      );
+    default:
+      return null;
   }
-  if (typeof fields.$ref === "string") {
-    return (
-      <FileChip
-        projectId={projectId}
-        blobId={fields.$ref}
-        size={typeof fields.size === "number" ? fields.size : null}
-        contentType={typeof fields.contentType === "string" ? fields.contentType : null}
-      />
-    );
-  }
-  if (typeof fields.$agent === "string") {
-    return (
-      <Badge tone="info">
-        <FunctionSquare className="size-3" /> agent {fields.$agent}
-      </Badge>
-    );
-  }
-  if (typeof fields.$closure === "number") {
-    return (
-      <Badge tone="info">
-        <FunctionSquare className="size-3" /> closure {String(fields.module ?? "")}#
-        {fields.$closure}
-      </Badge>
-    );
-  }
-  return null;
 }
 
 function FileChip({

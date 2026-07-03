@@ -52,6 +52,14 @@ export function useRun(projectId: string, runId: string) {
   });
 }
 
+export function useRunTree(projectId: string, runId: string, live: boolean) {
+  return useQuery({
+    queryKey: ["projects", projectId, "runs", runId, "tree"],
+    queryFn: () => api.getRunTree(projectId, runId),
+    refetchInterval: live ? LIVE_POLL_MILLISECONDS : false,
+  });
+}
+
 export function useRunEscalationAudit(projectId: string, runId: string, live: boolean) {
   return useQuery({
     queryKey: ["projects", projectId, "runs", runId, "escalations"],

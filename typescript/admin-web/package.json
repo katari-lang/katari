@@ -20,6 +20,7 @@
   "homepage": "https://katari-lang.dev",
   "bugs": "https://github.com/katari-lang/katari/issues",
   "dependencies": {
+    "@katari-lang/types": "workspace:*",
     "@tanstack/react-query": "^5.90.0",
     "lucide-react": "^0.545.0",
     "react": "^19.2.0",
