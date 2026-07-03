@@ -49,6 +49,9 @@ data CompileResult = CompileResult
   { loweredModules :: Map ModuleName IRModule,
     symbolTables :: Map ModuleName SymbolTable,
     typedModules :: Map ModuleName (Module Typed),
+    -- | Every module's export interface (user modules AND the stdlib) — what the query layer's
+    -- member completion resolves a @module.@ prefix against.
+    moduleInterfaces :: Map ModuleName ModuleInterface,
     diagnostics :: Diagnostics
   }
 
@@ -82,6 +85,7 @@ compile input =
           else mempty,
       symbolTables = Map.restrictKeys ((\identifiedModule -> identifiedModule.symbolTable) <$> identifiedModules) userKeys,
       typedModules = Map.restrictKeys typedModules userKeys,
+      moduleInterfaces = interfaces,
       diagnostics = preLoweringDiagnostics <> lowerDiagnostics
     }
   where

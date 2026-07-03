@@ -83,6 +83,8 @@ library:
     - Katari.Parser.Expression
     - Katari.Lowering
     - Katari.Compile
+    - Katari.Query
+    - Katari.Query.Completion
 
 tests:
   compiler-test:
