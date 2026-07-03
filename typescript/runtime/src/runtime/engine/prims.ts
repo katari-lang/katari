@@ -86,6 +86,29 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
     kind: "string",
     value: stringOf(field(argument, "left")) + stringOf(field(argument, "right")),
   }),
+  // ─── prelude.math ─────────────────────────────────────────────────────────────────────────
+  "prelude.math.abs": (argument) => {
+    const value = field(argument, "value");
+    return makeNumber(Math.abs(numberOf(value)), value);
+  },
+  "prelude.math.min": numeric((left, right) => Math.min(left, right)),
+  "prelude.math.max": numeric((left, right) => Math.max(left, right)),
+  "prelude.math.floor": (argument) => ({
+    kind: "integer",
+    // `+ 0` normalizes negative zero (e.g. floor of -0) to plain 0.
+    value: Math.floor(numberOf(field(argument, "value"))) + 0,
+  }),
+  "prelude.math.ceil": (argument) => ({
+    kind: "integer",
+    // `+ 0` normalizes negative zero (ceil of -0.5 is -0 in JS) to plain 0.
+    value: Math.ceil(numberOf(field(argument, "value"))) + 0,
+  }),
+  "prelude.math.round": (argument) => {
+    // Half away from zero (the declared grade-school rule); JS Math.round is half toward +Infinity,
+    // which would send -2.5 to -2. `+ 0` keeps a rounded -0.4 from minting negative zero.
+    const value = numberOf(field(argument, "value"));
+    return { kind: "integer", value: Math.sign(value) * Math.round(Math.abs(value)) + 0 };
+  },
   "prelude.string.to_string": async (argument, context) => {
     const value = field(argument, "value");
     // A blob-backed string renders as its content, like every other string-accepting prim.

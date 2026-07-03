@@ -22,7 +22,7 @@ import {
   type SchemaInfo,
 } from "@katari-lang/types";
 import type { IrSource } from "../ir.js";
-import { jsonToValue } from "../value/codec.js";
+import { jsonToValue, valueEquals } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import {
@@ -171,6 +171,16 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       })),
     };
   },
+  "prelude.record.merge": (argument) => ({
+    kind: "record",
+    // Right wins on a shared key (the declared override direction). Null-prototype like `set`, so a
+    // merged key named like an Object.prototype member stays an ordinary field.
+    fields: Object.assign(
+      Object.create(null),
+      recordOf(field(argument, "left")),
+      recordOf(field(argument, "right")),
+    ),
+  }),
   "prelude.record.empty": () => ({ kind: "record", fields: {} }),
 
   // ─── prelude.array ────────────────────────────────────────────────────────────────────────
@@ -195,6 +205,33 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       Math.max(0, integerOf(field(argument, "end"))),
     ),
   }),
+  "prelude.array.contains": (argument) => ({
+    kind: "boolean",
+    value: arrayOf(field(argument, "target")).some((element) =>
+      valueEquals(element, field(argument, "value")),
+    ),
+  }),
+  "prelude.array.index_of": (argument) => {
+    const index = arrayOf(field(argument, "target")).findIndex((element) =>
+      valueEquals(element, field(argument, "value")),
+    );
+    return index === -1 ? NULL_VALUE : { kind: "integer", value: index };
+  },
+  "prelude.array.flatten": (argument) => ({
+    kind: "array",
+    elements: arrayOf(field(argument, "target")).flatMap((element) => arrayOf(element)),
+  }),
+  "prelude.array.reverse": (argument) => ({
+    kind: "array",
+    elements: [...arrayOf(field(argument, "target"))].reverse(),
+  }),
+  "prelude.array.range": (argument) => {
+    const start = integerOf(field(argument, "start"));
+    const end = integerOf(field(argument, "end"));
+    const elements: Value[] = [];
+    for (let value = start; value < end; value += 1) elements.push({ kind: "integer", value });
+    return { kind: "array", elements };
+  },
   "prelude.array.empty": () => ({ kind: "array", elements: [] }),
 
   // ─── prelude.string (indices are Unicode code points, per the declared contract) ───────────
@@ -233,6 +270,72 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       await readStringField(argument, "search", context),
     ),
   }),
+  "prelude.string.starts_with": async (argument, context) => ({
+    kind: "boolean",
+    value: (await readStringField(argument, "value", context)).startsWith(
+      await readStringField(argument, "search", context),
+    ),
+  }),
+  "prelude.string.ends_with": async (argument, context) => ({
+    kind: "boolean",
+    value: (await readStringField(argument, "value", context)).endsWith(
+      await readStringField(argument, "search", context),
+    ),
+  }),
+  "prelude.string.index_of": async (argument, context) => {
+    const value = await readStringField(argument, "value", context);
+    const unitIndex = value.indexOf(await readStringField(argument, "search", context));
+    if (unitIndex === -1) return NULL_VALUE;
+    // The declared contract counts code points; convert the UTF-16 unit index of the hit.
+    return { kind: "integer", value: Array.from(value.slice(0, unitIndex)).length };
+  },
+  "prelude.string.replace": async (argument, context) => {
+    const value = await readStringField(argument, "value", context);
+    const search = await readStringField(argument, "search", context);
+    if (search === "") return { kind: "string", value };
+    // split/join rather than replaceAll: the replacement is literal text, so a `$&` in it must not
+    // be read as a substitution pattern.
+    return {
+      kind: "string",
+      value: value.split(search).join(await readStringField(argument, "replacement", context)),
+    };
+  },
+  "prelude.string.trim": async (argument, context) => ({
+    kind: "string",
+    value: (await readStringField(argument, "value", context)).trim(),
+  }),
+  "prelude.string.to_upper": async (argument, context) => ({
+    kind: "string",
+    value: (await readStringField(argument, "value", context)).toUpperCase(),
+  }),
+  "prelude.string.to_lower": async (argument, context) => ({
+    kind: "string",
+    value: (await readStringField(argument, "value", context)).toLowerCase(),
+  }),
+  "prelude.string.to_integer": async (argument, context) => {
+    const text = await readStringField(argument, "value", context);
+    // The canonical base-10 form only, and only a magnitude the number model holds exactly — a lossy
+    // read must be null, never a silently rounded integer.
+    if (!/^[+-]?[0-9]+$/.test(text)) return NULL_VALUE;
+    const value = Number(text);
+    return Number.isSafeInteger(value) ? { kind: "integer", value } : NULL_VALUE;
+  },
+  "prelude.string.to_number": async (argument, context) => {
+    const text = await readStringField(argument, "value", context);
+    // Exactly JSON's number grammar (the declared contract): no hex / "Infinity" forms that
+    // `Number(...)` would admit, and no surrounding whitespace either (JSON.parse tolerates it, but
+    // padded input is `trim`'s job — consistent with `to_integer`).
+    if (text !== text.trim()) return NULL_VALUE;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return NULL_VALUE;
+    }
+    return typeof parsed === "number" && Number.isFinite(parsed)
+      ? { kind: "number", value: parsed }
+      : NULL_VALUE;
+  },
 
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────
   "prelude.ai.get_metadata": async (argument, context) => {

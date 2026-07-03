@@ -24,5 +24,9 @@ primitive agent size(target: record[unknown]) -> integer
 @"Every entry as a @[key, value]@ pair, in sorted key order — the record's `for`-iterable view."
 primitive agent entries[T](target: record[T]) -> array[[string, T]]
 
+@"The two records' entries in one record; on a shared key the right value wins (the override
+direction of layered configuration, e.g. default headers extended per call)."
+primitive agent merge[T](left: record[T], right: record[T]) -> record[T]
+
 @"The empty record."
 primitive agent empty() -> record[never]

@@ -357,6 +357,132 @@ describe("prelude.record / prelude.array / prelude.string", () => {
       run("prelude.string.contains", { value: str("hello"), search: str("ell") }),
     ).resolves.toEqual({ kind: "boolean", value: true });
   });
+
+  test("record.merge combines entries with the right value winning on a shared key", async () => {
+    await expect(
+      run("prelude.record.merge", {
+        left: { kind: "record", fields: { a: int(1), b: int(2) } },
+        right: { kind: "record", fields: { b: int(20), c: int(3) } },
+      }),
+    ).resolves.toEqual({ kind: "record", fields: { a: int(1), b: int(20), c: int(3) } });
+  });
+
+  test("array.contains / index_of use structural equality; flatten / reverse / range reshape", async () => {
+    const records: Value = {
+      kind: "array",
+      elements: [
+        { kind: "record", fields: { x: int(1) } },
+        { kind: "record", fields: { x: int(2) } },
+      ],
+    };
+    await expect(
+      run("prelude.array.contains", { target: records, value: { kind: "record", fields: { x: int(2) } } }),
+    ).resolves.toEqual({ kind: "boolean", value: true });
+    await expect(
+      run("prelude.array.index_of", { target: records, value: { kind: "record", fields: { x: int(2) } } }),
+    ).resolves.toEqual(int(1));
+    await expect(
+      run("prelude.array.index_of", { target: records, value: { kind: "record", fields: { x: int(9) } } }),
+    ).resolves.toEqual({ kind: "null" });
+    await expect(
+      run("prelude.array.flatten", {
+        target: {
+          kind: "array",
+          elements: [
+            { kind: "array", elements: [int(1)] },
+            { kind: "array", elements: [] },
+            { kind: "array", elements: [int(2), int(3)] },
+          ],
+        },
+      }),
+    ).resolves.toEqual({ kind: "array", elements: [int(1), int(2), int(3)] });
+    await expect(
+      run("prelude.array.reverse", { target: { kind: "array", elements: [int(1), int(2)] } }),
+    ).resolves.toEqual({ kind: "array", elements: [int(2), int(1)] });
+    await expect(run("prelude.array.range", { start: int(2), end: int(5) })).resolves.toEqual({
+      kind: "array",
+      elements: [int(2), int(3), int(4)],
+    });
+    await expect(run("prelude.array.range", { start: int(3), end: int(3) })).resolves.toEqual({
+      kind: "array",
+      elements: [],
+    });
+  });
+
+  test("string.starts_with / ends_with / index_of / replace / trim / case fold", async () => {
+    await expect(
+      run("prelude.string.starts_with", { value: str("hello"), search: str("he") }),
+    ).resolves.toEqual({ kind: "boolean", value: true });
+    await expect(
+      run("prelude.string.ends_with", { value: str("hello"), search: str("he") }),
+    ).resolves.toEqual({ kind: "boolean", value: false });
+    // index_of counts code points: the hit after an astral character is at 2, not 3.
+    await expect(
+      run("prelude.string.index_of", { value: str("a👍b"), search: str("b") }),
+    ).resolves.toEqual(int(2));
+    await expect(
+      run("prelude.string.index_of", { value: str("abc"), search: str("zz") }),
+    ).resolves.toEqual({ kind: "null" });
+    // The replacement is literal text — `$&` must not be read as a substitution pattern.
+    await expect(
+      run("prelude.string.replace", { value: str("a-b-c"), search: str("-"), replacement: str("$&") }),
+    ).resolves.toEqual(str("a$&b$&c"));
+    await expect(
+      run("prelude.string.replace", { value: str("abc"), search: str(""), replacement: str("x") }),
+    ).resolves.toEqual(str("abc"));
+    await expect(run("prelude.string.trim", { value: str("  hi\n") })).resolves.toEqual(str("hi"));
+    await expect(run("prelude.string.to_upper", { value: str("hé") })).resolves.toEqual(str("HÉ"));
+    await expect(run("prelude.string.to_lower", { value: str("HÉ") })).resolves.toEqual(str("hé"));
+  });
+
+  test("string.to_integer / to_number accept exactly the declared grammar, null otherwise", async () => {
+    await expect(run("prelude.string.to_integer", { value: str("-42") })).resolves.toEqual(int(-42));
+    await expect(run("prelude.string.to_integer", { value: str("+7") })).resolves.toEqual(int(7));
+    // Not the canonical integer form: fractional, padded, hex, and empty are all null.
+    for (const text of ["42.0", " 42", "0x10", "", "abc"]) {
+      await expect(run("prelude.string.to_integer", { value: str(text) })).resolves.toEqual({
+        kind: "null",
+      });
+    }
+    // A magnitude the number model cannot hold exactly must be null, not silently rounded.
+    await expect(
+      run("prelude.string.to_integer", { value: str("9007199254740993") }),
+    ).resolves.toEqual({ kind: "null" });
+    await expect(run("prelude.string.to_number", { value: str("-1.5e3") })).resolves.toEqual({
+      kind: "number",
+      value: -1500,
+    });
+    // JSON's grammar only: the `Number(...)` extras (hex, Infinity, whitespace) are all null.
+    for (const text of ["0x10", "Infinity", " 1", "1e999", ""]) {
+      await expect(run("prelude.string.to_number", { value: str(text) })).resolves.toEqual({
+        kind: "null",
+      });
+    }
+  });
+});
+
+describe("prelude.math", () => {
+  const num = (value: number): Value => ({ kind: "number", value });
+
+  test("abs / min / max preserve integer-ness like the arithmetic operators", async () => {
+    await expect(run("prelude.math.abs", { value: int(-3) })).resolves.toEqual(int(3));
+    await expect(run("prelude.math.abs", { value: num(-3.5) })).resolves.toEqual(num(3.5));
+    await expect(run("prelude.math.min", { left: int(2), right: int(5) })).resolves.toEqual(int(2));
+    await expect(run("prelude.math.max", { left: int(2), right: num(5.5) })).resolves.toEqual(
+      num(5.5),
+    );
+  });
+
+  test("floor / ceil / round convert number to integer (round is half away from zero)", async () => {
+    await expect(run("prelude.math.floor", { value: num(1.9) })).resolves.toEqual(int(1));
+    await expect(run("prelude.math.floor", { value: num(-1.1) })).resolves.toEqual(int(-2));
+    await expect(run("prelude.math.ceil", { value: num(1.1) })).resolves.toEqual(int(2));
+    await expect(run("prelude.math.ceil", { value: num(-0.5) })).resolves.toEqual(int(0));
+    await expect(run("prelude.math.round", { value: num(2.5) })).resolves.toEqual(int(3));
+    // Half away from zero: -2.5 rounds to -3 (JS Math.round alone would give -2).
+    await expect(run("prelude.math.round", { value: num(-2.5) })).resolves.toEqual(int(-3));
+    await expect(run("prelude.math.round", { value: num(-0.4) })).resolves.toEqual(int(0));
+  });
 });
 
 describe("prelude.ai.get_metadata", () => {

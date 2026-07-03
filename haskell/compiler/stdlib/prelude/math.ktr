@@ -1,0 +1,23 @@
+// The `prelude.math` sub-module: numeric operations beyond the arithmetic operators. Called
+// qualified — `math.floor`, `math.max` — via the default import. The rounding trio is the only
+// number -> integer conversion in the language (`/` always yields `number`), so integer arithmetic
+// over divided quantities goes through here.
+
+@"The absolute value; preserves integer."
+primitive agent abs[T extends number](value: T) -> T
+
+@"The smaller of the two; preserves integer when both operands are integers."
+primitive agent min[T extends number](left: T, right: T) -> T
+
+@"The larger of the two; preserves integer when both operands are integers."
+primitive agent max[T extends number](left: T, right: T) -> T
+
+@"The largest integer not above the value. A non-finite value cannot occur (division never yields
+one)."
+primitive agent floor(value: number) -> integer
+
+@"The smallest integer not below the value."
+primitive agent ceil(value: number) -> integer
+
+@"The nearest integer (half away from zero, the grade-school rule — not banker's rounding)."
+primitive agent round(value: number) -> integer
