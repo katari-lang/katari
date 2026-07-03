@@ -46,6 +46,12 @@ import { errorData, KatariThrow } from "./throw-signal.js";
 const PARSE_ERROR = "prelude.json.parse_error";
 const DECODE_ERROR = "prelude.json.decode_error";
 
+// The largest array `range` will materialise. `range` allocates the whole array synchronously on the
+// actor's serial turn, so an unbounded (possibly AI-supplied) bound would stall the event loop or exhaust
+// memory, taking down every concurrent run in the project. The ceiling is far above any real orchestration
+// range; crossing it is a logic error, so it panics (fail-safe) rather than trying to run.
+const MAX_RANGE_LENGTH = 10_000_000;
+
 const NULL_VALUE: Value = { kind: "null" };
 
 /** A `StringReader` over the context's blob store (inline strings read directly). */
@@ -228,6 +234,11 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   "prelude.array.range": (argument) => {
     const start = integerOf(field(argument, "start"));
     const end = integerOf(field(argument, "end"));
+    if (end - start > MAX_RANGE_LENGTH) {
+      throw new Error(
+        `range(${start}, ${end}) would produce ${end - start} elements, exceeding the ${MAX_RANGE_LENGTH} limit`,
+      );
+    }
     const elements: Value[] = [];
     for (let value = start; value < end; value += 1) elements.push({ kind: "integer", value });
     return { kind: "array", elements };

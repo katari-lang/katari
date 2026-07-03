@@ -15,10 +15,11 @@ import { and, eq } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
 import { projects, snapshots } from "../db/tables/projects.js";
-import { ConflictError, NotFoundError } from "../lib/errors.js";
+import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
 import { envReader } from "../modules/env/env.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
+import { messageOf } from "./actor/failure.js";
 import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry } from "./engine/types.js";
@@ -35,6 +36,20 @@ import {
 import { ProjectRegistry } from "./registry.js";
 import { createBlobStore } from "./value/blob-store.js";
 import { jsonToValue } from "./value/codec.js";
+import type { Value } from "./value/types.js";
+
+/** Decode client-supplied `Json` (a run argument, an escalation answer) into an engine `Value`, mapping a
+ *  malformed-input decode failure — a reserved `$`-key, a non-string `$constructor` tag, an undecodable
+ *  file / agent / closure handle — to a 400 rather than letting `jsonToValue`'s plain `Error` surface as a
+ *  500. These acceptance surfaces are the only unchecked entries for client `Json`, so the decode guard
+ *  lives here, once. */
+export function decodeClientJson(value: Json, what: string): Value {
+  try {
+    return jsonToValue(value);
+  } catch (error) {
+    throw new BadRequestError(`${what} is not a decodable value: ${messageOf(error)}`);
+  }
+}
 
 /** Read a snapshot's compiled sidecar bundle from the store (null when it has no FFI handlers). The
  *  `SnapshotFfiTransport` spawns it as the `node` sidecar for that snapshot's external calls. */
@@ -125,7 +140,8 @@ async function resolveSnapshot(projectId: string, snapshotId?: string): Promise<
 export const facade = {
   async startRun(input: StartRunInput): Promise<{ runId: string }> {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
-    const argument = input.argument !== undefined ? jsonToValue(input.argument) : null;
+    const argument =
+      input.argument !== undefined ? decodeClientJson(input.argument, "the run argument") : null;
     // The engine mints the run delegation and kicks off the run; its id is the durable run handle and its
     // Layer 1 row is the outcome's source of truth. The run's metadata sidecar (`runs` row) is written by the
     // engine in the SAME commit as the run's `delegate` — `await started` resolves once that launch commit is
@@ -156,7 +172,10 @@ export const facade = {
   async answerEscalation(input: AnswerEscalationInput): Promise<void> {
     await registry
       .actorFor(input.projectId as ProjectId)
-      .answerEscalation(input.escalationId as EscalationId, jsonToValue(input.value));
+      .answerEscalation(
+        input.escalationId as EscalationId,
+        decodeClientJson(input.value, "the answer"),
+      );
   },
 
   /** Upload a file as an api-root-owned blob: store the bytes (content-addressed by their hash), then

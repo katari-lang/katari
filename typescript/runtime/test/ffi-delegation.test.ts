@@ -69,12 +69,47 @@ function ir(): IRModule {
         block: { kind: "request", name: createAgentName("ask_value"), input: 17 },
         parameters: { parameter: 17 },
       },
+      // typed_compute: an external agent that declares `-> string`, so its result is conformed at the FFI
+      // boundary; typed_main calls it. A handler returning a non-string exercises the output-schema check.
+      20: {
+        block: {
+          kind: "agent",
+          body: 21,
+          schema: { input: {}, output: { type: "string" }, requests: [], genericBindings: {} },
+          defaults: {},
+        },
+        parameters: {},
+      },
+      21: {
+        block: { kind: "external", key: "typed_compute", input: 22, reactor: "ffi" },
+        parameters: { parameter: 22 },
+      },
+      25: { block: { kind: "agent", body: 26, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      26: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [], output: 2 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("typed_compute") },
+              argument: 2,
+              output: 3,
+            },
+            { kind: "exit", target: 25, value: 3 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
     },
     entries: {
       [createAgentName("main")]: 0,
       [createAgentName("compute")]: 6,
       [createAgentName("prelude.add")]: 10,
       [createAgentName("ask_value")]: 15,
+      [createAgentName("typed_compute")]: 20,
+      [createAgentName("typed_main")]: 25,
     },
     names: {},
   };
@@ -207,6 +242,21 @@ describe("FFI inner delegation", () => {
     await expect(result).resolves.toEqual({ kind: "string", value: "done" });
     // The held completion waited for the child's teardown — the child settled before the run did.
     expect(childSettled).toBe(true);
+  });
+
+  test("an external result conforming to the declared output schema flows through", async () => {
+    const actor = makeActor({ typed_compute: () => "hello" });
+    const { result } = actor.startRun(createAgentName("typed_main"), SNAPSHOT, null);
+    await expect(result).resolves.toEqual({ kind: "string", value: "hello" });
+  });
+
+  test("an external result that violates the declared output schema fails the run at the boundary", async () => {
+    // `typed_compute` declares `-> string`, but the untyped handler returns an integer. The assumed-typing
+    // contract is only a promise across the FFI boundary, so the runtime conforms the result and fails the
+    // run with a panic naming the boundary — rather than letting a wrong-typed value corrupt a match later.
+    const actor = makeActor({ typed_compute: () => 42 });
+    const { result } = actor.startRun(createAgentName("typed_main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/output schema/);
   });
 
   test("cancelling the run distributes the terminate through the call's inner delegations", async () => {

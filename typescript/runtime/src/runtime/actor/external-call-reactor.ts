@@ -36,7 +36,7 @@
 
 import type { Json } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
-import { THROW_REQUEST } from "../engine/throw-signal.js";
+import { isFailureRequest } from "../escalation-filter.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import {
   type DelegationId,
@@ -152,19 +152,14 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   private readonly callByInstance = new Map<InstanceId, DelegationId>();
   /** The durable inner-call bridge: an inner delegation to the transport token its outcome settles. */
   private readonly innerCalls = new Map<DelegationId, { parent: DelegationId; call: string }>();
+  /** The reverse of `innerCalls`: a parent call's delegation to the set of its live inner-delegation ids, so
+   *  `innerCallRowsOf` (persist) and the orphan-bridge sweep in `drop` read one bucket instead of scanning
+   *  every reactor-wide bridge. Maintained alongside `innerCalls`. */
+  private readonly innerCallsByParent = new Map<DelegationId, Set<DelegationId>>();
   /** Outcomes settled this turn, delivered to the transport strictly post-commit (durable-first). */
   private pendingDeliveries: InnerDelivery[] = [];
   private readonly dirty = new Set<DelegationId>();
   private droppedInstances: InstanceId[] = [];
-  /** The call whose turn this is — its instance is the issuer stamped on the replies it produces. */
-  private turnInstance: InstanceId | undefined;
-
-  currentTurnOwner(): InstanceId {
-    if (this.turnInstance === undefined) {
-      throw new Error(`${this.name}.currentTurnOwner read with no call instance (engine bug)`);
-    }
-    return this.turnInstance;
-  }
 
   // ─── concrete-reactor hooks (the only transport-specific surface) ────────────────────────────────
 
@@ -240,11 +235,11 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       return null;
     }
     const { instance } = this.routeOf(parent);
-    this.turnInstance = instance;
     const delegation = newDelegationId();
     this.innerCalls.set(delegation, { parent, call });
+    this.indexInnerCall(parent, delegation);
     this.dirty.add(parent);
-    this.send({ kind: "delegate", delegation, target, argument, from: this.name, to });
+    this.send({ kind: "delegate", delegation, target, argument, from: this.name, to }, instance);
     return delegation;
   }
 
@@ -258,7 +253,6 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const parent =
       context.caller === undefined ? undefined : this.callByInstance.get(context.caller);
     if (parent === undefined || context.caller === undefined) return; // the call is gone — an undeliverable result
-    this.turnInstance = context.caller;
     this.reownIncoming(event.value, context.caller);
     this.stageInnerDelivery(parent, event.delegation, { kind: "result", value: event.value });
     this.maybeSettle(parent);
@@ -273,7 +267,6 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const parent =
       context.caller === undefined ? undefined : this.callByInstance.get(context.caller);
     if (parent === undefined || context.caller === undefined) return;
-    this.turnInstance = context.caller;
     this.stageInnerDelivery(parent, event.delegation, { kind: "cancelled" });
     this.maybeSettle(parent);
   }
@@ -296,13 +289,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       context.caller === undefined ? undefined : this.callByInstance.get(context.caller);
     if (parent === undefined) return; // the raiser's call is gone; the child is being torn down independently
     const call = this.calls.get(parent);
-    if (call === undefined || call.status === "cancelling") return;
+    // Drop the ask when the call is winding its children down — `cancelling` (a terminate from above), or a
+    // completion already `pendingOutcome` (the transport finished and `complete` terminated the children):
+    // the child is being torn down, so its escalate is moot, and forwarding it would relay an ask the call
+    // will orphan when it resolves and drops. Symmetric to `openInnerDelegation`, which refuses new work in
+    // exactly these two states.
+    if (call === undefined || call.status === "cancelling" || call.pendingOutcome !== undefined) {
+      return;
+    }
     const { instance, caller } = this.routeOf(parent);
-    this.turnInstance = instance;
-    if (
-      event.ask.kind === "request" &&
-      (event.ask.request === PANIC_REQUEST || event.ask.request === THROW_REQUEST)
-    ) {
+    if (event.ask.kind === "request" && isFailureRequest(event.ask.request)) {
       this.stageInnerDelivery(
         parent,
         event.delegation,
@@ -313,9 +309,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       // Cancel the failing callee (its delegation row is still live — an acceptance-surface failure never
       // acks, a raised one suspends awaiting an answer that will never come). One already cancelling (or
       // already retired) needs no second terminate.
-      const child = this.issuedDelegationsOf(instance).find(
-        (row) => row.delegation === event.delegation,
-      );
+      const child = this.issuedRowOf(event.delegation);
       if (child !== undefined && child.state === "running") {
         this.send({
           kind: "terminate",
@@ -329,14 +323,17 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const outer = newEscalationId();
     call.relays.set(outer, { child: event.delegation, escalation: event.escalation });
     this.dirty.add(parent);
-    this.send({
-      kind: "escalate",
-      delegation: parent,
-      escalation: outer,
-      ask: event.ask,
-      from: this.name,
-      to: caller,
-    });
+    this.send(
+      {
+        kind: "escalate",
+        delegation: parent,
+        escalation: outer,
+        ask: event.ask,
+        from: this.name,
+        to: caller,
+      },
+      instance,
+    );
   }
 
   // ─── the shared callee lifecycle ─────────────────────────────────────────────────────────────────
@@ -375,7 +372,6 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     }
     if (call.status === "cancelling") return;
     const { instance } = this.routeOf(event.delegation);
-    this.turnInstance = instance;
     // An errored call (`awaitingAnswer`) has no transport work left to confirm; a held completion is moot.
     call.transportSettled = call.status === "awaitingAnswer";
     call.pendingOutcome = undefined;
@@ -400,8 +396,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       this.dirty.add(event.delegation);
       const to = this.issuedPeerOf(relay.child);
       if (to === undefined) return; // the child retired while the ask was open (cancelled) — the answer is moot
-      const { instance } = this.routeOf(event.delegation);
-      this.turnInstance = instance;
+      // An escalateAck owns no row and releases nothing, so it needs no issuer.
       this.send({
         kind: "escalateAck",
         delegation: relay.child,
@@ -414,14 +409,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     }
     if (call.status !== "awaitingAnswer") return;
     const { instance, caller } = this.routeOf(event.delegation);
-    this.turnInstance = instance;
-    this.send({
-      kind: "delegateAck",
-      delegation: event.delegation,
-      value: event.value,
-      from: this.name,
-      to: caller,
-    });
+    this.send(
+      {
+        kind: "delegateAck",
+        delegation: event.delegation,
+        value: event.value,
+        from: this.name,
+        to: caller,
+      },
+      instance,
+    );
     this.drop(event.delegation);
   }
 
@@ -433,7 +430,6 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const call = this.calls.get(completion.delegation);
     if (call === undefined) return; // a late completion for a call already resolved
     const { instance } = this.routeOf(completion.delegation);
-    this.turnInstance = instance;
     if (call.status === "cancelling") {
       call.transportSettled = true;
       this.maybeSettle(completion.delegation);
@@ -466,7 +462,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const call = this.calls.get(delegation);
     if (call === undefined) return;
     const { instance, caller } = this.routeOf(delegation);
-    if (this.issuedDelegationsOf(instance).length > 0) return; // children still winding down
+    if (this.hasIssuedDelegations(instance)) return; // children still winding down
     if (call.status === "cancelling") {
       if (!call.transportSettled) return;
       this.send({ kind: "terminateAck", delegation, from: this.name, to: caller });
@@ -478,13 +474,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     call.pendingOutcome = undefined;
     switch (outcome.kind) {
       case "result":
-        this.send({
-          kind: "delegateAck",
-          delegation,
-          value: jsonToValue(outcome.value),
-          from: this.name,
-          to: caller,
-        });
+        this.send(
+          {
+            kind: "delegateAck",
+            delegation,
+            value: jsonToValue(outcome.value),
+            from: this.name,
+            to: caller,
+          },
+          instance,
+        );
         this.drop(delegation);
         return;
       case "cancelled":
@@ -547,6 +546,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const bridge = this.innerCalls.get(child);
     if (bridge === undefined) return;
     this.innerCalls.delete(child);
+    this.unindexInnerCall(bridge.parent, child);
     this.dirty.add(parent);
     this.pendingDeliveries.push({ delegation: parent, call: bridge.call, outcome });
   }
@@ -630,6 +630,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       });
       for (const inner of row.innerCalls) {
         this.innerCalls.set(inner.delegation, { parent: row.delegation, call: inner.call });
+        this.indexInnerCall(row.delegation, inner.delegation);
       }
       if (row.status === "running") this.recover(row.delegation);
       else if (row.status === "cancelling") this.abort(row.delegation);
@@ -641,18 +642,36 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.calls.clear();
     this.callByInstance.clear();
     this.innerCalls.clear();
+    this.innerCallsByParent.clear();
     this.pendingDeliveries = [];
     this.dirty.clear();
     this.droppedInstances = [];
-    this.turnInstance = undefined;
   }
 
   private innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
     const rows: InnerCallRow[] = [];
-    for (const [delegation, bridge] of this.innerCalls) {
-      if (bridge.parent === parent) rows.push({ delegation, call: bridge.call });
+    const children = this.innerCallsByParent.get(parent);
+    if (children === undefined) return rows;
+    for (const child of children) {
+      const bridge = this.innerCalls.get(child);
+      if (bridge !== undefined) rows.push({ delegation: child, call: bridge.call });
     }
     return rows;
+  }
+
+  /** Add an inner delegation to its parent call's bucket (creating it on the first inner call). */
+  private indexInnerCall(parent: DelegationId, child: DelegationId): void {
+    const set = this.innerCallsByParent.get(parent);
+    if (set === undefined) this.innerCallsByParent.set(parent, new Set([child]));
+    else set.add(child);
+  }
+
+  /** Remove an inner delegation from its parent call's bucket, evicting the bucket once empty. */
+  private unindexInnerCall(parent: DelegationId, child: DelegationId): void {
+    const set = this.innerCallsByParent.get(parent);
+    if (set === undefined) return;
+    set.delete(child);
+    if (set.size === 0) this.innerCallsByParent.delete(parent);
   }
 
   private put(delegation: DelegationId, call: Call<Payload>): void {
@@ -667,8 +686,10 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       this.callByInstance.delete(instance);
     }
     // Stale inner-call bridges (an orphan child still running as its parent resolves) die with the call.
-    for (const [child, bridge] of this.innerCalls) {
-      if (bridge.parent === delegation) this.innerCalls.delete(child);
+    const children = this.innerCallsByParent.get(delegation);
+    if (children !== undefined) {
+      for (const child of children) this.innerCalls.delete(child);
+      this.innerCallsByParent.delete(delegation);
     }
     this.calls.delete(delegation);
     this.dropHandled(delegation);

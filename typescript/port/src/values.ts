@@ -18,7 +18,18 @@
 // A bare record's own `$`-keys travel escaped (leading `$` doubled); this layer unescapes on decode and
 // re-escapes on encode, so handler code sees natural keys.
 
-import type { Json } from "@katari-lang/types";
+import {
+  AGENT_KEY,
+  CLOSURE_KEY,
+  CONSTRUCTOR_KEY,
+  escapeRecordKey,
+  FILE_KEY,
+  type Json,
+  REDACTED_KEY,
+  SEMANTIC_KIND_KEY,
+  unescapeRecordKey,
+  VALUE_KEY,
+} from "@katari-lang/types";
 import type { FileHandle } from "./blob.js";
 
 /** What the decoded argument (and an inner call's decoded result) is made of. A handler's own argument type
@@ -170,25 +181,8 @@ export class KatariAgent {
   }
 }
 
-// ─── the wire conventions (kept in lockstep with runtime/value/codec.ts) ─────────────────────────
-
-const CONSTRUCTOR_KEY = "$constructor";
-const FILE_KEY = "$ref";
-const AGENT_KEY = "$agent";
-const CLOSURE_KEY = "$closure";
-const REDACTED_KEY = "$redacted";
-const VALUE_KEY = "value";
-const SEMANTIC_KIND_KEY = "semanticKind";
-
-/** Escape a bare-record key for the wire: a key starting with `$` gets its leading `$` doubled. */
-function escapeRecordKey(key: string): string {
-  return key.startsWith("$") ? `$${key}` : key;
-}
-
-/** Reverse `escapeRecordKey`: strip one leading `$` from a `$$…` key. */
-function unescapeRecordKey(key: string): string {
-  return key.startsWith("$$") ? key.slice(1) : key;
-}
+// The wire-convention constants (`CONSTRUCTOR_KEY`, `$`-key escaping, …) live in `@katari-lang/types`
+// (`wire.ts`), shared with the runtime codec so the two sides cannot drift — imported at the top.
 
 // ─── decode: wire Json → the handler's value model ────────────────────────────────────────────────
 

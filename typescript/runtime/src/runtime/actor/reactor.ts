@@ -101,6 +101,15 @@ export abstract class Reactor {
   private readonly retiredDelegations = new Set<DelegationId>();
   private readonly retiredEscalations = new Set<EscalationId>();
 
+  /** A reverse index over the caller-owned `delegations`: each issuing instance to the set of live
+   *  delegations it opened — its children in the delegation tree. Maintained alongside `delegations` (opened
+   *  on `openDelegation`, dropped on `retireDelegation`, rebuilt on load), so `issuedDelegationsOf` /
+   *  `hasIssuedDelegations` — read on every terminate + settle cascade — are O(children of one instance),
+   *  not a scan of the whole map. This is the base's record of "which instance summoned which child": with
+   *  the receive-side `handled` index (delegation → the instance handling it), a parent delegation's children
+   *  are `issuedDelegationsOf(handledInstanceOf(parent))`, the general delegation-tree wiring. */
+  private readonly issuedByCaller = new Map<InstanceId, Set<DelegationId>>();
+
   /** This turn's instance-envelope changes the next `persistBase` flushes, one entry per instance: an upsert
    *  (the concrete owns each instance's live state, so the base only stages its generic row) or a drop
    *  (cascade). One map keyed by id — so an upsert and a drop of the same instance in one turn resolve by
@@ -117,11 +126,6 @@ export abstract class Reactor {
    *  Layer 2 (an instance's envelope + extension, or its drop). The base writes the generic half (envelopes +
    *  delegations + escalations + drops) via `persistBase`; the concrete adds its own extension. */
   abstract persist(tx: PersistenceTx): Promise<void>;
-
-  /** The owner instance for the Layer 1 rows this turn's sends open (the delegation's caller / the escalation's
-   *  raiser) and for the resources they release. The turn's core instance, the api root, or the ffi call. Only
-   *  read when a send actually opens a row / releases a value. */
-  abstract currentTurnOwner(): InstanceId;
 
   /** Strictly-post-commit side effects (durable-first): settle an in-process promise, dispatch an FFI call.
    *  Runs only after the turn is durably committed, so recovery is always possible from durable state alone. */
@@ -202,45 +206,57 @@ export abstract class Reactor {
 
   // ─── send (final): record the owned-edge change the outgoing event implies, then buffer ──────────
 
-  /** Emit one fully routed follow-on event (its `from` / `to` already stamped by the emitter). The base records
-   *  the owned-edge change it implies — a `delegate` opens the caller's delegation, a `terminate` cancels it, a
-   *  user-facing `escalate` opens the raiser's escalation — so a concrete reactor never opens / transitions a
-   *  row itself. The first step of the two-step reown also rides here: a value leaving its instance UP across
-   *  the boundary (a `delegateAck` result, an `escalate`'s carried value) RELEASES the resources it captures
-   *  from the turn's owner to in-transit, so the receiver can reown them. */
-  protected send(event: ExternalEvent): void {
-    this.applySendEdge(event);
-    if (event.kind === "delegateAck") this.pool.release(event.value, this.currentTurnOwner());
-    else if (event.kind === "escalate") {
-      const value = escalateValue(event.ask);
-      if (value !== null) this.pool.release(value, this.currentTurnOwner());
-    }
-    this.sendBuffer.push(event);
-  }
-
-  /** Record the Layer 1 edge change the outgoing event implies on the side this reactor owns. */
-  private applySendEdge(event: ExternalEvent): void {
+  /** Emit one fully routed follow-on event (its `from` / `to` already stamped by the emitter), issued by
+   *  `issuer` — the instance whose turn produced it. The base records the Layer 1 edge the event implies (a
+   *  `delegate` opens the caller's delegation, a `terminate` cancels it, a user-facing `escalate` opens the
+   *  raiser's escalation) and performs the first step of the two-step reown (a value crossing UP — a
+   *  `delegateAck` result, an `escalate`'s carried value — RELEASES the resources it captures from `issuer`
+   *  to in-transit, so the receiver can reown them). So a concrete reactor only emits; it never opens /
+   *  transitions a row itself, and passes the issuing instance rather than the base reaching for an ambient.
+   *  `issuer` is required for exactly the events that open a row or release a value (delegate / user-facing
+   *  escalate / delegateAck / a value-carrying escalate); it is omitted for a reply that owns nothing (a
+   *  stray `terminateAck` for an already-gone delegation, an `escalateAck`, a plain `terminate`). */
+  protected send(event: ExternalEvent, issuer?: InstanceId): void {
     switch (event.kind) {
       case "delegate":
-        this.openDelegation(event.delegation, { caller: this.currentTurnOwner(), peer: event.to });
+        this.openDelegation(event.delegation, {
+          caller: this.requireIssuer(issuer, event),
+          peer: event.to,
+        });
         break;
       case "terminate":
         this.toCancelling(event.delegation);
         break;
-      case "escalate":
+      case "escalate": {
         // A durable row only for a user-facing request (one the API can list / answer). A panic / control
         // escape gets none — its raiser's suspended state (a core thread, an ffi `awaitingAnswer`) is the SoT.
         if (event.ask.kind === "request" && isUserFacingRequest(event.ask.request)) {
           this.openEscalation(event.escalation, {
-            raiser: this.currentTurnOwner(),
+            raiser: this.requireIssuer(issuer, event),
             peer: event.to,
             delegation: event.delegation,
             request: event.ask.request,
             argument: event.ask.argument,
           });
         }
+        const carried = escalateValue(event.ask);
+        if (carried !== null) this.pool.release(carried, this.requireIssuer(issuer, event));
+        break;
+      }
+      case "delegateAck":
+        this.pool.release(event.value, this.requireIssuer(issuer, event));
         break;
     }
+    this.sendBuffer.push(event);
+  }
+
+  /** The issuer for a send that needs one (it opens a row or releases a value). A missing issuer there is an
+   *  engine bug — the concrete failed to pass the instance whose turn produced the event. */
+  private requireIssuer(issuer: InstanceId | undefined, event: ExternalEvent): InstanceId {
+    if (issuer === undefined) {
+      throw new Error(`${this.name}.send(${event.kind}) needs an issuer instance (engine bug)`);
+    }
+    return issuer;
   }
 
   /** The second step of the two-step reown: an incoming `delegateAck`'s result lands here — claim the
@@ -297,6 +313,7 @@ export abstract class Reactor {
     this.dirtyEscalations.clear();
     this.retiredDelegations.clear();
     this.retiredEscalations.clear();
+    this.issuedByCaller.clear();
     this.dirtyInstances.clear();
     this.handled.clear();
   }
@@ -310,6 +327,22 @@ export abstract class Reactor {
   ): void {
     this.delegations.set(delegation, { ...row, state: "running" });
     this.dirtyDelegations.add(delegation);
+    this.indexIssued(row.caller, delegation);
+  }
+
+  /** Add a delegation to its caller's issued-set (creating the set on first child). */
+  private indexIssued(caller: InstanceId, delegation: DelegationId): void {
+    const set = this.issuedByCaller.get(caller);
+    if (set === undefined) this.issuedByCaller.set(caller, new Set([delegation]));
+    else set.add(delegation);
+  }
+
+  /** Remove a delegation from its caller's issued-set, evicting the set once its last child retires. */
+  private unindexIssued(caller: InstanceId, delegation: DelegationId): void {
+    const set = this.issuedByCaller.get(caller);
+    if (set === undefined) return;
+    set.delete(delegation);
+    if (set.size === 0) this.issuedByCaller.delete(caller);
   }
 
   /** Move a live delegation to `cancelling` (only from `running`) — from `send` on a `terminate`. A no-op when
@@ -326,10 +359,12 @@ export abstract class Reactor {
    *  races the first is a no-op and never resurrects or re-records it. Called by `react` on a
    *  `delegateAck` / `terminateAck`, and by a concrete for a policy retirement (the api run root failing a run). */
   protected retireDelegation(delegation: DelegationId): boolean {
-    if (!this.delegations.has(delegation)) return false;
+    const row = this.delegations.get(delegation);
+    if (row === undefined) return false;
     this.delegations.delete(delegation);
     this.dirtyDelegations.delete(delegation);
     this.retiredDelegations.add(delegation);
+    this.unindexIssued(row.caller, delegation);
     return true;
   }
 
@@ -353,12 +388,29 @@ export abstract class Reactor {
   ): Array<{ delegation: DelegationId; peer: ReactorName; state: DelegationState }> {
     const issued: Array<{ delegation: DelegationId; peer: ReactorName; state: DelegationState }> =
       [];
-    for (const [delegation, row] of this.delegations) {
-      if (row.caller === caller) {
-        issued.push({ delegation, peer: row.peer, state: row.state });
-      }
+    const children = this.issuedByCaller.get(caller);
+    if (children === undefined) return issued;
+    for (const delegation of children) {
+      const row = this.delegations.get(delegation);
+      if (row !== undefined) issued.push({ delegation, peer: row.peer, state: row.state });
     }
     return issued;
+  }
+
+  /** Whether `caller` still has any live issued delegation — the O(1) drain-barrier check `maybeSettle`
+   *  needs, instead of materialising the full `issuedDelegationsOf` array only to read its length. */
+  protected hasIssuedDelegations(caller: InstanceId): boolean {
+    return (this.issuedByCaller.get(caller)?.size ?? 0) > 0;
+  }
+
+  /** The callee reactor + state of one live delegation this reactor issued, by its id — an O(1) read where
+   *  `issuedDelegationsOf(...).find(...)` would rebuild and scan the whole issued array to inspect one known
+   *  child (the callee-call base cancelling a single failing inner delegation). `undefined` once retired. */
+  protected issuedRowOf(
+    delegation: DelegationId,
+  ): { peer: ReactorName; state: DelegationState } | undefined {
+    const row = this.delegations.get(delegation);
+    return row === undefined ? undefined : { peer: row.peer, state: row.state };
   }
 
   /** The callee reactor of a live delegation this reactor issued — where a reply addressed to that callee
@@ -482,6 +534,7 @@ export abstract class Reactor {
         peer: row.toReactor,
         state: row.state,
       });
+      this.indexIssued(row.caller, row.delegation);
     }
     for (const open of await loader.raisedEscalations(this.name)) {
       this.escalations.set(open.escalation, {

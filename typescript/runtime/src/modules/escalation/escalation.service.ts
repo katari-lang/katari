@@ -1,8 +1,8 @@
 import type { JSONSchema, Json, SchemaInfo } from "@katari-lang/types";
 import { db } from "../../db/client.js";
 import { BadRequestError, NotFoundError } from "../../lib/errors.js";
-import { facade } from "../../runtime/facade.js";
-import { jsonToValue, valueToJson } from "../../runtime/value/codec.js";
+import { decodeClientJson, facade } from "../../runtime/facade.js";
+import { valueToJson } from "../../runtime/value/codec.js";
 import { conformValue, renderConformFailures } from "../../runtime/value/validation.js";
 import { collectEntries, deriveAnswerSchema, loadSnapshotModules } from "../agent/agent.reader.js";
 import { escalationRepository, type OpenEscalationView } from "./escalation.repository.js";
@@ -88,7 +88,7 @@ async function answerSchemaOf(
  *  same Json), so what is checked is exactly what the raiser will resume with. */
 export function validateAnswer(value: Json, schema: JSONSchema | null): void {
   if (schema === null) return;
-  const check = conformValue(jsonToValue(value), schema);
+  const check = conformValue(decodeClientJson(value, "the answer"), schema);
   if (!check.ok) {
     throw new BadRequestError(
       `the answer does not conform to the request's answer schema — ${renderConformFailures(check.failures)}`,

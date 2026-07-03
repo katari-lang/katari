@@ -96,10 +96,6 @@ export class ApiReactor extends Reactor {
     super(pool);
   }
 
-  currentTurnOwner(): InstanceId {
-    return this.apiRootId;
-  }
-
   /** The api root runs no engine threads — its turn writes the run delegations it owns plus the run-metadata
    *  sidecar / audit it staged this turn (so they commit atomically with the events it produced). Starting a
    *  run first ensures the api root's own `instances` envelope, before `flushDelegations` writes the run
@@ -194,14 +190,18 @@ export class ApiReactor extends Reactor {
         argument,
       });
       // The api root only ever talks to core (a run is a delegate to a core instance), so it stamps `to` here.
-      this.send({
-        kind: "delegate",
-        delegation,
-        target: { kind: "named", name: qualifiedName, snapshot },
-        argument,
-        from: this.name,
-        to: "core",
-      });
+      // The run delegation is owned by (issued from) the api root.
+      this.send(
+        {
+          kind: "delegate",
+          delegation,
+          target: { kind: "named", name: qualifiedName, snapshot },
+          argument,
+          from: this.name,
+          to: "core",
+        },
+        this.apiRootId,
+      );
     });
     return { run: delegation, result, started };
   }

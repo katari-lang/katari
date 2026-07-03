@@ -12,6 +12,7 @@
 // are `KatariAgent`. The context is the way back into the runtime: `context.call(...)` runs another agent
 // (core by default, or another reactor), `context.file(...)` produces a file value.
 
+import { randomUUID } from "node:crypto";
 import type { Json } from "@katari-lang/types";
 import { downloadBlob, uploadBlob } from "./blob.js";
 import {
@@ -246,7 +247,11 @@ export class Sidecar {
             resultReply(message.delegation, value),
           ),
         (error: unknown) => {
-          if (dispatch.controller.signal.aborted) {
+          // A handler unwinding on cancellation rejects with `KatariCancelledError` (its inner call / file op
+          // saw the abort) — the expected cancellation path, so confirm it quietly. Any OTHER rejection while
+          // aborted is a real failure during cleanup: pass its natural reply through, so `settleDispatch`
+          // still confirms the cancel but also logs the swallowed error (its whole reason for existing).
+          if (dispatch.controller.signal.aborted && error instanceof KatariCancelledError) {
             this.settleDispatch(message.delegation, dispatch, send, {
               kind: "cancelled",
               delegation: message.delegation,
@@ -311,7 +316,7 @@ export class Sidecar {
       // durable, so a stale bridge from a former process may still deliver under its old token — with a
       // per-process counter that delivery could collide with a fresh call's token and settle it with a
       // stray result. A UUID makes stale deliveries land nowhere, by construction.
-      const token = crypto.randomUUID();
+      const token = randomUUID();
       return new Promise<KatariValue>((resolve, reject) => {
         dispatch.pendingCalls.add(token);
         this.pendingCalls.set(token, { delegation: message.delegation, binding, resolve, reject });

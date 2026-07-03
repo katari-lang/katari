@@ -9,13 +9,20 @@ import { THROW_REQUEST } from "./engine/throw-signal.js";
  *  these is an unwind crossing an instance boundary, not something a user answers. */
 const CONTROL_ESCAPE_KINDS = new Set(["next", "next-for", "return", "break", "break-for"]);
 
-/** Whether an escalation's `request` names a genuine user-answerable capability — i.e. it is not a panic,
- *  not a `prelude.throw` (both fail the run rather than wait for an answer: a throw answers with `never`,
- *  so no valid answer exists), and not a control-flow escape. The `request` column stores a request ask's
+/** Whether an escalation's `request` is a *failure* channel — a panic (a deterministic defect, uncatchable)
+ *  or a `prelude.throw` (a typed anticipated error). Both fail rather than wait for an answer (a throw
+ *  answers with `never`, so no valid answer exists), and both are caught at a callee boundary as the call
+ *  *failing* (the external-call reactor settles the inner call as a failure) rather than proxied up as an
+ *  answerable ask. Named once here so every site that distinguishes "a failure" from "an answerable request"
+ *  reads the same set — adding a third failure channel updates one place. */
+export function isFailureRequest(request: string): boolean {
+  return request === PANIC_REQUEST || request === THROW_REQUEST;
+}
+
+/** Whether an escalation's `request` names a genuine user-answerable capability — i.e. it is not a failure
+ *  channel (panic / throw) and not a control-flow escape. The `request` column stores a request ask's
  *  qualified name, or a control ask's bare `kind`; capability names are qualified, so they never collide
  *  with the bare control keywords. */
 export function isUserFacingRequest(request: string): boolean {
-  return (
-    request !== PANIC_REQUEST && request !== THROW_REQUEST && !CONTROL_ESCAPE_KINDS.has(request)
-  );
+  return !isFailureRequest(request) && !CONTROL_ESCAPE_KINDS.has(request);
 }

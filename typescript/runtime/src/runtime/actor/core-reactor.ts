@@ -13,7 +13,13 @@
 // the api root — a run-root instance records `callerReactor = api` (the summoning delegate's `from`), so a
 // reply it emits routes to `api` without core inferring it.
 
-import { delegateProxyOf, relayEscalate, resumeEscalation } from "../engine/common.js";
+import {
+  delegateProxyOf,
+  PANIC_REQUEST,
+  panicArgument,
+  relayEscalate,
+  resumeEscalation,
+} from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
@@ -29,7 +35,14 @@ import {
   type InternalEvent,
   type ReactorName,
 } from "../event/types.js";
-import type { DelegationId, InstanceId, ProjectId, ScopeId, SnapshotId } from "../ids.js";
+import {
+  type DelegationId,
+  type InstanceId,
+  newEscalationId,
+  type ProjectId,
+  type ScopeId,
+  type SnapshotId,
+} from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
@@ -54,7 +67,6 @@ export class CoreReactor extends Reactor {
    *  dropped — then clears the set. Tracking the change as a set + store lookup (rather than a single per-turn
    *  value) keeps the dirty state from ever drifting from the store. */
   private readonly touchedInstances = new Set<InstanceId>();
-  private turnOwnerId: InstanceId | undefined;
 
   constructor(
     private readonly projectId: ProjectId,
@@ -67,13 +79,6 @@ export class CoreReactor extends Reactor {
     pool: ResourcePool,
   ) {
     super(pool);
-  }
-
-  currentTurnOwner(): InstanceId {
-    if (this.turnOwnerId === undefined) {
-      throw new Error("CoreReactor.currentTurnOwner read with no turn instance (engine bug)");
-    }
-    return this.turnOwnerId;
   }
 
   /** Stage this turn's persistence: reconcile each instance this turn touched against the engine store (the
@@ -112,7 +117,6 @@ export class CoreReactor extends Reactor {
     this.store.nextScopeId = 0;
     this.store.blobs = {};
     this.touchedInstances.clear();
-    this.turnOwnerId = undefined;
   }
 
   // ─── reactivation (rebuilt from durable rows; called by the actor's reactivate) ─────────────────
@@ -262,10 +266,53 @@ export class CoreReactor extends Reactor {
     // proxy is gone (the branch was cancelled) the value is undeliverable, so we do not reown it onto a
     // caller that would never reference it (which would leave a durable scope owned-but-unreachable).
     this.reownIncoming(event.value, caller.id);
+    // An external (FFI / http) result crosses an untyped boundary, so the assumed-typing contract is only a
+    // promise — the sidecar's JS could return a value that violates the agent's declared output schema (a
+    // missing field, a wrong type, a bare/unqualified data constructor). Conform it here, the one seam that
+    // has the IR, the wrapper instance's schema, and its generics (mirroring the input conform at
+    // `onDelegate`). A violation is a broken contract, not a program-anticipatable error, so it fails the
+    // call as a panic raised at the proxy — exactly as an external *error* does — naming the boundary,
+    // rather than corrupting a match / field read far downstream. A core sub-call is statically typed by
+    // construction and skips this.
+    if (proxy.kind === "external") {
+      const failure = await this.conformExternalResult(caller, event.value);
+      if (failure !== null) {
+        await this.runTurnWith(caller, (ctx) =>
+          relayEscalate(ctx, proxy.id, newEscalationId(), {
+            kind: "request",
+            request: PANIC_REQUEST,
+            argument: panicArgument(failure),
+          }),
+        );
+        return;
+      }
+    }
     delete caller.threads[proxy.id];
     await this.runTurn(caller, [
       { kind: "callAck", target: proxy.parent, callId: proxy.parentCallId, value: event.value },
     ]);
+  }
+
+  /** Conform an external call's returned value against the calling wrapper instance's declared output schema
+   *  (an `external agent` lowers to a wrapper `AgentBlock` whose body is the external leaf; the instance that
+   *  issued the external delegation is that wrapper, so its `schema.output` is the external's declared output,
+   *  and its `ambientGenerics` fill the type params). Returns a failure message, or `null` when it conforms.
+   *  The wrapper is a live running instance, so its snapshot IR is already loaded — but preload defensively
+   *  (rethrowing a transient read so the substrate can replay the ack from the durable outbox). */
+  private async conformExternalResult(
+    instance: CoreInstance,
+    value: Value,
+  ): Promise<string | null> {
+    await this.ir.preload(agentSnapshot(instance.target));
+    const resolved = this.resolveTarget(instance.target);
+    const block = this.ir
+      .access(resolved.snapshot, moduleOf(instance.target))
+      .block(resolved.agentBlockId).block;
+    if (block.kind !== "agent") return null;
+    const substitution = typeSubstitutionOf(block.schema.genericBindings, instance.ambientGenerics);
+    const check = conformValue(value, fillGenericSchema(substitution, block.schema.output));
+    if (check.ok) return null;
+    return `${describeTarget(instance.target)}: the external result does not conform to the output schema — ${renderConformFailures(check.failures)}`;
   }
 
   // ─── escalate / escalateAck (a request / control ask crossing the instance boundary) ────────────
@@ -376,10 +423,10 @@ export class CoreReactor extends Reactor {
     });
     seed(ctx);
     await drive(ctx);
-    this.turnOwnerId = instance.id;
     // Emit each engine outbound (already routed by the emit edge); the base `send` derives the Layer 1 edge it
-    // implies — opening this instance's delegation, cancelling it, or opening a user-facing escalation.
-    for (const event of ctx.buffers.outbound) this.send(event);
+    // implies — opening this instance's delegation, cancelling it, or opening a user-facing escalation — from
+    // the issuing instance (this turn's `instance`), passed explicitly.
+    for (const event of ctx.buffers.outbound) this.send(event, instance.id);
     // DB reflection at the turn boundary. A completed instance is dropped (the cascade reclaims the scopes it
     // still owns; the ones its result released to in-transit survive — the receiver reowns them, the pool
     // re-writes them). A still-running one is persisted, and the pool flushes the scopes it touched (the

@@ -44,4 +44,18 @@ describe("validateAnswer", () => {
   test("a null schema (none advertised) accepts anything — matching the client's fallback", () => {
     expect(() => validateAnswer({ anything: ["goes", 1, null] }, null)).not.toThrow();
   });
+
+  test("an undecodable reserved-key answer is a 400, not a 500 (the decode is guarded too)", () => {
+    // `{ $constructor: <non-string> }` is structurally a data value the codec cannot decode; the guard maps
+    // that plain decode failure to a BadRequestError so the acceptance surface stays a clean 400 (the
+    // escalation stays open for the answerer to retry) rather than surfacing as an unhandled 500.
+    let caught: unknown;
+    try {
+      validateAnswer({ $constructor: 123 }, { type: "string" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(BadRequestError);
+    expect((caught as BadRequestError).message).toContain("decodable");
+  });
 });

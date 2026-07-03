@@ -409,6 +409,20 @@ describe("prelude.record / prelude.array / prelude.string", () => {
     });
   });
 
+  test("array.range refuses an over-large span rather than allocating unboundedly", async () => {
+    // The span is materialised synchronously on the actor's serial turn, so an unbounded (possibly
+    // AI-supplied) bound would stall or OOM the project. It is rejected as a plain Error (a panic at the
+    // prim seam) rather than run — fail-safe, since a billion-element range is a logic error.
+    await expect(
+      run("prelude.array.range", { start: int(0), end: int(20_000_000) }),
+    ).rejects.toThrow(/exceeding the/);
+    // A range at the ceiling is unaffected (checked cheaply, without building it).
+    await expect(run("prelude.array.range", { start: int(5), end: int(5) })).resolves.toEqual({
+      kind: "array",
+      elements: [],
+    });
+  });
+
   test("string.starts_with / ends_with / index_of / replace / trim / case fold", async () => {
     await expect(
       run("prelude.string.starts_with", { value: str("hello"), search: str("he") }),
