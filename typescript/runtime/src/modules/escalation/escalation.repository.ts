@@ -6,7 +6,7 @@
 // the same source the warm actor rebuilds its in-memory view from on recovery — so the API and the engine
 // always agree.
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { escalations, runs } from "../../db/tables/execution.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
@@ -25,26 +25,46 @@ export interface OpenEscalationView {
   createdAt: Date;
 }
 
+/** The shared open-escalation select: user-facing rows are the ones addressed to the api root
+ *  (`to_reactor = 'api'`) — core opens a row only for a user-facing request, and stamps its `to`. An
+ *  escalation row exists only while open, so presence alone selects the open ones — no state filter.
+ *  The left join picks up the raising run's snapshot pin; the run row always exists for a user-facing
+ *  escalation, so a missing one just degrades `snapshotId` to null. */
+async function selectOpen(executor: Executor, conditions: SQL[]): Promise<OpenEscalationView[]> {
+  const rows = await executor
+    .select({
+      id: escalations.id,
+      request: escalations.request,
+      argument: escalations.argument,
+      runId: escalations.delegationId,
+      snapshotId: runs.snapshotId,
+      createdAt: escalations.createdAt,
+    })
+    .from(escalations)
+    .leftJoin(runs, eq(runs.id, escalations.delegationId))
+    .where(and(eq(escalations.toReactor, "api"), ...conditions));
+  // Decrypt the at-rest question before the service redacts it for the wire (the inverse of seal-on-write).
+  return rows.map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));
+}
+
 export const escalationRepository = {
-  /** The open escalations awaiting an answer for a project — the ones addressed to the api root
-   *  (`to_reactor = 'api'`), which are exactly the user-facing run-root escalations (core opens a row only for a
-   *  user-facing request, and stamps its `to`). An escalation row exists only while open, so presence alone
-   *  selects the open ones — no state filter. The left join picks up the raising run's snapshot pin; the
-   *  run row always exists for a user-facing escalation, so a missing one just degrades `snapshotId` to null. */
-  async listOpen(executor: Executor, projectId: string): Promise<OpenEscalationView[]> {
-    const rows = await executor
-      .select({
-        id: escalations.id,
-        request: escalations.request,
-        argument: escalations.argument,
-        runId: escalations.delegationId,
-        snapshotId: runs.snapshotId,
-        createdAt: escalations.createdAt,
-      })
-      .from(escalations)
-      .leftJoin(runs, eq(runs.id, escalations.delegationId))
-      .where(and(eq(escalations.projectId, projectId), eq(escalations.toReactor, "api")));
-    // Decrypt the at-rest question before the service redacts it for the wire (the inverse of seal-on-write).
-    return rows.map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));
+  /** The open escalations awaiting an answer for a project. */
+  listOpen(executor: Executor, projectId: string): Promise<OpenEscalationView[]> {
+    return selectOpen(executor, [eq(escalations.projectId, projectId)]);
+  },
+
+  /** One open escalation by id, or undefined when it does not exist (or is already answered — the row
+   *  is deleted on answer, so absence covers both). The answer surface reads this to resolve the schema
+   *  the answer must satisfy. */
+  async findOpen(
+    executor: Executor,
+    projectId: string,
+    escalationId: string,
+  ): Promise<OpenEscalationView | undefined> {
+    const rows = await selectOpen(executor, [
+      eq(escalations.projectId, projectId),
+      eq(escalations.id, escalationId),
+    ]);
+    return rows[0];
   },
 };
