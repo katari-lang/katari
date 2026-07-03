@@ -42,6 +42,27 @@ export class KatariCallError extends Error {
   }
 }
 
+/** A typed katari error (`prelude.throw`). Thrown out of a handler — `katari.throw(payload)` — it fails the
+ *  call as `throw[T]` with `payload` as the error value, caught by a katari-side handler like any stdlib
+ *  throw (declare it on the agent: `external agent ... with prelude.throw[my_error]`). An inner
+ *  `context.call` whose callee threw rejects with one too, carrying the decoded payload — so a handler that
+ *  does not catch it rethrows the payload unchanged, exactly like a katari-side rethrow. */
+export class KatariThrowError extends Error {
+  constructor(readonly error: unknown) {
+    // The JS-facing message is a logging courtesy; the katari-facing content is the payload.
+    super(`katari throw: ${describeThrowPayload(error)}`);
+    this.name = "KatariThrowError";
+  }
+}
+
+function describeThrowPayload(value: unknown): string {
+  try {
+    return JSON.stringify(encodeWireValue(value));
+  } catch {
+    return String(value);
+  }
+}
+
 /** An inner agent call was cancelled — usually because the handler's own call is being cancelled. A handler
  *  awaiting the call unwinds here; it should finish quickly (the reply becomes the cancel confirmation). */
 export class KatariCancelledError extends Error {
@@ -72,8 +93,9 @@ export interface HandlerContext {
   signal: AbortSignal;
   /** Call another agent and await its (decoded) result — `core` agents by qualified name (the default), or
    *  another reactor's callee by key (`options.reactor`). The declared `Result` is assumed, like the
-   *  handler's own argument type. Rejects with `KatariCallError` (the callee failed) or
-   *  `KatariCancelledError` (the callee — or this whole call — was cancelled). */
+   *  handler's own argument type. Rejects with `KatariThrowError` (the callee raised a typed throw — catch
+   *  it, or let it propagate to rethrow), `KatariCallError` (the callee panicked / could not be resolved),
+   *  or `KatariCancelledError` (the callee — or this whole call — was cancelled). */
   call<Result = KatariValue>(
     agent: string,
     argument?: unknown,
@@ -117,10 +139,10 @@ interface PendingCall {
 /**
  * The sidecar's handler registry and dispatch logic — independent of the stdio channel so it is unit
  * testable. A `dispatch` decodes the argument, runs the keyed handler, and replies with its encoded
- * `result` (or an `error` if it throws / no handler is registered); an `abort` signals the in-flight
- * handler and rejects its pending inner calls, and once that handler settles the reply is a `cancelled`
- * confirmation instead of its result/error. An inner `context.call` goes out as a `delegate` message and
- * suspends until its `delegateResult` comes back.
+ * `result` (a `throw` if it raised a `KatariThrowError`; an `error` if it threw anything else / no handler
+ * is registered); an `abort` signals the in-flight handler and rejects its pending inner calls, and once
+ * that handler settles the reply is a `cancelled` confirmation instead of its result/error. An inner
+ * `context.call` goes out as a `delegate` message and suspends until its `delegateResult` comes back.
  */
 export class Sidecar {
   private readonly handlers = new Map<string, Handler>();
@@ -159,6 +181,13 @@ export class Sidecar {
           switch (message.outcome.kind) {
             case "result":
               pending.resolve(decodeWireValue(message.outcome.value, pending.binding));
+              return;
+            case "throw":
+              // The typed rejection: catch it by class to handle the callee's error, or let it propagate —
+              // an uncaught one settles this whole call as the same typed throw (the dispatch catch).
+              pending.reject(
+                new KatariThrowError(decodeWireValue(message.outcome.error, pending.binding)),
+              );
               return;
             case "error":
               pending.reject(new KatariCallError(message.outcome.message));
@@ -224,11 +253,18 @@ export class Sidecar {
             });
             return;
           }
-          this.settleDispatch(message.delegation, dispatch, send, {
-            kind: "error",
-            delegation: message.delegation,
-            message: errorMessage(error),
-          });
+          this.settleDispatch(
+            message.delegation,
+            dispatch,
+            send,
+            error instanceof KatariThrowError
+              ? throwReply(message.delegation, error.error)
+              : {
+                  kind: "error",
+                  delegation: message.delegation,
+                  message: errorMessage(error),
+                },
+          );
         },
       );
   }
@@ -246,11 +282,12 @@ export class Sidecar {
     for (const token of dispatch.pendingCalls) this.pendingCalls.delete(token);
     dispatch.pendingCalls.clear();
     if (dispatch.controller.signal.aborted && reply.kind !== "cancelled") {
-      if (reply.kind === "error") {
+      if (reply.kind === "error" || reply.kind === "throw") {
         // The handler threw while it was being cancelled (e.g. a failing cleanup). The caller is already
         // unwinding and only needs the `cancelled` confirmation, but log the swallowed error so an
         // operator isn't left guessing why a cancelled call also failed.
-        reportDiagnostic(`handler threw during cancellation: ${reply.message}`);
+        const detailText = reply.kind === "error" ? reply.message : JSON.stringify(reply.error);
+        reportDiagnostic(`handler threw during cancellation: ${detailText}`);
       }
       send({ kind: "cancelled", delegation });
       return;
@@ -334,6 +371,20 @@ function resultReply(delegation: string, value: unknown): SidecarMessage {
   }
 }
 
+/** A `throw` reply — the typed-error twin of `resultReply`, with the same encode guard: a payload that has
+ *  no wire form fails the call as a plain `error` (a panic) instead of taking the process down. */
+function throwReply(delegation: string, error: unknown): SidecarMessage {
+  try {
+    return { kind: "throw", delegation, error: encodeWireValue(error) };
+  } catch (cause) {
+    return {
+      kind: "error",
+      delegation,
+      message: `the katari.throw payload has no wire form: ${errorMessage(cause)}`,
+    };
+  }
+}
+
 /** A diagnostic line for the operator. Always stderr — never stdout, which is the reply channel — so it
  *  surfaces in the runtime's inherited logs without corrupting protocol framing. */
 function reportDiagnostic(message: string): void {
@@ -375,6 +426,14 @@ export const katari = {
       throw new Error(`katari.agent: name "${name}" must be a bare identifier, not a dotted key`);
     }
     defaultSidecar.register(`${ambientModule()}.${name}`, handler);
+  },
+
+  /** Raise a typed error from a handler: fail this call as `prelude.throw` with `error` as its payload,
+   *  caught by a katari-side handler (declare the effect on the agent: `external agent ... with
+   *  prelude.throw[my_error]`). The payload is encoded like a return value — plain data and the value
+   *  wrappers all work. Never returns. */
+  throw(error: unknown): never {
+    throw new KatariThrowError(error);
   },
 };
 

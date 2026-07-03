@@ -1,0 +1,13 @@
+// Typed errors across the FFI boundary. `parse_port` is an FFI agent (main.ts) that fails a malformed
+// input with `katari.throw` — a typed `prelude.throw[parse_error]`, declared on the external agent like
+// any other effect, so the checker forces callers to handle it. `main` catches it with an ordinary throw
+// handler and falls back to the default port. (Any other JS error in the sidecar stays a panic.)
+
+data parse_error(message: string)
+
+external agent parse_port(text: string) -> integer with prelude.throw[parse_error]
+
+agent main(text: string) -> integer {
+  use handler { request prelude.throw(error: parse_error) -> never { break 8080 } }
+  parse_port(text = text)
+}

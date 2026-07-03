@@ -113,6 +113,29 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
     ]);
   });
 
+  test("maps a throw reply to a typed throw completion (the payload rides, not a message)", () => {
+    const channel = fakeChannel();
+    const transport = new SubprocessFfiTransport(channel.spawner);
+    const completions = collectCompletions(transport);
+
+    transport.dispatch(call("thrower"));
+    channel.reply({
+      kind: "throw",
+      delegation,
+      error: { $constructor: "main.my_error", value: { message: "typed!" } },
+    });
+
+    expect(completions).toEqual([
+      {
+        delegation,
+        outcome: {
+          kind: "throw",
+          error: { $constructor: "main.my_error", value: { message: "typed!" } },
+        },
+      },
+    ]);
+  });
+
   test("routes a sidecar delegate message to the delegate sink and sends its result back", () => {
     const channel = fakeChannel();
     const transport = new SubprocessFfiTransport(channel.spawner);
@@ -211,6 +234,7 @@ process.stdin.on("data", (chunk) => {
     if (message.kind === "abort") { reply({ kind: "cancelled", ...head }); continue; }
     if (message.key === "crash") { process.exit(1); }
     if (message.key === "boom") { reply({ kind: "error", ...head, message: "boom!" }); continue; }
+    if (message.key === "thrower") { reply({ kind: "throw", ...head, error: { message: "typed!" } }); continue; }
     if (message.key === "hang") { continue; }
     reply({ kind: "result", ...head, value: message.argument });
   }
@@ -234,11 +258,13 @@ describe("subprocessSidecar (real process)", () => {
       completions.find((completion) => completion.delegation === delegation);
     const echo = toDelegationId("d-echo");
     const boom = toDelegationId("d-boom");
+    const thrower = toDelegationId("d-thrower");
     const hang = toDelegationId("d-hang");
     const crash = toDelegationId("d-crash");
     try {
       transport.dispatch({ projectId: PROJECT, delegation: echo, snapshot: SNAPSHOT, key: "echo", argument: { kind: "integer", value: 42 } });
       transport.dispatch({ projectId: PROJECT, delegation: boom, snapshot: SNAPSHOT, key: "boom", argument: null });
+      transport.dispatch({ projectId: PROJECT, delegation: thrower, snapshot: SNAPSHOT, key: "thrower", argument: null });
       transport.dispatch({ projectId: PROJECT, delegation: hang, snapshot: SNAPSHOT, key: "hang", argument: null });
       transport.abort(hang);
 
@@ -249,6 +275,10 @@ describe("subprocessSidecar (real process)", () => {
       expect(await waitUntil(() => found(boom))).toEqual({
         delegation: boom,
         outcome: { kind: "error", message: "boom!" },
+      });
+      expect(await waitUntil(() => found(thrower))).toEqual({
+        delegation: thrower,
+        outcome: { kind: "throw", error: { message: "typed!" } },
       });
       expect(await waitUntil(() => found(hang))).toEqual({
         delegation: hang,

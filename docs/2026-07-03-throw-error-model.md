@@ -75,7 +75,8 @@ panic.
 | `json.stringify` / `encode` / `to_text` | non-finite number | panic (numeric invariant; unreachable once divide panics) |
 | `env.get_secret` | key not set | panic (a deployment error, not program logic) |
 | non-exhaustive match, engine backstops | — | panic |
-| FFI handler error | — | panic (typed sidecar throws are a port follow-up) |
+| FFI handler error | `katari.throw(payload)` | `throw[T]` (declared on the agent: `with prelude.throw[T]`) |
+| FFI handler error | any other JS error | panic (infrastructure failure, not program logic) |
 
 Each error data lives in its domain module and carries at least `message: string`
 (`prelude.json.parse_error(message)`, `prelude.json.decode_error(message)`,
@@ -107,10 +108,26 @@ surfaces far away at a JSON boundary.
   serializes the payload through the redacting codec (`throw: {json}`), so a tainted payload degrades to
   `$redacted` fields rather than leaking (the same fail-closed boundary as run results).
 
+## Typed throws over the FFI boundary (follow-up slice, same day)
+
+The port follow-up landed as its own slice. The wire gains a `throw` variant in both directions —
+`{ kind: "throw", delegation, error }` as a call outcome, and a `throw` `DelegateOutcome` on inner
+`delegateResult`s — and the payload stays typed end to end, never flattened to a message:
+
+- **Raising**: a sidecar handler calls `katari.throw(payload)` (it throws a `KatariThrowError`); the
+  dispatch reply is a `throw` whose payload is blind-encoded like a return value. The katari side declares
+  the effect as usual (`external agent ... with prelude.throw[my_error]` — the `http.fetch` precedent), so
+  the checker forces callers to handle it; the ffi reactor decodes the payload at its transport seam and
+  re-raises via `raiseThrow`, exactly the http reactor's shape. Any other JS error stays a panic.
+- **Catching**: a katari callee's throw reaching a handler's `context.call` rejects with
+  `KatariThrowError` carrying the *decoded* payload (previously it was flattened into an error message →
+  panic). Uncaught, it propagates out of the handler and becomes the call's own `throw` reply — a rethrow
+  that carries the payload katari → sidecar → katari unchanged.
+- **In-process twin**: `FfiThrow` (plain wire JSON payload) plays both roles on the
+  `InProcessFfiTransport`, so the whole circle is testable without a subprocess.
+
 ## Follow-ups (deliberately out of this slice)
 
-- **Typed throws over the FFI boundary** — `katari.throw(payload)` in the port so a sidecar handler can
-  raise `throw[T]` instead of an untyped error→panic; needs a wire-protocol error variant carrying JSON.
 - **`env.get_secret` as throw** — defensible either way; revisit if a real program wants in-program
   fallback for missing config.
 - **Retry/backoff combinators over `throw[http.fetch_error]`** — stdlib sugar once real orchestration

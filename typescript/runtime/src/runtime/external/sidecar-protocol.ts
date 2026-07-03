@@ -4,8 +4,8 @@
 //
 //   runtime → sidecar: `dispatch` (run this handler against this argument), `abort` (stop an in-flight
 //     call), and `delegateResult` (the outcome of an inner agent call the sidecar asked for).
-//   sidecar → runtime: the call's outcome (`result` / `error` / `cancelled`), and `delegate` (call another
-//     agent on the handler's behalf — the generic agent-call channel, routed to a reactor by name).
+//   sidecar → runtime: the call's outcome (`result` / `throw` / `error` / `cancelled`), and `delegate`
+//     (call another agent on the handler's behalf — the generic agent-call channel, routed by name).
 //
 // A call is correlated by its `delegation` — the same id core's external proxy thread and the ffi reactor's
 // pending-call use — which the sidecar echoes back, so the transport never needs a separate request-id
@@ -21,11 +21,13 @@
 import type { Json } from "@katari-lang/types";
 import { type DelegationId, toDelegationId } from "../ids.js";
 
-/** The outcome of one inner agent call, echoed to the sidecar: the callee's `result`, an `error` (the
- *  callee panicked / could not be resolved), or `cancelled` (the callee was terminated — usually because
- *  the parent call itself is being cancelled). */
+/** The outcome of one inner agent call, echoed to the sidecar: the callee's `result`, a `throw` (the
+ *  callee raised a typed `prelude.throw` — its payload rides back so the handler catches, or rethrows, the
+ *  typed error), an `error` (the callee panicked / could not be resolved), or `cancelled` (the callee was
+ *  terminated — usually because the parent call itself is being cancelled). */
 export type DelegateOutcome =
   | { kind: "result"; value: Json }
+  | { kind: "throw"; error: Json }
   | { kind: "error"; message: string }
   | { kind: "cancelled" };
 
@@ -43,12 +45,14 @@ export type RuntimeMessage =
   | { kind: "abort"; delegation: DelegationId }
   | { kind: "delegateResult"; delegation: DelegationId; call: string; outcome: DelegateOutcome };
 
-/** Sidecar → runtime: the outcome of one dispatched call — its `result`, an `error` (becomes a panic), or a
- *  `cancelled` confirmation (the abort completed) — or a `delegate`: run another agent on the in-flight
- *  handler's behalf. `agent` is a qualified agent name for the `core` reactor, or an external key for a
- *  call reactor (`ffi` / `http`); `reactor` defaults to `core` when absent. */
+/** Sidecar → runtime: the outcome of one dispatched call — its `result`, a `throw` (a typed
+ *  `prelude.throw` whose payload is `error`, caught by a katari-side handler), an `error` (becomes a
+ *  panic), or a `cancelled` confirmation (the abort completed) — or a `delegate`: run another agent on the
+ *  in-flight handler's behalf. `agent` is a qualified agent name for the `core` reactor, or an external key
+ *  for a call reactor (`ffi` / `http`); `reactor` defaults to `core` when absent. */
 export type SidecarMessage =
   | { kind: "result"; delegation: DelegationId; value: Json }
+  | { kind: "throw"; delegation: DelegationId; error: Json }
   | { kind: "error"; delegation: DelegationId; message: string }
   | { kind: "cancelled"; delegation: DelegationId }
   | {
@@ -85,6 +89,9 @@ export function decodeSidecarMessage(line: string): SidecarMessage | null {
       // valid `Value` downstream — `jsonToValue(undefined)` runs `"$ref" in undefined` and throws — rather
       // than poisoning the reactor on a dropped field.
       return { kind, delegation: id, value: (parsed.value ?? null) as Json };
+    case "throw":
+      // Same coercion as `result`'s value: an absent payload must still decode to a valid `Value` downstream.
+      return { kind, delegation: id, error: (parsed.error ?? null) as Json };
     case "error":
       return typeof parsed.message === "string"
         ? { kind, delegation: id, message: parsed.message }

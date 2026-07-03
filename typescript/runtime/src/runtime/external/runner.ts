@@ -42,14 +42,16 @@ export interface FfiCall {
   argument: Json | null;
 }
 
-/** The outcome of one dispatched call, fed back to the ffi reactor: a `result` (→ delegateAck), an `error`
- *  (→ a panic the reactor escalates), or a `cancelled` confirmation (→ terminateAck, after an `abort`). A
- *  late real result / error for an aborted call is harmless — the reactor treats any completion of a
- *  cancelling call as its abort. */
+/** The outcome of one dispatched call, fed back to the ffi reactor: a `result` (→ delegateAck), a `throw`
+ *  (a typed `prelude.throw` the reactor escalates with `error` as its payload — caught by a katari-side
+ *  handler), an `error` (→ a panic the reactor escalates), or a `cancelled` confirmation (→ terminateAck,
+ *  after an `abort`). A late real completion for an aborted call is harmless — the reactor treats any
+ *  completion of a cancelling call as its abort. */
 export interface FfiCompletion {
   delegation: DelegationId;
   outcome:
     | { kind: "result"; value: Json }
+    | { kind: "throw"; error: Json }
     | { kind: "error"; message: string }
     | { kind: "cancelled" };
 }
@@ -117,6 +119,16 @@ export class StubFfiTransport implements FfiTransport {
   }
   deliverDelegateResult(): void {
     // No handler ever runs, so there is nothing to deliver to.
+  }
+}
+
+/** Thrown by an in-process FFI handler to fail its call as a typed `prelude.throw` with `error` (plain wire
+ *  `Json`) as the payload — the in-process analogue of the real port's `katari.throw`. An inner call whose
+ *  callee threw rejects with one too, so a handler that does not catch it rethrows the payload unchanged. */
+export class FfiThrow extends Error {
+  constructor(readonly error: Json) {
+    super(`katari throw: ${JSON.stringify(error)}`);
+    this.name = "FfiThrow";
   }
 }
 
@@ -191,10 +203,13 @@ export class InProcessFfiTransport implements FfiTransport {
         }
         this.emit({
           delegation: call.delegation,
-          outcome: {
-            kind: "error",
-            message: error instanceof Error ? error.message : String(error),
-          },
+          outcome:
+            error instanceof FfiThrow
+              ? { kind: "throw", error: error.error }
+              : {
+                  kind: "error",
+                  message: error instanceof Error ? error.message : String(error),
+                },
         });
       }
     })();
@@ -236,6 +251,11 @@ export class InProcessFfiTransport implements FfiTransport {
     switch (result.outcome.kind) {
       case "result":
         pending.resolve(result.outcome.value);
+        return;
+      case "throw":
+        // The typed rejection: an awaiting handler catches it by class, or lets it propagate — which
+        // rethrows the payload as this call's own typed throw (the dispatch catch above).
+        pending.reject(new FfiThrow(result.outcome.error));
         return;
       case "error":
         pending.reject(new Error(result.outcome.message));

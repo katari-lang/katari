@@ -46,8 +46,9 @@ import {
   newEscalationId,
   newInstanceId,
 } from "../ids.js";
-import { jsonToValue, valueToJson } from "../value/codec.js";
+import { jsonToValue } from "../value/codec.js";
 import type { Value } from "../value/types.js";
+import { messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { Reactor } from "./reactor.js";
 
@@ -61,12 +62,14 @@ export type ExternalTarget = Extract<DelegateTarget, { kind: "external" }>;
 export type CallStatus = "running" | "cancelling" | "awaitingAnswer";
 
 /** A completion fed back from a transport (the ffi / http completion shape, structurally shared): a `result`
- *  (→ delegateAck), an `error` (no result → a panic the reactor escalates), or a `cancelled` confirmation
+ *  (→ delegateAck), a `throw` (a typed `prelude.throw` the reactor escalates with `error` as its decoded
+ *  payload), an `error` (no result → a panic the reactor escalates), or a `cancelled` confirmation
  *  (→ terminateAck, after an `abort`). A late completion for a resolved call is harmless (guarded). */
 export interface ExternalCompletion {
   delegation: DelegationId;
   outcome:
     | { kind: "result"; value: Json }
+    | { kind: "throw"; error: Json }
     | { kind: "error"; message: string }
     | { kind: "cancelled" };
 }
@@ -90,13 +93,14 @@ export interface InnerCallRow {
 }
 
 /** A settled inner delegation on its way to the transport: the parent call's `delegation`, the transport's
- *  `call` token, and the outcome (a result still as an engine `Value` — the concrete lowers it at its own
- *  boundary, e.g. revealing secrets to the FFI sidecar). */
+ *  `call` token, and the outcome (a result — or a typed throw's payload — still as an engine `Value`; the
+ *  concrete lowers it at its own boundary, e.g. revealing secrets to the FFI sidecar). */
 export interface InnerDelivery {
   delegation: DelegationId;
   call: string;
   outcome:
     | { kind: "result"; value: Value }
+    | { kind: "throw"; value: Value }
     | { kind: "error"; message: string }
     | { kind: "cancelled" };
 }
@@ -276,9 +280,10 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
 
   /** An inner delegation escalated. A PANIC or a `prelude.throw` is the inner call *failing*: the callee's
    *  handler — the call's immediate caller — handles it with its own try/catch (core's throw handler
-   *  analog), so it settles the inner call as an error and the dead callee is cancelled (a caught failure
-   *  never resumes, like a handle that catches-and-breaks); an uncaught error then re-raises through the
-   *  handler's own failure.
+   *  analog), so it settles the inner call as a failure and the dead callee is cancelled (a caught failure
+   *  never resumes, like a handle that catches-and-breaks); an uncaught one then re-raises through the
+   *  handler's own failure. A panic flattens to an error message; a throw stays typed — its payload rides
+   *  to the transport, so the handler catches (or rethrows) the same error a katari-side handler would.
    *  Any other ask (a user-facing request, a control escape) is beyond the handler — it is proxied UP under
    *  the call's own delegation with a fresh escalation id, bridged in `relays` so the answer descends the
    *  same path; the transport never sees it. A cancelling call drops the ask (its children are being torn
@@ -298,13 +303,13 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       event.ask.kind === "request" &&
       (event.ask.request === PANIC_REQUEST || event.ask.request === THROW_REQUEST)
     ) {
-      this.stageInnerDelivery(parent, event.delegation, {
-        kind: "error",
-        message:
-          event.ask.request === PANIC_REQUEST
-            ? panicMessageOf(event.ask.argument)
-            : throwMessageOf(event.ask.argument),
-      });
+      this.stageInnerDelivery(
+        parent,
+        event.delegation,
+        event.ask.request === PANIC_REQUEST
+          ? { kind: "error", message: panicMessageOf(event.ask.argument) }
+          : innerThrowOf(event.ask.argument),
+      );
       // Cancel the failing callee (its delegation row is still live — an acceptance-surface failure never
       // acks, a raised one suspends awaiting an answer that will never come). One already cancelling (or
       // already retired) needs no second terminate.
@@ -486,6 +491,15 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         this.send({ kind: "terminateAck", delegation, from: this.name, to: caller });
         this.drop(delegation);
         return;
+      case "throw":
+        // The callee raised a typed error of its own: re-raise it as `prelude.throw`, so a katari-side
+        // handler catches the sidecar's error exactly like a stdlib throw. Like the error case the call
+        // then waits — a throw answers with `never`, so resolution comes as a `terminate` (a handler broke
+        // out of its handle, or the run is failing).
+        this.escalateThrow(delegation, outcome.error, caller);
+        call.status = "awaitingAnswer";
+        this.dirty.add(delegation);
+        return;
       case "error":
         // A no-result error escalates to the caller (panic by default; a reactor whose errors a program
         // anticipates — http — overrides with a typed throw). Unhandled, it fails the run; if a handler
@@ -495,6 +509,24 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         this.dirty.add(delegation);
         return;
     }
+  }
+
+  /** The escalation a typed `throw` completion becomes: the payload decodes at this seam (the transport
+   *  boundary, like a result's value) and re-raises as `prelude.throw`. A payload that does not decode is
+   *  protocol drift, not a program-anticipatable error — that one degrades to a panic. */
+  private escalateThrow(delegation: DelegationId, error: Json, caller: ReactorName): void {
+    let payload: Value;
+    try {
+      payload = jsonToValue(error);
+    } catch (cause) {
+      this.raisePanic(
+        delegation,
+        `the callee threw an undecodable error payload: ${messageOf(cause)}`,
+        caller,
+      );
+      return;
+    }
+    this.raiseThrow(delegation, payload, caller);
   }
 
   /** The escalation a no-result error becomes. Panic by default — an external process / infrastructure
@@ -653,12 +685,13 @@ function panicMessageOf(argument: Value | null): string {
   return "the callee panicked";
 }
 
-/** The `{ error }` payload a `prelude.throw` escalation carries, serialized as the inner call's error
- *  message. The FFI boundary is the allowed information-flow sink, so this reveals (like arguments do). */
-function throwMessageOf(argument: Value | null): string {
+/** The `{ error }` payload a child's `prelude.throw` escalation carries, as a typed inner outcome — the
+ *  payload rides to the transport, still an engine `Value` (the concrete lowers it at its boundary). A
+ *  malformed argument (no `error` field — an engine bug, not a user input) degrades to a plain error. */
+function innerThrowOf(argument: Value | null): InnerDelivery["outcome"] {
   if (argument !== null && argument.kind === "record") {
     const payload = argument.fields.error;
-    if (payload !== undefined) return `throw: ${JSON.stringify(valueToJson(payload, "reveal"))}`;
+    if (payload !== undefined) return { kind: "throw", value: payload };
   }
-  return "the callee threw";
+  return { kind: "error", message: "the callee threw" };
 }

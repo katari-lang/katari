@@ -33,6 +33,12 @@ importers:
         specifier: workspace:*
         version: link:../../typescript/port
 
+  examples/ffi-throw:
+    dependencies:
+      '@katari-lang/port':
+        specifier: workspace:*
+        version: link:../../typescript/port
+
   typescript/bundle:
     dependencies:
       '@katari-lang/types':

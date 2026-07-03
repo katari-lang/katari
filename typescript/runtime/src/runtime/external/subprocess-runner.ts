@@ -1,7 +1,7 @@
 // SubprocessFfiTransport: an `FfiTransport` backed by a long-lived external (FFI) sidecar process. It speaks
 // the newline-JSON `sidecar-protocol` over the child's stdio: a `dispatch` / `abort` / `delegateResult` goes
-// out on the child's stdin, the sidecar's messages (`result` / `error` / `cancelled` / `delegate`) come back
-// on its stdout, and stderr is left for the sidecar's own logs. The sidecar is spawned lazily on the first
+// out on the child's stdin, the sidecar's messages (`result` / `throw` / `error` / `cancelled` /
+// `delegate`) come back on its stdout, and stderr is left for the sidecar's own logs. The sidecar is spawned lazily on the first
 // dispatch and respawned after a crash; a crash fails every call still in flight as an `error` completion (a
 // panic), so the ffi reactor never waits forever on a dead process. Calls are correlated by their
 // `delegation` id — the id the ffi reactor's pending-call and core's external proxy thread share — so the
@@ -195,6 +195,8 @@ function toCompletion(message: Exclude<SidecarMessage, { kind: "delegate" }>): F
   switch (message.kind) {
     case "result":
       return { delegation: message.delegation, outcome: { kind: "result", value: message.value } };
+    case "throw":
+      return { delegation: message.delegation, outcome: { kind: "throw", error: message.error } };
     case "error":
       return {
         delegation: message.delegation,

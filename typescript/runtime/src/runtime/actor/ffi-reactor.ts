@@ -18,6 +18,7 @@ import { createAgentName } from "@katari-lang/types";
 import type { BlobEntry } from "../engine/types.js";
 import type { DelegateTarget, ReactorName } from "../event/types.js";
 import type { FfiInnerDelegate, FfiTransport } from "../external/runner.js";
+import type { DelegateOutcome } from "../external/sidecar-protocol.js";
 import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../ids.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
@@ -157,11 +158,7 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     this.transport.deliverDelegateResult({
       delegation: delivery.delegation,
       call: delivery.call,
-      outcome:
-        delivery.outcome.kind === "result"
-          ? // The FFI sidecar is the allowed secret sink, exactly like the outer call's argument above.
-            { kind: "result", value: valueToJson(delivery.outcome.value, "reveal") }
-          : delivery.outcome,
+      outcome: lowerInnerOutcome(delivery.outcome),
     });
   }
 
@@ -180,6 +177,19 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     if (instance === undefined) return false;
     this.pool.registerBlob(blobId, { owner: instance, ...entry });
     return true;
+  }
+}
+
+/** Lower a settled inner outcome to the sidecar's wire form. A result — and a typed throw's payload — cross
+ *  the same boundary: the FFI sidecar is the allowed secret sink, exactly like the outer call's argument. */
+function lowerInnerOutcome(outcome: InnerDelivery["outcome"]): DelegateOutcome {
+  switch (outcome.kind) {
+    case "result":
+      return { kind: "result", value: valueToJson(outcome.value, "reveal") };
+    case "throw":
+      return { kind: "throw", error: valueToJson(outcome.value, "reveal") };
+    default:
+      return outcome;
   }
 }
 
