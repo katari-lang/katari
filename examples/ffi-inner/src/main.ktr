@@ -1,0 +1,13 @@
+// FFI inner delegation. `main` calls the external agent `compute`; its FFI implementation (main.ts)
+// calls the ordinary katari agent `double` *back through the runtime* (`context.call`) and finishes the
+// computation on the FFI side. The round trip is katari -> sidecar -> katari -> sidecar.
+
+external agent compute(x: integer) -> integer
+
+agent double(x: integer) -> integer {
+  x * 2
+}
+
+agent main(x: integer) -> integer {
+  compute(x = x)
+}
