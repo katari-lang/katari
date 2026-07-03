@@ -1,0 +1,28 @@
+{
+  "name": "@katari-lang/cli",
+  "version": "0.1.0-rc6",
+  "description": "Katari CLI: a thin Node shim that locates the prebuilt katari binary shipped by @katari-lang/cli-<platform> packages and forwards arguments. Installs the `katari` executable.",
+  "type": "module",
+  "bin": {
+    "katari": "bin/katari.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "yukikurage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/cli"
+  },
+  "homepage": "https://katari-lang.dev",
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "optionalDependencies": {
+    "@katari-lang/bundle": "workspace:*"
+  }
+}
