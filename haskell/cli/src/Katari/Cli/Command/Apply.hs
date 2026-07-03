@@ -50,7 +50,7 @@ import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), lockf
 import Katari.Project.Upload (ModuleHash (..), UploadPlan (..), hashModule, planUpload)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Options.Applicative
-import System.Directory (doesFileExist)
+import System.Directory (canonicalizePath, doesFileExist)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -228,9 +228,10 @@ runKatariBundle root packages = do
 --      through @node@ (a dev checkout's @dist\/cli.mjs@), anything else spawns directly.
 --   2. A project-local npm install: @node_modules\/.bin\/katari-bundle@, walking up from the project
 --      root like node's own resolution (the katari project may sit inside a workspace whose
---      @node_modules@ lives higher). Run through @node@ so it works regardless of the shim's
---      executable bit — this also covers running the CLI directly, where npx would otherwise have
---      been needed to put the local @.bin@ on PATH.
+--      @node_modules@ lives higher). What that entry IS differs by package manager: npm symlinks
+--      the JS entry point (run it through @node@, so the executable bit never matters), while pnpm
+--      writes a POSIX launcher script (execute it directly — feeding a shell script to @node@ is a
+--      SyntaxError). Canonicalizing first tells the two apart.
 --   3. @katari-bundle@ on PATH (a global install, or an npx\/npm-script parent that prepended the
 --      local @.bin@ itself).
 resolveBundleInvocation :: FilePath -> IO (String, List String)
@@ -242,9 +243,14 @@ resolveBundleInvocation root = do
       | otherwise -> pure (path, [])
     Nothing -> do
       localBin <- findLocalBundleBin root
-      pure $ case localBin of
-        Just path -> ("node", [path])
-        Nothing -> ("katari-bundle", [])
+      case localBin of
+        Just path -> do
+          resolved <- canonicalizePath path
+          pure $
+            if isJsFile resolved
+              then ("node", [resolved])
+              else (path, [])
+        Nothing -> pure ("katari-bundle", [])
   where
     isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
 

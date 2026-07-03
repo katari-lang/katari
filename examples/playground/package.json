@@ -5,5 +5,8 @@
   "type": "module",
   "dependencies": {
     "@katari-lang/port": "workspace:*"
+  },
+  "devDependencies": {
+    "@katari-lang/bundle": "workspace:*"
   }
 }

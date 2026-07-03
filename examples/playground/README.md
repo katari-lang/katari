@@ -16,7 +16,7 @@ every core feature in a small, deterministic form.
 From the repo root, with the runtime already up (see the repo README / `compose.yaml`):
 
 ```sh
-export KATARI_API_URL="http://localhost:3000"
+# The runtime URL comes from katari.toml's [runtime].url — no environment needed.
 cd examples/playground
 
 katari apply                                  # compile + bundle the sidecar + deploy a snapshot

@@ -26,12 +26,20 @@ importers:
       discord.js:
         specifier: ^14.16.3
         version: 14.26.4
+    devDependencies:
+      '@katari-lang/bundle':
+        specifier: workspace:*
+        version: link:../../typescript/bundle
 
   examples/playground:
     dependencies:
       '@katari-lang/port':
         specifier: workspace:*
         version: link:../../typescript/port
+    devDependencies:
+      '@katari-lang/bundle':
+        specifier: workspace:*
+        version: link:../../typescript/bundle
 
   typescript/admin-web:
     dependencies:

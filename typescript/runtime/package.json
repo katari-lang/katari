@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "dev": "tsx watch src/bin.ts",
+    "dev": "tsx watch --env-file-if-exists=../../.env --env-file-if-exists=.env src/bin.ts",
     "start": "node dist/bin.mjs",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit",

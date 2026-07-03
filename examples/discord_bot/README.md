@@ -24,7 +24,7 @@ The composition example: everything in [`playground`](../playground) working tog
 With the runtime up and the repo's toolchain built (see the repo README):
 
 ```sh
-export KATARI_API_URL="http://localhost:3000"
+# The runtime URL comes from katari.toml's [runtime].url — no environment needed.
 cd examples/discord_bot
 
 # Secrets live in the runtime, not in files:
