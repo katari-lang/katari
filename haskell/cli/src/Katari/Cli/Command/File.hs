@@ -9,6 +9,7 @@ module Katari.Cli.Command.File
   )
 where
 
+import Control.Exception (IOException, bracketOnError, catch)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -17,7 +18,9 @@ import Katari.Cli.Common (RuntimeContext (..), dieIn, renderPrefixError, resolve
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (printText, progress)
 import Options.Applicative
-import System.IO (IOMode (..), hIsTerminalDevice, stdout, withFile)
+import System.Directory (removeFile, renameFile)
+import System.FilePath (takeDirectory, takeFileName)
+import System.IO (hClose, hIsTerminalDevice, openTempFile, stdout)
 
 data Action
   = ActionUpload UploadOptions
@@ -90,10 +93,34 @@ run options = do
           (resolveIdPrefix downloadOptions.fileId (map (\row -> row.id) files))
       case downloadOptions.outputPath of
         Just path -> do
-          withFile path WriteMode (downloadFileTo context.client context.projectId target)
+          -- Stream into a sibling temp file and atomically rename it into place only once the whole
+          -- download succeeds, so a failed download (a bad id, a mid-stream error) leaves any
+          -- existing destination file untouched instead of truncating it to nothing.
+          downloadToPath context target path
           progress context.output ("Wrote " <> Text.pack path)
         Nothing -> do
           stdoutIsTerminal <- hIsTerminalDevice stdout
           if stdoutIsTerminal
             then dieIn "file" "refusing to write raw bytes to a terminal; pass -o PATH or pipe stdout"
             else downloadFileTo context.client context.projectId target stdout
+
+-- | Download a file's bytes to @path@ without ever leaving it in a half-written state: the bytes
+-- stream into a unique temp file in the same directory, which is atomically renamed onto @path@ only
+-- after the transfer completes. Any failure removes the temp file and leaves @path@ as it was.
+downloadToPath :: RuntimeContext -> Text -> FilePath -> IO ()
+downloadToPath context target path =
+  bracketOnError
+    (openTempFile (takeDirectory path) (takeFileName path <> ".partial"))
+    ( \(tempPath, tempHandle) -> do
+        -- The download failed; drop the partial file (best effort) so only the intact destination
+        -- ever survives.
+        ignoringIOErrors (hClose tempHandle)
+        ignoringIOErrors (removeFile tempPath)
+    )
+    ( \(tempPath, tempHandle) -> do
+        downloadFileTo context.client context.projectId target tempHandle
+        hClose tempHandle
+        renameFile tempPath path
+    )
+  where
+    ignoringIOErrors step = step `catch` \(_ :: IOException) -> pure ()

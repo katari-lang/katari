@@ -19,7 +19,7 @@ import Data.Text.Encoding qualified as TextEncoding
 import Katari.Cli.Api (EscalationView (..), answerEscalation)
 import Katari.Cli.Common (RuntimeContext (..), dieIn, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
-import Katari.Cli.Output (OutputContext (..), hint, printText, progress)
+import Katari.Cli.Output (OutputContext (..), printText, progress)
 import Katari.Cli.Pick (resolveEscalation)
 import Katari.Cli.Prompt (compactJson, promptFromSchema)
 import Katari.Data.JSONSchema (JSONSchema (..))
@@ -53,8 +53,9 @@ run options = do
   escalation <- resolveEscalation "answer" context options.escalationId
   answerValue <- resolveValue context escalation options.valueJson
   answerEscalation context.client context.projectId escalation.id answerValue
+  -- No scriptable hint is echoed on success: the answer is already submitted, and re-printing it with
+  -- @--value@ would leak the just-entered value (potentially a secret) into the terminal scrollback.
   progress context.output ("Answered " <> escalation.id)
-  hint context.output ("katari answer " <> escalation.id <> " --value '" <> compactJson answerValue <> "'")
   printText escalation.id
 
 -- | The answer value: parsed from @--value@ when given; otherwise an interactive interview over the

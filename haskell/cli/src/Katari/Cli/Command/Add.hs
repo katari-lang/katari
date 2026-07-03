@@ -27,7 +27,7 @@ import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Cli.Common (dieIn, dieInternal, resolveProjectRoot, warnCompilerMismatch, writeOrExit)
-import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
+import Katari.Cli.Options (GlobalOptions, directoryOption, globalOptionsParser)
 import Katari.Cli.Output (newOutputContext, progress)
 import Katari.Project.Config (DependenciesSection (..), ProjectConfig (..), loadKatariTomlLenient, parseKatariToml)
 import Katari.Project.Discovery (configFilename)
@@ -56,14 +56,7 @@ optionsParser :: Parser Options
 optionsParser =
   Options
     <$> globalOptionsParser
-    <*> optional
-      ( strOption
-          ( long "project"
-              <> short 'p'
-              <> metavar "DIR"
-              <> help "Project root (the directory containing katari.toml). Defaults to walking up from the current directory."
-          )
-      )
+    <*> directoryOption
     <*> some (strArgument (metavar "PKG..." <> help "Package name(s) from the pinned registry snapshot (or a root [overrides] entry)"))
 
 run :: Mode -> Options -> IO ()
@@ -99,35 +92,37 @@ run mode options = do
           dieIn subcommand ("remove the [overrides." <> name <> "] entry first (an override may not name an undeclared dependency)")
       pure (filter (`notElem` requested) declared)
 
-  when (newList == declared) $ do
-    progress context "nothing to change"
-  unless (newList == declared) $ do
-    original <- TextIO.readFile configPath
-    rewritten <- case rewritePackages original newList of
-      Left editError -> dieIn subcommand (renderEditError editError)
-      Right text -> pure text
-    -- The final gate: the rewritten file must parse and decode to exactly the intended list, or the
-    -- edit never lands on disk.
-    case parseKatariToml configPath rewritten of
-      Left projectError ->
-        dieInternal subcommand ("the rewritten katari.toml no longer parses: " <> renderProjectError projectError)
-      Right reparsed ->
-        unless (reparsed.dependencies.packages == newList) $
-          dieInternal subcommand "the rewritten katari.toml decodes to a different package list"
-    writeOrExit subcommand "could not write katari.toml" (TextIO.writeFile configPath rewritten)
+  -- When the request leaves the declared set untouched (every `add` name was already there), there is
+  -- nothing to rewrite, re-resolve or report — say so once and stop, rather than also claiming success.
+  if newList == declared
+    then progress context "nothing to change"
+    else do
+      original <- TextIO.readFile configPath
+      rewritten <- case rewritePackages original newList of
+        Left editError -> dieIn subcommand (renderEditError editError)
+        Right text -> pure text
+      -- The final gate: the rewritten file must parse and decode to exactly the intended list, or the
+      -- edit never lands on disk.
+      case parseKatariToml configPath rewritten of
+        Left projectError ->
+          dieInternal subcommand ("the rewritten katari.toml no longer parses: " <> renderProjectError projectError)
+        Right reparsed ->
+          unless (reparsed.dependencies.packages == newList) $
+            dieInternal subcommand "the rewritten katari.toml decodes to a different package list"
+      writeOrExit subcommand "could not write katari.toml" (TextIO.writeFile configPath rewritten)
 
-  -- Re-resolve the (possibly unchanged) closure and refresh the lock, so `check` and `build` see the
-  -- new set immediately.
-  resolved <-
-    resolveProject manager root >>= \case
-      Left projectError -> dieIn subcommand (renderProjectError projectError)
-      Right loaded -> pure loaded
-  writeOrExit subcommand "could not write lockfile" $
-    writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
-  warnCompilerMismatch context resolved
-  case mode of
-    ModeAdd -> progress context ("Added: " <> renderNames requested)
-    ModeRemove -> progress context ("Removed: " <> renderNames requested)
+      -- Re-resolve the new closure and refresh the lock, so `check` and `build` see the new set
+      -- immediately.
+      resolved <-
+        resolveProject manager root >>= \case
+          Left projectError -> dieIn subcommand (renderProjectError projectError)
+          Right loaded -> pure loaded
+      writeOrExit subcommand "could not write lockfile" $
+        writeLockfile (root </> lockfileFilename) (lockfileFromResolved resolved)
+      warnCompilerMismatch context resolved
+      case mode of
+        ModeAdd -> progress context ("Added: " <> renderNames requested)
+        ModeRemove -> progress context ("Removed: " <> renderNames requested)
   where
     renderNames names = case names of
       [] -> "(nothing)"

@@ -87,7 +87,7 @@ dieInternal subcommand message = do
 exitInterrupted :: IO a
 exitInterrupted = exitWith (ExitFailure 130)
 
--- | Resolve the project root: the explicit @--project@ override if given, otherwise the nearest
+-- | Resolve the project root: the explicit @--directory@ override if given, otherwise the nearest
 -- ancestor of the current directory that holds a @katari.toml@. Exits with code 2 when none is found.
 resolveProjectRoot :: Text -> Maybe FilePath -> IO FilePath
 resolveProjectRoot subcommand override = do

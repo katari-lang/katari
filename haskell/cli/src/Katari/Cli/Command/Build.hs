@@ -16,7 +16,7 @@ import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, writeOrExit)
-import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
+import Katari.Cli.Options (GlobalOptions, directoryOption, globalOptionsParser)
 import Katari.Cli.Output (newOutputContext, progress)
 import Katari.Data.ModuleName (renderModuleName)
 import Katari.Project.Discovery (emptyOverlay)
@@ -37,14 +37,7 @@ optionsParser :: Parser Options
 optionsParser =
   Options
     <$> globalOptionsParser
-    <*> optional
-      ( strOption
-          ( long "project"
-              <> short 'p'
-              <> metavar "DIR"
-              <> help "Project root (the directory containing katari.toml). Defaults to walking up from the current directory."
-          )
-      )
+    <*> directoryOption
     <*> optional
       ( strOption
           ( long "out"

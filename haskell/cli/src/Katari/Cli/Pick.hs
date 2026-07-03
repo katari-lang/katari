@@ -8,6 +8,7 @@ module Katari.Cli.Pick
   )
 where
 
+import Control.Exception (throwIO, try)
 import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -15,6 +16,8 @@ import Katari.Cli.Api
   ( EscalationView (..),
     RunDetail (..),
     RunListQuery (..),
+    RuntimeError (..),
+    getRun,
     listEscalations,
     listRuns,
   )
@@ -36,9 +39,17 @@ prefixResolutionLimit = 500
 -- offers only running runs); an explicit prefix resolves against every state.
 resolveRunId :: Text -> RuntimeContext -> Maybe Text -> Maybe Text -> IO Text
 resolveRunId subcommand context given stateFilter = case given of
-  Just prefix -> do
-    (_, runs) <- listRuns context.client context.projectId RunListQuery {state = Nothing, limit = Just prefixResolutionLimit}
-    either (dieIn subcommand . renderPrefixError prefix) pure (resolveIdPrefix prefix (map (\run -> run.id) runs))
+  Just candidate -> do
+    -- A complete id resolves straight against the runtime's per-id endpoint, so a valid full id
+    -- always works no matter how much run history has piled up (the listing below is capped). A
+    -- prefix — or an unknown id — misses that lookup and falls through to prefix resolution over the
+    -- most recent runs.
+    directHit <- runExists context candidate
+    if directHit
+      then pure candidate
+      else do
+        (_, runs) <- listRuns context.client context.projectId RunListQuery {state = Nothing, limit = Just prefixResolutionLimit}
+        either (dieIn subcommand . renderPrefixError candidate) pure (resolveIdPrefix candidate (map (\run -> run.id) runs))
   Nothing
     | context.output.interactive -> do
         (_, runs) <- listRuns context.client context.projectId RunListQuery {state = stateFilter, limit = Just pickerPageSize}
@@ -50,6 +61,17 @@ resolveRunId subcommand context given stateFilter = case given of
               Just runId -> pure runId
               Nothing -> dieIn subcommand "cancelled"
     | otherwise -> dieIn subcommand "no run id given (pass one, or run interactively)"
+
+-- | Does the runtime hold a run with exactly this id? A 4xx (a missing run, or an id the runtime
+-- rejects as malformed — which a short prefix is) answers no, so the caller can fall back to prefix
+-- resolution; a network or server failure still propagates rather than being read as "not found".
+runExists :: RuntimeContext -> Text -> IO Bool
+runExists context candidate = do
+  result <- try (getRun context.client context.projectId candidate)
+  case result of
+    Right _ -> pure True
+    Left (RuntimeHttpError status _) | status >= 400 && status < 500 -> pure False
+    Left other -> throwIO other
 
 runLabel :: RunDetail -> Text
 runLabel run =

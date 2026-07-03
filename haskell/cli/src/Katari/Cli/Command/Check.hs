@@ -13,7 +13,7 @@ where
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot)
-import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
+import Katari.Cli.Options (GlobalOptions, directoryOption, globalOptionsParser)
 import Katari.Cli.Output (newOutputContext, progress)
 import Katari.Project.Discovery (emptyOverlay)
 import Katari.Project.Error (ProjectError (..), renderProjectError)
@@ -30,14 +30,7 @@ optionsParser :: Parser Options
 optionsParser =
   Options
     <$> globalOptionsParser
-    <*> optional
-      ( strOption
-          ( long "project"
-              <> short 'p'
-              <> metavar "DIR"
-              <> help "Project root (the directory containing katari.toml). Defaults to walking up from the current directory."
-          )
-      )
+    <*> directoryOption
 
 run :: Options -> IO ()
 run options = do

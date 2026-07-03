@@ -59,6 +59,7 @@ import System.Console.ANSI
     hClearFromCursorToScreenEnd,
     hClearLine,
     hCursorUpLine,
+    hGetTerminalSize,
     hHideCursor,
     hShowCursor,
   )
@@ -92,18 +93,38 @@ select context question items = case items of
 
 arrowSelect :: OutputContext -> Text -> List (Text, a) -> IO (Maybe a)
 arrowSelect context question items = do
-  TextIO.hPutStrLn stderr (questionLine context question <> " " <> dim context "(↑/↓ move, Enter picks, Esc cancels)")
+  TextIO.hPutStrLn stderr (questionLine context question <> " " <> dim context hintText)
   drawItems 0
   outcome <- withRawInput (bracket_ (hHideCursor stderr) (hShowCursor stderr) (loop 0))
-  -- Erase the menu (items + header) and leave the choice as a plain line the scrollback keeps.
-  hCursorUpLine stderr (length items + 1)
-  hClearFromCursorToScreenEnd stderr
+  eraseMenu
   case outcome of
     Nothing -> TextIO.hPutStrLn stderr (questionLine context question <> " " <> dim context "(cancelled)")
     Just index -> forM_ (labelAt index) $ \label ->
       TextIO.hPutStrLn stderr (questionLine context question <> " " <> label)
   pure (outcome >>= valueAt)
   where
+    hintText = "(↑/↓ move, Enter picks, Esc cancels)"
+
+    -- Erase the menu (items + header) and leave the choice as a plain line the scrollback keeps. A
+    -- long header or item wraps onto several physical rows on a narrow terminal, so the cursor must
+    -- rise by the true wrapped-row count — moving up a fixed one-row-per-line would leave the wrapped
+    -- remainder on screen. The visible widths ignore the ANSI styling codes, which take no columns.
+    eraseMenu = do
+      terminalSize <- hGetTerminalSize stderr
+      let rowsToClear = case terminalSize of
+            Just (_, width) | width > 0 -> sum [physicalRows width lineWidth | lineWidth <- lineWidths]
+            _ -> length items + 1
+      hCursorUpLine stderr rowsToClear
+      hClearFromCursorToScreenEnd stderr
+
+    -- The header is @"? " <> question@ then a space then the hint; each item is a two-column marker
+    -- then its label.
+    lineWidths =
+      (2 + Text.length question + 1 + Text.length hintText)
+        : [2 + Text.length label | (label, _) <- items]
+
+    physicalRows width lineWidth = max 1 ((lineWidth + width - 1) `div` width)
+
     labelAt index = fmap fst (itemAt index)
     valueAt index = fmap snd (itemAt index)
     itemAt index = case drop index items of
@@ -243,13 +264,13 @@ readKeyEvent = do
         then pure KeyCancel
         else do
           second <- getChar
+          -- Arrow keys arrive either as a CSI sequence (ESC [ A/B) or, when the terminal is in
+          -- application-cursor-key mode (DECCKM — the default under tmux and many xterm setups), as
+          -- an SS3 sequence (ESC O A/B). Both introducers map to the same final-byte decoding, so a
+          -- picker keeps working regardless of which mode the terminal is in.
           case second of
-            '[' -> do
-              third <- getChar
-              pure $ case third of
-                'A' -> KeyUp
-                'B' -> KeyDown
-                _ -> KeyOther
+            '[' -> decodeArrowFinalByte
+            'O' -> decodeArrowFinalByte
             _ -> pure KeyCancel
     '\r' -> pure KeyEnter
     '\n' -> pure KeyEnter
@@ -258,6 +279,13 @@ readKeyEvent = do
     'j' -> pure KeyDown
     'k' -> pure KeyUp
     _ -> pure KeyOther
+  where
+    decodeArrowFinalByte = do
+      third <- getChar
+      pure $ case third of
+        'A' -> KeyUp
+        'B' -> KeyDown
+        _ -> KeyOther
 
 escapeDelayMilliseconds :: Int
 escapeDelayMilliseconds = 50

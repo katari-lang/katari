@@ -97,6 +97,7 @@ import Network.HTTP.Client
   )
 import Network.HTTP.Client qualified as HttpClient
 import Network.HTTP.Types.Status (statusCode)
+import Network.HTTP.Types.URI (urlEncode)
 import System.Environment (lookupEnv)
 import System.IO (Handle)
 
@@ -188,6 +189,13 @@ queryString :: List (Text, Maybe Text) -> Text
 queryString parameters = case [name <> "=" <> value | (name, Just value) <- parameters] of
   [] -> ""
   pairs -> "?" <> Text.intercalate "&" pairs
+
+-- | Percent-encode one user-supplied path segment so it survives intact as a single segment. Without
+-- this a space raises an @InvalidUrlException@ (surfacing as a misleading "network error") and a @/@
+-- or @#@ silently retargets the request; encoding reserved characters (the @True@) keeps an env key
+-- or a qualified agent name that contains any of them addressing the row it names.
+encodePathSegment :: Text -> Text
+encodePathSegment = TextEncoding.decodeUtf8Lenient . urlEncode True . TextEncoding.encodeUtf8
 
 -- ===========================================================================
 -- Projects
@@ -337,7 +345,7 @@ getAgent client projectId qualifiedName snapshotId = do
     requestJson
       client
       "GET"
-      ("/projects/" <> projectId <> "/agents/" <> qualifiedName <> queryString [("snapshotId", snapshotId)])
+      ("/projects/" <> projectId <> "/agents/" <> encodePathSegment qualifiedName <> queryString [("snapshotId", snapshotId)])
       Nothing
   pure agent
 
@@ -526,20 +534,20 @@ listEnv client projectId = getWithRaw client ("/projects/" <> projectId <> "/env
 
 getEnv :: RuntimeClient -> Text -> Text -> IO EnvEntry
 getEnv client projectId key = do
-  SuccessEnvelope entry <- requestJson client "GET" ("/projects/" <> projectId <> "/env/" <> key) Nothing
+  SuccessEnvelope entry <- requestJson client "GET" ("/projects/" <> projectId <> "/env/" <> encodePathSegment key) Nothing
   pure entry
 
 setEnv :: RuntimeClient -> Text -> Text -> Text -> Bool -> IO ()
 setEnv client projectId key value isSecret = do
   let body = object ["value" .= value, "isSecret" .= isSecret]
   SuccessEnvelope (_ :: Value) <-
-    requestJson client "PUT" ("/projects/" <> projectId <> "/env/" <> key) (Just (Aeson.encode body))
+    requestJson client "PUT" ("/projects/" <> projectId <> "/env/" <> encodePathSegment key) (Just (Aeson.encode body))
   pure ()
 
 unsetEnv :: RuntimeClient -> Text -> Text -> IO ()
 unsetEnv client projectId key = do
   SuccessEnvelope (_ :: Value) <-
-    requestJson client "DELETE" ("/projects/" <> projectId <> "/env/" <> key) Nothing
+    requestJson client "DELETE" ("/projects/" <> projectId <> "/env/" <> encodePathSegment key) Nothing
   pure ()
 
 -- ===========================================================================

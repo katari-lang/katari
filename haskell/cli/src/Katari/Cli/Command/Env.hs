@@ -93,7 +93,7 @@ run options = do
       progress context.output ("Unset " <> unsetOptions.key)
 
 -- | Where a @set@ value comes from when it is not an argument: an echo-off prompt on a terminal
--- (secrets stay out of history and scrollback), stdin otherwise (trailing newline dropped, so
+-- (secrets stay out of history and scrollback), stdin otherwise (one trailing newline dropped, so
 -- @echo secret | katari env set KEY --secret@ does the expected thing).
 resolveSetValue :: RuntimeContext -> SetOptions -> IO Text
 resolveSetValue context setOptions = case setOptions.value of
@@ -109,7 +109,13 @@ resolveSetValue context setOptions = case setOptions.value of
           Nothing -> dieIn "env" "cancelled"
     | otherwise -> do
         piped <- TextIO.getContents
-        let pipedValue = Text.dropWhileEnd (== '\n') piped
+        let pipedValue = stripOneTrailingNewline piped
         if Text.null pipedValue
           then dieIn "env" "no VALUE given and stdin was empty"
           else pure pipedValue
+  where
+    -- Strip only the single trailing newline a shell's here-string or `echo` appends (and the `\r`
+    -- of a `\r\n` pair), not every trailing newline: a value like a PEM legitimately ends in one.
+    stripOneTrailingNewline text = case Text.stripSuffix "\n" text of
+      Nothing -> text
+      Just body -> fromMaybe body (Text.stripSuffix "\r" body)

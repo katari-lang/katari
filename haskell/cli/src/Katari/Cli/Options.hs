@@ -4,6 +4,7 @@
 module Katari.Cli.Options
   ( GlobalOptions (..),
     globalOptionsParser,
+    directoryOption,
   )
 where
 
@@ -40,3 +41,18 @@ globalOptionsParser =
               <> help "Runtime URL. Overrides KATARI_API_URL and [runtime].url from katari.toml."
           )
       )
+
+-- | The offline commands' project-directory flag (@check@ / @build@ / @apply@ / @add@ / @remove@).
+-- Deliberately distinct from the networked commands' @--project NAME@, which names a runtime project:
+-- this names a filesystem directory instead. Centralised here so every offline command spells it the
+-- same, keeping @--project@ a single concept across the whole CLI.
+directoryOption :: Parser (Maybe FilePath)
+directoryOption =
+  optional
+    ( strOption
+        ( long "directory"
+            <> short 'C'
+            <> metavar "DIR"
+            <> help "Project directory (the one containing katari.toml). Defaults to walking up from the current directory."
+        )
+    )

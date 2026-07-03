@@ -39,7 +39,7 @@ import Katari.Cli.Api
     withTrace,
   )
 import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
-import Katari.Cli.Options (GlobalOptions (..), globalOptionsParser)
+import Katari.Cli.Options (GlobalOptions (..), directoryOption, globalOptionsParser)
 import Katari.Cli.Output (OutputContext, newOutputContext, printText, progress, verboseLog)
 import Katari.Data.IR (IRModule)
 import Katari.Data.ModuleName (ModuleName (..), renderModuleName)
@@ -68,19 +68,12 @@ optionsParser :: Parser Options
 optionsParser =
   Options
     <$> globalOptionsParser
+    <*> directoryOption
     <*> optional
       ( strOption
           ( long "project"
-              <> short 'p'
-              <> metavar "DIR"
-              <> help "Project root (the directory containing katari.toml). Defaults to walking up from the current directory."
-          )
-      )
-    <*> optional
-      ( strOption
-          ( long "name"
               <> metavar "NAME"
-              <> help "Override the project name registered with the runtime (default: [package].name)"
+              <> help "Project name to register with the runtime (default: [package].name)"
           )
       )
     <*> optional

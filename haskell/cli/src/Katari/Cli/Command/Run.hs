@@ -9,9 +9,10 @@
 --     so the interactive session teaches the scriptable form.
 --
 -- While waiting, the run's own open escalations surface here: on a terminal they are answered
--- inline (the human-in-the-loop core case closes inside one @katari run@); non-interactively each is
--- announced once with the @katari answer@ command that resolves it. Ctrl-C detaches — the run keeps
--- going server-side — and exits 130 after printing how to pick it back up.
+-- inline (the human-in-the-loop core case closes inside one @katari run@); non-interactively a
+-- human-answerable escalation would block forever, so the wait fails fast (exit 2) and names the
+-- @katari answer@ command that resolves it. Ctrl-C detaches — the run keeps going server-side — and
+-- exits 130 after printing how to pick it back up.
 module Katari.Cli.Command.Run
   ( Options (..),
     optionsParser,
@@ -221,8 +222,9 @@ waitForRun context runId = loop initialDelayMicroseconds Set.empty
           threadDelay delay
           loop (min (delay * 2) ceilingMicroseconds) notifiedNow
 
--- | Bring one open escalation to the user: answer it inline on a terminal, otherwise announce it
--- once (the set remembers which ids have been announced or declined).
+-- | Bring one open escalation to the user: answer it inline on a terminal. Off a terminal there is no
+-- one to answer it in this session and the run cannot progress without an answer, so rather than poll
+-- forever the wait fails fast (exit 2) with the command that resolves it elsewhere.
 surfaceEscalation :: RuntimeContext -> Set Text -> EscalationView -> IO (Set Text)
 surfaceEscalation context notified escalation
   | Set.member escalation.id notified = pure notified
@@ -233,14 +235,23 @@ surfaceEscalation context notified escalation
       case answered of
         Just answerValue -> do
           answerEscalation context.client context.projectId escalation.id answerValue
+          -- The answer is already submitted, so no scriptable hint is echoed here: it would only
+          -- leak the just-entered value (potentially a secret) into the terminal scrollback.
           progress context.output "Answered; waiting on the run again..."
-          hint context.output ("katari answer " <> escalation.id <> " --value '" <> compactJson answerValue <> "'")
         Nothing ->
           progress context.output ("Left unanswered — pick it up later: katari answer " <> Text.take 8 escalation.id)
       pure (Set.insert escalation.id notified)
-  | otherwise = do
-      progress context.output ("Run is waiting on " <> escalation.request <> " — answer with: katari answer " <> Text.take 8 escalation.id)
-      pure (Set.insert escalation.id notified)
+  | otherwise =
+      -- Non-interactive: a human-answerable escalation would block the run indefinitely here. Fail
+      -- fast like every other missing-input case, pointing at how to unblock it.
+      dieIn
+        "run"
+        ( "the run is waiting on "
+            <> escalation.request
+            <> " and needs a human answer; answer it from another session with `katari answer "
+            <> Text.take 8 escalation.id
+            <> "`, or re-run with --detach and answer it later"
+        )
 
 -- | Interview for the answer using the runtime-derived schema, degrading to raw JSON input when no
 -- schema came through (an undecodable or missing entry).

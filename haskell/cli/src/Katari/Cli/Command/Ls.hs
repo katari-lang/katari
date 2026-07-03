@@ -11,10 +11,13 @@ module Katari.Cli.Command.Ls
   )
 where
 
+import Data.Aeson (Value (..))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Vector qualified as Vector
 import GHC.List (List)
 import Katari.Cli.Api
   ( AgentView (..),
@@ -61,7 +64,7 @@ data Options = Options
     state :: Maybe Text,
     -- | @runs@ only: how many to show (newest first).
     limit :: Maybe Int,
-    -- | @agents@ only: include the @primitive.*@ stdlib callables.
+    -- | @agents@ only: include the @prelude.*@ stdlib callables.
     includePrimitives :: Bool,
     -- | @agents@ only: read a pinned snapshot instead of the head.
     snapshotId :: Maybe Text
@@ -120,11 +123,14 @@ run options = do
               ]
         TargetAgents -> do
           (raw, response) <- listAgents context.client context.projectId options.snapshotId
-          let visible view = options.includePrimitives || not ("prelude." `Text.isPrefixOf` view.qualifiedName)
-          emit options raw $
+          -- Apply the prelude/@--all@ filter to both output modes: the JSON path must agree with the
+          -- table, so machine consumers get the same set and @--all@ has an effect under @--json@.
+          let visibleName name = options.includePrimitives || not ("prelude." `Text.isPrefixOf` name)
+              agents = [view | view <- response.agents, visibleName view.qualifiedName]
+          emit options (filterAgentsPayload visibleName raw) $
             table
               ["AGENT", "INPUT", "OUTPUT"]
-              [[view.qualifiedName, briefSchema view.input, briefSchema view.output] | view <- response.agents, visible view]
+              [[view.qualifiedName, briefSchema view.input, briefSchema view.output] | view <- agents]
         TargetSnapshots -> do
           (raw, snapshots) <- listSnapshots context.client context.projectId
           emit options raw $
@@ -186,3 +192,20 @@ briefSchema :: Aeson.Value -> Text
 briefSchema document = case Aeson.fromJSON document of
   Aeson.Success (schema :: JSONSchema) -> renderSchemaBrief schema
   Aeson.Error _ -> "(unreadable schema)"
+
+-- | Filter the raw agents payload's @agents@ array by the same visibility predicate the table uses,
+-- so @--json@ output honours the prelude/@--all@ filter instead of leaking the full stdlib set. Any
+-- element the CLI cannot read a @qualifiedName@ off is kept (a filter must not silently drop rows it
+-- does not understand).
+filterAgentsPayload :: (Text -> Bool) -> Aeson.Value -> Aeson.Value
+filterAgentsPayload keepName document = case document of
+  Object payload -> case KeyMap.lookup "agents" payload of
+    Just (Array agents) -> Object (KeyMap.insert "agents" (Array (Vector.filter keepAgent agents)) payload)
+    _ -> document
+  _ -> document
+  where
+    keepAgent agent = case agent of
+      Object fields -> case KeyMap.lookup "qualifiedName" fields of
+        Just (String name) -> keepName name
+        _ -> True
+      _ -> True
