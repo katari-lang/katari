@@ -1,0 +1,44 @@
+// The typed error model. A program raises `throw(error = <data>)` — a typed, catchable error the
+// signature tracks as `with prelude.throw[T]` — and a `use handler` clause catches it by its payload type.
+// A `panic`, by contrast, is the runtime's own failure channel: it cannot be raised from Katari,
+// but the ambient `panic` clause below can still catch one (e.g. a failed FFI process) on its way
+// out and turn it into a value instead of a failed run.
+
+@"The typed error `half` raises on odd input."
+data not_even(value: integer)
+
+@"Half of an even integer; odd input raises the typed error."
+agent half(value: integer) -> integer with prelude.throw[not_even] {
+  if (value % 2 == 0) {
+    math.floor(value = value / 2)
+  } else {
+    prelude.throw(error = not_even(value = value))
+  }
+}
+
+@"Catch the typed error: `half(7)` lands in the throw clause, `half(12)` returns plainly."
+agent describe_half(value: integer) -> string {
+  use handler {
+    request prelude.throw(error: not_even) -> never {
+      break f"${string.to_string(value = error.value)} is odd — no half"
+    }
+  }
+  f"half=${string.to_string(value = half(value = value))}"
+}
+
+@"Entry: one caught throw, one clean path, and a caught panic from a missing env entry."
+agent main() -> string {
+  let caught = describe_half(value = 7)
+  let clean = describe_half(value = 12)
+  // The ambient `panic` clause: catchable in any handler, raisable by nobody. Reading an env
+  // entry that does not exist is a runtime failure (a panic, not a typed throw) — without this
+  // clause it would fail the whole run.
+  let recovered = {
+    use handler {
+      request panic(msg: string) { break f"panic caught: ${msg}" }
+    }
+    let missing = env.get_secret(key = "playground.no_such_key")
+    "unreachable"
+  }
+  string.join(parts = [caught, clean, recovered], separator = " | ")
+}

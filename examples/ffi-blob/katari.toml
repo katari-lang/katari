@@ -1,9 +1,0 @@
-[package]
-name = "ffi_blob"
-description = "FFI blob end-to-end example: a handler produces a file (upload), another reads it back (download)."
-
-[runtime]
-url = "http://localhost:3000"
-
-[dependencies]
-packages = []

@@ -1,9 +1,0 @@
-[package]
-name = "ffi_hello"
-description = "A minimal FFI end-to-end example: an agent that calls an external (FFI) handler."
-
-[runtime]
-url = "http://localhost:3000"
-
-[dependencies]
-packages = []

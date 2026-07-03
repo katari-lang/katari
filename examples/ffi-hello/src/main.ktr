@@ -1,9 +1,0 @@
-// A minimal FFI example. `main` calls the external (FFI) agent `greet`, whose implementation lives in
-// the sidecar (`main.ts`, the same module path). The runtime spawns the compiled sidecar bundle and
-// dispatches `main.greet` to it.
-
-external agent greet(name: string) -> string
-
-agent main(name: string) -> string {
-  greet(name = name)
-}

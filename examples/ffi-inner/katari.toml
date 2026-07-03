@@ -1,9 +1,0 @@
-[package]
-name = "ffi_inner"
-description = "FFI inner delegation: an external handler that calls a katari agent back through the runtime."
-
-[runtime]
-url = "http://localhost:3000"
-
-[dependencies]
-packages = []

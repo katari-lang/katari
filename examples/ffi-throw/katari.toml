@@ -1,9 +1,0 @@
-[package]
-name = "ffi_throw"
-description = "Typed errors across the FFI boundary: a sidecar handler raises throw[T] with katari.throw."
-
-[runtime]
-url = "http://localhost:3000"
-
-[dependencies]
-packages = []

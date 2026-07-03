@@ -1,0 +1,9 @@
+[package]
+name = "discord_bot"
+description = "A tool-using AI Discord bot: provider-agnostic model loop (Gemini/OpenAI), a discord.js gateway sidecar, and an e2b Python tool."
+
+[runtime]
+url = "http://localhost:3000"
+
+[dependencies]
+packages = []
