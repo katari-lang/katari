@@ -198,7 +198,6 @@ export class StoringPersistence implements Persistence {
               instance: id,
               snapshot: ext.snapshotId,
               key: ext.key,
-              argument: ext.argument,
               caller: envelope.callerReactor,
               status: ext.status,
               relays: ext.relays,
@@ -379,6 +378,16 @@ export class StoringPersistence implements Persistence {
     let count = 0;
     for (const envelope of this.envelopes.values()) {
       if (envelope.kind === "core") count += 1;
+    }
+    return count;
+  }
+
+  /** Test helper: how many live instance envelopes of `kind` remain — e.g. `ffi` calls, to assert a
+   *  recovery left no orphaned external work behind. */
+  envelopeCount(kind: string): number {
+    let count = 0;
+    for (const envelope of this.envelopes.values()) {
+      if (envelope.kind === kind) count += 1;
     }
     return count;
   }

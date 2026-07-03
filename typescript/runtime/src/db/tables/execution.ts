@@ -116,8 +116,9 @@ export const coreInstances = pgTable("core_instances", {
 });
 
 // The `ffi` instance extension: an in-flight external call (what was `ffi_calls`). Cascades with its
-// envelope; pins its snapshot (the compiled sidecar bundle hosting the handler). Re-dispatched / re-aborted
-// on recovery by `status`. The delegation it handles is its envelope's `delegation_id`.
+// envelope; pins its snapshot (the compiled sidecar bundle hosting the handler). The delegation it handles
+// is its envelope's `delegation_id`. Like `http_instances` it stores no argument: recovery is at-most-once
+// (a handler is never re-run — a call whose process died fails as a panic), so nothing reads it back.
 export const ffiInstances = pgTable("ffi_instances", {
   instanceId: uuid("instance_id")
     .primaryKey()
@@ -128,7 +129,6 @@ export const ffiInstances = pgTable("ffi_instances", {
     .references(() => snapshots.id),
   /** The handler dispatch key (the external block's `key`). */
   key: text("key").notNull(),
-  argument: jsonb("argument").$type<Value | null>(),
   /** running (transport in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
    *  awaiting a caught-panic answer or the run's terminate). The caller reactor its reply routes to is on the
    *  generic envelope (`instances.caller_reactor`), not repeated here. */
@@ -156,8 +156,9 @@ export const httpInstances = pgTable("http_instances", {
     .primaryKey()
     .references(() => instances.id, { onDelete: "cascade" }),
   /** running (request in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
-   *  awaiting a caught-panic answer or the run's terminate). On recovery a running call is re-dispatched
-   *  (which the transport fails — at-most-once), a cancelling call is aborted, an awaitingAnswer one waits. */
+   *  awaiting a caught-panic answer or the run's terminate). On recovery a running call is reconciled with
+   *  the transport (at-most-once: a surviving request is left alone, a gone one fails), a cancelling call
+   *  is aborted, an awaitingAnswer one waits. */
   status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
 });
 
@@ -238,8 +239,8 @@ export const escalations = pgTable(
  *  that *produces* events and the turn that *consumes* one commit in a single tx alongside their Layer 1/2
  *  writes (transactional outbox / consumer), so a crash neither loses an in-flight event nor double-delivers
  *  it. The actor drains this into its mailbox; on recovery the undrained rows are replayed. (FFI completions
- *  are NOT here — they are an ephemeral transport side channel; the ffi reactor re-dispatches its in-flight
- *  calls from its own `ffi_calls` rows on recovery.) */
+ *  are NOT here — they are an ephemeral transport side channel; the ffi reactor reconciles its in-flight
+ *  calls from its own `ffi_instances` rows on recovery.) */
 export const outbox = pgTable(
   "outbox",
   {

@@ -72,7 +72,6 @@ CREATE TABLE "ffi_instances" (
 	"instance_id" uuid PRIMARY KEY NOT NULL,
 	"snapshot_id" uuid NOT NULL,
 	"key" text NOT NULL,
-	"argument" jsonb,
 	"status" text NOT NULL,
 	"relays" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"inner_calls" jsonb DEFAULT '[]'::jsonb NOT NULL

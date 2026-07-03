@@ -5,9 +5,10 @@
 //
 // `dispatch` is fire-and-forget: the outcome is asynchronous and arrives via the sink. The in-flight call is
 // durable as the reactor's `http_instances` row, so recovery knows it existed. There is no safe re-send (an
-// http request is not idempotent / dedup-able), so a recovery re-dispatch does NOT fetch — it reports an
-// `error` straight away (a mid-flight restart is a failure), which the reactor turns into a `panic` the
-// caller can handle locally. This at-most-once guarantee is why http is a reactor, not a core-inline prim.
+// http request is not idempotent / dedup-able), so `recover` never fetches: a request this transport still
+// holds is left to complete (a warm reset), a gone one reports an `error` straight away (a mid-flight
+// restart is a failure), which the reactor turns into a `panic` the caller can handle locally. This
+// at-most-once guarantee is why http is a reactor, not a core-inline prim.
 
 import type { Json } from "@katari-lang/types";
 import type { DelegationId } from "../ids.js";
@@ -17,14 +18,11 @@ import type { DelegationId } from "../ids.js";
 export interface HttpCall {
   delegation: DelegationId;
   argument: Json | null;
-  /** True when this is a recovery re-dispatch of a call that was in flight when the process went down. The
-   *  transport must NOT re-send it (at-most-once) — it reports an `error` so the call fails deterministically. */
-  redispatch?: boolean;
 }
 
 /** The outcome of one dispatched http call, fed back to the reactor: a `result` (any HTTP response —
  *  `{ status, body }`, 2xx or not — → a delegateAck), an `error` (the request produced no response: DNS /
- *  connection / timeout / a recovery re-dispatch → a panic the reactor escalates), or a `cancelled`
+ *  connection / timeout / a refused recovery → a panic the reactor escalates), or a `cancelled`
  *  confirmation (→ terminateAck, after an `abort`). A late completion for an aborted call is harmless. */
 export interface HttpCompletion {
   delegation: DelegationId;
@@ -37,8 +35,12 @@ export interface HttpCompletion {
 export interface HttpTransport {
   /** Register the sink the reactor consumes completions through (called once at wiring). */
   onComplete(sink: (completion: HttpCompletion) => void): void;
-  /** Perform one request (fire-and-forget; the outcome arrives via the sink). */
+  /** Perform one request — always means "send it" (fire-and-forget; the outcome arrives via the sink). */
   dispatch(call: HttpCall): void;
+  /** Reconcile a reloaded in-flight call (at-most-once; never re-sends): a request this transport still has
+   *  running is left alone — its completion will come (a warm reset); one whose process is gone reports an
+   *  `error`, so the caller decides whether to retry. */
+  recover(delegation: DelegationId): void;
   /** Abort an in-flight request; its `cancelled` (or a racing real) completion confirms the teardown. */
   abort(delegation: DelegationId): void;
 }
@@ -49,6 +51,9 @@ export class StubHttpTransport implements HttpTransport {
   onComplete(): void {}
   dispatch(call: HttpCall): void {
     throw new Error(`http transport not configured (call ${call.delegation})`);
+  }
+  recover(delegation: DelegationId): void {
+    throw new Error(`http transport not configured (recovering call ${delegation})`);
   }
   abort(): void {}
 }
@@ -67,19 +72,23 @@ export class FetchHttpTransport implements HttpTransport {
   }
 
   dispatch(call: HttpCall): void {
-    // A recovery re-dispatch must not re-send: report an error so the call fails at-most-once.
-    if (call.redispatch === true) {
-      this.emit({
-        delegation: call.delegation,
-        outcome: { kind: "error", message: "http request interrupted by a runtime restart" },
-      });
-      return;
-    }
     const controller = new AbortController();
     this.controllers.set(call.delegation, controller);
     void this.perform(call, controller.signal)
       .then((outcome) => this.emit({ delegation: call.delegation, outcome }))
       .finally(() => this.controllers.delete(call.delegation));
+  }
+
+  recover(delegation: DelegationId): void {
+    // Never re-send (at-most-once). A request this transport still has in flight survived a warm reset —
+    // leave it alone, its completion will come; one it does not know is gone with its process — report an
+    // error so the call fails deterministically.
+    if (!this.controllers.has(delegation)) {
+      this.emit({
+        delegation,
+        outcome: { kind: "error", message: "http request interrupted by a runtime restart" },
+      });
+    }
   }
 
   abort(delegation: DelegationId): void {

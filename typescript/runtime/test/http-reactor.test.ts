@@ -106,7 +106,7 @@ const FETCH_IR: IRModule = {
 // agent main() { par [ fetch({url,method,headers,body}), return 7 ] }
 // The `return 7` cancels the par, terminating the in-flight fetch. The cancel is graceful: the reactor
 // `terminate`s the http call, the transport confirms with a `cancelled`, and the run resolves to 7 only after
-// that terminateAck — so the terminateAck follows the terminate (never a redispatch error).
+// that terminateAck — so the terminateAck follows the terminate (never a recovery error).
 const CANCELLING_FETCH_IR: IRModule = {
   metadata: { schemaVersion: 1 },
   blocks: {
@@ -182,10 +182,11 @@ const ENV: EnvReader = {
 };
 
 /** A transport the test drives by hand: it records each dispatched call and lets the test feed completions.
- *  A recovery re-dispatch is auto-answered with an error, mirroring the real transport's at-most-once contract
- *  (an interrupted request is never re-sent). */
+ *  A recovery is auto-answered with an error, mirroring the real transport's at-most-once contract for work
+ *  it no longer holds (an interrupted request is never re-sent). */
 class ControlledHttpTransport implements HttpTransport {
   readonly dispatched: HttpCall[] = [];
+  readonly recovered: DelegationId[] = [];
   readonly aborted: DelegationId[] = [];
   private sink: ((completion: HttpCompletion) => void) | null = null;
 
@@ -195,12 +196,15 @@ class ControlledHttpTransport implements HttpTransport {
 
   dispatch(call: HttpCall): void {
     this.dispatched.push(call);
-    if (call.redispatch === true) {
-      this.feed({
-        delegation: call.delegation,
-        outcome: { kind: "error", message: "http request interrupted by a runtime restart" },
-      });
-    }
+  }
+
+  recover(delegation: DelegationId): void {
+    this.recovered.push(delegation);
+    // A fresh test transport holds no live requests, so a recovery always refuses (at-most-once).
+    this.feed({
+      delegation,
+      outcome: { kind: "error", message: "http request interrupted by a runtime restart" },
+    });
   }
 
   abort(delegation: DelegationId): void {
@@ -318,13 +322,14 @@ describe("http reactor", () => {
     await waitUntil(() => (persistence.instanceCount() >= 2 ? true : undefined));
 
     // Process "crash": a fresh actor recovers from the same state. Its transport refuses to re-send the
-    // in-flight request (redispatch → error), so the call fails with a panic that, unhandled, fails the run.
+    // in-flight request (recover → error), so the call fails with a panic that, unhandled, fails the run.
     const secondTransport = new ControlledHttpTransport();
     const actorTwo = makeActor(secondTransport, persistence);
     await actorTwo.activate();
 
-    const redispatched = await waitUntil(() => secondTransport.dispatched[0]);
-    expect(redispatched.redispatch).toBe(true);
+    await waitUntil(() => secondTransport.recovered[0]);
+    // Recovery never turned into a fresh send.
+    expect(secondTransport.dispatched).toHaveLength(0);
 
     const failed = await waitUntil(() => {
       const record = persistence.peekRun(run);
@@ -336,7 +341,7 @@ describe("http reactor", () => {
   test("cancels an in-flight fetch via abort and resolves once the transport confirms (terminateAck)", async () => {
     // The `return 7` cancels the par → the reactor `terminate`s the fetch → the transport confirms the abort
     // with a `cancelled` → terminateAck. The run resolves to 7 ONLY after that confirmation (it would hang if
-    // the abort path were not wired), so this proves the terminateAck follows the terminate — no redispatch.
+    // the abort path were not wired), so this proves the terminateAck follows the terminate — no re-send.
     const transport = new ControlledHttpTransport();
     const actor = makeActor(transport, new InMemoryPersistence(), CANCELLING_FETCH_IR);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);

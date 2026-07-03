@@ -12,12 +12,22 @@
 // `delegation` id — the same id core's external proxy thread holds.
 //
 // `dispatch` is fire-and-forget: the result is asynchronous and arrives via the sink, so a completion always
-// re-enters through the actor's serial mailbox and never races a turn in flight. The in-flight call is
-// durable as the ffi reactor's `ffi_instances` row (key + argument), so recovery re-dispatches from there.
+// re-enters through the actor's serial mailbox and never races a turn in flight.
+//
+// Execution is AT-MOST-ONCE: the runtime never re-runs a handler. A `recovery` dispatch (reload of a call
+// that was in flight) must not start fresh work — the transport leaves a handler it still has running alone
+// (a warm reset: the process survived, the completion will come), and fails one whose process is gone with
+// an `error` completion (→ a panic). Retrying is a katari-level decision (`handle … with panic`), never the
+// runtime's; the transport can tell the two apart because its own lifetime IS the process's lifetime.
 
 import type { Json } from "@katari-lang/types";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
 import type { DelegateOutcome } from "./sidecar-protocol.js";
+
+/** The `error` a recovery dispatch fails with when the handler's process is gone — the at-most-once refusal
+ *  (never a silent re-run). Surfaces as a catchable panic, so katari code decides whether to retry. */
+export const INTERRUPTED_MESSAGE =
+  "the external call was interrupted by a runtime restart (at-most-once: it is not re-run)";
 
 /** One external dispatch: the call's `delegation`, the handler `key`, and the argument. The argument is
  *  plain `Json` — the ffi reactor converts the engine's `Value` at this seam, so the transport and the
@@ -30,9 +40,6 @@ export interface FfiCall {
   /** The opaque dispatch key the handler interprets (the external block's `key`). */
   key: string;
   argument: Json | null;
-  /** True when this is a recovery re-dispatch of a still-in-flight call (the process went down with the call
-   *  pending). A handler can treat it as a retry — e.g. dedupe a non-idempotent side effect. */
-  redispatch?: boolean;
 }
 
 /** The outcome of one dispatched call, fed back to the ffi reactor: a `result` (→ delegateAck), an `error`
@@ -71,8 +78,12 @@ export interface FfiTransport {
   onComplete(sink: (completion: FfiCompletion) => void): void;
   /** Register the sink a handler's inner agent calls are delivered to. Called once. */
   onDelegate(sink: (request: FfiInnerDelegate) => void): void;
-  /** Dispatch a call. Fire-and-forget — the outcome arrives later via the sink. */
+  /** Dispatch a call — always means "run it". Fire-and-forget — the outcome arrives later via the sink. */
   dispatch(call: FfiCall): void;
+  /** Reconcile a reloaded in-flight call (at-most-once; never starts work): a handler this transport still
+   *  has running is left alone — its completion will come (a warm reset); one whose process is gone fails
+   *  with an `error` completion (`INTERRUPTED_MESSAGE`), so the caller decides whether to retry. */
+  recover(delegation: DelegationId): void;
   /** Abort an in-flight call (its proxy is being cancelled). Fire-and-forget: once the underlying process has
    *  actually stopped, report it via the sink as `cancelled` so the reactor can `terminateAck` gracefully. */
   abort(delegation: DelegationId): void;
@@ -93,6 +104,12 @@ export class StubFfiTransport implements FfiTransport {
   dispatch(call: FfiCall): void {
     throw new Error(
       `no external process configured for FFI key "${call.key}" (inject a real FfiTransport)`,
+    );
+  }
+  recover(delegation: DelegationId): void {
+    // A durable in-flight call exists but no FFI is configured — a wiring error, surfaced loudly.
+    throw new Error(
+      `no external process configured to recover FFI call ${delegation} (inject a real FfiTransport)`,
     );
   }
   abort(): void {
@@ -148,11 +165,10 @@ export class InProcessFfiTransport implements FfiTransport {
   }
 
   dispatch(call: FfiCall): void {
-    const handler = this.handlers[call.key];
-    const sink = this.sink;
-    if (sink === null) {
+    if (this.sink === null) {
       throw new Error("InProcessFfiTransport.dispatch called before onComplete registered a sink");
     }
+    const handler = this.handlers[call.key];
     this.live.add(call.delegation);
     void (async () => {
       try {
@@ -163,17 +179,17 @@ export class InProcessFfiTransport implements FfiTransport {
         const resolved = await value;
         this.live.delete(call.delegation);
         if (this.aborted.delete(call.delegation)) {
-          sink({ delegation: call.delegation, outcome: { kind: "cancelled" } });
+          this.emit({ delegation: call.delegation, outcome: { kind: "cancelled" } });
           return;
         }
-        sink({ delegation: call.delegation, outcome: { kind: "result", value: resolved } });
+        this.emit({ delegation: call.delegation, outcome: { kind: "result", value: resolved } });
       } catch (error) {
         this.live.delete(call.delegation);
         if (this.aborted.delete(call.delegation)) {
-          sink({ delegation: call.delegation, outcome: { kind: "cancelled" } });
+          this.emit({ delegation: call.delegation, outcome: { kind: "cancelled" } });
           return;
         }
-        sink({
+        this.emit({
           delegation: call.delegation,
           outcome: {
             kind: "error",
@@ -182,6 +198,20 @@ export class InProcessFfiTransport implements FfiTransport {
         });
       }
     })();
+  }
+
+  recover(delegation: DelegationId): void {
+    // At-most-once: never re-run. A handler this transport still has live survived a warm reset — leave it
+    // alone, its completion will come. One that is gone (a fresh transport = a fresh "process") failed.
+    if (!this.live.has(delegation)) {
+      this.emit({ delegation, outcome: { kind: "error", message: INTERRUPTED_MESSAGE } });
+    }
+  }
+
+  /** Deliver to the CURRENT sink (read at delivery time, like the real transport's reply routing): a warm
+   *  reset re-registers the sink, and a completion from work that outlived the reset must reach the new one. */
+  private emit(completion: FfiCompletion): void {
+    this.sink?.(completion);
   }
 
   abort(delegation: DelegationId): void {

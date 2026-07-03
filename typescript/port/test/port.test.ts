@@ -31,7 +31,6 @@ const dispatch = (
   delegation,
   key,
   argument,
-  redispatch: false,
 });
 
 describe("Sidecar dispatch", () => {

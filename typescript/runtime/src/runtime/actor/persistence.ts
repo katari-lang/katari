@@ -119,13 +119,13 @@ export interface PersistedInnerCall {
 
 /** The `ffi` instance extension write (`ffi_instances`) — the call-specific state behind an `ffi`-kind
  *  instance envelope. The delegation it handles is on the envelope (`delegation_id`), so it is not repeated
- *  here; `projectId` is injected by the transaction. */
+ *  here; `projectId` is injected by the transaction. The argument is NOT stored: recovery never re-runs a
+ *  handler (at-most-once, like http), so nothing reads it back — and it may carry secrets. */
 export interface PersistedFfiInstanceRow {
   instanceId: InstanceId;
-  /** The snapshot whose sidecar bundle hosts the handler — so a recovery re-dispatch targets the right one. */
+  /** The snapshot whose sidecar bundle hosts the handler — pins the running version. */
   snapshotId: SnapshotId;
   key: string;
-  argument: Value | null;
   status: "running" | "cancelling" | "awaitingAnswer";
   relays: PersistedEscalationRelay[];
   innerCalls: PersistedInnerCall[];
@@ -139,7 +139,6 @@ export interface PersistedFfiInstance {
   instance: InstanceId;
   snapshot: SnapshotId;
   key: string;
-  argument: Value | null;
   caller: ReactorName;
   status: "running" | "cancelling" | "awaitingAnswer";
   relays: PersistedEscalationRelay[];
@@ -291,7 +290,7 @@ export interface ApiLoader {
   answerableEscalations(): Promise<PersistedOpenEscalation[]>;
 }
 
-/** The `ffi` reactor's own-data read surface: its in-flight instances (calls), to re-dispatch / re-abort. */
+/** The `ffi` reactor's own-data read surface: its in-flight instances (calls), to recover / re-abort. */
 export interface FfiLoader {
   instances(): Promise<PersistedFfiInstance[]>;
 }

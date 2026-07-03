@@ -24,11 +24,15 @@
 //     like a core instance's cancel cascade).
 //
 // A call's lifecycle: running (transport in flight) → result / error / cancel. A completion that lands while
-// the callee still has live children is HELD (in memory — it is reproducible via a recovery re-dispatch) and
-// the children are cancelled first, so a resolved call never leaves in-transit resources behind. On an error
-// the call does not finish — like a panicking sub-call it escalates the panic and waits (`awaitingAnswer`)
-// for either an `escalateAck` (a handler caught it — the answer becomes the result) or a `terminate`
-// (unhandled — the run is failing). The process/request has stopped, so that wait needs no transport.
+// the callee still has live children is HELD (in memory — after a crash the reload converges to the same
+// shape, the refused call's error cancelling the children the same way) and the children are cancelled
+// first, so a resolved call never leaves in-transit resources behind. On an error the call does not finish —
+// like a panicking sub-call it escalates the panic and waits (`awaitingAnswer`) for either an `escalateAck`
+// (a handler caught it — the answer becomes the result) or a `terminate` (unhandled — the run is failing).
+// The process/request has stopped, so that wait needs no transport.
+//
+// Execution is AT-MOST-ONCE: the runtime never re-runs external work (see `recover`) — a call whose process
+// died fails as a panic, and whether to retry is a katari-level decision, not the runtime's.
 
 import type { Json } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
@@ -77,8 +81,8 @@ export interface EscalationRelayRow {
 
 /** One inner delegation's transport correlation: the delegation the base opened, and the transport's own
  *  `call` token its settled outcome is delivered under. Durable on the call's ext row, so a result landing
- *  after a warm reset still reaches its consumer (only a transport-process death makes it stale — then the
- *  delivery is dropped and the re-dispatched handler issues fresh calls). */
+ *  after a warm reset still reaches its consumer (only a transport-process death makes it stale — the call
+ *  is then failing anyway, and the stale delivery is dropped). */
 export interface InnerCallRow {
   delegation: DelegationId;
   call: string;
@@ -99,8 +103,8 @@ export interface InnerDelivery {
 /** One in-flight call's state, keyed by its delegation. Its instance id (the issuer of its replies) and its
  *  caller (the reply-to) are NOT here — they are the received-delegation edge, held once in the base
  *  `handled` index (added / dropped alongside this entry). `relays` is durable (the ext row); the two
- *  hold-state fields are in-memory only — both are reproducible (`transportSettled` by re-aborting on
- *  recovery, `pendingOutcome` by re-dispatching the handler). */
+ *  hold-state fields are in-memory only — a reload reproduces them (`transportSettled` by re-aborting,
+ *  `pendingOutcome` by the recovery outcome the transport reports). */
 interface Call<Payload> {
   status: CallStatus;
   payload: Payload;
@@ -159,16 +163,17 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
 
   // ─── concrete-reactor hooks (the only transport-specific surface) ────────────────────────────────
 
-  /** Build the per-call payload (the transport data recovery re-dispatches from) for a fresh delegate. */
+  /** Build the per-call payload (the call's transport data) for a fresh delegate. */
   protected abstract openPayload(target: ExternalTarget, argument: Value | null): Payload;
 
-  /** Dispatch a call to the transport. `redispatch` marks a recovery re-dispatch of a still-running call —
-   *  ffi re-runs its handler (deduping on the flag); http reports an error (at-most-once, never re-sending). */
-  protected abstract dispatch(
-    delegation: DelegationId,
-    payload: Payload,
-    redispatch: boolean,
-  ): void;
+  /** Dispatch a fresh call to the transport (always means "run it"). */
+  protected abstract dispatch(delegation: DelegationId, payload: Payload): void;
+
+  /** Reconcile a reloaded in-flight call with the transport (at-most-once; never starts work): work the
+   *  transport still has running is left alone (a warm reset — its completion will come), gone work fails
+   *  with an `error` completion → a panic katari code can catch and retry. The runtime never re-runs
+   *  external work on its own. */
+  protected abstract recover(delegation: DelegationId): void;
 
   /** Abort an in-flight call — a post-commit `terminate`, or a `cancelling` call recovered after a crash. The
    *  transport confirms with a `cancelled` completion (synthesising one when the request is already gone). */
@@ -504,7 +509,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   afterCommit(event: ExternalEvent): void {
     if (event.kind === "delegate" && event.target.kind === "external") {
       const call = this.calls.get(event.delegation);
-      if (call !== undefined) this.dispatch(event.delegation, call.payload, false);
+      if (call !== undefined) this.dispatch(event.delegation, call.payload);
     } else if (event.kind === "terminate") {
       if (this.calls.get(event.delegation)?.status === "cancelling") this.abort(event.delegation);
     }
@@ -550,11 +555,13 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.droppedInstances = [];
   }
 
-  /** Reload the in-flight calls on reactivation and resume the transport uniformly: a `running` call
-   *  re-dispatches (ffi re-runs its handler; http fails at-most-once), a `cancelling` call re-aborts (the
-   *  transport confirms with a synthesised `cancelled` — the request is gone; its children's terminates
-   *  replay from the outbox), an `awaitingAnswer` call just waits (its request already stopped; the core
-   *  side drives the escalation's resolution). The inner-delegation bridges reload with each call. */
+  /** Reload the in-flight calls on reactivation and resume the transport uniformly: a `running` call is
+   *  offered back as a `recovery` dispatch (still-live work continues untouched after a warm reset; gone
+   *  work fails at-most-once as a panic — and that error path cancels the call's inner delegations, so no
+   *  orphans survive a restart), a `cancelling` call re-aborts (the transport confirms with a synthesised
+   *  `cancelled`; its children's terminates replay from the outbox), an `awaitingAnswer` call just waits
+   *  (its request already stopped; the core side drives the escalation's resolution). The inner-delegation
+   *  bridges reload with each call. */
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
     for (const row of await this.loadCallRows(loader)) {
@@ -576,7 +583,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       for (const inner of row.innerCalls) {
         this.innerCalls.set(inner.delegation, { parent: row.delegation, call: inner.call });
       }
-      if (row.status === "running") this.dispatch(row.delegation, row.payload, true);
+      if (row.status === "running") this.recover(row.delegation);
       else if (row.status === "cancelling") this.abort(row.delegation);
     }
   }

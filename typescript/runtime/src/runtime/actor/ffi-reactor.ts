@@ -2,8 +2,10 @@
 // the shared callee-call lifecycle). An external call reaches it as a `delegate` routed from core's
 // `ExternalThread` proxy; it dispatches the handler through its subprocess transport and the base turns the
 // completion into the call's `delegateAck` / `escalate` / `terminateAck`. It owns its in-flight calls as
-// durable `ffi_instances` rows (its callee-side warm state), re-dispatched on recovery so an interrupted
-// handler re-runs (deduping on the `redispatch` flag) — symmetric to core owning its instances.
+// durable `ffi_instances` rows (its callee-side warm state) — symmetric to core owning its instances.
+// Execution is AT-MOST-ONCE, like http: recovery never re-runs a handler (a handler whose process died
+// fails as a panic; retrying is katari-level policy), so the argument is not persisted either — a reloaded
+// call carries none, exactly like an http call.
 //
 // A running handler can call back INTO the runtime (`innerDelegate` — the transport's inbound agent-call
 // channel): this reactor only resolves the request to a delegate target — a qualified agent name for `core`
@@ -30,8 +32,9 @@ import { messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
-/** The transport data an ffi call recovers from: the snapshot whose sidecar bundle hosts the handler, the
- *  dispatch key, and the argument (re-sent on a recovery re-dispatch). */
+/** An ffi call's transport data: the snapshot whose sidecar bundle hosts the handler, the dispatch key, and
+ *  the argument. Only the snapshot + key persist (recovery never re-runs, so the argument is never re-sent —
+ *  a reloaded call carries `null`, like http). */
 interface FfiPayload {
   snapshot: SnapshotId;
   key: string;
@@ -53,7 +56,7 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     return { snapshot: target.snapshot, key: target.key, argument };
   }
 
-  protected dispatch(delegation: DelegationId, payload: FfiPayload, redispatch: boolean): void {
+  protected dispatch(delegation: DelegationId, payload: FfiPayload): void {
     this.transport.dispatch({
       projectId: this.projectId,
       delegation,
@@ -62,8 +65,11 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
       // FFI is an allowed sink for secrets (an API key flows to its external call), so a private argument is
       // revealed to the sidecar here — unlike the user-facing API, which redacts.
       argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
-      redispatch,
     });
+  }
+
+  protected recover(delegation: DelegationId): void {
+    this.transport.recover(delegation);
   }
 
   protected abort(delegation: DelegationId): void {
@@ -71,11 +77,12 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
   }
 
   protected async persistCallRow(tx: PersistenceTx, row: CallRow<FfiPayload>): Promise<void> {
+    // The argument is not persisted: recovery never re-runs the handler (at-most-once), so nothing ever
+    // reads it back — and not storing it keeps one less secret-bearing value at rest.
     await tx.ffi.putFfiInstance({
       instanceId: row.instance,
       snapshotId: row.payload.snapshot,
       key: row.payload.key,
-      argument: row.payload.argument,
       status: row.status,
       relays: row.relays,
       innerCalls: row.innerCalls,
@@ -88,7 +95,8 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
       instance: row.instance,
       caller: row.caller,
       status: row.status,
-      payload: { snapshot: row.snapshot, key: row.key, argument: row.argument },
+      // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
+      payload: { snapshot: row.snapshot, key: row.key, argument: null },
       relays: row.relays,
       innerCalls: row.innerCalls,
     }));

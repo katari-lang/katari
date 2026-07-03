@@ -33,13 +33,16 @@ const PROJECT = "project-recovery" as ProjectId;
 const SNAPSHOT = "snapshot-recovery" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
-/** A recording FFI transport: logs each dispatched key, and optionally completes some keys immediately
- *  (the others stay in flight forever, modelling a slow external call). */
+/** A recording FFI transport: logs each dispatched key and each recovery, and optionally completes some
+ *  keys immediately (the others stay in flight forever, modelling a slow external call). A fresh instance
+ *  models a fresh process, so a recovery always refuses (at-most-once, like the real transports). */
 function recordingRunner(complete: Record<string, boolean>): {
   runner: FfiTransport;
   dispatched: string[];
+  recovered: string[];
 } {
   const dispatched: string[] = [];
+  const recovered: string[] = [];
   let sink: ((completion: FfiCompletion) => void) | null = null;
   const runner: FfiTransport = {
     onComplete(register) {
@@ -56,10 +59,17 @@ function recordingRunner(complete: Record<string, boolean>): {
         });
       }
     },
+    recover(delegation) {
+      recovered.push(delegation);
+      sink?.({
+        delegation,
+        outcome: { kind: "error", message: "interrupted by a runtime restart (at-most-once)" },
+      });
+    },
     abort() {},
     deliverDelegateResult() {},
   };
-  return { runner, dispatched };
+  return { runner, dispatched, recovered };
 }
 
 /** A `Persistence` that throws on its `nth` commit, delegating everything else to an inner store — so a
@@ -111,11 +121,11 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
 }
 
 describe("recovery", () => {
-  test("resumes a project from persisted state in a fresh actor and makes progress past an in-flight external", async () => {
+  test("a warm reset leaves the in-flight handler running: its completion resumes the reloaded project", async () => {
     // agent main() { let a = step1({}); let b = step2({}); return b }
-    // step1 / step2 are external agents. The first actor's runner never completes step1, so the project is
-    // persisted suspended on step1's in-flight external. A fresh actor (same persistence) completes step1
-    // on recovery, which resumes `main` and lets it dispatch step2 — observable progress past the crash.
+    // step1 / step2 are external agents. The SAME transport serves both actors — the process-survived
+    // (poison / warm-reset) model: step1's handler is still live when the second actor reloads, so its
+    // `recover` leaves it alone, and releasing the handler resumes `main`, which dispatches step2.
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -159,32 +169,43 @@ describe("recovery", () => {
 
     const persistence = new StoringPersistence();
 
-    // First actor: step1 dispatches but never completes, so the project persists suspended on it.
-    const first = recordingRunner({ step1: false });
-    const actorOne = makeActor(ir, persistence, first.runner);
-    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
-    await waitUntil(() => (first.dispatched.includes("step1") ? true : undefined));
-    // The run root (`main`) and step1's external instance are both persisted at this suspend point.
+    // One shared transport across both actors = the handler's process survived the reset.
+    let releaseStep1: (value: string) => void = () => {};
+    let step2Ran = false;
+    const transport = new InProcessFfiTransport({
+      step1: () => new Promise<string>((resolve) => (releaseStep1 = resolve)),
+      step2: () => {
+        step2Ran = true;
+        return "step2-done";
+      },
+    });
+
+    const actorOne = makeActor(ir, persistence, transport);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
     await waitUntil(() => (persistence.instanceCount() >= 2 ? true : undefined));
 
-    // Process "crash": a brand-new actor recovers from the same persisted state. Its runner completes
-    // step1, so recovery's re-dispatch of the open external resolves and `main` proceeds to step2.
-    const second = recordingRunner({ step1: true });
-    const actorTwo = makeActor(ir, persistence, second.runner);
+    // Warm reset: a new actor reloads from the same rows over the SAME transport. `recover(step1)` finds the
+    // handler still live and leaves it alone — no error, no re-run.
+    const actorTwo = makeActor(ir, persistence, transport);
     await actorTwo.activate();
+    expect(step2Ran).toBe(false); // nothing moved yet — step1 is still (correctly) in flight
 
-    // step1 was re-dispatched on recovery; completing it resumed `main`, which dispatched step2 — progress
-    // strictly past the suspend point, reconstructed entirely from persisted rows.
-    await waitUntil(() => (second.dispatched.includes("step2") ? true : undefined));
-    expect(second.dispatched).toContain("step1");
-    expect(second.dispatched).toContain("step2");
+    // The surviving handler settles: its completion reaches the NEW actor, `main` resumes and runs step2.
+    releaseStep1("step1-done");
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(step2Ran).toBe(true);
+    expect(done.result).toEqual({ kind: "string", value: "step2-done" });
   });
 
-  test("recovers a run's routing from the Layer 1 delegations table and durably records its result", async () => {
+  test("a process death fails an in-flight external at-most-once, recording the run error via Layer 1 routing", async () => {
     // agent main() { return step1({}) }   — `main` is the run root (its delegation's caller is the api
     // root, which runs no engine thread). After a crash, the run delegation's caller can only be recovered
-    // from the Layer 1 delegations table; once recovery completes step1, `main` returns and the run
-    // delegation moves running → done with the result — the durable run outcome, no in-actor promise.
+    // from the Layer 1 delegations table. A FRESH transport (= a fresh process) cannot vouch for step1, so
+    // its `recover` refuses at-most-once: the handler is never re-run, the call panics, and — unhandled —
+    // the run records the error durably. Retrying is katari-level policy, never the runtime's.
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -225,17 +246,20 @@ describe("recovery", () => {
     // The run delegation is durably `running` at the suspend point (its caller = the api root).
     expect(persistence.peekDelegation(run)?.state).toBe("running");
 
-    // Crash + recover in a fresh actor with no in-memory run handlers. Recovery rebuilds the run's caller
-    // purely from the delegations table, completes step1, and lets `main` return.
+    // Crash + recover in a fresh actor (a fresh transport = a fresh process). Recovery rebuilds the run's
+    // caller purely from the delegations table; the refused call's panic bubbles out and fails the run.
     const second = recordingRunner({ step1: true });
     const actorTwo = makeActor(ir, persistence, second.runner);
     await actorTwo.activate();
 
-    const done = await waitUntil(() => {
+    const failed = await waitUntil(() => {
       const record = persistence.peekRun(run);
-      return record?.state === "done" ? record : undefined;
+      return record?.state === "error" ? record : undefined;
     });
-    expect(done.result).toEqual({ kind: "string", value: "step1-done" });
+    expect(failed.errorMessage).toMatch(/interrupted by a runtime restart/);
+    // The whole point of at-most-once: the handler was never re-run.
+    expect(second.dispatched).toHaveLength(0);
+    expect(second.recovered).toHaveLength(1);
   });
 
   test("recovers a run suspended on an open user escalation and resumes it when answered in a fresh actor", async () => {
@@ -498,13 +522,13 @@ describe("recovery", () => {
     expect(store.instanceCount()).toBe(0);
   });
 
-  test("recovers a handler suspended on an inner delegation: the re-dispatched handler calls afresh, the orphan is dropped", async () => {
+  test("a process death cancels a dead handler's inner delegations — nothing is re-run, no orphans remain", async () => {
     // agent main() { return compute({}) }   — compute is an FFI handler that calls another FFI key
     // ("helper") through the inner agent-call channel. The first actor's helper never completes, so the
     // project persists suspended with: main + the compute call (its innerCalls bridge) + the helper call.
-    // A fresh actor re-dispatches BOTH ffi calls: the redispatched compute handler makes a NEW inner call
-    // (its previous continuation died with the "process"); the orphaned old helper delegation completes
-    // too, and its result — delivered under the stale bridge token — must be dropped, not misdelivered.
+    // A fresh actor (a fresh process) refuses BOTH calls at-most-once: compute's error path cancels its
+    // inner delegation (the would-be orphan), the panic bubbles out, and the run fails — leaving no live
+    // external work behind.
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -556,21 +580,31 @@ describe("recovery", () => {
     // main, the compute call (with its innerCalls bridge), and the helper call — is already durable.
     await waitUntil(() => (helperDispatched ? true : undefined));
 
-    // Crash + recover: the fresh transport's helper completes immediately.
+    // Crash + recover with a FRESH transport (= a fresh process): neither handler is re-run — both calls
+    // are refused at-most-once, and compute's failure cancels its (would-be orphan) inner delegation.
+    let reRan = false;
     const secondHandlers: Record<string, FfiHandler> = {
-      compute: async (_argument, context) => {
-        const inner = await context.call("helper", null, { reactor: "ffi" });
-        return `compute: ${String(inner)}`;
+      compute: () => {
+        reRan = true;
+        return "unreachable";
       },
-      helper: () => "helped",
+      helper: () => {
+        reRan = true;
+        return "unreachable";
+      },
     };
     const actorTwo = makeActor(ir, persistence, new InProcessFfiTransport(secondHandlers));
     await actorTwo.activate();
 
-    const done = await waitUntil(() => {
+    const failed = await waitUntil(() => {
       const record = persistence.peekRun(run);
-      return record?.state === "done" ? record : undefined;
+      return record?.state === "error" ? record : undefined;
     });
-    expect(done.result).toEqual({ kind: "string", value: "compute: helped" });
+    expect(failed.errorMessage).toMatch(/interrupted by a runtime restart/);
+    expect(reRan).toBe(false);
+    // No orphans: every external call — the dead compute call AND its inner helper delegation — fully
+    // retired (their envelopes are gone), and the run root tore down with the failed run.
+    await waitUntil(() => (persistence.envelopeCount("ffi") === 0 ? true : undefined));
+    await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
   });
 });

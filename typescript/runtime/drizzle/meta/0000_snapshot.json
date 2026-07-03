@@ -1,5 +1,5 @@
 {
-  "id": "467e213d-47b7-4e74-8d8c-83673877da88",
+  "id": "fd4aec6b-2abd-4d97-b440-7cfeb5752448",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -666,12 +666,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "argument": {
-          "name": "argument",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         },
         "status": {
           "name": "status",

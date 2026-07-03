@@ -31,15 +31,14 @@ export type DelegateOutcome =
 
 /** Runtime → sidecar. `dispatch` runs the handler `key` against `argument` for one external call; `abort`
  *  asks the sidecar to stop an in-flight call; `delegateResult` settles one inner agent call the sidecar
- *  made (`call` echoes the sidecar's token). `redispatch` marks a recovery re-dispatch of a call that was
- *  already in flight before a crash (so a handler can dedupe a side effect). */
+ *  made (`call` echoes the sidecar's token). A dispatch always means "run it": execution is at-most-once —
+ *  a recovery never reaches the sidecar (the transport refuses it with an `error` completion instead). */
 export type RuntimeMessage =
   | {
       kind: "dispatch";
       delegation: DelegationId;
       key: string;
       argument: Json | null;
-      redispatch: boolean;
     }
   | { kind: "abort"; delegation: DelegationId }
   | { kind: "delegateResult"; delegation: DelegationId; call: string; outcome: DelegateOutcome };

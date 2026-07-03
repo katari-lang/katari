@@ -70,9 +70,6 @@ export interface HandlerContext {
    *  its promise settle (the port then confirms the cancellation). A pending `context.call` rejects with
    *  `KatariCancelledError` on cancellation, so an awaiting handler unwinds by itself. */
   signal: AbortSignal;
-  /** True on a recovery re-dispatch (the runtime restarted with this call still in flight). A handler with a
-   *  non-idempotent side effect can use it to dedupe. */
-  redispatch: boolean;
   /** Call another agent and await its (decoded) result — `core` agents by qualified name (the default), or
    *  another reactor's callee by key (`options.reactor`). The declared `Result` is assumed, like the
    *  handler's own argument type. Rejects with `KatariCallError` (the callee failed) or
@@ -186,9 +183,9 @@ export class Sidecar {
   ): void {
     if (this.inFlight.has(message.delegation)) {
       // A second dispatch for an already in-flight delegation would overwrite its abort controller and let
-      // one settle delete the other's entry (breaking abort, double-replying). The runtime never does this
-      // within a process — a `redispatch` only follows a crash, i.e. a fresh process with an empty map — so
-      // treat it as protocol drift: keep the original, report it, drop the duplicate.
+      // one settle delete the other's entry (breaking abort, double-replying). The runtime never sends one
+      // (execution is at-most-once — nothing is ever re-dispatched), so treat it as protocol drift: keep
+      // the original, report it, drop the duplicate.
       reportDiagnostic(
         `duplicate dispatch for in-flight delegation ${message.delegation}; ignoring it`,
       );
@@ -273,9 +270,10 @@ export class Sidecar {
       reactor?: string,
     ): Promise<KatariValue> => {
       if (signal.aborted) return Promise.reject(new KatariCancelledError());
-      // The token must be unique ACROSS sidecar processes, not just within one: the runtime's bridge rows
-      // are durable, so after a crash + re-dispatch a stale bridge still delivers under the old token — a
-      // counter would collide with the fresh process's first calls and settle them with a stray result.
+      // The token is unique ACROSS sidecar processes, not just within one: the runtime's bridge rows are
+      // durable, so a stale bridge from a former process may still deliver under its old token — with a
+      // per-process counter that delivery could collide with a fresh call's token and settle it with a
+      // stray result. A UUID makes stale deliveries land nowhere, by construction.
       const token = crypto.randomUUID();
       return new Promise<KatariValue>((resolve, reject) => {
         dispatch.pendingCalls.add(token);
@@ -299,7 +297,6 @@ export class Sidecar {
     };
     const context: HandlerContext = {
       signal,
-      redispatch: message.redispatch,
       call: <Result>(agent: string, argument?: unknown, options?: CallOptions) =>
         // The declared Result is assumed (the typed-boundary assertion, like the argument type).
         sendDelegate(agent, encodeWireValue(argument), options?.reactor) as Promise<Result>,

@@ -197,7 +197,7 @@ export class ProjectActor {
     return this.api.listOpenEscalations();
   }
 
-  /** Activate a (possibly recovered) actor: reload persisted state and re-dispatch in-flight external work,
+  /** Activate a (possibly recovered) actor: reload persisted state and reconcile in-flight external work,
    *  without an inbound message to trigger it. Idempotent — the warm actor also self-activates on its first
    *  command; a host calls this on boot to resume a project whose process went down mid-flight. */
   async activate(): Promise<void> {
@@ -208,7 +208,7 @@ export class ProjectActor {
 
   /** Lazily reload the project's persisted state on first use: each reactor pulls only the rows it owns from
    *  the loader (core its engine graph + routing + its delegations/escalations; the api root its run
-   *  delegations + answerable escalations; the ffi reactor its in-flight calls, which it re-dispatches) —
+   *  delegations + answerable escalations; the ffi reactor its in-flight calls, which it reconciles) —
    *  no central blob, no cross-reactor classification. The undrained outbox is replayed into the mailbox.
    *  The api management root's durable `instances` row is ensured by the api reactor in each run's
    *  `delegate` commit (it owns that row), so reactivation only reads. */
@@ -223,10 +223,10 @@ export class ProjectActor {
     await this.persistence.load(this.projectId, async (loader) => {
       // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
       await Promise.all([this.core.load(loader), this.api.load(loader)]);
-      // The ffi / http loads re-dispatch their in-flight calls through their transports (a side effect), so
-      // they run only after the pure reads have succeeded — but concurrently with each other. ffi re-runs its
-      // handler (dedupe on `redispatch`); http fails at-most-once (the transport turns a re-dispatch into an
-      // error / confirms an abort).
+      // The ffi / http loads reconcile their in-flight calls with their transports (a side effect), so they
+      // run only after the pure reads have succeeded — but concurrently with each other. Both are
+      // at-most-once: work the transport still holds is left running (a warm reset), gone work fails as a
+      // panic (never re-run), a cancelling call re-aborts.
       await Promise.all([this.ffi.load(loader), this.http.load(loader)]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {

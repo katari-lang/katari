@@ -14,12 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SidecarBundle } from "@katari-lang/types";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
-import type {
-  FfiCall,
-  FfiCompletion,
-  FfiInnerDelegate,
-  FfiInnerResult,
-  FfiTransport,
+import {
+  type FfiCall,
+  type FfiCompletion,
+  type FfiInnerDelegate,
+  type FfiInnerResult,
+  type FfiTransport,
+  INTERRUPTED_MESSAGE,
 } from "./runner.js";
 import type { SidecarSpawner } from "./subprocess-runner.js";
 import { SubprocessFfiTransport, subprocessSidecar } from "./subprocess-runner.js";
@@ -70,6 +71,20 @@ export class SnapshotFfiTransport implements FfiTransport {
       (transport) => transport.dispatch(call),
       (error: unknown) => this.fail(call.delegation, error),
     );
+  }
+
+  recover(delegation: DelegationId): void {
+    // At-most-once: recovery never starts work, so it must not spawn a process either. Route it to the
+    // snapshot's still-running transport if this multiplexer survived (a warm reset — that transport then
+    // leaves its live handler alone / refuses a settled one); with no live route the handler's process is
+    // gone — refuse here.
+    const snapshot = this.delegationSnapshot.get(delegation);
+    const existing = snapshot === undefined ? undefined : this.perSnapshot.get(snapshot);
+    if (existing === undefined) {
+      this.sink?.({ delegation, outcome: { kind: "error", message: INTERRUPTED_MESSAGE } });
+      return;
+    }
+    void existing.then((transport) => transport.recover(delegation));
   }
 
   abort(delegation: DelegationId): void {

@@ -66,10 +66,10 @@ describe("SnapshotFfiTransport", () => {
 
     expect([...channels.keys()].sort()).toEqual(["s1", "s2"]);
     expect(channels.get("s1")?.sent).toEqual([
-      { kind: "dispatch", delegation: "d1", key: "handler", argument: null, redispatch: false },
+      { kind: "dispatch", delegation: "d1", key: "handler", argument: null },
     ]);
     expect(channels.get("s2")?.sent).toEqual([
-      { kind: "dispatch", delegation: "d2", key: "handler", argument: null, redispatch: false },
+      { kind: "dispatch", delegation: "d2", key: "handler", argument: null },
     ]);
   });
 

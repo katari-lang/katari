@@ -6,9 +6,10 @@
 // panic that bubbles to the caller's handler), or a `terminateAck` (an abort confirmed).
 //
 // It owns its in-flight calls durably as `http`-kind instances (`http_instances` — the call's status + caller),
-// and on recovery it does NOT re-send (an http request is not idempotent): the transport's re-dispatch reports
-// an error, so an interrupted running call fails with a `panic` the caller can catch and retry. This
-// at-most-once guarantee is the whole reason http is a reactor rather than a core-inline primitive.
+// and on recovery it does NOT re-send (an http request is not idempotent): the transport's `recover` leaves a
+// surviving request alone and reports an error for a gone one, so an interrupted running call fails with a
+// `panic` the caller can catch and retry. This at-most-once guarantee is the whole reason http is a reactor
+// rather than a core-inline primitive.
 
 import type { ReactorName } from "../event/types.js";
 import type { HttpTransport } from "../external/http-transport.js";
@@ -44,15 +45,17 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     return { argument };
   }
 
-  protected dispatch(delegation: DelegationId, payload: HttpPayload, redispatch: boolean): void {
+  protected dispatch(delegation: DelegationId, payload: HttpPayload): void {
     this.transport.dispatch({
       delegation,
       // Lower the engine's Value to plain Json for the request; a secret header value is revealed here (http
-      // is an allowed sink — an API key flows to its request), unlike the user-facing API which redacts. A
-      // recovery re-dispatch carries no argument (it never re-sends — the transport turns it into an error).
+      // is an allowed sink — an API key flows to its request), unlike the user-facing API which redacts.
       argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
-      redispatch,
     });
+  }
+
+  protected recover(delegation: DelegationId): void {
+    this.transport.recover(delegation);
   }
 
   protected abort(delegation: DelegationId): void {

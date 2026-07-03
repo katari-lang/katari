@@ -217,7 +217,6 @@ export class DbPersistence implements Persistence {
               caller: instances.callerReactor,
               snapshot: ffiInstances.snapshotId,
               key: ffiInstances.key,
-              argument: ffiInstances.argument,
               status: ffiInstances.status,
               relays: ffiInstances.relays,
               innerCalls: ffiInstances.innerCalls,
@@ -236,7 +235,6 @@ export class DbPersistence implements Persistence {
                     instance: row.instance as InstanceId,
                     snapshot: row.snapshot as SnapshotId,
                     key: row.key,
-                    argument: unsealFromStorage(row.argument),
                     caller: row.caller,
                     status: row.status,
                     relays: row.relays.map((relay) => ({
@@ -458,7 +456,6 @@ export class DbPersistence implements Persistence {
               instanceId: row.instanceId,
               snapshotId: row.snapshotId,
               key: row.key,
-              argument: sealForStorage(row.argument),
               status: row.status,
               relays,
               innerCalls,

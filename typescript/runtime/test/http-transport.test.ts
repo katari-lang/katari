@@ -1,7 +1,8 @@
 // Unit tests for the real `FetchHttpTransport` (the production http seam) — the piece the reactor tests stub
 // out. Covers request building (method / headers / body pass-through, GET carries no body, an explicit empty
 // body IS sent), the response mapping (any status is a `result`, a throwing fetch is an `error`), and the two
-// recovery-critical guarantees: a re-dispatch NEVER re-sends (it reports an error — at-most-once), and an
+// recovery-critical guarantees: a recovery NEVER re-sends (a surviving request is left alone, a gone one
+// reports an error — at-most-once), and an
 // abort with no live request synthesises a `cancelled` (so a recovered cancelling call can be confirmed).
 
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -27,8 +28,8 @@ function dispatchOnce(transport: FetchHttpTransport, call: HttpCall): Promise<Ht
   });
 }
 
-function requestCall(argument: HttpCall["argument"], redispatch = false): HttpCall {
-  return { delegation: DELEGATION, argument, redispatch };
+function requestCall(argument: HttpCall["argument"]): HttpCall {
+  return { delegation: DELEGATION, argument };
 }
 
 afterEach(() => {
@@ -120,18 +121,41 @@ describe("FetchHttpTransport", () => {
     expect(completion.outcome.kind).toBe("error");
   });
 
-  test("a recovery re-dispatch reports an error WITHOUT re-sending the request (at-most-once)", async () => {
+  test("recovering an unknown call reports an error WITHOUT re-sending the request (at-most-once)", async () => {
     const fetchMock = fetchStub(() => Promise.resolve(new Response("ok", { status: 200 })));
     vi.stubGlobal("fetch", fetchMock);
     const transport = new FetchHttpTransport();
 
-    const completion = await dispatchOnce(
-      transport,
-      requestCall({ url: "https://example.test/x", method: "GET", headers: {}, body: "" }, true),
-    );
+    const completion = await new Promise<HttpCompletion>((resolve) => {
+      transport.onComplete(resolve);
+      transport.recover(DELEGATION);
+    });
     expect(completion.outcome.kind).toBe("error");
     // The whole point: the interrupted request is never re-sent.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("recovering a request the transport still has in flight leaves it alone (a warm reset)", async () => {
+    // A fetch that resolves only when the test releases it, so the request is verifiably in flight.
+    let release: (response: Response) => void = () => {};
+    const fetchMock = fetchStub(() => new Promise<Response>((resolve) => (release = resolve)));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new FetchHttpTransport();
+
+    const completions: HttpCompletion[] = [];
+    transport.onComplete((completion) => completions.push(completion));
+    transport.dispatch(
+      requestCall({ url: "https://example.test/slow", method: "GET", headers: {}, body: "" }),
+    );
+    transport.recover(DELEGATION);
+    // No error was synthesised — the surviving request is left to complete on its own.
+    expect(completions).toHaveLength(0);
+    release(new Response("late", { status: 200 }));
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
+    expect(completions[0]?.outcome).toEqual({
+      kind: "result",
+      value: { status: 200, body: "late" },
+    });
   });
 
   test("aborting a call with no live request synthesises a cancelled confirmation", async () => {

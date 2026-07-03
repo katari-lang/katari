@@ -13,12 +13,13 @@
 
 import { spawn } from "node:child_process";
 import type { DelegationId } from "../ids.js";
-import type {
-  FfiCall,
-  FfiCompletion,
-  FfiInnerDelegate,
-  FfiInnerResult,
-  FfiTransport,
+import {
+  type FfiCall,
+  type FfiCompletion,
+  type FfiInnerDelegate,
+  type FfiInnerResult,
+  type FfiTransport,
+  INTERRUPTED_MESSAGE,
 } from "./runner.js";
 import {
   decodeSidecarMessage,
@@ -70,8 +71,16 @@ export class SubprocessFfiTransport implements FfiTransport {
       delegation: call.delegation,
       key: call.key,
       argument: call.argument,
-      redispatch: call.redispatch ?? false,
     });
+  }
+
+  recover(delegation: DelegationId): void {
+    // At-most-once: never re-run a handler. Still in flight ⇒ this transport (and so its process) survived
+    // a warm reset — leave the handler alone, its reply will come. Not in flight ⇒ the process that ran it
+    // is gone (this transport is fresh, or the sidecar crashed) — fail the call rather than re-execute.
+    if (!this.inFlight.has(delegation)) {
+      this.sink?.({ delegation, outcome: { kind: "error", message: INTERRUPTED_MESSAGE } });
+    }
   }
 
   abort(delegation: DelegationId): void {

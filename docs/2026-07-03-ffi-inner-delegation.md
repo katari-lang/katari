@@ -47,20 +47,32 @@ snapshot** (an agent and its FFI handlers deploy together) and converts JSON↔V
   confirmation AND the children's drain — the same graceful-cancel barrier as core's cascade.
 - **Held completions**: a transport completion landing while children are still live (a fire-and-forget
   `context.call`) is held in memory and the children cancelled first; the call settles once drained. Held
-  state need not be durable — a crash re-dispatches the handler, which reproduces the completion.
+  state need not be durable — after a crash the reload converges to the same shape (the refused call's
+  error outcome cancels the children the same way).
 
-## Persistence and recovery
+## Persistence and recovery — at-most-once, like http
 
-The two bridges are durable on the call's ext row (`ffi_instances.relays` / `.inner_calls`, jsonb): a warm
-reset (poisoned commit) reloads them, so a result / answer in flight still finds its route — the sidecar
-process survives a poison, so nothing may hang. The delegation rows themselves reload through the base
-(`from = ffi` self-select), which is also where the terminate distribution finds the children.
+The runtime NEVER re-runs external work: retrying is katari-level policy (`handle … with panic`), not the
+runtime's. The old `redispatch` mechanism is gone entirely (no wire flag, no handler dedupe hook, and the
+call argument is no longer persisted — like http). On reload, a `running` call is reconciled with the
+transport via `recover(delegation)`, and the transport can tell the two restart shapes apart because its
+own lifetime IS the process's lifetime:
 
-After a **process** crash the bridges reload but their consumers died with the sidecar: the re-dispatched
-handler issues fresh calls (fresh UUID tokens — no collision with stale bridges), an orphan child runs to
-completion, its resources re-own onto the call, and its stale-token delivery is dropped by the port.
-Orphan work is wasted but sound; proactively cancelling it would need the transport to distinguish a
-process death from a warm reset — deferred.
+- **Warm reset** (a poisoned commit): the transport still holds the call in flight → it is left alone; the
+  surviving handler's completion arrives later and resumes the reloaded project seamlessly. The durable
+  bridges (`ffi_instances.relays` / `.inner_calls`, jsonb) are what make this safe with inner delegations
+  in flight: a result / answer landing after the reset still finds its route to the living sidecar.
+- **Process death**: the transport does not know the call → it refuses with an `error` completion
+  (`INTERRUPTED_MESSAGE`) → the call panics. That error path runs the same held-outcome machinery, which
+  **cancels the call's inner delegations** — so a dead handler's children are torn down, not orphaned
+  (their heavy work and side effects stop with the graceful terminate cascade). The delegation rows reload
+  through the base (`from = ffi` self-select), which is where the distribution finds them.
+
+The narrow honest window: a handler that completed and replied just before a poison whose completion turn
+never committed is refused on reload although its work succeeded — the call fails rather than silently
+re-running; at-most-once + katari-level retry is still at-least-once *end to end* when the program chooses
+to retry (exactly-once side effects need idempotence at the effect itself — that is now an explicit,
+language-level decision).
 
 Known pre-existing gap (unchanged, now shared with core): an acceptance-surface panic (unresolvable name /
 schema violation — no instance is born) cannot consume an `escalateAck`, so a katari handler answering such

@@ -23,15 +23,15 @@ export type DelegateOutcome =
   | { kind: "error"; message: string }
   | { kind: "cancelled" };
 
-/** Runtime → sidecar. */
+/** Runtime → sidecar. A dispatch always means "run it": execution is at-most-once — the runtime never
+ *  re-dispatches a call after a restart (an interrupted call fails as a panic on the katari side, where the
+ *  program decides whether to retry). */
 export type RuntimeMessage =
   | {
       kind: "dispatch";
       delegation: string;
       key: string;
       argument: Json | null;
-      /** True on a recovery re-dispatch — the runtime restarted with this call in flight. */
-      redispatch: boolean;
     }
   | { kind: "abort"; delegation: string }
   | { kind: "delegateResult"; delegation: string; call: string; outcome: DelegateOutcome };
@@ -78,7 +78,6 @@ export function decodeRuntimeMessage(line: string): RuntimeMessage | null {
             delegation,
             key: record.key,
             argument: (record.argument ?? null) as Json | null,
-            redispatch: record.redispatch === true,
           }
         : null;
     case "abort":

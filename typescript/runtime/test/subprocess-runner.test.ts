@@ -86,7 +86,6 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
         delegation,
         key: "echo",
         argument: { kind: "integer", value: 7 },
-        redispatch: false,
       },
     ]);
 
@@ -144,6 +143,27 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
       call: "token-1",
       outcome: { kind: "result", value: 2 },
     });
+  });
+
+  test("recover leaves an in-flight handler alone and refuses a call it no longer holds (at-most-once)", () => {
+    const channel = fakeChannel();
+    const transport = new SubprocessFfiTransport(channel.spawner);
+    const completions = collectCompletions(transport);
+
+    // In flight: recovery must neither error it nor send anything (its reply will come by itself).
+    transport.dispatch(call("slow"));
+    const sentBefore = channel.sent.length;
+    transport.recover(delegation);
+    expect(channel.sent).toHaveLength(sentBefore);
+    expect(completions).toEqual([]);
+
+    // Unknown (a fresh transport = a fresh process): refused with an error, never re-run.
+    const gone = toDelegationId("delegation-gone");
+    transport.recover(gone);
+    expect(completions).toEqual([
+      { delegation: gone, outcome: { kind: "error", message: expect.stringMatching(/at-most-once/) } },
+    ]);
+    expect(channel.sent).toHaveLength(sentBefore);
   });
 
   test("a sidecar crash fails every in-flight call as a panic, and the next dispatch respawns", () => {
