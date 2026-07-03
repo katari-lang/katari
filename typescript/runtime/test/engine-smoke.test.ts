@@ -486,6 +486,7 @@ describe("in-memory core", () => {
       onComplete(register) {
         sink = register;
       },
+      onDelegate() {},
       dispatch() {
         // never resolves
       },
@@ -493,6 +494,7 @@ describe("in-memory core", () => {
         aborted.push(delegation);
         sink?.({ delegation, outcome: { kind: "cancelled" } });
       },
+      deliverDelegateResult() {},
     };
 
     await expect(run(ir, "main", null, external)).resolves.toEqual({ kind: "integer", value: 7 });

@@ -131,6 +131,11 @@ export class ProjectActor {
     dependencies.external.onComplete((completion) =>
       this.substrate.submit(this.ffi, () => this.ffi.complete(completion)),
     );
+    // A running handler's inner agent call enters the same way, as a ffi reactor turn that opens an ordinary
+    // `delegate` (to core by default, or another call reactor) under the in-flight call's instance.
+    dependencies.external.onDelegate((request) =>
+      this.substrate.submit(this.ffi, () => this.ffi.innerDelegate(request)),
+    );
     // An http transport completion re-enters the same way, as an http reactor turn that turns it into the
     // call's delegateAck / escalate / terminateAck.
     dependencies.http.onComplete((completion) =>

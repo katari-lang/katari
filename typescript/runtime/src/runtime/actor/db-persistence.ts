@@ -219,6 +219,8 @@ export class DbPersistence implements Persistence {
               key: ffiInstances.key,
               argument: ffiInstances.argument,
               status: ffiInstances.status,
+              relays: ffiInstances.relays,
+              innerCalls: ffiInstances.innerCalls,
             })
             .from(instances)
             .innerJoin(ffiInstances, eq(instances.id, ffiInstances.instanceId))
@@ -237,6 +239,15 @@ export class DbPersistence implements Persistence {
                     argument: unsealFromStorage(row.argument),
                     caller: row.caller,
                     status: row.status,
+                    relays: row.relays.map((relay) => ({
+                      escalation: relay.escalation as EscalationId,
+                      child: relay.child as DelegationId,
+                      childEscalation: relay.childEscalation as EscalationId,
+                    })),
+                    innerCalls: row.innerCalls.map((inner) => ({
+                      delegation: inner.delegation as DelegationId,
+                      call: inner.call,
+                    })),
                   },
                 ],
           );
@@ -436,6 +447,11 @@ export class DbPersistence implements Persistence {
       },
       ffi: {
         putFfiInstance: async (row) => {
+          // The bridges carry only routing ids / opaque tokens (no values), so they are not sealed. The
+          // branded ids widen to the column's plain-string shape implicitly.
+          const relays: Array<{ escalation: string; child: string; childEscalation: string }> =
+            row.relays;
+          const innerCalls: Array<{ delegation: string; call: string }> = row.innerCalls;
           await drizzleTx
             .insert(ffiInstances)
             .values({
@@ -444,8 +460,13 @@ export class DbPersistence implements Persistence {
               key: row.key,
               argument: sealForStorage(row.argument),
               status: row.status,
+              relays,
+              innerCalls,
             })
-            .onConflictDoUpdate({ target: ffiInstances.instanceId, set: { status: row.status } });
+            .onConflictDoUpdate({
+              target: ffiInstances.instanceId,
+              set: { status: row.status, relays, innerCalls },
+            });
         },
       },
       http: {

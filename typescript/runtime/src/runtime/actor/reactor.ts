@@ -329,6 +329,28 @@ export abstract class Reactor {
     return this.delegations.get(delegation)?.caller;
   }
 
+  /** The live delegations `caller` issued, with each row's callee reactor and state — the callee-call base
+   *  reads this to distribute a terminate to (and drain) the inner delegations one of its calls opened.
+   *  Derived from the base-owned rows, so it needs no parallel child bookkeeping and survives reload. */
+  protected issuedDelegationsOf(
+    caller: InstanceId,
+  ): Array<{ delegation: DelegationId; peer: ReactorName; state: DelegationState }> {
+    const issued: Array<{ delegation: DelegationId; peer: ReactorName; state: DelegationState }> =
+      [];
+    for (const [delegation, row] of this.delegations) {
+      if (row.caller === caller) {
+        issued.push({ delegation, peer: row.peer, state: row.state });
+      }
+    }
+    return issued;
+  }
+
+  /** The callee reactor of a live delegation this reactor issued — where a reply addressed to that callee
+   *  (an escalation's answer descending to the raiser) routes. `undefined` once the delegation retired. */
+  protected issuedPeerOf(delegation: DelegationId): ReactorName | undefined {
+    return this.delegations.get(delegation)?.peer;
+  }
+
   /** Open an escalation this reactor raised — from `send` on a user-facing `escalate` (idempotent). */
   private openEscalation(
     escalation: EscalationId,
@@ -400,11 +422,14 @@ export abstract class Reactor {
   }
 
   /** Stage an instance drop (cascade) for the next `persistBase`. Supersedes any upsert staged for the same id
-   *  this turn. Also reclaims the blobs the dropping instance still owns (the ones it did not ascend out as a
-   *  result), uniformly for a core instance and an ffi call's instance. */
+   *  this turn. Also reclaims the blobs AND scopes the dropping instance still owns (the ones it did not
+   *  ascend out as a result), uniformly for a core instance and an ffi call's instance — a core teardown
+   *  already freed its scopes (this is then a no-op), but an ffi call that received a closure from an inner
+   *  delegation and did not return it has no other reclamation path. */
   protected markInstanceDropped(id: InstanceId): void {
     this.dirtyInstances.set(id, { kind: "drop" });
     this.pool.reclaimBlobsOwnedBy(id);
+    this.pool.reclaimScopesOwnedBy(id);
   }
 
   /** Persist everything the base owns for this turn through `tx.base`, in FK order: the instance envelopes

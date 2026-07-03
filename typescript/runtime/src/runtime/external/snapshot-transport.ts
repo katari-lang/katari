@@ -14,7 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SidecarBundle } from "@katari-lang/types";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
-import type { FfiCall, FfiCompletion, FfiTransport } from "./runner.js";
+import type {
+  FfiCall,
+  FfiCompletion,
+  FfiInnerDelegate,
+  FfiInnerResult,
+  FfiTransport,
+} from "./runner.js";
 import type { SidecarSpawner } from "./subprocess-runner.js";
 import { SubprocessFfiTransport, subprocessSidecar } from "./subprocess-runner.js";
 
@@ -35,11 +41,12 @@ export type Materialize = (
 
 export class SnapshotFfiTransport implements FfiTransport {
   private sink: ((completion: FfiCompletion) => void) | null = null;
+  private delegateSink: ((request: FfiInnerDelegate) => void) | null = null;
   /** One sub-transport (one sidecar process) per snapshot, cached as the in-flight spawn promise so two
    *  concurrent dispatches for the same snapshot share a single process. */
   private readonly perSnapshot = new Map<SnapshotId, Promise<SubprocessFfiTransport>>();
-  /** Which snapshot each in-flight delegation belongs to, so an `abort` (delegation only) routes to the
-   *  right process. Cleared when the call completes. */
+  /** Which snapshot each in-flight delegation belongs to, so an `abort` / a `deliverDelegateResult`
+   *  (delegation only) routes to the right process. Cleared when the call completes. */
   private readonly delegationSnapshot = new Map<DelegationId, SnapshotId>();
 
   constructor(
@@ -49,6 +56,10 @@ export class SnapshotFfiTransport implements FfiTransport {
 
   onComplete(sink: (completion: FfiCompletion) => void): void {
     this.sink = sink;
+  }
+
+  onDelegate(sink: (request: FfiInnerDelegate) => void): void {
+    this.delegateSink = sink;
   }
 
   dispatch(call: FfiCall): void {
@@ -73,6 +84,14 @@ export class SnapshotFfiTransport implements FfiTransport {
     }
     // Only abort if the process is up; if its spawn is still pending, the dispatch has not gone out yet.
     void this.perSnapshot.get(snapshot)?.then((transport) => transport.abort(delegation));
+  }
+
+  deliverDelegateResult(result: FfiInnerResult): void {
+    const snapshot = this.delegationSnapshot.get(result.delegation);
+    if (snapshot === undefined) return; // the parent call is gone — the result is moot, drop it
+    void this.perSnapshot
+      .get(snapshot)
+      ?.then((transport) => transport.deliverDelegateResult(result));
   }
 
   /** Kill every sidecar process (host cleanup on actor disposal). */
@@ -101,6 +120,7 @@ export class SnapshotFfiTransport implements FfiTransport {
         this.delegationSnapshot.delete(completion.delegation);
         this.sink?.(completion);
       });
+      transport.onDelegate((request) => this.delegateSink?.(request));
       return transport;
     })();
     // Do not cache a failed spawn — a later dispatch should be able to retry rather than inherit the error.

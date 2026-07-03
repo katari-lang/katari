@@ -98,6 +98,18 @@ export class ResourcePool {
     }
   }
 
+  /** Reclaim every scope a dropping instance still owns, mirroring 'reclaimBlobsOwnedBy': drop each from the
+   *  warm store (and the owner index); the durable rows are removed by the instance's own drop cascade, so no
+   *  explicit row delete is staged. A core teardown already freed its scopes (`teardownInstance`), making this
+   *  a no-op there — it exists for the non-core instance kinds (an ffi call holding a closure an inner
+   *  delegation returned), which have no engine-side teardown. */
+  reclaimScopesOwnedBy(instanceId: InstanceId): void {
+    for (const scopeId of scopesOwnedBy(this.store, instanceId)) {
+      deleteScope(this.store, scopeId);
+      this.dirty.delete(scopeId);
+    }
+  }
+
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
    *  the value's recipient can re-own them rather than have them dropped with `owner`. Only `owner`'s own
    *  resources move; ancestors / others' are left as they are. */

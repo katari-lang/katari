@@ -73,7 +73,9 @@ CREATE TABLE "ffi_instances" (
 	"snapshot_id" uuid NOT NULL,
 	"key" text NOT NULL,
 	"argument" jsonb,
-	"status" text NOT NULL
+	"status" text NOT NULL,
+	"relays" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"inner_calls" jsonb DEFAULT '[]'::jsonb NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "http_instances" (

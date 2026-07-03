@@ -4,7 +4,7 @@
 // is correlated by its `delegation` id (the id the ffi reactor's pending-call and core's proxy share).
 
 import { describe, expect, test } from "vitest";
-import type { FfiCompletion } from "../src/runtime/external/runner.js";
+import type { FfiCompletion, FfiInnerDelegate } from "../src/runtime/external/runner.js";
 import type {
   SidecarHandlers,
   SidecarSpawner,
@@ -14,7 +14,7 @@ import {
   subprocessSidecar,
 } from "../src/runtime/external/subprocess-runner.js";
 import type { Json } from "@katari-lang/types";
-import type { SidecarReply, SidecarRequest } from "../src/runtime/external/sidecar-protocol.js";
+import type { RuntimeMessage, SidecarMessage } from "../src/runtime/external/sidecar-protocol.js";
 import {
   type DelegationId,
   type ProjectId,
@@ -28,7 +28,7 @@ const SNAPSHOT = "snapshot-ffi" as SnapshotId;
 /** A fake channel: records what the transport sends, lets the test drive replies / a crash on the latest
  *  spawn, and counts spawns (so respawn-after-crash is observable). */
 function fakeChannel() {
-  const sent: SidecarRequest[] = [];
+  const sent: RuntimeMessage[] = [];
   let current: SidecarHandlers | null = null;
   let spawnCount = 0;
   let killed = 0;
@@ -36,7 +36,7 @@ function fakeChannel() {
     spawnCount += 1;
     current = handlers;
     return {
-      send: (request) => sent.push(request),
+      send: (message) => sent.push(message),
       kill: () => {
         killed += 1;
       },
@@ -45,7 +45,7 @@ function fakeChannel() {
   return {
     spawner,
     sent,
-    reply: (reply: SidecarReply) => current?.onReply(reply),
+    reply: (message: SidecarMessage) => current?.onMessage(message),
     crash: (reason: string) => current?.onClose(reason),
     get spawnCount() {
       return spawnCount;
@@ -112,6 +112,38 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
       { delegation, outcome: { kind: "error", message: "boom!" } },
       { delegation, outcome: { kind: "cancelled" } },
     ]);
+  });
+
+  test("routes a sidecar delegate message to the delegate sink and sends its result back", () => {
+    const channel = fakeChannel();
+    const transport = new SubprocessFfiTransport(channel.spawner);
+    collectCompletions(transport);
+    const delegates: FfiInnerDelegate[] = [];
+    transport.onDelegate((request) => delegates.push(request));
+
+    transport.dispatch(call("caller"));
+    channel.reply({
+      kind: "delegate",
+      delegation,
+      call: "token-1",
+      agent: "main.helper",
+      argument: { n: 1 },
+    });
+    expect(delegates).toEqual([
+      { kind: "delegate", delegation, call: "token-1", agent: "main.helper", argument: { n: 1 } },
+    ]);
+
+    transport.deliverDelegateResult({
+      delegation,
+      call: "token-1",
+      outcome: { kind: "result", value: 2 },
+    });
+    expect(channel.sent.at(-1)).toEqual({
+      kind: "delegateResult",
+      delegation,
+      call: "token-1",
+      outcome: { kind: "result", value: 2 },
+    });
   });
 
   test("a sidecar crash fails every in-flight call as a panic, and the next dispatch respawns", () => {

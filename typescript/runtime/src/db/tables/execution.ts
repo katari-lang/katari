@@ -133,6 +133,18 @@ export const ffiInstances = pgTable("ffi_instances", {
    *  awaiting a caught-panic answer or the run's terminate). The caller reactor its reply routes to is on the
    *  generic envelope (`instances.caller_reactor`), not repeated here. */
   status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+  /** The escalations this call is proxying upward for its inner delegations (outer id → the child leg the
+   *  answer descends to) — so an in-flight answer still routes down after a restart. */
+  relays: jsonb("relays")
+    .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
+    .notNull()
+    .default([]),
+  /** The call's open inner delegations and the sidecar `call` token each settles under — so a result landing
+   *  after a warm reset still reaches its consumer in the (still-running) sidecar process. */
+  innerCalls: jsonb("inner_calls")
+    .$type<Array<{ delegation: string; call: string }>>()
+    .notNull()
+    .default([]),
 });
 
 // The `http` instance extension: an in-flight http call. Cascades with its envelope. Unlike `ffi`, it pins no

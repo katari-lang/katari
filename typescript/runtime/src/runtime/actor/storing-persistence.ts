@@ -201,6 +201,8 @@ export class StoringPersistence implements Persistence {
               argument: ext.argument,
               caller: envelope.callerReactor,
               status: ext.status,
+              relays: ext.relays,
+              innerCalls: ext.innerCalls,
             });
           }
           return result;

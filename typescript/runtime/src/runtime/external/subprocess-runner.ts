@@ -1,10 +1,11 @@
 // SubprocessFfiTransport: an `FfiTransport` backed by a long-lived external (FFI) sidecar process. It speaks
-// the newline-JSON `sidecar-protocol` over the child's stdio: a `dispatch` goes out on the child's stdin, the
-// reply (`result` / `error` / `cancelled`) comes back on its stdout, and stderr is left for the sidecar's own
-// logs. The sidecar is spawned lazily on the first dispatch and respawned after a crash; a crash fails every
-// call still in flight as an `error` completion (a panic), so the ffi reactor never waits forever on a dead
-// process. Calls are correlated by their `delegation` id — the id the ffi reactor's pending-call and core's
-// external proxy thread share — so the transport needs no request-id table of its own.
+// the newline-JSON `sidecar-protocol` over the child's stdio: a `dispatch` / `abort` / `delegateResult` goes
+// out on the child's stdin, the sidecar's messages (`result` / `error` / `cancelled` / `delegate`) come back
+// on its stdout, and stderr is left for the sidecar's own logs. The sidecar is spawned lazily on the first
+// dispatch and respawned after a crash; a crash fails every call still in flight as an `error` completion (a
+// panic), so the ffi reactor never waits forever on a dead process. Calls are correlated by their
+// `delegation` id — the id the ffi reactor's pending-call and core's external proxy thread share — so the
+// transport needs no request-id table of its own; inner agent calls ride the sidecar's own `call` token.
 //
 // The transport is split from the channel: this class implements the protocol logic over an injected
 // `SidecarSpawner`, so the routing / crash / cancel behaviour is unit-testable with a fake channel, while
@@ -12,25 +13,31 @@
 
 import { spawn } from "node:child_process";
 import type { DelegationId } from "../ids.js";
-import type { FfiCall, FfiCompletion, FfiTransport } from "./runner.js";
+import type {
+  FfiCall,
+  FfiCompletion,
+  FfiInnerDelegate,
+  FfiInnerResult,
+  FfiTransport,
+} from "./runner.js";
 import {
-  decodeReply,
-  encodeRequest,
+  decodeSidecarMessage,
+  encodeRuntimeMessage,
   LineBuffer,
-  type SidecarReply,
-  type SidecarRequest,
+  type RuntimeMessage,
+  type SidecarMessage,
 } from "./sidecar-protocol.js";
 
-/** The runtime's end of one running sidecar: send it a request, or kill it. */
+/** The runtime's end of one running sidecar: send it a message, or kill it. */
 export interface SidecarHandle {
-  send(request: SidecarRequest): void;
+  send(message: RuntimeMessage): void;
   kill(): void;
 }
 
-/** How the transport is notified by a sidecar: one reply per completed message, and one close (exit / spawn
+/** How the transport is notified by a sidecar: one message per protocol line, and one close (exit / spawn
  *  failure) with a human reason. */
 export interface SidecarHandlers {
-  onReply(reply: SidecarReply): void;
+  onMessage(message: SidecarMessage): void;
   onClose(reason: string): void;
 }
 
@@ -40,6 +47,7 @@ export type SidecarSpawner = (handlers: SidecarHandlers) => SidecarHandle;
 
 export class SubprocessFfiTransport implements FfiTransport {
   private sink: ((completion: FfiCompletion) => void) | null = null;
+  private delegateSink: ((request: FfiInnerDelegate) => void) | null = null;
   private handle: SidecarHandle | null = null;
   /** Calls dispatched but not yet replied — keyed by `delegation`, so a sidecar crash can fail them all as
    *  panics rather than leave their proxy threads suspended forever. */
@@ -49,6 +57,10 @@ export class SubprocessFfiTransport implements FfiTransport {
 
   onComplete(sink: (completion: FfiCompletion) => void): void {
     this.sink = sink;
+  }
+
+  onDelegate(sink: (request: FfiInnerDelegate) => void): void {
+    this.delegateSink = sink;
   }
 
   dispatch(call: FfiCall): void {
@@ -68,6 +80,17 @@ export class SubprocessFfiTransport implements FfiTransport {
     this.handle?.send({ kind: "abort", delegation });
   }
 
+  deliverDelegateResult(result: FfiInnerResult): void {
+    // A result for a process that already died is moot: the crash failed the parent call, and the respawned
+    // process's tokens never collide (the sidecar mints process-unique tokens), so dropping it is safe.
+    this.handle?.send({
+      kind: "delegateResult",
+      delegation: result.delegation,
+      call: result.call,
+      outcome: result.outcome,
+    });
+  }
+
   /** Kill the sidecar (host cleanup on actor disposal). In-flight calls fail through the close handler. */
   close(): void {
     this.handle?.kill();
@@ -77,22 +100,27 @@ export class SubprocessFfiTransport implements FfiTransport {
   private ensureSpawned(): SidecarHandle {
     if (this.handle !== null) return this.handle;
     const handle = this.spawner({
-      onReply: (reply) => this.onReply(reply),
+      onMessage: (message) => this.onMessage(message),
       onClose: (reason) => this.onClose(reason),
     });
     this.handle = handle;
     return handle;
   }
 
-  private onReply(reply: SidecarReply): void {
-    this.inFlight.delete(reply.delegation);
-    this.sink?.(toCompletion(reply));
+  private onMessage(message: SidecarMessage): void {
+    if (message.kind === "delegate") {
+      this.delegateSink?.(message);
+      return;
+    }
+    this.inFlight.delete(message.delegation);
+    this.sink?.(toCompletion(message));
   }
 
   private onClose(reason: string): void {
     // The sidecar died: fail every call still in flight as a panic, and drop the handle so the next dispatch
     // respawns. (A failure of a call whose proxy is already cancelling is treated by the reactor as its abort
-    // confirmation, so an abort that races the crash still completes gracefully.)
+    // confirmation, so an abort that races the crash still completes gracefully.) The calls' pending inner
+    // delegations die as orphans — their results are undeliverable and are dropped by `deliverDelegateResult`.
     const failed = [...this.inFlight];
     this.inFlight.clear();
     this.handle = null;
@@ -102,8 +130,8 @@ export class SubprocessFfiTransport implements FfiTransport {
   }
 }
 
-/** The real channel: spawn the sidecar command and frame the protocol over its stdio — `dispatch` / `abort`
- *  out on stdin, replies in on stdout (one JSON per line), stderr inherited for the sidecar's logs. */
+/** The real channel: spawn the sidecar command and frame the protocol over its stdio — runtime messages out
+ *  on stdin, sidecar messages in on stdout (one JSON per line), stderr inherited for the sidecar's logs. */
 export function subprocessSidecar(
   command: string,
   args: string[] = [],
@@ -133,8 +161,8 @@ export function subprocessSidecar(
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       for (const line of buffer.push(chunk)) {
-        const reply = decodeReply(line);
-        if (reply !== null) handlers.onReply(reply);
+        const message = decodeSidecarMessage(line);
+        if (message !== null) handlers.onMessage(message);
       }
     });
     // A write to a dying child's stdin surfaces EPIPE on the stream; the close handler already fails its
@@ -143,7 +171,7 @@ export function subprocessSidecar(
     child.on("exit", (code, signal) => close(exitReason(code, signal)));
     child.on("error", (error) => close(`FFI sidecar failed to start: ${error.message}`));
     return {
-      send: (request) => void child.stdin?.write(encodeRequest(request)),
+      send: (message) => void child.stdin?.write(encodeRuntimeMessage(message)),
       kill: () => void child.kill(),
     };
   };
@@ -154,13 +182,16 @@ function exitReason(code: number | null, signal: NodeJS.Signals | null): string 
   return `FFI sidecar exited (code ${code ?? "unknown"})`;
 }
 
-function toCompletion(reply: SidecarReply): FfiCompletion {
-  switch (reply.kind) {
+function toCompletion(message: Exclude<SidecarMessage, { kind: "delegate" }>): FfiCompletion {
+  switch (message.kind) {
     case "result":
-      return { delegation: reply.delegation, outcome: { kind: "result", value: reply.value } };
+      return { delegation: message.delegation, outcome: { kind: "result", value: message.value } };
     case "error":
-      return { delegation: reply.delegation, outcome: { kind: "error", message: reply.message } };
+      return {
+        delegation: message.delegation,
+        outcome: { kind: "error", message: message.message },
+      };
     case "cancelled":
-      return { delegation: reply.delegation, outcome: { kind: "cancelled" } };
+      return { delegation: message.delegation, outcome: { kind: "cancelled" } };
   }
 }

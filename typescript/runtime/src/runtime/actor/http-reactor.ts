@@ -60,6 +60,8 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
   }
 
   protected async persistCallRow(tx: PersistenceTx, row: CallRow<HttpPayload>): Promise<void> {
+    // The inner-delegation bridges (`relays` / `innerCalls`) are not persisted: an http transport surfaces
+    // no inner agent calls, so both are empty by construction.
     await tx.http.putHttpInstance({
       instanceId: row.instance,
       status: row.status,
@@ -74,6 +76,8 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
       status: row.status,
       // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
       payload: { argument: null },
+      relays: [],
+      innerCalls: [],
     }));
   }
 }

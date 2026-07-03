@@ -3,13 +3,13 @@
 // fails the call as an error. Driven against fake channels (no real `node`).
 
 import { describe, expect, test } from "vitest";
-import type { FfiCompletion } from "../src/runtime/external/runner.js";
+import type { FfiCompletion, FfiInnerDelegate } from "../src/runtime/external/runner.js";
 import {
   type BundleSource,
   type Materialize,
   SnapshotFfiTransport,
 } from "../src/runtime/external/snapshot-transport.js";
-import type { SidecarReply, SidecarRequest } from "../src/runtime/external/sidecar-protocol.js";
+import type { RuntimeMessage, SidecarMessage } from "../src/runtime/external/sidecar-protocol.js";
 import type { SidecarHandlers, SidecarSpawner } from "../src/runtime/external/subprocess-runner.js";
 import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 
@@ -17,13 +17,13 @@ const PROJECT = "project-ffi" as ProjectId;
 
 /** A fake sidecar channel: records what was sent and lets the test drive replies on it. */
 function fakeChannel() {
-  const sent: SidecarRequest[] = [];
+  const sent: RuntimeMessage[] = [];
   let handlers: SidecarHandlers | null = null;
   const spawner: SidecarSpawner = (h) => {
     handlers = h;
-    return { send: (request) => sent.push(request), kill: () => {} };
+    return { send: (message) => sent.push(message), kill: () => {} };
   };
-  return { spawner, sent, reply: (reply: SidecarReply) => handlers?.onReply(reply) };
+  return { spawner, sent, reply: (message: SidecarMessage) => handlers?.onMessage(message) };
 }
 
 /** A transport over fake channels: one channel per snapshot (recorded), and a bundle for every snapshot
@@ -40,7 +40,9 @@ function harness() {
   const transport = new SnapshotFfiTransport(bundleSource, materialize);
   const completions: FfiCompletion[] = [];
   transport.onComplete((completion) => completions.push(completion));
-  return { transport, channels, completions };
+  const delegates: FfiInnerDelegate[] = [];
+  transport.onDelegate((request) => delegates.push(request));
+  return { transport, channels, completions, delegates };
 }
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -104,5 +106,32 @@ describe("SnapshotFfiTransport", () => {
     await tick();
     expect(completions).toHaveLength(1);
     expect(completions[0]?.outcome.kind).toBe("error");
+  });
+
+  test("forwards a sidecar delegate to the shared sink and routes its result back by delegation", async () => {
+    const { transport, channels, delegates } = harness();
+    transport.dispatch(call("d1", "s1"));
+    await tick();
+    channels.get("s1")?.reply({
+      kind: "delegate",
+      delegation: "d1" as DelegationId,
+      call: "t1",
+      agent: "main.helper",
+      argument: null,
+    });
+    expect(delegates).toMatchObject([{ delegation: "d1", call: "t1", agent: "main.helper" }]);
+
+    transport.deliverDelegateResult({
+      delegation: "d1" as DelegationId,
+      call: "t1",
+      outcome: { kind: "result", value: 7 },
+    });
+    await tick(); // the delivery routes to the process on a microtask
+    expect(channels.get("s1")?.sent.at(-1)).toEqual({
+      kind: "delegateResult",
+      delegation: "d1",
+      call: "t1",
+      outcome: { kind: "result", value: 7 },
+    });
   });
 });

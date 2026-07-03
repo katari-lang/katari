@@ -101,6 +101,22 @@ export interface PersistedRunEscalationAudit {
   answer: Value;
 }
 
+/** One escalation an ffi call is proxying upward: the outer id it was re-raised under, and the child leg
+ *  (inner delegation + its escalation) the answer descends to. Rides on the call's ext row so an in-flight
+ *  answer still routes down after a restart. */
+export interface PersistedEscalationRelay {
+  escalation: EscalationId;
+  child: DelegationId;
+  childEscalation: EscalationId;
+}
+
+/** One inner delegation's transport correlation (delegation ↔ the sidecar's `call` token), riding on the
+ *  call's ext row so a settled result still finds its consumer after a warm reset. */
+export interface PersistedInnerCall {
+  delegation: DelegationId;
+  call: string;
+}
+
 /** The `ffi` instance extension write (`ffi_instances`) — the call-specific state behind an `ffi`-kind
  *  instance envelope. The delegation it handles is on the envelope (`delegation_id`), so it is not repeated
  *  here; `projectId` is injected by the transaction. */
@@ -111,6 +127,8 @@ export interface PersistedFfiInstanceRow {
   key: string;
   argument: Value | null;
   status: "running" | "cancelling" | "awaitingAnswer";
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
 }
 
 /** One in-flight FFI call a reactivation reads (envelope ⋈ `ffi_instances`): the ffi reactor rebuilds its
@@ -124,6 +142,8 @@ export interface PersistedFfiInstance {
   argument: Value | null;
   caller: ReactorName;
   status: "running" | "cancelling" | "awaitingAnswer";
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
 }
 
 /** The `http` instance extension write (`http_instances`) — just the call-specific `status` (the envelope

@@ -13,7 +13,9 @@ import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import {
   type FfiCall,
   type FfiCompletion,
+  type FfiHandler,
   type FfiTransport,
+  InProcessFfiTransport,
   StubFfiTransport,
 } from "../src/runtime/external/runner.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
@@ -43,6 +45,7 @@ function recordingRunner(complete: Record<string, boolean>): {
     onComplete(register) {
       sink = register;
     },
+    onDelegate() {},
     dispatch(call: FfiCall) {
       dispatched.push(call.key);
       if (complete[call.key]) {
@@ -54,6 +57,7 @@ function recordingRunner(complete: Record<string, boolean>): {
       }
     },
     abort() {},
+    deliverDelegateResult() {},
   };
   return { runner, dispatched };
 }
@@ -492,5 +496,81 @@ describe("recovery", () => {
     // Recovery quiesced: the outbox drained and nothing is left suspended.
     await waitUntil(() => (store.outboxSize() === 0 ? true : undefined));
     expect(store.instanceCount()).toBe(0);
+  });
+
+  test("recovers a handler suspended on an inner delegation: the re-dispatched handler calls afresh, the orphan is dropped", async () => {
+    // agent main() { return compute({}) }   — compute is an FFI handler that calls another FFI key
+    // ("helper") through the inner agent-call channel. The first actor's helper never completes, so the
+    // project persists suspended with: main + the compute call (its innerCalls bridge) + the helper call.
+    // A fresh actor re-dispatches BOTH ffi calls: the redispatched compute handler makes a NEW inner call
+    // (its previous continuation died with the "process"); the orphaned old helper delegation completes
+    // too, and its result — delivered under the stale bridge token — must be dropped, not misdelivered.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 20 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("compute") },
+                argument: 20,
+                output: 21,
+              },
+              { kind: "exit", target: 0, value: 21 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        7: {
+          block: { kind: "external", key: "compute", input: 8, reactor: "ffi" },
+          parameters: { parameter: 8 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("compute")]: 6,
+      },
+      names: {},
+    };
+
+    const persistence = new StoringPersistence();
+
+    // First actor: compute suspends on an inner call to helper, which never completes.
+    let helperDispatched = false;
+    const firstHandlers: Record<string, FfiHandler> = {
+      compute: (_argument, context) => context.call("helper", null, { reactor: "ffi" }),
+      helper: () => {
+        helperDispatched = true;
+        return new Promise(() => {}); // never settles — the durable suspend point
+      },
+    };
+    const actorOne = makeActor(ir, persistence, new InProcessFfiTransport(firstHandlers));
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    // The transport dispatch is strictly post-commit, so helper's dispatch means the whole suspend point —
+    // main, the compute call (with its innerCalls bridge), and the helper call — is already durable.
+    await waitUntil(() => (helperDispatched ? true : undefined));
+
+    // Crash + recover: the fresh transport's helper completes immediately.
+    const secondHandlers: Record<string, FfiHandler> = {
+      compute: async (_argument, context) => {
+        const inner = await context.call("helper", null, { reactor: "ffi" });
+        return `compute: ${String(inner)}`;
+      },
+      helper: () => "helped",
+    };
+    const actorTwo = makeActor(ir, persistence, new InProcessFfiTransport(secondHandlers));
+    await actorTwo.activate();
+
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "compute: helped" });
   });
 });

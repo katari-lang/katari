@@ -1,5 +1,5 @@
 {
-  "id": "1d59a6ac-3f37-42b1-aca6-a732ed6b6851",
+  "id": "467e213d-47b7-4e74-8d8c-83673877da88",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -678,6 +678,20 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "relays": {
+          "name": "relays",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "inner_calls": {
+          "name": "inner_calls",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
         }
       },
       "indexes": {},
