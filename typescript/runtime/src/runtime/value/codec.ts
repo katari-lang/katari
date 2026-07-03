@@ -1,27 +1,140 @@
 // Value codec + scalar helpers. Three jobs:
 //   - lift an IR `Literal` into a runtime `Value` (`literalToValue`);
-//   - convert across the HTTP boundary, where the wire speaks bare `Json` and the engine speaks the
-//     tagged `Value` model (`jsonToValue` / `valueToJson`);
-//   - the value-level operations the engine and pattern matcher need (`valueEquals`, `valueTag`).
+//   - convert across the HTTP / FFI value boundary, where the wire speaks bare `Json` and the engine
+//     speaks the tagged `Value` model (`jsonToValue` / `valueToJson`);
+//   - the value-level operations the engine and pattern matcher need (`valueEquals`, `valueMatchesTag`).
+//
+// `jsonToValue` / `valueToJson` are a total, schema-independent bijection: every `Value` has one
+// unambiguous JSON form and back, so no schema is consulted here. Validation is a separate, strict pass
+// (`./validation.ts`) — decode never rewrites to fit a schema. The wire conventions those two walks obey
+// (the reserved keys, `$`-key escaping, variant detection) are defined at the top of this file and shared
+// with the `json` data-type codec (`engine/json-value.ts`), so the two cannot drift.
 //
 // A bare JSON number is ambiguous between the runtime's `integer` and `number`; at the untyped wire
 // boundary we split on `Number.isInteger`. Inside the engine the distinction is carried explicitly, so
 // this heuristic only ever applies to values entering from outside (a run argument, an answered
-// escalation), never to values already in flight.
+// escalation), never to values already in flight. A blob-backed string surfaces as its `$ref` handle
+// here (the value-transport boundary hands out a handle, not the bytes); the `json` document codec
+// (`engine/json-value.ts`) instead materialises it to text, since a JSON document's string is text.
 
-import type { Json, Literal, QualifiedName, TypeTag } from "@katari-lang/types";
-import type { BlobId } from "../ids.js";
-import type { SemanticKind, Value } from "./types.js";
+import {
+  createAgentName,
+  type GenericArgumentSchema,
+  type Json,
+  type Literal,
+  type TypeTag,
+} from "@katari-lang/types";
+import { type BlobId, toScopeId, toSnapshotId } from "../ids.js";
+import { jsonToRequests, jsonToSchema, requestsToJson, schemaToJson } from "./schema-json.js";
+import type {
+  AgentValue,
+  ClosureValue,
+  GenericSubstitution,
+  SemanticKind,
+  Value,
+} from "./types.js";
 
-// The reserved `$`-prefixed discriminator keys the compiler emits in a value's JSON schema (mirrors
-// `Katari.Schema`): a `data` value's constructor, a callable reference, a file/blob handle. The engine's
-// tagged `Value` keeps these out-of-band; the codec bridges to/from the keyed JSON form at the boundary.
-const CONSTRUCTOR_KEY = "$constructor";
-const AGENT_KEY = "$agent";
-const FILE_KEY = "$ref";
-/** The placeholder a private subtree collapses to when emitted under the `redact` policy (a user-facing
- *  boundary). A reserved `$`-prefixed sentinel, like the others, so it never collides with real record data. */
-const REDACTED_KEY = "$redacted";
+// ─── the wire conventions ─────────────────────────────────────────────────────────────────────────
+//
+// A JSON object is exactly one variant, chosen by which reserved single-`$` discriminator key it carries:
+//
+//   data value      { "$constructor": name, "value": { …fields } }
+//   file handle     { "$ref": blobId, "semanticKind": …, "size": …, "hash": …, "contentType"? }
+//   agent reference { "$agent": name, "snapshot": …, "generics"? }
+//   closure         { "$closure": blockId, "scopeId": …, "snapshot": …, "module": …, "generics"? }
+//   bare record     { …escaped keys }              (no reserved key present)
+//
+// A data value's fields nest under `value`, so no field name can collide with a discriminator. A bare
+// record's own keys that begin with `$` are escaped (leading `$` doubled), so a record can never emit a
+// single-`$` key — the discriminator namespace is exclusive. Only the discriminator key is `$`-prefixed;
+// every metadata key (`value`, `semanticKind`, `snapshot`, …) is plain and read positionally within its
+// variant. `$redacted` is the one exception: it marks a subtree the `redact` policy withheld — a one-way
+// sink, not part of the bijection. `engine/json-value.ts` (the `json` data type) obeys the same conventions.
+
+/** A `data` value's constructor name; its fields ride under `VALUE_KEY`. */
+export const CONSTRUCTOR_KEY = "$constructor";
+/** A `file` value's blob id; its metadata rides in the plain sibling keys. */
+export const FILE_KEY = "$ref";
+/** A top-level agent reference's qualified name. */
+export const AGENT_KEY = "$agent";
+/** A closure reference's block id. */
+export const CLOSURE_KEY = "$closure";
+/** The placeholder a private subtree collapses to under the `redact` policy (one-way, not decoded). */
+export const REDACTED_KEY = "$redacted";
+
+// Plain metadata keys (no `$`), read positionally within a variant.
+export const VALUE_KEY = "value";
+export const SEMANTIC_KIND_KEY = "semanticKind";
+export const SIZE_KEY = "size";
+export const HASH_KEY = "hash";
+export const CONTENT_TYPE_KEY = "contentType";
+export const SNAPSHOT_KEY = "snapshot";
+export const GENERICS_KEY = "generics";
+export const SCOPE_KEY = "scopeId";
+export const MODULE_KEY = "module";
+
+/** Escape a bare-record key for the wire: a key starting with `$` gets its leading `$` doubled, so a
+ *  record can never emit a single-`$` key (that namespace is the reserved discriminators'). */
+export function escapeRecordKey(key: string): string {
+  return key.startsWith("$") ? `$${key}` : key;
+}
+
+/** Reverse `escapeRecordKey`: strip one leading `$` from a `$$…` key (our escaped output). A single-`$`
+ *  key was never produced by our encoder, so if one reaches a record position it is an external
+ *  producer's literal key — preserve it unchanged. */
+export function unescapeRecordKey(key: string): string {
+  return key.startsWith("$$") ? key.slice(1) : key;
+}
+
+export type WireKind = "data" | "file" | "agent" | "closure" | "redacted";
+
+/** Which variant a JSON object denotes, from which reserved discriminator key it carries (checked in a
+ *  fixed order; the keys are mutually exclusive in well-formed input). `undefined` means a bare record. */
+export function wireKindOf(hasKey: (key: string) => boolean): WireKind | undefined {
+  if (hasKey(CONSTRUCTOR_KEY)) return "data";
+  if (hasKey(FILE_KEY)) return "file";
+  if (hasKey(AGENT_KEY)) return "agent";
+  if (hasKey(CLOSURE_KEY)) return "closure";
+  if (hasKey(REDACTED_KEY)) return "redacted";
+  return undefined;
+}
+
+/** Serialise a callable value's `generics` (a `foo[T]` instantiation) so a `$agent` / `$closure`
+ *  reference round-trips it. Each argument is a type schema or an effect's request list. */
+export function genericsToJson(generics: GenericSubstitution): Json {
+  const out: { [name: string]: Json } = {};
+  for (const [name, argument] of Object.entries(generics)) {
+    out[name] =
+      argument.kind === "type"
+        ? { kind: "type", schema: schemaToJson(argument.schema) }
+        : { kind: "requests", requests: requestsToJson(argument.requests) };
+  }
+  return out;
+}
+
+/** Reconstruct a `generics` substitution from its JSON form (the inverse of `genericsToJson`). */
+export function genericsFromJson(json: Json): GenericSubstitution {
+  if (typeof json !== "object" || json === null || Array.isArray(json)) return {};
+  const generics: GenericSubstitution = {};
+  for (const [name, entry] of Object.entries(json)) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const argument = genericArgumentFromJson(entry);
+    if (argument !== undefined) generics[name] = argument;
+  }
+  return generics;
+}
+
+function genericArgumentFromJson(entry: {
+  [key: string]: Json;
+}): GenericArgumentSchema | undefined {
+  if (entry.kind === "requests") {
+    return { kind: "requests", requests: jsonToRequests(entry.requests ?? []) };
+  }
+  if (entry.kind === "type") {
+    return { kind: "type", schema: jsonToSchema(entry.schema ?? {}) };
+  }
+  return undefined;
+}
 
 /**
  * How `valueToJson` treats a private (`value.private`) node:
@@ -50,7 +163,10 @@ export function literalToValue(literal: Literal): Value {
   }
 }
 
-/** Bare wire JSON -> tagged runtime value (façade input boundary). Numbers split on integer-ness. */
+// ─── bare Json → Value (façade / FFI input boundary) ─────────────────────────────────────────────
+
+/** Bare wire JSON -> tagged runtime value. Numbers split on integer-ness; objects dispatch on their
+ *  reserved discriminator key (`./wire.ts`). A total inverse of `valueToJson` (reveal). */
 export function jsonToValue(json: Json): Value {
   if (json === null) return { kind: "null" };
   switch (typeof json) {
@@ -66,45 +182,115 @@ export function jsonToValue(json: Json): Value {
   if (Array.isArray(json)) {
     return { kind: "array", elements: json.map(jsonToValue) };
   }
-  // A file handle reconstructs the blob ref it names; a callable cannot be built from JSON (the AI never
-  // constructs one). Everything else is an object, tagged (a `data` value) or bare.
-  if (FILE_KEY in json) {
-    return fileFromJson(json);
+  switch (wireKindOf((key) => Object.hasOwn(json, key))) {
+    case "data":
+      return dataFromJson(json);
+    case "file":
+      return fileFromJson(json);
+    case "agent":
+      return agentFromJson(json);
+    case "closure":
+      return closureFromJson(json);
+    case "redacted":
+      // `$redacted` marks content the `redact` policy withheld — it was never encodable, so it is not
+      // decodable either. Reaching it means feeding a redacted document back in; fail loudly.
+      throw new Error(
+        "a redacted value cannot be decoded (its content was withheld at a boundary)",
+      );
+    case undefined:
+      return { kind: "record", fields: recordFieldsFromJson(json) };
   }
-  if (AGENT_KEY in json) {
-    throw new Error("a callable value cannot be constructed from JSON input");
-  }
-  const constructorTag = json[CONSTRUCTOR_KEY];
-  const fields: Record<string, Value> = {};
+}
+
+/** Decode a bare JSON object's entries into record fields, unescaping keys, into a prototype-less map
+ *  (so a `__proto__` / reserved-looking key is an ordinary own field, never a prototype write). */
+function recordFieldsFromJson(json: { [key: string]: Json }): Record<string, Value> {
+  const fields: Record<string, Value> = Object.create(null);
   for (const [key, child] of Object.entries(json)) {
-    if (key === CONSTRUCTOR_KEY) continue;
-    fields[key] = jsonToValue(child);
+    fields[unescapeRecordKey(key)] = jsonToValue(child);
   }
-  return typeof constructorTag === "string"
-    ? { kind: "record", fields, ctor: constructorTag as QualifiedName }
-    : { kind: "record", fields };
+  return fields;
+}
+
+/** `{ "$constructor": name, "value": { …fields } }` -> a tagged `data` value. */
+function dataFromJson(json: { [key: string]: Json }): Value {
+  const constructorTag = json[CONSTRUCTOR_KEY];
+  const valueObject = json[VALUE_KEY];
+  if (typeof constructorTag !== "string") {
+    throw new Error("a data value's $constructor must be a string");
+  }
+  const fields =
+    typeof valueObject === "object" && valueObject !== null && !Array.isArray(valueObject)
+      ? recordFieldsFromJson(valueObject)
+      : Object.create(null);
+  return { kind: "record", fields, ctor: createAgentName(constructorTag) };
 }
 
 /** Reconstruct a blob `ref` from a `{ "$ref": blobId, size, hash, semanticKind?, contentType? }` handle. */
 function fileFromJson(json: { [key: string]: Json }): Value {
   const blobId = json[FILE_KEY];
-  const size = json.size;
-  const hash = json.hash;
+  const size = json[SIZE_KEY];
+  const hash = json[HASH_KEY];
   if (typeof blobId !== "string" || typeof size !== "number" || typeof hash !== "string") {
     throw new Error("a file handle must carry a string $ref, a numeric size, and a string hash");
   }
-  const semanticKind: SemanticKind = json.semanticKind === "string" ? "string" : "file";
+  const semanticKind: SemanticKind = json[SEMANTIC_KIND_KEY] === "string" ? "string" : "file";
+  const contentType = json[CONTENT_TYPE_KEY];
   const ref: Value = { kind: "ref", semanticKind, blobId: blobId as BlobId, hash, size };
-  return typeof json.contentType === "string" ? { ...ref, contentType: json.contentType } : ref;
+  return typeof contentType === "string" ? { ...ref, contentType } : ref;
 }
 
+/** `{ "$agent": name, "snapshot": …, "generics"? }` -> a top-level agent reference value. */
+function agentFromJson(json: { [key: string]: Json }): Value {
+  const name = json[AGENT_KEY];
+  const snapshot = json[SNAPSHOT_KEY];
+  if (typeof name !== "string" || typeof snapshot !== "string") {
+    throw new Error("an agent reference must carry a string $agent name and a string snapshot");
+  }
+  const agent: AgentValue = {
+    kind: "agent",
+    name: createAgentName(name),
+    snapshot: toSnapshotId(snapshot),
+  };
+  const generics = json[GENERICS_KEY];
+  return generics !== undefined ? { ...agent, generics: genericsFromJson(generics) } : agent;
+}
+
+/** `{ "$closure": blockId, "scopeId": …, "snapshot": …, "module": …, "generics"? }` -> a closure value. */
+function closureFromJson(json: { [key: string]: Json }): Value {
+  const blockId = json[CLOSURE_KEY];
+  const scopeId = json[SCOPE_KEY];
+  const snapshot = json[SNAPSHOT_KEY];
+  const module = json[MODULE_KEY];
+  if (
+    typeof blockId !== "number" ||
+    typeof scopeId !== "number" ||
+    typeof snapshot !== "string" ||
+    typeof module !== "string"
+  ) {
+    throw new Error(
+      "a closure reference must carry a numeric $closure/scopeId and string snapshot/module",
+    );
+  }
+  const closure: ClosureValue = {
+    kind: "closure",
+    blockId,
+    scopeId: toScopeId(scopeId),
+    snapshot: toSnapshotId(snapshot),
+    module,
+  };
+  const generics = json[GENERICS_KEY];
+  return generics !== undefined ? { ...closure, generics: genericsFromJson(generics) } : closure;
+}
+
+// ─── Value → bare Json (façade / FFI output boundary) ────────────────────────────────────────────
+
 /**
- * Tagged runtime value -> bare wire JSON (façade output boundary). The `policy` decides what happens at a
- * private node: `redact` (the default, fail-closed) collapses the private subtree to `{ "$redacted": true }`
- * for any user-facing boundary, while `reveal` emits the real value — an explicit opt-in for the FFI sidecar,
- * the one allowed sink. The marker itself is not part of the wire shape either way. Blob refs surface as a
- * small descriptor rather than their (potentially large, async-fetched) bytes; a callable value is never
- * run-result data and throws.
+ * Tagged runtime value -> bare wire JSON. The `policy` decides what happens at a private node: `redact`
+ * (the default, fail-closed) collapses the private subtree to `{ "$redacted": true }` for any user-facing
+ * boundary; `reveal` emits the real value — an explicit opt-in for the FFI sidecar, the one allowed sink.
+ * A blob ref surfaces as its `$ref` descriptor (not its bytes — download is a separate path). The total
+ * inverse of `jsonToValue` (under `reveal`).
  */
 export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Json {
   if (policy === "redact" && value.private === true) {
@@ -114,41 +300,71 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
     case "null":
       return null;
     case "boolean":
+      return value.value;
     case "integer":
     case "number":
+      if (!Number.isFinite(value.value)) {
+        throw new Error("a non-finite number (NaN / Infinity) has no JSON representation");
+      }
+      return value.value;
     case "string":
       return value.value;
     case "array":
       return value.elements.map((element) => valueToJson(element, policy));
     case "record": {
-      const out: { [key: string]: Json } = {};
-      // A tagged `data` value re-acquires its `$constructor` discriminator; a bare record has none.
-      if (value.ctor !== undefined) {
-        out[CONSTRUCTOR_KEY] = value.ctor;
-      }
-      for (const [key, child] of Object.entries(value.fields)) {
-        out[key] = valueToJson(child, policy);
-      }
+      const fields = recordFieldsToJson(value.fields, policy);
+      if (value.ctor === undefined) return fields;
+      // A `data` value nests its fields under `value`, keeping the discriminator disjoint from them.
+      const out: { [key: string]: Json } = Object.create(null);
+      out[CONSTRUCTOR_KEY] = value.ctor;
+      out[VALUE_KEY] = fields;
       return out;
     }
-    case "ref":
-      // A file/blob handle: expose the addressable metadata, not the bytes (fetch is a separate, async
-      // download path). A semantic string blob would be materialised before reaching here.
-      return {
-        [FILE_KEY]: value.blobId,
-        semanticKind: value.semanticKind,
-        size: value.size,
-        hash: value.hash,
-      };
-    case "closure":
-      // A closure's captured scope id is meaningless outside the engine — it cannot leave as JSON data.
-      throw new Error(
-        "a closure value cannot cross the JSON boundary (it captures engine-local scope)",
-      );
-    case "agent":
-      return { [AGENT_KEY]: value.name };
+    case "ref": {
+      // A file / blob handle: expose the addressable metadata, not the bytes.
+      const out: { [key: string]: Json } = Object.create(null);
+      out[FILE_KEY] = value.blobId;
+      out[SEMANTIC_KIND_KEY] = value.semanticKind;
+      out[SIZE_KEY] = value.size;
+      out[HASH_KEY] = value.hash;
+      if (value.contentType !== undefined) out[CONTENT_TYPE_KEY] = value.contentType;
+      return out;
+    }
+    case "agent": {
+      const out: { [key: string]: Json } = Object.create(null);
+      out[AGENT_KEY] = value.name;
+      out[SNAPSHOT_KEY] = value.snapshot;
+      if (value.generics !== undefined) out[GENERICS_KEY] = genericsToJson(value.generics);
+      return out;
+    }
+    case "closure": {
+      // A closure carries engine-local ids (its captured scope must still exist to be callable); they
+      // round-trip so a closure returned to / from the JSON boundary reconstructs.
+      const out: { [key: string]: Json } = Object.create(null);
+      out[CLOSURE_KEY] = value.blockId;
+      out[SCOPE_KEY] = value.scopeId;
+      out[SNAPSHOT_KEY] = value.snapshot;
+      out[MODULE_KEY] = value.module;
+      if (value.generics !== undefined) out[GENERICS_KEY] = genericsToJson(value.generics);
+      return out;
+    }
   }
 }
+
+/** Encode record fields to a bare JSON object, escaping keys, into a prototype-less map (so a
+ *  `__proto__` / `$`-prefixed field is an ordinary own key, not a prototype write). */
+function recordFieldsToJson(
+  fields: Record<string, Value>,
+  policy: PrivatePolicy,
+): { [key: string]: Json } {
+  const out: { [key: string]: Json } = Object.create(null);
+  for (const [key, child] of Object.entries(fields)) {
+    out[escapeRecordKey(key)] = valueToJson(child, policy);
+  }
+  return out;
+}
+
+// ─── value-level operations ──────────────────────────────────────────────────────────────────────
 
 /**
  * Structural equality for `==` and `PatternLiteral` matching. Scalars compare by value; a string

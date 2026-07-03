@@ -1,7 +1,7 @@
 // The stdlib sub-module prims (`prelude.json.*`, `prelude.record.*`, `prelude.array.*`,
 // `prelude.string.*`) and `prelude.get_metadata`, exercised directly through the registry (no
-// actor). JSON round-trips cover the wire conventions ($constructor / $agent / $ref) and the
-// pass-through that lets `json.encode` mix plain fields with already-`json` values.
+// actor). JSON round-trips cover the wire conventions (nested `$constructor`, `$agent` / `$closure`
+// references carrying their snapshot, `$ref` handles) and the total encode/decode bijection.
 
 import {
   createAgentName,
@@ -90,41 +90,39 @@ describe("prelude.json", () => {
   });
 
   test("encode treats a json value like any data value (no special case) and decode inverts it", async () => {
-    // `json` is an ordinary data type: encoding a json value yields its tagged wire form, and
-    // decode[T] re-tags it back — the round-trip law decode(encode(x)) == x, uniform in T.
+    // `json` is an ordinary data type: encoding a json value yields its nested tagged wire form, and
+    // decode[T] re-tags it back — the total round-trip law decode(encode(x)) == x, uniform in T.
     const original = jsonValueFromJson("hi");
     const encoded = await run("prelude.json.encode", { value: original });
     await expect(asJson(encoded)).resolves.toEqual({
       $constructor: "prelude.json.json_string",
-      value: "hi",
+      value: { value: "hi" },
     });
     await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(
       original,
     );
   });
 
-  test("encode keeps a data value's constructor and decode re-tags it", async () => {
+  test("encode nests a data value's fields under `value` and decode re-tags it", async () => {
     const data: Value = {
       kind: "record",
-      fields: { value: int(3) },
+      fields: { n: int(3) },
       ctor: createAgentName("main.box"),
     };
     const encoded = await run("prelude.json.encode", { value: data });
-    await expect(asJson(encoded)).resolves.toEqual({ $constructor: "main.box", value: 3 });
+    await expect(asJson(encoded)).resolves.toEqual({ $constructor: "main.box", value: { n: 3 } });
     const decoded = await run("prelude.json.decode", { value: encoded }, contextWithT({}));
     expect(decoded).toEqual(data);
   });
 
-  test("encode renders an agent value as its $agent reference and decode refuses it", async () => {
+  test("encode renders an agent as its $agent reference (with snapshot) and decode reconstructs it", async () => {
     const agent: Value = { kind: "agent", name: createAgentName("main.tool"), snapshot: SNAPSHOT };
     const encoded = await run("prelude.json.encode", { value: agent });
-    await expect(asJson(encoded)).resolves.toEqual({ $agent: "main.tool" });
-    await expect(
-      run("prelude.json.decode", { value: encoded }, contextWithT({})),
-    ).rejects.toThrow(/callable/);
+    await expect(asJson(encoded)).resolves.toEqual({ $agent: "main.tool", snapshot: SNAPSHOT });
+    await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(agent);
   });
 
-  test("encode refuses a closure", async () => {
+  test("encode renders a closure as its $closure reference and decode reconstructs it", async () => {
     const closure: Value = {
       kind: "closure",
       blockId: 1,
@@ -132,7 +130,14 @@ describe("prelude.json", () => {
       snapshot: SNAPSHOT,
       module: "main",
     };
-    await expect(run("prelude.json.encode", { value: closure })).rejects.toThrow(/closure/);
+    const encoded = await run("prelude.json.encode", { value: closure });
+    await expect(asJson(encoded)).resolves.toEqual({
+      $closure: 1,
+      scopeId: 0,
+      snapshot: SNAPSHOT,
+      module: "main",
+    });
+    await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(closure);
   });
 
   test("decode flattens nested json values into plain values", async () => {
@@ -200,18 +205,10 @@ describe("prelude.json", () => {
     });
     expect(fused).toEqual(composed);
     if (fused.kind !== "string") throw new Error("expected a string");
-    // parse_as[unknown] of to_text(x) round-trips x (the $constructor entries re-tag).
+    // parse_as[unknown] of to_text(x) round-trips x (the nested $constructor entries re-tag).
     await expect(
       run("prelude.json.parse_as", { text: fused }, contextWithT({})),
     ).resolves.toEqual(mixed);
-    const closure: Value = {
-      kind: "closure",
-      blockId: 1,
-      scopeId: 0 as ScopeId,
-      snapshot: SNAPSHOT,
-      module: "main",
-    };
-    await expect(run("prelude.json.to_text", { value: closure })).rejects.toThrow(/closure/);
   });
 
   test("stringify takes json only; the generic pipe is stringify(encode(x))", async () => {

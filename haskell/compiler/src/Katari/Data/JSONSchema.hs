@@ -14,7 +14,7 @@
 -- order — readers must not rely on the written order.
 module Katari.Data.JSONSchema where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), object, withObject, (.:?), (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser)
@@ -111,15 +111,17 @@ instance ToJSON AdditionalProperties where
 instance FromJSON JSONSchema where
   parseJSON = withObject "JSONSchema" $ \schemaObject -> do
     generic <- schemaObject .:? "$generic"
-    notKeyword <- schemaObject .:? "not"
+    -- Parse the @not@ body as a schema so its content is not discarded (a @{"not": X}@ is not
+    -- unconditionally bottom).
+    notSchema <- schemaObject .:? "not"
     -- @const@ is looked up by key membership, not @.:?@ — a @{"const": null}@ pins the literal null,
     -- which @.:?@ would conflate with the key being absent.
     let constant = KeyMap.lookup "const" schemaObject
     anyOfBranches <- schemaObject .:? "anyOf"
     typeName <- schemaObject .:? "type"
-    case (generic, notKeyword :: Maybe Value, constant, anyOfBranches) of
+    case (generic, notSchema :: Maybe JSONSchema, constant, anyOfBranches) of
       (Just genericId, _, _, _) -> pure (SchemaGeneric genericId)
-      (_, Just _, _, _) -> pure SchemaNever
+      (_, Just notBody, _, _) -> pure (interpretNot notBody)
       (_, _, Just value, _) -> pure (SchemaConst value)
       (_, _, _, Just branches) -> pure (SchemaAnyOf branches)
       _ -> case typeName :: Maybe Text of
@@ -138,6 +140,13 @@ instance FromJSON JSONSchema where
         Just "object" -> SchemaObject <$> parseObjectSchema schemaObject
         Just other -> fail ("unsupported schema type: " <> show other)
         Nothing -> pure SchemaAny
+    where
+      -- Katari models only the bottom schema @{"not": {}}@ (nothing matches). A non-empty @not@ body is
+      -- outside the modelled subset; a schema *reader* (the CLI prompting for arguments) over-approximates
+      -- it as "anything" rather than mis-reading it as bottom, which would reject every value.
+      interpretNot notBody = case notBody of
+        SchemaAny -> SchemaNever
+        _ -> SchemaAny
 
 -- | Decode the object-schema keywords off an already-opened @{"type": "object", ...}@ document.
 -- JSON object keys are unordered, so properties come back in key order.

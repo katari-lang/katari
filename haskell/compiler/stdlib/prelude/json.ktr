@@ -14,25 +14,28 @@
 //   - `parse_as[T] : string -> T`      fused `decode[T]` of `parse` (no intermediate tree)
 //   - `to_text[T] : T -> string`       fused `stringify` of `encode` (no intermediate tree)
 //
-// Laws: `stringify(parse(t)) == t`; `decode[T](encode(x)) == x` for every T — including a T that
-// contains `json` itself, which is why `encode` does NOT special-case `json` values: a `json` value
-// is a `data` value like any other and embeds as its tagged wire form (`$constructor` entry) — and
-// the fused pair agrees with the composed one (`to_text(x) == stringify(encode(x))`,
-// `parse_as[T](t) == decode[T](parse(t))`). Composing a larger document out of existing `json`
-// values — a tool list embedding schemas from `get_metadata` — is explicit tree construction:
-// `json_object(entries = { input_schema = m.input, ... })`.
+// Laws: `stringify(parse(t)) == t`; `decode[T](encode(x)) == x` for every T. The value <-> `json`
+// conversion is a *total, blind bijection* — every value has one unambiguous wire form and back, with
+// no schema consulted — so the law holds for every T, including a T that contains `json`, an agent, or
+// a closure. Validation against T's schema is a *separate* pass layered on top (see the typed readers);
+// the codec itself never rewrites a value to fit. The fused pair agrees with the composed one
+// (`to_text(x) == stringify(encode(x))`, `parse_as[T](t) == decode[T](parse(t))`). Composing a larger
+// document out of existing `json` values — a tool list embedding schemas from `get_metadata` — is
+// explicit tree construction: `json_object(entries = { input_schema = m.input, ... })`.
 //
 // The typed readers (`parse_as[T]` / `decode[T]`) are schema-directed: the call site's instantiation
 // carries T's JSON Schema to the runtime (an inferred instantiation is stamped just like an explicit
-// one), the document is validated against it, and a mismatch raises `panic` naming the offending
+// one), the decoded value is validated against it, and a mismatch raises `panic` naming the offending
 // path. T appears only in the result, so it is never inferable from the arguments — instantiate
 // explicitly (`json.decode[my_type](...)`); an uninstantiated call is a compile error (K3016).
 //
-// `encode` embeds by wire form: a record becomes `json_object` (a `data` value keeps its
-// `$constructor` entry), an array `json_array`, a `file` its `$ref` handle object, an agent its
-// `$agent` reference object. A closure cannot be encoded (`panic`). A secret operand taints the
-// whole result, which then may not cross a user-facing boundary — the usual monotonic
-// information-flow rule.
+// `encode` embeds by wire form: a bare record becomes `json_object` (a key beginning with `$` is
+// escaped by doubling it, so it never collides with a discriminator); a `data` value nests its fields
+// under `value` — `{ $constructor: name, value: { ...fields } }` — a disjoint shape a bare record
+// cannot forge; an array becomes `json_array`; a `file` its `$ref` handle object; an agent / closure
+// its `$agent` / `$closure` reference object (carrying the snapshot / scope it needs to reconstruct).
+// A secret operand taints the whole result, which then may not cross a user-facing boundary — the
+// usual monotonic information-flow rule.
 
 @"A JSON null."
 data json_null()
@@ -67,21 +70,19 @@ primitive agent parse_as[T](text: string) -> T
 compose with the embedding: `stringify(value = encode(value = x))`."
 primitive agent stringify(value: json) -> string
 
-@"Embed any value into `json` by its wire form: records become `json_object` (a `data` value —
-including a `json` value itself — keeps its `$constructor` entry), arrays `json_array`, scalars
-their JSON shape; a `file` becomes its `$ref` handle object and an agent its `$agent` reference
-object. `decode[T]` inverts it for every T. A closure cannot cross the JSON boundary and raises
-`panic`."
+@"Embed any value into `json` by its wire form: a bare record becomes `json_object`, a `data` value
+nests its fields under `value` (`{ $constructor: name, value: { ...fields } }`), arrays `json_array`,
+scalars their JSON shape; a `file` becomes its `$ref` handle object, and an agent / closure its
+`$agent` / `$closure` reference object. `decode[T]` inverts it for every T (the conversion is total)."
 primitive agent encode[T](value: T) -> json
 
 @"Render any value as the (compact) JSON text of its wire form — `stringify(value = encode(value =
-x))` fused, without building the intermediate `json` tree; the inverse of `parse_as[T]`. A closure
-cannot cross the JSON boundary and raises `panic`."
+x))`; the inverse of `parse_as[T]`."
 primitive agent to_text[T](value: T) -> string
 
-@"Read a `json` tree back as a T, validated against T's schema (a `$constructor` entry re-tags a
-`data` value; a missing tag is repaired when T pins exactly one). Instantiate T explicitly (it
+@"Read a `json` tree back as a T (the total inverse of `encode`: a `$constructor` object re-tags a
+`data` value, an `$agent` / `$closure` / `$ref` object reconstructs the callable / file), then
+validate the result against T's schema as a separate strict check. Instantiate T explicitly (it
 appears only in the result, so it cannot be inferred) — `json.decode[unknown]` reads without a
-shape. A mismatch raises `panic` naming the offending path; a `$agent` reference cannot be turned
-back into a callable (`panic`)."
+shape. A schema mismatch raises `panic` naming the offending path."
 primitive agent decode[T](value: json) -> T

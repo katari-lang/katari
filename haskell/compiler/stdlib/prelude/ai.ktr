@@ -2,9 +2,12 @@
 // via the default import — `ai.get_metadata`, `ai.call_agent`, type `ai.agent_metadata`.
 //
 // `get_metadata` derives a callable value's public signature — its qualified name, its `@"..."`
-// description, and the JSON Schemas of its input / output / requests, each schema a `json` value
-// ready to embed in a tool list (`json.encode` passes `json` values through unchanged, so
-// `json.encode(value = { name = m.name, input_schema = m.input })` composes directly).
+// description, and the JSON Schemas of its input / output / requests, each schema already a `json`
+// value. To assemble a tool list, build the surrounding document explicitly with the `json`
+// constructors, embedding each schema as a subtree — e.g.
+// `json.json_object(entries = { name = json.json_string(value = m.name), input_schema = m.input })`.
+// (Do NOT wrap it with `json.encode`: `encode` embeds a `json` value as its tagged wire form like any
+// other `data` value, so it would double-tag the schema rather than pass it through.)
 //
 // `call_agent` dispatches a callable VALUE with a runtime-built argument record — the
 // dynamic-dispatch counterpart of a static call, for a target an AI picked out of a tool list. The

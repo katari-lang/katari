@@ -19,6 +19,10 @@ export type ModuleHash = Brand<string, "ModuleHash">;
 /** Brand a wire-supplied string as a `ModuleHash`. The runtime trusts the CLI's hash as an opaque
  *  key (it does not recompute it), so this is the single boundary cast. */
 export const toModuleHash = (value: string): ModuleHash => value as ModuleHash;
+
+/** Brand a wire-supplied string as a `SnapshotId`. A callable value round-trips its snapshot through the
+ *  JSON boundary (a `$agent` / `$closure` reference carries it), so the codec re-brands it on the way in. */
+export const toSnapshotId = (value: string): SnapshotId => value as SnapshotId;
 export type InstanceId = Brand<string, "InstanceId">;
 export type DelegationId = Brand<string, "DelegationId">;
 export type EscalationId = Brand<string, "EscalationId">;

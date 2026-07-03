@@ -145,3 +145,40 @@ Follow-up slice, superseding some names above (`primitive.*` → `prelude.*`).
 Also fixed en route: a panic raised at the acceptance surface births no instance, so a later
 `terminate` for that delegation found no callee and the cancel cascade hung; `onTerminate` now acks
 an instance-less delegation (see §2 of the main text).
+
+## Addendum (2026-07-03): the wire form is a total, blind bijection
+
+A review of the codec found the wire form was neither total nor unambiguous, and that its walk was
+hand-duplicated across four functions that had begun to diverge. This slice redesigns it. The theme:
+**value ↔ JSON is a total, schema-independent bijection, and validation is a separate strict pass.**
+The wire conventions now live in one place (`value/wire.ts`), shared by both codecs. Superseding §1
+(the repair) and §3 (flat data, `json` pass-through, `$agent` refusal):
+
+1. **A `data` value nests its fields under `value`** — `{ "$constructor": name, "value": { …fields } }`
+   — instead of spreading them as siblings of the tag. The old flat form made `$constructor` (and
+   `$ref` / `$agent`) unusable as record keys; worse, a schema-blind decoder cannot disambiguate a
+   flat data value from a bare record inside an `anyOf(data, record)` union. The nested form plus
+   **`$`-key escaping** for bare records (a leading `$` is doubled, so a record can never emit a
+   single-`$` key) makes the object variants a genuine disjoint union — decode needs no schema.
+
+2. **Agents and closures round-trip.** A `$agent` / `$closure` reference now carries the `snapshot`
+   (and captured `scopeId` / `module` / `generics`) it needs to reconstruct, so `decode(encode(a))`
+   returns the callable rather than panicking. The metadata keys are plain (no `$`), matching
+   `file`'s `semanticKind` / `size` / `hash`. `decode[T](encode(x)) == x` now holds for *every* `x`.
+
+3. **No `$constructor` repair.** The codec is blind and total; `conformValue` is a *separate* pass
+   that only checks, never rewrites. An AI supplies a value already in wire shape (the schema — now
+   the nested `data` shape — tells it to), so there is nothing to repair. `parseJson` is gone;
+   callers decode (`jsonToValue` / `treeToValue`) then check.
+
+4. **One shared convention layer, three review bugs closed.** `value/wire.ts` owns the reserved keys,
+   the escaping, and variant detection; `value/schema-json.ts` owns the `JSONSchema ↔ Json` bijection
+   (killing a triple-walked `schemaToJson`). Fixed alongside: prototype-pollution at the parse
+   boundary (`__proto__` is an ordinary own field of a prototype-less map); `record.get/has/set` now
+   guard with `Object.hasOwn` (consistent with `record.keys`); a fixed tuple rejects surplus
+   elements; a non-finite number is rejected rather than silently emitted as `null`.
+
+The compiler side (`Katari.Schema.convertData`) emits the nested schema; the CLI's schema interview
+is generic (`SchemaConst` auto-fills the `$constructor`, the `value` object recurses), so it produces
+the nested form with no change. The integer/number split (Known gaps) is unchanged and inherent to
+JSON text; the tree still distinguishes `json_integer` / `json_number`, so `decode` preserves it.

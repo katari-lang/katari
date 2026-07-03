@@ -1,67 +1,34 @@
-// Schema conformance for runtime values — the checking half of the JSON boundary. The compiler stamps
-// every callable's public shape as a `JSONSchema` (`AgentBlock.schema`); this module decides whether a
-// runtime `Value` fits one, so the delegate surface can reject a malformed argument (an AI-built
-// `call_agent` args record, a `katari run` argument) as a panic instead of letting it corrupt a body.
+// Schema conformance for runtime values — the checking half of the JSON boundary, and a *separate* pass
+// from the codec. The codec (`./codec.ts`, `../engine/json-value.ts`) is a blind, total bijection: it
+// turns wire JSON into a `Value` (and back) with no schema in sight. This module then decides whether a
+// decoded `Value` fits a `JSONSchema`, so the delegate surface can reject a malformed argument (an AI-built
+// `call_agent` args record, a `katari run` argument) as a panic. It only *checks* — it never rewrites the
+// value to fit (the AI supplies a value already in wire shape, e.g. a `data` value's `$constructor` tag,
+// so there is nothing to repair).
 //
-// `conformValue` walks value and schema together and returns the (possibly coerced) value or the list
-// of mismatches. Coercion is deliberately minimal: the single rewrite is attaching a missing
-// `$constructor` tag when the schema pins exactly one — an AI client naturally omits the discriminator
-// on a non-union `data` argument, and the tag is schema-implied there, so we accept and repair rather
-// than reject. Everything else is checked, never rewritten (an `integer` already satisfies `number` by
-// subtyping, so no numeric re-tagging is needed).
+// The compiler emits a `data` type as a nested schema — `{ "$constructor": {const}, "value": {fields} }`
+// (Haskell `Katari.Schema`) — matching the wire form, while the engine keeps a `data` value's constructor
+// out-of-band (`value.ctor`) and its fields flat. This module bridges the two: it checks `value.ctor`
+// against the `$constructor` const and the flat fields against the `value` sub-schema.
 //
-// Failure messages carry the path, the expectation, and the offending value's *kind* — never its
-// content. A panic message crosses the user boundary, and the value may be private (`value.private`),
-// so redaction here is structural: kinds are shape, not data.
-//
-// The engine's tagged values reach beyond JSON (blob refs, callables), so the walk folds the codec's
-// conventions back in: a semantic-string blob satisfies `{"type": "string"}`, a `file` value satisfies
-// the `$ref` reference schema, an agent / closure satisfies the `$agent` reference schema. A residual
-// `$generic` placeholder (an uninstantiated type parameter) constrains nothing.
+// Failure messages carry the path, the expectation, and the offending value's *kind* — never its content
+// (a value may be private). Kinds are shape, not data.
 
 import type { GenericId, JSONSchema, Json, SchemaInfo } from "@katari-lang/types";
-import { jsonToValue, valueEquals } from "./codec.js";
+import { AGENT_KEY, CONSTRUCTOR_KEY, FILE_KEY, VALUE_KEY, valueEquals } from "./codec.js";
 import type { GenericSubstitution, Value } from "./types.js";
 
 /** One mismatch: where in the argument (a `$`-rooted path) and what was expected. */
 export type ConformFailure = { path: string; message: string };
 
-export type ConformResult = { ok: true; value: Value } | { ok: false; failures: ConformFailure[] };
+export type ConformResult = { ok: true } | { ok: false; failures: ConformFailure[] };
 
-/** The reserved `$`-prefixed schema property names (mirrors `Katari.Schema` / the value codec). */
-const CONSTRUCTOR_KEY = "$constructor";
-const AGENT_KEY = "$agent";
-const FILE_KEY = "$ref";
-
-/**
- * Check `value` against `schema`, returning the conformed value (identical except for repaired
- * `$constructor` tags) or every mismatch found. `schema` should already have its generic placeholders
- * filled (`fillGenericSchema`); a residual `$generic` is treated as unconstrained.
- */
+/** Check `value` against `schema`. `schema` should already have its generic placeholders filled
+ *  (`fillGenericSchema`); a residual `$generic` is treated as unconstrained. The value is never rewritten. */
 export function conformValue(value: Value, schema: JSONSchema): ConformResult {
   const failures: ConformFailure[] = [];
-  const conformed = conform(value, schema, "$", failures, true);
-  return conformed !== undefined && failures.length === 0
-    ? { ok: true, value: conformed }
-    : { ok: false, failures };
-}
-
-/**
- * Parse bare wire JSON against a schema: lift it into the tagged value model, then conform. This is
- * the checked counterpart of `jsonToValue` for any input whose target schema is known (a run argument,
- * an escalation answer).
- */
-export function parseJson(json: Json, schema: JSONSchema): ConformResult {
-  let value: Value;
-  try {
-    value = jsonToValue(json);
-  } catch (error) {
-    return {
-      ok: false,
-      failures: [{ path: "$", message: error instanceof Error ? error.message : String(error) }],
-    };
-  }
-  return conformValue(value, schema);
+  conform(value, schema, "$", failures);
+  return failures.length === 0 ? { ok: true } : { ok: false, failures };
 }
 
 /** Render conform failures as one panic-ready message (one line per mismatch). */
@@ -150,121 +117,165 @@ function referenceKeyOf(schema: JSONSchema): string | undefined {
   return undefined;
 }
 
-/**
- * The recursive check: returns the conformed value, or `undefined` after appending the mismatches to
- * `failures`. The returned value is `value` itself unless a `$constructor` repair happened somewhere
- * beneath (rebuild is minimal, so untouched subtrees keep their identity — blob refs and callables are
- * never cloned, which the resource-ownership machinery relies on).
- *
- * `repair` gates the `$constructor` fix-up: inside an `anyOf` branch trial the expected constructor is
- * NOT uniquely determined (an untagged `{}` would "match" whichever tag-only branch comes first), so
- * trials run strict and only an unambiguous position may repair.
- */
-function conform(
-  value: Value,
-  schema: JSONSchema,
-  path: string,
-  failures: ConformFailure[],
-  repair: boolean,
-): Value | undefined {
+/** The `$constructor` const of a `data` schema (its discriminator), or `undefined` for a plain object. */
+function dataConstructorOf(schema: JSONSchema): string | undefined {
+  const constructorSchema = schema.properties?.[CONSTRUCTOR_KEY];
+  return typeof constructorSchema?.const === "string" ? constructorSchema.const : undefined;
+}
+
+/** The recursive check: appends any mismatches to `failures`. */
+function conform(value: Value, schema: JSONSchema, path: string, failures: ConformFailure[]): void {
   // A residual generic placeholder constrains nothing (the callable was not instantiated at this
   // parameter; the static checker already bounded it).
-  if (schema.$generic !== undefined) return value;
+  if (schema.$generic !== undefined) return;
 
   if (schema.not !== undefined) {
     // The compiler emits `not` only as `{"not": {}}` (never); check the general form anyway.
     const scratch: ConformFailure[] = [];
-    if (conform(value, schema.not, path, scratch, false) !== undefined && scratch.length === 0) {
+    conform(value, schema.not, path, scratch);
+    if (scratch.length === 0) {
       failures.push({ path, message: "no value can satisfy this schema (never)" });
-      return undefined;
     }
-    return value;
+    return;
   }
 
   if (schema.anyOf !== undefined) {
     for (const branch of schema.anyOf) {
       const scratch: ConformFailure[] = [];
-      const conformed = conform(value, branch, path, scratch, false);
-      if (conformed !== undefined && scratch.length === 0) return conformed;
+      conform(value, branch, path, scratch);
+      if (scratch.length === 0) return;
     }
     failures.push({
       path,
       message: `${describeValue(value)} does not match any variant of the expected union`,
     });
-    return undefined;
+    return;
   }
 
   if (schema.const !== undefined) {
-    // A blob-backed string's content is not readable synchronously; accept it rather than fetch.
-    if (value.kind === "ref" && value.semanticKind === "string") return value;
-    if (!valueEquals(value, jsonToValue(schema.const))) {
+    // A blob-backed string's content is not readable synchronously; a string const may accept it (a
+    // >4KB literal is degenerate). A non-string const cannot be a blob-string.
+    if (value.kind === "ref" && value.semanticKind === "string") {
+      if (typeof schema.const !== "string") {
+        failures.push({
+          path,
+          message: `${describeValue(value)} does not equal the expected constant`,
+        });
+      }
+      return;
+    }
+    if (!valueEquals(value, jsonConstToValue(schema.const))) {
       failures.push({
         path,
         message: `${describeValue(value)} does not equal the expected constant`,
       });
-      return undefined;
     }
-    return value;
+    return;
   }
 
   // A callable or a blob handle satisfies its `$`-keyed reference schema (and an unconstrained one);
   // any other constraint cannot hold for it.
   if (value.kind === "agent" || value.kind === "closure") {
-    if (isUnconstrained(schema) || referenceKeyOf(schema) === AGENT_KEY) return value;
-    failures.push({ path, message: `expected ${describeSchema(schema)}, got a callable value` });
-    return undefined;
+    if (!(isUnconstrained(schema) || referenceKeyOf(schema) === AGENT_KEY)) {
+      failures.push({ path, message: `expected ${describeSchema(schema)}, got a callable value` });
+    }
+    return;
   }
   if (value.kind === "ref" && value.semanticKind === "file") {
-    if (isUnconstrained(schema) || referenceKeyOf(schema) === FILE_KEY) return value;
-    failures.push({ path, message: `expected ${describeSchema(schema)}, got a file handle` });
-    return undefined;
+    if (!(isUnconstrained(schema) || referenceKeyOf(schema) === FILE_KEY)) {
+      failures.push({ path, message: `expected ${describeSchema(schema)}, got a file handle` });
+    }
+    return;
+  }
+
+  // A `data` schema (nested `{ $constructor: {const}, value: {fields} }`) is checked against the value's
+  // out-of-band constructor and flat fields, not by walking a literal `$constructor` property.
+  const dataConstructor = dataConstructorOf(schema);
+  if (dataConstructor !== undefined) {
+    conformData(value, dataConstructor, schema, path, failures);
+    return;
   }
 
   switch (schema.type) {
     case undefined:
       break;
     case "null":
-      if (value.kind !== "null") return typeMismatch(value, schema, path, failures);
-      return value;
+      if (value.kind !== "null") typeMismatch(value, schema, path, failures);
+      return;
     case "boolean":
-      if (value.kind !== "boolean") return typeMismatch(value, schema, path, failures);
-      return value;
+      if (value.kind !== "boolean") typeMismatch(value, schema, path, failures);
+      return;
     case "integer":
-      if (value.kind !== "integer") return typeMismatch(value, schema, path, failures);
-      return value;
+      if (value.kind !== "integer") typeMismatch(value, schema, path, failures);
+      return;
     case "number":
-      // `integer` is a subtype of `number`; keep its tag.
-      if (value.kind !== "number" && value.kind !== "integer") {
-        return typeMismatch(value, schema, path, failures);
-      }
-      return value;
+      // `integer` is a subtype of `number`.
+      if (value.kind !== "number" && value.kind !== "integer")
+        typeMismatch(value, schema, path, failures);
+      return;
     case "string":
       // A semantic-string blob is a string by value; its content constraints are unverifiable here.
-      if (value.kind === "ref" && value.semanticKind === "string") return value;
-      if (value.kind !== "string") return typeMismatch(value, schema, path, failures);
-      return value;
+      if (value.kind === "ref" && value.semanticKind === "string") return;
+      if (value.kind !== "string") typeMismatch(value, schema, path, failures);
+      return;
     case "array":
-      if (value.kind !== "array") return typeMismatch(value, schema, path, failures);
-      return conformArray(value, schema, path, failures, repair);
+      if (value.kind !== "array") {
+        typeMismatch(value, schema, path, failures);
+        return;
+      }
+      conformArray(value, schema, path, failures);
+      return;
     case "object":
-      if (value.kind !== "record") return typeMismatch(value, schema, path, failures);
-      return conformRecord(value, schema, path, failures, repair);
+      if (value.kind !== "record") {
+        typeMismatch(value, schema, path, failures);
+        return;
+      }
+      conformRecord(value, schema, path, failures);
+      return;
   }
 
   // No `type` (an `{}`-any, possibly with stray keywords): apply whichever structural keywords are
   // present against a matching value; anything else passes.
   if (value.kind === "array" && (schema.items !== undefined || schema.prefixItems !== undefined)) {
-    return conformArray(value, schema, path, failures, repair);
-  }
-  if (
+    conformArray(value, schema, path, failures);
+  } else if (
     value.kind === "record" &&
     (schema.properties !== undefined ||
       schema.required !== undefined ||
       schema.additionalProperties !== undefined)
   ) {
-    return conformRecord(value, schema, path, failures, repair);
+    conformRecord(value, schema, path, failures);
   }
-  return value;
+}
+
+/** Check a value against a `data` schema: its constructor must equal the discriminator const, and its
+ *  fields must conform to the `value` sub-schema (an object schema). */
+function conformData(
+  value: Value,
+  dataConstructor: string,
+  schema: JSONSchema,
+  path: string,
+  failures: ConformFailure[],
+): void {
+  if (value.kind !== "record" || value.ctor === undefined) {
+    failures.push({
+      path,
+      message: `expected a "${dataConstructor}" value, got ${describeValue(value)}`,
+    });
+    return;
+  }
+  if (String(value.ctor) !== dataConstructor) {
+    failures.push({
+      path,
+      message: `expected a "${dataConstructor}" value, got a "${value.ctor}" value`,
+    });
+    return;
+  }
+  const valueSchema = schema.properties?.[VALUE_KEY];
+  if (valueSchema !== undefined) {
+    // The value's flat fields are the `value` wrapper's object; check them as a bare record.
+    conform({ kind: "record", fields: value.fields }, valueSchema, path, failures);
+  }
 }
 
 function typeMismatch(
@@ -272,12 +283,11 @@ function typeMismatch(
   schema: JSONSchema,
   path: string,
   failures: ConformFailure[],
-): undefined {
+): void {
   failures.push({
     path,
     message: `expected ${describeSchema(schema)}, got ${describeValue(value)}`,
   });
-  return undefined;
 }
 
 function conformArray(
@@ -285,40 +295,37 @@ function conformArray(
   schema: JSONSchema,
   path: string,
   failures: ConformFailure[],
-  repair: boolean,
-): Value | undefined {
-  let changed = false;
-  let failed = false;
-  const elements: Value[] = [];
+): void {
+  // A fixed tuple (`prefixItems`, no `items` tail) accepts exactly its length: too few or too many is a
+  // mismatch. A homogeneous `items` array has no length bound.
+  if (schema.prefixItems !== undefined && schema.items === undefined) {
+    if (value.elements.length !== schema.prefixItems.length) {
+      failures.push({
+        path,
+        message: `expected a tuple of ${schema.prefixItems.length} elements, got ${value.elements.length}`,
+      });
+      return;
+    }
+  } else if (
+    schema.prefixItems !== undefined &&
+    value.elements.length < schema.prefixItems.length
+  ) {
+    failures.push({
+      path,
+      message: `expected at least ${schema.prefixItems.length} elements, got ${value.elements.length}`,
+    });
+    return;
+  }
   for (let index = 0; index < value.elements.length; index += 1) {
     const element = value.elements[index];
     if (element === undefined) continue;
-    // Positional (tuple) schemas win; a homogeneous `items` applies to every element. An element past
-    // the `prefixItems` positions is unconstrained (Draft 2020-12 semantics — the compiler emits no
-    // `items: false` tail).
-    const elementSchema =
-      schema.prefixItems?.[index] ?? (schema.prefixItems ? undefined : schema.items);
-    if (elementSchema === undefined) {
-      elements.push(element);
-      continue;
+    // A positional (tuple) schema wins; a homogeneous `items` applies to every element; an element past
+    // the tuple positions of a `prefixItems`-with-`items` schema falls to `items`.
+    const elementSchema = schema.prefixItems?.[index] ?? schema.items;
+    if (elementSchema !== undefined) {
+      conform(element, elementSchema, `${path}[${index}]`, failures);
     }
-    const conformed = conform(element, elementSchema, `${path}[${index}]`, failures, repair);
-    if (conformed === undefined) {
-      failed = true;
-      continue;
-    }
-    if (conformed !== element) changed = true;
-    elements.push(conformed);
   }
-  if (schema.prefixItems !== undefined && value.elements.length < schema.prefixItems.length) {
-    failures.push({
-      path,
-      message: `expected a tuple of ${schema.prefixItems.length} elements, got ${value.elements.length}`,
-    });
-    failed = true;
-  }
-  if (failed) return undefined;
-  return changed ? { ...value, elements } : value;
 }
 
 function conformRecord(
@@ -326,95 +333,50 @@ function conformRecord(
   schema: JSONSchema,
   path: string,
   failures: ConformFailure[],
-  repair: boolean,
-): Value | undefined {
-  let failed = false;
-
-  // The `$constructor` discriminator lives out-of-band on the value (`ctor`), in-band in the schema
-  // (a required const property). A matching tag passes; a *missing* tag against a pinned constructor
-  // is repaired (an AI-built record legitimately omits it); a different tag is a mismatch.
-  let ctor = value.ctor;
-  const constructorSchema = schema.properties?.[CONSTRUCTOR_KEY];
-  if (constructorSchema !== undefined && typeof constructorSchema.const === "string") {
-    const expected = constructorSchema.const;
-    if (ctor === undefined && repair) {
-      ctor = expected as typeof value.ctor;
-    } else if (ctor !== expected) {
-      failures.push({
-        path,
-        message: `expected a "${expected}" value, got a "${ctor}" value`,
-      });
-      failed = true;
-    }
-  }
-
-  let changed = ctor !== value.ctor;
-  const fields: Record<string, Value> = {};
+): void {
   for (const [key, field] of Object.entries(value.fields)) {
     const propertySchema = schema.properties?.[key];
     if (propertySchema !== undefined) {
-      const conformed = conform(field, propertySchema, `${path}.${key}`, failures, repair);
-      if (conformed === undefined) {
-        failed = true;
-        continue;
-      }
-      if (conformed !== field) changed = true;
-      fields[key] = conformed;
+      conform(field, propertySchema, `${path}.${key}`, failures);
       continue;
     }
     // A key beyond the declared properties: closed (`false`) rejects it, a tail schema (`record[V]`)
     // constrains it, open (`true` / absent) passes it through.
     if (schema.additionalProperties === false) {
       failures.push({ path: `${path}.${key}`, message: "unexpected field" });
-      failed = true;
-      continue;
+    } else if (typeof schema.additionalProperties === "object") {
+      conform(field, schema.additionalProperties, `${path}.${key}`, failures);
     }
-    if (typeof schema.additionalProperties === "object") {
-      const conformed = conform(
-        field,
-        schema.additionalProperties,
-        `${path}.${key}`,
-        failures,
-        repair,
-      );
-      if (conformed === undefined) {
-        failed = true;
-        continue;
-      }
-      if (conformed !== field) changed = true;
-      fields[key] = conformed;
-      continue;
-    }
-    fields[key] = field;
   }
 
   for (const required of schema.required ?? []) {
-    if (required === CONSTRUCTOR_KEY) {
-      if (ctor === undefined) {
-        failures.push({ path, message: "expected a constructor-tagged (data) value" });
-        failed = true;
-      }
-      continue;
-    }
-    // A required `$agent` / `$ref` cannot be satisfied by a record (callables and files were accepted
-    // before the record walk), so reaching here with one is a mismatch.
-    if (required === AGENT_KEY || required === FILE_KEY) {
-      failures.push({
-        path,
-        message: `expected ${required === AGENT_KEY ? "a callable value" : "a file handle"}, got a record`,
-      });
-      failed = true;
-      continue;
-    }
+    // The `$constructor` / `$ref` / `$agent` reserved requireds are handled by the `data` and reference
+    // paths above; a plain object schema's requireds are ordinary fields.
+    if (required === CONSTRUCTOR_KEY || required === AGENT_KEY || required === FILE_KEY) continue;
     if (value.fields[required] === undefined) {
       failures.push({ path, message: `missing required field "${required}"` });
-      failed = true;
     }
   }
+}
 
-  if (failed) return undefined;
-  if (!changed) return value;
-  return ctor !== undefined ? { ...value, fields, ctor } : { ...value, fields };
+/** Lift a schema `const` (bare JSON) to a value for structural comparison, without the wire conventions
+ *  (a const is a literal JSON scalar / array / object, not a tagged value). */
+function jsonConstToValue(json: Json): Value {
+  if (json === null) return { kind: "null" };
+  switch (typeof json) {
+    case "boolean":
+      return { kind: "boolean", value: json };
+    case "number":
+      return Number.isInteger(json)
+        ? { kind: "integer", value: json }
+        : { kind: "number", value: json };
+    case "string":
+      return { kind: "string", value: json };
+  }
+  if (Array.isArray(json)) return { kind: "array", elements: json.map(jsonConstToValue) };
+  const fields: Record<string, Value> = {};
+  for (const [key, child] of Object.entries(json)) fields[key] = jsonConstToValue(child);
+  return { kind: "record", fields };
 }
 
 // ─── description helpers (shape only — never value content, which may be private) ─────────────
@@ -434,6 +396,8 @@ function describeValue(value: Value): string {
 }
 
 function describeSchema(schema: JSONSchema): string {
+  const dataConstructor = dataConstructorOf(schema);
+  if (dataConstructor !== undefined) return `a "${dataConstructor}" value`;
   if (schema.type !== undefined) return `a value of type ${schema.type}`;
   if (referenceKeyOf(schema) === AGENT_KEY) return "a callable value";
   if (referenceKeyOf(schema) === FILE_KEY) return "a file handle";

@@ -1,19 +1,14 @@
-// The schema-conformance walk (`conformValue` / `parseJson`): the delegate boundary's argument check.
-// Covers the value-model foldbacks (integer-as-number subtyping, blob-string / file / callable
-// reference schemas), the single repair (a missing `$constructor` against a pinned constructor — but
-// never inside an `anyOf` trial, where the tag is what picks the branch), unions, tuples, closed
-// records, and generic instantiation.
+// The schema-conformance walk (`conformValue`): the delegate boundary's argument check, now a *pure,
+// strict* pass separate from the codec — it only checks, never rewrites (no `$constructor` repair). Covers
+// the value-model foldbacks (integer-as-number subtyping, blob-string / file / callable reference schemas),
+// nested `data` schemas, unions, tuples (including over-length rejection), closed records, and generics.
 
 import { createAgentName, type JSONSchema } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
+import { jsonToValue } from "../src/runtime/value/codec.js";
 import type { BlobId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
 import type { Value } from "../src/runtime/value/types.js";
-import {
-  conformValue,
-  fillGenericSchema,
-  parseJson,
-  typeSubstitutionOf,
-} from "../src/runtime/value/validation.js";
+import { conformValue, fillGenericSchema, typeSubstitutionOf } from "../src/runtime/value/validation.js";
 
 const SNAPSHOT = "snapshot-validation" as SnapshotId;
 
@@ -39,11 +34,8 @@ const GREETER_INPUT: JSONSchema = {
 };
 
 describe("conformValue", () => {
-  test("accepts a matching record and keeps its identity", () => {
-    const value = record({ name: str("alice") });
-    const result = conformValue(value, GREETER_INPUT);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toBe(value);
+  test("accepts a matching record", () => {
+    expect(conformValue(record({ name: str("alice") }), GREETER_INPUT).ok).toBe(true);
   });
 
   test("rejects a missing required field with a path and no value content", () => {
@@ -61,13 +53,8 @@ describe("conformValue", () => {
     if (!result.ok) expect(result.failures[0]?.path).toBe("$.name");
   });
 
-  test("an integer satisfies a number schema without re-tagging", () => {
-    const result = conformValue(int(3), { type: "number" });
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toEqual(int(3));
-  });
-
-  test("a number does not satisfy an integer schema", () => {
+  test("an integer satisfies a number schema; a fraction does not satisfy integer", () => {
+    expect(conformValue(int(3), { type: "number" }).ok).toBe(true);
     expect(conformValue({ kind: "number", value: 1.5 }, { type: "integer" }).ok).toBe(false);
   });
 
@@ -130,56 +117,62 @@ describe("conformValue", () => {
     expect(conformValue(closure, agentSchema).ok).toBe(true);
   });
 
-  const DATA_SCHEMA: JSONSchema = {
+  // A `data` schema is nested: `{ $constructor: {const}, value: {object of fields} }` (the wire form).
+  const BOX_SCHEMA: JSONSchema = {
     type: "object",
-    properties: { $constructor: { const: "main.box" }, value: { type: "integer" } },
+    properties: {
+      $constructor: { const: "main.box" },
+      value: { type: "object", properties: { n: { type: "integer" } }, required: ["n"] },
+    },
     required: ["$constructor", "value"],
-    additionalProperties: true,
+    additionalProperties: false,
   };
 
-  test("repairs a missing $constructor against a pinned constructor", () => {
-    const result = conformValue(record({ value: int(1) }), DATA_SCHEMA);
-    expect(result.ok).toBe(true);
-    if (result.ok && result.value.kind === "record") {
-      expect(result.value.ctor).toBe("main.box");
-    }
+  test("accepts a data value whose constructor and fields match", () => {
+    expect(conformValue(record({ n: int(1) }, "main.box"), BOX_SCHEMA).ok).toBe(true);
   });
 
-  test("rejects a mismatching $constructor", () => {
-    expect(conformValue(record({ value: int(1) }, "main.other"), DATA_SCHEMA).ok).toBe(false);
+  test("rejects a data value with the wrong constructor", () => {
+    expect(conformValue(record({ n: int(1) }, "main.other"), BOX_SCHEMA).ok).toBe(false);
   });
 
-  test("does NOT repair inside an anyOf trial (an untagged record matches no union arm)", () => {
+  test("rejects an untagged record where a data value is expected (no repair)", () => {
+    const result = conformValue(record({ n: int(1) }), BOX_SCHEMA);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failures[0]?.message).toContain("main.box");
+  });
+
+  test("rejects a data value whose nested field is the wrong type", () => {
+    expect(conformValue(record({ n: str("x") }, "main.box"), BOX_SCHEMA).ok).toBe(false);
+  });
+
+  test("a union of data schemas is picked by the constructor tag", () => {
     const union: JSONSchema = {
       anyOf: [
+        BOX_SCHEMA,
         {
           type: "object",
-          properties: { $constructor: { const: "main.box" }, value: { type: "integer" } },
+          properties: { $constructor: { const: "main.empty" }, value: { type: "object" } },
           required: ["$constructor", "value"],
-          additionalProperties: true,
-        },
-        {
-          type: "object",
-          properties: { $constructor: { const: "main.empty" } },
-          required: ["$constructor"],
-          additionalProperties: true,
+          additionalProperties: false,
         },
       ],
     };
-    expect(conformValue(record({ value: int(1) }), union).ok).toBe(false);
-    expect(conformValue(record({ value: int(1) }, "main.box"), union).ok).toBe(true);
+    expect(conformValue(record({ n: int(1) }, "main.box"), union).ok).toBe(true);
     expect(conformValue(record({}, "main.empty"), union).ok).toBe(true);
+    expect(conformValue(record({ n: int(1) }, "main.nope"), union).ok).toBe(false);
   });
 
-  test("checks tuples positionally and rejects a short tuple", () => {
-    const tuple: JSONSchema = { type: "array", prefixItems: [{ type: "string" }, { type: "integer" }] };
-    expect(
-      conformValue({ kind: "array", elements: [str("a"), int(1)] }, tuple).ok,
-    ).toBe(true);
+  test("checks tuples positionally; rejects both a short AND an over-long tuple", () => {
+    const tuple: JSONSchema = {
+      type: "array",
+      prefixItems: [{ type: "string" }, { type: "integer" }],
+    };
+    expect(conformValue({ kind: "array", elements: [str("a"), int(1)] }, tuple).ok).toBe(true);
     expect(conformValue({ kind: "array", elements: [str("a")] }, tuple).ok).toBe(false);
-    expect(
-      conformValue({ kind: "array", elements: [int(1), int(2)] }, tuple).ok,
-    ).toBe(false);
+    // The over-length case is the regression fixed: a fixed tuple rejects surplus elements.
+    expect(conformValue({ kind: "array", elements: [str("a"), int(1), int(2)] }, tuple).ok).toBe(false);
+    expect(conformValue({ kind: "array", elements: [int(1), int(2)] }, tuple).ok).toBe(false);
   });
 
   test("checks a record[V] tail via additionalProperties", () => {
@@ -202,21 +195,14 @@ describe("conformValue", () => {
   });
 });
 
-describe("parseJson", () => {
-  test("lifts and checks wire JSON in one step", () => {
-    const result = parseJson({ name: "alice" }, GREETER_INPUT);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toEqual(record({ name: str("alice") }));
+describe("decode-then-check (the codec lifts, conformValue checks)", () => {
+  test("wire JSON lifts and checks", () => {
+    expect(conformValue(jsonToValue({ name: "alice" }), GREETER_INPUT).ok).toBe(true);
   });
 
   test("a fraction becomes a number and fails an integer schema", () => {
-    expect(parseJson(1.5, { type: "integer" }).ok).toBe(false);
-    expect(parseJson(1, { type: "integer" }).ok).toBe(true);
-  });
-
-  test("a $agent key in the JSON fails cleanly (callables cannot enter as JSON)", () => {
-    const result = parseJson({ $agent: "main.tool" }, {});
-    expect(result.ok).toBe(false);
+    expect(conformValue(jsonToValue(1.5), { type: "integer" }).ok).toBe(false);
+    expect(conformValue(jsonToValue(1), { type: "integer" }).ok).toBe(true);
   });
 });
 

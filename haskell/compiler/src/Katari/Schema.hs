@@ -59,6 +59,12 @@ type DataDefinitions = Map QualifiedName DataDefinition
 constructorDiscriminatorKey :: Text
 constructorDiscriminatorKey = "$constructor"
 
+-- | Reserved property nesting a tagged value's fields under their own object, so no field name can ever
+-- collide with the @$constructor@ discriminator — the wire form is a disjoint union (a @data@ value's
+-- two keys, @$constructor@ and @value@, cannot be produced by a bare record, whose @$@-keys are escaped).
+valueNestingKey :: Text
+valueNestingKey = "value"
+
 -- | Reserved property name marking a callable (agent / closure) reference value.
 callableReferenceKey :: Text
 callableReferenceKey = "$agent"
@@ -128,16 +134,26 @@ toJSONSchema dataDefinitions = convert Set.empty
                 [ (fieldName, convert visitedWithSelf (substituteGenerics substitution field.semanticType))
                   | (fieldName, field) <- expandedFields
                 ]
+              -- The constructor's fields, nested under @value@ as their own object (an open object — a
+              -- value may legitimately carry more; a declared field is required unless optional).
+              valueObject =
+                SchemaObject
+                  ObjectSchema
+                    { properties = fieldProperties,
+                      required = [fieldName | (fieldName, field) <- expandedFields, not field.optional],
+                      additionalProperties = AdditionalPropertiesBoolean True
+                    }
               -- The qualified constructor name tags the value; consumers use it as the discriminator
               -- when picking a union arm.
               constructorProperty = (constructorDiscriminatorKey, SchemaConst (toJSON (renderQualifiedName qualifiedName)))
            in SchemaObject
                 ObjectSchema
-                  { properties = constructorProperty : fieldProperties,
-                    -- The tag is always present; a declared field is required unless the constructor
-                    -- marks it optional (a defaulted / optional field the caller may omit).
-                    required = constructorDiscriminatorKey : [fieldName | (fieldName, field) <- expandedFields, not field.optional],
-                    additionalProperties = AdditionalPropertiesBoolean True
+                  { properties = [constructorProperty, (valueNestingKey, valueObject)],
+                    -- The wire form is exactly the discriminator and the nested fields object; both are
+                    -- always present, and no other top-level key is admitted (the two are disjoint from a
+                    -- bare record's escaped keys).
+                    required = [constructorDiscriminatorKey, valueNestingKey],
+                    additionalProperties = AdditionalPropertiesBoolean False
                   }
       -- An unknown @data@ name (should not arise once 'DataDefinitions' is complete): stay open
       -- rather than emit a wrong shape.

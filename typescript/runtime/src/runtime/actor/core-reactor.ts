@@ -180,24 +180,26 @@ export class CoreReactor extends Reactor {
     // The delegate acceptance check: the argument must conform to the target's input schema. Statically
     // checked call sites conform by construction; this is the enforcement point for every *dynamic* entry —
     // a run command's JSON argument, a `call_agent` args record — and a violation is a program failure
-    // (panic), exactly like an unresolvable name above. The conformed value is what runs (its only possible
-    // rewrite is a repaired `$constructor` tag).
+    // (panic), exactly like an unresolvable name above. The argument is passed through unchanged: the codec
+    // already decoded it, and this is a pure check, never a rewrite.
     const targetBlock = this.ir
       .access(resolved.snapshot, moduleOf(target))
       .block(resolved.agentBlockId).block;
     if (targetBlock.kind === "agent") {
       const substitution = typeSubstitutionOf(targetBlock.schema.genericBindings, generics);
       const inputSchema = fillGenericSchema(substitution, targetBlock.schema.input);
-      const conformed = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
-      if (!conformed.ok) {
+      // Strict acceptance: the codec already decoded the argument (a total, blind bijection); this only
+      // checks it against the input schema, never rewrites it. A missing argument is checked as an empty
+      // record — an agent with no required input accepts it, a data / required-field input rightly panics.
+      const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
+      if (!check.ok) {
         this.raisePanic(
           event.delegation,
-          `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(conformed.failures)}`,
+          `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
           event.from,
         );
         return;
       }
-      if (argument !== null) argument = conformed.value;
     }
     const instance = createInstance(this.store, {
       delegationId: event.delegation,

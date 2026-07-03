@@ -3,6 +3,7 @@ module Katari.SchemaSpec (spec) where
 import Data.Aeson (object, toJSON, (.=))
 import Data.Map qualified as Map
 import Data.Text (Text)
+import GHC.List (List)
 import Katari.Data.Id (GenericId (..))
 import Katari.Data.JSONSchema
 import Katari.Data.ModuleName (ModuleName (..))
@@ -87,42 +88,19 @@ spec = do
         `shouldBe` SchemaGeneric genericT
 
   describe "toJSONSchema with data definitions" $ do
-    it "inline-expands a data type with a qualified-name $constructor tag" $
+    it "inline-expands a data type as a $constructor tag over its fields nested under `value`" $
+      -- The @box@'s one field is itself named @value@, so the nesting reads
+      -- @{ $constructor: "test.box", value: { value: <integer> } }@.
       toJSONSchema boxDefinitions (SemanticTypeData boxName (Map.singleton "T" (SemanticGenericArgumentType SemanticTypeInteger)))
-        `shouldBe` SchemaObject
-          ObjectSchema
-            { properties =
-                [ ("$constructor", SchemaConst (toJSON ("test.box" :: Text))),
-                  ("value", SchemaInteger)
-                ],
-              required = ["$constructor", "value"],
-              additionalProperties = AdditionalPropertiesBoolean True
-            }
+        `shouldBe` dataSchema "test.box" [("value", SchemaInteger)] ["value"]
 
-    it "drops an optional data field from required" $
+    it "drops an optional data field from the nested value's required" $
       toJSONSchema noteDefinitions (SemanticTypeData noteName mempty)
-        `shouldBe` SchemaObject
-          ObjectSchema
-            { properties =
-                [ ("$constructor", SchemaConst (toJSON ("test.note" :: Text))),
-                  ("body", SchemaString),
-                  ("title", SchemaString)
-                ],
-              required = ["$constructor", "body"],
-              additionalProperties = AdditionalPropertiesBoolean True
-            }
+        `shouldBe` dataSchema "test.note" [("body", SchemaString), ("title", SchemaString)] ["body"]
 
     it "breaks a recursive data reference with an open schema" $
       toJSONSchema listDefinitions (SemanticTypeData listName mempty)
-        `shouldBe` SchemaObject
-          ObjectSchema
-            { properties =
-                [ ("$constructor", SchemaConst (toJSON ("test.list" :: Text))),
-                  ("tail", SchemaAny)
-                ],
-              required = ["$constructor", "tail"],
-              additionalProperties = AdditionalPropertiesBoolean True
-            }
+        `shouldBe` dataSchema "test.list" [("tail", SchemaAny)] ["tail"]
 
     it "stays open for an unknown data name" $
       toJSONSchema noData (SemanticTypeData boxName mempty) `shouldBe` SchemaAny
@@ -152,6 +130,27 @@ spec = do
             "required" .= ([] :: [Text]),
             "additionalProperties" .= object ["type" .= ("string" :: Text)]
           ]
+
+-- | The nested wire schema of a @data@ value: a @$constructor@ const over the fields nested (as an open
+-- object) under @value@, with the outer wrapper closed to exactly those two keys.
+dataSchema :: Text -> List (Text, JSONSchema) -> List Text -> JSONSchema
+dataSchema constructorName fields requiredFields =
+  SchemaObject
+    ObjectSchema
+      { properties =
+          [ ("$constructor", SchemaConst (toJSON constructorName)),
+            ( "value",
+              SchemaObject
+                ObjectSchema
+                  { properties = fields,
+                    required = requiredFields,
+                    additionalProperties = AdditionalPropertiesBoolean True
+                  }
+            )
+          ],
+        required = ["$constructor", "value"],
+        additionalProperties = AdditionalPropertiesBoolean False
+      }
 
 noData :: DataDefinitions
 noData = Map.empty

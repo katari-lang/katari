@@ -22,11 +22,12 @@ import {
   type SchemaInfo,
 } from "@katari-lang/types";
 import type { IrSource } from "../ir.js";
+import { jsonToValue } from "../value/codec.js";
+import { schemaToJson } from "../value/schema-json.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import {
-  type ConformResult,
+  conformValue,
   fillGenericSchema,
-  parseJson,
   renderConformFailures,
   typeSubstitutionOf,
 } from "../value/validation.js";
@@ -36,7 +37,7 @@ import {
   jsonValueFromJson,
   jsonValueToJson,
   type StringReader,
-  valueToWireJson,
+  treeToValue,
 } from "./json-value.js";
 import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
 
@@ -81,44 +82,56 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   },
   "prelude.json.encode": (argument, context) =>
     encodeValue(field(argument, "value"), stringReaderOf(context)),
-  "prelude.json.to_text": async (argument, context) => ({
-    // The fused inverse of parse_as[T]: value -> wire JSON -> text, with no intermediate tree.
-    kind: "string",
-    value: JSON.stringify(await valueToWireJson(field(argument, "value"), stringReaderOf(context))),
-  }),
+  "prelude.json.to_text": async (argument, context) => {
+    // The fused value -> text pipe: `stringify(encode(x))`, one composition of the two codecs.
+    const reader = stringReaderOf(context);
+    const tree = await encodeValue(field(argument, "value"), reader);
+    return { kind: "string", value: JSON.stringify(await jsonValueToJson(tree, reader)) };
+  },
   "prelude.json.decode": async (argument, context) => {
-    // Schema-directed: the call site's [T] instantiation carried T's schema here; flatten the tree
-    // to bare JSON, then lift-and-conform against it (`$constructor` entries re-tag data values).
+    // The call site's [T] instantiation carried T's schema here. Decode the tree to a value (the blind,
+    // total codec), then check it against T as a *separate* pass.
     const schema = instantiatedSchema(context, "json.decode");
-    const json = await jsonValueToJson(field(argument, "value"), stringReaderOf(context));
-    return conformed(parseJson(json, schema), "json.decode");
+    const value = await treeToValue(field(argument, "value"), stringReaderOf(context));
+    return conformedOrPanic(value, schema, "json.decode");
   },
   "prelude.json.parse_as": async (argument, context) => {
-    // The fused typed text boundary: JSON.parse -> value lift -> conform, with no intermediate
-    // tagged `json` tree (the whole point of fusing over `decode(parse(text))`).
+    // The fused typed text boundary: `decode[T](parse(text))` — JSON.parse -> value lift -> check.
     const schema = instantiatedSchema(context, "json.parse_as");
     const text = await readStringField(argument, "text", context);
-    let json: Json;
+    let value: Value;
     try {
-      json = JSON.parse(text) as Json;
+      value = jsonToValue(JSON.parse(text) as Json);
     } catch (error) {
       throw new Error(
         `json.parse_as: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    return conformed(parseJson(json, schema), "json.parse_as");
+    return conformedOrPanic(value, schema, "json.parse_as");
   },
 
-  // ─── prelude.record ───────────────────────────────────────────────────────────────────────
-  "prelude.record.get": (argument) =>
-    recordOf(field(argument, "target"))[stringOf(field(argument, "key"))] ?? NULL_VALUE,
+  // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //
+  // Every access is by *own* key (`Object.hasOwn`) and every rewrite copies into a prototype-less map,
+  // so an inherited key (`toString`) never reads as present and a `__proto__` key is an ordinary field —
+  // consistent with `record.keys` / `record.size`, which are own-only.
+  "prelude.record.get": (argument) => {
+    const fields = recordOf(field(argument, "target"));
+    const key = stringOf(field(argument, "key"));
+    return Object.hasOwn(fields, key) ? (fields[key] ?? NULL_VALUE) : NULL_VALUE;
+  },
   "prelude.record.set": (argument) => {
-    const fields = { ...recordOf(field(argument, "target")) };
+    const fields: Record<string, Value> = Object.assign(
+      Object.create(null),
+      recordOf(field(argument, "target")),
+    );
     fields[stringOf(field(argument, "key"))] = field(argument, "value");
     return { kind: "record", fields };
   },
   "prelude.record.remove": (argument) => {
-    const fields = { ...recordOf(field(argument, "target")) };
+    const fields: Record<string, Value> = Object.assign(
+      Object.create(null),
+      recordOf(field(argument, "target")),
+    );
     delete fields[stringOf(field(argument, "key"))];
     return { kind: "record", fields };
   },
@@ -131,7 +144,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   }),
   "prelude.record.has": (argument) => ({
     kind: "boolean",
-    value: recordOf(field(argument, "target"))[stringOf(field(argument, "key"))] !== undefined,
+    value: Object.hasOwn(recordOf(field(argument, "target")), stringOf(field(argument, "key"))),
   }),
   "prelude.record.size": (argument) => ({
     kind: "integer",
@@ -262,14 +275,16 @@ function instantiatedSchema(context: PrimContext, label: string): JSONSchema {
   return bound.schema;
 }
 
-/** Unwrap a conform result, turning a mismatch into the panic the typed readers promise. */
-function conformed(result: ConformResult, label: string): Value {
+/** Check a decoded value against T, turning a mismatch into the panic the typed readers promise. The
+ *  value itself is returned unchanged (the codec already produced it; validation only checks). */
+function conformedOrPanic(value: Value, schema: JSONSchema, label: string): Value {
+  const result = conformValue(value, schema);
   if (!result.ok) {
     throw new Error(
       `${label}: the document does not conform to T — ${renderConformFailures(result.failures)}`,
     );
   }
-  return result.value;
+  return value;
 }
 
 /** Resolve a callable value to its agent block's schema / description (following the value's own
@@ -359,33 +374,5 @@ function requestsToJson(
     }
   };
   expand(requests, new Set());
-  return out;
-}
-
-/** A `JSONSchema` as its standard JSON Schema document (the IR type is already the wire shape; this
- *  rebuilds it as `Json` field by field, keeping the `any`-free typing). */
-function schemaToJson(schema: JSONSchema): Json {
-  const out: { [key: string]: Json } = {};
-  if (schema.type !== undefined) out.type = schema.type;
-  if (schema.const !== undefined) out.const = schema.const;
-  if (schema.items !== undefined) out.items = schemaToJson(schema.items);
-  if (schema.prefixItems !== undefined) out.prefixItems = schema.prefixItems.map(schemaToJson);
-  if (schema.properties !== undefined) {
-    const properties: { [key: string]: Json } = {};
-    for (const [key, property] of Object.entries(schema.properties)) {
-      properties[key] = schemaToJson(property);
-    }
-    out.properties = properties;
-  }
-  if (schema.required !== undefined) out.required = [...schema.required];
-  if (schema.additionalProperties !== undefined) {
-    out.additionalProperties =
-      typeof schema.additionalProperties === "boolean"
-        ? schema.additionalProperties
-        : schemaToJson(schema.additionalProperties);
-  }
-  if (schema.anyOf !== undefined) out.anyOf = schema.anyOf.map(schemaToJson);
-  if (schema.not !== undefined) out.not = schemaToJson(schema.not);
-  if (schema.$generic !== undefined) out.$generic = schema.$generic;
   return out;
 }
