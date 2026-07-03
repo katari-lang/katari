@@ -472,9 +472,23 @@ renderSchemaBrief = \case
   SchemaConst value -> compactJson value
   SchemaArray element -> "array of " <> renderSchemaBrief element
   SchemaTuple elements -> "tuple (" <> Text.intercalate ", " (map renderSchemaBrief elements) <> ")"
-  SchemaObject objectSchema -> "record {" <> Text.intercalate ", " [name | (name, _) <- objectSchema.properties] <> "}"
+  SchemaObject objectSchema -> case dataConstructorBrief objectSchema of
+    Just brief -> brief
+    Nothing -> "record {" <> Text.intercalate ", " [name | (name, _) <- objectSchema.properties] <> "}"
   SchemaAnyOf branches -> Text.intercalate " | " (map renderSchemaBrief branches)
   SchemaGeneric _ -> "any json (generic)"
+
+-- | If an object schema is a @data@ value's wire schema — a @$constructor@ const over fields nested
+-- under @value@ (see "Katari.Schema") — a brief naming the constructor and its fields, so a union
+-- picker distinguishes the variants (otherwise every @data@ arm reads @record {$constructor, value}@).
+dataConstructorBrief :: ObjectSchema -> Maybe Text
+dataConstructorBrief objectSchema = case lookup "$constructor" objectSchema.properties of
+  Just (SchemaConst (String name)) ->
+    let fields = case lookup "value" objectSchema.properties of
+          Just (SchemaObject valueObject) -> [fieldName | (fieldName, _) <- valueObject.properties]
+          _ -> []
+     in Just (if null fields then name else name <> " {" <> Text.intercalate ", " fields <> "}")
+  _ -> Nothing
 
 -- | A JSON value rendered compactly for labels and hints.
 compactJson :: Value -> Text
