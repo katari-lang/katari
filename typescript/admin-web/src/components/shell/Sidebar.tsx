@@ -35,16 +35,13 @@ export function Sidebar() {
           className={({ isActive }) =>
             cn(
               "flex items-center gap-2.5 px-2.5 py-2 text-sm text-fg-muted transition-colors hover:bg-sunken hover:text-fg",
-              isActive &&
-                "bg-reversed text-accent-fg hover:bg-reversed-hover hover:text-accent-fg",
+              isActive && "bg-reversed text-accent-fg hover:bg-reversed-hover hover:text-accent-fg",
             )
           }
         >
           <Icon className="size-4" />
           <span className="grow">{label}</span>
-          {label === "Escalations" && (
-            <OpenEscalationCount projectId={projectId} />
-          )}
+          {label === "Escalations" && <OpenEscalationCount projectId={projectId} />}
         </NavLink>
       ))}
     </nav>

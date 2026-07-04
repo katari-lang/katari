@@ -32,12 +32,12 @@ import Katari.Cli.Api
     ProjectRow (..),
     RuntimeClient,
     createProject,
-    updateProject,
     deploySnapshot,
     listHeadModules,
     listProjects,
     newRuntimeClient,
     runtimeAuthFromEnvironment,
+    updateProject,
     withTrace,
   )
 import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
