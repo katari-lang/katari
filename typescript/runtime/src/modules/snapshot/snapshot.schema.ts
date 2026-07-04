@@ -48,3 +48,6 @@ export const deploySnapshotSchema = z.object({
 export type DeploySnapshotInput = z.infer<typeof deploySnapshotSchema>;
 
 export const snapshotParamSchema = projectIdParamSchema.extend({ snapshotId: z.uuid() });
+
+/** `PUT .../snapshots/head` — move the live head to an existing snapshot (a rollback / roll-forward). */
+export const setHeadSchema = z.object({ snapshotId: z.uuid() });

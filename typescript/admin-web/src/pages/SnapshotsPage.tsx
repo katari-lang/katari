@@ -1,21 +1,31 @@
-// Deploy history: every snapshot with its message and module manifest; the head is marked. Runs
-// pin the snapshot they started on, so old versions remain inspectable here.
+// Deploy history: every snapshot with its message and module manifest; the head is marked, and any
+// other snapshot can be made head again (a rollback — runs pin the snapshot they started on, so only
+// new runs follow the moved head and old versions remain inspectable here).
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Camera } from "lucide-react";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { ApiError, api } from "../api/client";
 import { useHeadSnapshot, useSnapshots } from "../api/queries";
 import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { CopyableId } from "../components/ui/Copy";
+import { ConfirmDialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { LoadingBlock } from "../components/ui/Spinner";
 import { formatDateTime, shortId } from "../lib/format";
+import { useToast } from "../lib/toast";
 
 export function SnapshotsPage() {
   const { projectId = "" } = useParams();
   const snapshots = useSnapshots(projectId);
   const head = useHeadSnapshot(projectId);
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const [rollingBack, setRollingBack] = useState<{ id: string; message: string } | null>(null);
 
   const ordered = [...(snapshots.data ?? [])].sort(
     (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
@@ -53,6 +63,17 @@ export function SnapshotsPage() {
                       agents
                     </Link>
                     <CopyableId id={snapshot.id} />
+                    {snapshot.id !== head.data?.id && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setRollingBack({ id: snapshot.id, message: snapshot.message })
+                        }
+                      >
+                        Make head
+                      </Button>
+                    )}
                   </span>
                 }
               />
@@ -71,6 +92,27 @@ export function SnapshotsPage() {
           ))}
         </div>
       )}
+      <ConfirmDialog
+        open={rollingBack !== null}
+        onClose={() => setRollingBack(null)}
+        onConfirm={() => {
+          if (rollingBack === null) return;
+          api
+            .setSnapshotHead(projectId, rollingBack.id)
+            .then(() => {
+              setRollingBack(null);
+              void queryClient.invalidateQueries({
+                queryKey: ["projects", projectId, "snapshots"],
+              });
+            })
+            .catch((error: unknown) =>
+              toast(error instanceof ApiError ? error.message : "Rollback failed.", "error"),
+            );
+        }}
+        title={`Make "${rollingBack?.message ?? ""}" the head?`}
+        description="New runs will start from this snapshot. Runs in flight keep the snapshot they started on."
+        confirmLabel="Make head"
+      />
     </>
   );
 }

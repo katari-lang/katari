@@ -69,6 +69,21 @@ export const snapshotService = {
     });
   },
 
+  /** Move the project's live head to an existing snapshot — the rollback (or roll-forward; snapshots are
+   *  immutable, so the head is just a pointer). Only NEW runs follow the moved head: a run pins the
+   *  snapshot it started on, so nothing in flight is touched. Locks the project row like `deploy`, so a
+   *  concurrent deploy and a head move serialize in commit order. */
+  async setHead(projectId: string, snapshotId: string) {
+    return db.transaction(async (tx) => {
+      const [project] = await snapshotRepository.findProjectForUpdate(tx, projectId);
+      if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
+      const [snapshot] = await snapshotRepository.findSnapshot(tx, projectId, snapshotId);
+      if (!snapshot) throw new NotFoundError(`Snapshot ${snapshotId} not found.`);
+      await snapshotRepository.setHead(tx, projectId, snapshotId);
+      return { id: snapshotId };
+    });
+  },
+
   /** The currently-live snapshot, or a null-`id` placeholder when nothing is deployed yet. The CLI
    *  diffs its fresh build against this `modules` manifest before uploading. */
   async head(projectId: string) {

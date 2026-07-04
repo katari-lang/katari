@@ -5,7 +5,7 @@ import { zValidator } from "../../lib/validation.js";
 import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
 import { screenRawDeployBody } from "./snapshot.middleware.js";
-import { deploySnapshotSchema, snapshotParamSchema } from "./snapshot.schema.js";
+import { deploySnapshotSchema, setHeadSchema, snapshotParamSchema } from "./snapshot.schema.js";
 import { snapshotService } from "./snapshot.service.js";
 
 // `/snapshots/head` is registered before `/snapshots/:snapshotId` so the literal segment wins.
@@ -28,6 +28,19 @@ export const snapshotRoutes = new Hono<AppEnv>()
     async (c) => {
       const { projectId } = c.req.valid("param");
       return c.json(success(await snapshotService.head(projectId)));
+    },
+  )
+  // Rollback (or roll-forward): move the live head to an existing snapshot. Runs pin the snapshot they
+  // started on, so only new runs follow the moved head.
+  .put(
+    "/projects/:projectId/snapshots/head",
+    requireJsonBody,
+    zValidator("param", projectIdParamSchema),
+    zValidator("json", setHeadSchema),
+    async (c) => {
+      const { projectId } = c.req.valid("param");
+      const { snapshotId } = c.req.valid("json");
+      return c.json(success(await snapshotService.setHead(projectId, snapshotId)));
     },
   )
   .get("/projects/:projectId/snapshots", zValidator("param", projectIdParamSchema), async (c) => {

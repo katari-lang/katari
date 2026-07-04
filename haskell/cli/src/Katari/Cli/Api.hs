@@ -30,6 +30,7 @@ module Katari.Cli.Api
     listHeadModules,
     listSnapshots,
     deploySnapshot,
+    setSnapshotHead,
 
     -- * Agents
     AgentView (..),
@@ -306,6 +307,15 @@ listHeadModules client projectId = do
 
 listSnapshots :: RuntimeClient -> Text -> IO (Value, List SnapshotRow)
 listSnapshots client projectId = getWithRaw client ("/projects/" <> projectId <> "/snapshots")
+
+-- | Move the project's live head to an existing snapshot (a rollback / roll-forward). Only new runs
+-- follow the moved head — a run pins the snapshot it started on.
+setSnapshotHead :: RuntimeClient -> Text -> Text -> IO ()
+setSnapshotHead client projectId snapshotId = do
+  let body = object ["snapshotId" .= snapshotId]
+  SuccessEnvelope (_ :: Value) <-
+    requestJson client "PUT" ("/projects/" <> projectId <> "/snapshots/head") (Just (Aeson.encode body))
+  pure ()
 
 -- | Deploy a new snapshot from the complete desired manifest, returning the new snapshot's id. The
 -- compiled FFI sidecar bundle (the bundler's opaque JSON, or 'Nothing' when the project has no external

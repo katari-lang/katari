@@ -159,7 +159,8 @@ POST /api/v1/projects/{projectId}/snapshots
   なので、CLI 提供 hash を opaque key として trust で十分。store 健全性を厳密化するなら
   canonical 化を TS 側にも実装し受信バイトを再 hash して検証するが、これは v0.1 では過剰（§5）。
 - **rollback**: head を古い snapshot に向ける別 API（`PUT snapshots/head { snapshotId }`）で
-  実現できる。本設計の storage はこれを許すが、エンドポイント自体は後続作業。
+  実現できる。2026-07-05 実装済み — endpoint + CLI `katari project rollback` + admin console の
+  Make head ボタン。run は開始時の snapshot に pin されるので、動く run には影響しない。
 
 > NOTE: 上記 HTTP リソースの実装は runtime の snapshot リソース scaffold（domain-model §5
 > の stateless HTTP リソース、実装計画 Phase 1 / 8）に属する。本 doc 時点では storage モデルと

@@ -95,6 +95,9 @@ export const api = {
   listSnapshots: (projectId: string) => get<SnapshotSummary[]>(`/projects/${projectId}/snapshots`),
   getHeadSnapshot: (projectId: string) =>
     get<HeadSnapshot>(`/projects/${projectId}/snapshots/head`),
+  /** Rollback (or roll-forward): move the live head; only new runs follow it. */
+  setSnapshotHead: (projectId: string, snapshotId: string) =>
+    requestJson<{ id: string }>("PUT", `/projects/${projectId}/snapshots/head`, { snapshotId }),
 
   listRuns: (projectId: string, filter: { state?: RunState; limit?: number } = {}) => {
     const query = new URLSearchParams();
