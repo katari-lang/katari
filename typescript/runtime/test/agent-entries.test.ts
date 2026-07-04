@@ -40,8 +40,8 @@ describe("collectEntries", () => {
     ]);
     const entries = collectEntries(modules);
     expect(entries.size).toBe(2);
-    expect(entries.get("main.main")?.input).toEqual(mainSchema.input);
-    expect(entries.get("main.ask")?.output).toEqual(askSchema.output);
+    expect(entries.get("main.main")?.schema.input).toEqual(mainSchema.input);
+    expect(entries.get("main.ask")?.schema.output).toEqual(askSchema.output);
   });
 
   test("skips an entry whose block is missing or not an agent (defensive against malformed IR)", () => {

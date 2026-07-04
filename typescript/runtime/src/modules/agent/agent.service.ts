@@ -13,10 +13,11 @@ export const agentService = {
       snapshotId,
     );
     const agents = [...collectEntries(modules)]
-      .map(([qualifiedName, schema]) => ({
+      .map(([qualifiedName, block]) => ({
         qualifiedName,
-        input: schema.input,
-        output: schema.output,
+        input: block.schema.input,
+        output: block.schema.output,
+        description: block.description ?? "",
       }))
       // Deterministic order so paging/diffing a listing is stable across requests.
       .sort((left, right) => left.qualifiedName.localeCompare(right.qualifiedName));
@@ -28,15 +29,16 @@ export const agentService = {
       projectId,
       snapshotId,
     );
-    const schema = collectEntries(modules).get(qualifiedName);
-    if (schema === undefined) {
+    const block = collectEntries(modules).get(qualifiedName);
+    if (block === undefined) {
       throw new NotFoundError(`No callable "${qualifiedName}" in snapshot ${resolvedSnapshotId}.`);
     }
     return {
       snapshotId: resolvedSnapshotId,
       qualifiedName,
-      input: schema.input,
-      output: schema.output,
+      input: block.schema.input,
+      output: block.schema.output,
+      description: block.description ?? "",
     };
   },
 };

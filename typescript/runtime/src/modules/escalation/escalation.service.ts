@@ -1,4 +1,4 @@
-import type { JSONSchema, Json, SchemaInfo } from "@katari-lang/types";
+import type { AgentBlock, JSONSchema, Json } from "@katari-lang/types";
 import { db } from "../../db/client.js";
 import { BadRequestError, NotFoundError } from "../../lib/errors.js";
 import { decodeClientJson, facade } from "../../runtime/facade.js";
@@ -29,7 +29,7 @@ export const escalationService = {
    *  loaded once per distinct id (not once per escalation). */
   async listOpen(projectId: string) {
     const views = await escalationRepository.listOpen(db, projectId);
-    const entriesBySnapshot = new Map<string | null, Map<string, SchemaInfo>>();
+    const entriesBySnapshot = new Map<string | null, Map<string, AgentBlock>>();
     const responses = [];
     for (const view of views) {
       let entries = entriesBySnapshot.get(view.snapshotId);

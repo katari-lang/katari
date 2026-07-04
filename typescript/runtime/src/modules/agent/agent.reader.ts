@@ -8,7 +8,7 @@
 // an API read wants plain per-request queries and HTTP-mapped errors (404 for a missing project /
 // snapshot / callable).
 
-import type { IRModule, JSONSchema, SchemaInfo } from "@katari-lang/types";
+import type { AgentBlock, IRModule, JSONSchema } from "@katari-lang/types";
 import { db } from "../../db/client.js";
 import { NotFoundError } from "../../lib/errors.js";
 import { snapshotRepository } from "../snapshot/snapshot.repository.js";
@@ -62,15 +62,16 @@ async function resolveHeadSnapshotId(projectId: string): Promise<string> {
   return project.headSnapshotId;
 }
 
-/** Every callable's schema across a snapshot's modules, keyed by qualified name. Entries always point
- *  at agent blocks (the sole schema-carrying wrapper); anything else is skipped defensively. */
-export function collectEntries(modules: Map<string, IRModule>): Map<string, SchemaInfo> {
-  const entries = new Map<string, SchemaInfo>();
+/** Every callable's agent block across a snapshot's modules, keyed by qualified name. Entries always
+ *  point at agent blocks (the sole schema-carrying wrapper); anything else is skipped defensively. The
+ *  whole block is returned so callers see both its schema and its `@"..."` description. */
+export function collectEntries(modules: Map<string, IRModule>): Map<string, AgentBlock> {
+  const entries = new Map<string, AgentBlock>();
   for (const ir of modules.values()) {
     for (const [qualifiedName, blockId] of Object.entries(ir.entries)) {
       const information = ir.blocks[blockId];
       if (information === undefined || information.block.kind !== "agent") continue;
-      entries.set(qualifiedName, information.block.schema);
+      entries.set(qualifiedName, information.block);
     }
   }
   return entries;
@@ -79,8 +80,8 @@ export function collectEntries(modules: Map<string, IRModule>): Map<string, Sche
 /** The schema an answer to `request` must satisfy: the request callable's output schema. `null` when
  *  the snapshot has no such entry (the caller falls back to unvalidated input). */
 export function deriveAnswerSchema(
-  entries: Map<string, SchemaInfo>,
+  entries: Map<string, AgentBlock>,
   request: string,
 ): JSONSchema | null {
-  return entries.get(request)?.output ?? null;
+  return entries.get(request)?.schema.output ?? null;
 }
