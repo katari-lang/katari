@@ -668,6 +668,10 @@ data SyntacticTypeExpression (phase :: Phase) where
   TypeUnknown :: SourceSpan -> SyntacticTypeExpression phase
   -- | @all@ — the effect top
   TypeAll :: SourceSpan -> SyntacticTypeExpression phase
+  -- | @io@ — the effect of performing external (FFI) calls
+  TypeIo :: SourceSpan -> SyntacticTypeExpression phase
+  -- | @pure@ — the empty effect (no requests, no io); the effect bottom
+  TypePure :: SourceSpan -> SyntacticTypeExpression phase
   -- | @[module.]name@ — a type / generic / effect / attribute name (kind resolved by
   -- the checker). With arguments it heads a 'TypeApplication'.
   TypeName :: TypeNameNode phase -> SyntacticTypeExpression phase
@@ -700,6 +704,8 @@ instance HasSourceSpan (SyntacticTypeExpression phase) where
     TypeNever sourceSpan -> sourceSpan
     TypeUnknown sourceSpan -> sourceSpan
     TypeAll sourceSpan -> sourceSpan
+    TypeIo sourceSpan -> sourceSpan
+    TypePure sourceSpan -> sourceSpan
     TypeName node -> node.sourceSpan
     TypeAgent node -> node.sourceSpan
     TypeArray sourceSpan -> sourceSpan
@@ -1209,6 +1215,8 @@ retagSyntacticTypeExpression = \case
   TypeNever sourceSpan -> TypeNever sourceSpan
   TypeUnknown sourceSpan -> TypeUnknown sourceSpan
   TypeAll sourceSpan -> TypeAll sourceSpan
+  TypeIo sourceSpan -> TypeIo sourceSpan
+  TypePure sourceSpan -> TypePure sourceSpan
   TypeName node ->
     TypeName
       TypeNameNode

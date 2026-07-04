@@ -9,7 +9,7 @@
 -- the normalized type — used by tests that only need the type-level result.
 module Katari.Typechecker.Check where
 
-import Control.Monad (foldM, unless, when, zipWithM)
+import Control.Monad (filterM, foldM, unless, when, zipWithM)
 import Control.Monad.RWS.Class (asks, tell)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -66,7 +66,7 @@ import Katari.Typechecker.Context
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
 import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), collectConstraints, metavarKinded, solveConstraints)
-import Katari.Typechecker.Normalizer (boundedType, checkBounds, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -1358,11 +1358,72 @@ filterSlot sourceSpan tag layer = case tag of
 -- Match expressions
 ------------------------------------------------------------------------------------------------
 
+-- | Over-approximate @scrutinee \\ cover@: the residual scrutinee after an arm whose match /cover/ is
+-- @cover@ has been tried. A @match@ is first-match at runtime (the arms are tried in order, the first
+-- match wins — see the runtime's @createMatch@), so a later arm only ever sees values no earlier arm
+-- matched; feeding this residual to a variable / wildcard binder is what narrows @case null => ...@
+-- then @case rest => ...@ so @rest@ binds at the non-null residual. Sound because an arm's cover
+-- /under-approximates/ the values it matches (an @integer@ literal covers nothing, only @null@ / the
+-- two booleans / a filter / a constructor do), so the residual /over-approximates/ what reaches a later
+-- arm — and @A \\ B = A \\ (A ∩ B)@, so subtracting a cover that also reaches values outside the
+-- residual is harmless. The finitely-covered layers (@null@, the booleans, and a whole-primitive filter)
+-- are subtracted precisely; a structural layer (function / sequence / object / a @data@ constructor) is
+-- dropped only when the cover provably subsumes it and is otherwise kept — a wider, still-sound residual.
+subtractCover :: NormalizedType -> NormalizedType -> Normalizer NormalizedType
+subtractCover scrutinee cover = case scrutinee.baseType of
+  -- Cannot subtract from the top layer; keep the scrutinee (no narrowing, still sound).
+  NormalizedBaseTypeUnknown -> pure scrutinee
+  NormalizedBaseTypeLayered scrutineeLayer -> case cover.baseType of
+    -- A variable / wildcard arm (cover = top) matches everything: nothing reaches a later arm.
+    NormalizedBaseTypeUnknown -> pure bottomType
+    NormalizedBaseTypeLayered coverLayer -> do
+      residualFunction <- keepUnlessSubsumed (\value -> neverLayer {functionLayer = Just value}) scrutineeLayer.functionLayer
+      residualSequence <- keepUnlessSubsumed (\value -> neverLayer {sequenceLayer = Just value}) scrutineeLayer.sequenceLayer
+      residualObject <- keepUnlessSubsumed (\value -> neverLayer {objectLayer = Just value}) scrutineeLayer.objectLayer
+      residualData <-
+        Map.fromList
+          <$> filterM
+            (\(name, arguments) -> not <$> subsumedByCover neverLayer {dataLayer = Map.singleton name arguments})
+            (Map.toList scrutineeLayer.dataLayer)
+      let residualLayer =
+            scrutineeLayer
+              { -- @null@ is a single value, and a whole-primitive cover sets exactly its own layer, so
+                -- these clear precisely; @numberLayer@ uses the @Absent < Integer < Number@ order (a
+                -- cover of @number@ subsumes @integer@); the two booleans are enumerable, so a @true@
+                -- cover leaves @false@.
+                nullLayer = scrutineeLayer.nullLayer && not coverLayer.nullLayer,
+                numberLayer = if scrutineeLayer.numberLayer <= coverLayer.numberLayer then NumberSlotAbsent else scrutineeLayer.numberLayer,
+                stringLayer = scrutineeLayer.stringLayer && not coverLayer.stringLayer,
+                booleanLayer = Set.difference scrutineeLayer.booleanLayer coverLayer.booleanLayer,
+                fileLayer = scrutineeLayer.fileLayer && not coverLayer.fileLayer,
+                functionLayer = residualFunction,
+                sequenceLayer = residualSequence,
+                objectLayer = residualObject,
+                dataLayer = residualData
+              }
+      -- Keep the scrutinee's attribute (privacy rides through a narrowing) and its generics (a generic
+      -- component cannot be subtracted soundly).
+      pure scrutinee {baseType = NormalizedBaseTypeLayered residualLayer}
+  where
+    -- A single-component type is subsumed when the cover fully accepts it. The comparison runs under the
+    -- caller's private world (see 'synthMatchExpression'), so only base types matter — the covers are
+    -- built public.
+    subsumedByCover :: LayeredType -> Normalizer Bool
+    subsumedByCover layer = do
+      (_, errors) <- captureErrors (subtype (layeredOf layer) cover)
+      pure (null errors)
+    keepUnlessSubsumed :: (a -> LayeredType) -> Maybe a -> Normalizer (Maybe a)
+    keepUnlessSubsumed build slot = case slot of
+      Nothing -> pure Nothing
+      Just value -> do
+        subsumed <- subsumedByCover (build value)
+        pure (if subsumed then Nothing else slot)
+
 synthMatchExpression :: MatchExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthMatchExpression expression = do
   (typedSubject, scrutineeType) <- synthExpression expression.subject
   scrutineeAttribute <- runNormalizer expression.sourceSpan (foldAttribute scrutineeType)
-  results <- traverse (processCase scrutineeType scrutineeAttribute) expression.cases
+  results <- narrowCases scrutineeType scrutineeAttribute scrutineeType expression.cases
   -- The arm covers union to a sound lower bound of what the match accepts; exhaustiveness is then
   -- @scrutinee <: ⋃ covers@. Folding from 'bottomType' makes an empty match (covers union to never)
   -- fail this check for any inhabited scrutinee, with no special case.
@@ -1383,8 +1444,24 @@ synthMatchExpression expression = do
           typeOf = semantic
         }
   where
-    processCase scrutType scrutAttribute arm = do
-      (typedPattern, cover, bindings) <- checkPattern arm.pattern scrutType
+    -- Thread the residual scrutinee through the arms in source order. A refutable arm still sees the
+    -- full scrutinee — its cover feeds exhaustiveness and must be unchanged — but a variable / wildcard
+    -- binder sees the residual, since those patterns' covers are scrutinee-independent (always @top@,
+    -- or the wildcard's own annotation). So @case null => ...@ then @case rest => ...@ binds @rest@ at
+    -- the non-null residual, with exhaustiveness and every cover identical to before this narrowing.
+    narrowCases _ _ _ [] = pure []
+    narrowCases fullScrutinee scrutAttribute residual (arm : rest) = do
+      outcome@(cover, _, _) <- processCase fullScrutinee scrutAttribute residual arm
+      -- Compared under a private world so the subtraction is about base-type coverage, not observation
+      -- (matching the exhaustiveness check below).
+      narrowedResidual <- withWorld topAttribute $ runNormalizer expression.sourceSpan (subtractCover residual cover)
+      (outcome :) <$> narrowCases fullScrutinee scrutAttribute narrowedResidual rest
+    processCase fullScrutinee scrutAttribute residual arm = do
+      let patternScrutinee = case arm.pattern of
+            PatternVariable _ -> residual
+            PatternWildcard _ -> residual
+            _ -> fullScrutinee
+      (typedPattern, cover, bindings) <- checkPattern arm.pattern patternScrutinee
       (typedBody, resultType) <-
         processObserved arm.sourceSpan scrutAttribute (withParameters bindings (synthBlock arm.body))
       let typedArm =

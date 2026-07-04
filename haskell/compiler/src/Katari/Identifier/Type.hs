@@ -22,6 +22,8 @@ resolveType = \case
   TypeNever sourceSpan -> pure (TypeNever sourceSpan)
   TypeUnknown sourceSpan -> pure (TypeUnknown sourceSpan)
   TypeAll sourceSpan -> pure (TypeAll sourceSpan)
+  TypeIo sourceSpan -> pure (TypeIo sourceSpan)
+  TypePure sourceSpan -> pure (TypePure sourceSpan)
   TypeArray sourceSpan -> pure (TypeArray sourceSpan)
   TypeRecord sourceSpan -> pure (TypeRecord sourceSpan)
   TypeAttributeLiteral node -> pure (TypeAttributeLiteral node)

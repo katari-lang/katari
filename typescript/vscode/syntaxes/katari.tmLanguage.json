@@ -91,7 +91,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.katari",
-          "match": "\\b(integer|boolean|number|string|file|never|unknown|array|record|all)\\b"
+          "match": "\\b(integer|boolean|number|string|file|never|unknown|array|record|all|io|pure)\\b"
         },
         {
           "name": "support.type.attribute.katari",

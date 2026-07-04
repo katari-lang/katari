@@ -3,17 +3,12 @@
 // back into the `json` world as `json_null()`; the readers below are then thin match wrappers.
 
 @"Fold a nullable json read (`record.get` / `array.get`, typed `json | null`) back into `json`:
-a missing value becomes `json_null()`. (A constructor pattern narrows; a match rebuilds the value.)"
+a missing value becomes `json_null()`. Matching the `null` arm narrows the residual to `json`, so the
+fallthrough binds `present` at `json` and returns it unchanged."
 agent or_null(value: json.json | null) -> json.json {
   match (value) {
     case null -> json.json_null()
-    case json.json_null() -> json.json_null()
-    case json.json_boolean(value => v) -> json.json_boolean(value = v)
-    case json.json_integer(value => v) -> json.json_integer(value = v)
-    case json.json_number(value => v) -> json.json_number(value = v)
-    case json.json_string(value => v) -> json.json_string(value = v)
-    case json.json_array(items => items) -> json.json_array(items = items)
-    case json.json_object(entries => entries) -> json.json_object(entries = entries)
+    case present -> present
   }
 }
 
@@ -38,27 +33,5 @@ agent text(node: json.json) -> string {
   match (node) {
     case json.json_string(value => string_value) -> string_value
     case _ -> ""
-  }
-}
-
-@"Unwrap a json value to a plain Katari value (strip the json_* tags recursively) — e.g. to hand a
-model's parsed tool args to `ai.call_agent`, which validates them against the target schema at runtime."
-// The recursive group needs an explicit effect row; `prelude.throw[never]` is the empty upper
-// bound (a throw that can never be raised), i.e. "pure" spelled as a row.
-agent to_value(node: json.json) -> unknown with prelude.throw[never] {
-  match (node) {
-    case json.json_null() -> null
-    case json.json_boolean(value => boolean_value) -> boolean_value
-    case json.json_integer(value => integer_value) -> integer_value
-    case json.json_number(value => number_value) -> number_value
-    case json.json_string(value => string_value) -> string_value
-    case json.json_array(items => items) -> {
-      for (let item in items) { next to_value(node = item) }
-    }
-    case json.json_object(entries => entries) -> {
-      for (let key in record.keys(target = entries), var acc: record[unknown] = record.empty()) {
-        next with { acc = record.set(target = acc, key = key, value = to_value(node = or_null(value = record.get(target = entries, key = key)))) }
-      } then (_values) { acc }
-    }
   }
 }

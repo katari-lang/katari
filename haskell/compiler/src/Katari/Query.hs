@@ -470,6 +470,8 @@ typeExpressionFacts moduleName = \case
   TypeNever _ -> mempty
   TypeUnknown _ -> mempty
   TypeAll _ -> mempty
+  TypeIo _ -> mempty
+  TypePure _ -> mempty
   TypeName node ->
     foldMap (moduleQualifierFacts moduleName) node.moduleQualifier
       <> typeReferenceFacts moduleName node.typeReference

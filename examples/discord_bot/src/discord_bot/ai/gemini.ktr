@@ -80,9 +80,9 @@ agent gemini_drop_schema_key(key: string) -> boolean {
   }
 }
 
-// The recursive group needs an explicit effect row; `prelude.throw[never]` is the empty upper
-// bound (a throw that can never be raised), i.e. "pure" spelled as a row.
-agent gemini_sanitize(node: json.json) -> json.json with prelude.throw[never] {
+// The recursive group needs an explicit effect row; `pure` is the empty effect — sanitizing the
+// schema tree performs no requests and no io.
+agent gemini_sanitize(node: json.json) -> json.json with pure {
   match (node) {
     case json.json_object(entries => entries) -> {
       let cleaned = for (let key in record.keys(target = entries), var acc: record[json.json] = record.empty()) {

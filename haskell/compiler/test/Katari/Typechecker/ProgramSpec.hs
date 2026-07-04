@@ -109,6 +109,28 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "accepts a variable pattern whose annotation is a supertype of the scrutinee" $
     typeErrorCodes [("test", "agent f(e: integer) -> integer { match (e) { case x: number -> 0 } }")] `shouldBe` []
 
+  -- A match is first-match, so a later arm only sees values no earlier arm matched: a variable /
+  -- wildcard binder therefore narrows to that residual. After `case null` covers null, a following
+  -- `case rest` binds `rest` at the non-null residual — the plain, in-language way to fold a nullable.
+  it "narrows a variable binder to the non-null residual after a null arm" $
+    typeErrorCodes [("test", "agent f(v: integer | null) -> integer { match (v) { case null -> 0\ncase rest -> rest } }")] `shouldBe` []
+
+  -- The residual also satisfies an annotated binder's supertype requirement: over the non-null
+  -- residual `integer`, an `(x: integer)` arm is accepted where the full `integer | null` scrutinee
+  -- would have been rejected.
+  it "accepts an annotated binder at the residual type after a null arm" $
+    typeErrorCodes [("test", "agent f(v: integer | null) -> integer { match (v) { case null -> 0\ncase x: integer -> x } }")] `shouldBe` []
+
+  -- Narrowing subtracts a matched `data` constructor too (null is a value, `box` a constructor): after
+  -- the null arm the residual keeps only `box`, so `rest` binds at `box`.
+  it "narrows a data-or-null scrutinee to the data type after a null arm" $
+    typeErrorCodes [("test", "data box(x: integer)\nagent f(v: box | null) -> box { match (v) { case null -> box(x = 0)\ncase rest -> rest } }")] `shouldBe` []
+
+  -- Narrowing is residual, not unconditional: a first-arm variable still sees the full scrutinee, so a
+  -- lone `case rest` over `integer | null` binds `rest` nullable (K3001 on the non-null return).
+  it "does not narrow a first-arm variable binder (still sees the full scrutinee, K3001)" $
+    typeErrorCodes [("test", "agent f(v: integer | null) -> integer { match (v) { case rest -> rest } }")] `shouldContain` ["K3001"]
+
   -- A match observes its scrutinee: a pure arm carries the scrutinee's privacy into the result.
   it "rejects a match whose pure arm launders a private scrutinee to public (K3001)" $
     typeErrorCodes [("test", "private agent sec() -> integer { 1 }\nagent f() -> integer { match (sec()) { case _ -> 0 } }")] `shouldContain` ["K3001"]
@@ -339,6 +361,23 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
 
   it "still rejects omitting a required external-agent parameter (K3001)" $
     typeErrorCodes [("test", "external agent ext(value: integer, flag: integer) -> integer\nagent run() -> integer { ext(value = 1) }")] `shouldContain` ["K3001"]
+
+  -- `with io` and `with pure` are effect-row keywords (like `all` / `never`), so an agent that does io
+  -- can spell that row explicitly, and a pure agent can pin its emptiness without the `throw[never]`
+  -- workaround.
+  it "accepts a `with io` row on an agent that calls an external" $
+    typeErrorCodes [("test", "external agent ext(value: integer) -> integer\nagent run() -> integer with io { ext(value = 1) }")] `shouldBe` []
+
+  it "accepts a `with pure` row on a pure agent" $
+    typeErrorCodes [("test", "agent run() -> integer with pure { 1 }")] `shouldBe` []
+
+  -- io cannot be discharged into a pure row (there is no handler for it), so `with pure` over an
+  -- external call is rejected (K3001) — the very mismatch the missing surface syntax used to hide.
+  it "rejects a `with pure` row on an agent that calls an external (K3001)" $
+    typeErrorCodes [("test", "external agent ext(value: integer) -> integer\nagent run() -> integer with pure { ext(value = 1) }")] `shouldContain` ["K3001"]
+
+  it "rejects a `with pure` row on an agent that performs a request (K3001)" $
+    typeErrorCodes [("test", "request tick() -> integer\nagent run() -> integer with pure { tick() }")] `shouldContain` ["K3001"]
 
   -- An undeclared named argument is currently accepted (the callee's parameter object is open at
   -- @rest = unknown@): the runtime ignores the extra key. Pinned so the behaviour is intentional, not

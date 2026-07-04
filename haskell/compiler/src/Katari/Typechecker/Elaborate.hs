@@ -204,6 +204,8 @@ elaborate = \case
   TypeNever _ -> pureType SemanticTypeNever
   TypeUnknown _ -> pureType SemanticTypeUnknown
   TypeAll _ -> pureEffect SemanticEffectAny
+  TypeIo _ -> pureEffect SemanticEffectIo
+  TypePure _ -> pureEffect SemanticEffectPure
   -- A bare @array@ / @record@ is the homogeneous top: an array / record of unknown.
   TypeArray _ -> pureType (SemanticTypeArray SemanticTypeUnknown)
   TypeRecord _ -> pureType (SemanticTypeRecord SemanticTypeUnknown)

@@ -76,6 +76,8 @@ atomType =
       TypeNever <$> keyword "never",
       TypeUnknown <$> keyword "unknown",
       TypeAll <$> keyword "all",
+      TypeIo <$> keyword "io",
+      TypePure <$> keyword "pure",
       attributeLiteralType,
       TypeArray <$> keyword "array",
       TypeRecord <$> keyword "record",

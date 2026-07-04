@@ -4,7 +4,6 @@
 // vocabulary in discord_bot.ai.types.
 
 import discord_bot.ai.types
-import discord_bot.ai.jsonx
 import discord_bot.ai.gemini
 import discord_bot.ai.openai
 import discord_bot.api
@@ -17,8 +16,9 @@ type ai_client = gemini.gemini | openai.openai
 // transport failure. (Type synonyms take no docs.)
 type step_error = json.parse_error | api.api_error | http.fetch_error
 
-// Everything the tool loop can raise: a step error or a bad dynamic dispatch.
-type loop_error = step_error | ai.call_error
+// Everything the tool loop can raise: a step error, a bad dynamic dispatch, or a failure decoding the
+// model's raw tool args (`json.decode[unknown]` — total in practice, but its throw is discharged here).
+type loop_error = step_error | ai.call_error | json.decode_error
 
 @"The shared AI client capability (provided once at the root)."
 request get_ai_client() -> ai_client
@@ -77,13 +77,14 @@ agent infer_with_tools[effect E](
 }
 
 @"Find the tool whose metadata name is the model's pick and invoke it by value via `ai.call_agent`
-(the delegation boundary validates the model-built args against the tool's schema). A hallucinated
-name matches nothing and is fed back as an error result so the model can correct on the next step."
+(the model's args, parsed as json, are decoded to a plain value with `json.decode[unknown]`, and the
+delegation boundary validates them against the tool's schema). A hallucinated name matches nothing and
+is fed back as an error result so the model can correct on the next step."
 agent dispatch_one[effect E](tools: array[agent never -> unknown with E], call: types.tool_call) -> string {
   for (let tool in tools) {
     let meta = ai.get_metadata(value = tool)
     if (meta.name == call.name) {
-      return json.to_text(value = ai.call_agent(target = tool, args = jsonx.to_value(node = call.args)))
+      return json.to_text(value = ai.call_agent(target = tool, args = json.decode[unknown](value = call.args)))
     } else {
       null
     }
