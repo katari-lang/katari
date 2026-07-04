@@ -1,0 +1,67 @@
+# A self-hosted Katari stack: the runtime (API + web console on one port), Postgres, and a
+# durable S3-compatible blob store (SeaweedFS). Copy `.env.example` to `.env` and set a key first:
+#
+#   cp .env.example .env
+#   echo "KATARI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
+#   docker compose up -d
+#
+# Then open the console at http://localhost:3000 and deploy with `katari apply`.
+
+services:
+  runtime:
+    image: ghcr.io/katari-lang/katari:{{version}}
+    restart: unless-stopped
+    ports:
+      # Serves BOTH the JSON API (/api/v1) and the admin console (/) — the console is baked in.
+      - "${KATARI_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      LOG_LEVEL: info
+      DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+      # The API key callers (the CLI, the web console) authenticate with — sent as a Bearer token.
+      # Required: the runtime refuses to boot without it. Distinct from the at-rest key below.
+      KATARI_API_KEY: ${KATARI_API_KEY:?set KATARI_API_KEY in .env (see .env.example)}
+      # At-rest encryption key for secret values (base64, 32 bytes). The runtime refuses to boot
+      # without it — set it in `.env` (see above).
+      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (see .env.example)}
+      # Blob bytes → the SeaweedFS store below. Repoint at a cloud bucket by dropping
+      # BLOB_S3_ENDPOINT and setting real AWS credentials; then delete the seaweedfs service.
+      BLOB_S3_BUCKET: katari-blobs
+      BLOB_S3_ENDPOINT: http://seaweedfs:8333
+      BLOB_S3_FORCE_PATH_STYLE: "true"
+      BLOB_S3_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: katari
+      AWS_SECRET_ACCESS_KEY: katari
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: katari
+      POSTGRES_PASSWORD: katari
+      POSTGRES_DB: katari
+    volumes:
+      - katari-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U katari -d katari"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Durable S3-compatible blob store (single-binary SeaweedFS). Bytes persist in the `katari-blobs`
+  # volume; the S3 port stays on the internal compose network.
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: server -s3 -dir=/data
+    volumes:
+      - katari-blobs:/data
+
+volumes:
+  katari-pgdata:
+  katari-blobs:

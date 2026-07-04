@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  // `test` is typechecked too (the build uses tsdown, so this `include` only drives `tsc --noEmit`): a test
+  // that drifts from a runtime interface is a bug we want caught, not silently type-erased by vitest.
+  "include": [
+    "src",
+    "test",
+    "*.config.ts"
+  ]
+}

@@ -1,7 +1,0 @@
-[package]
-name = "formap"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

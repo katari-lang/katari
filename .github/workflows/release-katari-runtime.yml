@@ -1,19 +1,15 @@
-name: release-katari-runtime
+# Build and push the runtime server image to GHCR for a tag. Multi-platform (amd64 + arm64);
+# `:latest` moves only on stable releases so a pre-release never becomes the default pull.
 
-# Build the katari Docker image (linux/amd64 + linux/arm64) and push
-# to GHCR on tag push. Same tag convention as release-katari.yml.
-#
-# Image name is `katari` (not katari-runtime) — matches the user-facing
-# product name. See docs/PUBLISHING.md.
+name: release-katari-runtime
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (eg. v0.1.0). Required for manual runs."
+        description: "Release tag (vX.Y.Z[-prerelease])"
         required: true
 
 permissions:
@@ -21,62 +17,39 @@ permissions:
   packages: write
 
 jobs:
-  # See release-katari.yml for the rationale — every release workflow
-  # gates on the same precheck so a misaligned tag fails before any
-  # artifact is published.
   verify-versions:
-    name: verify version source-of-truth
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
       - name: Resolve tag
         id: tag
         shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
-          tag="${INPUT_TAG:-$REF_NAME}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "release-katari-runtime: '$TAG' is not a vX.Y.Z[-prerelease] tag" >&2
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Verify versions match tag
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - name: Verify the tree matches the tag
         run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
 
   image:
-    name: build & push katari image
     needs: verify-versions
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Resolve version
-        id: version
-        shell: bash
-        # See release-katari.yml for env-passing rationale.
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          ref="${INPUT_TAG:-$REF_NAME}"
-          if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$ref'"
-            exit 1
-          fi
-          echo "tag=$ref" >> "$GITHUB_OUTPUT"
-          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          ref: ${{ needs.verify-versions.outputs.tag }}
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -86,35 +59,23 @@ jobs:
         id: tags
         shell: bash
         run: |
-          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/katari"
-          # Only stable tags update :latest. A prerelease tag (anything
-          # containing '-' per semver) gets only its versioned tag, so
-          # end users running `:latest` never inherit an rc.
-          version="${{ steps.version.outputs.version }}"
-          tag_lines="${image}:${version}"
-          case "$version" in
-            *-*) ;;  # prerelease, skip :latest
-            *)   tag_lines="${tag_lines}"$'\n'"${image}:latest" ;;
-          esac
-          {
-            echo "image=${image}"
-            echo "tags<<EOF"
-            echo "$tag_lines"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          VERSION="${TAG#v}"
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/$OWNER/katari"
+          TAGS="$IMAGE:$VERSION"
+          if [[ "$VERSION" != *-* ]]; then
+            TAGS="$TAGS,$IMAGE:latest"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
 
-      - name: Build & push
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
-          file: typescript/packages/katari-api-server/Dockerfile
+          file: typescript/runtime/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}

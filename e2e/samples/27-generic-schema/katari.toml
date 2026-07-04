@@ -1,7 +1,0 @@
-[package]
-name = "generic_schema"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

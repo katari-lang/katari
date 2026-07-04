@@ -1,59 +1,25 @@
-#!/usr/bin/env node
-// Injects `@katari-lang/cli-<platform>` entries into the `@katari-lang/cli`
-// shim's `optionalDependencies`, all pinned to the given release version.
+// Publish-time injection: add the platform binary packages to the CLI shim's optionalDependencies
+// immediately before `pnpm publish` (release-npm.yml). NOT part of stamp-version: the committed
+// tree must stay installable before the first publish, and the binary packages do not exist on the
+// registry until release-katari has uploaded their tarballs.
 //
-// optionalDependencies are intentionally absent from the committed
-// source manifest so a pre-first-publish `pnpm install` doesn't fail
-// trying to resolve not-yet-on-registry packages. This step runs in
-// the release pipeline (`release-npm.yml`) immediately before
-// `pnpm publish`.
-//
-// Note: this script used to also write the `version` field on every
-// publishable TS package. That responsibility has moved to
-// `scripts/stamp-version.mjs`, which is run by hand before the
-// release commit so source = artifact. The release workflow then
-// enforces the match via `scripts/verify-versions.mjs`. See
-// docs/PUBLISHING.md.
-//
-// Usage:
-//   node scripts/bump-versions.mjs --version 0.1.0
+//   node scripts/bump-versions.mjs --version 0.1.0-rc7
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { BINARY_PLATFORMS, parseVersionArgument, repoRoot } from "./versions-common.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const version = parseVersionArgument(process.argv, "bump-versions");
 
-const PLATFORMS = ["linux-x64", "darwin-arm64"];
-
-function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  if (i === -1 || i + 1 >= process.argv.length) {
-    throw new Error(`missing --${name} <value>`);
-  }
-  return process.argv[i + 1];
-}
-
-const version = arg("version");
-const shimPath = resolve(REPO_ROOT, "typescript/packages/katari/package.json");
-const pkg = JSON.parse(readFileSync(shimPath, "utf8"));
-
-if (pkg.version !== version) {
-  console.error(
-    `error: ${shimPath} has version ${pkg.version}, expected ${version}.\n` +
-      `       Run 'scripts/verify-versions.mjs --tag v${version}' to see` +
-      ` everything that's out of sync, then 'scripts/stamp-version.mjs' to fix.`,
-  );
-  process.exit(2);
-}
-
-pkg.optionalDependencies ??= {};
-for (const plat of PLATFORMS) {
-  pkg.optionalDependencies[`@katari-lang/cli-${plat}`] = version;
-}
-
-writeFileSync(shimPath, `${JSON.stringify(pkg, null, 2)}\n`);
+const manifestPath = join(repoRoot, "typescript/cli/package.json");
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+manifest.optionalDependencies = {
+  ...manifest.optionalDependencies,
+  ...Object.fromEntries(
+    BINARY_PLATFORMS.map(({ key }) => [`@katari-lang/cli-${key}`, version]),
+  ),
+};
+writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(
-  `Injected optionalDependencies into @katari-lang/cli @ ${version} ` +
-    `(${PLATFORMS.length} platforms)`,
+  `injected ${BINARY_PLATFORMS.map(({ key }) => `@katari-lang/cli-${key}@${version}`).join(", ")}`,
 );

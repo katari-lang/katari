@@ -1,16 +1,11 @@
 snapshot: lts-22.44 # GHC 9.6.7
 
 packages:
-  - haskell/katari
-  - haskell/katari-compiler
-  - haskell/katari-project
-  - haskell/katari-lsp
+  - haskell/compiler
+  - haskell/project
+  - haskell/cli
+  - haskell/lsp
 
-ghc-options:
-  "$locals": -Wall -Wcompat -Wincomplete-record-updates
-    -Wincomplete-uni-patterns -Wmissing-home-modules
-    -Wredundant-constraints
-
-extra-deps:
-  - tomland-1.3.3.3
-  - validation-selective-0.2.0.0
+# toml-reader (katari.toml / katari.lock / snapshot parsing) ships in lts-22.44, so it needs no
+# extra-deps pin.
+extra-deps: []

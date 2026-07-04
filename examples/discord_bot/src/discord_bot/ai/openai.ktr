@@ -1,147 +1,140 @@
-// OpenAI provider: maps the agnostic conversation/step vocabulary to/from the
-// Chat Completions wire format (built and parsed as `json` in Katari). Where
-// Gemini keys tool calls by name + a thought signature, OpenAI keys them by a
-// tool-call `id` (carried in tool_call.opaque / tool_result.call_id) and ships
-// the arguments as a JSON *string*. Same agnostic types, different shaping.
+// OpenAI provider: maps the agnostic conversation/step vocabulary to/from the Chat Completions
+// wire format (built and parsed as `json` in Katari). Where Gemini keys tool calls by name + a
+// thought signature, OpenAI keys them by a tool-call `id` (carried in tool_call.opaque /
+// tool_result.call_id) and ships the arguments as a JSON *string*. Same agnostic types, different
+// shaping.
 
 import discord_bot.ai.types
 import discord_bot.ai.jsonx
-import discord_bot.http
+import discord_bot.api
 
 @"An OpenAI provider connection (the Chat Completions API)."
-data openai(model: string, api_key: secret, config: types.infer_config)
+data openai(model: string, api_key: string of private, config: types.infer_config)
 
 // ── request body ─────────────────────────────────────────────────────────────
 
 agent openai_role(role: string) -> string {
   match (role) {
-    case "model" => { "assistant" }
-    case _ => { "user" }
+    case "model" -> "assistant"
+    case _ -> "user"
   }
 }
 
-agent openai_tool_call_json(call: types.tool_call) -> json {
-  let function_json = json_object(entries = {
-    name = json_string(value = call.name),
-    arguments = json_string(value = json.stringify(value = call.args)),
-  })
-  // `type` is a keyword, so it can't be a record-literal key; build via
-  // record.set from an empty record[json] so the value type stays `json`.
-  let entries = record.set(
-    record = record.set(
-      record = record.set(record = record.empty(), key = "id", value = json_string(value = call.opaque)),
-      key = "type",
-      value = json_string(value = "function"),
-    ),
-    key = "function",
-    value = function_json,
-  )
-  json_object(entries = entries)
+agent openai_call_entry(call: types.tool_call) -> json.json {
+  // `type` is a keyword, so the wire object is assembled with record.set instead of a literal.
+  let base = {
+    id = json.json_string(value = call.opaque),
+    function = json.json_object(entries = {
+      name = json.json_string(value = call.name),
+      arguments = json.json_string(value = json.stringify(value = call.args)),
+    }),
+  }
+  json.json_object(entries = record.set(target = base, key = "type", value = json.json_string(value = "function")))
 }
 
-agent openai_messages_of(msg: types.message) -> array[json] {
+agent openai_messages_of(msg: types.message) -> array[json.json] {
   match (msg) {
-    case types.turn(role = role, text = text) => {
-      [json_object(entries = { role = json_string(value = openai_role(role = role)), content = json_string(value = text) })]
+    case types.turn(role => role, text => text) -> {
+      [json.json_object(entries = {
+        role = json.json_string(value = openai_role(role = role)),
+        content = json.json_string(value = text),
+      })]
     }
-    case types.call_turn(calls = calls) => {
-      let tool_calls = json_array(items = for (let call in calls) { next openai_tool_call_json(call = call) })
-      [json_object(entries = { role = json_string(value = "assistant"), content = json_null(), tool_calls = tool_calls })]
+    case types.call_turn(calls => calls) -> {
+      [json.json_object(entries = {
+        role = json.json_string(value = "assistant"),
+        tool_calls = json.json_array(items = for (let call in calls) { next openai_call_entry(call = call) }),
+      })]
     }
-    case types.result_turn(results = results) => {
+    case types.result_turn(results => results) -> {
       for (let result in results) {
-        next json_object(entries = {
-          role = json_string(value = "tool"),
-          tool_call_id = json_string(value = result.call_id),
-          content = json_string(value = result.text),
+        next json.json_object(entries = {
+          role = json.json_string(value = "tool"),
+          tool_call_id = json.json_string(value = result.call_id),
+          content = json.json_string(value = result.text),
         })
       }
     }
   }
 }
 
-agent openai_messages(client: openai, history: array[types.message]) -> array[json] {
-  let base = for (let msg in history, var acc: array[json] = array.empty()) {
-    next with { acc = array.concat(lhs = acc, rhs = openai_messages_of(msg = msg)) }
-  } then { acc }
-  match (client.config.system) {
-    case "" => { base }
-    case _ => {
-      let system_message = json_object(entries = { role = json_string(value = "system"), content = json_string(value = client.config.system) })
-      array.concat(lhs = [system_message], rhs = base)
-    }
+agent openai_messages(client: openai, history: array[types.message]) -> array[json.json] {
+  let base = for (let msg in history, var acc: array[json.json] = []) {
+    next with { acc = array.concat(left = acc, right = openai_messages_of(msg = msg)) }
+  } then (_messages) { acc }
+  if (client.config.system == "") {
+    base
+  } else {
+    let system_message = json.json_object(entries = {
+      role = json.json_string(value = "system"),
+      content = json.json_string(value = client.config.system),
+    })
+    array.concat(left = [system_message], right = base)
   }
 }
 
-agent openai_function_tool(meta: agent_metadata) -> json with json_parse_error {
-  let function_json = json_object(entries = {
-    name = json_string(value = meta.name),
-    description = json_string(value = meta.description),
-    parameters = json.parse(text = meta.input),
-  })
-  let entries = record.set(
-    record = record.set(record = record.empty(), key = "type", value = json_string(value = "function")),
-    key = "function",
-    value = function_json,
-  )
-  json_object(entries = entries)
+agent openai_function_tool(meta: ai.agent_metadata) -> json.json {
+  // `type` is a keyword, so the wire object is assembled with record.set instead of a literal.
+  let base = {
+    function = json.json_object(entries = {
+      name = json.json_string(value = meta.name),
+      description = json.json_string(value = meta.description),
+      parameters = meta.input,
+    }),
+  }
+  json.json_object(entries = record.set(target = base, key = "type", value = json.json_string(value = "function")))
 }
 
-agent openai_request_body(client: openai, history: array[types.message], tool_metas: array[agent_metadata]) -> string with json_parse_error {
-  let messages = json_array(items = openai_messages(client = client, history = history))
-  match (array.length(array = tool_metas)) {
-    case 0 => {
-      json.stringify(value = json_object(entries = { model = json_string(value = client.model), messages = messages }))
-    }
-    case _ => {
-      let tools = json_array(items = for (let meta in tool_metas) { next openai_function_tool(meta = meta) })
-      json.stringify(value = json_object(entries = { model = json_string(value = client.model), messages = messages, tools = tools }))
-    }
+agent openai_request_body(client: openai, history: array[types.message], tool_metas: array[ai.agent_metadata]) -> string {
+  let messages = json.json_array(items = openai_messages(client = client, history = history))
+  if (array.length(target = tool_metas) == 0) {
+    json.stringify(value = json.json_object(entries = {
+      model = json.json_string(value = client.model),
+      messages = messages,
+    }))
+  } else {
+    let tools = json.json_array(items = for (let meta in tool_metas) { next openai_function_tool(meta = meta) })
+    json.stringify(value = json.json_object(entries = {
+      model = json.json_string(value = client.model),
+      messages = messages,
+      tools = tools,
+    }))
   }
 }
 
 // ── response parsing ─────────────────────────────────────────────────────────
 
-agent openai_string(node: json) -> string {
-  match (node) {
-    case json_string(value = value) => { value }
-    case _ => { "" }
-  }
-}
-
-agent openai_message(parsed: json) -> json {
+agent openai_message(parsed: json.json) -> json.json {
   jsonx.field(node = jsonx.elem(node = jsonx.field(node = parsed, key = "choices"), index = 0), key = "message")
 }
 
-agent openai_tool_call_of(tc: json, tool_names: array[string]) -> types.tool_call with json_parse_error {
-  let function = jsonx.field(node =tc, key = "function")
-  let name = openai_string(node = jsonx.field(node =function, key = "name"))
+agent openai_tool_call_of(tc: json.json) -> types.tool_call with prelude.throw[json.parse_error] {
+  let function = jsonx.field(node = tc, key = "function")
   types.tool_call(
-    tool_index = array.index_of(array = tool_names, value = name),
-    name = name,
-    opaque = openai_string(node = jsonx.field(node =tc, key = "id")),
-    args = json.parse(text = openai_string(node = jsonx.field(node =function, key = "arguments"))),
+    name = jsonx.text(node = jsonx.field(node = function, key = "name")),
+    opaque = jsonx.text(node = jsonx.field(node = tc, key = "id")),
+    args = json.parse(text = jsonx.text(node = jsonx.field(node = function, key = "arguments"))),
   )
 }
 
-agent openai_parse_step(response: string, tool_metas: array[agent_metadata]) -> types.step with json_parse_error {
+agent openai_parse_step(response: string) -> types.step with prelude.throw[json.parse_error] {
   let message = openai_message(parsed = json.parse(text = response))
-  let tool_names = for (let meta in tool_metas) { next meta.name }
-  match (jsonx.field(node =message, key = "tool_calls")) {
-    case json_array(items = tcs) => {
-      let calls = for (let tc in tcs) { next openai_tool_call_of(tc = tc, tool_names = tool_names) }
-      match (array.length(array = calls)) {
-        case 0 => { types.step_final(text = openai_string(node = jsonx.field(node =message, key = "content"))) }
-        case _ => { types.step_call(calls = calls) }
+  match (jsonx.field(node = message, key = "tool_calls")) {
+    case json.json_array(items => tcs) -> {
+      let calls = for (let tc in tcs) { next openai_tool_call_of(tc = tc) }
+      if (array.length(target = calls) == 0) {
+        types.step_final(text = jsonx.text(node = jsonx.field(node = message, key = "content")))
+      } else {
+        types.step_call(calls = calls)
       }
     }
-    case _ => { types.step_final(text = openai_string(node = jsonx.field(node =message, key = "content"))) }
+    case _ -> types.step_final(text = jsonx.text(node = jsonx.field(node = message, key = "content")))
   }
 }
 
-@"One OpenAI model step over the history + tool schemas (built and parsed as json in Katari; the sidecar only performs the POST)."
-agent openai_infer_step(client: openai, history: array[types.message], tool_metas: array[agent_metadata]) -> types.step with json_parse_error {
+@"One OpenAI model step over the history + tool schemas (built and parsed as json in Katari; only the POST leaves the runtime)."
+agent openai_infer_step(client: openai, history: array[types.message], tool_metas: array[ai.agent_metadata]) -> types.step {
   let body = openai_request_body(client = client, history = history, tool_metas = tool_metas)
-  let response = http.http_post(url = "https://api.openai.com/v1/chat/completions", body = body, auth_header_name = "Authorization", auth_prefix = "Bearer ", api_key = client.api_key)
-  openai_parse_step(response = response, tool_metas = tool_metas)
+  let response = api.post_json(url = "https://api.openai.com/v1/chat/completions", body = body, auth_header_name = "Authorization", auth_prefix = "Bearer ", api_key = client.api_key)
+  openai_parse_step(response = response)
 }

@@ -1,35 +1,31 @@
 {
   "private": true,
-  "packageManager": "pnpm@11.1.3",
+  "packageManager": "pnpm@11.5.2",
   "scripts": {
-    "prepare": "simple-git-hooks",
-    "build": "npm run build:hs && npm run build:ts",
-    "build:hs": "stack build",
-    "build:cli": "stack build katari",
-    "build:lsp": "stack build katari-lsp",
-    "build:ts": "pnpm -r --filter \"./typescript/packages/*\" run build",
-    "test": "npm run test:hs && npm run test:ts",
-    "test:hs": "stack test",
-    "test:ts": "pnpm -r run test",
-    "clean": "npm run clean:hs && npm run clean:ts",
-    "clean:hs": "stack clean",
-    "clean:ts": "pnpm -r exec -- rm -rf dist",
-    "fmt:hs": "find haskell -name '*.hs' -not -path '*/.stack-work/*' -print0 | xargs -0 -r stack exec --package ormolu -- ormolu --mode inplace",
-    "lint:hs": "stack build --fast",
-    "fmt:ts": "pnpm biome format --write .",
-    "lint:ts": "pnpm biome lint .",
-    "check:ts": "pnpm biome ci .",
-    "watch:hs": "stack build --file-watch",
-    "cli": "stack run katari --",
-    "lsp": "stack run katari-lsp",
-    "dev": "docker compose up -d --wait db s3mock && concurrently --kill-others-on-fail --names api,web --prefix-colors magenta,green \"pnpm --filter @katari-lang/api-server dev\" \"pnpm --filter @katari-lang/admin-web dev\""
+    "dev": "docker compose up -d --wait postgres s3mock && pnpm --parallel --filter @katari-lang/runtime --filter @katari-lang/admin-web run dev",
+    "dev:down": "docker compose down",
+    "build": "pnpm run build:haskell && pnpm run build:typescript",
+    "build:haskell": "stack build",
+    "build:typescript": "pnpm -r run build",
+    "test": "pnpm run test:haskell && pnpm run test:typescript",
+    "test:haskell": "stack test",
+    "test:typescript": "pnpm -r run test",
+  "test:e2e": "pnpm --filter @katari-lang/e2e run e2e",
+    "format": "pnpm run format:haskell && pnpm run format:typescript",
+    "format:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package ormolu -- ormolu --mode inplace {} +",
+    "format:typescript": "biome format --write",
+    "typecheck": "pnpm run typecheck:haskell && pnpm run typecheck:typescript",
+    "typecheck:haskell": "stack build --fast --ghc-options=\"-O0\"",
+    "typecheck:typescript": "pnpm -r run typecheck",
+    "lint": "pnpm run lint:haskell && pnpm run lint:typescript",
+    "lint:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package hlint -- hlint {} +",
+    "lint:typescript": "biome check",
+    "lint-fix": "pnpm run lint-fix:haskell && pnpm run lint-fix:typescript",
+    "lint-fix:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package hlint -- hlint --refactor --refactor-options=\"--inplace\" {} \\;",
+    "lint-fix:typescript": "biome check --fix"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.15",
-    "concurrently": "^9.1.0",
-    "simple-git-hooks": "^2.11.1"
-  },
-  "simple-git-hooks": {
-    "pre-commit": "./scripts/pre-commit.sh"
+    "@biomejs/biome": "^2.4.16",
+    "lefthook": "^2.1.9"
   }
 }

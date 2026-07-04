@@ -1,0 +1,54 @@
+// The `prelude.string` sub-module: operations over `string` beyond concatenation (`++` /
+// templates). Called qualified — `string.length`, `string.split` — via the default import. Indices
+// are Unicode code points, not UTF-16 units, so a character outside the BMP counts once.
+
+@"The number of Unicode code points."
+primitive agent length(value: string) -> integer
+
+@"The substrings between occurrences of @separator@. An empty separator splits into single
+code points."
+primitive agent split(value: string, separator: string) -> array[string]
+
+@"The parts joined with @separator@ between them."
+primitive agent join(parts: array[string], separator: string) -> string
+
+@"The code points from @start@ (inclusive) to @end@ (exclusive), 0-based, clamped to the bounds."
+primitive agent slice(value: string, start: integer, end: integer) -> string
+
+@"Whether @search@ occurs in the string."
+primitive agent contains(value: string, search: string) -> boolean
+
+@"Whether the string starts with @search@."
+primitive agent starts_with(value: string, search: string) -> boolean
+
+@"Whether the string ends with @search@."
+primitive agent ends_with(value: string, search: string) -> boolean
+
+@"The code-point index of the first occurrence of @search@, or `null` when it does not occur."
+primitive agent index_of(value: string, search: string) -> integer | null
+
+@"The string with every occurrence of @search@ replaced by @replacement@ (literal text, not a
+pattern). An empty @search@ returns the value unchanged."
+primitive agent replace(value: string, search: string, replacement: string) -> string
+
+@"The string with leading and trailing whitespace removed."
+primitive agent trim(value: string) -> string
+
+@"The string uppercased (Unicode default casing, no locale)."
+primitive agent to_upper(value: string) -> string
+
+@"The string lowercased (Unicode default casing, no locale)."
+primitive agent to_lower(value: string) -> string
+
+@"Render a scalar as its string form (an integer prints without a decimal point). For a composite
+value use `json.stringify(value = json.encode(value = ...))` instead."
+primitive agent to_string(value: null | boolean | number | string) -> string
+
+@"Read the string as a base-10 integer (an optional sign and digits, nothing else), or `null` when
+it is not one — including a magnitude the number model cannot hold exactly. Compose with `trim` for
+padded input; for a diagnosed parse use `json.parse_as[integer]` instead."
+primitive agent to_integer(value: string) -> integer | null
+
+@"Read the string as a number (any JSON-style numeric form), or `null` when it is not one. Compose
+with `trim` for padded input; for a diagnosed parse use `json.parse_as[number]` instead."
+primitive agent to_number(value: string) -> number | null

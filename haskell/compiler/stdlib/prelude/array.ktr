@@ -1,0 +1,38 @@
+// The `prelude.array` sub-module: operations over `array[T]` beyond what the language gives
+// directly (literals, `for` mapping). Called qualified — `array.get`, `array.length` — via the
+// default import. The parameter is named `target` throughout (uniform with `prelude.record`).
+
+@"The element at @index@ (0-based), or `null` when the index is out of bounds."
+primitive agent get[T](target: array[T], index: integer) -> T | null
+
+@"The number of elements."
+primitive agent length(target: array[unknown]) -> integer
+
+@"A copy of the array with @value@ appended."
+primitive agent append[T](target: array[T], value: T) -> array[T]
+
+@"The left array followed by the right."
+primitive agent concat[T](left: array[T], right: array[T]) -> array[T]
+
+@"The elements from @start@ (inclusive) to @end@ (exclusive), 0-based, clamped to the bounds."
+primitive agent slice[T](target: array[T], start: integer, end: integer) -> array[T]
+
+@"Whether @value@ occurs among the elements (structural equality, like `==`)."
+primitive agent contains[T](target: array[T], value: T) -> boolean
+
+@"The index of the first element equal to @value@ (structural equality), or `null` when none is."
+primitive agent index_of[T](target: array[T], value: T) -> integer | null
+
+@"The arrays' elements concatenated in order — one level of nesting removed. With `for`'s mapping
+this is also the filter idiom: map each element to `[x]` or `[]`, then flatten."
+primitive agent flatten[T](target: array[array[T]]) -> array[T]
+
+@"The elements in reverse order."
+primitive agent reverse[T](target: array[T]) -> array[T]
+
+@"The integers from @start@ (inclusive) to @end@ (exclusive), in order — `for`'s counted-loop
+source. Empty when @end@ <= @start@."
+primitive agent range(start: integer, end: integer) -> array[integer]
+
+@"The empty array."
+primitive agent empty() -> array[never]

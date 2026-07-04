@@ -1,36 +1,7 @@
-# Haskell / Stack
-.stack-work/
-*.cabal
-dist-newstyle/
-*.hi
-*.o
-.hie/
-.hls/
-
-# Rust / Cargo
-rust/target/
-
-# Node / TypeScript
+/node_modules/
+# Nested workspace-package node_modules (pnpm links a `node_modules` into each package dir).
 node_modules/
-dist/
-
-# Katari project-local artefacts
-.katari/
-
-# Release / publish staging (created by scripts/stage-binary-packages.mjs
-# and the release-npm workflow)
-.binaries/
-.staged/
-*.vsix
-
-# Review notes
-review/
-
-# Editor / OS
-.DS_Store
-.env
-.idea/
-.vscode/
-*~
-*.swp
-.claude/
+/.stack-work/
+/.vscode/
+/.claude/
+/.env

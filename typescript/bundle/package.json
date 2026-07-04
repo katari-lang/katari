@@ -1,0 +1,44 @@
+{
+  "name": "@katari-lang/bundle",
+  "version": "0.1.0-rc6",
+  "description": "esbuild-based bundler for Katari FFI sidecar modules. Spawned by the `katari` CLI during `katari apply`.",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "bin": {
+    "katari-bundle": "dist/cli.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "yukikurage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/bundle"
+  },
+  "homepage": "https://katari-lang.dev",
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "dependencies": {
+    "@katari-lang/types": "workspace:*",
+    "esbuild": "^0.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

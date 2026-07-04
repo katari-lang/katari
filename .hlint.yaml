@@ -1,42 +1,23 @@
-# HLint configuration for Katari.
-#
-# HLint's parser does not read cabal/package.yaml default-extensions, so any
-# extension that affects parse syntax must be passed via -X here.
-#
-# Source of truth: haskell/*/package.yaml `default-extensions:`. Keep this list
-# in sync when extensions are added.
-#
-# Non-parse-affecting extensions (OverloadedStrings, NoFieldSelectors,
-# UndecidableInstances, StrictData, etc.) are intentionally omitted — they
-# don't change how HLint reads tokens.
-#
-# `NoPatternSynonyms` is added explicitly (not in any package.yaml) so HLint
-# treats `pattern` as a regular identifier; Katari AST/IR use it as a record
-# field name (LetStatement, BindPatternData, MatchArm, ParameterBinding, ...)
-# and PatternSynonyms is not enabled in the project.
+# Shared HLint config for every package under haskell/.
+
 - arguments:
+    - -XGHC2021
     - -XDataKinds
     - -XLambdaCase
+    - -XOverloadedStrings
+    - -XDuplicateRecordFields
+    - -XNoFieldSelectors
     - -XRecordWildCards
     - -XOverloadedRecordDot
     - -XTypeFamilies
     - -XGADTs
     - -XQuantifiedConstraints
+    - -XUndecidableInstances
     - -XDerivingStrategies
     - -XTypeData
-    - -XDeriveAnyClass
+    - -XStrictData
+    - -XLiberalTypeSynonyms
+    - -XImpredicativeTypes
     - -XNoPatternSynonyms
 
-# Suppress style debates we have explicitly considered:
-
-# `data X = X { only :: T }` vs `newtype X = X { only :: T }`:
-# we sometimes prefer `data` for laziness or future expansion.
-- ignore: { name: "Use newtype instead of data" }
-
-# Eta-reduction is often a readability regression in this codebase
-# (the explicit lambda parameter documents intent).
-- ignore: { name: "Eta reduce" }
-
-# Tuple-sections would require adding the extension to every module;
-# the lambda form is fine.
-- ignore: { name: "Use tuple-section" }
+- ignore: { name: Use infix }

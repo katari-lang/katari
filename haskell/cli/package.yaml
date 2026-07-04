@@ -1,0 +1,118 @@
+name: katari-cli
+# Build-system placeholder (cabal versions cannot carry a pre-release suffix); the version users
+# see is the VERSION file, embedded into `cliVersion` and stamped by scripts/stamp-version.mjs.
+version: 0.1.0.0
+license: MIT
+author: "yukikurage"
+
+# The one-line version file `cliVersion` embeds at build time.
+extra-source-files:
+  - VERSION
+
+language: GHC2021
+
+dependencies:
+  - base >= 4.7 && < 5
+  - text
+  - bytestring
+  - containers
+  - aeson
+  - aeson-pretty
+  - optparse-applicative
+  - directory
+  - filepath
+  # Spawning `katari-bundle` to compile the FFI sidecars during apply.
+  - process
+  # Talking to the Katari runtime over HTTP (apply).
+  - http-client
+  - http-client-tls
+  - http-types
+  # ANSI styling + cursor control for the interactive prompts and coloured human output.
+  - ansi-terminal
+  # Distinguishing integer from fractional JSON numbers when coercing typed prompt input.
+  - scientific
+  # Building aeson arrays from prompted elements.
+  - vector
+  # Embedding the `init` scaffolding templates at build time (the compiler embeds its stdlib the
+  # same way), so they are maintained as real files while the binary stays self-contained.
+  - file-embed
+  # The compiler driver and the IR / module-name / diagnostics types it produces.
+  - katari-compiler
+  # Project discovery, dependency resolution, the lockfile, and the per-module upload plan.
+  - katari-project
+
+# NOTE: -Wmissing-export-lists is intentionally absent: modules export everything while the
+# scrap-and-build is in motion.
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wmissing-home-modules
+  - -Wpartial-fields
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.Cli.Api
+    - Katari.Cli.Common
+    - Katari.Cli.Options
+    - Katari.Cli.Output
+    - Katari.Cli.Prompt
+    - Katari.Cli.Pick
+    - Katari.Cli.Templates
+    - Katari.Cli.Command.Init
+    - Katari.Cli.Command.Check
+    - Katari.Cli.Command.Build
+    - Katari.Cli.Command.Apply
+    - Katari.Cli.Command.Add
+    - Katari.Cli.Command.Run
+    - Katari.Cli.Command.Status
+    - Katari.Cli.Command.Cancel
+    - Katari.Cli.Command.Answer
+    - Katari.Cli.Command.Ls
+    - Katari.Cli.Command.Env
+    - Katari.Cli.Command.File
+    - Katari.Cli.Command.Project
+
+executables:
+  katari:
+    main: Main.hs
+    source-dirs: app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-cli
+
+tests:
+  katari-cli-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-cli
+      - katari-compiler
+      - hspec
+      - directory
+      - filepath
+      - temporary
+      - text
+    build-tools:
+      - hspec-discover
+
+default-extensions:
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - RecordWildCards
+  - DerivingStrategies
+  - StrictData

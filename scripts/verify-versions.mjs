@@ -1,110 +1,55 @@
-#!/usr/bin/env node
-// Cross-check every "version source of truth" in the source tree
-// against a release tag. Intended as a precheck job in each release
-// workflow so a misaligned tag fails before any artifact is built.
+// Release precheck: cross-check every version source of truth against a pushed git tag. Every
+// release workflow runs this before building or publishing anything, so a half-stamped tree can
+// never ship under a tag it does not match.
 //
-// Exit 0  iff every file agrees with the tag.
-// Exit 2  with a tabular mismatch report otherwise.
+//   node scripts/verify-versions.mjs --tag v0.1.0-rc7
 //
-// Usage:
-//   node scripts/verify-versions.mjs --tag v0.1.0-rc5
-//
-// Files checked (must stay in sync with `stamp-version.mjs`):
-//   - haskell/katari/src/Katari/Version.hs   (katariVersion literal)
-//   - haskell/katari/package.yaml            (cabal version, 3-tuple
-//                                             prefix only — cabal
-//                                             cannot represent -rcN)
-//   - typescript/packages/*/package.json     (every workspace pkg)
+// Checks (the same set stamp-version.mjs writes):
+//   - haskell/cli/VERSION == the tag's version, exactly.
+//   - haskell/*/package.yaml `version:` == the tag's X.Y.Z release triple (+ .0).
+//   - typescript/*/package.json `version` == the tag's version, exactly.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+import { parseTagArgument, repoRoot, typescriptPackageDirs } from "./versions-common.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const version = parseTagArgument(process.argv, "verify-versions");
+const release = version.split("-")[0];
 
-function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  if (i === -1 || i + 1 >= process.argv.length) {
-    console.error(`error: missing --${name} <value>`);
-    process.exit(2);
-  }
-  return process.argv[i + 1];
+const mismatches = [];
+function check(label, actual, expected) {
+  if (actual !== expected) mismatches.push({ label, actual, expected });
 }
 
-const tag = arg("tag");
-const tagMatch = /^v(\d+\.\d+\.\d+)(-[A-Za-z0-9.-]+)?$/.exec(tag);
-if (!tagMatch) {
-  console.error(`error: --tag must match v<X.Y.Z>[-pre], got '${tag}'`);
+check(
+  "haskell/cli/VERSION",
+  readFileSync(join(repoRoot, "haskell/cli/VERSION"), "utf8").trim(),
+  version,
+);
+
+for (const name of readdirSync(join(repoRoot, "haskell"))) {
+  const packageYaml = join(repoRoot, "haskell", name, "package.yaml");
+  let source;
+  try {
+    source = readFileSync(packageYaml, "utf8");
+  } catch {
+    continue;
+  }
+  const found = source.match(/^version: (.*)$/m);
+  check(`haskell/${name}/package.yaml`, found?.[1], `${release}.0`);
+}
+
+for (const dir of typescriptPackageDirs()) {
+  const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  check(`${relative(repoRoot, dir)}/package.json`, manifest.version, version);
+}
+
+if (mismatches.length > 0) {
+  console.error(`verify-versions: tree does not match tag v${version}:`);
+  for (const { label, actual, expected } of mismatches) {
+    console.error(`  ${label}: ${actual} (expected ${expected})`);
+  }
+  console.error(`fix with: node scripts/stamp-version.mjs --version ${version}`);
   process.exit(2);
 }
-const expectedFull = tag.slice(1); // "0.1.0-rc5"
-const expectedCabalPrefix = tagMatch[1]; // "0.1.0"
-
-const findings = [];
-
-// 1) Katari.Version
-{
-  const path = resolve(REPO_ROOT, "haskell/katari/src/Katari/Version.hs");
-  const src = readFileSync(path, "utf8");
-  const m = /katariVersion = "([^"]*)" -- KATARI_VERSION/.exec(src);
-  const actual = m ? m[1] : "<sentinel not found>";
-  findings.push({
-    file: relative(REPO_ROOT, path),
-    field: "katariVersion",
-    expected: expectedFull,
-    actual,
-    ok: actual === expectedFull,
-  });
-}
-
-// 2) cabal (package.yaml) — 3-tuple prefix only
-{
-  const path = resolve(REPO_ROOT, "haskell/katari/package.yaml");
-  const src = readFileSync(path, "utf8");
-  const m = /^version:\s*(\d+(?:\.\d+)*)\s*$/m.exec(src);
-  const actualPrefix = m ? m[1].split(".").slice(0, 3).join(".") : "<not found>";
-  findings.push({
-    file: relative(REPO_ROOT, path),
-    field: "version (3-tuple prefix)",
-    expected: expectedCabalPrefix,
-    actual: actualPrefix,
-    ok: actualPrefix === expectedCabalPrefix,
-  });
-}
-
-// 3) TS workspace packages
-{
-  const root = resolve(REPO_ROOT, "typescript/packages");
-  for (const name of readdirSync(root).sort()) {
-    const pkgPath = join(root, name, "package.json");
-    try {
-      statSync(pkgPath);
-    } catch {
-      continue;
-    }
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-    findings.push({
-      file: relative(REPO_ROOT, pkgPath),
-      field: `${pkg.name}.version`,
-      expected: expectedFull,
-      actual: pkg.version,
-      ok: pkg.version === expectedFull,
-    });
-  }
-}
-
-const mismatches = findings.filter((f) => !f.ok);
-if (mismatches.length === 0) {
-  console.log(`ok: ${findings.length} files all at ${expectedFull}`);
-  process.exit(0);
-}
-
-console.error(`\nversion mismatch for tag ${tag} (expected ${expectedFull}):\n`);
-for (const f of mismatches) {
-  console.error(`  - ${f.file}`);
-  console.error(`      ${f.field}: expected ${f.expected}, got ${f.actual}`);
-}
-console.error(
-  `\nFix: run 'node scripts/stamp-version.mjs --version ${expectedFull}' and commit, then re-tag.\n`,
-);
-process.exit(2);
+console.log(`verify-versions: all sources match v${version}`);

@@ -1,194 +1,122 @@
-name: release-npm
+# Publish the npm packages for a tag, after release-katari has attached the platform binaries to
+# the GitHub Release: @katari-lang/{types,port,runtime,bundle}, the staged
+# @katari-lang/cli-<platform> binary packages, and finally the @katari-lang/cli shim that depends
+# on them. Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret.
 
-# Publishes `@katari-lang/cli` (shim), `@katari-lang/cli-<platform>`
-# (binaries), `@katari-lang/runtime`, `@katari-lang/port`,
-# `@katari-lang/bundle`, `@katari-lang/api-server` to npm. Triggered
-# after release-katari completes successfully so the tarballs are
-# already attached to the GitHub Release.
-#
-# Auth: npm Trusted Publishing (OIDC). No NPM_TOKEN secret is used —
-# instead each package must have a trusted publisher configured on
-# npmjs.com pointing at this workflow file. See `docs/PUBLISHING.md`.
+name: release-npm
 
 on:
   workflow_run:
-    workflows: ["release-katari"]
+    workflows: [release-katari]
     types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish (eg. v0.1.0)."
+        description: "Release tag (vX.Y.Z[-prerelease])"
         required: true
 
 permissions:
   contents: read
-  id-token: write   # required for OIDC handshake with npm
+  id-token: write
 
 jobs:
-  # See release-katari.yml for the rationale — every release workflow
-  # gates on the same precheck so a misaligned tag fails before any
-  # artifact is published.
   verify-versions:
-    name: verify version source-of-truth
-    # workflow_run fires regardless of conclusion — gate on success.
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch'
-          || github.event.workflow_run.conclusion == 'success' }}
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-22.04
     steps:
       - name: Resolve tag
         id: tag
         shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            tag="$INPUT_TAG"
-          else
-            tag="$RUN_BRANCH"
-          fi
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+          TAG="${{ inputs.tag || github.event.workflow_run.head_branch }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "release-npm: '$TAG' is not a vX.Y.Z[-prerelease] tag" >&2
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.tag }}
-      - name: Verify versions match tag
+      - name: Verify the tree matches the tag
         run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
 
   publish:
-    name: publish to npm
     needs: verify-versions
     runs-on: ubuntu-22.04
     steps:
-      - name: Resolve tag
-        id: tag
-        shell: bash
-        # Pass user-controllable values through `env:` rather than direct
-        # ${{ }} interpolation. Interpolation expands BEFORE the shell
-        # parses the command, so a malicious `inputs.tag` like
-        # `v0.1.0; curl evil` would execute as shell. Env vars are
-        # substituted at shell-evaluation time and survive proper quoting.
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            tag="$INPUT_TAG"
-          else
-            tag="$RUN_BRANCH"
-          fi
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
-            exit 1
-          fi
-          version="${tag#v}"
-          # Pick the npm dist-tag from the prerelease identifier so end
-          # users get the expected behaviour:
-          #   0.1.0        -> 'latest'  (the only tag that `npm i <pkg>`
-          #                              honours by default)
-          #   0.1.0-rc3    -> 'rc'      (-> `npm i pkg@rc` works)
-          #   0.1.0-alpha2 -> 'alpha'
-          #   0.1.0-beta.1 -> 'beta'
-          case "$version" in
-            *-*)
-              # Strip leading "<digits>.<digits>...-", trailing digits / "."
-              identifier="$(echo "$version" \
-                | sed -E 's/^[0-9.]+-//; s/[0-9.]+$//')"
-              [ -n "$identifier" ] || identifier="next"
-              ;;
-            *) identifier="latest" ;;
-          esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "dist_tag=$identifier" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ needs.verify-versions.outputs.tag }}
 
-      # Node 24 is required for Trusted Publishing — earlier versions
-      # ship npm CLI < 11.5.1 and the publish handshake fails with E404.
-      # registry-url is intentionally set even under OIDC; the auth
-      # token line in .npmrc is empty when NODE_AUTH_TOKEN is unset
-      # and npm falls through to OIDC.
+      - name: Resolve version and dist-tag
+        id: version
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          # Stable -> latest; a pre-release publishes under its identifier (rc, beta, ...) so
+          # `npm install @katari-lang/cli` never resolves to one by accident.
+          if [[ "$VERSION" == *-* ]]; then
+            SUFFIX="${VERSION#*-}"
+            DIST_TAG="${SUFFIX%%[.0-9]*}"
+            DIST_TAG="${DIST_TAG:-next}"
+          else
+            DIST_TAG="latest"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      # Node 24+: npm >= 11.5.1 is required for OIDC Trusted Publishing.
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+          node-version: 24
+          registry-url: https://registry.npmjs.org
 
-      - name: Setup pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.3 --activate
+      - uses: pnpm/action-setup@v4
 
-      - name: Install workspace deps
+      - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Build TS packages
-        run: pnpm -r --filter "./typescript/packages/*" run build
+      - name: Build
+        run: pnpm -r --filter "./typescript/*" run build
 
-      - name: Download binaries from release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download the platform binaries from the GitHub Release
+        shell: bash
         run: |
           mkdir -p .binaries
-          for plat in linux-x64 darwin-arm64; do
-            asset="katari-${{ steps.tag.outputs.version }}-${plat}.tar.gz"
-            # release-katari uploads in parallel; allow a brief grace period.
-            for i in 1 2 3 4 5; do
-              if gh release download "${{ steps.tag.outputs.tag }}" \
-                    --pattern "$asset" \
-                    --dir .binaries \
-                    --repo "${{ github.repository }}"; then
-                break
-              fi
-              echo "asset $asset not yet available, retry $i/5 in 10s..."
-              sleep 10
-            done
-            test -f ".binaries/$asset" || { echo "::error::missing $asset" ; exit 1 ; }
+          for attempt in 1 2 3 4 5; do
+            if gh release download "$TAG" --dir .binaries --pattern 'katari-*.tar.gz'; then
+              exit 0
+            fi
+            echo "release assets not ready yet (attempt $attempt); retrying in 30s"
+            sleep 30
           done
-          ls -la .binaries
+          exit 1
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
 
-      - name: Stage @katari-lang/cli-<platform> packages
-        run: node scripts/stage-binary-packages.mjs --version "${{ steps.tag.outputs.version }}"
+      - name: Stage the binary packages
+        run: node scripts/stage-binary-packages.mjs --version "${{ steps.version.outputs.version }}"
 
-      # The source tree's `version` fields are already at the target
-      # value (stamped by `scripts/stamp-version.mjs` before the release
-      # commit, and verified by the `verify-versions` precheck above).
-      # This step only injects the shim's `optionalDependencies` for
-      # the platform-specific binary packages — those are intentionally
-      # absent from the committed manifest. `workspace:*` refs are
-      # left alone; `pnpm publish` rewrites them on the fly.
-      # Provenance is automatic under Trusted Publishing.
-      - name: Inject @katari-lang/cli optionalDependencies
-        run: node scripts/bump-versions.mjs --version "${{ steps.tag.outputs.version }}"
+      - name: Inject the shim's optionalDependencies
+        run: node scripts/bump-versions.mjs --version "${{ steps.version.outputs.version }}"
 
-      - name: Publish library packages
+      - name: Publish
+        shell: bash
         run: |
-          # Order matters: dependents publish after their deps so that
-          # pnpm publish's workspace:* rewrite resolves correctly.
-          for pkg in katari-runtime katari-port katari-bundle katari-api-server; do
-            echo "::group::publishing $pkg"
-            ( cd typescript/packages/$pkg \
-              && pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}" )
-            echo "::endgroup::"
+          set -euo pipefail
+          # Library packages first, then the platform binaries, then the shim that ties them
+          # together — so a partially failed publish never leaves the shim pointing at nothing.
+          for dir in typescript/types typescript/port typescript/runtime typescript/bundle; do
+            (cd "$dir" && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
           done
-
-      - name: Publish @katari-lang/cli-<platform> packages
-        run: |
-          for plat in linux-x64 darwin-arm64; do
-            echo "::group::publishing @katari-lang/cli-$plat"
-            ( cd .staged/$plat && pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}" )
-            echo "::endgroup::"
+          for dir in .staged/*/; do
+            (cd "$dir" && npm publish --access public --tag "$DIST_TAG")
           done
-
-      - name: Publish katari shim
-        run: |
-          cd typescript/packages/katari
-          pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}"
+          (cd typescript/cli && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist-tag }}

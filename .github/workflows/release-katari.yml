@@ -1,152 +1,104 @@
-name: release-katari
+# Build the katari CLI binary per platform and attach the tarballs (+ sha256) to the tag's GitHub
+# Release. release-npm.yml listens for this workflow's success and packages the same tarballs as
+# the @katari-lang/cli-<platform> npm packages.
 
-# Build the `katari` Haskell binary for each supported platform and
-# attach the resulting tarballs to a GitHub Release on tag push.
-#
-# Tag convention: vMAJOR.MINOR.PATCH (eg. v0.1.0). Pushing such a tag
-# triggers the workflow and creates / updates a Release with that name.
-#
-# Artifact naming: katari-<version>-<platform>.tar.gz where <platform>
-# is one of linux-x64 / darwin-arm64. Each tarball contains
-# a single `katari` executable at its root.
+name: release-katari
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (eg. v0.1.0). Required for manual runs."
+        description: "Release tag (vX.Y.Z[-prerelease])"
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  # Gate every other job on a single source-of-truth check: the pushed
-  # tag must match `katariVersion` (haskell/katari/src/Katari/Version.hs),
-  # the cabal version's 3-tuple prefix, and every TS workspace
-  # package.json's "version". Releases are supposed to be made from a
-  # commit produced by `scripts/stamp-version.mjs`; if the operator
-  # forgot, this fails fast before anything gets uploaded.
   verify-versions:
-    name: verify version source-of-truth
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
       - name: Resolve tag
         id: tag
         shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
-          tag="${INPUT_TAG:-$REF_NAME}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$tag'"
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "release-katari: '$TAG' is not a vX.Y.Z[-prerelease] tag" >&2
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Verify versions match tag
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - name: Verify the tree matches the tag
         run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
 
   build:
-    name: build (${{ matrix.platform }})
     needs: verify-versions
     strategy:
-      fail-fast: false
       matrix:
         include:
+          # Must stay in sync with scripts/versions-common.mjs BINARY_PLATFORMS and the shim's
+          # supported set (typescript/cli/bin/katari.mjs).
           - os: ubuntu-22.04
             platform: linux-x64
           - os: macos-14
             platform: darwin-arm64
-          # darwin-x64 (Intel Mac) is intentionally dropped: GitHub's
-          # macos-13 runners are deprecated and queue indefinitely on
-          # free tier. Intel Mac users can run the darwin-arm64 binary
-          # via Rosetta 2 or build from source with stack.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.verify-versions.outputs.tag }}
 
       - uses: haskell-actions/setup@v2
         id: setup
         with:
           ghc-version: "9.6.7"
           enable-stack: true
-          stack-version: latest
+          stack-version: "3.7.1"
 
       - name: Resolve cache key inputs
         id: cache-key
         shell: bash
         run: |
-          echo "stack-version=$(stack --numeric-version)" >> "$GITHUB_OUTPUT"
           echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache ~/.stack (snapshot-scoped)
+      - name: Cache ~/.stack
         uses: actions/cache@v4
         with:
           path: ${{ steps.setup.outputs.stack-root }}
-          key: ${{ runner.os }}-${{ runner.arch }}-stack-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          key: ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-stack-${{ steps.cache-key.outputs.snapshot }}-
+            ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
 
-      - name: Cache .stack-work (project-scoped)
-        uses: actions/cache@v4
-        with:
-          path: |
-            .stack-work
-            haskell/*/.stack-work
-          key: ${{ runner.os }}-${{ runner.arch }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-stackwork-${{ steps.cache-key.outputs.snapshot }}-
+      - name: Build
+        run: stack build katari-cli:katari --copy-bins --local-bin-path ./bin
 
-      - name: Build katari
-        run: |
-          stack build katari:katari --copy-bins --local-bin-path ./bin
-          ls -la ./bin
-
-      - name: Strip binary
-        if: runner.os != 'macOS'
+      - name: Strip (linux)
+        if: runner.os == 'Linux'
         run: strip ./bin/katari
 
-      - name: Resolve version
-        id: version
+      - name: Package
+        id: package
         shell: bash
-        # `inputs.tag` is user-controllable on workflow_dispatch; pass it
-        # via env to avoid shell injection through ${{ }} interpolation.
+        run: |
+          VERSION="${TAG#v}"
+          TARBALL="katari-$VERSION-${{ matrix.platform }}.tar.gz"
+          tar czf "$TARBALL" -C ./bin katari
+          shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
         env:
-          INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          ref="${INPUT_TAG:-$REF_NAME}"
-          if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::tag must match v<major>.<minor>.<patch>[-prerelease]; got '$ref'"
-            exit 1
-          fi
-          echo "tag=$ref" >> "$GITHUB_OUTPUT"
-          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          TAG: ${{ needs.verify-versions.outputs.tag }}
 
-      - name: Package tarball
-        shell: bash
-        run: |
-          mkdir -p dist
-          name="katari-${{ steps.version.outputs.version }}-${{ matrix.platform }}"
-          tar czf "dist/${name}.tar.gz" -C ./bin katari
-          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
-          ls -la dist
-
-      - name: Upload to release
+      - name: Upload to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.verify-versions.outputs.tag }}
           files: |
-            dist/katari-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz
-            dist/katari-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz.sha256
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+            ${{ steps.package.outputs.tarball }}
+            ${{ steps.package.outputs.tarball }}.sha256

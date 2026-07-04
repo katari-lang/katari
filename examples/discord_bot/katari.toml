@@ -1,19 +1,9 @@
 [package]
 name = "discord_bot"
-version = "0.1.0"
-description = ""
+description = "A tool-using AI Discord bot: provider-agnostic model loop (Gemini/OpenAI), a discord.js gateway sidecar, and an e2b Python tool."
 
 [runtime]
-url = "http://localhost:8000"
+url = "http://localhost:3000"
 
 [dependencies]
-# registry = "https://github.com/katari-lang/katari-registry"
-# snapshot = "v0.1.0"
 packages = []
-
-# [overrides.my_fork]
-# path = "../my_fork"
-#
-# [overrides.upstream]
-# git = "https://github.com/..."
-# ref = "<full 40-hex commit sha>"

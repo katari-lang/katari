@@ -1,0 +1,31 @@
+// The `prelude.http` sub-module: a built-in HTTP client. `fetch` is an `external` whose calls route to the
+// runtime's `http` reactor (an in-runtime `fetch`, not an FFI sidecar) via the `from "http"` clause. It is
+// called as `http.fetch`.
+//
+// Because it is an external call it performs io: the call is impure (it carries the un-dischargeable `io`
+// effect, which propagates to the run root), so it takes the strict, non-lifting call path. That gives the
+// information-flow rules for free: `url` / `method` / `body` are public `string`, so a secret cannot be sent
+// in a URL or body (a private value there is a type error — a secret must not go outbound); only header
+// *values* are `string of private` (a secret may be sent as an auth header); and the response is public
+// (declassified — it is the server's response, not a function of the secret).
+//
+// Errors: a non-2xx response is returned as its `status` to branch on (`match (response.status) { ... }`).
+// A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) throws
+// `fetch_error`, which bubbles from the call site to the nearest handler — so a caller can `use handler {
+// request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
+// control retry.
+
+@"An HTTP request never completed: DNS failure, refused connection, timeout, or a mid-flight runtime
+restart. Thrown by `fetch`. (A response that did arrive is never an error — branch on its `status`.)"
+data fetch_error(message: string)
+
+@"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
+may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text. A
+request that never completes throws `fetch_error` (catchable with `use handler { request throw(error:
+http.fetch_error) -> never { ... } }`)."
+external agent fetch(
+  url: string,
+  method: string,
+  headers: record[string of private],
+  body: string,
+) -> { status: integer, body: string } with prelude.throw[fetch_error] from "http"

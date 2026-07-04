@@ -9,12 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  haskell:
-    name: haskell (build + test)
+  lint:
+    name: lint
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
+      # lint:haskell runs hlint via `stack exec --package hlint`, so the lint job needs the same
+      # stack toolchain and caches as the test job.
       - uses: haskell-actions/setup@v2
         id: setup
         with:
@@ -36,33 +38,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
 
-      - name: Cache .stack-work
-        uses: actions/cache@v4
-        with:
-          path: |
-            .stack-work
-            haskell/*/.stack-work
-          key: ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('haskell/**/*.hs', 'haskell/**/package.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-stackwork-v2-${{ steps.cache-key.outputs.snapshot }}-
-
-      - name: Build
-        run: stack build --fast
-
-      - name: Test
-        run: stack test --fast
-
-      - uses: haskell-actions/hlint-setup@v2
-
-      - name: Lint
-        run: hlint haskell
-
-  typescript:
-    name: typescript (build + test + lint)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
@@ -72,21 +47,14 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm -r --filter "./typescript/packages/*" run build
+      - name: pnpm typecheck
+        run: pnpm run typecheck
 
-      - name: Lint
-        run: pnpm biome lint .
+      - name: pnpm lint
+        run: pnpm run lint
 
-      - name: Typecheck (admin-web)
-        run: pnpm --filter @katari-lang/admin-web typecheck
-
-      - name: Test
-        run: pnpm -r run test
-
-  e2e:
-    name: e2e
-    needs: [haskell, typescript]
+  test:
+    name: test
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -135,7 +103,7 @@ jobs:
         run: stack build --fast
 
       - name: Build (TypeScript)
-        run: pnpm -r --filter "./typescript/packages/*" run build
+        run: pnpm -r run build
 
-      - name: Run e2e tests
-        run: pnpm --filter e2e test
+      - name: Test
+        run: pnpm run test

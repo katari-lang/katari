@@ -1,81 +1,48 @@
-# discord_bot
+# discord_bot — a tool-using AI Discord bot
 
-A Discord chat bot, written in Katari. It listens to a channel, asks Gemini
-for a reply, and posts it back — built to dogfood the language and SDK.
+The composition example: everything in [`playground`](../playground) working together in one app.
 
-## How it's put together
+- **Provider-agnostic AI layer** ([`ai.ktr`](src/discord_bot/ai.ktr) + [`ai/types.ktr`](src/discord_bot/ai/types.ktr)):
+  the conversation/step vocabulary, one `ai_client` union, and the tool-calling loop written *in
+  Katari* — schemas derived with `ai.get_metadata`, tool batches dispatched concurrently with
+  `parallel for`, each call validated against the tool's schema by `ai.call_agent`.
+- **Two providers** ([`ai/gemini.ktr`](src/discord_bot/ai/gemini.ktr), [`ai/openai.ktr`](src/discord_bot/ai/openai.ktr)):
+  request bodies built and responses parsed as `json` values in Katari; the only network call is
+  [`api.post_json`](src/discord_bot/api.ktr), a thin wrapper over the built-in `http.fetch`
+  (no HTTP sidecar at all). Swap providers by editing one line in `make_client`.
+- **Discord gateway** ([`discord.ktr`](src/discord_bot/discord.ktr) + [`discord.ts`](src/discord_bot/discord.ts)):
+  a discord.js client in the FFI sidecar. Incoming messages come back through an **inner
+  delegation** (`deliver_to.call(...)`) and surface as the `on_message` request, which the app
+  handles with a **stateful handler** holding the conversation history as a Katari value.
+- **e2b tool** ([`e2b.ktr`](src/discord_bot/e2b.ktr) + [`e2b.ts`](src/discord_bot/e2b.ts)): run
+  Python in a sandbox; its API key rides the `get_e2b_key` capability, provided once at the root.
+- **Secrets**: API keys are runtime env entries read with `env.get_secret` — private values that
+  can flow into an http auth header or an FFI call, but never out to a user-facing boundary.
 
-- **`src/discord_bot.ktr`** — the agents.
-  - `ai_client` is a `data` value (provider + model + a `secret` api key),
-    handed to the whole program once through the `get_ai_client` capability;
-    the Discord connection is shared the same way (`get_discord_client`).
-  - `watch_messages(channel_id)` serves a channel forever, raising an
-    `on_message(text, channel_id)` **request** for each message. `main` provides
-    the capabilities, then installs a `handle { request on_message(...) { ... } }`
-    that does the work — infers a reply, posts it with `send_message`, `next`s to
-    keep serving.
-  - The **conversation history is a Katari value**: an `array[turn]` kept in the
-    `on_message` handler's state cell (`var history`), grown with `array.append`
-    and threaded with `next ... with { history = ... }`. It lives in the language,
-    not the sidecar — long turns auto-promote to value-store refs at persist time.
-  - This is the point of the request model: `watch_messages` only knows it
-    raises `on_message`; what the reaction *does* (and which capabilities it
-    needs) lives in the user's handler, not in the watch signature.
-- **`src/discord_bot.ts`** — the ext (a JS sidecar) with the thin primitives:
-  a **stateless** Gemini call (`ai_infer` takes the history, returns the reply),
-  and the discord.js gateway client (`create_discord_client` / `discord_watch` /
-  `discord_send`, which the ktr wraps as the capability agents `watch_messages` /
-  `send_message`).
+## Run it
 
-## Setup
-
-1. **Create a Discord bot.** In the
-   [Developer Portal](https://discord.com/developers/applications): create an
-   application → **Bot** → copy the token. Under **Privileged Gateway Intents**,
-   enable **Message Content Intent** (the bot reads message text). Invite the
-   bot to a server with the `bot` scope and the *Send Messages* /
-   *Read Message History* permissions.
-
-2. **Get a Gemini API key** from [Google AI Studio](https://aistudio.google.com/apikey).
-
-3. **Start the runtime:**
-
-   ```sh
-   cp .env.example .env      # then edit KATARI_API_KEY / KATARI_SECRET_KEY for prod
-   docker compose up -d
-   ```
-
-4. **Store the two agent secrets** in the runtime (these are read at run time by
-   `get_secret_env`, encrypted at rest — they are *not* the `.env` above). In the
-   admin UI's **Env** page, add:
-
-   - `GEMINI_API_KEY`
-   - `DISCORD_TOKEN`
-   - `E2B_API_KEY` (only needed for the Python-tool demo below)
-
-5. **Deploy and run:**
-
-   ```sh
-   katari apply                                          # compile + bundle the ext + upload
-   katari run discord_bot.main --args '{"channel_id": "<channel id>"}'
-   ```
-
-   `main` never returns on its own — the bot stays up until you cancel the run.
-   Message the bot in that channel and it replies.
-
-## Tool calling (run Python via e2b)
-
-`ask(history, tools)` takes an **array of tool agents** and lets the model call
-any of them: Katari maps `get_metadata` over the tools (a `for` loop +
-`array.append`) to build their schemas, and the ext runs the tool-call feedback
-loop, dispatching the chosen tool back into Katari (so a tool is just an agent —
-it can use capabilities, raise requests, …). `solve` is a standalone entry that
-wires one tool (`run_python`) and tries it without Discord:
+With the runtime up and the repo's toolchain built (see the repo README):
 
 ```sh
-katari run discord_bot.solve --wait \
-  --args '{"task": "Use Python to compute the sum of the first 100 primes."}'
+# The runtime URL comes from katari.toml's [runtime].url. The CLI authenticates with the runtime's
+# KATARI_API_KEY (the same one in the repo `.env`), so export it once:
+export KATARI_API_KEY="$(grep -m1 '^KATARI_API_KEY=' ../../.env | cut -d= -f2-)"
+cd examples/discord_bot
+
+# Secrets live in the runtime, not in files:
+katari env set GEMINI_API_KEY  --secret   # or OPENAI_API_KEY + edit make_client
+katari env set E2B_API_KEY     --secret
+katari env set DISCORD_TOKEN   --secret   # bot token with the MESSAGE CONTENT intent
+
+katari apply
+
+# Tool loop only, no Discord (asks Gemini, runs Python via e2b when the model wants to):
+katari run discord_bot.solve --arg '{"task":"What is 2^100? Use python."}'
+
+# The bot: serve one channel until cancelled.
+katari run discord_bot.main --arg '{"channel_id":"<your channel id>"}'
 ```
 
-The runtime listens on `http://localhost:8000` by default; point the CLI at it
-with `--api` or `KATARI_API_URL`.
+While `main` runs, the console's run page shows the delegation tree: the gateway watch (an FFI
+call), and each incoming message spawning its inner `deliver` → `on_message` → provider-fetch
+chain under it.

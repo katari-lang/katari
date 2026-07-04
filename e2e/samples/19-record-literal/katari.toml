@@ -1,7 +1,0 @@
-[package]
-name = "record_literal"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

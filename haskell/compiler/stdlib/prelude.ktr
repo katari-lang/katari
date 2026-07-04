@@ -1,0 +1,74 @@
+// The wired-in `prelude` module. Every operator desugars to one of these functions, and the module
+// is default-imported into every user module (so `prelude.add` and stdlib submodules resolve).
+//
+// Generic bounds give operators precise typing: an arithmetic operator over `T extends number`
+// preserves `integer` when both operands are integers, and widens to `number` otherwise.
+
+// Arithmetic -------------------------------------------------------------------------------------
+
+@"Add two numbers; preserves integer when both operands are integers."
+primitive agent add[T extends number](left: T, right: T) -> T
+@"Subtract two numbers; preserves integer when both operands are integers."
+primitive agent subtract[T extends number](left: T, right: T) -> T
+@"Multiply two numbers; preserves integer when both operands are integers."
+primitive agent multiply[T extends number](left: T, right: T) -> T
+@"Floor-modulo two numbers; preserves integer when both operands are integers. A zero divisor
+panics (guard with a comparison first)."
+primitive agent modulo[T extends number](left: T, right: T) -> T
+@"Divide two numbers; always yields a number. A zero divisor panics (guard with a comparison
+first) — division never yields Infinity / NaN."
+primitive agent divide(left: number, right: number) -> number
+@"Negate a number; preserves integer."
+primitive agent negate[T extends number](value: T) -> T
+
+// Comparison -------------------------------------------------------------------------------------
+
+@"Whether two values are equal."
+primitive agent equal[T](left: T, right: T) -> boolean
+@"Whether two values are not equal."
+primitive agent not_equal[T](left: T, right: T) -> boolean
+@"Whether the left number is less than the right."
+primitive agent less_than[T extends number](left: T, right: T) -> boolean
+@"Whether the left number is less than or equal to the right."
+primitive agent less_or_equal[T extends number](left: T, right: T) -> boolean
+@"Whether the left number is greater than the right."
+primitive agent greater_than[T extends number](left: T, right: T) -> boolean
+@"Whether the left number is greater than or equal to the right."
+primitive agent greater_or_equal[T extends number](left: T, right: T) -> boolean
+
+// Logical ----------------------------------------------------------------------------------------
+
+@"Logical conjunction."
+primitive agent and(left: boolean, right: boolean) -> boolean
+@"Logical disjunction."
+primitive agent or(left: boolean, right: boolean) -> boolean
+@"Logical negation."
+primitive agent not(value: boolean) -> boolean
+
+// String -----------------------------------------------------------------------------------------
+
+@"Concatenate two strings."
+primitive agent concat(left: string, right: string) -> string
+
+// Errors -----------------------------------------------------------------------------------------
+//
+// The two error channels:
+//
+//   - `throw[T]` (below) is the error channel for programs: anticipated, domain-specific failures a
+//     caller may recover from. The payload type is an error `data` declared next to the operation
+//     that fails (`json.parse_error`, `http.fetch_error`, ...). Raises in one scope join to the
+//     payload union (`throw[a] | throw[b]` is `throw[a | b]`), and a handler discharges exactly the
+//     payload its parameter annotation names — handle the whole union, or rethrow the rest.
+//
+//   - `panic` is the runtime's own failure signal and has no declaration here on purpose: a program
+//     can neither raise it nor handle it. The runtime panics on invariant violations (a
+//     non-exhaustive match, a zero divisor, an FFI infrastructure error, an engine backstop), and an
+//     unhandled panic fails the run. Recovery from a broken invariant is not a program-level
+//     concern; re-running is.
+
+@"Signal a typed error the caller may recover from. The payload is a domain-specific error `data`
+(e.g. `json.parse_error`); a handler at that payload type catches it — `use handler { request
+throw(error: my_error) -> never { break fallback } }` — and an unhandled throw fails the run with
+the payload. `-> never` means a throw cannot be resumed: a handler recovers by `break`ing out of
+the handle (or rethrows)."
+request throw[T](error: T) -> never

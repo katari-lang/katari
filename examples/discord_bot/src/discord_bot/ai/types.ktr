@@ -1,14 +1,17 @@
-// The provider-AGNOSTIC vocabulary of the AI abstraction: the conversation
-// history shape, a model step's outcome, and the shared knobs. Each provider
-// module maps these to/from its own wire format; the orchestration
-// (`discord_bot.ai`) and apps speak only this vocabulary. No provider details
-// leak in here — that is the whole point of the abstraction.
+// The provider-AGNOSTIC vocabulary of the AI abstraction: the conversation history shape, a model
+// step's outcome, and the shared knobs. Each provider module maps these to/from its own wire
+// format; the orchestration (`discord_bot.ai`) and apps speak only this vocabulary. No provider
+// details leak in here — that is the whole point of the abstraction.
 
 @"One turn in a conversation: who spoke (\"user\" / \"model\") and what they said."
 data turn(role: string, text: string)
 
-@"One tool the model wants to invoke this step — @tool_index@ selects it from the tools array (for dispatch), @name@ is its function name (for the model-facing call/response record), @opaque@ is any provider token that must be replayed verbatim on the call turn (Gemini's thought signature; empty for providers that don't use one), @args@ is the model's argument object as parsed `json` (replayed verbatim on the call turn; `jsonx.to_value` turns it into the value `call_agent` dispatches with)."
-data tool_call(tool_index: integer, name: string, opaque: string, args: json)
+@"One tool the model wants to invoke this step — @name@ is its function name (the dispatch key and
+the model-facing call/response record), @opaque@ is any provider token that must be replayed
+verbatim on the call turn (Gemini's thought signature, OpenAI's call id), @args@ is the model's
+argument object as parsed json (replayed verbatim; `json.decode[unknown]` turns it into the plain
+value `ai.call_agent` dispatches with)."
+data tool_call(name: string, opaque: string, args: json.json)
 
 @"A tool's output for the model, keyed by the tool @name@ / @call_id@ so it round-trips as a function response."
 data tool_result(name: string, call_id: string, text: string)
@@ -19,9 +22,9 @@ data call_turn(calls: array[tool_call])
 @"A conversation turn carrying the results of a tool-call batch."
 data result_turn(results: array[tool_result])
 
-// One conversation-history element. Each provider maps it to its content parts
-// (Gemini text / functionCall / functionResponse; OpenAI user|assistant|tool
-// messages), so the function-calling loop closes. (Type synonyms take no docs.)
+// One conversation-history element. Each provider maps it to its content parts (Gemini text /
+// functionCall / functionResponse; OpenAI user|assistant|tool messages), so the function-calling
+// loop closes. (Type synonyms take no docs.)
 type message = turn | call_turn | result_turn
 
 @"One inference step's decision: a final reply text for the user."
@@ -34,4 +37,4 @@ data step_call(calls: array[tool_call])
 type step = step_final | step_call
 
 @"Shared, provider-independent generation knobs. Each provider maps the ones it supports onto its wire request; the rest are ignored."
-data infer_config(temperature: number = 1.0, max_output_tokens: integer = 2048, system: string = "")
+data infer_config(temperature: number ?= 1.0, max_output_tokens: integer ?= 2048, system: string ?= "")

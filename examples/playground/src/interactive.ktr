@@ -1,0 +1,24 @@
+// Escalation: a request with no handler in scope bubbles out of the run and becomes an open
+// question — answer it from the console (Escalations inbox / run page) or `katari answer`. While
+// the run waits, the delegation tree (run page) shows exactly which agents are blocked on what:
+// `main` → `panel` → two parallel `consult` children, each holding an open `ask`.
+
+@"Ask the human operator a question; the run waits until it is answered."
+request ask(question: string) -> string
+
+@"Deliberate on one topic by asking the operator — one node of the delegation tree."
+agent consult(topic: string) -> string with ask {
+  let advice = ask(question = f"What should we consider about ${topic}?")
+  f"${topic}: ${advice}"
+}
+
+@"Consult on both topics in parallel — two children under one parent in the tree."
+agent panel(first: string, second: string) -> array[string] with ask {
+  parallel [consult(topic = first), consult(topic = second)]
+}
+
+@"Entry: run the panel and join its findings. Answer the two questions to finish the run."
+agent main() -> string with ask {
+  let findings = panel(first = "safety", second = "cost")
+  string.join(parts = findings, separator = "; ")
+}

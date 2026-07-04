@@ -1,0 +1,66 @@
+-- | Project-local cache at @\<projectRoot>/.katari/@.
+--
+-- Layout (v0.1):
+--
+-- @
+-- .katari/
+-- ├── packages/      -- downloaded dependency sources
+-- └── snapshots/     -- mirrored registry snapshot files
+-- @
+--
+-- v0.1 has /no build cache/. The compiler runs fast enough to rebuild every module from source each
+-- time, and per-module upload does not need one: build everything, hash each module's IR, and
+-- upload only the modules whose hash differs from what the runtime already holds (see
+-- 'Katari.Project.Upload'). So the cache stores only what is expensive to re-acquire — dependency
+-- source trees fetched over the network.
+--
+-- The whole @.katari/@ directory is gitignored by default (@katari init@ writes the entry).
+module Katari.Project.Cache
+  ( CachePaths (..),
+    projectCachePaths,
+    ensureCacheDirs,
+    packageDir,
+  )
+where
+
+import Data.Text (Text)
+import Data.Text qualified as Text
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
+
+-- | The cache root, relative to the project root, and its two subdirectories.
+cacheDirName, packagesDirName, snapshotsDirName :: FilePath
+cacheDirName = ".katari"
+packagesDirName = "packages"
+snapshotsDirName = "snapshots"
+
+-- | Resolved on-disk paths rooted at the project's @.katari/@ directory.
+data CachePaths = CachePaths
+  { root :: FilePath,
+    packages :: FilePath,
+    snapshots :: FilePath
+  }
+  deriving (Show, Eq)
+
+-- | Build 'CachePaths' for a given project root directory.
+projectCachePaths :: FilePath -> CachePaths
+projectCachePaths projectRoot =
+  CachePaths
+    { root = cacheRoot,
+      packages = cacheRoot </> packagesDirName,
+      snapshots = cacheRoot </> snapshotsDirName
+    }
+  where
+    cacheRoot = projectRoot </> cacheDirName
+
+-- | Create every cache directory on demand. @createDirectoryIfMissing True@ creates parents, so each
+-- subdirectory is made even on a first run with no @.katari/@ yet. Safe to call repeatedly.
+ensureCacheDirs :: CachePaths -> IO ()
+ensureCacheDirs paths = do
+  createDirectoryIfMissing True paths.packages
+  createDirectoryIfMissing True paths.snapshots
+
+-- | Package source directory: @\<packages>/\<name>-\<sha256>@. The @name@ is the dependency name and
+-- @sha@ the hex content hash that uniquely identifies the source tree.
+packageDir :: CachePaths -> Text -> Text -> FilePath
+packageDir paths name sha = paths.packages </> Text.unpack (name <> "-" <> sha)

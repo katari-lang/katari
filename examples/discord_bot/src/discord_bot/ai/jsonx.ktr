@@ -1,55 +1,37 @@
-// Small JSON read helpers — plain Katari over the `json` data union. `record.get`
-// / `array.get` are typed `V | null` (null on absent key / out-of-range index),
-// so `or_null` folds that null back into the `json` world as `json_null()`; the
-// readers below are then thin match wrappers. No reify / stdlib json prims needed.
+// Small JSON read helpers — plain Katari over the `json` data union. `record.get` / `array.get`
+// are typed `V | null` (null on absent key / out-of-range index), so `or_null` folds that null
+// back into the `json` world as `json_null()`; the readers below are then thin match wrappers.
 
-@"Fold a nullable json read (`record.get` / `array.get`, typed `json | null`) back into `json`: a missing value becomes `json_null()`."
-agent or_null(value: json | null) -> json {
+@"Fold a nullable json read (`record.get` / `array.get`, typed `json | null`) back into `json`:
+a missing value becomes `json_null()`. Matching the `null` arm narrows the residual to `json`, so the
+fallthrough binds `present` at `json` and returns it unchanged."
+agent or_null(value: json.json | null) -> json.json {
   match (value) {
-    case null => { json_null() }
-    case present => { present }
+    case null -> json.json_null()
+    case present -> present
   }
 }
 
 @"The child at object key @key@ (json_null if @node@ is not an object or has no such key)."
-agent field(node: json, key: string) -> json {
+agent field(node: json.json, key: string) -> json.json {
   match (node) {
-    case json_object(entries = entries) => { or_null(value = record.get(record = entries, key = key)) }
-    case _ => { json_null() }
+    case json.json_object(entries => entries) -> or_null(value = record.get(target = entries, key = key))
+    case _ -> json.json_null()
   }
 }
 
 @"The element at array index @index@ (json_null if @node@ is not an array or @index@ is out of range)."
-agent elem(node: json, index: integer) -> json {
+agent elem(node: json.json, index: integer) -> json.json {
   match (node) {
-    case json_array(items = items) => { or_null(value = array.get(array = items, index = index)) }
-    case _ => { json_null() }
+    case json.json_array(items => items) -> or_null(value = array.get(target = items, index = index))
+    case _ -> json.json_null()
   }
 }
 
 @"The string @node@ holds (empty string if it is not a json_string)."
-agent text(node: json) -> string {
+agent text(node: json.json) -> string {
   match (node) {
-    case json_string(value = string_value) => { string_value }
-    case _ => { "" }
-  }
-}
-
-@"Unwrap a json value to a plain Katari value (strip the json_* tags recursively) — e.g. to hand a model's parsed tool args to call_agent, which validates them against the target schema at runtime."
-agent to_value(node: json) -> unknown with pure {
-  match (node) {
-    case json_null() => { null }
-    case json_boolean(value = boolean_value) => { boolean_value }
-    case json_integer(value = integer_value) => { integer_value }
-    case json_number(value = number_value) => { number_value }
-    case json_string(value = string_value) => { string_value }
-    case json_array(items = items) => {
-      for (let item in items) { next to_value(node = item) }
-    }
-    case json_object(entries = entries) => {
-      for (let key in record.keys(record = entries), var acc: record[unknown] = record.empty()) {
-        next with { acc = record.set(record = acc, key = key, value = to_value(node = or_null(value = record.get(record = entries, key = key)))) }
-      } then { acc }
-    }
+    case json.json_string(value => string_value) -> string_value
+    case _ -> ""
   }
 }

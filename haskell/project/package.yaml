@@ -1,0 +1,93 @@
+name: katari-project
+version: 0.1.0.0
+license: MIT
+author: "yukikurage"
+
+language: GHC2021
+
+dependencies:
+  - base >= 4.7 && < 5
+  - text
+  - bytestring
+  - containers
+  # Canonical JSON serialisation of IRModule for the per-module upload hash (Katari.Project.Upload).
+  - aeson
+  - mtl
+  - transformers
+  - filepath
+  - directory
+  - temporary
+  # TOML parsing for katari.toml / katari.lock / registry snapshots. Decodes dynamic-key tables
+  # ([overrides.X], [packages.X]) directly into 'Map', so there is no nested-table workaround.
+  - toml-reader
+  # Registry snapshot download + git dependency fetch.
+  - http-client
+  - http-client-tls
+  - http-types
+  # Git tarball extraction (GitHub archive .tar.gz) + content hashing for the lockfile.
+  - tar
+  - zlib
+  - crypton
+  - memory
+  # The module-name type the compiler keys 'CompileInput' by; this package produces that map.
+  - katari-compiler
+
+# NOTE: -Wmissing-export-lists is intentionally absent: modules export everything while the
+# scrap-and-build is in motion.
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wmissing-home-modules
+  - -Wpartial-fields
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Katari.Project.Error
+    - Katari.Project.Hash
+    - Katari.Project.Http
+    - Katari.Project.Config
+    - Katari.Project.Discovery
+    - Katari.Project.Edit
+    - Katari.Project.Cache
+    - Katari.Project.Fetch
+    - Katari.Project.Snapshot
+    - Katari.Project.Lockfile
+    - Katari.Project.Resolve
+    - Katari.Project.Upload
+
+tests:
+  katari-project-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-project
+      - katari-compiler
+      - hspec
+      - directory
+      - filepath
+      - temporary
+      - text
+      - containers
+      # An unused Manager for exercising loadSnapshotFromUrl over file:// (no network involved).
+      - http-client
+    build-tools:
+      - hspec-discover
+
+default-extensions:
+  - LambdaCase
+  - OverloadedStrings
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - RecordWildCards
+  - DerivingStrategies
+  - StrictData

@@ -1,177 +1,173 @@
-// Gemini provider: maps the agnostic conversation/step vocabulary
-// (discord_bot.ai.types) to/from Gemini's generateContent wire format — request
-// body built as `json` and the response parsed from `json`, entirely in Katari.
-// The only sidecar call is the generic `http.http_post`.
+// Gemini provider: maps the agnostic conversation/step vocabulary (discord_bot.ai.types) to/from
+// Gemini's generateContent wire format — request body built as `json` and the response parsed from
+// `json`, entirely in Katari. The only network call is the generic `api.post_json`.
 
 import discord_bot.ai.types
 import discord_bot.ai.jsonx
-import discord_bot.http
+import discord_bot.api
 
 @"A Gemini provider connection (the generativelanguage generateContent API)."
-data gemini(model: string, api_key: secret, config: types.infer_config)
+data gemini(model: string, api_key: string of private, config: types.infer_config)
 
 // ── request body (built as json) ─────────────────────────────────────────────
 
 agent gemini_role(role: string) -> string {
   match (role) {
-    case "model" => { "model" }
-    case _ => { "user" }
+    case "model" -> "model"
+    case _ -> "user"
   }
 }
 
-agent gemini_text_part(text: string) -> json {
-  json_object(entries = { text = json_string(value = text) })
+agent gemini_text_part(text: string) -> json.json {
+  json.json_object(entries = { text = json.json_string(value = text) })
 }
 
-agent gemini_call_part(call: types.tool_call) -> json {
-  // Replay the model's functionCall verbatim: name + the original args (already
-  // json) + the thought signature Gemini 3 requires echoed.
-  json_object(entries = {
-    functionCall = json_object(entries = {
-      name = json_string(value = call.name),
+agent gemini_call_part(call: types.tool_call) -> json.json {
+  // Replay the model's functionCall verbatim: name + the original args (already json) + the
+  // thought signature Gemini requires echoed.
+  json.json_object(entries = {
+    functionCall = json.json_object(entries = {
+      name = json.json_string(value = call.name),
       args = call.args,
     }),
-    thoughtSignature = json_string(value = call.opaque),
+    thoughtSignature = json.json_string(value = call.opaque),
   })
 }
 
-agent gemini_result_part(result: types.tool_result) -> json {
-  json_object(entries = {
-    functionResponse = json_object(entries = {
-      name = json_string(value = result.name),
-      response = json_object(entries = { result = json_string(value = result.text) }),
+agent gemini_result_part(result: types.tool_result) -> json.json {
+  json.json_object(entries = {
+    functionResponse = json.json_object(entries = {
+      name = json.json_string(value = result.name),
+      response = json.json_object(entries = { result = json.json_string(value = result.text) }),
     }),
   })
 }
 
-agent gemini_content(msg: types.message) -> json {
+agent gemini_content(msg: types.message) -> json.json {
   match (msg) {
-    case types.turn(role = role, text = text) => {
-      json_object(entries = {
-        role = json_string(value = gemini_role(role = role)),
-        parts = json_array(items = [gemini_text_part(text = text)]),
+    case types.turn(role => role, text => text) -> {
+      json.json_object(entries = {
+        role = json.json_string(value = gemini_role(role = role)),
+        parts = json.json_array(items = [gemini_text_part(text = text)]),
       })
     }
-    case types.call_turn(calls = calls) => {
-      json_object(entries = {
-        role = json_string(value = "model"),
-        parts = json_array(items = for (let call in calls) { next gemini_call_part(call = call) }),
+    case types.call_turn(calls => calls) -> {
+      json.json_object(entries = {
+        role = json.json_string(value = "model"),
+        parts = json.json_array(items = for (let call in calls) { next gemini_call_part(call = call) }),
       })
     }
-    case types.result_turn(results = results) => {
-      json_object(entries = {
-        role = json_string(value = "user"),
-        parts = json_array(items = for (let result in results) { next gemini_result_part(result = result) }),
+    case types.result_turn(results => results) -> {
+      json.json_object(entries = {
+        role = json.json_string(value = "user"),
+        parts = json.json_array(items = for (let result in results) { next gemini_result_part(result = result) }),
       })
     }
   }
 }
 
-// Gemini's functionDeclarations.parameters accepts only an OpenAPI subset and
-// 400s on draft-07 keywords (additionalProperties / $schema / ...). Strip them
-// recursively from the compiler-emitted schema.
+// Gemini's functionDeclarations.parameters accepts only an OpenAPI subset and 400s on JSON-Schema
+// keywords (additionalProperties / $schema / ...). Strip them recursively from the compiler-emitted
+// schema.
 agent gemini_drop_schema_key(key: string) -> boolean {
   match (key) {
-    case "additionalProperties" => { true }
-    case "$schema" => { true }
-    case "$id" => { true }
-    case "$defs" => { true }
-    case "definitions" => { true }
-    case _ => { false }
+    case "additionalProperties" -> true
+    case "$schema" -> true
+    case "$id" -> true
+    case "$defs" -> true
+    case "definitions" -> true
+    case _ -> false
   }
 }
 
-agent gemini_sanitize(node: json) -> json with json_parse_error {
+// The recursive group needs an explicit effect row; `pure` is the empty effect — sanitizing the
+// schema tree performs no requests and no io.
+agent gemini_sanitize(node: json.json) -> json.json with pure {
   match (node) {
-    case json_object(entries = entries) => {
-      let cleaned = for (let key in record.keys(record = entries), var acc: record[json] = record.empty()) {
-        match (gemini_drop_schema_key(key = key)) {
-          case true => { next with { acc = acc } }
-          case _ => { next with { acc = record.set(record = acc, key = key, value = gemini_sanitize(node = jsonx.field(node =node, key = key))) } }
+    case json.json_object(entries => entries) -> {
+      let cleaned = for (let key in record.keys(target = entries), var acc: record[json.json] = record.empty()) {
+        if (gemini_drop_schema_key(key = key)) {
+          next with { acc = acc }
+        } else {
+          next with { acc = record.set(target = acc, key = key, value = gemini_sanitize(node = jsonx.field(node = node, key = key))) }
         }
-      } then { acc }
-      json_object(entries = cleaned)
+      } then (_values) { acc }
+      json.json_object(entries = cleaned)
     }
-    case json_array(items = items) => {
-      json_array(items = for (let item in items) { next gemini_sanitize(node = item) })
+    case json.json_array(items => items) -> {
+      json.json_array(items = for (let item in items) { next gemini_sanitize(node = item) })
     }
-    case _ => { node }
+    case _ -> node
   }
 }
 
-agent gemini_function_declaration(meta: agent_metadata) -> json with json_parse_error {
-  json_object(entries = {
-    name = json_string(value = meta.name),
-    description = json_string(value = meta.description),
-    parameters = gemini_sanitize(node = json.parse(text = meta.input)),
+agent gemini_function_declaration(meta: ai.agent_metadata) -> json.json {
+  json.json_object(entries = {
+    name = json.json_string(value = meta.name),
+    description = json.json_string(value = meta.description),
+    parameters = gemini_sanitize(node = meta.input),
   })
 }
 
-agent gemini_request_body(client: gemini, history: array[types.message], tool_metas: array[agent_metadata]) -> string with json_parse_error {
-  let contents = json_array(items = for (let msg in history) { next gemini_content(msg = msg) })
-  match (array.length(array = tool_metas)) {
-    case 0 => {
-      json.stringify(value = json_object(entries = { contents = contents }))
-    }
-    case _ => {
-      let declarations = json_array(items = for (let meta in tool_metas) { next gemini_function_declaration(meta = meta) })
-      let tools = json_array(items = [json_object(entries = { functionDeclarations = declarations })])
-      json.stringify(value = json_object(entries = { contents = contents, tools = tools }))
-    }
+agent gemini_request_body(client: gemini, history: array[types.message], tool_metas: array[ai.agent_metadata]) -> string {
+  let contents = json.json_array(items = for (let msg in history) { next gemini_content(msg = msg) })
+  if (array.length(target = tool_metas) == 0) {
+    json.stringify(value = json.json_object(entries = { contents = contents }))
+  } else {
+    let declarations = json.json_array(items = for (let meta in tool_metas) { next gemini_function_declaration(meta = meta) })
+    let tools = json.json_array(items = [json.json_object(entries = { functionDeclarations = declarations })])
+    json.stringify(value = json.json_object(entries = { contents = contents, tools = tools }))
   }
 }
 
 // ── response parsing (read out of json) ──────────────────────────────────────
 
-agent gemini_parts(parsed: json) -> array[json] {
-  let candidate = jsonx.elem(node =jsonx.field(node =parsed, key = "candidates"), index = 0)
-  let content = jsonx.field(node =candidate, key = "content")
-  match (jsonx.field(node =content, key = "parts")) {
-    case json_array(items = items) => { items }
-    case _ => { array.empty() }
+agent gemini_parts(parsed: json.json) -> array[json.json] {
+  let candidate = jsonx.elem(node = jsonx.field(node = parsed, key = "candidates"), index = 0)
+  let content = jsonx.field(node = candidate, key = "content")
+  match (jsonx.field(node = content, key = "parts")) {
+    case json.json_array(items => items) -> items
+    case _ -> []
   }
 }
 
-agent gemini_is_call(part: json) -> boolean {
-  match (jsonx.field(node =part, key = "functionCall")) {
-    case json_null() => { false }
-    case _ => { true }
+agent gemini_is_call(part: json.json) -> boolean {
+  match (jsonx.field(node = part, key = "functionCall")) {
+    case json.json_null() -> false
+    case _ -> true
   }
 }
 
-agent gemini_tool_call(part: json, tool_names: array[string]) -> types.tool_call {
-  let call = jsonx.field(node =part, key = "functionCall")
-  let name = jsonx.text(node =jsonx.field(node =call, key = "name"))
+agent gemini_tool_call(part: json.json) -> types.tool_call {
+  let call = jsonx.field(node = part, key = "functionCall")
   types.tool_call(
-    tool_index = array.index_of(array = tool_names, value = name),
-    name = name,
-    opaque = jsonx.text(node =jsonx.field(node =part, key = "thoughtSignature")),
-    args = jsonx.field(node =call, key = "args"),
+    name = jsonx.text(node = jsonx.field(node = call, key = "name")),
+    opaque = jsonx.text(node = jsonx.field(node = part, key = "thoughtSignature")),
+    args = jsonx.field(node = call, key = "args"),
   )
 }
 
-agent gemini_parse_step(response: string, tool_metas: array[agent_metadata]) -> types.step with json_parse_error {
+agent gemini_parse_step(response: string) -> types.step with prelude.throw[json.parse_error] {
   let parts = gemini_parts(parsed = json.parse(text = response))
-  let tool_names = for (let meta in tool_metas) { next meta.name }
-  let calls = for (let part in parts, var acc: array[types.tool_call] = array.empty()) {
-    match (gemini_is_call(part = part)) {
-      case true => { next with { acc = array.append(array = acc, value = gemini_tool_call(part = part, tool_names = tool_names)) } }
-      case _ => { next with { acc = acc } }
+  let calls = for (let part in parts, var acc: array[types.tool_call] = []) {
+    if (gemini_is_call(part = part)) {
+      next with { acc = array.append(target = acc, value = gemini_tool_call(part = part)) }
+    } else {
+      next with { acc = acc }
     }
-  } then { acc }
-  match (array.length(array = calls)) {
-    case 0 => {
-      let texts = for (let part in parts) { next jsonx.text(node =jsonx.field(node =part, key = "text")) }
-      types.step_final(text = string.join(parts = texts, separator = ""))
-    }
-    case _ => { types.step_call(calls = calls) }
+  } then (_parts) { acc }
+  if (array.length(target = calls) == 0) {
+    let texts = for (let part in parts) { next jsonx.text(node = jsonx.field(node = part, key = "text")) }
+    types.step_final(text = string.join(parts = texts, separator = ""))
+  } else {
+    types.step_call(calls = calls)
   }
 }
 
-@"One Gemini model step over the history + tool schemas (built and parsed as json in Katari; the sidecar only performs the POST)."
-agent gemini_infer_step(client: gemini, history: array[types.message], tool_metas: array[agent_metadata]) -> types.step with json_parse_error {
+@"One Gemini model step over the history + tool schemas (built and parsed as json in Katari; only the POST leaves the runtime)."
+agent gemini_infer_step(client: gemini, history: array[types.message], tool_metas: array[ai.agent_metadata]) -> types.step {
   let body = gemini_request_body(client = client, history = history, tool_metas = tool_metas)
   let url = f"https://generativelanguage.googleapis.com/v1beta/models/${client.model}:generateContent"
-  let response = http.http_post(url = url, body = body, auth_header_name = "x-goog-api-key", auth_prefix = "", api_key = client.api_key)
-  gemini_parse_step(response = response, tool_metas = tool_metas)
+  let response = api.post_json(url = url, body = body, auth_header_name = "x-goog-api-key", auth_prefix = "", api_key = client.api_key)
+  gemini_parse_step(response = response)
 }

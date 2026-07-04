@@ -1,7 +1,0 @@
-[package]
-name = "list_utils"
-
-[runtime]
-url = "http://localhost:8000"
-
-[dependencies]

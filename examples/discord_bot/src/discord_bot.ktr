@@ -1,73 +1,76 @@
-// The Discord bot APP. It wires the reusable library modules — the provider-
-// agnostic `ai` orchestration (+ its `gemini` / `openai` providers), `discord`,
-// and the `e2b` tool — and provides the capabilities at the root. The AI session
-// is installed with `use session_provider(model = ...)`: a reusable provider
-// agent that returns a first-class `handler` value, so the rest of the block runs
-// with the `ai.get_ai_client` capability bound. Swapping the model or provider is
-// a one-line change inside `session_provider`; none of the library modules know
-// anything Discord- or e2b-specific.
+// The Discord bot APP. It wires the reusable library modules — the provider-agnostic `ai`
+// orchestration (+ its `gemini` / `openai` providers), `discord`, and the `e2b` tool — and
+// provides the capabilities at the root with inline handlers. Swapping the model or provider is a
+// one-line change inside `make_client`; none of the library modules know anything Discord- or
+// e2b-specific.
 
 import discord_bot.ai
 import discord_bot.ai.types
 import discord_bot.ai.gemini
+import discord_bot.api
 import discord_bot.discord
 import discord_bot.e2b
 
-@"Run the tool-using model loop over a history (its last turn is the user's task). The tools all share the @e2b.get_e2b_key@ effect, which `ai.infer_with_tools[e2b.get_e2b_key]` tracks through to here."
-agent ask(history: array[types.message], tools: array[agent (...never) -> unknown with e2b.get_e2b_key]) -> string with ai.get_ai_client | e2b.get_e2b_key | json_parse_error | error_invalid_argument {
-  ai.infer_with_tools[e2b.get_e2b_key](history = history, tools = tools, max_steps = 8)
+@"Run the tool-using model loop over a history (its last turn is the user's task). Generic over
+the tools' shared effect @E@ (for `[e2b.run_python]` that is `e2b.get_e2b_key` + the FFI's io),
+which `ai.infer_with_tools[E]` tracks through to the caller's handlers."
+agent ask[effect E](history: array[types.message], tools: array[agent never -> unknown with E]) -> string {
+  ai.infer_with_tools[E](history = history, tools = tools, max_steps = 8)
 }
 
-@"A reusable AI-session provider. Builds the provider connection for `model` ONCE (reading its key — so a missing key raises `env_not_found` here) and hands it to the continuation as the ambient `ai.get_ai_client` capability: `use session_provider(model = ...)` makes the rest of the block run with that client. Generic over the continuation's return type `R` and residual effect `E`, so the same provider serves both `solve` and `main`. Swap gemini -> openai (and the model id) to change provider; nothing else changes."
-agent session_provider[R, effect E](model: string) -> (agent (...(agent () -> R with { ...E, ai.get_ai_client })) -> R with E) with env_not_found {
-  let client = gemini.gemini(
-    model = model,
+@"Build the provider connection ONCE (reading its key — a missing key throws `env.missing_secret`,
+caught by the root's throw clause). Swap gemini -> openai (and the model id) to change provider;
+nothing else changes."
+agent make_client() -> gemini.gemini {
+  gemini.gemini(
+    model = "gemini-2.5-flash",
     api_key = env.get_secret(key = "GEMINI_API_KEY"),
     config = types.infer_config(system = "You are a helpful assistant in a Discord channel."),
   )
-  return handler[R, E] {
-    request ai.get_ai_client() { next client }
-  }
 }
 
-@"Standalone entry to test the tool loop from the CLI (no Discord): katari run discord_bot.solve --args '{\"task\": \"...\"}'."
+@"Standalone entry to test the tool loop from the CLI (no Discord):
+katari run discord_bot.solve --arg '{\"task\": \"...\"}'."
 agent solve(task: string) -> string {
+  // A provider / dispatch failure and a missing secret are typed throws (one handler covers the
+  // joined payload union); an interrupted sidecar is a panic. All become readable strings here
+  // instead of failing the run.
+  use handler { request panic(msg: string) { break f"failed: ${msg}" } }
   use handler {
-    request env_not_found(env_key: string) {
-      break f"missing env: ${env_key}"
+    request prelude.throw(error: ai.loop_error | env.missing_secret) -> never {
+      break f"error: ${json.to_text(value = error)}"
     }
   }
   use handler (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
-    request e2b.get_e2b_key() {
-      next e2b_key
-    }
+    request e2b.get_e2b_key() { next e2b_key }
   }
-  use session_provider(model = "gemini-3.5-flash")
-  ask(
-    history = array.append(array = array.empty(), value = types.turn(role = "user", text = task)),
-    tools = [e2b.run_python],
-  )
+  use handler (var client = make_client()) {
+    request ai.get_ai_client() { next client }
+  }
+  ask(history = [types.turn(role = "user", text = task)], tools = [e2b.run_python])
 }
 
-@"Entry: set up the AI client + Discord connection, then serve one channel forever, keeping the conversation history as a Katari value."
+@"Entry: set up the AI client + Discord connection, then serve one channel forever, keeping the
+conversation history as a Katari value."
 agent main(channel_id: string) -> string {
+  use handler { request panic(msg: string) { break f"failed: ${msg}" } }
   use handler {
-    request env_not_found(env_key: string) {
-      break f"missing env: ${env_key}"
+    request prelude.throw(error: ai.loop_error | env.missing_secret) -> never {
+      break f"error: ${json.to_text(value = error)}"
     }
   }
-  use session_provider(model = "gemini-3.5-flash")
+  use handler (var client = make_client()) {
+    request ai.get_ai_client() { next client }
+  }
   use handler (var discord_client = discord.create_discord_client(token = env.get_secret(key = "DISCORD_TOKEN"))) {
-    request discord.get_discord_client() {
-      next discord_client
-    }
+    request discord.get_discord_client() { next discord_client }
   }
-  use handler (var history: array[types.message] = array.empty()) {
+  use handler (var history: array[types.message] = []) {
     request discord.on_message(text: string, channel_id: string) {
-      let asked = array.append(array = history, value = types.turn(role = "user", text = text))
+      let asked = array.append(target = history, value = types.turn(role = "user", text = text))
       let answer = ai.reply(history = asked)
       discord.send_message(channel_id = channel_id, text = answer)
-      next null with { history = array.append(array = asked, value = types.turn(role = "model", text = answer)) }
+      next null with { history = array.append(target = asked, value = types.turn(role = "model", text = answer)) }
     }
   }
   discord.watch_messages(channel_id = channel_id)

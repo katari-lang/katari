@@ -1,0 +1,9 @@
+[package]
+name = "playground"
+description = "A tour of Katari's standard features: language basics, agents as AI tools, escalation, typed errors, and the FFI."
+
+[runtime]
+url = "http://localhost:3000"
+
+[dependencies]
+packages = []
