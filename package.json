@@ -10,6 +10,7 @@
     "test": "pnpm run test:haskell && pnpm run test:typescript",
     "test:haskell": "stack test",
     "test:typescript": "pnpm -r run test",
+  "test:e2e": "pnpm --filter @katari-lang/e2e run e2e",
     "format": "pnpm run format:haskell && pnpm run format:typescript",
     "format:haskell": "find haskell -path '*/.stack-work' -prune -o -name '*.hs' -type f -exec stack exec --package ormolu -- ormolu --mode inplace {} +",
     "format:typescript": "biome format --write",

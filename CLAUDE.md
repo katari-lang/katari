@@ -69,6 +69,7 @@ CURRENT Phase:
 - `pnpm run test`: Run tests for both haskell and typescript code
 - `pnpm run test:haskell`: Run tests for haskell code
 - `pnpm run test:typescript`: Run tests for typescript code
+- `pnpm run test:e2e`: Run the smoke e2e (`e2e/`): compiles examples/playground with the stack-built katari CLI and drives a real runtime server (needs docker + `stack build`; not part of `pnpm run test`)
 - `pnpm run format`: Format both haskell and typescript code
 - `pnpm run format:haskell`: Format haskell code using ormolu
 - `pnpm run format:typescript`: Format typescript code using biome

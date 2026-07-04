@@ -1,6 +1,7 @@
 packages:
   - "typescript/*"
   - "examples/*"
+  - "e2e"
 
 allowBuilds:
   "@vscode/vsce-sign": true

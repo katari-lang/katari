@@ -1,0 +1,16 @@
+{
+  "name": "@katari-lang/e2e",
+  "version": "0.0.0",
+  "description": "End-to-end smoke harness: compiles examples/playground with the real katari CLI, deploys it to a real runtime server (compose postgres + s3mock), and drives runs over HTTP.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

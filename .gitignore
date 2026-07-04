@@ -1,4 +1,6 @@
 /node_modules/
+# Nested workspace-package node_modules (pnpm links a `node_modules` into each package dir).
+node_modules/
 /.stack-work/
 /.vscode/
 /.claude/
