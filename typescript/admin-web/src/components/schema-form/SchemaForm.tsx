@@ -36,14 +36,7 @@ export function SchemaForm({
   onChange: (next: Json | undefined) => void;
   context: FormContext;
 }) {
-  return (
-    <SchemaField
-      schema={schema}
-      value={value}
-      onChange={onChange}
-      context={context}
-    />
-  );
+  return <SchemaField schema={schema} value={value} onChange={onChange} context={context} />;
 }
 
 interface FieldProps {
@@ -62,12 +55,9 @@ function SchemaField(props: FieldProps) {
 
   if (isReferenceSchema(node, FILE_KEY)) return <FileField {...props} />;
   if (isReferenceSchema(node, AGENT_KEY)) return <AgentField {...props} />;
-  if (node.const !== undefined)
-    return <ConstField {...props} constant={node.const} />;
-  if (Array.isArray(node.enum))
-    return <EnumField {...props} options={node.enum} />;
-  if (Array.isArray(node.anyOf))
-    return <UnionField {...props} branches={node.anyOf} />;
+  if (node.const !== undefined) return <ConstField {...props} constant={node.const} />;
+  if (Array.isArray(node.enum)) return <EnumField {...props} options={node.enum} />;
+  if (Array.isArray(node.anyOf)) return <UnionField {...props} branches={node.anyOf} />;
 
   switch (node.type) {
     case "null":
@@ -87,29 +77,16 @@ function SchemaField(props: FieldProps) {
       );
     case "object": {
       const properties = node.properties;
-      if (
-        typeof properties === "object" &&
-        properties !== null &&
-        !Array.isArray(properties)
-      ) {
+      if (typeof properties === "object" && properties !== null && !Array.isArray(properties)) {
         return (
           <ObjectField
             {...props}
             properties={properties as { [name: string]: Json }}
-            required={
-              new Set(
-                Array.isArray(node.required) ? (node.required as string[]) : [],
-              )
-            }
+            required={new Set(Array.isArray(node.required) ? (node.required as string[]) : [])}
           />
         );
       }
-      return (
-        <RecordField
-          {...props}
-          valueSchema={node.additionalProperties ?? true}
-        />
-      );
+      return <RecordField {...props} valueSchema={node.additionalProperties ?? true} />;
     }
     default:
       return <JsonField {...props} />;
@@ -117,10 +94,7 @@ function SchemaField(props: FieldProps) {
 }
 
 /** The `$ref` / `$agent` reference schemas are objects requiring exactly that discriminator key. */
-function isReferenceSchema(
-  node: JsonSchema,
-  key: typeof FILE_KEY | typeof AGENT_KEY,
-): boolean {
+function isReferenceSchema(node: JsonSchema, key: typeof FILE_KEY | typeof AGENT_KEY): boolean {
   return Array.isArray(node.required) && node.required.includes(key);
 }
 
@@ -128,17 +102,9 @@ function isReferenceSchema(
 // Scalars
 // ---------------------------------------------------------------------------
 
-function ConstField({
-  value,
-  onChange,
-  constant,
-}: FieldProps & { constant: Json }) {
+function ConstField({ value, onChange, constant }: FieldProps & { constant: Json }) {
   if (value === undefined) onChange(constant);
-  return (
-    <span className="font-mono text-xs text-fg-faint">
-      {JSON.stringify(constant)}
-    </span>
-  );
+  return <span className="font-mono text-xs text-fg-faint">{JSON.stringify(constant)}</span>;
 }
 
 function BooleanField({ value, onChange }: FieldProps) {
@@ -156,20 +122,14 @@ function BooleanField({ value, onChange }: FieldProps) {
   );
 }
 
-function NumberField({
-  value,
-  onChange,
-  integer,
-}: FieldProps & { integer: boolean }) {
+function NumberField({ value, onChange, integer }: FieldProps & { integer: boolean }) {
   return (
     <Input
       type="number"
       step={integer ? 1 : "any"}
       value={typeof value === "number" ? value : ""}
       onChange={(event) => {
-        const parsed = integer
-          ? parseInt(event.target.value, 10)
-          : Number(event.target.value);
+        const parsed = integer ? parseInt(event.target.value, 10) : Number(event.target.value);
         onChange(Number.isNaN(parsed) ? undefined : parsed);
       }}
     />
@@ -185,14 +145,8 @@ function StringField({ value, onChange }: FieldProps) {
   );
 }
 
-function EnumField({
-  value,
-  onChange,
-  options,
-}: FieldProps & { options: Json[] }) {
-  const index = options.findIndex(
-    (option) => JSON.stringify(option) === JSON.stringify(value),
-  );
+function EnumField({ value, onChange, options }: FieldProps & { options: Json[] }) {
+  const index = options.findIndex((option) => JSON.stringify(option) === JSON.stringify(value));
   return (
     <Select
       value={index === -1 ? "" : String(index)}
@@ -224,10 +178,7 @@ function ObjectField({
   properties: { [name: string]: Json };
   required: Set<string>;
 }) {
-  const record =
-    typeof value === "object" && value !== null && !Array.isArray(value)
-      ? value
-      : {};
+  const record = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
   const setField = (name: string, next: Json | undefined) => {
     const updated = { ...record };
     if (next === undefined) {
@@ -243,9 +194,7 @@ function ObjectField({
         <div key={name} className="flex flex-col gap-1">
           <span className="text-xs font-medium text-fg-muted">
             {name}
-            {!required.has(name) && (
-              <span className="text-fg-faint"> (optional)</span>
-            )}
+            {!required.has(name) && <span className="text-fg-faint"> (optional)</span>}
           </span>
           <SchemaField
             schema={childSchema}
@@ -265,15 +214,11 @@ function RecordField({
   context,
   valueSchema,
 }: FieldProps & { valueSchema: Json }) {
-  const record =
-    typeof value === "object" && value !== null && !Array.isArray(value)
-      ? value
-      : {};
+  const record = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
   const entries = Object.entries(record);
   const rename = (from: string, to: string) => {
     const updated: { [key: string]: Json } = {};
-    for (const [key, child] of entries)
-      updated[key === from ? to : key] = child;
+    for (const [key, child] of entries) updated[key === from ? to : key] = child;
     onChange(updated);
   };
   return (
@@ -302,20 +247,12 @@ function RecordField({
           />
         </div>
       ))}
-      <AddButton
-        label="Add entry"
-        onClick={() => onChange({ ...record, "": null })}
-      />
+      <AddButton label="Add entry" onClick={() => onChange({ ...record, "": null })} />
     </Nested>
   );
 }
 
-function ArrayField({
-  value,
-  onChange,
-  context,
-  itemSchema,
-}: FieldProps & { itemSchema: Json }) {
+function ArrayField({ value, onChange, context, itemSchema }: FieldProps & { itemSchema: Json }) {
   const items = Array.isArray(value) ? value : [];
   return (
     <Nested>
@@ -328,16 +265,12 @@ function ArrayField({
               schema={itemSchema}
               value={item}
               onChange={(next) =>
-                onChange(
-                  items.map((old, at) => (at === index ? (next ?? null) : old)),
-                )
+                onChange(items.map((old, at) => (at === index ? (next ?? null) : old)))
               }
               context={context}
             />
           </div>
-          <RemoveButton
-            onClick={() => onChange(items.filter((_, at) => at !== index))}
-          />
+          <RemoveButton onClick={() => onChange(items.filter((_, at) => at !== index))} />
         </div>
       ))}
       <AddButton label="Add item" onClick={() => onChange([...items, null])} />
@@ -345,12 +278,7 @@ function ArrayField({
   );
 }
 
-function TupleField({
-  value,
-  onChange,
-  context,
-  elements,
-}: FieldProps & { elements: Json[] }) {
+function TupleField({ value, onChange, context, elements }: FieldProps & { elements: Json[] }) {
   const items = Array.isArray(value) ? value : elements.map(() => null);
   return (
     <Nested>
@@ -362,9 +290,7 @@ function TupleField({
           schema={elementSchema}
           value={items[index]}
           onChange={(next) =>
-            onChange(
-              items.map((old, at) => (at === index ? (next ?? null) : old)),
-            )
+            onChange(items.map((old, at) => (at === index ? (next ?? null) : old)))
           }
           context={context}
         />
@@ -373,13 +299,8 @@ function TupleField({
   );
 }
 
-function UnionField({
-  value,
-  onChange,
-  context,
-  branches,
-}: FieldProps & { branches: Json[] }) {
-  const [selected, setSelected] = useState(0);
+function UnionField({ value, onChange, context, branches }: FieldProps & { branches: Json[] }) {
+  const [selected, setSelected] = useState(() => initialBranch(branches, value));
   return (
     <Nested>
       <Select
@@ -410,8 +331,7 @@ function UnionField({
 }
 
 function branchLabel(branch: Json): string {
-  if (typeof branch !== "object" || branch === null || Array.isArray(branch))
-    return "…";
+  if (typeof branch !== "object" || branch === null || Array.isArray(branch)) return "…";
   const node = branch as JsonSchema;
   const properties = node.properties;
   if (
@@ -428,6 +348,46 @@ function branchLabel(branch: Json): string {
   return "…";
 }
 
+/** The branch index whose schema the current value matches, so a pasted / loaded value opens on the
+ *  right branch instead of always the first. */
+function initialBranch(branches: Json[], value: Json | undefined): number {
+  if (value === undefined) return 0;
+  const index = branches.findIndex((branch) => branchMatches(branch, value));
+  return index === -1 ? 0 : index;
+}
+
+function branchMatches(branch: Json, value: Json): boolean {
+  if (typeof branch !== "object" || branch === null || Array.isArray(branch)) return false;
+  const node = branch as JsonSchema;
+  const properties = node.properties;
+  // Constructor union: match the `$constructor` tag.
+  if (
+    typeof properties === "object" &&
+    properties !== null &&
+    !Array.isArray(properties) &&
+    typeof (properties as { [key: string]: Json })[CONSTRUCTOR_KEY] === "object"
+  ) {
+    const tag = (properties as { [key: string]: JsonSchema })[CONSTRUCTOR_KEY];
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      tag !== undefined &&
+      tag.const === value[CONSTRUCTOR_KEY]
+    );
+  }
+  if (node.const !== undefined) return JSON.stringify(node.const) === JSON.stringify(value);
+  const { type } = node;
+  if (type === "null") return value === null;
+  if (type === "string") return typeof value === "string";
+  if (type === "boolean") return typeof value === "boolean";
+  if (type === "integer" || type === "number") return typeof value === "number";
+  if (type === "array") return Array.isArray(value);
+  if (type === "object")
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Reference fields (file upload / agent handle) and the raw fallback
 // ---------------------------------------------------------------------------
@@ -436,18 +396,13 @@ function FileField({ value, onChange, context }: FieldProps) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const current =
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    FILE_KEY in value
+    typeof value === "object" && value !== null && !Array.isArray(value) && FILE_KEY in value
       ? value
       : null;
   return (
     <div className="flex items-center gap-2">
       {current !== null && (
-        <span className="font-mono text-xs text-fg-muted">
-          file {String(current[FILE_KEY])}
-        </span>
+        <span className="font-mono text-xs text-fg-muted">file {String(current[FILE_KEY])}</span>
       )}
       <label className="inline-flex cursor-pointer items-center gap-1.5 border border-edge-strong px-2.5 py-1 text-xs text-fg hover:bg-sunken">
         <Upload className="size-3.5" />
@@ -481,10 +436,7 @@ function FileField({ value, onChange, context }: FieldProps) {
 
 function AgentField({ value, onChange, context }: FieldProps) {
   const current =
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    AGENT_KEY in value
+    typeof value === "object" && value !== null && !Array.isArray(value) && AGENT_KEY in value
       ? String(value[AGENT_KEY])
       : "";
   return (
@@ -506,9 +458,7 @@ function AgentField({ value, onChange, context }: FieldProps) {
 }
 
 function JsonField({ value, onChange }: FieldProps) {
-  const [text, setText] = useState(
-    value === undefined ? "" : JSON.stringify(value, null, 2),
-  );
+  const [text, setText] = useState(value === undefined ? "" : JSON.stringify(value, null, 2));
   const [invalid, setInvalid] = useState(false);
   return (
     <TextArea
@@ -539,11 +489,7 @@ function JsonField({ value, onChange }: FieldProps) {
 // ---------------------------------------------------------------------------
 
 function Nested({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-2 border-l border-edge pl-3">
-      {children}
-    </div>
-  );
+  return <div className="flex flex-col gap-2 border-l border-edge pl-3">{children}</div>;
 }
 
 function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
