@@ -9,7 +9,6 @@ import { FilesPage } from "./pages/FilesPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
 import { RunsPage } from "./pages/RunsPage";
-import { SettingsPage } from "./pages/SettingsPage";
 import { SnapshotsPage } from "./pages/SnapshotsPage";
 
 export function App() {
@@ -18,7 +17,6 @@ export function App() {
       <Route element={<AppShell />}>
         <Route path="/" element={<Navigate to="/projects" replace />} />
         <Route path="/projects" element={<ProjectsPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
         <Route path="/projects/:projectId" element={<DashboardPage />} />
         <Route path="/projects/:projectId/runs" element={<RunsPage />} />
         <Route path="/projects/:projectId/runs/:runId" element={<RunDetailPage />} />
