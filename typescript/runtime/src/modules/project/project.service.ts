@@ -1,7 +1,7 @@
 import { db } from "../../db/client.js";
 import { ConflictError, NotFoundError } from "../../lib/errors.js";
 import { projectRepository } from "./project.repository.js";
-import type { CreateProjectInput } from "./project.schema.js";
+import type { CreateProjectInput, UpdateProjectInput } from "./project.schema.js";
 
 /** Postgres unique-violation SQLSTATE; raised when two projects claim the same `name`. */
 const isUniqueViolation = (error: unknown): boolean =>
@@ -20,6 +20,12 @@ export const projectService = {
       }
       throw error;
     }
+  },
+
+  async update(projectId: string, input: UpdateProjectInput) {
+    const [project] = await projectRepository.update(db, projectId, input);
+    if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
+    return project;
   },
 
   list() {

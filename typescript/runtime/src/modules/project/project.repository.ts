@@ -4,13 +4,25 @@
 import { eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { projects } from "../../db/tables/projects.js";
-import type { CreateProjectInput } from "./project.schema.js";
+import type { CreateProjectInput, UpdateProjectInput } from "./project.schema.js";
 
 export const projectRepository = {
   create(executor: Executor, input: CreateProjectInput) {
     return executor
       .insert(projects)
       .values({ name: input.name, description: input.description, readme: input.readme })
+      .returning();
+  },
+
+  update(executor: Executor, projectId: string, input: UpdateProjectInput) {
+    // Only touch the fields the caller actually sent, so a partial update never clobbers the rest.
+    return executor
+      .update(projects)
+      .set({
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.readme !== undefined ? { readme: input.readme } : {}),
+      })
+      .where(eq(projects.id, projectId))
       .returning();
   },
 

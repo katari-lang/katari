@@ -21,6 +21,7 @@ module Katari.Cli.Api
     ProjectRow (..),
     listProjects,
     createProject,
+    updateProject,
     deleteProject,
 
     -- * Snapshots
@@ -222,12 +223,25 @@ instance FromJSON ProjectRow where
 listProjects :: RuntimeClient -> IO (Value, List ProjectRow)
 listProjects client = getWithRaw client "/projects"
 
--- | Create a project with the given name and optional description. Fails with a 'RuntimeHttpError'
--- (409) if a project of that name already exists.
-createProject :: RuntimeClient -> Text -> Maybe Text -> IO ProjectRow
-createProject client name description = do
-  let body = object (["name" .= name] <> maybe [] (\value -> ["description" .= value]) description)
+-- | Create a project with the given name, optional description and optional README. Fails with a
+-- 'RuntimeHttpError' (409) if a project of that name already exists.
+createProject :: RuntimeClient -> Text -> Maybe Text -> Maybe Text -> IO ProjectRow
+createProject client name description readme = do
+  let body =
+        object
+          ( ["name" .= name]
+              <> maybe [] (\value -> ["description" .= value]) description
+              <> maybe [] (\value -> ["readme" .= value]) readme
+          )
   SuccessEnvelope project <- requestJson client "POST" "/projects" (Just (Aeson.encode body))
+  pure project
+
+-- | Update an existing project's description / README. Both fields are sent explicitly (a @null@
+-- clears the column), so @katari apply@ keeps them in sync with the source on every deploy.
+updateProject :: RuntimeClient -> Text -> Maybe Text -> Maybe Text -> IO ProjectRow
+updateProject client projectId description readme = do
+  let body = object ["description" .= description, "readme" .= readme]
+  SuccessEnvelope project <- requestJson client "PATCH" ("/projects/" <> projectId) (Just (Aeson.encode body))
   pure project
 
 deleteProject :: RuntimeClient -> Text -> IO ()

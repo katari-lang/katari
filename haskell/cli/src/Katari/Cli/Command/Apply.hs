@@ -25,12 +25,14 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Cli.Api
   ( ModuleUpload (..),
     ProjectRow (..),
     RuntimeClient,
     createProject,
+    updateProject,
     deploySnapshot,
     listHeadModules,
     listProjects,
@@ -112,12 +114,16 @@ run options = do
   -- Reuse the resolution manager so a single apply opens one TLS connection pool, not two.
   let client = withTrace (verboseLog context) (newRuntimeClient manager url token)
   let name = fromMaybe config.package.name options.projectName
+  readme <- readProjectReadme root
   (_, projects) <- listProjects client
   projectId <- case filter (\project -> project.name == name) projects of
-    (existing : _) -> pure existing.id
+    (existing : _) -> do
+      -- Keep the existing project's description / README in step with the source on every apply.
+      _ <- updateProject client existing.id config.package.description readme
+      pure existing.id
     [] -> do
       progress context ("Creating project " <> name)
-      created <- createProject client name config.package.description
+      created <- createProject client name config.package.description readme
       pure created.id
   runtimeHashes <- runtimeModuleHashes client projectId
   let plan = planUpload loweredModules runtimeHashes
@@ -131,6 +137,14 @@ run options = do
   progress context ("Applied snapshot " <> snapshotId <> " to project " <> name)
   -- The new snapshot id is the invocation's result; scripts read it off stdout.
   printText snapshotId
+
+-- | The project's @README.md@, surfaced as the project's rendered README in the console. Nothing when
+-- the project has no such file.
+readProjectReadme :: FilePath -> IO (Maybe Text)
+readProjectReadme root = do
+  let path = root </> "README.md"
+  exists <- doesFileExist path
+  if exists then Just <$> TextIO.readFile path else pure Nothing
 
 -- | Read the runtime's current head manifest and key it the way 'planUpload' expects.
 runtimeModuleHashes :: RuntimeClient -> Text -> IO (Map ModuleName ModuleHash)
