@@ -34,13 +34,11 @@ export function createApp() {
 
   const api = app.route("/api/v1", apiRoutes);
 
-  // The image bakes the console in and serves it at the root; a source checkout leaves the dist unset and
-  // keeps the JSON info root (the console runs from its own vite dev server there). Either way the API stays
-  // under `/api/v1`, so the returned type — what the RPC client binds to — is the same.
-  if (config.adminWebDist === undefined) {
+  // The image bakes the console in and serves it at the root; a source checkout has no built dist, so the
+  // root falls back to the JSON info (the console runs from its own vite dev server there). Either way the
+  // API stays under `/api/v1`, so the returned type — what the RPC client binds to — is the same.
+  if (!mountAdminWeb(api)) {
     api.get("/", (c) => c.json(success({ name: "katari-api-server", api: "/api/v1" })));
-  } else {
-    mountAdminWeb(api, config.adminWebDist);
   }
   return api;
 }

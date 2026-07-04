@@ -51,12 +51,12 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 # ---------- runtime: minimal, non-root ----------
 FROM node:${NODE_VERSION}-slim AS runtime
 ENV NODE_ENV=production \
-    PORT=3000 \
-    KATARI_ADMIN_WEB_DIST=/app/admin-web/dist
+    PORT=3000
 WORKDIR /app
 COPY --from=build --chown=node:node /prod ./
-# The built console — served at the server root by the runtime (see KATARI_ADMIN_WEB_DIST). Pass an
-# empty KATARI_ADMIN_WEB_DIST at run time to disable the UI and serve only the JSON API.
+# The built console at the fixed path the runtime serves it from (WORKDIR/admin-web/dist). Its presence
+# is what makes the runtime serve the UI at the root; a source checkout has no such directory and serves
+# only the JSON API.
 COPY --from=build --chown=node:node /repo/typescript/admin-web/dist ./admin-web/dist
 USER node
 EXPOSE 3000

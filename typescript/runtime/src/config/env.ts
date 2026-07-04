@@ -46,9 +46,6 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
-  /** The built admin console's static dist to serve at the server root. The runtime image sets this to the
-   *  baked-in dist; a source checkout leaves it unset (the console runs from its own vite dev server). */
-  KATARI_ADMIN_WEB_DIST: z.string().optional(),
   /** The bearer token the API requires — every caller (the CLI, the web console) sends
    *  `Authorization: Bearer <this>`. Required (no default): the runtime refuses to boot without it, so an
    *  API is never accidentally left open. Distinct from KATARI_SECRET_KEY, which only encrypts secrets at
