@@ -193,6 +193,12 @@ export const facade = {
     });
   },
 
+  /** Delete an uploaded file: free its blob row through the actor (ownership has one SoT — the warm pool),
+   *  the bytes following strictly after the commit. Resolves to whether the file existed. */
+  deleteFile(input: { projectId: string; fileId: string }): Promise<boolean> {
+    return registry.actorFor(input.projectId as ProjectId).deleteBlob(input.fileId as BlobId);
+  },
+
   /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob
    *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Returns
    *  the blob handle the sidecar lifts into a `File` value; throws a `ConflictError` (so the upload fails) when

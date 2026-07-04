@@ -1,12 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, FileIcon, Upload } from "lucide-react";
+import { Download, FileIcon, Trash2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import { useFiles } from "../api/queries";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { CopyableId } from "../components/ui/Copy";
+import { ConfirmDialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { LoadingBlock } from "../components/ui/Spinner";
@@ -21,6 +22,7 @@ export function FilesPage() {
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const upload = async (file: File) => {
     setUploading(true);
@@ -94,15 +96,39 @@ export function FilesPage() {
                 <Cell className="font-mono text-xs text-fg-muted">{file.contentType ?? "—"}</Cell>
                 <Cell className="text-fg-muted">{file.semanticKind}</Cell>
                 <Cell className="text-right">
-                  <Button size="sm" variant="ghost" onClick={() => void download(file.id)}>
-                    <Download className="size-3.5" /> Download
-                  </Button>
+                  <span className="inline-flex gap-1">
+                    <Button size="sm" variant="ghost" onClick={() => void download(file.id)}>
+                      <Download className="size-3.5" /> Download
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setDeleting(file.id)}>
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </span>
                 </Cell>
               </Row>
             ))}
           </Table>
         </Card>
       )}
+      <ConfirmDialog
+        open={deleting !== null}
+        onClose={() => setDeleting(null)}
+        onConfirm={() => {
+          if (deleting === null) return;
+          api
+            .deleteFile(projectId, deleting)
+            .then(() => {
+              setDeleting(null);
+              void queryClient.invalidateQueries({ queryKey: ["projects", projectId, "files"] });
+            })
+            .catch((error: unknown) =>
+              toast(error instanceof ApiError ? error.message : "Delete failed.", "error"),
+            );
+        }}
+        title="Delete this file?"
+        description="A run still referencing it will read it as gone."
+        confirmLabel="Delete"
+      />
     </>
   );
 }

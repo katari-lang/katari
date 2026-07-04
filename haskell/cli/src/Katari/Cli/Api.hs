@@ -66,6 +66,7 @@ module Katari.Cli.Api
     listFiles,
     uploadFile,
     downloadFileTo,
+    deleteFile,
   )
 where
 
@@ -601,6 +602,13 @@ instance FromJSON UploadedFile where
 
 listFiles :: RuntimeClient -> Text -> IO (Value, List FileRow)
 listFiles client projectId = getWithRaw client ("/projects/" <> projectId <> "/files")
+
+-- | Delete a stored file (its blob row now, its bytes after the runtime's commit).
+deleteFile :: RuntimeClient -> Text -> Text -> IO ()
+deleteFile client projectId fileId = do
+  SuccessEnvelope (_ :: Value) <-
+    requestJson client "DELETE" ("/projects/" <> projectId <> "/files/" <> fileId) Nothing
+  pure ()
 
 -- | Upload a file's bytes (streamed from disk, not buffered) under the given content type.
 uploadFile :: RuntimeClient -> Text -> FilePath -> Text -> IO UploadedFile

@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { NotImplementedError } from "../../lib/errors.js";
 import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
@@ -48,8 +47,10 @@ export const fileRoutes = new Hono<AppEnv>()
       },
     });
   })
+  // Delete: drop the file's blob row (its bytes follow strictly after the commit). A file a live run still
+  // references reads as gone afterwards — the explicit delete is the user's call.
   .delete("/projects/:projectId/files/:fileId", zValidator("param", fileParamSchema), async (c) => {
-    // An api-root blob is retained until an explicit-delete feature lands (intentionally deferred).
-    c.req.valid("param");
-    throw new NotImplementedError("Deleting a file is not implemented yet.");
+    const { projectId, fileId } = c.req.valid("param");
+    await fileService.delete(projectId, fileId);
+    return c.json(success({ id: fileId }));
   });

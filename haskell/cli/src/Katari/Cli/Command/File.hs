@@ -1,4 +1,4 @@
--- | @katari file upload|download@ — the project's blob storage (listing lives under
+-- | @katari file upload|download|delete@ — the project's blob storage (listing lives under
 -- @katari ls files@). Bytes stream in both directions, so a large blob never sits in the CLI's
 -- memory. A download without @-o@ goes to stdout only when stdout is not a terminal — raw bytes at a
 -- terminal are refused rather than sprayed.
@@ -13,7 +13,7 @@ import Control.Exception (IOException, bracketOnError, catch)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Cli.Api (FileRow (..), UploadedFile (..), downloadFileTo, listFiles, uploadFile)
+import Katari.Cli.Api (FileRow (..), UploadedFile (..), deleteFile, downloadFileTo, listFiles, uploadFile)
 import Katari.Cli.Common (RuntimeContext (..), dieIn, renderPrefixError, resolveIdPrefix, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (printText, progress)
@@ -25,6 +25,7 @@ import System.IO (hClose, hIsTerminalDevice, openTempFile, stdout)
 data Action
   = ActionUpload UploadOptions
   | ActionDownload DownloadOptions
+  | ActionDelete DeleteOptions
   deriving stock (Show)
 
 data UploadOptions = UploadOptions
@@ -36,6 +37,11 @@ data UploadOptions = UploadOptions
 data DownloadOptions = DownloadOptions
   { fileId :: Text,
     outputPath :: Maybe FilePath
+  }
+  deriving stock (Show)
+
+newtype DeleteOptions = DeleteOptions
+  { fileId :: Text
   }
   deriving stock (Show)
 
@@ -60,6 +66,7 @@ optionsParser =
     <*> hsubparser
       ( command "upload" (info (ActionUpload <$> uploadParser) (progDesc "Upload a file; prints the new file id"))
           <> command "download" (info (ActionDownload <$> downloadParser) (progDesc "Download a file's bytes"))
+          <> command "delete" (info (ActionDelete <$> deleteParser) (progDesc "Delete a file (a run still referencing it reads it as gone)"))
       )
   where
     uploadParser =
@@ -70,6 +77,9 @@ optionsParser =
       DownloadOptions
         <$> strArgument (metavar "FILE" <> help "File id, or a unique prefix of one")
         <*> optional (strOption (long "out" <> short 'o' <> metavar "PATH" <> help "Write to this path (default: stdout, when it is not a terminal)"))
+    deleteParser =
+      DeleteOptions
+        <$> strArgument (metavar "FILE" <> help "File id, or a unique prefix of one")
 
 run :: Options -> IO ()
 run options = do
@@ -103,6 +113,15 @@ run options = do
           if stdoutIsTerminal
             then dieIn "file" "refusing to write raw bytes to a terminal; pass -o PATH or pipe stdout"
             else downloadFileTo context.client context.projectId target stdout
+    ActionDelete deleteOptions -> do
+      (_, files) <- listFiles context.client context.projectId
+      target <-
+        either
+          (dieIn "file" . renderPrefixError deleteOptions.fileId)
+          pure
+          (resolveIdPrefix deleteOptions.fileId (map (\row -> row.id) files))
+      deleteFile context.client context.projectId target
+      progress context.output ("Deleted " <> target)
 
 -- | Download a file's bytes to @path@ without ever leaving it in a half-written state: the bytes
 -- stream into a unique temp file in the same directory, which is atomically renamed onto @path@ only

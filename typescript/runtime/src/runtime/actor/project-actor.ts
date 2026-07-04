@@ -174,6 +174,12 @@ export class ProjectActor {
     return this.api.registerUploadedBlob(blobId, entry);
   }
 
+  /** Delete an uploaded file's api-root-owned blob (its row in the delete commit, its bytes strictly after).
+   *  Resolves once the delete commit is durable — to `false` when the project holds no such file. */
+  deleteBlob(blobId: BlobId): Promise<boolean> {
+    return this.api.deleteUploadedBlob(blobId);
+  }
+
   /** Register a blob an FFI handler produced mid-call as owned by that call's instance (bytes already in the
    *  BlobStore) — so the call's return ascends it to the core caller, and a handler that dies before returning
    *  has it reclaimed at teardown. Runs as a serial command turn so the ownership row commits before the

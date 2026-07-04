@@ -1,7 +1,6 @@
-// The file resource: a file is an api-root-owned blob. Upload goes through the engine command edge (the
-// facade → the actor → the ResourcePool, so the blob's ownership has one SoT); download / list are reads
-// straight from the committed `blobs` row + the BlobStore bytes. There is no explicit delete (api-root
-// blobs are retained until a future explicit-delete feature).
+// The file resource: a file is an api-root-owned blob. Upload and delete go through the engine command
+// edge (the facade → the actor → the ResourcePool, so the blob's ownership has one SoT); download / list
+// are reads straight from the committed `blobs` row + the BlobStore bytes.
 
 import { db } from "../../db/client.js";
 import { NotFoundError } from "../../lib/errors.js";
@@ -46,5 +45,12 @@ export const fileService = {
       throw new NotFoundError(`file ${fileId} not found`);
     }
     return { bytes, contentType: row.contentType, size: row.size };
+  },
+
+  /** Delete a file: its blob row goes in the delete commit, its bytes strictly after — or a 404 when the
+   *  project holds no such file (an engine-instance-owned blob is not a file; see `fileRepository.list`). */
+  async delete(projectId: string, fileId: string): Promise<void> {
+    const deleted = await facade.deleteFile({ projectId, fileId });
+    if (!deleted) throw new NotFoundError(`file ${fileId} not found`);
   },
 };

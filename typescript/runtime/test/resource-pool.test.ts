@@ -205,4 +205,27 @@ describe("ResourcePool blob reclaim", () => {
     expect(reclaimed).toEqual([MINE]);
     expect(dropped).toEqual([MINE]);
   });
+
+  test("deleteBlobOwnedBy frees only the named owner's blob (the file API's explicit delete)", async () => {
+    const store = storeWithBlobs({ [MINE]: OWNER, [THEIRS]: OTHER, [TRANSIT]: null });
+    const pool = new ResourcePool(PROJECT, store);
+
+    // Another instance's blob, an in-transit blob, and an unknown id all refuse — they are not `OWNER`'s
+    // files, so the delete must not touch them.
+    expect(pool.deleteBlobOwnedBy(THEIRS, OWNER)).toBe(false);
+    expect(pool.deleteBlobOwnedBy(TRANSIT, OWNER)).toBe(false);
+    expect(pool.deleteBlobOwnedBy("blob-unknown" as BlobId, OWNER)).toBe(false);
+    expect(store.blobs[THEIRS]).toBeDefined();
+    expect(store.blobs[TRANSIT]).toBeDefined();
+
+    // The owner's blob deletes: row drop staged, bytes staged for post-commit deletion.
+    expect(pool.deleteBlobOwnedBy(MINE, OWNER)).toBe(true);
+    expect(store.blobs[MINE]).toBeUndefined();
+    const { tx, dropped } = recordingBlobTx();
+    expect(await pool.persist(tx)).toEqual([MINE]);
+    expect(dropped).toEqual([MINE]);
+
+    // A second delete of the same id is a plain miss.
+    expect(pool.deleteBlobOwnedBy(MINE, OWNER)).toBe(false);
+  });
 });

@@ -11,8 +11,9 @@
 // instance's own scopes, plus any whose ownership changed) and `persist` writes exactly those — scopes are
 // no longer carried inside `putInstance`. In-memory is the source of truth; a freed scope is reclaimed by its
 // owner instance's drop (cascade), and an in-transit scope survives that drop (its `owner = null` row is
-// re-written here in the same commit). Blob ownership is updated in memory but not yet persisted (blobs have
-// no producer — see `engine/ascent.ts`).
+// re-written here in the same commit). Blob rows follow the same shape (dirty / freed sets, flushed by
+// `persist`); a reclaimed blob's BYTES are deleted from the `BlobStore` strictly after the commit (see
+// `reclaimedBytes`).
 
 import { reachableResources } from "../engine/ascent.js";
 import { deleteScope, scopesOwnedBy, setScopeOwner } from "../engine/scope.js";
@@ -69,6 +70,17 @@ export class ResourcePool {
     this.dirtyBlobs.clear();
     this.freedBlobs.clear();
     this.reclaimedBytes.clear();
+  }
+
+  /** Free a blob on an explicit user delete, but only when `owner` still owns it — the file API deletes
+   *  api-root-owned blobs (files) and must not touch one owned by an engine instance (an in-flight FFI
+   *  call's mid-call upload). Returns whether the blob existed under `owner` and was freed. There is no
+   *  reference check: a live run still holding the deleted blob's ref reads it as gone — the explicit
+   *  delete is the user's call. */
+  deleteBlobOwnedBy(blobId: BlobId, owner: InstanceId): boolean {
+    if (this.store.blobs[blobId]?.owner !== owner) return false;
+    this.freeBlob(blobId);
+    return true;
   }
 
   /** Reclaim a single blob found dead by an intra-instance GC: drop it from the warm store, stage its durable

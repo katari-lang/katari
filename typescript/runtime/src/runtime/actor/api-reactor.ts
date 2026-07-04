@@ -150,6 +150,19 @@ export class ApiReactor extends Reactor {
     });
   }
 
+  /** Delete an uploaded file on the user's explicit request: free its api-root-owned blob row this turn (the
+   *  bytes are deleted from the `BlobStore` strictly after the commit, by the substrate). Resolves once the
+   *  delete commit is durable — to whether the blob existed as a file (`false` for an unknown id, or for a
+   *  blob owned by an engine instance, which is not a file and is reclaimed by its owner's lifecycle). */
+  deleteUploadedBlob(blobId: BlobId): Promise<boolean> {
+    let deleted = false;
+    return this.commands
+      .enqueue(() => {
+        deleted = this.pool.deleteBlobOwnedBy(blobId, this.apiRootId);
+      })
+      .then(() => deleted);
+  }
+
   /** Reject and drop every in-process run-result promise after a poisoned commit: the run continues durably
    *  and the API reads its outcome by projection, but this non-SoT notification hook cannot survive the
    *  reactivation, so its caller is told to re-query rather than left hanging. */

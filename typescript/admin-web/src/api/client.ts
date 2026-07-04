@@ -147,6 +147,8 @@ export const api = {
     });
     return unwrap<{ id: string; hash: string; size: number }>(response);
   },
+  deleteFile: (projectId: string, fileId: string) =>
+    requestJson<{ id: string }>("DELETE", `/projects/${projectId}/files/${fileId}`),
   /** Download bytes (the one endpoint outside the envelope); the caller owns the object URL. */
   downloadFile: async (projectId: string, fileId: string): Promise<Blob> => {
     const response = await fetch(`${BASE}/projects/${projectId}/files/${fileId}`, {
