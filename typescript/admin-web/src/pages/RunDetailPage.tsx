@@ -45,13 +45,17 @@ export function RunDetailPage() {
   if (run.data === undefined) return null;
   const current = run.data;
 
-  const openForRun = (escalations.data ?? []).filter((escalation) => escalation.runId === runId);
+  const openForRun = (escalations.data ?? []).filter(
+    (escalation) => escalation.runId === runId,
+  );
 
   const rerun = () => {
     rerunMutation.mutate(
       {
         qualifiedName: current.qualifiedName,
-        ...(current.snapshotId === null ? {} : { snapshotId: current.snapshotId }),
+        ...(current.snapshotId === null
+          ? {}
+          : { snapshotId: current.snapshotId }),
         ...(current.argument === null ? {} : { argument: current.argument }),
       },
       {
@@ -66,7 +70,10 @@ export function RunDetailPage() {
       <PageHeader
         title={
           <span className="inline-flex items-center gap-3">
-            <Link to={`/projects/${projectId}/runs`} className="text-fg-faint hover:text-fg">
+            <Link
+              to={`/projects/${projectId}/runs`}
+              className="text-fg-faint hover:text-fg"
+            >
               <ChevronLeft className="size-5" />
             </Link>
             {current.name}
@@ -83,7 +90,10 @@ export function RunDetailPage() {
               </Button>
             )}
             {live && (
-              <Button variant="danger" onClick={() => setConfirmingCancel(true)}>
+              <Button
+                variant="danger"
+                onClick={() => setConfirmingCancel(true)}
+              >
                 Cancel run
               </Button>
             )}
@@ -111,7 +121,9 @@ export function RunDetailPage() {
               {tree.data?.tree != null ? (
                 <DelegationTree root={tree.data.tree} />
               ) : (
-                <p className="text-sm text-fg-faint">Waiting for the first delegation to land…</p>
+                <p className="text-sm text-fg-faint">
+                  Waiting for the first delegation to land…
+                </p>
               )}
             </CardBody>
           </Card>
@@ -166,12 +178,18 @@ export function RunDetailPage() {
                     <CopyableId id={current.snapshotId} />
                   )}
                 </KeyValueRow>
-                <KeyValueRow label="Started">{formatDateTime(current.createdAt)}</KeyValueRow>
+                <KeyValueRow label="Started">
+                  {formatDateTime(current.createdAt)}
+                </KeyValueRow>
                 {current.completedAt !== null && (
-                  <KeyValueRow label="Finished">{formatDateTime(current.completedAt)}</KeyValueRow>
+                  <KeyValueRow label="Finished">
+                    {formatDateTime(current.completedAt)}
+                  </KeyValueRow>
                 )}
                 {current.cancelReason !== null && (
-                  <KeyValueRow label="Cancel reason">{current.cancelReason}</KeyValueRow>
+                  <KeyValueRow label="Cancel reason">
+                    {current.cancelReason}
+                  </KeyValueRow>
                 )}
               </KeyValueList>
             </CardBody>
@@ -185,16 +203,25 @@ export function RunDetailPage() {
               {(audit.data ?? []).map((entry) => (
                 <div
                   key={entry.escalationId}
-                  className="flex flex-col gap-2 border-l-2 border-edge pl-3"
+                  className="flex flex-col gap-2 border-l border-edge pl-3"
                 >
-                  <p className="text-xs text-fg-faint">{formatDateTime(entry.answeredAt)}</p>
+                  <p className="text-xs text-fg-faint">
+                    {formatDateTime(entry.answeredAt)}
+                  </p>
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                     <div>
-                      <p className="pb-1 text-xs font-medium text-fg-faint uppercase">Question</p>
-                      <ValueBlock value={entry.question} projectId={projectId} />
+                      <p className="pb-1 text-xs font-medium text-fg-faint uppercase">
+                        Question
+                      </p>
+                      <ValueBlock
+                        value={entry.question}
+                        projectId={projectId}
+                      />
                     </div>
                     <div>
-                      <p className="pb-1 text-xs font-medium text-fg-faint uppercase">Answer</p>
+                      <p className="pb-1 text-xs font-medium text-fg-faint uppercase">
+                        Answer
+                      </p>
                       <ValueBlock value={entry.answer} projectId={projectId} />
                     </div>
                   </div>
@@ -231,7 +258,10 @@ export function RunDetailPage() {
 
 function containsRedaction(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  if (!Array.isArray(value) && (value as { [key: string]: unknown })[REDACTED_KEY] === true) {
+  if (
+    !Array.isArray(value) &&
+    (value as { [key: string]: unknown })[REDACTED_KEY] === true
+  ) {
     return true;
   }
   return Object.values(value).some(containsRedaction);

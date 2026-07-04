@@ -28,7 +28,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             key={toast.id}
             role="status"
             className={cn(
-              "border border-edge bg-raised px-4 py-2 text-sm",
+              "border border-edge bg-surface px-4 py-2 text-sm",
               toast.tone === "error" && "border-danger text-danger",
             )}
           >

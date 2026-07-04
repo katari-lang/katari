@@ -105,6 +105,8 @@ export interface AgentEntry {
   qualifiedName: string;
   input: JsonSchema;
   output: JsonSchema;
+  /** The agent's `@"..."` doc annotation; empty string when undocumented. */
+  description: string;
 }
 
 export interface AgentList {
@@ -117,6 +119,8 @@ export interface AgentDetail {
   qualifiedName: string;
   input: JsonSchema;
   output: JsonSchema;
+  /** The agent's `@"..."` doc annotation; empty string when undocumented. */
+  description: string;
 }
 
 export interface FileEntry {

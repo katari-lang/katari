@@ -2,7 +2,7 @@
 // pin the snapshot they started on, so old versions remain inspectable here.
 
 import { Camera } from "lucide-react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useHeadSnapshot, useSnapshots } from "../api/queries";
 import { Badge } from "../components/ui/Badge";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -46,6 +46,12 @@ export function SnapshotsPage() {
                 actions={
                   <span className="flex items-center gap-2 text-xs text-fg-faint">
                     {formatDateTime(snapshot.createdAt)}
+                    <Link
+                      to={`/projects/${projectId}/agents?snapshot=${snapshot.id}`}
+                      className="text-accent hover:underline"
+                    >
+                      agents
+                    </Link>
                     <CopyableId id={snapshot.id} />
                   </span>
                 }

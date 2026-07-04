@@ -8,10 +8,10 @@
 // second bounce.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { KeyRound } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { ApiError, api, setStoredApiToken } from "../../api/client";
 import { setUnauthorizedHandler } from "../../lib/auth";
+import { Logo } from "../shell/Logo";
 import { Button } from "../ui/Button";
 import { Input, Label } from "../ui/Field";
 
@@ -58,22 +58,17 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => void }) {
   };
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-sunken p-6">
+    <div className="flex min-h-dvh items-center justify-center p-6">
       <form
-        className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-edge bg-surface p-6"
+        className="flex w-full max-w-sm flex-col gap-4 bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           void signIn();
         }}
       >
         <div className="flex items-center gap-2 text-fg">
-          <KeyRound className="size-5 text-accent" />
-          <h1 className="text-lg font-semibold">Sign in to Katari</h1>
+          <Logo />
         </div>
-        <p className="text-sm text-fg-muted">
-          This runtime requires an API key. Enter the{" "}
-          <code className="font-mono">KATARI_API_KEY</code> it was started with.
-        </p>
         <Label text="API key">
           <Input
             type="password"

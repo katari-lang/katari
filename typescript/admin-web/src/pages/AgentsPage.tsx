@@ -2,7 +2,6 @@ import { FunctionSquare } from "lucide-react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useAgents, useSnapshots } from "../api/queries";
 import { AgentsTree, isStdlibAgent } from "../components/agents/AgentsTree";
-import { Card, CardBody } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Select, Switch } from "../components/ui/Field";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -50,7 +49,7 @@ export function AgentsPage() {
             />
             <Select
               aria-label="Snapshot"
-              className="w-56 py-1 text-xs"
+              className="w-56"
               value={snapshotParam ?? ""}
               onChange={(event) => updateParams({ snapshot: event.target.value })}
             >
@@ -77,11 +76,9 @@ export function AgentsPage() {
           }
         />
       ) : (
-        <Card>
-          <CardBody>
-            <AgentsTree projectId={projectId} agents={visible} snapshotId={snapshotParam} />
-          </CardBody>
-        </Card>
+        <div className="border border-edge">
+          <AgentsTree projectId={projectId} agents={visible} snapshotId={snapshotParam} />
+        </div>
       )}
     </>
   );

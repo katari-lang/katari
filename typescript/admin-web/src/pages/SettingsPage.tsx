@@ -17,7 +17,7 @@ export function SettingsPage() {
       <div className="flex max-w-xl flex-col gap-4">
         <Card>
           <CardHeader title="Appearance" />
-          <CardBody>
+          <CardBody className="flex jutify-start">
             <ThemeToggle />
           </CardBody>
         </Card>
@@ -26,8 +26,9 @@ export function SettingsPage() {
           <CardBody className="flex flex-col gap-3">
             <p className="text-sm text-fg-muted">
               The key this console sends as a Bearer header (the runtime's{" "}
-              <code className="font-mono">KATARI_API_KEY</code>). Clear it to sign out; if the
-              runtime requires one, you will be prompted at the next request.
+              <code className="font-mono">KATARI_API_KEY</code>). Clear it to
+              sign out; if the runtime requires one, you will be prompted at the
+              next request.
             </p>
             <Label text="Key">
               <Input

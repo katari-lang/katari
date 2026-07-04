@@ -73,6 +73,8 @@
   --color-accent-hover: var(--accent-hover);
   --color-accent-fg: var(--accent-fg);
   --color-accent-soft: var(--accent-soft);
+  --color-reversed: var(--reversed);
+  --color-reversed-hover: var(--reversed-hover);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
   --color-success: var(--success);
@@ -82,10 +84,15 @@
 
   --font-sans: "DM Sans", "Noto Sans JP", system-ui, sans-serif;
   --font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
-  --font-display: "Montserrat", "DM Sans", system-ui, sans-serif;
+  --font-display: "Lexend Tera", "Lexend", system-ui, sans-serif;
+  --font-display-text: "Lexend", system-ui, sans-serif;
 }
 
 :root {
+  /* Tell the browser which palette its own native controls (the number-input stepper, the <select>
+   * popup, autofill, date pickers, scrollbars) should paint in. Without this the UA draws them in the
+   * OS scheme even when the app is toggled to the other theme via [data-theme], so they clash. */
+  color-scheme: light;
   --surface: var(--color-paper-50);
   --raised: var(--color-paper-50);
   --sunken: var(--color-paper-100);
@@ -97,16 +104,31 @@
   --accent: var(--color-highlight-500);
   --accent-hover: var(--color-highlight-600);
   --accent-fg: var(--color-paper-50);
-  --accent-soft: color-mix(in oklch, var(--color-highlight-500) 15%, transparent);
+  --accent-soft: color-mix(
+    in oklch,
+    var(--color-highlight-500) 15%,
+    transparent
+  );
+  --reversed: var(--color-katari-900);
+  --reversed-hover: var(--color-katari-800);
   --danger: var(--color-danger-500);
   --danger-soft: color-mix(in oklch, var(--color-danger-500) 15%, transparent);
   --success: var(--color-success-600);
-  --success-soft: color-mix(in oklch, var(--color-success-600) 15%, transparent);
+  --success-soft: color-mix(
+    in oklch,
+    var(--color-success-600) 15%,
+    transparent
+  );
   --warning: var(--color-warning-600);
-  --warning-soft: color-mix(in oklch, var(--color-warning-600) 15%, transparent);
+  --warning-soft: color-mix(
+    in oklch,
+    var(--color-warning-600) 15%,
+    transparent
+  );
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --surface: var(--color-katari-950);
   --raised: var(--color-katari-900);
   --sunken: var(--color-katari-900);
@@ -118,13 +140,27 @@
   --accent: var(--color-highlight-300);
   --accent-hover: var(--color-highlight-200);
   --accent-fg: var(--color-katari-950);
-  --accent-soft: color-mix(in oklch, var(--color-highlight-300) 22%, transparent);
+  --accent-soft: color-mix(
+    in oklch,
+    var(--color-highlight-300) 22%,
+    transparent
+  );
+  --reversed: var(--color-katari-50);
+  --reversed-hover: var(--color-katari-100);
   --danger: var(--color-danger-400);
   --danger-soft: color-mix(in oklch, var(--color-danger-400) 20%, transparent);
   --success: var(--color-success-400);
-  --success-soft: color-mix(in oklch, var(--color-success-400) 20%, transparent);
+  --success-soft: color-mix(
+    in oklch,
+    var(--color-success-400) 20%,
+    transparent
+  );
   --warning: var(--color-warning-400);
-  --warning-soft: color-mix(in oklch, var(--color-warning-400) 20%, transparent);
+  --warning-soft: color-mix(
+    in oklch,
+    var(--color-warning-400) 20%,
+    transparent
+  );
 }
 
 body {
@@ -133,8 +169,19 @@ body {
 }
 
 ::selection {
-  background-color: var(--accent);
+  background-color: var(--reversed);
   color: var(--accent-fg);
+}
+
+/* Tailwind's preflight leaves buttons at the default arrow cursor; restore the pointer affordance on
+ * everything clickable (main did this per-component with `hover:cursor-pointer`). */
+button:not(:disabled),
+[role="button"],
+[role="switch"],
+[role="tab"],
+summary,
+label:has(> input[type="checkbox"], > input[type="radio"]) {
+  cursor: pointer;
 }
 
 /* Consistent thin scrollbars across light / dark. */

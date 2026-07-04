@@ -1,11 +1,12 @@
 // Atomic form controls sharing one visual language. `fieldClass` is the single home of the
 // bordered-control style so Input / TextArea / Select never drift apart.
 
+import { ChevronDown } from "lucide-react";
 import type { InputHTMLAttributes, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
 import { cn } from "../../lib/cn";
 
 const fieldClass =
-  "w-full border border-edge-strong bg-raised px-2.5 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none disabled:opacity-50";
+  "w-full border border-edge-strong bg-surface px-2.5 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none disabled:opacity-50";
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cn(fieldClass, className)} {...rest} />;
@@ -16,10 +17,15 @@ export function TextArea({ className, ...rest }: TextareaHTMLAttributes<HTMLText
 }
 
 export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
+  // `appearance-none` drops the native arrow, so the wrapper renders our own chevron. `className`
+  // carries the width (default: full); the select fills it and leaves room for the chevron with pr-8.
   return (
-    <select className={cn(fieldClass, "appearance-none", className)} {...rest}>
-      {children}
-    </select>
+    <div className={cn("relative", className)}>
+      <select className={cn(fieldClass, "appearance-none pr-8")} {...rest}>
+        {children}
+      </select>
+      <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 size-4 -translate-y-1/2 text-fg-faint" />
+    </div>
   );
 }
 
@@ -64,15 +70,12 @@ export function Switch({
     >
       <span
         className={cn(
-          "inline-flex h-5 w-9 items-center rounded-full p-0.5 transition-colors",
+          "inline-flex h-5 w-9 items-center p-0.5 transition-colors",
           checked ? "bg-accent" : "bg-edge-strong",
         )}
       >
         <span
-          className={cn(
-            "size-4 rounded-full bg-raised transition-transform",
-            checked && "translate-x-4",
-          )}
+          className={cn("size-4 bg-surface transition-transform", checked && "translate-x-4")}
         />
       </span>
       {label}

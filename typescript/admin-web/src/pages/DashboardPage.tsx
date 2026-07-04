@@ -1,11 +1,10 @@
-import Markdown from "react-markdown";
 import { Link, useParams } from "react-router-dom";
-import remarkGfm from "remark-gfm";
 import { isLiveRun, useEscalations, useHeadSnapshot, useProject, useRuns } from "../api/queries";
 import { RunStateBadge } from "../components/runs/RunStateBadge";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { CopyableId } from "../components/ui/Copy";
 import { KeyValueList, KeyValueRow } from "../components/ui/KeyValue";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { PageHeader } from "../components/ui/PageHeader";
 import { LoadingBlock } from "../components/ui/Spinner";
 import { formatDateTime, relativeTime } from "../lib/format";
@@ -102,8 +101,8 @@ export function DashboardPage() {
       {project.data.readme !== null && (
         <Card className="mt-4">
           <CardHeader title="README" />
-          <CardBody className="prose prose-sm max-w-none text-fg">
-            <Markdown remarkPlugins={[remarkGfm]}>{project.data.readme}</Markdown>
+          <CardBody>
+            <MarkdownContent source={project.data.readme} />
           </CardBody>
         </Card>
       )}

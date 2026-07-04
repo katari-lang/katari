@@ -13,7 +13,9 @@ export function PageHeader({
   return (
     <header className="flex flex-wrap items-start justify-between gap-3 pb-5">
       <div className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-fg">{title}</h1>
+        <h1 className="font-display-text text-2xl font-semibold tracking-tight text-accent">
+          {title}
+        </h1>
         {description !== undefined && <div className="text-sm text-fg-muted">{description}</div>}
       </div>
       {actions !== undefined && <div className="flex items-center gap-2">{actions}</div>}

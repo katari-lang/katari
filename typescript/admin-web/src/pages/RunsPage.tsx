@@ -33,15 +33,18 @@ export function RunsPage() {
         title="Runs"
         description="Agent activations, newest first."
         actions={
-          <div className="flex items-center border border-edge p-0.5">
+          <div className="flex items-center border border-edge">
             {filters.map(({ label, state }) => (
               <button
                 key={label}
                 type="button"
-                onClick={() => setSearchParams(state === undefined ? {} : { state })}
+                onClick={() =>
+                  setSearchParams(state === undefined ? {} : { state })
+                }
                 className={cn(
                   "px-2.5 py-1 text-xs text-fg-muted transition-colors hover:text-fg",
-                  stateParam === (state ?? null) && "bg-sunken font-medium text-fg",
+                  stateParam === (state ?? null) &&
+                    "bg-sunken font-medium text-fg",
                 )}
               >
                 {label}

@@ -8,7 +8,7 @@ export function ProjectSwitcher({ currentProjectId }: { currentProjectId: string
   return (
     <Select
       aria-label="Switch project"
-      className="w-48 py-1 text-xs"
+      className="w-48"
       value={currentProjectId}
       onChange={(event) => navigate(`/projects/${event.target.value}`)}
     >

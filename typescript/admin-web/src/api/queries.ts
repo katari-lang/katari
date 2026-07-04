@@ -3,7 +3,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import type { Json, Run, RunState } from "./types";
+import type { Escalation, Json, Run, RunState } from "./types";
 
 const LIVE_POLL_MILLISECONDS = 2500;
 
@@ -131,8 +131,12 @@ export function useAnswerEscalation(projectId: string) {
   return useMutation({
     mutationFn: ({ escalationId, value }: { escalationId: string; value: Json }) =>
       api.answerEscalation(projectId, escalationId, value),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "escalations"] });
+    onSuccess: (_result, { escalationId }) => {
+      // Drop the answered escalation from the inbox immediately. The runtime closes it asynchronously,
+      // so invalidating (a refetch) would race that and momentarily re-add it; the 2.5s poll reconciles.
+      queryClient.setQueryData<Escalation[]>(["projects", projectId, "escalations"], (current) =>
+        current?.filter((escalation) => escalation.id !== escalationId),
+      );
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "runs"] });
     },
   });

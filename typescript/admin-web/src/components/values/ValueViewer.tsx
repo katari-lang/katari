@@ -1,6 +1,11 @@
 // Read-only renderer for wire Json values. The variant dispatch and key unescaping come from
 // `@katari-lang/types/wire` — the same single definition the runtime codec and the FFI port encode
 // against — so this viewer can never drift from what the runtime actually emits.
+//
+// Nesting always grows straight down with a fixed indent: a value's `label` (an object key, an array
+// index, or a constructor name) sits on the container's header line, and the body indents one step
+// from that header's left edge — never to the right of the label, so deep structures don't stair-step
+// off the page.
 
 import {
   AGENT_KEY,
@@ -15,7 +20,7 @@ import {
   wireKindOf,
 } from "@katari-lang/types";
 import { Braces, Download, EyeOff, FileIcon, FunctionSquare } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { api } from "../../api/client";
 import type { Json } from "../../api/types";
 import { formatBytes } from "../../lib/format";
@@ -41,94 +46,225 @@ export function ValueBlock({ value, projectId }: { value: Json; projectId: strin
   );
 }
 
-function Node({ value, projectId }: { value: Json; projectId: string }) {
-  if (value === null) return <span className="text-fg-faint">null</span>;
-  if (typeof value === "boolean" || typeof value === "number") {
-    return <span className="text-accent">{String(value)}</span>;
+/** A value, optionally prefixed by `label` (an object key / array index). Scalars render inline after
+ *  the label; containers put the label on their header line and indent their body straight down. */
+function Node({ value, projectId, label }: { value: Json; projectId: string; label?: ReactNode }) {
+  if (value === null) {
+    return (
+      <Inline label={label}>
+        <span className="text-fg-faint">null</span>
+      </Inline>
+    );
   }
-  if (typeof value === "string")
-    return <span className="text-success">{JSON.stringify(value)}</span>;
-  if (Array.isArray(value)) return <ArrayNode items={value} projectId={projectId} />;
-  return <ObjectNode fields={value} projectId={projectId} />;
+  if (typeof value === "boolean" || typeof value === "number") {
+    return (
+      <Inline label={label}>
+        <span className="text-accent">{String(value)}</span>
+      </Inline>
+    );
+  }
+  if (typeof value === "string") {
+    return (
+      <Inline label={label}>
+        <span className="text-success">{JSON.stringify(value)}</span>
+      </Inline>
+    );
+  }
+  if (Array.isArray(value)) return <ArrayNode items={value} projectId={projectId} label={label} />;
+  return <ObjectNode fields={value} projectId={projectId} label={label} />;
 }
 
-function ArrayNode({ items, projectId }: { items: Json[]; projectId: string }) {
-  if (items.length === 0) return <span>[]</span>;
+/** A leaf value on one line: `label value`, or just the value when unlabelled. */
+function Inline({ label, children }: { label?: ReactNode; children: ReactNode }) {
+  if (label === undefined) return <>{children}</>;
   return (
-    <Collapsible preview={`[ ${items.length} item${items.length === 1 ? "" : "s"} ]`}>
-      <div className="flex flex-col border-l border-edge pl-4">
-        {items.map((item, index) => (
+    <div className="flex gap-2">
+      {label}
+      {children}
+    </div>
+  );
+}
+
+/** A collapsible container: the `label` + toggle on the header line, the children indented one fixed
+ *  step below it (a left border marks the level). */
+function Container({
+  label,
+  preview,
+  children,
+}: {
+  label?: ReactNode;
+  preview: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center gap-2">
+        {label}
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="text-fg-faint transition-colors hover:text-fg"
+        >
+          {open ? "▾" : `▸ ${preview}`}
+        </button>
+      </div>
+      {open && <div className="flex flex-col border-l border-edge pl-4">{children}</div>}
+    </div>
+  );
+}
+
+function ArrayNode({
+  items,
+  projectId,
+  label,
+}: {
+  items: Json[];
+  projectId: string;
+  label?: ReactNode;
+}) {
+  if (items.length === 0) {
+    return (
+      <Inline label={label}>
+        <span>[]</span>
+      </Inline>
+    );
+  }
+  return (
+    <Container label={label} preview={`[ ${items.length} item${items.length === 1 ? "" : "s"} ]`}>
+      {items.map((item, index) => (
+        <Node
           // Order is the identity of a JSON array element.
           // biome-ignore lint/suspicious/noArrayIndexKey: positional data
-          <div key={index} className="flex gap-2">
-            <span className="text-fg-faint">{index}:</span>
-            <Node value={item} projectId={projectId} />
-          </div>
-        ))}
-      </div>
-    </Collapsible>
+          key={index}
+          value={item}
+          projectId={projectId}
+          label={<span className="text-fg-faint">{index}:</span>}
+        />
+      ))}
+    </Container>
   );
 }
 
-function ObjectNode({ fields, projectId }: { fields: { [key: string]: Json }; projectId: string }) {
-  const special = specialNode(fields, projectId);
+function ObjectNode({
+  fields,
+  projectId,
+  label,
+}: {
+  fields: { [key: string]: Json };
+  projectId: string;
+  label?: ReactNode;
+}) {
+  const special = specialNode(fields, projectId, label);
   if (special !== null) return special;
   const entries = Object.entries(fields);
-  if (entries.length === 0) return <span>{"{}"}</span>;
+  if (entries.length === 0) {
+    return (
+      <Inline label={label}>
+        <span>{"{}"}</span>
+      </Inline>
+    );
+  }
   return (
-    <Collapsible preview={`{ ${entries.length} field${entries.length === 1 ? "" : "s"} }`}>
-      <div className="flex flex-col border-l border-edge pl-4">
-        {entries.map(([key, child]) => (
-          <div key={key} className="flex gap-2">
-            <span className="text-fg-muted">{unescapeRecordKey(key)}:</span>
-            <Node value={child} projectId={projectId} />
-          </div>
-        ))}
-      </div>
-    </Collapsible>
+    <Container
+      label={label}
+      preview={`{ ${entries.length} field${entries.length === 1 ? "" : "s"} }`}
+    >
+      {entries.map(([key, child]) => (
+        <Node
+          key={key}
+          value={child}
+          projectId={projectId}
+          label={fieldLabel(unescapeRecordKey(key))}
+        />
+      ))}
+    </Container>
   );
 }
 
-function specialNode(fields: { [key: string]: Json }, projectId: string) {
+/** An object / record field label, e.g. `radius:`. */
+function fieldLabel(name: string): ReactNode {
+  return <span className="text-fg-muted">{name}:</span>;
+}
+
+function specialNode(fields: { [key: string]: Json }, projectId: string, label?: ReactNode) {
   switch (wireKindOf((key) => key in fields)) {
     case "redacted":
       return (
-        <Badge tone="danger">
-          <EyeOff className="size-3" /> redacted
+        <Inline label={label}>
+          <Badge tone="danger">
+            <EyeOff className="size-3" /> redacted
+          </Badge>
+        </Inline>
+      );
+    case "data": {
+      // A constructor is a labelled record: the tag is the header, its fields indent straight below —
+      // so a chain of constructors nests down-left instead of stepping right by each tag's width.
+      const constructorName = String(fields[CONSTRUCTOR_KEY]);
+      const payload = fields[VALUE_KEY] ?? null;
+      const tag = (
+        <Badge tone="info">
+          <Braces className="size-3" /> {constructorName}
         </Badge>
       );
-    case "data":
-      return (
-        <span className="inline-flex items-start gap-2">
-          <Badge tone="info">
-            <Braces className="size-3" /> {String(fields[CONSTRUCTOR_KEY])}
-          </Badge>
-          <Node value={fields[VALUE_KEY] ?? null} projectId={projectId} />
+      const record =
+        typeof payload === "object" && payload !== null && !Array.isArray(payload) ? payload : null;
+      const entries = record !== null ? Object.entries(record) : [];
+      if (entries.length === 0) {
+        // Nullary constructor (or an empty record): just the tag.
+        return <Inline label={label}>{tag}</Inline>;
+      }
+      const header = (
+        <span className="inline-flex items-center gap-2">
+          {label}
+          {tag}
         </span>
       );
+      return (
+        <Container
+          label={header}
+          preview={`{ ${entries.length} field${entries.length === 1 ? "" : "s"} }`}
+        >
+          {entries.map(([key, child]) => (
+            <Node
+              key={key}
+              value={child}
+              projectId={projectId}
+              label={fieldLabel(unescapeRecordKey(key))}
+            />
+          ))}
+        </Container>
+      );
+    }
     case "file":
       return (
-        <FileChip
-          projectId={projectId}
-          blobId={String(fields[FILE_KEY])}
-          size={typeof fields[SIZE_KEY] === "number" ? fields[SIZE_KEY] : null}
-          contentType={
-            typeof fields[CONTENT_TYPE_KEY] === "string" ? fields[CONTENT_TYPE_KEY] : null
-          }
-        />
+        <Inline label={label}>
+          <FileChip
+            projectId={projectId}
+            blobId={String(fields[FILE_KEY])}
+            size={typeof fields[SIZE_KEY] === "number" ? fields[SIZE_KEY] : null}
+            contentType={
+              typeof fields[CONTENT_TYPE_KEY] === "string" ? fields[CONTENT_TYPE_KEY] : null
+            }
+          />
+        </Inline>
       );
     case "agent":
       return (
-        <Badge tone="info">
-          <FunctionSquare className="size-3" /> agent {String(fields[AGENT_KEY])}
-        </Badge>
+        <Inline label={label}>
+          <Badge tone="info">
+            <FunctionSquare className="size-3" /> agent {String(fields[AGENT_KEY])}
+          </Badge>
+        </Inline>
       );
     case "closure":
       return (
-        <Badge tone="info">
-          <FunctionSquare className="size-3" /> closure {String(fields[MODULE_KEY] ?? "")}#
-          {String(fields[CLOSURE_KEY])}
-        </Badge>
+        <Inline label={label}>
+          <Badge tone="info">
+            <FunctionSquare className="size-3" /> closure {String(fields[MODULE_KEY] ?? "")}#
+            {String(fields[CLOSURE_KEY])}
+          </Badge>
+        </Inline>
       );
     default:
       return null;
@@ -181,21 +317,5 @@ function FileChip({
         <Download className="size-3.5" />
       </button>
     </span>
-  );
-}
-
-function Collapsible({ preview, children }: { preview: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <div className="flex flex-col">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="self-start text-fg-faint transition-colors hover:text-fg"
-      >
-        {open ? "▾" : `▸ ${preview}`}
-      </button>
-      {open && children}
-    </div>
   );
 }

@@ -8,7 +8,7 @@ export function Table({ headers, children }: { headers: ReactNode[]; children: R
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-edge text-left text-xs text-fg-faint">
+          <tr className="border-b border-edge bg-sunken/50 text-left text-xs uppercase tracking-wider text-fg-faint">
             {headers.map((header, index) => (
               // Header cells are a fixed positional list; the index is a stable key here.
               // biome-ignore lint/suspicious/noArrayIndexKey: positional header row

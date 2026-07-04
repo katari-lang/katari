@@ -9,7 +9,7 @@ export function Logo({ className }: { className?: string }) {
       <span className="font-display text-base font-bold uppercase leading-none tracking-tight">
         Katari
       </span>
-      <span className="border border-edge bg-sunken px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-muted">
+      <span className="border border-edge px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-muted">
         Console
       </span>
     </span>

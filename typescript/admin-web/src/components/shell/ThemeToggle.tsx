@@ -2,7 +2,11 @@ import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { type ThemePreference, useTheme } from "../../lib/theme";
 
-const options: Array<{ value: ThemePreference; icon: typeof Sun; label: string }> = [
+const options: Array<{
+  value: ThemePreference;
+  icon: typeof Sun;
+  label: string;
+}> = [
   { value: "light", icon: Sun, label: "Light" },
   { value: "system", icon: Monitor, label: "System" },
   { value: "dark", icon: Moon, label: "Dark" },
@@ -11,7 +15,7 @@ const options: Array<{ value: ThemePreference; icon: typeof Sun; label: string }
 export function ThemeToggle() {
   const { preference, setPreference } = useTheme();
   return (
-    <div className="flex items-center border border-edge p-0.5">
+    <div className="flex items-center border border-edge">
       {options.map(({ value, icon: Icon, label }) => (
         <button
           key={value}
