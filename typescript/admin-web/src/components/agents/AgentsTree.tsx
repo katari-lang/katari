@@ -31,7 +31,7 @@ export function AgentsTree({
               <li key={agent.qualifiedName}>
                 <Link
                   to={`/projects/${projectId}/agents/${encodeURIComponent(agent.qualifiedName)}${query}`}
-                  className="flex items-center gap-2 rounded-r-md px-3 py-1.5 text-sm text-fg transition-colors hover:bg-sunken"
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-fg transition-colors hover:bg-sunken"
                 >
                   <FunctionSquare className="size-3.5 text-accent" />
                   <span className="font-mono">

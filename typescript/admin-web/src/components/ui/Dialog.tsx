@@ -35,7 +35,7 @@ export function Dialog({
         // affordance explicit for the keyboard path.
         if (event.key === "Escape") onClose();
       }}
-      className="m-auto w-full max-w-lg rounded-xl border border-edge bg-raised text-fg shadow-xl backdrop:bg-black/40"
+      className="m-auto w-full max-w-lg border border-edge-strong bg-raised text-fg backdrop:bg-black/40"
     >
       <div className="p-5">
         <h2 className="pb-3 text-base font-semibold">{title}</h2>

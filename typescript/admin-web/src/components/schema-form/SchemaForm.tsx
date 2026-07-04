@@ -361,7 +361,7 @@ function FileField({ value, onChange, context }: FieldProps) {
       {current !== null && (
         <span className="font-mono text-xs text-fg-muted">file {String(current[FILE_KEY])}</span>
       )}
-      <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-edge-strong bg-raised px-2.5 py-1 text-xs text-fg hover:bg-sunken">
+      <label className="inline-flex cursor-pointer items-center gap-1.5 border border-edge-strong bg-raised px-2.5 py-1 text-xs text-fg hover:bg-sunken">
         <Upload className="size-3.5" />
         {busy ? "Uploading…" : current === null ? "Upload file" : "Replace"}
         <input

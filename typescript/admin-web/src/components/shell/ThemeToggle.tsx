@@ -11,7 +11,7 @@ const options: Array<{ value: ThemePreference; icon: typeof Sun; label: string }
 export function ThemeToggle() {
   const { preference, setPreference } = useTheme();
   return (
-    <div className="flex items-center rounded-md border border-edge p-0.5">
+    <div className="flex items-center border border-edge p-0.5">
       {options.map(({ value, icon: Icon, label }) => (
         <button
           key={value}
@@ -20,7 +20,7 @@ export function ThemeToggle() {
           aria-pressed={preference === value}
           onClick={() => setPreference(value)}
           className={cn(
-            "rounded p-1.5 text-fg-faint transition-colors hover:text-fg",
+            "p-1.5 text-fg-faint transition-colors hover:text-fg",
             preference === value && "bg-sunken text-fg",
           )}
         >

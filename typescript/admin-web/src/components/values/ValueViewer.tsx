@@ -176,7 +176,7 @@ function FileChip({
         title="Download"
         disabled={busy}
         onClick={() => void download()}
-        className="rounded p-1 text-fg-faint transition-colors hover:bg-sunken hover:text-fg disabled:opacity-50"
+        className="p-1 text-fg-faint transition-colors hover:bg-sunken hover:text-fg disabled:opacity-50"
       >
         <Download className="size-3.5" />
       </button>

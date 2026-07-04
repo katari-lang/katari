@@ -5,7 +5,7 @@ import type { InputHTMLAttributes, SelectHTMLAttributes, TextareaHTMLAttributes 
 import { cn } from "../../lib/cn";
 
 const fieldClass =
-  "w-full rounded-md border border-edge-strong bg-raised px-2.5 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none disabled:opacity-50";
+  "w-full border border-edge-strong bg-raised px-2.5 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none disabled:opacity-50";
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cn(fieldClass, className)} {...rest} />;
@@ -70,7 +70,7 @@ export function Switch({
       >
         <span
           className={cn(
-            "size-4 rounded-full bg-raised shadow transition-transform",
+            "size-4 rounded-full bg-raised transition-transform",
             checked && "translate-x-4",
           )}
         />

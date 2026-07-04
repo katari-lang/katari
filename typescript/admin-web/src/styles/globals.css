@@ -1,8 +1,65 @@
 @import "tailwindcss";
 
+/* Fonts are loaded via <link rel="stylesheet"> in index.html (Tailwind v4's import expands into
+ * rules, so a trailing @import url(...) would violate the CSS "imports first" rule). */
+
+/* === Brand palettes (fixed) ===============================================
+ * Mirrors the marketing site's palette. Tailwind v4 generates utilities like `bg-highlight-500`
+ * from this block, and the role tokens below reference these `--color-*` variables. */
+@theme {
+  --color-highlight-50: oklch(0.937 0.093 177.13);
+  --color-highlight-100: oklch(0.892 0.164 178.26);
+  --color-highlight-200: oklch(0.826 0.149 179.05);
+  --color-highlight-300: oklch(0.751 0.138 177.93);
+  --color-highlight-400: oklch(0.674 0.124 177.62);
+  --color-highlight-500: oklch(0.59 0.109 177.01);
+  --color-highlight-600: oklch(0.515 0.096 175.78);
+  --color-highlight-700: oklch(0.437 0.082 176.09);
+  --color-highlight-800: oklch(0.362 0.069 174.34);
+  --color-highlight-900: oklch(0.279 0.054 172.85);
+  --color-highlight-950: oklch(0.243 0.047 173.37);
+
+  --color-katari-50: oklch(0.931 0.004 271.53);
+  --color-katari-100: oklch(0.897 0.006 264.6);
+  --color-katari-200: oklch(0.82 0.01 267.39);
+  --color-katari-300: oklch(0.751 0.015 268.48);
+  --color-katari-400: oklch(0.674 0.02 272.22);
+  --color-katari-500: oklch(0.605 0.025 274.52);
+  --color-katari-600: oklch(0.528 0.027 277.55);
+  --color-katari-700: oklch(0.458 0.028 279.97);
+  --color-katari-800: oklch(0.38 0.025 282.12);
+  --color-katari-900: oklch(0.311 0.025 284.87);
+  --color-katari-950: oklch(0.233 0.015 279.54);
+
+  --color-paper-50: oklch(0.966 0.007 67.76);
+  --color-paper-100: oklch(0.932 0.015 70.88);
+  --color-paper-200: oklch(0.872 0.03 70.68);
+  --color-paper-300: oklch(0.813 0.041 70.92);
+  --color-paper-400: oklch(0.733 0.04 71.03);
+  --color-paper-500: oklch(0.647 0.037 71.38);
+  --color-paper-600: oklch(0.562 0.033 70.35);
+  --color-paper-700: oklch(0.484 0.031 70.73);
+  --color-paper-800: oklch(0.397 0.027 73.58);
+  --color-paper-900: oklch(0.319 0.023 72.44);
+  --color-paper-950: oklch(0.278 0.023 75.43);
+
+  --color-danger-400: oklch(0.696 0.198 29.23);
+  --color-danger-500: oklch(0.612 0.215 33.31);
+  --color-danger-600: oklch(0.555 0.205 34.5);
+
+  --color-success-400: oklch(0.681 0.197 149.27);
+  --color-success-500: oklch(0.585 0.171 148.74);
+  --color-success-600: oklch(0.503 0.149 148.34);
+
+  --color-warning-400: oklch(0.784 0.171 78.67);
+  --color-warning-500: oklch(0.708 0.156 66.42);
+  --color-warning-600: oklch(0.62 0.144 55.32);
+}
+
 /* Semantic color tokens. Components use `bg-surface` / `text-fg-muted` / `border-edge` etc. — one
  * class per property, resolved through CSS variables — so theming never needs `dark:` twins on
- * every call site. */
+ * every call site. The `-soft` tints are a translucent wash of their base so they sit correctly on
+ * either surface without a second hand-tuned value. */
 @theme inline {
   --color-surface: var(--surface);
   --color-raised: var(--raised);
@@ -22,50 +79,79 @@
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
+
+  --font-sans: "DM Sans", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Montserrat", "DM Sans", system-ui, sans-serif;
 }
 
 :root {
-  --surface: oklch(0.985 0.002 250);
-  --raised: oklch(1 0 0);
-  --sunken: oklch(0.955 0.004 250);
-  --fg: oklch(0.25 0.02 260);
-  --fg-muted: oklch(0.5 0.02 260);
-  --fg-faint: oklch(0.65 0.015 260);
-  --edge: oklch(0.9 0.006 250);
-  --edge-strong: oklch(0.82 0.01 250);
-  --accent: oklch(0.55 0.18 275);
-  --accent-hover: oklch(0.5 0.19 275);
-  --accent-fg: oklch(0.99 0 0);
-  --accent-soft: oklch(0.94 0.04 275);
-  --danger: oklch(0.55 0.2 25);
-  --danger-soft: oklch(0.94 0.04 25);
-  --success: oklch(0.55 0.15 155);
-  --success-soft: oklch(0.94 0.05 155);
-  --warning: oklch(0.6 0.14 80);
-  --warning-soft: oklch(0.95 0.06 90);
+  --surface: var(--color-paper-50);
+  --raised: var(--color-paper-50);
+  --sunken: var(--color-paper-100);
+  --fg: var(--color-katari-900);
+  --fg-muted: var(--color-katari-600);
+  --fg-faint: var(--color-katari-500);
+  --edge: var(--color-paper-200);
+  --edge-strong: var(--color-paper-300);
+  --accent: var(--color-highlight-500);
+  --accent-hover: var(--color-highlight-600);
+  --accent-fg: var(--color-paper-50);
+  --accent-soft: color-mix(in oklch, var(--color-highlight-500) 15%, transparent);
+  --danger: var(--color-danger-500);
+  --danger-soft: color-mix(in oklch, var(--color-danger-500) 15%, transparent);
+  --success: var(--color-success-600);
+  --success-soft: color-mix(in oklch, var(--color-success-600) 15%, transparent);
+  --warning: var(--color-warning-600);
+  --warning-soft: color-mix(in oklch, var(--color-warning-600) 15%, transparent);
 }
 
 [data-theme="dark"] {
-  --surface: oklch(0.19 0.012 265);
-  --raised: oklch(0.23 0.014 265);
-  --sunken: oklch(0.16 0.012 265);
-  --fg: oklch(0.93 0.008 260);
-  --fg-muted: oklch(0.7 0.015 260);
-  --fg-faint: oklch(0.55 0.015 260);
-  --edge: oklch(0.31 0.015 265);
-  --edge-strong: oklch(0.4 0.02 265);
-  --accent: oklch(0.68 0.16 275);
-  --accent-hover: oklch(0.73 0.15 275);
-  --accent-fg: oklch(0.15 0.02 275);
-  --accent-soft: oklch(0.3 0.06 275);
-  --danger: oklch(0.68 0.18 25);
-  --danger-soft: oklch(0.3 0.07 25);
-  --success: oklch(0.7 0.13 155);
-  --success-soft: oklch(0.29 0.06 155);
-  --warning: oklch(0.75 0.13 85);
-  --warning-soft: oklch(0.3 0.06 90);
+  --surface: var(--color-katari-950);
+  --raised: var(--color-katari-900);
+  --sunken: var(--color-katari-900);
+  --fg: var(--color-katari-50);
+  --fg-muted: var(--color-katari-300);
+  --fg-faint: var(--color-katari-400);
+  --edge: var(--color-katari-800);
+  --edge-strong: var(--color-katari-700);
+  --accent: var(--color-highlight-300);
+  --accent-hover: var(--color-highlight-200);
+  --accent-fg: var(--color-katari-950);
+  --accent-soft: color-mix(in oklch, var(--color-highlight-300) 22%, transparent);
+  --danger: var(--color-danger-400);
+  --danger-soft: color-mix(in oklch, var(--color-danger-400) 20%, transparent);
+  --success: var(--color-success-400);
+  --success-soft: color-mix(in oklch, var(--color-success-400) 20%, transparent);
+  --warning: var(--color-warning-400);
+  --warning-soft: color-mix(in oklch, var(--color-warning-400) 20%, transparent);
 }
 
 body {
   @apply bg-surface text-fg antialiased;
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* Consistent thin scrollbars across light / dark. */
+* {
+  scrollbar-color: var(--edge-strong) transparent;
+  scrollbar-width: thin;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--edge-strong);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
 }

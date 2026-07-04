@@ -2,11 +2,7 @@ import type { ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return (
-    <section className={cn("rounded-xl border border-edge bg-raised", className)}>
-      {children}
-    </section>
-  );
+  return <section className={cn("border border-edge bg-raised", className)}>{children}</section>;
 }
 
 /** Card header combo: title on the left, optional actions on the right. */

@@ -13,7 +13,7 @@ export function CopyButton({ value, label }: { value: string; label?: string }) 
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}
-      className="rounded p-1 text-fg-faint transition-colors hover:bg-sunken hover:text-fg"
+      className="p-1 text-fg-faint transition-colors hover:bg-sunken hover:text-fg"
     >
       {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
     </button>

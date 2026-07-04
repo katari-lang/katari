@@ -11,7 +11,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
   render() {
     if (this.state.error !== null) {
       return (
-        <div className="rounded-xl border border-danger bg-danger-soft p-5">
+        <div className="border border-danger bg-danger-soft p-5">
           <p className="text-sm font-semibold text-danger">This page failed to render.</p>
           <pre className="overflow-x-auto pt-2 font-mono text-xs whitespace-pre-wrap text-danger">
             {this.state.error.message}
