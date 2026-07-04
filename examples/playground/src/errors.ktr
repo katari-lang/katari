@@ -1,8 +1,8 @@
 // The typed error model. A program raises `throw(error = <data>)` — a typed, catchable error the
 // signature tracks as `with prelude.throw[T]` — and a `use handler` clause catches it by its payload type.
 // A `panic`, by contrast, is the runtime's own failure channel: it cannot be raised from Katari,
-// but the ambient `panic` clause below can still catch one (e.g. a failed FFI process) on its way
-// out and turn it into a value instead of a failed run.
+// but the ambient `panic` clause below can still catch one (e.g. a division by zero, a failed FFI
+// process) on its way out and turn it into a value instead of a failed run.
 
 @"The typed error `half` raises on odd input."
 data not_even(value: integer)
@@ -26,19 +26,29 @@ agent describe_half(value: integer) -> string {
   f"half=${string.to_string(value = half(value = value))}"
 }
 
-@"Entry: one caught throw, one clean path, and a caught panic from a missing env entry."
+@"Entry: one caught throw, one clean path, a caught panic, and a config fallback on a missing secret."
 agent main() -> string {
   let caught = describe_half(value = 7)
   let clean = describe_half(value = 12)
-  // The ambient `panic` clause: catchable in any handler, raisable by nobody. Reading an env
-  // entry that does not exist is a runtime failure (a panic, not a typed throw) — without this
-  // clause it would fail the whole run.
-  let recovered = {
+  // The ambient `panic` clause: catchable in any handler, raisable by nobody. Dividing by zero is a
+  // runtime failure (a panic, not a typed throw) — without this clause it would fail the whole run.
+  let survived = {
     use handler {
       request panic(msg: string) { break f"panic caught: ${msg}" }
     }
-    let missing = env.get_secret(key = "playground.no_such_key")
+    let boom = 1 / 0
     "unreachable"
   }
-  string.join(parts = [caught, clean, recovered], separator = " | ")
+  // A missing secret, by contrast, is an anticipated configuration failure: `env.get_secret` throws
+  // the typed `env.missing_secret`, so optional config can fall back in-program instead of failing.
+  let fallback = {
+    use handler {
+      request prelude.throw(error: env.missing_secret) -> never {
+        break f"no secret under ${error.key}"
+      }
+    }
+    let secret = env.get_secret(key = "playground.no_such_key")
+    "secret is set"
+  }
+  string.join(parts = [caught, clean, survived, fallback], separator = " | ")
 }

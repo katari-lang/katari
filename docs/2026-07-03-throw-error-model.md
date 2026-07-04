@@ -73,7 +73,7 @@ panic.
 | `ai.call_agent` | bad target / non-conforming args | `throw[ai.call_error]` |
 | `divide` / `modulo` | zero divisor | panic (was: silent `Infinity` / `NaN`) |
 | `json.stringify` / `encode` / `to_text` | non-finite number | panic (numeric invariant; unreachable once divide panics) |
-| `env.get_secret` | key not set | panic (a deployment error, not program logic) |
+| `env.get_secret` | key not set | `throw[env.missing_secret]` (2026-07-05; was panic — see follow-ups) |
 | non-exhaustive match, engine backstops | — | panic |
 | FFI handler error | `katari.throw(payload)` | `throw[T]` (declared on the agent: `with prelude.throw[T]`) |
 | FFI handler error | any other JS error | panic (infrastructure failure, not program logic) |
@@ -128,7 +128,9 @@ The port follow-up landed as its own slice. The wire gains a `throw` variant in 
 
 ## Follow-ups (deliberately out of this slice)
 
-- **`env.get_secret` as throw** — defensible either way; revisit if a real program wants in-program
-  fallback for missing config.
+- **`env.get_secret` as throw** — landed 2026-07-05: a missing key now throws
+  `env.missing_secret(key, message)` (the key rides along so a fallback handler can branch on which
+  secret is absent). Optional config gets in-program fallback; uncaught, the throw still fails the run,
+  so the required-config behaviour is unchanged.
 - **Retry/backoff combinators over `throw[http.fetch_error]`** — stdlib sugar once real orchestration
   programs show the shape.

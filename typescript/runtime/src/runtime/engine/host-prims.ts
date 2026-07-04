@@ -8,10 +8,15 @@
 // explicitly (its `key` argument is public, so the seam's monotonic taint would not). The engine awaits
 // them inline — they are the "bounded env fetch" the turn's drive loop is designed to suspend on.
 
+import type { QualifiedName } from "@katari-lang/types";
 import type { ProjectId } from "../ids.js";
 import { markPrivate } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
 import type { PrimRegistry } from "./prims.js";
+import { KatariThrow } from "./throw-signal.js";
+
+// The domain error ctor `get_secret` throws (`prelude/env.ktr` declares it).
+const MISSING_SECRET = "prelude.env.missing_secret" as QualifiedName;
 
 /** The project-scoped env store the env primitives read. A consumer-defined port: the wiring (facade)
  *  supplies the real DB-backed reader, while tests stub it. */
@@ -35,8 +40,16 @@ export function registerHostPrims(prims: PrimRegistry, stores: HostPrimStores): 
     const key = stringArgument(argument, "key");
     const value = await stores.env.readSecret(context.projectId, key);
     if (value === null) {
-      // A missing secret is a deterministic failure; the thrown error becomes the prim's declared `panic`.
-      throw new Error(`env: no secret is set under "${key}"`);
+      // A missing secret is an anticipated configuration failure, not a broken invariant: raise the typed
+      // `env.missing_secret` (carrying the key, so a fallback handler can branch on which secret is absent).
+      throw new KatariThrow({
+        kind: "record",
+        ctor: MISSING_SECRET,
+        fields: {
+          key: { kind: "string", value: key },
+          message: { kind: "string", value: `env.get_secret: no secret is set under "${key}"` },
+        },
+      });
     }
     // A secret source: the value is tainted `private` so it cannot reach a user-facing boundary unredacted.
     return markPrivate({ kind: "string", value });

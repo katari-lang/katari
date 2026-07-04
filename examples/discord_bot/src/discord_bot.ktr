@@ -18,8 +18,9 @@ agent ask[effect E](history: array[types.message], tools: array[agent never -> u
   ai.infer_with_tools[E](history = history, tools = tools, max_steps = 8)
 }
 
-@"Build the provider connection ONCE (reading its key — a missing key panics here, caught by the
-root's `panic` clause). Swap gemini -> openai (and the model id) to change provider; nothing else changes."
+@"Build the provider connection ONCE (reading its key — a missing key throws `env.missing_secret`,
+caught by the root's throw clause). Swap gemini -> openai (and the model id) to change provider;
+nothing else changes."
 agent make_client() -> gemini.gemini {
   gemini.gemini(
     model = "gemini-2.5-flash",
@@ -31,12 +32,13 @@ agent make_client() -> gemini.gemini {
 @"Standalone entry to test the tool loop from the CLI (no Discord):
 katari run discord_bot.solve --arg '{\"task\": \"...\"}'."
 agent solve(task: string) -> string {
-  // A missing env entry / interrupted sidecar is a panic; a provider or dispatch failure is a
-  // typed throw. Both become readable strings here instead of failing the run.
+  // A provider / dispatch failure and a missing secret are typed throws (one handler covers the
+  // joined payload union); an interrupted sidecar is a panic. All become readable strings here
+  // instead of failing the run.
   use handler { request panic(msg: string) { break f"failed: ${msg}" } }
   use handler {
-    request prelude.throw(error: ai.loop_error) -> never {
-      break f"provider error: ${json.to_text(value = error)}"
+    request prelude.throw(error: ai.loop_error | env.missing_secret) -> never {
+      break f"error: ${json.to_text(value = error)}"
     }
   }
   use handler (var e2b_key = env.get_secret(key = "E2B_API_KEY")) {
@@ -53,8 +55,8 @@ conversation history as a Katari value."
 agent main(channel_id: string) -> string {
   use handler { request panic(msg: string) { break f"failed: ${msg}" } }
   use handler {
-    request prelude.throw(error: ai.loop_error) -> never {
-      break f"provider error: ${json.to_text(value = error)}"
+    request prelude.throw(error: ai.loop_error | env.missing_secret) -> never {
+      break f"error: ${json.to_text(value = error)}"
     }
   }
   use handler (var client = make_client()) {

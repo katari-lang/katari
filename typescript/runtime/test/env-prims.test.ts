@@ -1,12 +1,13 @@
 // The env host primitives (`prelude.env.get_secret` / `prelude.env.get_all`) registered on the prim
 // registry by `registerHostPrims`, exercised over a stubbed `EnvReader`. These assert the privacy contract
-// at the source: a secret read is tainted `private`, a non-secret read is public, and a missing secret is a
-// (deterministic) failure the engine turns into a `panic`.
+// at the source: a secret read is tainted `private`, a non-secret read is public, and a missing secret
+// raises the typed `env.missing_secret` throw (an anticipated configuration failure, not a panic).
 
 import { describe, expect, test } from "vitest";
 import type { PrimContext } from "../src/runtime/engine/context.js";
 import { type EnvReader, registerHostPrims } from "../src/runtime/engine/host-prims.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
 import type { ProjectId } from "../src/runtime/ids.js";
 import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
@@ -55,15 +56,32 @@ describe("env host primitives", () => {
     expect(result).toEqual({ kind: "string", value: "sk-123", private: true });
   });
 
-  test("get_secret on a missing secret throws (the engine raises a panic)", async () => {
+  test("get_secret on a missing secret raises the typed `env.missing_secret` throw", async () => {
+    // A non-secret entry under the same key does not count: `get_secret` reads the secret bucket only.
     const prims = primsWith(reader({}, { API_KEY: "not-a-secret" }));
-    await expect(
-      prims.run(
+    const failure = await prims
+      .run(
         "prelude.env.get_secret",
         recordArgument({ key: { kind: "string", value: "API_KEY" } }),
         CONTEXT,
-      ),
-    ).rejects.toThrow(/API_KEY/);
+      )
+      .then(
+        () => {
+          throw new Error("expected get_secret to throw");
+        },
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(KatariThrow);
+    if (failure instanceof KatariThrow) {
+      expect(failure.payload).toEqual({
+        kind: "record",
+        ctor: "prelude.env.missing_secret",
+        fields: {
+          key: { kind: "string", value: "API_KEY" },
+          message: { kind: "string", value: 'env.get_secret: no secret is set under "API_KEY"' },
+        },
+      });
+    }
   });
 
   test("get_all returns a public record of the non-secret entries", async () => {
