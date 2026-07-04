@@ -7,10 +7,12 @@
 // without pulling the whole object — the engine's hot path stays bounded even when a value is big.
 
 import {
+  CreateBucketCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
   S3Client,
+  S3ServiceException,
 } from "@aws-sdk/client-s3";
 import type { BlobId, ProjectId } from "../ids.js";
 
@@ -60,14 +62,18 @@ export class InMemoryBlobStore implements BlobStore {
   }
 }
 
-/** S3 connection config for a blob store (an AWS bucket, or any S3-compatible endpoint like MinIO). */
+/** S3 connection config for a blob store (an AWS bucket, or any S3-compatible endpoint like SeaweedFS). */
 export interface BlobS3Config {
   bucket: string;
   region: string;
-  /** A non-AWS endpoint (e.g. MinIO); omitted for real AWS S3. */
+  /** A non-AWS endpoint (e.g. SeaweedFS / s3mock); omitted for real AWS S3. */
   endpoint?: string;
-  /** Path-style addressing (`endpoint/bucket/key`), which MinIO and most S3-compatible servers need. */
+  /** Path-style addressing (`endpoint/bucket/key`), which most S3-compatible servers need. */
   forcePathStyle: boolean;
+  /** Create the bucket on boot if it is absent (idempotent). For a local S3 mock whose bucket is
+   *  not provisioned out of band; leave false against real AWS, where the app usually lacks (and
+   *  should not need) `CreateBucket` permission and the bucket is managed separately. */
+  createBucket: boolean;
 }
 
 /** The production store: one S3 object per blob, keyed `{projectId}/{blobId}`. Credentials come from the
@@ -81,6 +87,29 @@ export class S3BlobStore implements BlobStore {
       ...(config.endpoint !== undefined ? { endpoint: config.endpoint } : {}),
       forcePathStyle: config.forcePathStyle,
     });
+  }
+
+  /** Create the bucket if configured to and it is absent (idempotent) — called once at boot. This is also
+   *  the runtime's first S3 contact, so it doubles as a readiness gate: a local mock may still be starting
+   *  when the runtime boots. An already-owned bucket is success; a 4xx (auth / config) fails fast; a
+   *  connection failure or 5xx is retried a bounded number of times, then propagates (a real
+   *  misconfiguration should fail the boot, not surface later as a failed upload). */
+  async ensureBucket(): Promise<void> {
+    if (!this.config.createBucket) return;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.client.send(new CreateBucketCommand({ Bucket: this.config.bucket }));
+        return;
+      } catch (error) {
+        const name = error instanceof S3ServiceException ? error.name : "";
+        if (name === "BucketAlreadyOwnedByYou" || name === "BucketAlreadyExists") return;
+        const status =
+          error instanceof S3ServiceException ? error.$metadata.httpStatusCode : undefined;
+        const isClientError = status !== undefined && status >= 400 && status < 500;
+        if (isClientError || attempt >= 20) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
   }
 
   private key(projectId: ProjectId, blobId: BlobId): string {
@@ -140,4 +169,11 @@ export class S3BlobStore implements BlobStore {
  *  store (bytes lost on restart — never use it in production). */
 export function createBlobStore(s3: BlobS3Config | null): BlobStore {
   return s3 === null ? new InMemoryBlobStore() : new S3BlobStore(s3);
+}
+
+/** Ensure a configured blob store is ready to serve — for S3 with `createBucket`, create the bucket if it
+ *  is absent (idempotent). Called once at boot, before serving, so the first upload never races a missing
+ *  bucket. A no-op for the in-memory store and for S3 without `createBucket`. */
+export async function ensureBlobStoreReady(store: BlobStore): Promise<void> {
+  if (store instanceof S3BlobStore) await store.ensureBucket();
 }

@@ -151,9 +151,6 @@ importers:
       '@hono/zod-validator':
         specifier: ^0.8.0
         version: 0.8.0(hono@4.12.24)(zod@4.4.3)
-      '@katari-lang/types':
-        specifier: workspace:*
-        version: link:../types
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(postgres@3.4.9)
@@ -167,6 +164,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@katari-lang/types':
+        specifier: workspace:*
+        version: link:../types
       '@types/node':
         specifier: ^25.9.2
         version: 25.9.2

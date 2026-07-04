@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { config } from "./config/index.js";
 import { success } from "./lib/response.js";
+import { mountAdminWeb } from "./middleware/admin-web.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { requestContext } from "./middleware/request-context.js";
@@ -26,9 +27,17 @@ export function createApp() {
   app.onError(errorHandler);
   app.notFound(notFound);
 
-  return app
-    .get("/", (c) => c.json(success({ name: "katari-api-server", api: "/api/v1" })))
-    .route("/api/v1", apiRoutes);
+  const api = app.route("/api/v1", apiRoutes);
+
+  // The image bakes the console in and serves it at the root; a source checkout leaves the dist unset and
+  // keeps the JSON info root (the console runs from its own vite dev server there). Either way the API stays
+  // under `/api/v1`, so the returned type — what the RPC client binds to — is the same.
+  if (config.adminWebDist === undefined) {
+    api.get("/", (c) => c.json(success({ name: "katari-api-server", api: "/api/v1" })));
+  } else {
+    mountAdminWeb(api, config.adminWebDist);
+  }
+  return api;
 }
 
 /** Route type for the end-to-end typed RPC client (`hc<AppType>(...)`). */

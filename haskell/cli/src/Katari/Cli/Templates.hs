@@ -12,7 +12,7 @@
 module Katari.Cli.Templates
   ( ScaffoldFile (..),
     scaffoldFiles,
-    interpolateName,
+    interpolate,
   )
 where
 
@@ -56,6 +56,7 @@ embeddedTemplateFiles = $(makeRelativeToProject "templates" >>= embedDir)
 decodeTemplate :: ByteString -> Text
 decodeTemplate = decodeUtf8With lenientDecode
 
--- | Fill the @{{name}}@ placeholders with the project's name.
-interpolateName :: Text -> Text -> Text
-interpolateName = Text.replace "{{name}}"
+-- | Fill a template's placeholders: @{{name}}@ with the project's name, @{{version}}@ with the CLI
+-- version (so a scaffolded @compose.yaml@ pins the runtime image tag that matches this CLI).
+interpolate :: Text -> Text -> Text -> Text
+interpolate name version = Text.replace "{{version}}" version . Text.replace "{{name}}" name

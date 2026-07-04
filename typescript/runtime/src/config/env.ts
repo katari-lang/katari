@@ -40,6 +40,15 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  /** Create the S3 bucket on boot if absent (idempotent). For a local S3 mock; leave false against real
+   *  AWS, where the bucket is provisioned separately and the app should not need `CreateBucket`. */
+  BLOB_S3_CREATE_BUCKET: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /** The built admin console's static dist to serve at the server root. The runtime image sets this to the
+   *  baked-in dist; a source checkout leaves it unset (the console runs from its own vite dev server). */
+  KATARI_ADMIN_WEB_DIST: z.string().optional(),
 });
 
 /** Whether a base64 string decodes to exactly `length` bytes (Node accepts loose base64, so we re-encode and

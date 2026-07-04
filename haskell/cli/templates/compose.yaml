@@ -1,10 +1,40 @@
-# A local Katari stack: Postgres + the runtime.
+# A self-hosted Katari stack: the runtime (API + web console on one port), Postgres, and a
+# durable S3-compatible blob store (SeaweedFS). Copy `.env.example` to `.env` and set a key first:
 #
-# The runtime image is not on a public registry yet — build it once from a katari checkout
-# (`docker compose build` in the katari repository produces `katari-runtime:local`), then
-# `docker compose up -d` here.
+#   cp .env.example .env
+#   echo "KATARI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
+#   docker compose up -d
+#
+# Then open the console at http://localhost:3000 and deploy with `katari apply`.
 
 services:
+  runtime:
+    image: ghcr.io/katari-lang/katari:{{version}}
+    restart: unless-stopped
+    ports:
+      # Serves BOTH the JSON API (/api/v1) and the admin console (/) — the console is baked in.
+      - "${KATARI_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      LOG_LEVEL: info
+      DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+      # At-rest encryption key for secret values (base64, 32 bytes). The runtime refuses to boot
+      # without it — set it in `.env` (see above).
+      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (see .env.example)}
+      # Blob bytes → the SeaweedFS store below. Repoint at a cloud bucket by dropping
+      # BLOB_S3_ENDPOINT and setting real AWS credentials; then delete the seaweedfs service.
+      BLOB_S3_BUCKET: katari-blobs
+      BLOB_S3_ENDPOINT: http://seaweedfs:8333
+      BLOB_S3_FORCE_PATH_STYLE: "true"
+      BLOB_S3_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: katari
+      AWS_SECRET_ACCESS_KEY: katari
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -12,8 +42,6 @@ services:
       POSTGRES_USER: katari
       POSTGRES_PASSWORD: katari
       POSTGRES_DB: katari
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - katari-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,24 +50,15 @@ services:
       timeout: 5s
       retries: 10
 
-  runtime:
-    image: katari-runtime:local
+  # Durable S3-compatible blob store (single-binary SeaweedFS). Bytes persist in the `katari-blobs`
+  # volume; the S3 port stays on the internal compose network.
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
     restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 3000
-      LOG_LEVEL: info
-      # `postgres` is the service hostname on the compose network.
-      DATABASE_URL: postgres://katari:katari@postgres:5432/katari
-      # At-rest encryption key for secret values (base64 32 bytes); the runtime refuses to boot
-      # without it. This dev-only default lets the local stack come up — override it in `.env`
-      # for anything shared (see env.example).
-      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:-XAHob6KS/e98OejNFErgNfA8RqiOmI7fLLaNl9dRU5Q=}
-    ports:
-      - "${APP_PORT:-3000}:3000"
-    depends_on:
-      postgres:
-        condition: service_healthy
+    command: server -s3 -dir=/data
+    volumes:
+      - katari-blobs:/data
 
 volumes:
   katari-pgdata:
+  katari-blobs:

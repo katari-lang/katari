@@ -16,11 +16,11 @@ import Data.Char (isAlpha, isAlphaNum, isDigit)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
-import Katari.Cli.Common (dieIn, writeOrExit)
+import Katari.Cli.Common (cliVersion, dieIn, writeOrExit)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (OutputContext (..), hint, newOutputContext, progress, warn)
 import Katari.Cli.Prompt (inputLine)
-import Katari.Cli.Templates (ScaffoldFile (..), interpolateName, scaffoldFiles)
+import Katari.Cli.Templates (ScaffoldFile (..), interpolate, scaffoldFiles)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 import System.FilePath (takeBaseName, takeDirectory, (</>))
@@ -58,7 +58,7 @@ run options = do
       then warn context (Text.pack file.destination <> " already exists; leaving it untouched")
       else writeOrExit "init" ("could not write " <> Text.pack file.destination) $ do
         createDirectoryIfMissing True (takeDirectory path)
-        TextIO.writeFile path (interpolateName packageName file.contents)
+        TextIO.writeFile path (interpolate packageName cliVersion file.contents)
         progress context ("  + " <> Text.pack file.destination)
   progress context ("Initialized " <> packageName)
   hint context "docker compose up -d && katari apply && katari run"

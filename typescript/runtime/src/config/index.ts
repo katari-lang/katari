@@ -28,7 +28,14 @@ export const config = {
           region: env.BLOB_S3_REGION,
           endpoint: env.BLOB_S3_ENDPOINT,
           forcePathStyle: env.BLOB_S3_FORCE_PATH_STYLE,
+          createBucket: env.BLOB_S3_CREATE_BUCKET,
         },
+  // The built admin console's static dist, served at the server root when set (the runtime image bakes it in
+  // and points here). Undefined in a source checkout — the console runs from its own vite dev server there.
+  adminWebDist:
+    env.KATARI_ADMIN_WEB_DIST === undefined || env.KATARI_ADMIN_WEB_DIST === ""
+      ? undefined
+      : env.KATARI_ADMIN_WEB_DIST,
 } as const;
 
 export type Config = typeof config;

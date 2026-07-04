@@ -5,14 +5,18 @@ import { closeDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { app } from "./index.js";
 import { createLogger } from "./lib/logger.js";
+import { blobStore } from "./runtime/facade.js";
+import { ensureBlobStoreReady } from "./runtime/value/blob-store.js";
 
 const logger = createLogger({ level: config.logLevel, bindings: { module: "server" } });
 
-// Apply migrations before serving. If they fail, do not start (fail fast).
+// Apply migrations and provision the blob store before serving. If either fails, do not start (fail fast):
+// a missing bucket or unreachable S3 endpoint is a boot-time misconfiguration, not a per-upload surprise.
 try {
   await runMigrations();
+  await ensureBlobStoreReady(blobStore);
 } catch (err) {
-  logger.error("migration failed; not starting server", {
+  logger.error("startup failed; not starting server", {
     message: err instanceof Error ? err.message : String(err),
   });
   process.exit(1);

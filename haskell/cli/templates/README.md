@@ -5,11 +5,15 @@ questions to their operator, and the runtime keeps every run durable.
 
 ## Quickstart
 
-1. Start a local runtime (once — see the note in `compose.yaml` about building the image):
+1. Start a local runtime (Postgres + a blob store + the runtime, from the published image):
 
    ```sh
+   cp .env.example .env
+   echo "KATARI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
    docker compose up -d
    ```
+
+   The web console is now at <http://localhost:3000>.
 
 2. Deploy this project:
 
@@ -24,7 +28,7 @@ questions to their operator, and the runtime keeps every run durable.
    ```
 
    Pick `main.main`. It asks for your name — that question is an escalation leaving the
-   run, and `katari run` lets you answer it right in the terminal.
+   run, and `katari run` lets you answer it right in the terminal (or from the console).
 
 ## Everyday commands
 

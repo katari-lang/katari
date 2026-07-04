@@ -34,11 +34,37 @@ services:
       # This dev-only default lets the local stack come up. Override it in any shared / production deployment
       # (export KATARI_SECRET_KEY, or set it in a root `.env`) and generate a real one: openssl rand -base64 32.
       KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:-XAHob6KS/e98OejNFErgNfA8RqiOmI7fLLaNl9dRU5Q=}
+      # Blob bytes go to the s3mock container (S3-compatible) over the internal network, so the
+      # dockerized runtime exercises the same S3 path as production. `forcePathStyle` is required for
+      # a non-AWS endpoint; s3mock ignores the AWS creds but the SDK still needs some present to sign.
+      # The runtime creates the bucket on boot (idempotent), since s3mock is ephemeral.
+      BLOB_S3_BUCKET: katari-blobs
+      BLOB_S3_ENDPOINT: http://s3mock:9090
+      BLOB_S3_FORCE_PATH_STYLE: "true"
+      BLOB_S3_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: s3mock
+      AWS_SECRET_ACCESS_KEY: s3mock
     ports:
+      # The runtime serves BOTH the JSON API (/api/v1) and the admin console (/) on this port — the
+      # image bakes the built console in, so http://localhost:3000 is the web UI.
       - "${APP_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy
+      s3mock:
+        condition: service_started
+
+  # S3-compatible object store for the blob layer. adobe/s3mock is a purpose-built in-memory mock
+  # (the successor to the now-defunct MinIO OSS image for local testing); a self-host stack wants a
+  # durable store instead — the `katari init` template scaffolds SeaweedFS.
+  s3mock:
+    image: adobe/s3mock:latest
+    container_name: katari-s3mock
+    restart: unless-stopped
+    environment:
+      debug: "false"
+    ports:
+      - "${S3_PORT:-9090}:9090"
 
 volumes:
   katari-pgdata:
