@@ -9,11 +9,13 @@ questions to their operator, and the runtime keeps every run durable.
 
    ```sh
    cp .env.example .env
+   echo "KATARI_API_KEY=$(openssl rand -hex 32)"       >> .env
    echo "KATARI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
    docker compose up -d
    ```
 
-   The web console is now at <http://localhost:3000>.
+   The web console is now at <http://localhost:3000> (it prompts for the `KATARI_API_KEY`); the CLI
+   reads the key from `.env`.
 
 2. Deploy this project:
 

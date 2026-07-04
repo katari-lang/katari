@@ -24,7 +24,9 @@ The composition example: everything in [`playground`](../playground) working tog
 With the runtime up and the repo's toolchain built (see the repo README):
 
 ```sh
-# The runtime URL comes from katari.toml's [runtime].url — no environment needed.
+# The runtime URL comes from katari.toml's [runtime].url. The CLI authenticates with the runtime's
+# KATARI_API_KEY (the same one in the repo `.env`), so export it once:
+export KATARI_API_KEY="$(grep -m1 '^KATARI_API_KEY=' ../../.env | cut -d= -f2-)"
 cd examples/discord_bot
 
 # Secrets live in the runtime, not in files:

@@ -49,6 +49,13 @@ const envSchema = z.object({
   /** The built admin console's static dist to serve at the server root. The runtime image sets this to the
    *  baked-in dist; a source checkout leaves it unset (the console runs from its own vite dev server). */
   KATARI_ADMIN_WEB_DIST: z.string().optional(),
+  /** The bearer token the API requires — every caller (the CLI, the web console) sends
+   *  `Authorization: Bearer <this>`. Required (no default): the runtime refuses to boot without it, so an
+   *  API is never accidentally left open. Distinct from KATARI_SECRET_KEY, which only encrypts secrets at
+   *  rest. */
+  KATARI_API_KEY: z
+    .string()
+    .min(1, "must be set to the API bearer token (generate one with `openssl rand -hex 32`)"),
 });
 
 /** Whether a base64 string decodes to exactly `length` bytes (Node accepts loose base64, so we re-encode and

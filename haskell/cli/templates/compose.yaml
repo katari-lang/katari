@@ -18,6 +18,9 @@ services:
       PORT: 3000
       LOG_LEVEL: info
       DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+      # The API key callers (the CLI, the web console) authenticate with — sent as a Bearer token.
+      # Required: the runtime refuses to boot without it. Distinct from the at-rest key below.
+      KATARI_API_KEY: ${KATARI_API_KEY:?set KATARI_API_KEY in .env (see .env.example)}
       # At-rest encryption key for secret values (base64, 32 bytes). The runtime refuses to boot
       # without it — set it in `.env` (see above).
       KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:?set KATARI_SECRET_KEY in .env (see .env.example)}

@@ -4,6 +4,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { config } from "./config/index.js";
 import { success } from "./lib/response.js";
 import { mountAdminWeb } from "./middleware/admin-web.js";
+import { bearerAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { requestContext } from "./middleware/request-context.js";
@@ -22,6 +23,10 @@ export function createApp() {
   app.use("*", requestContext);
   app.use("*", secureHeaders());
   app.use("*", cors({ origin: config.corsOrigin }));
+
+  // Bearer auth on every request (KATARI_API_KEY is required at boot). It exempts /api/v1/health and the
+  // console's static assets — see `auth.ts`.
+  app.use("*", bearerAuth(config.apiKey));
 
   // Boundaries.
   app.onError(errorHandler);

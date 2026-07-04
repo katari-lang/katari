@@ -16,7 +16,9 @@ every core feature in a small, deterministic form.
 From the repo root, with the runtime already up (see the repo README / `compose.yaml`):
 
 ```sh
-# The runtime URL comes from katari.toml's [runtime].url — no environment needed.
+# The runtime URL comes from katari.toml's [runtime].url. The CLI authenticates with the runtime's
+# KATARI_API_KEY (the same one in the repo `.env`), so export it once:
+export KATARI_API_KEY="$(grep -m1 '^KATARI_API_KEY=' ../../.env | cut -d= -f2-)"
 cd examples/playground
 
 katari apply                                  # compile + bundle the sidecar + deploy a snapshot

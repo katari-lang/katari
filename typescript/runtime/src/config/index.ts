@@ -36,6 +36,8 @@ export const config = {
     env.KATARI_ADMIN_WEB_DIST === undefined || env.KATARI_ADMIN_WEB_DIST === ""
       ? undefined
       : env.KATARI_ADMIN_WEB_DIST,
+  // The bearer token every API caller must present (required — see `env.ts`). Auth is always enforced.
+  apiKey: env.KATARI_API_KEY,
 } as const;
 
 export type Config = typeof config;

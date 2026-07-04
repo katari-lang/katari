@@ -30,6 +30,9 @@ services:
       LOG_LEVEL: info
       # `postgres` is the service hostname on the compose network.
       DATABASE_URL: postgres://katari:katari@postgres:5432/katari
+      # The API bearer token every caller (the CLI, the web console) must present. Required — the runtime
+      # refuses to boot without it. Read from the root `.env` (shared with the host `pnpm run dev` flow).
+      KATARI_API_KEY: ${KATARI_API_KEY:?set KATARI_API_KEY in .env}
       # At-rest encryption key for secret values (base64 32 bytes); the runtime refuses to boot without it.
       # This dev-only default lets the local stack come up. Override it in any shared / production deployment
       # (export KATARI_SECRET_KEY, or set it in a root `.env`) and generate a real one: openssl rand -base64 32.

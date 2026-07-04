@@ -22,13 +22,14 @@ export function SettingsPage() {
           </CardBody>
         </Card>
         <Card>
-          <CardHeader title="API token" />
+          <CardHeader title="API key" />
           <CardBody className="flex flex-col gap-3">
             <p className="text-sm text-fg-muted">
-              The runtime itself is unauthenticated; set a token only when this console reaches it
-              through an authenticating proxy. It is sent as a Bearer header with every request.
+              The key this console sends as a Bearer header (the runtime's{" "}
+              <code className="font-mono">KATARI_API_KEY</code>). Clear it to sign out; if the
+              runtime requires one, you will be prompted at the next request.
             </p>
-            <Label text="Token">
+            <Label text="Key">
               <Input
                 type="password"
                 value={token}
@@ -36,16 +37,28 @@ export function SettingsPage() {
                 placeholder="none"
               />
             </Label>
-            <Button
-              variant="primary"
-              className="self-start"
-              onClick={() => {
-                setStoredApiToken(token === "" ? null : token);
-                toast("Saved.");
-              }}
-            >
-              Save
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setStoredApiToken(token === "" ? null : token);
+                  toast("Saved.");
+                }}
+              >
+                Save
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={token === ""}
+                onClick={() => {
+                  setToken("");
+                  setStoredApiToken(null);
+                  toast("Signed out.");
+                }}
+              >
+                Sign out
+              </Button>
+            </div>
           </CardBody>
         </Card>
       </div>

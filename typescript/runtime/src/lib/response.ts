@@ -19,3 +19,8 @@ export interface ErrorBody {
 export type ApiResponse<T> = SuccessBody<T> | ErrorBody;
 
 export const success = <T>(data: T): SuccessBody<T> => ({ ok: true, data });
+
+export const failure = (code: string, message: string): ErrorBody => ({
+  ok: false,
+  error: { code, message },
+});
