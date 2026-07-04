@@ -36,7 +36,7 @@ services:
       # At-rest encryption key for secret values (base64 32 bytes); the runtime refuses to boot without it.
       # This dev-only default lets the local stack come up. Override it in any shared / production deployment
       # (export KATARI_SECRET_KEY, or set it in a root `.env`) and generate a real one: openssl rand -base64 32.
-      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY:-XAHob6KS/e98OejNFErgNfA8RqiOmI7fLLaNl9dRU5Q=}
+      KATARI_SECRET_KEY: ${KATARI_SECRET_KEY}
       # Blob bytes go to the s3mock container (S3-compatible) over the internal network, so the
       # dockerized runtime exercises the same S3 path as production. `forcePathStyle` is required for
       # a non-AWS endpoint; s3mock ignores the AWS creds but the SDK still needs some present to sign.
