@@ -1,6 +1,7 @@
 // The blob side channel client: a handler downloads a blob's bytes over HTTP to the runtime's file endpoint,
-// addressed by the env the runtime hands a hosted sidecar (`KATARI_RUNTIME_URL` / `KATARI_PROJECT_ID`). Run
-// outside such a sidecar (no env), a blob op throws a clear error rather than guessing an endpoint.
+// addressed by the env the runtime hands a hosted sidecar (`KATARI_RUNTIME_URL` / `KATARI_PROJECT_ID` /
+// `KATARI_API_KEY`). The blob routes are under the runtime's authenticated `/api`, so every call carries the
+// bearer. Run outside such a sidecar (missing env), a blob op throws a clear error rather than guessing.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { downloadBlob, uploadBlob } from "../src/blob.js";
@@ -9,18 +10,22 @@ describe("downloadBlob (blob side channel)", () => {
   beforeEach(() => {
     process.env.KATARI_RUNTIME_URL = "http://127.0.0.1:9999";
     process.env.KATARI_PROJECT_ID = "proj-1";
+    process.env.KATARI_API_KEY = "test-key";
   });
   afterEach(() => {
     delete process.env.KATARI_RUNTIME_URL;
     delete process.env.KATARI_PROJECT_ID;
+    delete process.env.KATARI_API_KEY;
     vi.unstubAllGlobals();
   });
 
-  test("GETs the file endpoint by handle or bare id and returns the bytes", async () => {
+  test("GETs the file endpoint by handle or bare id, with the bearer, and returns the bytes", async () => {
     const bytes = new Uint8Array([1, 2, 3]);
     const urls: string[] = [];
-    vi.stubGlobal("fetch", (url: string | URL) => {
+    const auths: (string | null)[] = [];
+    vi.stubGlobal("fetch", (url: string | URL, init?: RequestInit) => {
       urls.push(String(url));
+      auths.push(new Headers(init?.headers).get("authorization"));
       return Promise.resolve(new Response(bytes));
     });
 
@@ -33,6 +38,7 @@ describe("downloadBlob (blob side channel)", () => {
       "http://127.0.0.1:9999/projects/proj-1/files/blob-1",
       "http://127.0.0.1:9999/projects/proj-1/files/blob-2",
     ]);
+    expect(auths).toEqual(["Bearer test-key", "Bearer test-key"]);
   });
 
   test("throws on a non-ok response", async () => {
@@ -46,27 +52,41 @@ describe("downloadBlob (blob side channel)", () => {
     delete process.env.KATARI_RUNTIME_URL;
     await expect(downloadBlob("blob-1")).rejects.toThrow(/runtime-hosted sidecar/);
   });
+
+  test("throws when the bearer token is unset (a blob op cannot authenticate)", async () => {
+    delete process.env.KATARI_API_KEY;
+    await expect(downloadBlob("blob-1")).rejects.toThrow(/runtime-hosted sidecar/);
+  });
 });
 
 describe("uploadBlob (blob side channel)", () => {
   beforeEach(() => {
     process.env.KATARI_RUNTIME_URL = "http://127.0.0.1:9999";
     process.env.KATARI_PROJECT_ID = "proj-1";
+    process.env.KATARI_API_KEY = "test-key";
   });
   afterEach(() => {
     delete process.env.KATARI_RUNTIME_URL;
     delete process.env.KATARI_PROJECT_ID;
+    delete process.env.KATARI_API_KEY;
     vi.unstubAllGlobals();
   });
 
-  test("POSTs the bytes to the ffi blob endpoint and assembles the handle from the reply", async () => {
-    const seen: { url: string; method?: string; contentType?: string; body: unknown }[] = [];
+  test("POSTs the bytes to the ffi blob endpoint, with the bearer, and assembles the handle", async () => {
+    const seen: {
+      url: string;
+      method?: string;
+      contentType?: string;
+      authorization?: string;
+      body: unknown;
+    }[] = [];
     vi.stubGlobal("fetch", (url: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       seen.push({
         url: String(url),
         method: init?.method,
         contentType: headers.get("content-type") ?? undefined,
+        authorization: headers.get("authorization") ?? undefined,
         body: init?.body,
       });
       return Promise.resolve(
@@ -88,6 +108,7 @@ describe("uploadBlob (blob side channel)", () => {
     expect(seen[0]?.url).toBe("http://127.0.0.1:9999/projects/proj-1/ffi/deleg-1/blobs");
     expect(seen[0]?.method).toBe("POST");
     expect(seen[0]?.contentType).toBe("image/png");
+    expect(seen[0]?.authorization).toBe("Bearer test-key");
     expect(seen[0]?.body).toBe(bytes);
   });
 

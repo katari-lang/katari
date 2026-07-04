@@ -180,7 +180,8 @@ run, that is an optional notification hook, decoupled from the SoT, not the run'
   `caller.kind === "api"` / `kind !== "core"` branch in the core handlers (replaced by the single dispatch).
 - `runResolvers`, `runRejecters`, in-memory `cancelReasons`, in-memory `openEscalations` (→ durable projection).
 - One of `db-persistence` / `storing-persistence`'s duplicated `applyTransition` (→ shared core).
-- Legacy: `activate()` (no production caller — boot resume becomes an explicit substrate concern, see C4);
+- Legacy: `activate()` (2026-07-05: now the boot resume — `bin.ts` calls `activateInFlightProjects`
+  once the server listens, touching every project with a non-terminal run);
   `ApiInstance.status` (never transitions); resolve `run_escalations_audit` (either wire it on
   `escalation-answered`, or delete the table + its comments — it is currently dead).
 - SSoT consolidation: one `isUserFacingRequest`, one `LIVE_DELEGATION_STATES` predicate, the delegation→run

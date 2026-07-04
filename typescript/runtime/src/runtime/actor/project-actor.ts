@@ -70,11 +70,16 @@ export class ProjectActor {
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
   private readonly substrate: Substrate;
+  /** The injected transports, kept for disposal (their reactors hold them too, but teardown is actor-level). */
+  private readonly externalTransport: FfiTransport;
+  private readonly httpTransport: HttpTransport;
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
     this.apiRootId = apiRootIdOf(this.projectId);
     this.persistence = dependencies.persistence;
+    this.externalTransport = dependencies.external;
+    this.httpTransport = dependencies.http;
     // The shared scope store + the pool that wraps it: the engine reads / writes scopes in place, while every
     // reactor reowns through the same pool (so a run result crosses from a core instance to the api root).
     const store = createProjectStore();
@@ -208,6 +213,16 @@ export class ProjectActor {
    *  command; a host calls this on boot to resume a project whose process went down mid-flight. */
   async activate(): Promise<void> {
     await this.substrate.activate();
+  }
+
+  /** Tear the actor down (the project is being deleted): kill the FFI sidecar processes, abort in-flight
+   *  http requests, and reject the in-process run promises so nothing hangs. Durable state is the caller's
+   *  concern (the project row's delete cascade); a disposed actor must simply stop working — it is dropped
+   *  from the registry and never used again. */
+  dispose(): void {
+    this.externalTransport.close();
+    this.httpTransport.close();
+    this.api.poisonRunPromises(new Error("the project was deleted"));
   }
 
   // ─── reactivation (the substrate's domain half) ─────────────────────────────────────────────────

@@ -491,6 +491,7 @@ describe("in-memory core", () => {
         // never resolves
       },
       recover() {},
+      close() {},
       abort(delegation) {
         aborted.push(delegation);
         sink?.({ delegation, outcome: { kind: "cancelled" } });

@@ -80,4 +80,13 @@ export class ProjectRegistry {
     this.actors.set(projectId, actor);
     return actor;
   }
+
+  /** Drop a project's warm actor and tear it down (the project is being deleted): its sidecar processes are
+   *  killed and its in-process run promises rejected. A no-op when the project was never warmed. */
+  evict(projectId: ProjectId): void {
+    const actor = this.actors.get(projectId);
+    if (actor === undefined) return;
+    this.actors.delete(projectId);
+    actor.dispose();
+  }
 }

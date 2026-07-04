@@ -216,6 +216,10 @@ class ControlledHttpTransport implements HttpTransport {
     }
   }
 
+  close(): void {
+    this.sink = null;
+  }
+
   /** Feed a completion back to the reactor (the test's hook for a finished initial dispatch). */
   feed(completion: HttpCompletion): void {
     if (this.sink === null) throw new Error("ControlledHttpTransport: no sink registered");

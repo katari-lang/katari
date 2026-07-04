@@ -3,6 +3,7 @@
 
 import { eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
+import { blobs } from "../../db/tables/engine.js";
 import { projects } from "../../db/tables/projects.js";
 import type { CreateProjectInput, UpdateProjectInput } from "./project.schema.js";
 
@@ -39,5 +40,14 @@ export const projectRepository = {
       .delete(projects)
       .where(eq(projects.id, projectId))
       .returning({ id: projects.id });
+  },
+
+  /** Every blob id the project holds — read before the project row's delete cascade removes the rows, so
+   *  the service can free the bytes afterwards (rows gone ⇒ bytes unreferenced; durable-first). */
+  blobIds(executor: Executor, projectId: string) {
+    return executor
+      .select({ blobId: blobs.blobId })
+      .from(blobs)
+      .where(eq(blobs.projectId, projectId));
   },
 };

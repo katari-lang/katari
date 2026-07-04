@@ -43,6 +43,9 @@ export interface HttpTransport {
   recover(delegation: DelegationId): void;
   /** Abort an in-flight request; its `cancelled` (or a racing real) completion confirms the teardown. */
   abort(delegation: DelegationId): void;
+  /** Tear the transport down (host cleanup on actor disposal — the project was deleted): abort every
+   *  in-flight request and deliver nothing after. */
+  close(): void;
 }
 
 /** The seam default: no http client configured, so dispatching one is an error (fails loudly, like the FFI
@@ -56,6 +59,7 @@ export class StubHttpTransport implements HttpTransport {
     throw new Error(`http transport not configured (recovering call ${delegation})`);
   }
   abort(): void {}
+  close(): void {}
 }
 
 /** The methods that carry no request body — sending one to `fetch` for them throws. */
@@ -102,6 +106,13 @@ export class FetchHttpTransport implements HttpTransport {
     // request died with the process. Confirm the teardown straight away so the reactor can `terminateAck`.
     // (Harmless if a real completion also lands: the reactor drops the call on the first, ignores the rest.)
     this.emit({ delegation, outcome: { kind: "cancelled" } });
+  }
+
+  close(): void {
+    // Abort whatever is still in flight and unhook the sink, so a late completion delivers nowhere.
+    for (const controller of this.controllers.values()) controller.abort();
+    this.controllers.clear();
+    this.sink = null;
   }
 
   private emit(completion: HttpCompletion): void {

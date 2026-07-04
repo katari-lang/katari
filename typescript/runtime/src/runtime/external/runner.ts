@@ -92,6 +92,9 @@ export interface FfiTransport {
   /** Settle one inner agent call back to the sidecar. Fire-and-forget; delivery to a process that is already
    *  gone is dropped (the crash path fails the parent call independently). */
   deliverDelegateResult(result: FfiInnerResult): void;
+  /** Tear the transport down (host cleanup on actor disposal — the project was deleted): kill any sidecar
+   *  process and drop in-flight work. Nothing is delivered after close. */
+  close(): void;
 }
 
 /** The seam default: no real process is configured, so dispatching one is an error. A host swaps in a
@@ -119,6 +122,9 @@ export class StubFfiTransport implements FfiTransport {
   }
   deliverDelegateResult(): void {
     // No handler ever runs, so there is nothing to deliver to.
+  }
+  close(): void {
+    // No process to kill.
   }
 }
 
@@ -291,6 +297,19 @@ export class InProcessFfiTransport implements FfiTransport {
         });
       },
     };
+  }
+
+  close(): void {
+    // The in-process analogue of killing the sidecar: unwind every handler awaiting an inner call, drop the
+    // live/aborted tracking, and unhook the sinks so work that outlives the close delivers nowhere.
+    for (const [token, pending] of this.pendingCalls) {
+      this.pendingCalls.delete(token);
+      pending.reject(new Error("the transport was closed"));
+    }
+    this.live.clear();
+    this.aborted.clear();
+    this.sink = null;
+    this.delegateSink = null;
   }
 
   private rejectPendingCalls(delegation: DelegationId, error: Error): void {

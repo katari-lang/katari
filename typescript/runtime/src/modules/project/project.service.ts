@@ -1,7 +1,13 @@
+import { config } from "../../config/index.js";
 import { db } from "../../db/client.js";
 import { ConflictError, NotFoundError } from "../../lib/errors.js";
+import { createLogger } from "../../lib/logger.js";
+import { blobStore, facade } from "../../runtime/facade.js";
+import type { BlobId, ProjectId } from "../../runtime/ids.js";
 import { projectRepository } from "./project.repository.js";
 import type { CreateProjectInput, UpdateProjectInput } from "./project.schema.js";
+
+const logger = createLogger({ level: config.logLevel, bindings: { module: "project" } });
 
 /** Postgres unique-violation SQLSTATE; raised when two projects claim the same `name`. */
 const isUniqueViolation = (error: unknown): boolean =>
@@ -38,8 +44,27 @@ export const projectService = {
     return project;
   },
 
+  /** Delete a project outright: tear down its warm engine (sidecars killed, in-flight runs die with it —
+   *  the explicit delete is the user's call), drop every DB row through the project's delete cascade, then
+   *  free the blob bytes those rows referenced (rows gone ⇒ bytes unreferenced; the same durable-first
+   *  order as the engine's byte reclaim). */
   async delete(projectId: string) {
+    facade.evictProject(projectId);
+    // Read the blob ids before the cascade removes their rows. A blob minted between this read and the
+    // delete would orphan its bytes, but the engine was just evicted and deletion is a deliberate admin
+    // action — the window is accepted for v0.1.
+    const blobRows = await projectRepository.blobIds(db, projectId);
     const [deleted] = await projectRepository.delete(db, projectId);
     if (!deleted) throw new NotFoundError(`Project ${projectId} not found.`);
+    for (const { blobId } of blobRows) {
+      // Best-effort: a failed byte delete only leaks storage (never correctness), so log and continue.
+      await blobStore.delete(projectId as ProjectId, blobId as BlobId).catch((error: unknown) => {
+        logger.warn("failed to delete a deleted project's blob bytes", {
+          projectId,
+          blobId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
   },
 };

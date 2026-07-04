@@ -5,7 +5,7 @@ import { closeDb } from "./db/client.js";
 import { runMigrations } from "./db/migrate.js";
 import { app } from "./index.js";
 import { createLogger } from "./lib/logger.js";
-import { blobStore } from "./runtime/facade.js";
+import { activateInFlightProjects, blobStore } from "./runtime/facade.js";
 import { ensureBlobStoreReady } from "./runtime/value/blob-store.js";
 
 const logger = createLogger({ level: config.logLevel, bindings: { module: "server" } });
@@ -26,6 +26,14 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
   logger.info("katari-api-server started", {
     url: `http://${config.host}:${info.port}`,
     env: config.nodeEnv,
+  });
+  // Resume projects with in-flight runs now that the server is listening (a resuming FFI sidecar reaches
+  // back over this server's blob side channel). Fire-and-forget: boot must not block on recovery, and each
+  // project's failure is already logged inside.
+  void activateInFlightProjects(logger).catch((error: unknown) => {
+    logger.error("boot-time project resume failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
   });
 });
 

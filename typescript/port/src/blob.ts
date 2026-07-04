@@ -1,10 +1,11 @@
 // The blob side channel: how an FFI handler moves a blob's BYTES to / from the runtime. A blob crosses the FFI
 // boundary as a small handle (`{ $ref, size, hash, ... }`) — never its bytes — so reading a received file (or,
 // in a later step, producing a new one) goes over HTTP to the runtime, out of band from the one-shot stdio
-// reply channel that carries only the handler's JSON result. The runtime hands the sidecar its own URL and the
-// project id as env (`KATARI_RUNTIME_URL` / `KATARI_PROJECT_ID`); these helpers read them. Outside a
-// runtime-hosted sidecar (e.g. a bare unit test) the env is unset and they throw a clear error rather than
-// guessing an endpoint.
+// reply channel that carries only the handler's JSON result. The runtime hands the sidecar its own URL, the
+// project id, and the API bearer token as env (`KATARI_RUNTIME_URL` / `KATARI_PROJECT_ID` / `KATARI_API_KEY`);
+// these helpers read them. The blob routes are under the runtime's authenticated `/api`, so every call carries
+// the bearer. Outside a runtime-hosted sidecar (e.g. a bare unit test) the env is unset and they throw a clear
+// error rather than guessing an endpoint.
 
 /** The handle an FFI handler receives for a `File` argument (and returns to produce one): a content reference,
  *  not the bytes. `$ref` is the blob id; `size` / `hash` describe it. Declared as a type (not an interface) so
@@ -19,15 +20,28 @@ export type FileHandle = {
 };
 
 /** The runtime endpoint a runtime-hosted sidecar was given, or a thrown error when run outside one. */
-function runtimeEndpoint(): { baseUrl: string; projectId: string } {
+function runtimeEndpoint(): { baseUrl: string; projectId: string; apiKey: string } {
   const baseUrl = process.env.KATARI_RUNTIME_URL;
   const projectId = process.env.KATARI_PROJECT_ID;
-  if (baseUrl === undefined || baseUrl === "" || projectId === undefined || projectId === "") {
+  const apiKey = process.env.KATARI_API_KEY;
+  if (
+    baseUrl === undefined ||
+    baseUrl === "" ||
+    projectId === undefined ||
+    projectId === "" ||
+    apiKey === undefined ||
+    apiKey === ""
+  ) {
     throw new Error(
-      "katari: a blob operation needs a runtime-hosted sidecar (KATARI_RUNTIME_URL / KATARI_PROJECT_ID are unset)",
+      "katari: a blob operation needs a runtime-hosted sidecar (KATARI_RUNTIME_URL / KATARI_PROJECT_ID / KATARI_API_KEY are unset)",
     );
   }
-  return { baseUrl, projectId };
+  return { baseUrl, projectId, apiKey };
+}
+
+/** The bearer header every blob-channel request carries (the routes are under the runtime's `/api`). */
+function authHeader(apiKey: string): Record<string, string> {
+  return { authorization: `Bearer ${apiKey}` };
 }
 
 /** The blob id a handle (or a bare id string) names. */
@@ -41,11 +55,11 @@ export async function downloadBlob(
   handle: FileHandle | string,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
-  const { baseUrl, projectId } = runtimeEndpoint();
-  const response = await fetch(
-    `${baseUrl}/projects/${projectId}/files/${blobIdOf(handle)}`,
-    signal !== undefined ? { signal } : {},
-  );
+  const { baseUrl, projectId, apiKey } = runtimeEndpoint();
+  const response = await fetch(`${baseUrl}/projects/${projectId}/files/${blobIdOf(handle)}`, {
+    headers: authHeader(apiKey),
+    ...(signal !== undefined ? { signal } : {}),
+  });
   if (!response.ok) {
     throw new Error(`katari: blob download failed (${response.status} ${response.statusText})`);
   }
@@ -100,8 +114,8 @@ export async function uploadBlob(
   options?: UploadOptions,
   signal?: AbortSignal,
 ): Promise<FileHandle> {
-  const { baseUrl, projectId } = runtimeEndpoint();
-  const headers: Record<string, string> = {};
+  const { baseUrl, projectId, apiKey } = runtimeEndpoint();
+  const headers: Record<string, string> = authHeader(apiKey);
   if (options?.contentType !== undefined) headers["content-type"] = options.contentType;
   const response = await fetch(`${baseUrl}/projects/${projectId}/ffi/${delegation}/blobs`, {
     method: "POST",

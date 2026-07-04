@@ -11,11 +11,13 @@
 
 import { createHash } from "node:crypto";
 import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/types";
-import { and, eq } from "drizzle-orm";
+import { and, eq, notInArray } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
+import { runs, TERMINAL_RUN_STATES } from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
+import type { Logger } from "../lib/logger.js";
 import { envReader } from "../modules/env/env.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
@@ -114,7 +116,10 @@ const registry = new ProjectRegistry({
   prims,
   blobs: blobStore,
   externalFactory: () =>
-    new SnapshotFfiTransport(loadSidecarBundle, nodeSidecarMaterialize(runtimeBaseUrl)),
+    new SnapshotFfiTransport(
+      loadSidecarBundle,
+      nodeSidecarMaterialize(runtimeBaseUrl, config.apiKey),
+    ),
   // The built-in http client: a fresh in-runtime `fetch` transport per project actor (its own completion
   // sink). The api root performs `http.fetch` requests through it.
   httpFactory: () => new FetchHttpTransport(),
@@ -199,6 +204,12 @@ export const facade = {
     return registry.actorFor(input.projectId as ProjectId).deleteBlob(input.fileId as BlobId);
   },
 
+  /** Tear down a project's warm engine (the project is being deleted): kill its sidecars, abort its
+   *  in-flight http, reject its in-process run promises, and drop the actor. A no-op when never warmed. */
+  evictProject(projectId: string): void {
+    registry.evict(projectId as ProjectId);
+  },
+
   /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob
    *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Returns
    *  the blob handle the sidecar lifts into a `File` value; throws a `ConflictError` (so the upload fails) when
@@ -217,6 +228,30 @@ export const facade = {
     );
   },
 };
+
+/** Resume every project that still has an in-flight run — the boot half of recovery. Reactivation is
+ *  otherwise lazy (a project reloads when next touched), so after a restart a long-running run would stay
+ *  suspended until external traffic happens to arrive; the host calls this once at boot to touch them
+ *  itself. Sequential and per-project fault-isolated: one broken project logs and must not stop the rest.
+ *  Called after the server is listening — a resuming FFI call's sidecar reaches back over the blob side
+ *  channel of this very server. */
+export async function activateInFlightProjects(logger: Logger): Promise<void> {
+  const inFlight = await db
+    .selectDistinct({ projectId: runs.projectId })
+    .from(runs)
+    .where(notInArray(runs.state, [...TERMINAL_RUN_STATES]));
+  for (const { projectId } of inFlight) {
+    try {
+      await registry.actorFor(projectId as ProjectId).activate();
+      logger.info("resumed a project with in-flight runs", { projectId });
+    } catch (error) {
+      logger.error("failed to resume a project with in-flight runs", {
+        projectId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
 
 /** Mint a content-addressed blob, store its bytes, then register ownership through `register`. The bytes are
  *  put before the (small) registration command so the actor loop never carries the payload. The catch is that

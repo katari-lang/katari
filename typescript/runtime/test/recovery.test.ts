@@ -68,6 +68,7 @@ function recordingRunner(complete: Record<string, boolean>): {
     },
     abort() {},
     deliverDelegateResult() {},
+    close() {},
   };
   return { runner, dispatched, recovered };
 }
