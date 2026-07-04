@@ -3,5 +3,7 @@ packages:
   - "examples/*"
 
 allowBuilds:
+  "@vscode/vsce-sign": true
   esbuild: true
+  keytar: true
   lefthook: true
