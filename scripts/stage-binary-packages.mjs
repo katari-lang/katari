@@ -39,7 +39,13 @@ for (const { key, os, cpu } of BINARY_PLATFORMS) {
         },
         os: [os],
         cpu: [cpu],
-        bin: { katari: "bin/katari" },
+        // The bin key is deliberately NOT "katari". A `bin` entry is still needed so npm marks
+        // bin/katari executable (0o755) in the published tarball, but the user-facing `katari`
+        // command belongs to the @katari-lang/cli shim (which resolves this binary by path, not by
+        // name). Naming this "katari" too would make npm see two packages claiming
+        // node_modules/.bin/katari and link NEITHER — breaking `npx katari`. A platform-qualified
+        // name keeps the executable bit without colliding with the shim.
+        bin: { [`katari-${key}`]: "bin/katari" },
         files: ["bin", "README.md"],
       },
       null,
