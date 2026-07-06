@@ -12,7 +12,7 @@
 //      delegation boundary (a mismatch throws `ai.call_error` — catch it to let the model retry).
 //
 // With a real AI, step 2's canned reply becomes an `http.fetch` of the tool-calling API with
-// step 1's body — the rest is unchanged (and `examples/discord_bot` does exactly that).
+// step 1's body — the rest is unchanged (the standalone discord-bot example does exactly that).
 
 @"Raised when the AI reply names a tool that is not in the list (never, in this demo)."
 request bad_reply(message: string) -> never
