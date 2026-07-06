@@ -6,6 +6,7 @@ import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
 import {
   cancelRunSchema,
+  listRunEventsQuerySchema,
   listRunsQuerySchema,
   runParamSchema,
   startRunSchema,
@@ -50,6 +51,15 @@ export const runRoutes = new Hono<AppEnv>()
     const { projectId, runId } = c.req.valid("param");
     return c.json(success(await runService.getDelegationTree(projectId, runId)));
   })
+  .get(
+    "/projects/:projectId/runs/:runId/events",
+    zValidator("param", runParamSchema),
+    zValidator("query", listRunEventsQuerySchema),
+    async (c) => {
+      const { projectId, runId } = c.req.valid("param");
+      return c.json(success(await runService.listEvents(projectId, runId, c.req.valid("query"))));
+    },
+  )
   .post(
     "/projects/:projectId/runs/:runId/cancel",
     requireJsonBody,

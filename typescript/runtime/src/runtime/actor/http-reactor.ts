@@ -18,7 +18,7 @@
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { HttpTransport } from "../external/http-transport.js";
-import type { DelegationId } from "../ids.js";
+import type { DelegationId, InstanceId } from "../ids.js";
 import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
@@ -69,8 +69,9 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     delegation: DelegationId,
     message: string,
     caller: ReactorName,
+    run: InstanceId,
   ): void {
-    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller);
+    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller, run);
   }
 
   protected abort(delegation: DelegationId): void {
@@ -91,6 +92,7 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
       delegation: row.delegation,
       instance: row.instance,
       caller: row.caller,
+      run: row.run,
       status: row.status,
       // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
       payload: { argument: null },

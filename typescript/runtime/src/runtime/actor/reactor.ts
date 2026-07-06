@@ -42,12 +42,14 @@ interface DelegationRow {
 
 /** A raiser-owned (open) escalation row in memory. `peer` is the reactor the escalate was addressed to (its
  *  `to`; `api` ⟺ the raiser is a run root, i.e. the escalation is user-facing). `delegation` is the raiser's
- *  delegation (the run, for a user-facing escalation), so the api root rebuilds its answerable list from the
- *  row alone. An escalation in the map is always open; answering it evicts the row (the Q&A lives in the audit). */
+ *  delegation and `run` the run it belongs to (the event's trace context), so the api reactor rebuilds its
+ *  answerable list — the answer's routing (delegation) AND its run attribution — from the row alone. An
+ *  escalation in the map is always open; answering it evicts the row (the Q&A lives in the audit). */
 interface EscalationRow {
   raiser: InstanceId;
   peer: ReactorName;
   delegation: DelegationId;
+  run: InstanceId;
   request: string;
   argument: Value | null;
 }
@@ -59,16 +61,19 @@ type InstanceEnvelopeChange =
       kind: "upsert";
       delegationId: DelegationId | null;
       callerReactor: ReactorName | null;
+      runId: InstanceId | null;
       status: InstanceStatus;
     }
   | { kind: "drop" };
 
-/** A received (callee-side) delegation edge: the local instance handling it, and the reactor that summoned it
- *  (the reply-to). Both are the summoned instance's ambient — rebuilt on load from its envelope
- *  (`delegationId` + `callerReactor`), so this is a derived index, not an independent source of truth. */
+/** A received (callee-side) delegation edge: the local instance handling it, the reactor that summoned it
+ *  (the reply-to), and the run it belongs to (the summoning event's trace context). All three are the
+ *  summoned instance's ambient — rebuilt on load from its envelope (`delegationId` + `callerReactor` +
+ *  `runId`), so this is a derived index, not an independent source of truth. */
 interface HandledDelegation {
   instance: InstanceId;
   caller: ReactorName;
+  run: InstanceId;
 }
 
 /** The caller-side context the base resolves for a reply event before dispatching to the concrete hook: the
@@ -235,6 +240,7 @@ export abstract class Reactor {
             raiser: this.requireIssuer(issuer, event),
             peer: event.to,
             delegation: event.delegation,
+            run: event.run,
             request: event.ask.request,
             argument: event.ask.argument,
           });
@@ -268,8 +274,14 @@ export abstract class Reactor {
   /** Fail a delegation with a `panic` escalation addressed to its caller (`to`). A panic is the deterministic
    *  failure channel — an unhandled one fails the run (no recovery, no retry). It carries a `{ msg }` that
    *  captures no resources and it opens no escalation row (not user-facing), so it bypasses `send`'s edge /
-   *  release entirely — which also means it needs no turn owner (an unresolvable delegate has no instance). */
-  protected raisePanic(delegation: DelegationId, message: string, to: ReactorName): void {
+   *  release entirely — which also means it needs no turn owner (an unresolvable delegate has no instance).
+   *  `run` is the failing delegation's trace context, taken from the event being failed. */
+  protected raisePanic(
+    delegation: DelegationId,
+    message: string,
+    to: ReactorName,
+    run: InstanceId,
+  ): void {
     this.sendBuffer.push({
       kind: "escalate",
       delegation,
@@ -277,6 +289,7 @@ export abstract class Reactor {
       ask: { kind: "request", request: PANIC_REQUEST, argument: panicArgument(message) },
       from: this.name,
       to,
+      run,
     });
   }
 
@@ -284,7 +297,12 @@ export abstract class Reactor {
    *  reactor-level twin of a prim's `KatariThrow`, for failures a program anticipates and may handle (an
    *  http no-response, a bad dynamic dispatch). Like a panic it opens no escalation row (a throw answers
    *  with `never`, so it is not user-facing) and its runtime-built payload captures no resources. */
-  protected raiseThrow(delegation: DelegationId, payload: Value, to: ReactorName): void {
+  protected raiseThrow(
+    delegation: DelegationId,
+    payload: Value,
+    to: ReactorName,
+    run: InstanceId,
+  ): void {
     this.sendBuffer.push({
       kind: "escalate",
       delegation,
@@ -292,6 +310,7 @@ export abstract class Reactor {
       ask: { kind: "request", request: THROW_REQUEST, argument: throwArgument(payload) },
       from: this.name,
       to,
+      run,
     });
   }
 
@@ -426,6 +445,7 @@ export abstract class Reactor {
       raiser: InstanceId;
       peer: ReactorName;
       delegation: DelegationId;
+      run: InstanceId;
       request: string;
       argument: Value | null;
     },
@@ -447,14 +467,16 @@ export abstract class Reactor {
   // ─── handled delegations (the callee-side receive index) ────────────────────────────────────────
 
   /** Record a delegation this reactor accepted as callee — a fresh delegate it is about to run, or one
-   *  re-seeded on load from its surviving envelope — mapping it to the local `instance` handling it and the
-   *  `caller` reactor that summoned it (the reply-to). */
+   *  re-seeded on load from its surviving envelope — mapping it to the local `instance` handling it, the
+   *  `caller` reactor that summoned it (the reply-to), and the `run` it belongs to (the trace context the
+   *  replies this reactor emits for it are stamped with). */
   protected acceptDelegation(
     delegation: DelegationId,
     instance: InstanceId,
     caller: ReactorName,
+    run: InstanceId,
   ): void {
-    this.handled.set(delegation, { instance, caller });
+    this.handled.set(delegation, { instance, caller, run });
   }
 
   /** Forget a handled delegation once its payload retired, so it is not consulted after teardown. */
@@ -474,6 +496,12 @@ export abstract class Reactor {
     return this.handled.get(delegation)?.caller;
   }
 
+  /** The run of a delegation this reactor handles as callee — the trace context the events it emits under
+   *  that delegation are stamped with. */
+  protected handledRunOf(delegation: DelegationId): InstanceId | undefined {
+    return this.handled.get(delegation)?.run;
+  }
+
   // ─── base-managed persist / load (the generic half, in one place) ──────────────────────────────
 
   /** Stage an instance-envelope upsert for the next `persistBase` — the concrete calls this when it creates or
@@ -483,6 +511,7 @@ export abstract class Reactor {
     envelope: {
       delegationId: DelegationId | null;
       callerReactor: ReactorName | null;
+      runId: InstanceId | null;
       status: InstanceStatus;
     },
   ): void {
@@ -512,6 +541,7 @@ export abstract class Reactor {
           kind: this.name,
           delegationId: change.delegationId,
           callerReactor: change.callerReactor,
+          runId: change.runId,
           status: change.status,
         });
     }
@@ -541,6 +571,7 @@ export abstract class Reactor {
         raiser: open.raiser,
         peer: open.toReactor,
         delegation: open.delegation,
+        run: open.run,
         request: open.request,
         argument: open.argument,
       });
@@ -576,6 +607,7 @@ export abstract class Reactor {
         fromReactor: this.name,
         toReactor: row.peer,
         delegation: row.delegation,
+        run: row.run,
         request: row.request,
         argument: row.argument,
       });

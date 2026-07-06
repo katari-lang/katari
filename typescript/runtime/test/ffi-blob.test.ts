@@ -13,12 +13,14 @@ import type { ExternalEvent } from "../src/runtime/event/types.js";
 import {
   type BlobId,
   type DelegationId,
+  type InstanceId,
   type ProjectId,
   type SnapshotId,
 } from "../src/runtime/ids.js";
 
 const PROJECT = "project-ffi-blob" as ProjectId;
 const DELEGATION = "delegation-1" as DelegationId;
+const RUN = "run-1" as InstanceId;
 const SNAPSHOT = "snapshot-1" as SnapshotId;
 const BLOB = "blob-produced" as BlobId;
 
@@ -39,6 +41,7 @@ function openCall(): {
     argument: null,
     from: "core",
     to: "ffi",
+    run: RUN,
   };
   ffi.react(delegate);
   return { ffi, pool, store };
@@ -93,7 +96,7 @@ describe("FFI mid-call blob production", () => {
     // The handler produced a blob (owned by the call), but the call is cancelled before it could return it:
     // a `terminate` then the transport's `cancelled` confirmation drop the call, leaving the blob owned.
     ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
-    ffi.react({ kind: "terminate", delegation: DELEGATION, from: "core", to: "ffi" });
+    ffi.react({ kind: "terminate", delegation: DELEGATION, from: "core", to: "ffi", run: RUN });
     ffi.complete({ delegation: DELEGATION, outcome: { kind: "cancelled" } });
     expect(ffi.drainSends()[0]?.kind).toBe("terminateAck");
 

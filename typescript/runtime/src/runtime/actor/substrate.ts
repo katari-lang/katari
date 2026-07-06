@@ -319,6 +319,10 @@ export class Substrate {
       reclaimedBytes = await this.pool.persist(tx);
       if (consumed !== null) await tx.outbox.consumeOutbox(consumed);
       if (produced.length > 0) await tx.outbox.produceOutbox(produced);
+      // The journal — the run's execution trace — mirrors the produce in the same commit: an event is
+      // journaled exactly iff it was durably sent (a failed commit rolls both back). After the reactor's
+      // persist, so a run's launching commit writes its `runs` row before the FK-referencing trace rows.
+      if (produced.length > 0) await tx.journal.appendEvents(sends);
     });
     // Strictly post-commit (durable-first): the rows referencing these blobs are now durably gone, so their
     // bytes are unreferenced and safe to delete. Fire-and-forget — the serial loop must not gate on object-store

@@ -22,6 +22,7 @@ import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import {
   apiRootIdOf,
   newDelegationId,
+  newInstanceId,
   newOutboxSeq,
   type ProjectId,
   type SnapshotId,
@@ -245,7 +246,7 @@ describe("recovery", () => {
     const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
     await waitUntil(() => (first.dispatched.includes("step1") ? true : undefined));
     // The run delegation is durably `running` at the suspend point (its caller = the api root).
-    expect(persistence.peekDelegation(run)?.state).toBe("running");
+    expect(persistence.runDelegationOf(run)?.state).toBe("running");
 
     // Crash + recover in a fresh actor (a fresh transport = a fresh process). Recovery rebuilds the run's
     // caller purely from the delegations table; the refused call's panic bubbles out and fails the run.
@@ -364,7 +365,7 @@ describe("recovery", () => {
     expect(meta?.argument).toEqual(argument);
     expect(meta?.cancelReason).toBeNull();
     // The delegation row committed in the same launch commit — both durable, atomically.
-    expect(persistence.peekDelegation(run)).toBeDefined();
+    expect(persistence.runDelegationOf(run)).toBeDefined();
   });
 
   test("records a failed run durably in Layer 1 (delegation failed + message) and tears down its root", async () => {
@@ -470,11 +471,12 @@ describe("recovery", () => {
     // must reload the run row, replay the delegate from the outbox, summon the agent, and run it to
     // completion — recorded durably as the delegation's `done` result, all reconstructed from the rows.
     const persistence = new StoringPersistence();
-    const run = newDelegationId();
+    const run = newInstanceId();
+    const delegation = newDelegationId();
     const target = { kind: "named" as const, name: createAgentName("main"), snapshot: SNAPSHOT };
-    // A run delegation: issued by the api root (`from: api`) to a core instance (`to: core`).
-    persistence.seedDelegation(run, {
-      caller: apiRootIdOf(PROJECT),
+    // The run's delegation: issued by its run instance (`from: api`) to a core instance (`to: core`).
+    persistence.seedDelegation(delegation, {
+      caller: run,
       fromReactor: "api",
       toReactor: "core",
     });
@@ -487,7 +489,15 @@ describe("recovery", () => {
     });
     persistence.seedOutbox({
       seq: newOutboxSeq(),
-      event: { kind: "delegate", from: "api", to: "core", delegation: run, target, argument: null },
+      event: {
+        kind: "delegate",
+        from: "api",
+        to: "core",
+        run,
+        delegation,
+        target,
+        argument: null,
+      },
     });
 
     const actor = makeActor(constantIr(), persistence);

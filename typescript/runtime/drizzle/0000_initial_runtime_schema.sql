@@ -60,6 +60,7 @@ CREATE TABLE "escalations" (
 	"project_id" uuid NOT NULL,
 	"raiser_instance_id" uuid NOT NULL,
 	"delegation_id" uuid NOT NULL,
+	"run_id" uuid NOT NULL,
 	"from_reactor" text NOT NULL,
 	"to_reactor" text NOT NULL,
 	"request" text NOT NULL,
@@ -88,6 +89,7 @@ CREATE TABLE "instances" (
 	"delegation_id" uuid,
 	"kind" text NOT NULL,
 	"caller_reactor" text,
+	"run_id" uuid,
 	"status" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -109,6 +111,14 @@ CREATE TABLE "run_escalations_audit" (
 	"answer" jsonb,
 	"answered_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "run_escalations_audit_run_id_escalation_id_pk" PRIMARY KEY("run_id","escalation_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_events" (
+	"seq" bigserial PRIMARY KEY NOT NULL,
+	"project_id" uuid NOT NULL,
+	"run_id" uuid NOT NULL,
+	"event" jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "runs" (
@@ -182,6 +192,9 @@ ALTER TABLE "instances" ADD CONSTRAINT "instances_project_id_projects_id_fk" FOR
 ALTER TABLE "instances" ADD CONSTRAINT "instances_delegation_id_delegations_id_fk" FOREIGN KEY ("delegation_id") REFERENCES "public"."delegations"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "outbox" ADD CONSTRAINT "outbox_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_escalations_audit" ADD CONSTRAINT "run_escalations_audit_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_events" ADD CONSTRAINT "run_events_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_events" ADD CONSTRAINT "run_events_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_id_instances_id_fk" FOREIGN KEY ("id") REFERENCES "public"."instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_snapshot_id_snapshots_id_fk" FOREIGN KEY ("snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "env_entries" ADD CONSTRAINT "env_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -196,5 +209,6 @@ CREATE INDEX "escalations_raiser_instance_id_idx" ON "escalations" USING btree (
 CREATE INDEX "instances_project_id_idx" ON "instances" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "instances_delegation_id_idx" ON "instances" USING btree ("delegation_id");--> statement-breakpoint
 CREATE INDEX "outbox_project_id_idx" ON "outbox" USING btree ("project_id");--> statement-breakpoint
+CREATE INDEX "run_events_run_id_seq_idx" ON "run_events" USING btree ("run_id","seq");--> statement-breakpoint
 CREATE INDEX "runs_project_id_idx" ON "runs" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");

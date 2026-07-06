@@ -16,6 +16,7 @@ import type {
   Project,
   Run,
   RunEscalationAudit,
+  RunEventsPage,
   RunState,
   RunTree,
   SnapshotSummary,
@@ -119,6 +120,17 @@ export const api = {
     get<RunEscalationAudit[]>(`/projects/${projectId}/runs/${runId}/escalations`),
   getRunTree: (projectId: string, runId: string) =>
     get<RunTree>(`/projects/${projectId}/runs/${runId}/tree`),
+  listRunEvents: (
+    projectId: string,
+    runId: string,
+    options: { after?: number; limit?: number } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (options.after !== undefined) query.set("after", String(options.after));
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+    return get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${suffix}`);
+  },
 
   listEscalations: (projectId: string) => get<Escalation[]>(`/projects/${projectId}/escalations`),
   answerEscalation: (projectId: string, escalationId: string, value: Json) =>

@@ -46,6 +46,10 @@ export interface PersistedInstanceEnvelope {
   /** The reactor that summoned this instance (its reply-to), the instance's ambient — `null` only for the
    *  `api` management root, which nothing delegates to. Base-owned, uniform across reactor kinds. */
   callerReactor: ReactorName | null;
+  /** The run (its permanent run instance's id) this instance runs under — the trace context stamped on
+   *  every event it emits. A run instance carries its own id here; `null` only for the `api` management
+   *  root, which belongs to no single run. */
+  runId: InstanceId | null;
   status: InstanceStatus;
 }
 
@@ -68,6 +72,9 @@ export interface PersistedInstance {
   /** The summoner, read from the generic envelope (`instances.caller_reactor`). A `core` instance is always
    *  summoned, so this is non-null here (the engine load guards a corrupt null). */
   callerReactor: ReactorName;
+  /** The run, read from the generic envelope (`instances.run_id`). A `core` instance is always summoned
+   *  under a run, so this is non-null here (the engine load guards a corrupt null). */
+  runId: InstanceId;
   target: DelegateTarget;
   snapshotId: SnapshotId;
   status: InstanceStatus;
@@ -215,6 +222,7 @@ export function deserializeProject(
       id: row.id,
       delegationId: row.delegationId,
       callerReactor: row.callerReactor,
+      runId: row.runId,
       target: row.target,
       argument: null,
       status: row.status,

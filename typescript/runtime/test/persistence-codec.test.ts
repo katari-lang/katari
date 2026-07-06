@@ -27,6 +27,7 @@ const PROJECT = "project-p" as ProjectId;
 const SNAPSHOT = "snapshot-s" as SnapshotId;
 const INSTANCE = "instance-i" as InstanceId;
 const DELEGATION = "delegation-d" as DelegationId;
+const RUN = "run-r" as InstanceId;
 const BLOB = "blob-b" as BlobId;
 
 describe("persistence codec", () => {
@@ -37,6 +38,7 @@ describe("persistence codec", () => {
       id: INSTANCE,
       delegationId: DELEGATION,
       callerReactor: "core",
+      runId: RUN,
       target: { kind: "named", name: "demo.main" as never, snapshot: SNAPSHOT },
       argument: null,
       status: "running",
@@ -117,8 +119,9 @@ describe("persistence codec", () => {
     const joined: PersistedInstance = {
       id: instance.id,
       delegationId: instance.delegationId,
-      // The summoner rides on the generic envelope now (not in engineState); the join reads it back.
+      // The summoner + run ride on the generic envelope now (not in engineState); the join reads them back.
       callerReactor: instance.callerReactor,
+      runId: instance.runId,
       target: serialized.instance.target,
       snapshotId: serialized.instance.snapshotId,
       status: instance.status,

@@ -53,8 +53,9 @@ export interface ProjectActorDependencies {
 
 export class ProjectActor {
   private readonly projectId: ProjectId;
-  /** The project's permanent `api` management root id (the issuer of run delegations / the sink of
-   *  user-facing escalations). Derived from the project id — deterministic and stable across restarts. */
+  /** The project's permanent `api` management root id (the owner of project-scoped resources — uploaded
+   *  files). Derived from the project id — deterministic and stable across restarts. Run delegations are
+   *  issued by each run's own permanent run instance, not by this root. */
   private readonly apiRootId: InstanceId;
   private readonly persistence: Persistence;
 
@@ -150,21 +151,21 @@ export class ProjectActor {
 
   // ─── api root commands (exposed for in-process callers; the logic lives in the ApiReactor) ──────────
 
-  /** Start a run on the api root. The run id is the run delegation id (the durable handle); `result` is an
-   *  in-process convenience; `started` resolves once the launch (delegation + `runs` metadata + delegate) is
-   *  durably committed. `name` is the run's human label (defaults to the qualified name). */
+  /** Start a run. The run id is its permanent run instance's id (the durable handle); `result` is an
+   *  in-process convenience; `started` resolves once the launch (instance + `runs` metadata + delegation +
+   *  delegate) is durably committed. `name` is the run's human label (defaults to the qualified name). */
   startRun(
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
     argument: Value | null,
     name?: string,
-  ): { run: DelegationId; result: Promise<Value>; started: Promise<void> } {
+  ): { run: InstanceId; result: Promise<Value>; started: Promise<void> } {
     return this.api.startRun(qualifiedName, snapshot, argument, name ?? qualifiedName);
   }
 
   /** Request a run's cancellation (terminate cascade + durable cancel reason). Resolves once the cancel
    *  commit is durable; a no-op in the engine if the run already finished. */
-  cancelRun(run: DelegationId, reason?: string): Promise<void> {
+  cancelRun(run: InstanceId, reason?: string): Promise<void> {
     return this.api.cancelRun(run, reason);
   }
 

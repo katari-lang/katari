@@ -129,7 +129,9 @@ export function makeStepContext(args: {
       buffers.internalQueue.push(event);
     },
     emit(event, to) {
-      buffers.outbound.push({ ...event, from: args.reactorName, to });
+      // The emit edge stamps the full envelope: routing (`from` here, `to` from the emit site's edge
+      // knowledge) and the trace context (`run` — the driven instance's ambient run).
+      buffers.outbound.push({ ...event, from: args.reactorName, to, run: args.instance.runId });
     },
     log(level, message) {
       buffers.logs.push({ level, message });

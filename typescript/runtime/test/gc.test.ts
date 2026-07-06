@@ -29,6 +29,7 @@ function instanceWith(threads: Record<number, Thread>): CoreInstance {
     id: INSTANCE,
     delegationId: "d" as DelegationId,
     callerReactor: "core",
+    runId: "r" as InstanceId,
     target: { kind: "named", name: "demo.main" as never, snapshot: "snap" as SnapshotId },
     argument: null,
     status: "running",

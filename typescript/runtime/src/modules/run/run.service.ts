@@ -3,7 +3,8 @@ import { NotFoundError } from "../../lib/errors.js";
 import { facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
 import { type RunView, runRepository } from "./run.repository.js";
-import type { ListRunsQuery, StartRunBody } from "./run.schema.js";
+import type { ListRunEventsQuery, ListRunsQuery, StartRunBody } from "./run.schema.js";
+import { projectRunEvent, runEventsRepository } from "./run-events.repository.js";
 import { runTreeRepository } from "./run-tree.repository.js";
 
 /** The wire shape of a run: its projected view with the tagged `argument` / `result` `Value`s rendered
@@ -55,6 +56,21 @@ export const runService = {
       throw new NotFoundError(`run ${runId} not found`);
     }
     return { state: view.state, tree: await runTreeRepository.get(db, projectId, runId) };
+  },
+
+  /** A run's execution trace: the journaled external events after `after` (a tail — a watcher polls with
+   *  the growing seq), oldest first. `state` rides along so one poll both extends the trace and tells the
+   *  watcher whether the run is still live (mirroring the delegation tree's `{ state, tree }`). */
+  async listEvents(projectId: string, runId: string, query: ListRunEventsQuery = {}) {
+    const view = await runRepository.get(db, projectId, runId);
+    if (view === undefined) {
+      throw new NotFoundError(`run ${runId} not found`);
+    }
+    const rows = await runEventsRepository.list(db, projectId, runId, {
+      ...(query.after !== undefined ? { after: query.after } : {}),
+      limit: query.limit ?? 500,
+    });
+    return { state: view.state, events: rows.map(projectRunEvent) };
   },
 
   /** A run's answered-escalation transcript. Open escalations are the escalation resource's concern;

@@ -15,6 +15,7 @@ import type {
   CallId,
   DelegationId,
   EscalationId,
+  InstanceId,
   ScopeId,
   SnapshotId,
   ThreadId,
@@ -107,8 +108,21 @@ export type ExternalEventBody =
   | { kind: "escalateAck"; delegation: DelegationId; escalation: EscalationId; value: Value };
 
 /** A routed external event: a payload plus its `from` (issuing reactor) and `to` (destination reactor). The
- *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives. */
-export type ExternalEvent = ExternalEventBody & { from: ReactorName; to: ReactorName };
+ *  substrate routes by `to`; a reply inverts from/to. This is the wire form an actor sends / receives.
+ *
+ *  `run` is the event's trace context — the id of the run's permanent api-side *run instance* (see the
+ *  ApiReactor: a run IS that instance, and `runs.id` is its id), whose causal tree the event belongs to.
+ *  It rides the envelope exactly like routing: an instance-originated event carries its instance's ambient
+ *  run (recorded at delegate-accept from the summoning event's `run`, the same way `callerReactor` is
+ *  recorded from its `from`), and a reply that has no instance derives it from the inbound event it
+ *  answers. The run instance seeds it — a run's launching `delegate` carries `run = that instance's id`.
+ *  It exists so every event can be attributed to its run at the commit boundary (the `run_events` journal)
+ *  without any tree walk. */
+export type ExternalEvent = ExternalEventBody & {
+  from: ReactorName;
+  to: ReactorName;
+  run: InstanceId;
+};
 
 /** The snapshot a delegate target is pinned to: the version whose IR a `named` / `closure` runs, or whose
  *  compiled sidecar bundle hosts an `external` handler. Every target carries one. */

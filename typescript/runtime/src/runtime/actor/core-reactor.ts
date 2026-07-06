@@ -10,8 +10,8 @@
 // opens / cancels / retires the row. So core holds no delegation / escalation bookkeeping — it only creates /
 // tears down instances, drives their turns, and implements the per-event hooks (`onDelegate` etc.) that resume
 // the proxying `DelegateThread` from the base-resolved caller / callee / raiser. A *run* delegation is owned by
-// the api root — a run-root instance records `callerReactor = api` (the summoning delegate's `from`), so a
-// reply it emits routes to `api` without core inferring it.
+// its api-side run instance — a run-root core instance records `callerReactor = api` (the summoning delegate's
+// `from`), so a reply it emits routes to `api` without core inferring it.
 
 import {
   delegateProxyOf,
@@ -95,6 +95,7 @@ export class CoreReactor extends Reactor {
         this.markInstance(id, {
           delegationId: instance.delegationId,
           callerReactor: instance.callerReactor,
+          runId: instance.runId,
           status: instance.status,
         });
       else this.markInstanceDropped(id);
@@ -139,7 +140,12 @@ export class CoreReactor extends Reactor {
     // an ack) needs no rebuild here: it reads the issued delegations reloaded just below (`callerInstanceOf`).
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) {
-        this.acceptDelegation(instance.delegationId, instance.id, instance.callerReactor);
+        this.acceptDelegation(
+          instance.delegationId,
+          instance.id,
+          instance.callerReactor,
+          instance.runId,
+        );
       }
     }
     // The delegations core issued and the escalations it raised reload through the base, uniformly.
@@ -162,7 +168,12 @@ export class CoreReactor extends Reactor {
       dynamicDispatch = true;
       const unwrapped = unwrapCallAgent(argument);
       if ("error" in unwrapped) {
-        this.raiseThrow(event.delegation, errorData(CALL_ERROR, unwrapped.error), event.from);
+        this.raiseThrow(
+          event.delegation,
+          errorData(CALL_ERROR, unwrapped.error),
+          event.from,
+          event.run,
+        );
         return;
       }
       target = unwrapped.target;
@@ -183,7 +194,7 @@ export class CoreReactor extends Reactor {
       resolved = this.resolveTarget(target);
     } catch (error) {
       if (isTransientError(error)) throw error;
-      this.failDelegate(dynamicDispatch, event.delegation, messageOf(error), event.from);
+      this.failDelegate(dynamicDispatch, event.delegation, messageOf(error), event.from, event.run);
       return;
     }
     // The delegate acceptance check: the argument must conform to the target's input schema. Statically
@@ -208,6 +219,7 @@ export class CoreReactor extends Reactor {
           event.delegation,
           `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
           event.from,
+          event.run,
         );
         return;
       }
@@ -217,6 +229,8 @@ export class CoreReactor extends Reactor {
       // The summoner's reactor: a reply this instance emits routes back here (core for a sub-call, api for a
       // run root) — recorded now from the delegate's `from`, never re-inferred.
       callerReactor: event.from,
+      // The run this activation belongs to (the delegate's trace context) — every event it emits carries it.
+      runId: event.run,
       target: target,
       argument: argument,
       agentBlockId: resolved.agentBlockId,
@@ -228,7 +242,7 @@ export class CoreReactor extends Reactor {
     // terminate / escalateAck for it finds the child and its replies route back. The caller-side delegation row
     // was already opened by its caller (core's issuing turn, or the api root's startRun); this turn only summons
     // the child and runs it.
-    this.acceptDelegation(event.delegation, instance.id, event.from);
+    this.acceptDelegation(event.delegation, instance.id, event.from, event.run);
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
   }
 
@@ -240,11 +254,12 @@ export class CoreReactor extends Reactor {
     delegation: DelegationId,
     message: string,
     to: ReactorName,
+    run: InstanceId,
   ): void {
     if (dynamicDispatch) {
-      this.raiseThrow(delegation, errorData(CALL_ERROR, message), to);
+      this.raiseThrow(delegation, errorData(CALL_ERROR, message), to, run);
     } else {
-      this.raisePanic(delegation, message, to);
+      this.raisePanic(delegation, message, to, run);
     }
   }
 
@@ -366,6 +381,7 @@ export class CoreReactor extends Reactor {
         delegation: event.delegation,
         from: this.name,
         to: event.from,
+        run: event.run,
       });
       return;
     }

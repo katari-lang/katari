@@ -14,12 +14,14 @@ module Katari.Cli.Output
     progress,
     hint,
     warn,
+    traceLine,
     verboseLog,
     printJson,
     printText,
     renderTable,
     styled,
     compactTimestamp,
+    compactTime,
   )
 where
 
@@ -88,6 +90,13 @@ warn :: OutputContext -> Text -> IO ()
 warn context message =
   TextIO.hPutStrLn stderr (styled context [SetColor Foreground Vivid Yellow] ("warning: " <> message))
 
+-- | One execution-trace line (a run's external event while waiting on it) — dim, so the trace reads as
+-- background narration next to the CLI's own progress lines. stderr, silenced by @--quiet@.
+traceLine :: OutputContext -> Text -> IO ()
+traceLine context message
+  | context.quiet = pure ()
+  | otherwise = TextIO.hPutStrLn stderr (styled context [SetConsoleIntensity FaintIntensity] ("  " <> message))
+
 -- | A @--verbose@ trace line (HTTP requests and responses).
 verboseLog :: OutputContext -> Text -> IO ()
 verboseLog context message
@@ -135,4 +144,12 @@ columnWidths rows = case rows of
 compactTimestamp :: Text -> Text
 compactTimestamp timestamp
   | Text.length timestamp >= 16 = Text.replace "T" " " (Text.take 16 timestamp)
+  | otherwise = timestamp
+
+-- | The time-of-day slice of an ISO-8601 timestamp (@…T12:34:56.789Z@ → @12:34:56@), for dense per-event
+-- lines where repeating the date on every row would drown the signal. Purely textual — anything shorter
+-- than the expected shape passes through untouched.
+compactTime :: Text -> Text
+compactTime timestamp
+  | Text.length timestamp >= 19 = Text.take 8 (Text.drop 11 timestamp)
   | otherwise = timestamp

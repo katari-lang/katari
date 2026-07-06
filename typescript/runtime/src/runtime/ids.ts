@@ -26,7 +26,8 @@ export const toSnapshotId = (value: string): SnapshotId => value as SnapshotId;
 export type InstanceId = Brand<string, "InstanceId">;
 export type DelegationId = Brand<string, "DelegationId">;
 export type EscalationId = Brand<string, "EscalationId">;
-export type RunId = Brand<string, "RunId">;
+// A run has no id family of its own: a run IS its permanent api-side instance, so a run id is an
+// `InstanceId` (`runs.id` = that instance's id) — see the ApiReactor.
 export type BlobId = Brand<string, "BlobId">;
 /** The id of one durable outbox row — a produced-but-not-yet-consumed external event (the transactional
  *  outbox backing the actor's mailbox, so an in-flight event survives a crash). */

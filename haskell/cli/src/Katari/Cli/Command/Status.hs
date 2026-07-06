@@ -10,14 +10,14 @@ module Katari.Cli.Command.Status
   )
 where
 
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Cli.Api (EscalationView (..), RunDetail (..), getRunDetail, listEscalations)
+import Katari.Cli.Api (EscalationView (..), RunDetail (..), RunEventView (..), getRunDetail, listAllRunEvents, listEscalations)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
-import Katari.Cli.Output (compactTimestamp, printJson, printText)
+import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
 import Katari.Cli.Pick (resolveRunId)
 import Katari.Cli.Prompt (compactJson)
 import Options.Applicative
@@ -66,6 +66,26 @@ run options = do
                 <> "  — answer with: katari answer "
                 <> Text.take 8 escalation.id
             )
+      renderTrace context target
+
+-- | The run's execution trace (its journaled external events), truncated to the newest tail — the
+-- "what actually happened" half of the status screen. The full trace is one `GET .../events` away.
+renderTrace :: RuntimeContext -> Text -> IO ()
+renderTrace context target = do
+  (_, events) <- listAllRunEvents context.client context.projectId target
+  unless (null events) $ do
+    let shown = drop (length events - traceTailLength) events
+        hidden = length events - length shown
+    printText ""
+    printText "Trace:"
+    when (hidden > 0) $
+      printText ("  (… " <> Text.pack (show hidden) <> " earlier events)")
+    forM_ shown $ \event ->
+      printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
+
+-- | How many trace events `status` shows — enough to see how a run ended without flooding the screen.
+traceTailLength :: Int
+traceTailLength = 20
 
 renderDetail :: RunDetail -> IO ()
 renderDetail detail = do

@@ -36,6 +36,8 @@ import Katari.Cli.Api
   ( AgentView (..),
     AgentsResponse (..),
     EscalationView (..),
+    RunEventView (..),
+    RunEventsResponse (..),
     RunView (..),
     StartRunRequest (..),
     answerEscalation,
@@ -43,11 +45,12 @@ import Katari.Cli.Api
     getRun,
     listAgents,
     listEscalations,
+    listRunEvents,
     startRun,
   )
 import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, exitInterrupted, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
-import Katari.Cli.Output (OutputContext (..), hint, printJson, printText, progress)
+import Katari.Cli.Output (OutputContext (..), compactTime, hint, printJson, printText, progress, traceLine)
 import Katari.Cli.Prompt (compactJson, promptFromSchema, select)
 import Katari.Data.JSONSchema (JSONSchema (..), ObjectSchema (..))
 import Options.Applicative
@@ -200,27 +203,48 @@ decodeInputSchema document = case Aeson.fromJSON document of
 -- Waiting on the run
 -- ===========================================================================
 
--- | Poll until the run reaches a terminal state, surfacing its open escalations along the way. The
--- interval backs off to a 2s ceiling; there is no overall timeout — a long-running orchestration is
--- normal, and Ctrl-C detaches.
+-- | Poll until the run reaches a terminal state, tailing its execution trace (each external event the
+-- engine journals prints as a dim one-line summary on stderr) and surfacing its open escalations along
+-- the way. The interval backs off to a 2s ceiling; there is no overall timeout — a long-running
+-- orchestration is normal, and Ctrl-C detaches.
 waitForRun :: RuntimeContext -> Text -> IO ()
-waitForRun context runId = loop initialDelayMicroseconds Set.empty
+waitForRun context runId = loop initialDelayMicroseconds Set.empty 0
   where
     initialDelayMicroseconds = 100000
     ceilingMicroseconds = 2000000
 
-    loop delay notified = do
-      view <- getRun context.client context.projectId runId
-      case view.state of
-        "done" -> printJson (fromMaybe Null view.result)
-        "error" -> dieProgram "run" ("run failed: " <> fromMaybe "(no message)" view.errorMessage)
+    loop delay notified lastSeq = do
+      -- One events poll serves both needs: the new trace lines AND the run's lifecycle state — read from
+      -- the same response, so the terminal turn's final events always print before the exit path runs.
+      (state, seqNow) <- drainTrace lastSeq
+      case state of
+        "done" -> do
+          view <- getRun context.client context.projectId runId
+          printJson (fromMaybe Null view.result)
+        "error" -> do
+          view <- getRun context.client context.projectId runId
+          dieProgram "run" ("run failed: " <> fromMaybe "(no message)" view.errorMessage)
         "cancelled" -> dieProgram "run" "run was cancelled"
         _ -> do
           (_, escalations) <- listEscalations context.client context.projectId
           let mine = filter (\escalation -> escalation.runId == runId) escalations
           notifiedNow <- foldM (surfaceEscalation context) notified mine
           threadDelay delay
-          loop (min (delay * 2) ceilingMicroseconds) notifiedNow
+          loop (min (delay * 2) ceilingMicroseconds) notifiedNow seqNow
+
+    -- Print every trace event past `lastSeq`, following full pages until the tail is drained (the
+    -- endpoint returns one server-capped page per call), and return the run's state as of the last page
+    -- with the new tail cursor.
+    drainTrace lastSeq = do
+      (_, trace) <- listRunEvents context.client context.projectId runId lastSeq
+      mapM_ (printEvent context.output) trace.events
+      case trace.events of
+        [] -> pure (trace.state, lastSeq)
+        events -> drainTrace (maximum (map (.seq) events))
+
+-- | One trace event as a dim stderr line: @HH:MM:SS@ + the server-rendered summary.
+printEvent :: OutputContext -> RunEventView -> IO ()
+printEvent output event = traceLine output (compactTime event.createdAt <> " " <> event.summary)
 
 -- | Bring one open escalation to the user: answer it inline on a terminal. Off a terminal there is no
 -- one to answer it in this session and the run cannot progress without an answer, so rather than poll

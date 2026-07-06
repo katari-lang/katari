@@ -20,6 +20,7 @@
 import { sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
+  bigserial,
   check,
   index,
   jsonb,
@@ -79,6 +80,11 @@ export const instances = pgTable(
      *  across kinds. `null` only for the `api` management root, which nothing delegates to. A callee's reply
      *  (`delegateAck` / `escalate`) routes back here; recovered from this column, never re-inferred. */
     callerReactor: text("caller_reactor").$type<ReactorName>(),
+    /** The run (its permanent run instance's id) this instance runs under — the trace context stamped on
+     *  every event it emits, recorded from the summoning `delegate`'s `run` like `caller_reactor` from its
+     *  `from`. A run instance carries its own id; `null` only for the `api` management root. No FK: it is
+     *  ambient routing metadata, exactly like `caller_reactor`. */
+    runId: uuid("run_id"),
     /** running | cancelling — an instance is ephemeral, so it has no terminal state (that lives on `runs`). */
     status: text("status").$type<InstanceStatus>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -207,9 +213,12 @@ export const escalations = pgTable(
     raiserInstanceId: uuid("raiser_instance_id")
       .notNull()
       .references(() => instances.id, { onDelete: "cascade" }),
-    /** The raiser's delegation — for a user-facing escalation (`to_reactor = 'api'`) this IS the run, so the
-     *  api root rebuilds its answerable list (run + question) from the row alone. */
+    /** The raiser's delegation — the leg the answering `escalateAck` descends. */
     delegationId: uuid("delegation_id").notNull(),
+    /** The run (its run instance's id) this escalation belongs to — its attribution, from the escalate
+     *  event's `run` stamp, so the api reactor rebuilds its answerable list (run + question) from the row
+     *  alone and the API lists escalations by run without inferring it from routing. */
+    runId: uuid("run_id").notNull(),
     /** The reactors this escalation runs between: `from` = the raiser's reactor (always `core` today — only
      *  core instances raise), `to` = the reactor the escalate was addressed to (`api` ⟺ the raiser is a run
      *  root, i.e. a user-facing escalation). The api root self-selects its answerable set by `to_reactor`. */
@@ -258,16 +267,21 @@ export const outbox = pgTable(
   ],
 );
 
-/** The API's per-run record — the single source of truth for a run, since the run delegation row is pure
- *  live routing (deleted on terminal). A run *is* the api root's delegation while live; the api root writes
- *  this row on launch (id = the run delegation id, the human `name`, launch metadata — so a run lists the
- *  instant it starts) and updates its outcome (`state` / `result` / `errorMessage` / `completedAt`) and cancel
- *  reason as it progresses. The API reads it directly — see `run.repository`. */
+/** The run's metadata / outcome record — the `runs` extension of the run's permanent api-side *run
+ *  instance* (class-table inheritance, exactly like `core_instances` extends a core envelope): `id` IS that
+ *  instance's id and cascades with it, so a future run deletion is one instance drop that reclaims the
+ *  run's record, its trace (`run_events`), and the resources the instance owns (result scopes / blobs)
+ *  together. The api reactor writes this row on launch (atomically with the instance envelope and the run's
+ *  `delegate`) and updates its outcome (`state` / `result` / `errorMessage` / `completedAt`) and cancel
+ *  reason as it progresses — the run delegation row is pure live routing (deleted on terminal), so this is
+ *  the run's durable source of truth. The API reads it directly — see `run.repository`. */
 export const runs = pgTable(
   "runs",
   {
-    /** The run delegation id (the run's stable handle, even after the delegation row is deleted). */
-    id: uuid("id").primaryKey(),
+    /** The run instance's id (the run's identity — permanent, unlike the launch delegation). */
+    id: uuid("id")
+      .primaryKey()
+      .references(() => instances.id, { onDelete: "cascade" }),
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
@@ -296,6 +310,34 @@ export const runs = pgTable(
       "runs_state_check",
       sql`${table.state} in ('running', 'cancelling', 'done', 'error', 'cancelled')`,
     ),
+  ],
+);
+
+/** The run's execution trace: every external event ever produced under a run, in production order — the
+ *  permanent, append-only twin of the `outbox` (which is transient delivery: a row is deleted once
+ *  consumed). Appended by the substrate in the same commit as `produceOutbox`, so an event is journaled
+ *  exactly iff it was durably sent (a failed commit rolls both back), exactly once. `run_id` is the event's
+ *  own `run` stamp denormalised for the query; the `event` JSON is the source of truth (sealed like the
+ *  outbox — private values are encrypted at rest). Rows live as long as their run (the FK cascade is the
+ *  retention policy: deleting a run deletes its trace). */
+export const runEvents = pgTable(
+  "run_events",
+  {
+    /** Append order. Per project the substrate is serial (one commit at a time), so within one run the
+     *  sequence is the causal production order. */
+    seq: bigserial("seq", { mode: "number" }).primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    event: jsonb("event").$type<ExternalEvent>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // `GET /projects/:projectId/runs/:runId/events` tails a run's trace by (run, seq > after).
+    index("run_events_run_id_seq_idx").on(table.runId, table.seq),
   ],
 );
 

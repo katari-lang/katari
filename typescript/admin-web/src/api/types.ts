@@ -101,6 +101,31 @@ export interface RunTree {
   tree: DelegationTreeNode | null;
 }
 
+/** One event of a run's execution trace (the journaled external events, oldest first). `target` is set
+ *  for a `delegate`, `ask` / `request` for an `escalate`; `payload` is the redacted value the event
+ *  carried (`null` on the terminate legs); `summary` is the server-rendered one-liner the CLI prints. */
+export interface RunEvent {
+  seq: number;
+  kind: "delegate" | "delegateAck" | "escalate" | "escalateAck" | "terminate" | "terminateAck";
+  from: "core" | "api" | "ffi" | "http";
+  to: "core" | "api" | "ffi" | "http";
+  delegationId: string;
+  escalationId: string | null;
+  target: TreeTarget | null;
+  ask: string | null;
+  request: string | null;
+  payload: Json;
+  summary: string;
+  createdAt: string;
+}
+
+/** The events endpoint's payload: one page of the trace, with the run's state riding along so a single
+ *  poll both extends the trace and answers "is it still running". */
+export interface RunEventsPage {
+  state: RunState;
+  events: RunEvent[];
+}
+
 export interface AgentEntry {
   qualifiedName: string;
   input: JsonSchema;

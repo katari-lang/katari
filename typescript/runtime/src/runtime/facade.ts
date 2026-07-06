@@ -31,6 +31,7 @@ import {
   type BlobId,
   type DelegationId,
   type EscalationId,
+  type InstanceId,
   newBlobId,
   type ProjectId,
   type SnapshotId,
@@ -147,11 +148,11 @@ export const facade = {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
     const argument =
       input.argument !== undefined ? decodeClientJson(input.argument, "the run argument") : null;
-    // The engine mints the run delegation and kicks off the run; its id is the durable run handle and its
-    // Layer 1 row is the outcome's source of truth. The run's metadata sidecar (`runs` row) is written by the
-    // engine in the SAME commit as the run's `delegate` — `await started` resolves once that launch commit is
-    // durable, so the run is immediately visible to the API's reads. The in-process `result` promise is
-    // ignored (the API reads the outcome from the delegation, correct even after a crash + recovery).
+    // The engine mints the run's permanent run instance and kicks the run off; that instance's id is the
+    // durable run handle (`runs.id`). The run's metadata (`runs` row) is written by the engine in the SAME
+    // commit as the run's `delegate` — `await started` resolves once that launch commit is durable, so the
+    // run is immediately visible to the API's reads. The in-process `result` promise is ignored (the API
+    // reads the outcome from the `runs` row, correct even after a crash + recovery).
     const { run, result, started } = registry
       .actorFor(input.projectId as ProjectId)
       .startRun(
@@ -171,7 +172,7 @@ export const facade = {
     // `cancelled` outcome the API projects.
     await registry
       .actorFor(input.projectId as ProjectId)
-      .cancelRun(input.runId as DelegationId, input.reason);
+      .cancelRun(input.runId as InstanceId, input.reason);
   },
 
   async answerEscalation(input: AnswerEscalationInput): Promise<void> {

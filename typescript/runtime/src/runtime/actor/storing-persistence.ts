@@ -13,7 +13,7 @@ import {
   isTerminalRunState,
   type RunState,
 } from "../../db/tables/execution.js";
-import type { ReactorName } from "../event/types.js";
+import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
   DelegationId,
@@ -62,6 +62,7 @@ interface StoredEscalation {
   fromReactor: ReactorName;
   toReactor: ReactorName;
   delegation: DelegationId;
+  run: InstanceId;
   request: string;
   argument: Value | null;
 }
@@ -94,9 +95,11 @@ export class StoringPersistence implements Persistence {
   private readonly escalations = new Map<EscalationId, StoredEscalation>();
   /** Layer 3: the transactional outbox (produced-but-not-consumed events), insertion-ordered. */
   private readonly outbox = new Map<OutboxSeq, OutboxMessage>();
+  /** The journal — the outbox's permanent twin: every event ever produced, in production order. */
+  private readonly journal: ExternalEvent[] = [];
   /** The API's run-metadata sidecar + answered-escalation history (DB-SoT projections; reads go straight to
    *  these, not through the warm actor). */
-  private readonly runs = new Map<DelegationId, StoredRun>();
+  private readonly runs = new Map<InstanceId, StoredRun>();
   private readonly audits: PersistedRunEscalationAudit[] = [];
 
   async load(_projectId: ProjectId, body: (loader: Loader) => Promise<void>): Promise<void> {
@@ -137,6 +140,7 @@ export class StoringPersistence implements Persistence {
           fromReactor: row.fromReactor,
           toReactor: row.toReactor,
           delegation: row.delegation,
+          run: row.run,
           request: row.request,
           argument: row.argument,
         });
@@ -155,14 +159,18 @@ export class StoringPersistence implements Persistence {
           for (const [id, envelope] of this.envelopes) {
             const ext = this.coreInstanceRows.get(id);
             if (envelope.kind !== "core" || ext === undefined) continue;
-            // A core instance is always summoned, so its envelope caller is non-null (guarded loudly).
+            // A core instance is always summoned, so its envelope caller / run are non-null (guarded loudly).
             if (envelope.callerReactor === null) {
               throw new Error(`core instance ${id} has no callerReactor (corrupt envelope)`);
+            }
+            if (envelope.runId === null) {
+              throw new Error(`core instance ${id} has no runId (corrupt envelope)`);
             }
             coreInstances.push({
               id,
               delegationId: envelope.delegationId,
               callerReactor: envelope.callerReactor,
+              runId: envelope.runId,
               target: ext.target,
               snapshotId: ext.snapshotId,
               status: envelope.status,
@@ -190,7 +198,8 @@ export class StoringPersistence implements Persistence {
               envelope.kind !== "ffi" ||
               ext === undefined ||
               envelope.delegationId === null ||
-              envelope.callerReactor === null
+              envelope.callerReactor === null ||
+              envelope.runId === null
             )
               continue;
             result.push({
@@ -199,6 +208,7 @@ export class StoringPersistence implements Persistence {
               snapshot: ext.snapshotId,
               key: ext.key,
               caller: envelope.callerReactor,
+              run: envelope.runId,
               status: ext.status,
               relays: ext.relays,
               innerCalls: ext.innerCalls,
@@ -216,13 +226,15 @@ export class StoringPersistence implements Persistence {
               envelope.kind !== "http" ||
               ext === undefined ||
               envelope.delegationId === null ||
-              envelope.callerReactor === null
+              envelope.callerReactor === null ||
+              envelope.runId === null
             )
               continue;
             result.push({
               delegation: envelope.delegationId,
               instance: id,
               caller: envelope.callerReactor,
+              run: envelope.runId,
               status: ext.status,
             });
           }
@@ -276,6 +288,7 @@ export class StoringPersistence implements Persistence {
             fromReactor: row.fromReactor,
             toReactor: row.toReactor,
             delegation: row.delegation,
+            run: row.run,
             request: row.request,
             argument: row.argument,
           });
@@ -346,6 +359,11 @@ export class StoringPersistence implements Persistence {
           for (const message of messages) this.outbox.set(message.seq, message);
         },
       },
+      journal: {
+        appendEvents: async (events) => {
+          this.journal.push(...events);
+        },
+      },
     };
   }
 
@@ -397,6 +415,11 @@ export class StoringPersistence implements Persistence {
     return this.outbox.size;
   }
 
+  /** Test helper: the journaled trace of one run, in production order. */
+  journalFor(run: InstanceId): ExternalEvent[] {
+    return this.journal.filter((event) => event.run === run);
+  }
+
   /** Test helper: seed the outbox directly, simulating an event produced just before a crash. */
   seedOutbox(message: OutboxMessage): void {
     this.outbox.set(message.seq, message);
@@ -420,7 +443,7 @@ export class StoringPersistence implements Persistence {
   /** Test helper: seed a live run record directly, simulating the `runs` row `startRun` persisted (atomically
    *  with the run delegation + its `delegate`) just before a crash, so a recovered actor can update its
    *  outcome. Starts `running`. */
-  seedRun(run: DelegationId, launch: Omit<PersistedRun, "run">): void {
+  seedRun(run: InstanceId, launch: Omit<PersistedRun, "run">): void {
     this.runs.set(run, {
       run,
       ...launch,
@@ -437,13 +460,22 @@ export class StoringPersistence implements Persistence {
     return this.delegations.get(delegation);
   }
 
+  /** Test helper: the run's single live delegation row (the one its run instance issued), or undefined once
+   *  the run is terminal — the storing twin of the api reactor's own caller-owned lookup. */
+  runDelegationOf(run: InstanceId): StoredDelegation | undefined {
+    for (const row of this.delegations.values()) {
+      if (row.caller === run) return row;
+    }
+    return undefined;
+  }
+
   /** Test helper: the stored `runs` metadata sidecar (+ cancel reason) for a run. */
-  peekRun(run: DelegationId): StoredRun | undefined {
+  peekRun(run: InstanceId): StoredRun | undefined {
     return this.runs.get(run);
   }
 
   /** Test helper: the answered-escalation audit rows recorded for a run, in answer order. */
-  auditsFor(run: DelegationId): PersistedRunEscalationAudit[] {
+  auditsFor(run: InstanceId): PersistedRunEscalationAudit[] {
     return this.audits.filter((audit) => audit.run === run);
   }
 }

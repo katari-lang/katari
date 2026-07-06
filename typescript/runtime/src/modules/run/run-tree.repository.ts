@@ -93,9 +93,10 @@ export interface TreeEscalationRow {
   createdAt: Date;
 }
 
-/** Assemble the tree rooted at `runId` (a run IS its root delegation, so the ids coincide). Pure — the
- *  testable heart of the read path. Returns `null` when the root delegation is gone (the run is terminal,
- *  or never started). A visited guard makes corrupt rows degrade to a truncated tree, never a hang. */
+/** Assemble the tree rooted at `runId` — the run's permanent api-side instance, whose single issued
+ *  delegation is the tree's root edge. Pure — the testable heart of the read path. Returns `null` when that
+ *  delegation is gone (the run is terminal, or never started). A visited guard makes corrupt rows degrade
+ *  to a truncated tree, never a hang. */
 export function assembleDelegationTree(
   runId: string,
   rows: {
@@ -122,7 +123,8 @@ export function assembleDelegationTree(
     else raised.push(escalation);
   }
 
-  const root = rows.delegations.find((delegation) => delegation.id === runId);
+  // The run instance is the caller of exactly one delegation — the run's live root edge.
+  const root = rows.delegations.find((delegation) => delegation.callerInstanceId === runId);
   if (root === undefined) return null;
 
   const visited = new Set<string>();

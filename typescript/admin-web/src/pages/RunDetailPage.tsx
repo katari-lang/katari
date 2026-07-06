@@ -11,15 +11,17 @@ import {
   useEscalations,
   useRun,
   useRunEscalationAudit,
+  useRunEvents,
   useRunTree,
   useStartRun,
 } from "../api/queries";
 import { EscalationCard } from "../components/escalations/EscalationCard";
 import { DelegationTree } from "../components/runs/DelegationTree";
 import { RunStateBadge } from "../components/runs/RunStateBadge";
+import { RunTrace } from "../components/runs/RunTrace";
 import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
-import { CopyableId } from "../components/ui/Copy";
+import { CopyableId, CopyButton } from "../components/ui/Copy";
 import { ConfirmDialog } from "../components/ui/Dialog";
 import { KeyValueList, KeyValueRow } from "../components/ui/KeyValue";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -34,6 +36,7 @@ export function RunDetailPage() {
   const escalations = useEscalations(projectId);
   const live = run.data !== undefined && isLiveRun(run.data);
   const tree = useRunTree(projectId, runId, live);
+  const trace = useRunEvents(projectId, runId, live);
   const audit = useRunEscalationAudit(projectId, runId, live);
   const cancelMutation = useCancelRun(projectId);
   const rerunMutation = useStartRun(projectId);
@@ -113,6 +116,29 @@ export function RunDetailPage() {
               ) : (
                 <p className="text-sm text-fg-faint">Waiting for the first delegation to land…</p>
               )}
+            </CardBody>
+          </Card>
+        )}
+
+        {(trace.data?.events.length ?? 0) > 0 && (
+          <Card>
+            <CardHeader
+              title="Trace"
+              actions={
+                <CopyButton
+                  value={JSON.stringify(trace.data?.events ?? [], null, 2)}
+                  label="Copy trace as JSON"
+                />
+              }
+            />
+            <CardBody className="overflow-x-auto">
+              {/* The events page is capped; a run past it still shows its beginning, flagged here. */}
+              {(trace.data?.events.length ?? 0) >= 1000 && (
+                <p className="pb-2 text-xs text-fg-faint">
+                  Showing the first 1000 events — the full trace is available over the API.
+                </p>
+              )}
+              <RunTrace events={trace.data?.events ?? []} projectId={projectId} />
             </CardBody>
           </Card>
         )}

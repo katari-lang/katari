@@ -49,13 +49,14 @@ export interface PersistedDelegation {
  *  the row exists only while open (answering deletes it — the Q&A lives in the audit). `fromReactor` (the
  *  raiser's reactor) / `toReactor` (the reactor the escalate was addressed to) let each reactor self-select on
  *  restart — `toReactor = "api"` ⟺ the raiser is a run root (a user-facing escalation). `delegation` is the
- *  raiser's delegation (the run, for a user-facing escalation). */
+ *  raiser's delegation (the answer's routing); `run` is the run instance it belongs to (its attribution). */
 export interface PersistedEscalation {
   escalation: EscalationId;
   raiser: InstanceId;
   fromReactor: ReactorName;
   toReactor: ReactorName;
   delegation: DelegationId;
+  run: InstanceId;
   request: string;
   argument: Value | null;
 }
@@ -67,24 +68,25 @@ export interface OutboxMessage {
   event: ExternalEvent;
 }
 
-/** A run's launch record (`runs` row), written by the api root atomically with the run's `delegate` so a run
- *  is never visible without its launch metadata. `run` is the run delegation id (the run's stable handle).
- *  The run starts `running`; its outcome is updated later via `setRunOutcome`. */
+/** A run's launch record (`runs` row — the run instance's extension record, keyed by that instance's id),
+ *  written by the api reactor atomically with the run instance's envelope and its `delegate`, so a run is
+ *  never visible without its launch metadata. The run starts `running`; its outcome is updated later via
+ *  `setRunOutcome`. */
 export interface PersistedRun {
-  run: DelegationId;
+  run: InstanceId;
   name: string;
   qualifiedName: string;
   snapshotId: SnapshotId;
   argument: Value | null;
 }
 
-/** A run's state / outcome update — the api root writes it as the run advances (`cancelling` on a cancel
+/** A run's state / outcome update — the api reactor writes it as the run advances (`cancelling` on a cancel
  *  request; `done` / `cancelled` / `error` with its result / error at the terminal). Since the run delegation
  *  row is deleted on terminal, this is the durable source of truth for the run's outcome. A `cancelReason`
  *  rides along on the `cancelling` update (so a cancel's state + reason commit as one write); it is `undefined`
  *  on every other update, leaving the stored reason untouched. */
 export interface PersistedRunOutcome {
-  run: DelegationId;
+  run: InstanceId;
   state: RunState;
   result: Value | null;
   errorMessage: string | null;
@@ -92,10 +94,10 @@ export interface PersistedRunOutcome {
 }
 
 /** One answered user-facing escalation, recorded for the run's history (`run_escalations_audit`) when the
- *  api root relays the answer back — live escalations are open-only and raiser-owned, so the answered ones
- *  live as this projection. */
+ *  api reactor relays the answer back — live escalations are open-only and raiser-owned, so the answered
+ *  ones live as this projection. */
 export interface PersistedRunEscalationAudit {
-  run: DelegationId;
+  run: InstanceId;
   escalation: EscalationId;
   question: Value | null;
   answer: Value;
@@ -140,6 +142,8 @@ export interface PersistedFfiInstance {
   snapshot: SnapshotId;
   key: string;
   caller: ReactorName;
+  /** The run the call belongs to (its trace context), from the envelope. */
+  run: InstanceId;
   status: "running" | "cancelling" | "awaitingAnswer";
   relays: PersistedEscalationRelay[];
   innerCalls: PersistedInnerCall[];
@@ -162,6 +166,8 @@ export interface PersistedHttpInstance {
   delegation: DelegationId;
   instance: InstanceId;
   caller: ReactorName;
+  /** The run the call belongs to (its trace context), from the envelope. */
+  run: InstanceId;
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
@@ -237,6 +243,14 @@ export interface OutboxTx {
   produceOutbox(messages: OutboxMessage[]): Promise<void>;
 }
 
+/** The substrate's journal write surface: the permanent, append-only twin of the outbox. Where the outbox is
+ *  transient delivery (a row is deleted once consumed), the journal keeps every produced event forever as a
+ *  run's execution trace, keyed by the event's own `run` stamp — appended in the same commit as
+ *  `produceOutbox`, so an event is journaled exactly iff it was durably sent. */
+export interface JournalTx {
+  appendEvents(events: ExternalEvent[]): Promise<void>;
+}
+
 /** The per-turn write surface over one shared transaction: the base-managed generic rows go through `tx.base`
  *  (via `Reactor.persistBase`), each reactor's own extension through `tx.<name>`, the pool through `tx.pool`,
  *  the substrate through `tx.outbox`. So a concrete reactor's `persist` is `persistBase(tx.base, …)` plus its
@@ -249,17 +263,19 @@ export interface PersistenceTx {
   http: HttpTx;
   pool: PoolTx;
   outbox: OutboxTx;
+  journal: JournalTx;
 }
 
 /** A persisted open escalation (an `escalations` row still in the `open` state). Each reactor self-selects
  *  the ones it needs from the `Loader` by reactor (`from` = the raiser's reactor; `to` = the addressed
- *  reactor — `to = "api"` is a user-facing escalation, whose `delegation` is the run). */
+ *  reactor — `to = "api"` is a user-facing escalation). `delegation` routes the answer; `run` attributes it. */
 export interface PersistedOpenEscalation {
   escalation: EscalationId;
   raiser: InstanceId;
   fromReactor: ReactorName;
   toReactor: ReactorName;
   delegation: DelegationId;
+  run: InstanceId;
   request: string;
   argument: Value | null;
 }
@@ -380,6 +396,9 @@ export const NO_OP_TX: PersistenceTx = {
   outbox: {
     async consumeOutbox() {},
     async produceOutbox() {},
+  },
+  journal: {
+    async appendEvents() {},
   },
 };
 

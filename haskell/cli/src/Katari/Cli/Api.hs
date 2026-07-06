@@ -43,10 +43,14 @@ module Katari.Cli.Api
     RunView (..),
     RunDetail (..),
     RunListQuery (..),
+    RunEventView (..),
+    RunEventsResponse (..),
     startRun,
     getRun,
     getRunDetail,
     listRuns,
+    listRunEvents,
+    listAllRunEvents,
     cancelRun,
 
     -- * Escalations
@@ -484,6 +488,62 @@ listRuns client projectId query =
         <> "/runs"
         <> queryString [("state", query.state), ("limit", fmap (Text.pack . show) query.limit)]
     )
+
+-- | One event of a run's execution trace, as the events endpoint presents it — the slice the CLI
+-- renders: the journal position (@seq@, the tail cursor), the event kind, and the server-rendered
+-- one-line @summary@. The structured payload fields exist on the wire but the CLI prints summaries.
+data RunEventView = RunEventView
+  { seq :: Int,
+    kind :: Text,
+    summary :: Text,
+    createdAt :: Text
+  }
+  deriving stock (Show)
+
+instance FromJSON RunEventView where
+  parseJSON = withObject "RunEventView" $ \object' ->
+    RunEventView
+      <$> object' .: "seq"
+      <*> object' .: "kind"
+      <*> object' .: "summary"
+      <*> object' .: "createdAt"
+
+-- | One page of a run's execution trace. The run's lifecycle @state@ rides along so a watcher's single
+-- poll both extends the trace and answers "is it still running".
+data RunEventsResponse = RunEventsResponse
+  { state :: Text,
+    events :: List RunEventView
+  }
+  deriving stock (Show)
+
+instance FromJSON RunEventsResponse where
+  parseJSON = withObject "RunEventsResponse" $ \object' ->
+    RunEventsResponse <$> object' .: "state" <*> object' .: "events"
+
+-- | Tail a run's execution trace: the journaled events after @after@ (exclusive; 0 for the start),
+-- oldest first, one server-capped page per call.
+listRunEvents :: RuntimeClient -> Text -> Text -> Int -> IO (Value, RunEventsResponse)
+listRunEvents client projectId runId after =
+  getWithRaw
+    client
+    ( "/projects/"
+        <> projectId
+        <> "/runs/"
+        <> runId
+        <> "/events"
+        <> queryString [("after", Just (Text.pack (show after)))]
+    )
+
+-- | A run's whole trace, following pages until the tail is drained (the endpoint returns at most one
+-- page per call). Returns the run's state as of the last page.
+listAllRunEvents :: RuntimeClient -> Text -> Text -> IO (Text, List RunEventView)
+listAllRunEvents client projectId runId = go 0 []
+  where
+    go after collected = do
+      (_, response) <- listRunEvents client projectId runId after
+      case response.events of
+        [] -> pure (response.state, collected)
+        events -> go (maximum (map (.seq) events)) (collected <> events)
 
 -- | Ask the runtime to cancel a run (it transitions to @cancelling@ and winds down asynchronously).
 cancelRun :: RuntimeClient -> Text -> Text -> Maybe Text -> IO ()

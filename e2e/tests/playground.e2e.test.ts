@@ -192,9 +192,13 @@ test("apply compiles, bundles, and deploys the playground", async () => {
 });
 
 test("basics.main: data/match, for, parallel for, handlers, prelude", async () => {
-  const { stdout } = await katari(["run", "basics.main", "--project", "playground"]);
+  const { stdout, stderr } = await katari(["run", "basics.main", "--project", "playground"]);
   expect(stdout).toContain("ticks=[0,1,2]");
   expect(stdout).toContain("sum(squares(4))=30");
+  // The wait loop tails the run's execution trace to stderr: the launch delegate and the final ack
+  // must have printed as summary lines while stdout stayed result-only.
+  expect(stderr).toContain("delegate api→core basics.main");
+  expect(stderr).toContain("delegateAck core→api");
 });
 
 test("tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
@@ -262,6 +266,25 @@ test("a suspended run survives a server restart (boot reactivation), then comple
   });
   expect(JSON.stringify(run.result)).toContain("safety: measure twice");
   expect(JSON.stringify(run.result)).toContain("cost: measure twice");
+
+  // The run's execution trace survived the restart too (the journal is append-only and outlives the
+  // live routing): the launch delegate opens it, the answered questions appear as escalate/escalateAck
+  // legs, the final delegateAck closes it — in strictly increasing production order, each event with a
+  // printable summary.
+  const trace = await apiGet<{
+    state: string;
+    events: { seq: number; kind: string; summary: string }[];
+  }>(`/projects/${projectId}/runs/${runId}/events`);
+  expect(trace.state).toBe("done");
+  expect(trace.events.length).toBeGreaterThanOrEqual(6);
+  expect(trace.events[0]?.kind).toBe("delegate");
+  expect(trace.events.at(-1)?.kind).toBe("delegateAck");
+  const kinds = trace.events.map((event) => event.kind);
+  expect(kinds).toContain("escalate");
+  expect(kinds).toContain("escalateAck");
+  const seqs = trace.events.map((event) => event.seq);
+  expect([...seqs].sort((left, right) => left - right)).toEqual(seqs);
+  for (const event of trace.events) expect(event.summary.length).toBeGreaterThan(0);
 });
 
 test("file upload / download / delete roundtrip", async () => {

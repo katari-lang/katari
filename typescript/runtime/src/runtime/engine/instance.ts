@@ -29,6 +29,7 @@ export function createInstance(
   args: {
     delegationId: DelegationId | null;
     callerReactor: ReactorName;
+    runId: InstanceId;
     target: DelegateTarget;
     argument: Value | null;
     agentBlockId: BlockId;
@@ -43,6 +44,7 @@ export function createInstance(
     id,
     delegationId: args.delegationId,
     callerReactor: args.callerReactor,
+    runId: args.runId,
     target: args.target,
     argument: args.argument,
     status: "running",

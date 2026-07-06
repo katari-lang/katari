@@ -25,3 +25,12 @@ export const listRunsQuerySchema = z.object({
 export type ListRunsQuery = z.infer<typeof listRunsQuerySchema>;
 
 export const runParamSchema = projectIdParamSchema.extend({ runId: z.uuid() });
+
+/** Trace tail: `after` = the last seq the client already has (exclusive; omit for the start), `limit` =
+ *  page size. A watcher polls with the growing `after`, so the default page only matters for the first
+ *  fetch of a long trace. */
+export const listRunEventsQuerySchema = z.object({
+  after: z.coerce.number().int().nonnegative().optional(),
+  limit: z.coerce.number().int().positive().max(1000).optional(),
+});
+export type ListRunEventsQuery = z.infer<typeof listRunEventsQuerySchema>;

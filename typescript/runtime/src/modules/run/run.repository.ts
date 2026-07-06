@@ -1,7 +1,8 @@
-// Run queries. The `runs` row is the single source of truth for a run — its launch metadata and its durable
-// state / outcome (state / result / error / completedAt), written by the api root as the run advances. The
-// run delegation row is pure live routing (deleted on terminal), so the read side never touches it; the API
-// reads `runs` directly, and a run reflects the engine's durable state even after a crash + recovery.
+// Run queries. The `runs` row — the run instance's extension record (`id` = that instance's id) — is the
+// single source of truth for a run: its launch metadata and its durable state / outcome (state / result /
+// error / completedAt), written by the api reactor as the run advances. The run delegation row is pure live
+// routing (deleted on terminal), so the read side never touches it; the API reads `runs` directly, and a
+// run reflects the engine's durable state even after a crash + recovery.
 
 import { and, asc, desc, eq, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";

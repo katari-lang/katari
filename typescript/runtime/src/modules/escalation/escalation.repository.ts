@@ -13,9 +13,10 @@ import { unsealFromStorage } from "../../runtime/actor/seal.js";
 import type { Value } from "../../runtime/value/types.js";
 
 /** An open escalation as the API presents it (its `argument` rendered to Json by the service). For a
- *  user-facing escalation the raiser's delegation IS the run, so `runId` links back to the run that is
- *  waiting; `snapshotId` is that run's pinned snapshot, carried so the service can resolve the request's
- *  answer schema from the right IR (null defensively means "the project head"). */
+ *  `runId` is the row's own run attribution (the escalate event's `run` stamp — the run instance id),
+ *  linking back to the run that is waiting; `snapshotId` is that run's pinned snapshot, carried so the
+ *  service can resolve the request's answer schema from the right IR (null defensively means "the project
+ *  head"). */
 export interface OpenEscalationView {
   id: string;
   request: string;
@@ -36,12 +37,12 @@ async function selectOpen(executor: Executor, conditions: SQL[]): Promise<OpenEs
       id: escalations.id,
       request: escalations.request,
       argument: escalations.argument,
-      runId: escalations.delegationId,
+      runId: escalations.runId,
       snapshotId: runs.snapshotId,
       createdAt: escalations.createdAt,
     })
     .from(escalations)
-    .leftJoin(runs, eq(runs.id, escalations.delegationId))
+    .leftJoin(runs, eq(runs.id, escalations.runId))
     .where(and(eq(escalations.toReactor, "api"), ...conditions));
   // Decrypt the at-rest question before the service redacts it for the wire (the inverse of seal-on-write).
   return rows.map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));

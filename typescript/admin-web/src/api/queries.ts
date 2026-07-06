@@ -60,6 +60,16 @@ export function useRunTree(projectId: string, runId: string, live: boolean) {
   });
 }
 
+export function useRunEvents(projectId: string, runId: string, live: boolean) {
+  return useQuery({
+    queryKey: ["projects", projectId, "runs", runId, "events"],
+    // One capped page from the start: the journal is append-only, so a full refetch while live always
+    // extends what was shown (no reordering); a run past the cap notes its truncation in the card.
+    queryFn: () => api.listRunEvents(projectId, runId, { limit: 1000 }),
+    refetchInterval: live ? LIVE_POLL_MILLISECONDS : false,
+  });
+}
+
 export function useRunEscalationAudit(projectId: string, runId: string, live: boolean) {
   return useQuery({
     queryKey: ["projects", projectId, "runs", runId, "escalations"],

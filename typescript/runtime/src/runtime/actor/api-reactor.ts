@@ -1,16 +1,23 @@
-// ApiReactor: the api management root's participation in the external-event world — the user-facing bridge.
-// Symmetric to a core instance, it both *issues* external events on a user's behalf (startRun -> delegate,
-// cancel -> terminate, answer -> escalateAck) and *reacts* to the events a run's delegation routes back to
-// the root (delegateAck -> the run finished, escalate -> a user-facing open escalation or a run failure,
-// terminateAck -> the run was cancelled). It owns its run delegation rows (it is their caller) and persists
-// them through the base class; the in-process run-result promises and the answerable open escalations are a
-// non-SoT convenience on top. The core engine never appears here, and this never drives an engine turn.
+// ApiReactor: the api-side management instances' participation in the external-event world — the
+// user-facing bridge. It manages two kinds of `api` instance:
+//
+//   - The permanent *api root* (one per project, id = the project id): the owner of project-scoped
+//     resources (uploaded file blobs). It issues nothing and belongs to no run.
+//   - One permanent *run instance* per run: the run's identity (`runs.id` IS its instance id) and the
+//     durable node the run's world hangs off. It issues the run's `delegate` (so it is the caller the
+//     delegation row names), receives the replies (delegateAck -> the run finished, escalate -> an open
+//     escalation or a run failure, terminateAck -> cancelled), and OWNS the resources the run's result
+//     ascends (scopes / blobs reown onto it, not onto the root) — so a future run deletion is one instance
+//     drop whose cascade reclaims the run's record, trace, and resources together. Unlike an execution
+//     instance it is NOT dropped at the run's terminal; its envelope `status` stays `running` (the run's
+//     real lifecycle lives on `runs.state`).
 //
 // Commands originate *outside* the substrate's react loop (a façade / test calls them), so each enqueues a
 // serial command thunk on the bus: the mutation (open / cancel / answer) and its `send` run inside a normal
 // serial turn, committed atomically like any reaction. The in-process `result` promise's resolvers are
-// captured synchronously (so a fast run cannot settle before they exist); the durable outcome is the
-// delegation row the API reads by projection — the promise is only an in-process notification hook.
+// captured synchronously (so a fast run cannot settle before they exist); the durable outcome is the `runs`
+// row — the promise is only an in-process notification hook. The core engine never appears here, and this
+// never drives an engine turn.
 
 import type { QualifiedName } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
@@ -24,6 +31,7 @@ import {
   type EscalationId,
   type InstanceId,
   newDelegationId,
+  newInstanceId,
   type SnapshotId,
 } from "../ids.js";
 import { valueToJson } from "../value/codec.js";
@@ -66,19 +74,23 @@ export class ApiReactor extends Reactor {
   readonly name: ReactorName = "api";
 
   /** The in-process run-result *notification hook* (NOT the source of truth — a run's outcome is its durable
-   *  delegation row, read by projection). It lets an in-process caller `await` a run it started: a
-   *  delegateAck resolves it, a panic / unhandled escape rejects it, a terminate (cancel) rejects it with
-   *  `RunCancelledError`. Absent for a recovered run (no in-process caller is awaiting it). */
-  private readonly runResolvers: Record<DelegationId, (value: Value) => void> = {};
-  private readonly runRejecters: Record<DelegationId, (error: Error) => void> = {};
+   *  `runs` row, read by projection). Keyed by the run's id (its run instance id). It lets an in-process
+   *  caller `await` a run it started: a delegateAck resolves it, a panic / unhandled escape rejects it, a
+   *  terminate (cancel) rejects it with `RunCancelledError`. Absent for a recovered run (no in-process
+   *  caller is awaiting it). */
+  private readonly runResolvers: Record<InstanceId, (value: Value) => void> = {};
+  private readonly runRejecters: Record<InstanceId, (error: Error) => void> = {};
   /** Run-root requests the engine could not handle, kept open (their run-root instance stays suspended)
    *  until a user answers. The durable escalation row is owned by core (the raiser); this is the answering
-   *  projection, rehydrated on recovery from core's user-facing open escalations. */
-  private readonly openEscalations: Record<EscalationId, OpenEscalation & { run: DelegationId }> =
-    {};
+   *  projection, rehydrated on recovery from core's user-facing open escalations. `delegation` routes the
+   *  `escalateAck` back down; `run` attributes the audit row (and cleans up on the run's settle). */
+  private readonly openEscalations: Record<
+    EscalationId,
+    OpenEscalation & { run: InstanceId; delegation: DelegationId }
+  > = {};
   /** A cancelling run's reason — held only to decorate the in-process `RunCancelledError` (the durable
    *  reason is `runs.cancelReason`). Kept only while the run is tracked in-process, so it cannot leak. */
-  private readonly cancelReasons: Record<DelegationId, string | undefined> = {};
+  private readonly cancelReasons: Record<InstanceId, string | undefined> = {};
   /** This turn's `runs`-table writes — the api root owns the metadata sidecar (it persists them atomically
    *  with the run's `delegate` / `terminate` / `escalateAck`, so the API never sees a run without metadata).
    *  Flushed and cleared by `persist`. */
@@ -96,26 +108,28 @@ export class ApiReactor extends Reactor {
     super(pool);
   }
 
-  /** The api root runs no engine threads — its turn writes the run delegations it owns plus the run-metadata
-   *  sidecar / audit it staged this turn (so they commit atomically with the events it produced). Starting a
-   *  run first ensures the api root's own `instances` envelope, before `flushDelegations` writes the run
-   *  delegation whose caller FK points at it (the api root has no producing `delegate` turn to create it). */
+  /** The api reactor runs no engine threads — its turn writes the instance envelopes it staged (the root's
+   *  idempotent upsert + any run instance created this turn), the run delegations those instances own, and
+   *  the run-metadata / audit rows it staged (so they commit atomically with the events it produced). The
+   *  base's FK order does the rest: envelopes flush before the delegation rows whose caller FK points at a
+   *  run instance, and `putRun` runs after `persistBase`, so the `runs` row's FK to its instance is
+   *  satisfied within the same commit. */
   async persist(tx: PersistenceTx): Promise<void> {
-    // Always stage the api root's envelope (an idempotent upsert), so the generic half is present before any FK
-    // that points at it — a run delegation's caller, or a file-upload blob's owner. The api root is the
-    // project's permanent management root, so ensuring it every turn is correct and needs no per-FK flag; the
-    // base then writes that envelope plus the run delegations it owns. It raises no escalations and drops
-    // nothing; the run-metadata sidecar is the api's own data.
-    // The api root is summoned by nobody, so its ambient summoner is `null`.
+    // Always stage the api root's envelope (an idempotent upsert), so the generic half is present before any
+    // FK that points at it — a file-upload blob's owner. The root is summoned by nobody and belongs to no
+    // single run, so both ambients are `null`. Run instances are staged by `startRun`'s command turn, not
+    // here — their envelopes are immutable after creation.
     this.markInstance(this.apiRootId, {
       delegationId: null,
       callerReactor: null,
+      runId: null,
       status: "running",
     });
     await this.persistBase(tx.base);
-    // The run launch row first (a later outcome update targets it); then this turn's state / outcome updates
-    // (the durable SoT, since the run delegation row was just deleted by the base on its terminal). A cancel's
-    // reason rides on its `cancelling` outcome, so the cancel is one UPDATE, not two.
+    // The run launch row first (a later outcome update targets it, and its `id` FK needs the run instance
+    // envelope persistBase just wrote); then this turn's state / outcome updates (the durable SoT, since the
+    // run delegation row was just deleted by the base on its terminal). A cancel's reason rides on its
+    // `cancelling` outcome, so the cancel is one UPDATE, not two.
     for (const run of this.pendingRunStarts) await tx.api.putRun(run);
     for (const outcome of this.pendingRunOutcomes) await tx.api.setRunOutcome(outcome);
     for (const audit of this.pendingAudits) await tx.api.putRunEscalationAudit(audit);
@@ -133,8 +147,7 @@ export class ApiReactor extends Reactor {
     for (const key of Object.keys(this.openEscalations)) {
       delete this.openEscalations[key as EscalationId];
     }
-    for (const key of Object.keys(this.cancelReasons))
-      delete this.cancelReasons[key as DelegationId];
+    for (const key of Object.keys(this.cancelReasons)) delete this.cancelReasons[key as InstanceId];
     this.pendingRunStarts = [];
     this.pendingRunOutcomes = [];
     this.pendingAudits = [];
@@ -168,42 +181,51 @@ export class ApiReactor extends Reactor {
    *  reactivation, so its caller is told to re-query rather than left hanging. */
   poisonRunPromises(error: Error): void {
     for (const reject of Object.values(this.runRejecters)) reject(error);
-    for (const key of Object.keys(this.runResolvers)) delete this.runResolvers[key as DelegationId];
-    for (const key of Object.keys(this.runRejecters)) delete this.runRejecters[key as DelegationId];
+    for (const key of Object.keys(this.runResolvers)) delete this.runResolvers[key as InstanceId];
+    for (const key of Object.keys(this.runRejecters)) delete this.runRejecters[key as InstanceId];
   }
 
   // ─── commands (the api root issuing external events on a user's behalf) ─────────────────────────
 
-  /** Start a run: summon a root instance for `qualifiedName@snapshot`, recording its `runs` metadata sidecar
-   *  atomically with the run's `delegate` (so the API never sees a run without its launch metadata, nor vice
-   *  versa). Returns the run delegation (the `cancelRun` handle), an in-process `result` promise (a non-SoT
-   *  notification hook), and `started` — which resolves once the launch commit is durable (the façade awaits
-   *  it so a just-returned run is immediately visible). The resolvers are captured now so a fast run cannot
-   *  settle before they exist. */
+  /** Start a run: mint its permanent run instance (whose id IS the run's id), record its `runs` metadata
+   *  extension, and summon a core root for `qualifiedName@snapshot` — the instance envelope, the `runs` row,
+   *  the run delegation and its `delegate` all land in one commit (so the API never sees a run without its
+   *  metadata, nor vice versa). Returns the run id, an in-process `result` promise (a non-SoT notification
+   *  hook), and `started` — which resolves once the launch commit is durable (the façade awaits it so a
+   *  just-returned run is immediately visible). The resolvers are captured now so a fast run cannot settle
+   *  before they exist. */
   startRun(
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
     argument: Value | null,
     name: string,
-  ): { run: DelegationId; result: Promise<Value>; started: Promise<void> } {
+  ): { run: InstanceId; result: Promise<Value>; started: Promise<void> } {
+    const run = newInstanceId();
     const delegation = newDelegationId();
     const result = new Promise<Value>((resolve, reject) => {
-      this.runResolvers[delegation] = resolve;
-      this.runRejecters[delegation] = reject;
+      this.runResolvers[run] = resolve;
+      this.runRejecters[run] = reject;
     });
     const started = this.commands.enqueue(() => {
-      // Record the run's metadata sidecar before the delegate is produced, so the run survives a crash before
-      // its root is even created. The run delegation row itself is opened by the base from the `send` below (the
-      // api root is its caller), atomically in the same commit — so metadata and delegation land together.
+      // The run instance: permanent (never dropped at the run's terminal), summoned by nobody (both routing
+      // ambients null), and its own trace root (`runId` = itself). Its envelope is immutable after this turn.
+      this.markInstance(run, {
+        delegationId: null,
+        callerReactor: null,
+        runId: run,
+        status: "running",
+      });
+      // The run's metadata extension (`runs`, keyed by the instance id) rides in the same commit.
       this.pendingRunStarts.push({
-        run: delegation,
+        run,
         name,
         qualifiedName,
         snapshotId: snapshot,
         argument,
       });
-      // The api root only ever talks to core (a run is a delegate to a core instance), so it stamps `to` here.
-      // The run delegation is owned by (issued from) the api root.
+      // The api reactor only ever talks to core (a run is a delegate to a core instance), so it stamps `to`
+      // here. The delegation is issued by (caller-owned by) the run instance — the base opens the row from
+      // this send — and the delegate seeds the run's trace: every event in its causal tree inherits `run`.
       this.send(
         {
           kind: "delegate",
@@ -212,23 +234,32 @@ export class ApiReactor extends Reactor {
           argument,
           from: this.name,
           to: "core",
+          run,
         },
-        this.apiRootId,
+        run,
       );
     });
-    return { run: delegation, result, started };
+    return { run, result, started };
+  }
+
+  /** The run's single live delegation (a run instance issues exactly one), or `undefined` once the run is
+   *  terminal (the row is retired with the outcome). Read from the base's caller-owned rows, so it survives
+   *  recovery (loadBase reloads them) without any run-local bookkeeping. */
+  private liveRunDelegation(run: InstanceId): DelegationId | undefined {
+    return this.issuedDelegationsOf(run)[0]?.delegation;
   }
 
   /** Request a run's cancellation: move it to `cancelling`, record the cancel reason on its `runs` row, and
-   *  terminate its root — all in one commit. The cascade tears the tree down; the terminateAck moves it to
-   *  `gone` and rejects the run with `RunCancelledError`. Always produce the terminate (so a recovered,
+   *  terminate its root — all in one commit. The cascade tears the tree down; the terminateAck retires the
+   *  delegation and rejects the run with `RunCancelledError`. Always produce the terminate (so a recovered,
    *  still-live run is cancellable). The in-process reason (to decorate the error) is kept only while the run
    *  is tracked here, so it cannot leak. Returns when the cancel commit is durable. */
-  cancelRun(run: DelegationId, reason?: string): Promise<void> {
+  cancelRun(run: InstanceId, reason?: string): Promise<void> {
     return this.commands.enqueue(() => {
-      // A run that already reached a terminal state (done / failed / gone) cannot be cancelled — its row is
-      // gone from the live map, so do not stamp a cancel reason or emit a redundant terminate for it.
-      if (!this.hasLiveDelegation(run)) return;
+      // A run that already reached a terminal state cannot be cancelled — its delegation is gone from the
+      // live rows, so do not stamp a cancel reason or emit a redundant terminate for it.
+      const delegation = this.liveRunDelegation(run);
+      if (delegation === undefined) return;
       if (this.runResolvers[run] !== undefined) this.cancelReasons[run] = reason;
       // The run delegation is moved to `cancelling` by the base from the `send(terminate)` below.
       // The cancel reason rides on the `cancelling` outcome, so the run's state + reason commit as one UPDATE.
@@ -239,7 +270,7 @@ export class ApiReactor extends Reactor {
         errorMessage: null,
         cancelReason: reason ?? null,
       });
-      this.send({ kind: "terminate", delegation: run, from: this.name, to: "core" });
+      this.send({ kind: "terminate", delegation, from: this.name, to: "core", run });
     });
   }
 
@@ -254,11 +285,12 @@ export class ApiReactor extends Reactor {
       if (open === undefined) return;
       this.send({
         kind: "escalateAck",
-        delegation: open.run,
+        delegation: open.delegation,
         escalation,
         value,
         from: this.name,
         to: "core",
+        run: open.run,
       });
       this.pendingAudits.push({
         run: open.run,
@@ -279,16 +311,19 @@ export class ApiReactor extends Reactor {
     }));
   }
 
-  /** Reload the api root's warm state from durable rows. The run delegations it issued (`from = api`, so a
-   *  recovered run is cancellable and can record its terminal state) reload through the base. Its *answerable*
-   *  set — escalations addressed to it (`to = api`, raised by a run root) — is its own data: every such row is
-   *  user-facing by construction (core opens a row only for an answerable request; a panic / control escape
-   *  reaching the run root fails the run, it is never an open escalation), so no re-classification is needed. */
+  /** Reload the api reactor's warm state from durable rows. The run delegations its run instances issued
+   *  (`from = api`, so a recovered run is cancellable and can record its terminal state) reload through the
+   *  base. Its *answerable* set — escalations addressed to it (`to = api`, raised by a run root) — is its
+   *  own data: every such row is user-facing by construction (core opens a row only for an answerable
+   *  request; a panic / control escape reaching the run root fails the run, it is never an open escalation),
+   *  so no re-classification is needed. The run instances themselves need no warm reload — they are pure
+   *  durable structure (FK anchors); everything warm about a run hangs off its delegation and these rows. */
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
     for (const open of await loader.api.answerableEscalations()) {
       this.openEscalations[open.escalation] = {
-        run: open.delegation,
+        run: open.run,
+        delegation: open.delegation,
         escalation: open.escalation,
         request: open.request as QualifiedName,
         argument: open.argument,
@@ -304,18 +339,21 @@ export class ApiReactor extends Reactor {
   // outcome inherits the same sticky-terminal protection (a second ack for an already-terminal run records
   // nothing). The in-process result promise settles strictly post-commit in `afterCommit`.
 
-  /** A run finished: reown its result to the api root and record the `done` outcome (only if the retirement
-   *  fired — a no-op means the run already reached a terminal state, whose durable outcome stands). */
+  /** A run finished: reown its result onto the run's own instance and record the `done` outcome (only if
+   *  the retirement fired — a no-op means the run already reached a terminal state, whose durable outcome
+   *  stands). */
   protected onDelegateAck(
     event: Extract<ExternalEvent, { kind: "delegateAck" }>,
     context: AckContext,
   ): void {
     // The same two-step reown a core caller does for a sub-call — keeps a run that returns a closure / blob
-    // alive instead of dropping it (the run-root instance released it to in-transit as it retired).
-    this.reownIncoming(event.value, this.apiRootId);
+    // alive instead of dropping it (the core root released it to in-transit as it retired). The owner is the
+    // *run instance* (permanent, = event.run), not the project root: the result's resources live exactly as
+    // long as the run's record, so a future run deletion reclaims them by cascade.
+    this.reownIncoming(event.value, event.run);
     if (context.settled) {
       this.pendingRunOutcomes.push({
-        run: event.delegation,
+        run: event.run,
         state: "done",
         result: event.value,
         errorMessage: null,
@@ -332,7 +370,7 @@ export class ApiReactor extends Reactor {
   ): void {
     if (context.settled) {
       this.pendingRunOutcomes.push({
-        run: event.delegation,
+        run: event.run,
         state: "cancelled",
         result: null,
         errorMessage: null,
@@ -347,11 +385,12 @@ export class ApiReactor extends Reactor {
   protected onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
     const ask = event.ask;
     if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
-      // Reown the question's resources to the api root: the raiser released them on send, and the root now
-      // holds the open escalation across an arbitrary wait for the user's answer.
-      if (ask.argument !== null) this.reownIncoming(ask.argument, this.apiRootId);
+      // Reown the question's resources onto the run's instance: the raiser released them on send, and the
+      // run now holds the open escalation across an arbitrary wait for the user's answer.
+      if (ask.argument !== null) this.reownIncoming(ask.argument, event.run);
       this.openEscalations[event.escalation] = {
-        run: event.delegation,
+        run: event.run,
+        delegation: event.delegation,
         escalation: event.escalation,
         request: ask.request,
         argument: ask.argument,
@@ -362,12 +401,18 @@ export class ApiReactor extends Reactor {
     // an already-terminal run retires nothing (its outcome is already durable), so guard the outcome + teardown.
     if (this.retireDelegation(event.delegation)) {
       this.pendingRunOutcomes.push({
-        run: event.delegation,
+        run: event.run,
         state: "error",
         result: null,
         errorMessage: escalationErrorMessage(event),
       });
-      this.send({ kind: "terminate", delegation: event.delegation, from: this.name, to: "core" });
+      this.send({
+        kind: "terminate",
+        delegation: event.delegation,
+        from: this.name,
+        to: "core",
+        run: event.run,
+      });
     }
   }
 
@@ -377,30 +422,30 @@ export class ApiReactor extends Reactor {
   afterCommit(event: ExternalEvent): void {
     switch (event.kind) {
       case "delegateAck":
-        this.settleRun(event.delegation, { value: event.value });
+        this.settleRun(event.run, { value: event.value });
         break;
       case "terminateAck":
-        this.settleRun(event.delegation, {
-          error: new RunCancelledError(this.cancelReasons[event.delegation]),
+        this.settleRun(event.run, {
+          error: new RunCancelledError(this.cancelReasons[event.run]),
         });
         break;
       case "escalate":
         if (isRunFailure(event)) {
-          this.settleRun(event.delegation, { error: new Error(escalationErrorMessage(event)) });
+          this.settleRun(event.run, { error: new Error(escalationErrorMessage(event)) });
         }
         break;
     }
   }
 
-  /** Settle a run-root delegation either way and drop its handlers + any of its still-open escalations. */
-  private settleRun(delegation: DelegationId, outcome: { value: Value } | { error: Error }): void {
-    const resolver = this.runResolvers[delegation];
-    const rejecter = this.runRejecters[delegation];
-    delete this.runResolvers[delegation];
-    delete this.runRejecters[delegation];
-    delete this.cancelReasons[delegation];
+  /** Settle a run either way and drop its handlers + any of its still-open escalations. */
+  private settleRun(run: InstanceId, outcome: { value: Value } | { error: Error }): void {
+    const resolver = this.runResolvers[run];
+    const rejecter = this.runRejecters[run];
+    delete this.runResolvers[run];
+    delete this.runRejecters[run];
+    delete this.cancelReasons[run];
     for (const [escalation, open] of Object.entries(this.openEscalations)) {
-      if (open.run === delegation) delete this.openEscalations[escalation as EscalationId];
+      if (open.run === run) delete this.openEscalations[escalation as EscalationId];
     }
     if ("value" in outcome) resolver?.(outcome.value);
     else rejecter?.(outcome.error);

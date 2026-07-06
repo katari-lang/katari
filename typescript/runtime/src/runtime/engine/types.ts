@@ -312,6 +312,12 @@ export type CoreInstance = {
    *  *envelope* (`instances.caller_reactor`, base-owned) — the callee's ambient, uniform across reactor kinds
    *  — and seeded back onto this in-memory field on load. */
   callerReactor: ReactorName;
+  /** The run (its permanent api-side run instance's id) this activation runs under — the trace context,
+   *  recorded from the summoning `delegate`'s `run` exactly like `callerReactor` from its `from`. Every
+   *  external event this instance emits is stamped with it (the emit edge in `StepContext.emit`), so the
+   *  event journal attributes each event to its run without a tree walk. Persisted on the generic envelope
+   *  (`instances.run_id`). */
+  runId: InstanceId;
   /** What this instance runs — `(name, snapshot)` or a closure; the snapshot lives here. */
   target: DelegateTarget;
   /** The argument this activation was summoned with (the spawning `delegate.argument`). */

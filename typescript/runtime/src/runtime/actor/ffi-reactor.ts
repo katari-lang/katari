@@ -95,6 +95,7 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
       delegation: row.delegation,
       instance: row.instance,
       caller: row.caller,
+      run: row.run,
       status: row.status,
       // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
       payload: { snapshot: row.snapshot, key: row.key, argument: null },

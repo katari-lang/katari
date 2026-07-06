@@ -45,17 +45,19 @@ const named = (name: string) => ({
 
 describe("assembleDelegationTree", () => {
   test("a run chain assembles root → callee → issued children, with labels per kind", () => {
+    // The run's id is its permanent api-side run instance ("run-i"); the tree roots at the single
+    // delegation that instance issued.
     const rows = {
       delegations: [
-        delegation({ id: "run-1", callerInstanceId: "api-root" }),
+        delegation({ id: "d-root", callerInstanceId: "run-i" }),
         delegation({ id: "d-sub", callerInstanceId: "i-main", createdAt: at(1) }),
         delegation({ id: "d-ffi", callerInstanceId: "i-sub", toReactor: "ffi", createdAt: at(2) }),
       ],
       instances: [
-        instance({ id: "api-root", kind: "api" }),
+        instance({ id: "run-i", kind: "api" }),
         instance({
           id: "i-main",
-          delegationId: "run-1",
+          delegationId: "d-root",
           target: named("main.main"),
           snapshotId: "snap-1",
         }),
@@ -71,9 +73,9 @@ describe("assembleDelegationTree", () => {
       escalations: [],
     };
 
-    const tree = assembleDelegationTree("run-1", rows);
+    const tree = assembleDelegationTree("run-i", rows);
     expect(tree).not.toBeNull();
-    expect(tree?.delegationId).toBe("run-1");
+    expect(tree?.delegationId).toBe("d-root");
     expect(tree?.instance?.target).toEqual({ kind: "agent", name: "main.main" });
     const sub = tree?.instance?.children[0];
     expect(sub?.instance?.target).toEqual({ kind: "agent", name: "main.helper" });
@@ -83,9 +85,9 @@ describe("assembleDelegationTree", () => {
   });
 
   test("an issued-but-unaccepted delegate is a node without an instance", () => {
-    const tree = assembleDelegationTree("run-1", {
-      delegations: [delegation({ id: "run-1", callerInstanceId: "api-root" })],
-      instances: [instance({ id: "api-root", kind: "api" })],
+    const tree = assembleDelegationTree("run-i", {
+      delegations: [delegation({ id: "d-root", callerInstanceId: "run-i" })],
+      instances: [instance({ id: "run-i", kind: "api" })],
       escalations: [],
     });
     expect(tree?.instance).toBeNull();
@@ -115,14 +117,14 @@ describe("assembleDelegationTree", () => {
         createdAt: at(2),
       },
     ];
-    const tree = assembleDelegationTree("run-1", {
+    const tree = assembleDelegationTree("run-i", {
       delegations: [
-        delegation({ id: "run-1", callerInstanceId: "api-root" }),
+        delegation({ id: "d-root", callerInstanceId: "run-i" }),
         delegation({ id: "d-sub", callerInstanceId: "i-main" }),
       ],
       instances: [
-        instance({ id: "api-root", kind: "api" }),
-        instance({ id: "i-main", delegationId: "run-1", target: named("main.main") }),
+        instance({ id: "run-i", kind: "api" }),
+        instance({ id: "i-main", delegationId: "d-root", target: named("main.main") }),
         instance({ id: "i-sub", delegationId: "d-sub", target: named("main.helper") }),
       ],
       escalations: escalationRows,
@@ -136,15 +138,15 @@ describe("assembleDelegationTree", () => {
   });
 
   test("parallel children come back oldest first, and an ffi call surfaces its own status", () => {
-    const tree = assembleDelegationTree("run-1", {
+    const tree = assembleDelegationTree("run-i", {
       delegations: [
-        delegation({ id: "run-1", callerInstanceId: "api-root" }),
+        delegation({ id: "d-root", callerInstanceId: "run-i" }),
         delegation({ id: "d-late", callerInstanceId: "i-main", createdAt: at(9) }),
         delegation({ id: "d-early", callerInstanceId: "i-main", toReactor: "ffi", createdAt: at(1) }),
       ],
       instances: [
-        instance({ id: "api-root", kind: "api" }),
-        instance({ id: "i-main", delegationId: "run-1", target: named("main.main") }),
+        instance({ id: "run-i", kind: "api" }),
+        instance({ id: "i-main", delegationId: "d-root", target: named("main.main") }),
         instance({
           id: "i-call",
           delegationId: "d-early",
@@ -162,8 +164,9 @@ describe("assembleDelegationTree", () => {
 
   test("a corrupt cycle truncates instead of hanging", () => {
     // The root's own delegation id reappears among its instance's issued children — impossible in a
-    // healthy store, but the guard must degrade it to a truncated branch, never recurse forever.
-    const tree = assembleDelegationTree("run-1", {
+    // healthy store, but the guard must degrade it to a truncated branch, never recurse forever. (The
+    // run id here is "i-loop": the corrupt row makes the run's "instance" also the caller of the root.)
+    const tree = assembleDelegationTree("i-loop", {
       delegations: [
         delegation({ id: "run-1", callerInstanceId: "i-loop" }),
         delegation({ id: "d-loop", callerInstanceId: "i-loop" }),
