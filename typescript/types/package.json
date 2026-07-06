@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/types",
-  "version": "0.1.0-rc6",
+  "version": "0.1.0-rc7",
   "description": "Shared type definitions for Katari Language",
   "type": "module",
   "main": "src/index.ts",

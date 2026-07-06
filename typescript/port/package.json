@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/port",
-  "version": "0.1.0-rc6",
+  "version": "0.1.0-rc7",
   "description": "Katari FFI port: the sidecar runtime a user's external (FFI) handlers import to register and serve over IPC.",
   "type": "module",
   "main": "src/index.ts",
