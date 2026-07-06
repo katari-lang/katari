@@ -22,7 +22,7 @@
   },
   "homepage": "https://katari-lang.dev",
   "bugs": "https://github.com/katari-lang/katari/issues",
-  "optionalDependencies": {
+  "dependencies": {
     "@katari-lang/bundle": "workspace:*"
   }
 }

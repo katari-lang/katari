@@ -26,6 +26,7 @@ module Katari.Cli.Common
     RuntimeContext (..),
     withRuntimeContext,
     makeRuntimeClient,
+    requireRuntimeAuth,
     tryLoadNearestConfig,
     warnCompilerMismatch,
     assembleSourcesOrExit,
@@ -180,9 +181,26 @@ makeRuntimeClient subcommand global output config = do
   url <- case global.url <|> fromEnvironment <|> fmap (\projectConfig -> projectConfig.runtime.url) config of
     Just resolved -> pure resolved
     Nothing -> dieIn subcommand "no --url given, KATARI_API_URL unset, and no surrounding katari.toml's [runtime].url found"
-  token <- runtimeAuthFromEnvironment
+  token <- requireRuntimeAuth subcommand
   manager <- newTlsManager
-  pure (withTrace (verboseLog output) (newRuntimeClient manager url token))
+  pure (withTrace (verboseLog output) (newRuntimeClient manager url (Just token)))
+
+-- | The runtime authenticates every request with a Bearer token read from @KATARI_API_KEY@; return
+-- it, or exit with a specific, actionable message. Doing this up front means a missing key fails fast
+-- and locally instead of surfacing as an opaque HTTP 401 from the server.
+requireRuntimeAuth :: Text -> IO Text
+requireRuntimeAuth subcommand = do
+  token <- runtimeAuthFromEnvironment
+  case token of
+    Just value -> pure value
+    Nothing ->
+      dieIn
+        subcommand
+        ( "KATARI_API_KEY is not set, but the runtime requires it as a Bearer token.\n"
+            <> "Set it to the same key the runtime was started with, then retry:\n"
+            <> "  export KATARI_API_KEY=<key>        (bash / zsh)\n"
+            <> "  set -x KATARI_API_KEY <key>        (fish)"
+        )
 
 -- | The nearest @katari.toml@ walking up from the current directory, when there is one. A present
 -- but broken config is a loud exit-2 — silently ignoring it would send the command at the wrong

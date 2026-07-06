@@ -36,11 +36,10 @@ import Katari.Cli.Api
     listHeadModules,
     listProjects,
     newRuntimeClient,
-    runtimeAuthFromEnvironment,
     updateProject,
     withTrace,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, requireRuntimeAuth, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
 import Katari.Cli.Options (GlobalOptions (..), directoryOption, globalOptionsParser)
 import Katari.Cli.Output (OutputContext, newOutputContext, printText, progress, verboseLog)
 import Katari.Data.IR (IRModule)
@@ -52,7 +51,7 @@ import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), lockf
 import Katari.Project.Upload (ModuleHash (..), UploadPlan (..), hashModule, planUpload)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Options.Applicative
-import System.Directory (canonicalizePath, doesFileExist)
+import System.Directory (canonicalizePath, doesFileExist, findExecutable)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -110,9 +109,9 @@ run options = do
   -- 3. Connect to the runtime and diff the build against its current head.
   let config = resolved.rootPackage.config :: ProjectConfig
   url <- resolveRuntimeUrl options.global.url config.runtime.url
-  token <- runtimeAuthFromEnvironment
+  token <- requireRuntimeAuth "apply"
   -- Reuse the resolution manager so a single apply opens one TLS connection pool, not two.
-  let client = withTrace (verboseLog context) (newRuntimeClient manager url token)
+  let client = withTrace (verboseLog context) (newRuntimeClient manager url (Just token))
   let name = fromMaybe config.package.name options.projectName
   readme <- readProjectReadme root
   (_, projects) <- listProjects client
@@ -217,7 +216,16 @@ packagesFromResolved resolved =
 -- @{ bundle }@ stdout — the compiled sidecar, or 'Nothing' when no package has one.
 runKatariBundle :: FilePath -> List BundlePackage -> IO (Maybe Value)
 runKatariBundle root packages = do
-  (bundleCommand, prefixArguments) <- resolveBundleInvocation root
+  (bundleCommand, prefixArguments) <-
+    resolveBundleInvocation root >>= \case
+      Just invocation -> pure invocation
+      Nothing ->
+        dieIn
+          "apply"
+          ( "the sidecar bundler (katari-bundle) was not found.\n"
+              <> "Install it with `pnpm add @katari-lang/bundle` (or `npm i @katari-lang/bundle`),\n"
+              <> "or set KATARI_BUNDLE_BIN to its cli.mjs."
+          )
   let arguments =
         prefixArguments
           <> concatMap
@@ -236,10 +244,14 @@ runKatariBundle root packages = do
       Left decodeError -> dieIn "apply" ("katari-bundle returned unparseable JSON: " <> Text.pack decodeError)
       Right (response :: BundleResponse) -> pure response.bundle
 
--- | Where the bundler comes from, in npm-convention order (a local install beats a global one):
+-- | Where the bundler comes from, as @Just (command, prefixArgs)@ in npm-convention order (a local
+-- install beats a global one), or @Nothing@ when none of the three resolves (the caller turns that
+-- into a clear error):
 --
---   1. @KATARI_BUNDLE_BIN@ — the explicit override; a JS file (@.js@ \/ @.mjs@ \/ @.cjs@) runs
---      through @node@ (a dev checkout's @dist\/cli.mjs@), anything else spawns directly.
+--   1. @KATARI_BUNDLE_BIN@ — the explicit override, honoured only when it points at a file that
+--      exists. A stale value (e.g. a shell universal variable left over from an old checkout) falls
+--      through instead of spawning a dead path. A JS file (@.js@ \/ @.mjs@ \/ @.cjs@) runs through
+--      @node@ (a dev checkout's @dist\/cli.mjs@), anything else spawns directly.
 --   2. A project-local npm install: @node_modules\/.bin\/katari-bundle@, walking up from the project
 --      root like node's own resolution (the katari project may sit inside a workspace whose
 --      @node_modules@ lives higher). What that entry IS differs by package manager: npm symlinks
@@ -248,23 +260,32 @@ runKatariBundle root packages = do
 --      SyntaxError). Canonicalizing first tells the two apart.
 --   3. @katari-bundle@ on PATH (a global install, or an npx\/npm-script parent that prepended the
 --      local @.bin@ itself).
-resolveBundleInvocation :: FilePath -> IO (String, List String)
+resolveBundleInvocation :: FilePath -> IO (Maybe (String, List String))
 resolveBundleInvocation root = do
   binOverride <- lookupEnv "KATARI_BUNDLE_BIN"
-  case binOverride of
+  overridePath <- case binOverride of
+    Just path -> do
+      exists <- doesFileExist path
+      pure (if exists then Just path else Nothing)
+    Nothing -> pure Nothing
+  case overridePath of
     Just path
-      | isJsFile path -> pure ("node", [path])
-      | otherwise -> pure (path, [])
+      | isJsFile path -> pure (Just ("node", [path]))
+      | otherwise -> pure (Just (path, []))
     Nothing -> do
       localBin <- findLocalBundleBin root
       case localBin of
         Just path -> do
           resolved <- canonicalizePath path
-          pure $
+          pure . Just $
             if isJsFile resolved
               then ("node", [resolved])
               else (path, [])
-        Nothing -> pure ("katari-bundle", [])
+        Nothing -> do
+          onPath <- findExecutable "katari-bundle"
+          case onPath of
+            Just executable -> pure (Just (executable, []))
+            Nothing -> pure Nothing
   where
     isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
 

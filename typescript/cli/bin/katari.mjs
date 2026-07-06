@@ -76,16 +76,18 @@ function collectBinDirs(startFile) {
   return dirs;
 }
 
-// @katari-lang/bundle is an optionalDependency — users who don't use
-// sidecars don't need it, but commands that do (e.g. `katari apply`)
-// fail opaquely if `katari-bundle` cannot be resolved. When the package
-// is present, point KATARI_BUNDLE_BIN at its CLI entry; the bin script
-// lives next to the resolved module entry inside dist/.
+// @katari-lang/bundle is a regular dependency of this package, so `apply`
+// always has a bundler. Point KATARI_BUNDLE_BIN at its CLI entry (next to the
+// resolved module inside dist/) so the katari binary uses this exact copy —
+// this is what makes a global install work, where the project directory has no
+// local node_modules/.bin/katari-bundle to walk to. If resolution somehow
+// fails, the katari binary resolves the bundler itself and owns the precise
+// "bundler not found" error, so we do not second-guess it here.
 let bundleBin = null;
 try {
   bundleBin = join(dirname(require.resolve("@katari-lang/bundle")), "cli.mjs");
 } catch {
-  // Package not installed — spawn anyway and hint on failure below.
+  // Unresolvable (a broken install); leave it to the katari binary.
 }
 
 const env = { ...process.env };
@@ -115,13 +117,6 @@ child.on("close", (code, signal) => {
   if (signal) {
     process.kill(process.pid, signal);
   } else {
-    if (code !== 0 && bundleBin === null) {
-      console.error(
-        "\nkatari: hint: @katari-lang/bundle is not installed.\n" +
-          "If this command requires sidecar bundling, install it with:\n" +
-          "  pnpm add @katari-lang/bundle\n",
-      );
-    }
     process.exit(code ?? 1);
   }
 });

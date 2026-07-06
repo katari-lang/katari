@@ -158,7 +158,8 @@ withTrace :: (Text -> IO ()) -> RuntimeClient -> RuntimeClient
 withTrace sink client = client {trace = sink}
 
 -- | Read the bearer token from @KATARI_API_KEY@, treating unset / empty as 'Nothing'. The runtime
--- does not require auth today, so this is sent only when present.
+-- requires this on every request, so callers enforce presence (see @requireRuntimeAuth@) rather than
+-- send an unauthenticated request that the server rejects with a 401.
 runtimeAuthFromEnvironment :: IO (Maybe Text)
 runtimeAuthFromEnvironment = do
   value <- lookupEnv "KATARI_API_KEY"
