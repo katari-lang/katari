@@ -47,7 +47,7 @@
         "katari.server.path": {
           "type": "string",
           "default": "katari-lsp",
-          "description": "Path to the katari-lsp executable (looked up on PATH if not absolute)."
+          "description": "Path to the katari-lsp executable. Leave unset to use the server bundled with the extension (falling back to a katari-lsp on PATH); set an absolute path or a PATH name to override it with your own build."
         },
         "katari.server.args": {
           "type": "array",
@@ -68,7 +68,9 @@
     "build": "node scripts/bundle.mjs",
     "typecheck": "tsc -p . --noEmit",
     "vscode:prepublish": "NODE_ENV=production node scripts/bundle.mjs",
+    "server:copy": "node scripts/copy-server-binary.mjs",
     "package": "vsce package --no-dependencies --out katari-vscode.vsix",
+    "package:local": "node scripts/copy-server-binary.mjs && node scripts/bundle.mjs && vsce package --no-dependencies --out katari-vscode.vsix",
     "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
   },
   "dependencies": {

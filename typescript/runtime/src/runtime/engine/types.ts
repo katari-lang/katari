@@ -275,10 +275,9 @@ export type CancelExit =
   | { kind: "returnInstance"; value: Value }
   /** An agent being terminated: emit `terminateAck` and retire the instance (no delegateAck). */
   | { kind: "terminateInstance" }
-  /** A handle's `break`: complete the handle (ack its parent) with the break `value`. */
-  | { kind: "completeWith"; value: Value }
-  /** A for-loop's `break-for`: stop iterating and finish (build the mapping + run the then-clause). */
-  | { kind: "finishFor" };
+  /** A `handle`'s `break` or a `for`'s `break-for`: cancel the subtree, then complete the thread (ack its
+   *  parent) with the break `value` — bypassing any then-clause. */
+  | { kind: "completeWith"; value: Value };
 
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 

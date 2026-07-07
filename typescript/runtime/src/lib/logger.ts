@@ -7,6 +7,9 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   error: 40,
 };
 
+/** The record fields the logger owns; a colliding meta/binding key is relocated, never dropped. */
+const RESERVED_FIELDS = ["level", "time", "message"] as const;
+
 export interface Logger {
   debug(message: string, meta?: Record<string, unknown>): void;
   info(message: string, meta?: Record<string, unknown>): void;
@@ -30,15 +33,16 @@ export function createLogger({ level, bindings = {} }: LoggerOptions): Logger {
 
   const emit = (logLevel: LogLevel, message: string, meta?: Record<string, unknown>): void => {
     if (LEVEL_ORDER[logLevel] < threshold) return;
-    // Reserved fields are spread LAST so a caller-supplied binding/meta key (e.g. `message` from
-    // `{ message: err.message }`) can never clobber the event's own level/time/message.
-    const record = {
-      ...bindings,
-      ...meta,
-      level: logLevel,
-      time: new Date().toISOString(),
-      message,
-    };
+    const record: Record<string, unknown> = { ...bindings, ...meta };
+    // A caller-supplied binding/meta key must never clobber the event's own level/time/message — but it
+    // must not be silently dropped either (a `{ message: err.message }` would vanish, hiding the real
+    // error). Relocate any collision under a `meta.`-prefixed key, then stamp the reserved fields.
+    for (const key of RESERVED_FIELDS) {
+      if (key in record) record[`meta.${key}`] = record[key];
+    }
+    record.level = logLevel;
+    record.time = new Date().toISOString();
+    record.message = message;
     const sink = logLevel === "error" || logLevel === "warn" ? console.error : console.log;
     sink(JSON.stringify(record));
   };

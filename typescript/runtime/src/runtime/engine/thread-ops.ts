@@ -249,12 +249,6 @@ function finishCancel(ctx: StepContext, thread: Thread): void {
     case "completeWith":
       completeThread(ctx, thread, exit.value);
       return;
-    case "finishFor":
-      if (thread.kind === "for") {
-        thread.status = "running"; // resumes normal completion (the then-clause)
-        finishFor(ctx, thread, forBlock(ctx, thread).thenClause);
-      }
-      return;
   }
 }
 
@@ -680,8 +674,10 @@ function forAsk(
     return;
   }
   if (ask.kind === "break-for" && ask.target === thread.blockId) {
-    // Early exit: cancel all the in-flight iterations, then finish with the mapping collected so far.
-    beginCancel(ctx, thread, { kind: "finishFor" });
+    // Early exit with the break value: cancel all the in-flight iterations, then complete with that
+    // value. The then-clause reduces the collected mapping only on natural exhaustion; a `break-for`
+    // bypasses it entirely, exactly as a `handle`'s `break` bypasses its then-clause.
+    beginCancel(ctx, thread, { kind: "completeWith", value: ask.value });
     return;
   }
   // return / break to an ancestor, or a request: bubble up.

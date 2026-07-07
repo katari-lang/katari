@@ -62,7 +62,7 @@ export const projectService = {
         logger.warn("failed to delete a deleted project's blob bytes", {
           projectId,
           blobId,
-          message: error instanceof Error ? error.message : String(error),
+          error: error instanceof Error ? error.message : String(error),
         });
       });
     }

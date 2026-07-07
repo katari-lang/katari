@@ -95,6 +95,11 @@ export function RunDetailPage() {
       />
 
       <div className="flex flex-col gap-4">
+        {/* Order: open escalations first — the only actionable card, and shown only while the run is
+            blocked on an answer, so it never coexists with the result/error below (promoting it costs
+            nothing). Then the outcome (result / error), the static inputs (argument / metadata), and
+            finally the run's interaction and history — answered escalations → delegation tree → the
+            full execution trace last, as the deepest detail. */}
         {openForRun.map((escalation) => (
           <EscalationCard
             key={escalation.id}
@@ -103,45 +108,6 @@ export function RunDetailPage() {
             showRunLink={false}
           />
         ))}
-
-        {/* The delegation rows are live routing, deleted on terminal — so the tree only exists while
-            the run does. A live run whose tree has not landed yet (the delegate is between commits)
-            shows a quiet placeholder instead of flashing the card in and out. */}
-        {live && (
-          <Card>
-            <CardHeader title="Delegation tree" />
-            <CardBody>
-              {tree.data?.tree != null ? (
-                <DelegationTree root={tree.data.tree} />
-              ) : (
-                <p className="text-sm text-fg-faint">Waiting for the first delegation to land…</p>
-              )}
-            </CardBody>
-          </Card>
-        )}
-
-        {(trace.data?.events.length ?? 0) > 0 && (
-          <Card>
-            <CardHeader
-              title="Trace"
-              actions={
-                <CopyButton
-                  value={JSON.stringify(trace.data?.events ?? [], null, 2)}
-                  label="Copy trace as JSON"
-                />
-              }
-            />
-            <CardBody className="overflow-x-auto">
-              {/* The events page is capped; a run past it still shows its beginning, flagged here. */}
-              {(trace.data?.events.length ?? 0) >= 1000 && (
-                <p className="pb-2 text-xs text-fg-faint">
-                  Showing the first 1000 events — the full trace is available over the API.
-                </p>
-              )}
-              <RunTrace events={trace.data?.events ?? []} projectId={projectId} />
-            </CardBody>
-          </Card>
-        )}
 
         {current.state === "error" && current.errorMessage !== null && (
           <Card className="border-danger">
@@ -226,6 +192,45 @@ export function RunDetailPage() {
                   </div>
                 </div>
               ))}
+            </CardBody>
+          </Card>
+        )}
+
+        {/* The delegation rows are live routing, deleted on terminal — so the tree only exists while
+            the run does. A live run whose tree has not landed yet (the delegate is between commits)
+            shows a quiet placeholder instead of flashing the card in and out. */}
+        {live && (
+          <Card>
+            <CardHeader title="Delegation tree" />
+            <CardBody>
+              {tree.data?.tree != null ? (
+                <DelegationTree root={tree.data.tree} />
+              ) : (
+                <p className="text-sm text-fg-faint">Waiting for the first delegation to land…</p>
+              )}
+            </CardBody>
+          </Card>
+        )}
+
+        {(trace.data?.events.length ?? 0) > 0 && (
+          <Card>
+            <CardHeader
+              title="Trace"
+              actions={
+                <CopyButton
+                  value={JSON.stringify(trace.data?.events ?? [], null, 2)}
+                  label="Copy trace as JSON"
+                />
+              }
+            />
+            <CardBody className="overflow-x-auto">
+              {/* The events page is capped; a run past it still shows its beginning, flagged here. */}
+              {(trace.data?.events.length ?? 0) >= 1000 && (
+                <p className="pb-2 text-xs text-fg-faint">
+                  Showing the first 1000 events — the full trace is available over the API.
+                </p>
+              )}
+              <RunTrace events={trace.data?.events ?? []} projectId={projectId} />
             </CardBody>
           </Card>
         )}

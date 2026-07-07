@@ -1,6 +1,8 @@
-# Build the katari CLI binary per platform and attach the tarballs (+ sha256) to the tag's GitHub
-# Release. release-npm.yml listens for this workflow's success and packages the same tarballs as
-# the @katari-lang/cli-<platform> npm packages.
+# Build the katari CLI + katari-lsp binaries per platform and attach the tarballs (+ sha256) to the
+# tag's GitHub Release. Two consumers listen for this workflow's success: release-npm.yml packages the
+# `katari-<version>-<platform>.tar.gz` CLI tarballs as the @katari-lang/cli-<platform> npm packages,
+# and release-vsix.yml bundles the `katari-lsp-<version>-<platform>.tar.gz` server tarballs into the
+# platform-specific VSIXes.
 
 name: release-katari
 
@@ -77,21 +79,27 @@ jobs:
             ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
 
       - name: Build
-        run: stack build katari-cli:katari --copy-bins --local-bin-path ./bin
+        run: stack build katari-cli:katari katari-lsp:katari-lsp --copy-bins --local-bin-path ./bin
 
       - name: Strip (linux)
         if: runner.os == 'Linux'
-        run: strip ./bin/katari
+        run: strip ./bin/katari ./bin/katari-lsp
 
       - name: Package
         id: package
         shell: bash
         run: |
           VERSION="${TAG#v}"
-          TARBALL="katari-$VERSION-${{ matrix.platform }}.tar.gz"
-          tar czf "$TARBALL" -C ./bin katari
-          shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
-          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          # The CLI tarball (consumed by release-npm) and the LSP tarball (consumed by release-vsix)
+          # each hold a single binary; distinct name prefixes keep the two consumers' globs disjoint.
+          CLI_TARBALL="katari-$VERSION-${{ matrix.platform }}.tar.gz"
+          LSP_TARBALL="katari-lsp-$VERSION-${{ matrix.platform }}.tar.gz"
+          tar czf "$CLI_TARBALL" -C ./bin katari
+          tar czf "$LSP_TARBALL" -C ./bin katari-lsp
+          shasum -a 256 "$CLI_TARBALL" > "$CLI_TARBALL.sha256"
+          shasum -a 256 "$LSP_TARBALL" > "$LSP_TARBALL.sha256"
+          echo "cli_tarball=$CLI_TARBALL" >> "$GITHUB_OUTPUT"
+          echo "lsp_tarball=$LSP_TARBALL" >> "$GITHUB_OUTPUT"
         env:
           TAG: ${{ needs.verify-versions.outputs.tag }}
 
@@ -100,5 +108,7 @@ jobs:
         with:
           tag_name: ${{ needs.verify-versions.outputs.tag }}
           files: |
-            ${{ steps.package.outputs.tarball }}
-            ${{ steps.package.outputs.tarball }}.sha256
+            ${{ steps.package.outputs.cli_tarball }}
+            ${{ steps.package.outputs.cli_tarball }}.sha256
+            ${{ steps.package.outputs.lsp_tarball }}
+            ${{ steps.package.outputs.lsp_tarball }}.sha256

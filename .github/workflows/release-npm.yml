@@ -87,8 +87,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p .binaries
+          # Match only the CLI tarballs (`katari-<version>-...`), not the LSP tarballs
+          # (`katari-lsp-...`) release-vsix consumes: the version starts with a digit, so the class
+          # excludes the `l` of `lsp`.
           for attempt in 1 2 3 4 5; do
-            if gh release download "$TAG" --dir .binaries --pattern 'katari-*.tar.gz'; then
+            if gh release download "$TAG" --dir .binaries --pattern 'katari-[0-9]*.tar.gz'; then
               exit 0
             fi
             echo "release assets not ready yet (attempt $attempt); retrying in 30s"

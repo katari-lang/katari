@@ -248,7 +248,7 @@ export async function activateInFlightProjects(logger: Logger): Promise<void> {
     } catch (error) {
       logger.error("failed to resume a project with in-flight runs", {
         projectId,
-        message: error instanceof Error ? error.message : String(error),
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   }

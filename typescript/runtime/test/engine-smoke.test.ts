@@ -299,6 +299,113 @@ describe("in-memory core", () => {
     });
   });
 
+  test("breaks out of a for from inside a match arm, returning the break value past the then-clause", async () => {
+    // agent pick(xs) {
+    //   for (x in xs) { match x { 2 => break-for 99; v => next-for v } } then (result) { -1 }
+    // }
+    // Mirrors the real `infer_with_tools` tool loop: earlier iterations `next-for` (so a mapping is
+    // collected), then a match arm `break-for`s a value. The break must short-circuit the whole loop to
+    // that value — bypassing BOTH the then-clause reducer (-1) and the collected mapping ([1]). A prior
+    // bug ran the then-clause on break-for, so the loop yielded the fallback and the break value was lost.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "getField", source: 10, field: "xs", output: 11 },
+              { kind: "call", target: 2, output: 12 },
+              { kind: "exit", target: 0, value: 12 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        2: {
+          block: {
+            kind: "for",
+            parallel: false,
+            source: 11,
+            initialStates: [],
+            body: 3,
+            thenClause: { body: 7 },
+          },
+          parameters: {},
+        },
+        // for body: call into a match over the iterator (its arms raise break-for / next-for)
+        3: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [{ kind: "call", target: 4, output: 30 }],
+          },
+          parameters: { iterator: 20 },
+        },
+        4: {
+          block: {
+            kind: "match",
+            subject: 20,
+            arms: [
+              { pattern: { kind: "literal", value: { kind: "integer", value: 2 } }, body: 5 },
+              { pattern: { kind: "variable", variable: 40 }, body: 6 },
+            ],
+            fallback: null,
+          },
+          parameters: {},
+        },
+        // arm x == 2: break-for 99 (exit targeting the for block)
+        5: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 50, value: { kind: "integer", value: 99 } },
+              { kind: "exit", target: 2, value: 50 },
+            ],
+          },
+          parameters: {},
+        },
+        // arm v: next-for v (collect it into the mapping the break must discard)
+        6: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [{ kind: "continue", target: 2, value: 40, modifiers: [] }],
+          },
+          parameters: {},
+        },
+        // then-clause: the fallback the break must bypass (reads the mapping via `result`, ignores it)
+        7: {
+          block: {
+            kind: "sequence",
+            result: 71,
+            operations: [{ kind: "loadLiteral", output: 71, value: { kind: "integer", value: -1 } }],
+          },
+          parameters: { result: 70 },
+        },
+      },
+      entries: { [createAgentName("pick")]: 0 },
+      names: {},
+    };
+
+    const argument: Value = {
+      kind: "record",
+      fields: {
+        xs: {
+          kind: "array",
+          elements: [
+            { kind: "integer", value: 1 },
+            { kind: "integer", value: 2 },
+            { kind: "integer", value: 3 },
+          ],
+        },
+      },
+    };
+    await expect(run(ir, "pick", argument)).resolves.toEqual({ kind: "integer", value: 99 });
+  });
+
   test("selects a match arm and binds its pattern variable", async () => {
     // agent classify(n) { match n { 0 => "zero"; m => "other" } }   (over the record field `n`)
     const ir: IRModule = {

@@ -17,7 +17,7 @@ try {
   await ensureBlobStoreReady(blobStore);
 } catch (err) {
   logger.error("startup failed; not starting server", {
-    message: err instanceof Error ? err.message : String(err),
+    error: err instanceof Error ? (err.stack ?? err.message) : String(err),
   });
   process.exit(1);
 }
@@ -32,7 +32,7 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
   // project's failure is already logged inside.
   void activateInFlightProjects(logger).catch((error: unknown) => {
     logger.error("boot-time project resume failed", {
-      message: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? (error.stack ?? error.message) : String(error),
     });
   });
 });
@@ -42,7 +42,7 @@ const shutdown = (signal: NodeJS.Signals): void => {
   server.close(async (err) => {
     await closeDb().catch(() => {});
     if (err) {
-      logger.error("error during shutdown", { message: err.message });
+      logger.error("error during shutdown", { error: err.message });
       process.exit(1);
     }
     process.exit(0);
