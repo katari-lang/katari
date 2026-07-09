@@ -1,9 +1,9 @@
 // An in-memory `Persistence` that actually *stores* the serialised rows (unlike `InMemoryPersistence`'s
-// no-op), so the recovery path — commit at the turn boundary, then reload + reactivate in a fresh actor —
+// no-op), so the recovery path — commit at the batch boundary, then reload + reactivate in a fresh actor —
 // is exercisable without Postgres. The DB-backed `DbPersistence` mirrors this against real tables; keeping
 // a faithful in-memory twin lets recovery be unit-tested deterministically.
 //
-// One turn = one `transaction`: the substrate hands the reactor + outbox a `PersistenceTx` whose methods
+// One batch = one `transaction`: the substrate hands the reactors + outbox a `PersistenceTx` whose methods
 // mutate these maps. There is no real atomicity to enforce here (a single-threaded twin), so the tx just
 // applies each write as it is called; the FK / cascade order is the caller's (the reactor writes its instance
 // before the rows that reference it, and `dropInstance` cascades last).
@@ -306,10 +306,14 @@ export class StoringPersistence implements Persistence {
     };
   }
 
+  /** How many commits (transactions) ran — what batching tests assert (one batch = one commit). */
+  commitCount = 0;
+
   async transaction(
     _projectId: ProjectId,
     body: (tx: PersistenceTx) => Promise<void>,
   ): Promise<void> {
+    this.commitCount += 1;
     await body(this.tx());
   }
 

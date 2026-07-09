@@ -344,10 +344,46 @@ describe("recovery", () => {
   });
 
   test("startRun writes the run's metadata sidecar atomically with its delegation", async () => {
-    // C3: the engine writes the `runs` metadata row in the same commit as the run's `delegate`, so after the
-    // launch commit (`started`) a run is durable with BOTH its metadata and its delegation — never one alone.
+    // C3: the engine writes the `runs` metadata row in the same commit as the run's `delegate`, so once
+    // the launch batch commits (`started`) a LIVE run is durable with BOTH its metadata and its
+    // delegation — never one alone. The run must still be live at the commit for the delegation row to
+    // be observable (batching folds a COMPLETED run's whole routing lifecycle into the launch commit —
+    // see the net-zero test below), so this fixture suspends on an unhandled request.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 20 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("ask_value") },
+                argument: 20,
+                output: 21,
+              },
+              { kind: "exit", target: 0, value: 21 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("ask_value"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("ask_value")]: 5,
+      },
+      names: {},
+    };
     const persistence = new StoringPersistence();
-    const actor = makeActor(constantIr(), persistence);
+    const actor = makeActor(ir, persistence);
     const argument = { kind: "integer" as const, value: 3 };
     const { run, result, started } = actor.startRun(
       createAgentName("main"),
@@ -357,6 +393,7 @@ describe("recovery", () => {
     );
     void result.catch(() => {});
     await started;
+    await waitUntil(() => (actor.listOpenEscalations().length > 0 ? true : undefined));
 
     const meta = persistence.peekRun(run);
     expect(meta?.name).toBe("nightly");
@@ -364,8 +401,32 @@ describe("recovery", () => {
     expect(meta?.snapshotId).toBe(SNAPSHOT);
     expect(meta?.argument).toEqual(argument);
     expect(meta?.cancelReason).toBeNull();
-    // The delegation row committed in the same launch commit — both durable, atomically.
+    // The delegation row committed with the metadata — both durable, atomically.
     expect(persistence.runDelegationOf(run)).toBeDefined();
+  });
+
+  test("a run completing within its launch batch commits ONCE, writing no routing rows (net-zero)", async () => {
+    // The launch command and the whole run fold into one batch: every delegation / instance / outbox
+    // row is created and torn down in memory, never touching the store. What commits is exactly the
+    // permanent record — the `runs` outcome and the journal — in a single transaction.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(constantIr(), persistence);
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).resolves.toEqual({ kind: "integer", value: 7 });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "integer", value: 7 });
+    expect(persistence.commitCount).toBe(1);
+    expect(persistence.runDelegationOf(run)).toBeUndefined();
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+    // The journal still records every hop (the trace is complete even though the outbox saw nothing).
+    expect(persistence.journalFor(run).map((event) => event.kind)).toEqual([
+      "delegate",
+      "delegateAck",
+    ]);
   });
 
   test("records a failed run durably in Layer 1 (delegation failed + message) and tears down its root", async () => {
@@ -512,16 +573,40 @@ describe("recovery", () => {
   });
 
   test("a poisoned commit drops the warm state and reactivates from durable — the run still completes", async () => {
-    // The run's `delegate` commits (turn 1), then the run-root's create + complete turn fails its commit
-    // (turn 2). The actor must not advance on that failure: it drops the warm engine state and reactivates
-    // from durable (the still-running delegation row + the unconsumed delegate in the outbox), replays the
-    // turn — now succeeding — and the run completes. The in-process result promise is rejected on the poison
-    // (a non-SoT hook), so the durable `runs` outcome is the proof the run finished.
+    // The run's launch is already durable (a seeded delegation + outbox delegate, as after a crash); the
+    // batch that RUNS it then fails its commit. The actor must not advance on that failure: it drops the
+    // warm engine state, reactivates from durable (the still-unconsumed delegate replays), re-runs the
+    // batch — now succeeding — and the run completes, recorded durably on the `runs` row.
     const store = new StoringPersistence();
-    const persistence = new FailingPersistence(store, 2);
+    const run = newInstanceId();
+    const delegation = newDelegationId();
+    const target = { kind: "named" as const, name: createAgentName("main"), snapshot: SNAPSHOT };
+    store.seedDelegation(delegation, {
+      caller: run,
+      fromReactor: "api",
+      toReactor: "core",
+    });
+    store.seedRun(run, {
+      name: "main",
+      qualifiedName: createAgentName("main"),
+      snapshotId: SNAPSHOT,
+      argument: null,
+    });
+    store.seedOutbox({
+      seq: newOutboxSeq(),
+      event: {
+        kind: "delegate",
+        from: "api",
+        to: "core",
+        run,
+        delegation,
+        target,
+        argument: null,
+      },
+    });
+    const persistence = new FailingPersistence(store, 1);
     const actor = makeActor(constantIr(), persistence);
-    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
-    await expect(result).rejects.toThrow(/reset after a commit failure/);
+    await actor.activate();
 
     const done = await waitUntil(() => {
       const record = store.peekRun(run);

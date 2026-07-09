@@ -1,10 +1,14 @@
 // Substrate: the bus. The sole owner of the transactional machinery every reactor's turn flows through — the
-// serial mailbox, the lazy-load gate, routing by `to`, and the one atomic commit per turn. A turn is: run the
-// reacting reactor (it mutates its warm state and buffers `send`s), then in a single transaction persist that
-// reactor and the transactional outbox (consume the inbound row, produce the buffered sends), then deliver
-// the produced events back into the mailbox and run the reactor's strictly-post-commit side effects. Holding
-// all of this in one place is what makes "one turn = one atomic commit" enforceable, and keeps reactors
-// DB-free (see docs/2026-06-25-reactor-persist-redesign.md).
+// serial mailbox, the lazy-load gate, routing by `to`, and the one atomic commit per BATCH of turns. A turn
+// runs the reacting reactor (it mutates its warm state and buffers `send`s); consecutive turns fold into one
+// batch — each turn's produced events join the same mailbox and are consumed by later turns of the same
+// batch — and the batch commits once: every touched reactor's accumulated state, the consumed inbound rows,
+// outbox rows only for events still unprocessed at the batch bound, and the journal of every event sent. An
+// event produced AND consumed within one batch never touches the outbox table, and an instance born and torn
+// down within one batch never touches its tables — the transactional-outbox guarantee holds at the batch
+// boundary (a crash mid-batch replays the whole batch from its durable inputs). Holding all of this in one
+// place is what makes "one batch = one atomic commit" enforceable, and keeps reactors DB-free (see
+// docs/2026-06-25-reactor-persist-redesign.md).
 //
 // Routing is self-contained: an inbound external event names its destination (`event.to`), so the substrate
 // dispatches purely by `registry[event.to]` — no api|core oracle. FFI completions and api commands are turns
@@ -24,6 +28,11 @@ import type { ResourcePool } from "./resource-pool.js";
  *  gives up in-process. Backoff caps the spin; a persistent failure stops here and is retried only on the
  *  next activation. (A *react* failure — a deterministic bug — is never retried; see `onReactFailure`.) */
 const MAX_COMMIT_RETRIES = 8;
+
+/** The most turns one batch folds into a single commit. Bounds the replay cost after a failure (the whole
+ *  batch re-runs from its durable inputs) and the memory a burst can pin; a longer burst simply splits,
+ *  its seam events riding the outbox like any inter-batch traffic. */
+const MAX_BATCH_TURNS = 256;
 
 /** Exponential backoff (ms) for the nth commit retry, capped — so a repeated commit failure does not spin. */
 function commitBackoffMs(attempt: number): number {
@@ -48,15 +57,35 @@ export interface SubstrateHost {
   onPoison(error: unknown): void;
 }
 
-/** One unit of serial work: run `reactor` (its `react` for an inbound event, or a command / FFI closure),
- *  then commit it. `event` is set only for an inbound external event — it consumes `consumed` and gets
- *  `afterCommit`. `settle` is set only for an api command, whose out-of-loop caller awaits the turn. */
+/** One unit of serial work: run `reactor` (its `react` for an inbound event, or a command / FFI closure).
+ *  `event` is set only for an inbound external event — it consumes `consumed` and gets `afterCommit`.
+ *  `settle` is set only for an api command, whose out-of-loop caller awaits the enclosing batch's commit. */
 interface Turn {
   reactor: Reactor;
   run: () => void | Promise<void>;
   event: ExternalEvent | null;
   consumed: OutboxSeq | null;
   settle: { resolve: () => void; reject: (error: unknown) => void } | null;
+}
+
+/** What a batch accumulates across its turns, flushed by one `commitBatch`. */
+interface Batch {
+  /** Reactors that reacted this batch — each persists its accumulated dirty state once. */
+  touched: Set<Reactor>;
+  /** Durable inbound rows the batch's turns consumed (rows from EARLIER commits — an in-batch event has
+   *  no row; see `pendingProduced`). */
+  consumed: OutboxSeq[];
+  /** Events produced this batch and not (yet) consumed by one of its own turns: the only ones that need
+   *  outbox rows at commit. A later turn of the same batch consuming one deletes it from here instead of
+   *  adding to `consumed` — the produce/consume pair cancels to zero rows. */
+  pendingProduced: Map<OutboxSeq, ExternalEvent>;
+  /** Every event sent this batch, in production order — the run-trace journal keeps ALL hops, including
+   *  the in-batch ones that never touch the outbox. */
+  journal: ExternalEvent[];
+  /** Post-commit notifications (FFI / transport dispatches, run-promise settlement), in turn order. */
+  afterCommits: Array<{ reactor: Reactor; event: ExternalEvent }>;
+  /** Command awaiters resolved once the batch is durable (rejected if it fails). */
+  settles: Array<NonNullable<Turn["settle"]>>;
 }
 
 export class Substrate {
@@ -137,15 +166,17 @@ export class Substrate {
     return { reactor, run: () => reactor.react(event), event, consumed, settle: null };
   }
 
-  /** The serial loop: load once, then run + commit one turn at a time. Reentrancy-guarded so only one pump
-   *  drains the mailbox; the events a turn produces are delivered back into the mailbox and drained here too.
+  /** The serial loop: load once, then run + commit one BATCH at a time. Reentrancy-guarded so only one
+   *  pump drains the mailbox; the events a batch's turns produce are delivered back into the mailbox and
+   *  join the same batch (up to its bound).
    *
-   *  Failure handling (the "warm store advances only when the durable commit advances" rule): a turn runs
-   *  `react` (mutating the warm store) *before* its commit. If that commit fails, the warm store has advanced
-   *  past durable — so the actor is poisoned: reject this turn's awaiter and every other pending command,
-   *  drop the warm state, and reactivate from durable (the unconsumed outbox row replays the lost turn). A
-   *  `reactivate` failure (e.g. the DB is unreachable) is caught the same way — pending commands reject, the
-   *  load is retried on the next call — so a commit / load error is never an unhandled rejection. */
+   *  Failure handling (the "warm store advances only when the durable commit advances" rule): a batch's
+   *  turns run `react` (mutating the warm store) *before* the batch commit. If anything fails, the warm
+   *  store has advanced past durable — so the actor is poisoned: reject the batch's awaiters and every
+   *  other pending command, drop the warm state, and reactivate from durable (the batch's unconsumed
+   *  inbound rows replay the lost work). A `reactivate` failure (e.g. the DB is unreachable) is caught the
+   *  same way — pending commands reject, the load is retried on the next call — so a commit / load error
+   *  is never an unhandled rejection. */
   private async pump(): Promise<void> {
     if (this.pumping) return;
     this.pumping = true;
@@ -153,9 +184,7 @@ export class Substrate {
     try {
       await this.ensureLoaded();
       while (this.mailbox.length > 0) {
-        const turn = this.mailbox.shift();
-        if (turn === undefined) break;
-        const outcome = await this.runOne(turn);
+        const outcome = await this.runBatch();
         if (outcome !== "ok") {
           after = outcome;
           break;
@@ -186,41 +215,85 @@ export class Substrate {
   /** The backoff (ms) the next `retry` re-pump waits — set by `onRetryableFailure`, consumed by `pump`. */
   private pendingBackoffMs = 0;
 
-  /** Run one turn through its three phases — react / commit / afterCommit — each with its own failure
-   *  policy. Returns how `pump` should proceed. */
-  private async runOne(turn: Turn): Promise<TurnOutcome> {
-    // Phase 1 — react: compute the reaction (mutate warm state, buffer sends). A *transient* infra failure
-    // here (a `TransientError` — e.g. an IR DB read blip on a resume turn) is retryable exactly like a commit
-    // failure: nothing committed, so drop + reload + replay. Any other throw is a deterministic bug (a
-    // deterministic failure is supposed to surface as a panic, not a throw) — never replay-loop it.
-    try {
-      await turn.run();
-    } catch (reactError) {
-      if (isTransientError(reactError)) return this.onRetryableFailure(turn, reactError, "react");
-      return this.onReactFailure(turn, reactError);
-    }
-    // Phase 2 — commit: the one atomic durable write. A failure here means the warm store advanced past
-    // durable, so it must be dropped + rebuilt; the (unconsumed) event replays as the retry.
-    try {
-      await this.commit(turn.reactor, turn.consumed);
-    } catch (commitError) {
-      return this.onRetryableFailure(turn, commitError, "commit");
-    }
-    if (turn.consumed !== null) this.commitRetries.delete(turn.consumed); // committed → clear its retry count
-    // Phase 3 — afterCommit: strictly-post-commit side effects (FFI dispatch, etc.). The turn is already
-    // durable, so a failure here must NOT poison — it would discard a committed turn. Log and move on; the
-    // side effect (e.g. an FFI dispatch) is re-driven on the next reactivation from durable state.
-    if (turn.event !== null) {
+  /** A one-shot bound for the NEXT batch, set after a mid-batch react failure: replaying just the good
+   *  prefix isolates the offending event at position 0 of a following batch, where the precise
+   *  single-turn policies (dead-event consumption, bounded commit retries) apply. */
+  private nextBatchLimit: number | null = null;
+
+  /** Run one batch through its three phases — the react loop / one commit / the afterCommits — each with
+   *  its own failure policy. Returns how `pump` should proceed. */
+  private async runBatch(): Promise<TurnOutcome> {
+    const limit = Math.max(1, this.nextBatchLimit ?? MAX_BATCH_TURNS);
+    this.nextBatchLimit = null;
+    const batch: Batch = {
+      touched: new Set(),
+      consumed: [],
+      pendingProduced: new Map(),
+      journal: [],
+      afterCommits: [],
+      settles: [],
+    };
+    // Phase 1 — the react loop: run consecutive turns against the warm store, folding each turn's
+    // produced events back into the mailbox where later turns of this same batch consume them. A
+    // *transient* infra failure (a `TransientError` — e.g. an IR DB read blip on a resume turn) is
+    // retryable exactly like a commit failure: nothing committed, so drop + reload + replay. Any other
+    // throw is a deterministic bug (a deterministic failure is supposed to surface as a panic, not a
+    // throw) — never replay-loop it.
+    let position = 0;
+    while (this.mailbox.length > 0 && position < limit) {
+      const turn = this.mailbox.shift();
+      if (turn === undefined) break;
+      // An event produced within THIS batch has no durable row — consuming it just cancels the pending
+      // produce (the pair nets to zero outbox writes). A row from an earlier commit is consumed for real.
+      if (turn.consumed !== null && !batch.pendingProduced.delete(turn.consumed)) {
+        batch.consumed.push(turn.consumed);
+      }
       try {
-        turn.reactor.afterCommit(turn.event);
+        await turn.run();
+      } catch (reactError) {
+        if (position === 0) {
+          // Nothing else is in flight: the single-turn policies apply precisely.
+          if (isTransientError(reactError))
+            return this.onRetryableFailure(turn, reactError, "react");
+          return this.onReactFailure(turn, reactError);
+        }
+        return this.onMidBatchFailure(batch, turn, reactError, position);
+      }
+      batch.touched.add(turn.reactor);
+      for (const event of turn.reactor.drainSends()) {
+        const seq = newOutboxSeq();
+        batch.pendingProduced.set(seq, event);
+        batch.journal.push(event);
+        this.mailbox.push(this.eventTurn(event, seq));
+      }
+      if (turn.event !== null)
+        batch.afterCommits.push({ reactor: turn.reactor, event: turn.event });
+      if (turn.settle !== null) batch.settles.push(turn.settle);
+      position += 1;
+    }
+    if (position === 0) return "ok";
+    // Phase 2 — commit: the one atomic durable write for the whole batch. A failure here means the warm
+    // store advanced past durable, so it must be dropped + rebuilt; the (unconsumed) inbound rows replay.
+    try {
+      await this.commitBatch(batch);
+    } catch (commitError) {
+      return this.onBatchCommitFailure(batch, commitError);
+    }
+    for (const seq of batch.consumed) this.commitRetries.delete(seq); // committed → clear retry counts
+    // Phase 3 — afterCommit: strictly-post-commit side effects (FFI dispatch, run-promise settlement).
+    // The batch is already durable, so a failure here must NOT poison — it would discard committed work.
+    // Log and move on; the side effect is re-driven on the next reactivation from durable state.
+    for (const { reactor, event } of batch.afterCommits) {
+      try {
+        reactor.afterCommit(event);
       } catch (afterError) {
-        this.logger.error("post-commit side effect failed (turn already committed)", {
-          kind: turn.event.kind,
+        this.logger.error("post-commit side effect failed (batch already committed)", {
+          kind: event.kind,
           error: messageOf(afterError),
         });
       }
     }
-    turn.settle?.resolve();
+    for (const settle of batch.settles) settle.resolve();
     return "ok";
   }
 
@@ -274,6 +347,62 @@ export class Substrate {
     return "stop";
   }
 
+  /** A react failure at batch position N > 0: the earlier turns' warm effects are uncommitted, so
+   *  everything drops and replays — bounded, by replaying the good PREFIX as its own batch first
+   *  (`nextBatchLimit`). The offending event then sits at position 0 of a following batch, where the
+   *  precise single-turn policies (dead-event consumption for a deterministic bug, bounded retries for a
+   *  transient) take over. */
+  private onMidBatchFailure(
+    batch: Batch,
+    turn: Turn,
+    error: unknown,
+    position: number,
+  ): TurnOutcome {
+    this.logger.warn("a turn failed mid-batch; replaying the prefix as its own batch", {
+      position,
+      error: messageOf(error),
+    });
+    turn.settle?.reject(error);
+    for (const settle of batch.settles) settle.reject(error);
+    this.dropWarm(error);
+    this.nextBatchLimit = Math.max(1, position);
+    return "reload";
+  }
+
+  /** A batch commit failure: like a single turn's — drop + reload, replaying from the batch's durable
+   *  inputs — with the bounded retry count attributed to the batch's first consumed row (an
+   *  originated-only batch has nothing durable to count against; its rejected callers retry). */
+  private onBatchCommitFailure(batch: Batch, error: unknown): TurnOutcome {
+    for (const settle of batch.settles) settle.reject(error);
+    this.dropWarm(error);
+    const origin = batch.consumed[0];
+    if (origin === undefined) {
+      this.logger.warn("commit failed for an originated-only batch; reloading", {
+        error: messageOf(error),
+      });
+      return "reload";
+    }
+    const attempts = (this.commitRetries.get(origin) ?? 0) + 1;
+    if (attempts <= MAX_COMMIT_RETRIES) {
+      this.commitRetries.set(origin, attempts);
+      this.pendingBackoffMs = commitBackoffMs(attempts);
+      this.logger.warn("batch commit failed; will replay from durable inputs", {
+        attempts,
+        error: messageOf(error),
+      });
+      return "retry";
+    }
+    this.commitRetries.delete(origin);
+    this.logger.error(
+      "batch commit kept failing; giving up in-process (retries on next activation)",
+      {
+        attempts,
+        error: messageOf(error),
+      },
+    );
+    return "stop";
+  }
+
   /** Consume a dead inbound event (a minimal commit) so reactivation does not replay it. If even this fails
    *  (the DB is down), the event survives and replays on the next activation — logged, not looped. */
   private async consumeDeadEvent(seq: OutboxSeq): Promise<void> {
@@ -304,29 +433,39 @@ export class Substrate {
     this.mailbox.length = 0;
   }
 
-  /** Commit one reactor turn atomically: drain its buffered sends, mint an outbox seq per produced event,
-   *  then write the reactor's own state plus the outbox bookkeeping (consume the inbound row, produce the
-   *  sends) in one transaction. Deliver the produced events back into the mailbox after the commit. */
-  private async commit(reactor: Reactor, consumed: OutboxSeq | null): Promise<void> {
-    const sends = reactor.drainSends();
-    const produced: OutboxMessage[] = sends.map((event) => ({ seq: newOutboxSeq(), event }));
+  /** Commit one batch atomically: every touched reactor's accumulated state, then the pool, the consumed
+   *  inbound rows, outbox rows ONLY for events still unprocessed at the batch bound (a produce/consume
+   *  pair inside the batch cancelled to nothing), and the journal of everything sent this batch — the run
+   *  trace keeps every hop, including the in-batch ones the outbox never sees. */
+  private async commitBatch(batch: Batch): Promise<void> {
+    const produced: OutboxMessage[] = [];
+    for (const [seq, event] of batch.pendingProduced) {
+      produced.push({ seq, event });
+    }
     let reclaimedBytes: BlobId[] = [];
     await this.persistence.transaction(this.projectId, async (tx) => {
-      await reactor.persist(tx);
-      // The pool flushes after the reactor so an in-transit scope (released as the run / sub-call result
+      // Reactors persist in first-touch (= causal) order, so a producer's rows land before a consumer's
+      // FK-referencing ones — the same order the per-turn commits used to write them in.
+      for (const reactor of batch.touched) {
+        await reactor.persist(tx);
+      }
+      // The pool flushes after the reactors so an in-transit scope (released as the run / sub-call result
       // left its instance) is re-written AFTER that instance's drop cascade removed its stale row. It reports
       // the blobs whose rows it dropped, whose bytes are freed below once this commit is durable.
       reclaimedBytes = await this.pool.persist(tx);
-      if (consumed !== null) await tx.outbox.consumeOutbox(consumed);
+      for (const seq of batch.consumed) {
+        await tx.outbox.consumeOutbox(seq);
+      }
       if (produced.length > 0) await tx.outbox.produceOutbox(produced);
-      // The journal — the run's execution trace — mirrors the produce in the same commit: an event is
-      // journaled exactly iff it was durably sent (a failed commit rolls both back). After the reactor's
-      // persist, so a run's launching commit writes its `runs` row before the FK-referencing trace rows.
-      if (produced.length > 0) await tx.journal.appendEvents(sends);
+      // The journal — the run's execution trace — commits with the work it records: an event is journaled
+      // exactly iff the turns around it durably happened (a failed commit rolls both back). After the
+      // reactors' persist, so a run's launching commit writes its `runs` row before the FK-referencing
+      // trace rows.
+      if (batch.journal.length > 0) await tx.journal.appendEvents(batch.journal);
     });
     // Strictly post-commit (durable-first): the rows referencing these blobs are now durably gone, so their
     // bytes are unreferenced and safe to delete. Fire-and-forget — the serial loop must not gate on object-store
-    // latency — and a failed delete is a harmless storage leak, logged (never thrown: the turn is committed, so
+    // latency — and a failed delete is a harmless storage leak, logged (never thrown: the batch is committed, so
     // throwing here would poison durable state). On a failed commit the transaction throws above and this is
     // never reached, so live bytes are never orphaned.
     for (const blobId of reclaimedBytes) {
@@ -337,6 +476,5 @@ export class Substrate {
         });
       });
     }
-    for (const message of produced) this.mailbox.push(this.eventTurn(message.event, message.seq));
   }
 }
