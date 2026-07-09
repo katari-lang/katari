@@ -24,7 +24,7 @@ import {
 import type { IrSource } from "../ir.js";
 import { jsonToValue, valueEquals } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
-import type { GenericSubstitution, Value } from "../value/types.js";
+import type { BlobRefValue, GenericSubstitution, Value } from "../value/types.js";
 import {
   conformValue,
   fillGenericSchema,
@@ -69,6 +69,13 @@ function stringReaderOf(context: PrimContext): StringReader {
 /** Read a possibly blob-backed string argument field. */
 function readStringField(argument: Value, name: string, context: PrimContext): Promise<string> {
   return stringReaderOf(context)(field(argument, name));
+}
+
+/** Read a `file` argument field: a blob ref whose semantic kind is `file` (the surface `file` type). */
+function fileArgument(argument: Value, name: string): BlobRefValue {
+  const value = field(argument, name);
+  if (value.kind === "ref" && value.semanticKind === "file") return value;
+  throw new Error(`expected a file, got ${value.kind}`);
 }
 
 export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
@@ -347,6 +354,23 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       ? { kind: "number", value: parsed }
       : NULL_VALUE;
   },
+
+  // ─── prelude.file ───────────────────────────────────────────────────────────────────────────
+  // A `file` value is a blob handle (the bytes stay in the store); these read it back. Privacy is
+  // the prim layer's monotonic rule, like every reader here: a private file taints the result.
+  "prelude.file.read_base64": async (argument, context) => {
+    const file = fileArgument(argument, "value");
+    const bytes = await context.blobs.get(context.projectId, file.blobId);
+    return { kind: "string", value: Buffer.from(bytes).toString("base64") };
+  },
+  "prelude.file.content_type": async (argument) => ({
+    kind: "string",
+    value: fileArgument(argument, "value").contentType ?? "",
+  }),
+  "prelude.file.size": async (argument) => ({
+    kind: "integer",
+    value: fileArgument(argument, "value").size,
+  }),
 
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────
   "prelude.reflection.get_metadata": async (argument, context) => {

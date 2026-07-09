@@ -15,7 +15,7 @@ import type { PrimContext } from "../src/runtime/engine/context.js";
 import { jsonValueFromJson, jsonValueToJson } from "../src/runtime/engine/json-value.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
-import type { ProjectId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, ProjectId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
 import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -650,5 +650,75 @@ describe("prelude.reflection.get_metadata", () => {
     );
     if (bare.kind !== "record" || bare.fields.output === undefined) throw new Error("expected output");
     await expect(asJson(bare.fields.output)).resolves.toEqual({});
+  });
+});
+
+describe("prelude.file", () => {
+  const BLOB = "blob-file-prim" as BlobId;
+  // The PNG magic bytes — a recognisable fixture whose base64 is stable.
+  const BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+
+  /** A context whose blob store holds the fixture bytes, and the `file` handle naming them. */
+  async function fileContext(): Promise<{ context: PrimContext; file: Value }> {
+    const blobs = new InMemoryBlobStore();
+    await blobs.put(PROJECT, BLOB, BYTES);
+    const context: PrimContext = { projectId: PROJECT, ir: new SnapshotRegistry(), blobs };
+    const file: Value = {
+      kind: "ref",
+      semanticKind: "file",
+      blobId: BLOB,
+      hash: "hash-file-prim",
+      size: BYTES.length,
+      contentType: "image/png",
+    };
+    return { context, file };
+  }
+
+  test("read_base64 returns the blob's bytes base64-encoded", async () => {
+    const { context, file } = await fileContext();
+    const result = await run("prelude.file.read_base64", { value: file }, context);
+    expect(result).toEqual({ kind: "string", value: Buffer.from(BYTES).toString("base64") });
+  });
+
+  test("content_type reads the handle's MIME type, degrading to \"\" when unrecorded", async () => {
+    const { context, file } = await fileContext();
+    await expect(run("prelude.file.content_type", { value: file }, context)).resolves.toEqual({
+      kind: "string",
+      value: "image/png",
+    });
+    if (file.kind !== "ref") throw new Error("fixture is a ref");
+    const { contentType: _dropped, ...bare } = file;
+    await expect(run("prelude.file.content_type", { value: bare }, context)).resolves.toEqual({
+      kind: "string",
+      value: "",
+    });
+  });
+
+  test("size reads the handle's byte count without touching the store", async () => {
+    const { file } = await fileContext();
+    // An EMPTY store: the size must come from the handle alone (no download).
+    const context: PrimContext = {
+      projectId: PROJECT,
+      ir: new SnapshotRegistry(),
+      blobs: new InMemoryBlobStore(),
+    };
+    await expect(run("prelude.file.size", { value: file }, context)).resolves.toEqual({
+      kind: "integer",
+      value: BYTES.length,
+    });
+  });
+
+  test("a non-file argument is rejected (a blob-backed string is not a file)", async () => {
+    const { context } = await fileContext();
+    const stringRef: Value = {
+      kind: "ref",
+      semanticKind: "string",
+      blobId: BLOB,
+      hash: "hash-file-prim",
+      size: BYTES.length,
+    };
+    await expect(run("prelude.file.read_base64", { value: stringRef }, context)).rejects.toThrow(
+      /expected a file/,
+    );
   });
 });

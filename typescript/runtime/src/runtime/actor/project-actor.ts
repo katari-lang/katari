@@ -237,6 +237,23 @@ export class ProjectActor {
       .then(() => registered);
   }
 
+  /** Like `registerProducedBlob`, for a blob the MCP transport produced from a tool result's image
+   *  content: owned by that mcp call's instance, so the result's `delegateAck` ascends it to the caller.
+   *  Same serial-command-turn contract — the ownership row commits durably before the completion (which
+   *  carries the blob's handle in its result) is processed. */
+  registerProducedMcpBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): Promise<boolean> {
+    let registered = false;
+    return this.substrate
+      .enqueueCommand(this.mcp, () => {
+        registered = this.mcp.registerProducedBlob(delegation, blobId, entry);
+      })
+      .then(() => registered);
+  }
+
   /** The run-root escalations currently awaiting an answer. */
   listOpenEscalations(): OpenEscalation[] {
     return this.api.listOpenEscalations();

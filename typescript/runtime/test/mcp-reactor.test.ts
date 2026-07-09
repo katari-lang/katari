@@ -239,6 +239,55 @@ describe("mcp reactor", () => {
     await expect(result).resolves.toEqual({ kind: "string", value: "42" });
   });
 
+  test("a tool result carrying file handles lifts them into `file` values for the caller", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const listing = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
+    const toolCall = await waitUntil(() => transport.dispatched[1]);
+    // What the SDK transport emits for an image-bearing result: the produced blob's `$ref` handle
+    // riding in `{ text, files }` (see `resolveToolResult`; the producer registered ownership).
+    transport.feed({
+      delegation: toolCall.delegation,
+      outcome: {
+        kind: "result",
+        value: {
+          text: "rendered a chart",
+          files: [
+            {
+              $ref: "blob-mcp-image",
+              size: 4,
+              hash: "hash-mcp-image",
+              semanticKind: "file",
+              contentType: "image/png",
+            },
+          ],
+        },
+      },
+    });
+    await expect(result).resolves.toEqual({
+      kind: "record",
+      fields: {
+        text: { kind: "string", value: "rendered a chart" },
+        files: {
+          kind: "array",
+          elements: [
+            {
+              kind: "ref",
+              semanticKind: "file",
+              blobId: "blob-mcp-image",
+              hash: "hash-mcp-image",
+              size: 4,
+              contentType: "image/png",
+            },
+          ],
+        },
+      },
+    });
+  });
+
   test("a server-reported failure surfaces as a typed throw[mcp.server_error]", async () => {
     const transport = new ControlledMcpTransport();
     const actor = makeActor(transport);

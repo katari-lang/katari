@@ -126,7 +126,27 @@ const registry = new ProjectRegistry({
   // sink). The api root performs `http.fetch` requests through it.
   httpFactory: () => new FetchHttpTransport(),
   // The built-in MCP client: the SDK-backed transport, one per project actor (its own connections).
-  mcpFactory: () => new SdkMcpTransport(),
+  // Its blob producer bridges a tool result's binary content (an image block) into a project blob owned
+  // by the mcp call's instance — the exact ownership + ascent path an FFI handler's mid-call upload
+  // takes (`produceFfiBlob`), just in-process. A vanished call (ConflictError) returns null, so the
+  // transport degrades that block to its text placeholder instead of failing the whole result.
+  mcpFactory: (projectId) =>
+    new SdkMcpTransport(async (delegation, bytes, contentType) => {
+      try {
+        const produced = await mintAndStoreBlob(projectId, bytes, contentType, (blobId, entry) =>
+          registry.actorFor(projectId).registerProducedMcpBlob(delegation, blobId, entry),
+        );
+        return {
+          $ref: produced.id,
+          size: produced.size,
+          hash: produced.hash,
+          semanticKind: "file",
+          ...(contentType !== undefined ? { contentType } : {}),
+        };
+      } catch {
+        return null;
+      }
+    }),
   // The public base `webhook.inbound` mints its URLs under (KATARI_PUBLIC_URL, or the local port).
   webhookBaseUrl: config.publicUrl,
 });

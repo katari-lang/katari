@@ -20,11 +20,10 @@
 
 import { createAgentName, type Json } from "@katari-lang/types";
 import { dispatchCallable } from "../engine/dynamic-dispatch.js";
-import type { BlobEntry } from "../engine/types.js";
 import type { DelegateTarget, ReactorName } from "../event/types.js";
 import type { FfiInnerDelegate, FfiTransport } from "../external/runner.js";
 import type { DelegateOutcome } from "../external/sidecar-protocol.js";
-import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../ids.js";
+import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import {
@@ -159,22 +158,9 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     });
   }
 
-  /** Register a blob a running handler produced mid-call (its bytes already in the `BlobStore`) as owned by
-   *  this call's instance — so the call's `delegateAck` ascends it to the core caller through the base reactor's
-   *  release / reown, exactly like a core sub-call's result blob. Run as an out-of-loop command turn (the blob
-   *  upload's HTTP request), so the ownership row commits durably before the handler's result is processed.
-   *  Returns whether it took: `false` when the call is already gone (cancelled / completed), so the caller can
-   *  delete the just-uploaded bytes — which have no row referencing them — rather than orphan them. */
-  registerProducedBlob(
-    delegation: DelegationId,
-    blobId: BlobId,
-    entry: Omit<BlobEntry, "owner">,
-  ): boolean {
-    const instance = this.callInstance(delegation);
-    if (instance === undefined) return false;
-    this.pool.registerBlob(blobId, { owner: instance, ...entry });
-    return true;
-  }
+  // `registerProducedBlob` (a handler's mid-call upload over the blob side channel) is the base
+  // `ExternalCallReactor` method — shared with the mcp reactor, whose transport produces blobs from a
+  // tool result's image content the same way.
 }
 
 /** Lower a settled inner outcome to the sidecar's wire form. A result — and a typed throw's payload — cross

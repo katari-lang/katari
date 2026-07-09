@@ -36,9 +36,11 @@
 
 import type { Json } from "@katari-lang/types";
 import { PANIC_REQUEST } from "../engine/common.js";
+import type { BlobEntry } from "../engine/types.js";
 import { isFailureRequest } from "../escalation-filter.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import {
+  type BlobId,
   type DelegationId,
   type EscalationId,
   type InstanceId,
@@ -206,6 +208,23 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
    *  (an ffi call's produced blob) to attribute them to the right instance. Reads the base received edge. */
   protected callInstance(delegation: DelegationId): InstanceId | undefined {
     return this.handledInstanceOf(delegation);
+  }
+
+  /** Register a blob this call's transport produced mid-call (its bytes already in the `BlobStore`) as owned
+   *  by the call's instance — so the call's `delegateAck` ascends it to the caller through the base reactor's
+   *  release / reown, exactly like a core sub-call's result blob. An ffi handler produces one over the blob
+   *  side channel; an mcp tool result's image content produces one at the transport seam. Returns whether it
+   *  took: `false` when the call is already gone (cancelled / completed), so the caller can delete the
+   *  just-stored bytes — which have no row referencing them — rather than orphan them. */
+  registerProducedBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): boolean {
+    const instance = this.callInstance(delegation);
+    if (instance === undefined) return false;
+    this.pool.registerBlob(blobId, { owner: instance, ...entry });
+    return true;
   }
 
   /** The transport payload of a live call — a concrete reactor reads a fresh inner delegation's ambient

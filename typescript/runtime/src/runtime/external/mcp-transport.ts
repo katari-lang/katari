@@ -86,6 +86,66 @@ export class StubMcpTransport implements McpTransport {
  *  name — tool names are server-scoped and never dotted like this, so the two cannot collide). */
 export const MCP_TOOLS_KEY = "prelude.mcp.tools";
 
+/** The blob-producer seam: store `bytes` as a project blob owned by `delegation`'s call instance and
+ *  return its `$ref` handle Json (the wire form the reactor's decode lifts back into a `file` value),
+ *  or `null` when the call is already gone (the block then degrades to its text placeholder). Wired by
+ *  the host (see the facade); absent — tests, a stub deployment — every binary block degrades. */
+export type McpBlobProducer = (
+  delegation: DelegationId,
+  bytes: Uint8Array,
+  contentType: string | undefined,
+) => Promise<Json | null>;
+
+/** Shape one successful tool call's SDK result into the completion's Json value:
+ *   - binary content blocks (image / audio: base64 `data` + `mimeType`) become project blobs via
+ *     `produceBlob`, and the result is `{ text, files }` — each handle lifts into a `file` value at
+ *     the reactor's decode, so a Katari caller (or an AI loop) receives real files;
+ *   - otherwise `structuredContent` rides through as the value it is;
+ *   - otherwise the text blocks, joined, are the result (what an AI loop renders back to the model).
+ *  A binary block with no producer — or whose call vanished mid-produce — degrades to its
+ *  `(<type> content)` placeholder line, the pre-bridge behaviour. */
+export async function resolveToolResult(
+  // The index signature admits every member of the SDK's result union (the legacy `{toolResult}` shape
+  // carries neither `content` nor `structuredContent`; it degrades to the empty text result).
+  result: { structuredContent?: unknown; content?: unknown; [key: string]: unknown },
+  produceBlob: McpBlobProducer | undefined,
+  delegation: DelegationId,
+): Promise<Json> {
+  const blocks = Array.isArray(result.content) ? result.content : [];
+  const texts: string[] = [];
+  const files: Json[] = [];
+  for (const block of blocks) {
+    if (typeof block !== "object" || block === null) continue;
+    const entry = block as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown };
+    if (entry.type === "text" && typeof entry.text === "string") {
+      texts.push(entry.text);
+      continue;
+    }
+    const binary =
+      (entry.type === "image" || entry.type === "audio") && typeof entry.data === "string";
+    if (binary && produceBlob !== undefined) {
+      const contentType = typeof entry.mimeType === "string" ? entry.mimeType : undefined;
+      const handle = await produceBlob(
+        delegation,
+        new Uint8Array(Buffer.from(entry.data as string, "base64")),
+        contentType,
+      );
+      if (handle !== null) {
+        files.push(handle);
+        continue;
+      }
+    }
+    if (typeof entry.type === "string") texts.push(`(${entry.type} content)`);
+  }
+  if (files.length > 0) {
+    return { text: texts.join("\n"), files };
+  }
+  if (result.structuredContent !== undefined) {
+    return result.structuredContent as Json;
+  }
+  return texts.join("\n");
+}
+
 /** The wire form of a typed `prelude.mcp.server_error` throw (decoded back into the data value at the
  *  reactor base). */
 function serverError(message: string): Json {
@@ -107,6 +167,10 @@ export class SdkMcpTransport implements McpTransport {
    *  share one connect; a rejected connect evicts itself, so nothing caches a dead entry. */
   private readonly clients = new Map<string, Promise<Client>>();
   private readonly controllers = new Map<DelegationId, AbortController>();
+
+  /** `produceBlob` bridges a tool result's binary content into project blobs (see `McpBlobProducer`);
+   *  without it every binary block degrades to its text placeholder. */
+  constructor(private readonly produceBlob?: McpBlobProducer) {}
 
   onComplete(sink: (completion: McpCompletion) => void): void {
     this.sink = sink;
@@ -167,7 +231,7 @@ export class SdkMcpTransport implements McpTransport {
       if (call.key === MCP_TOOLS_KEY) {
         return { kind: "result", value: await this.listTools(descriptor) };
       }
-      return await this.callTool(descriptor, call.key, call.argument, signal);
+      return await this.callTool(call.delegation, descriptor, call.key, call.argument, signal);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         return { kind: "cancelled" };
@@ -193,6 +257,7 @@ export class SdkMcpTransport implements McpTransport {
   }
 
   private async callTool(
+    delegation: DelegationId,
     descriptor: Descriptor,
     name: string,
     argument: Json | null,
@@ -212,12 +277,12 @@ export class SdkMcpTransport implements McpTransport {
       // (or an AI loop feeding it back to the model). The connection itself is fine: keep it cached.
       return { kind: "throw", error: serverError(contentText(result.content)) };
     }
-    // Structured content rides through as the value it is; otherwise the text blocks, joined, are the
-    // result (what an AI loop renders back to the model anyway).
-    if (result.structuredContent !== undefined) {
-      return { kind: "result", value: result.structuredContent as Json };
-    }
-    return { kind: "result", value: contentText(result.content) };
+    // Text / structured content ride through; binary content becomes project blobs (see
+    // `resolveToolResult`), so an image-returning tool hands the caller real `file` values.
+    return {
+      kind: "result",
+      value: await resolveToolResult(result, this.produceBlob, delegation),
+    };
   }
 
   /** The cached client for a descriptor, connecting on first use. Streamable HTTP first, one fallback

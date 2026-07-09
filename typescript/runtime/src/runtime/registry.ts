@@ -34,9 +34,10 @@ export interface ProjectRegistryDependencies {
   /** Builds a fresh `HttpTransport` per project actor (each needs its own completion sink). Defaults to the
    *  stub (http fails loudly until a real `fetch`-backed transport is injected). */
   httpFactory?: () => HttpTransport;
-  /** Builds a fresh `McpTransport` per project actor (each needs its own completion sink). Defaults to
-   *  the stub (mcp fails loudly until the SDK-backed transport is injected). */
-  mcpFactory?: () => McpTransport;
+  /** Builds a fresh `McpTransport` per project actor (each needs its own completion sink; the project
+   *  id lets the host bind a blob producer for image tool results). Defaults to the stub (mcp fails
+   *  loudly until the SDK-backed transport is injected). */
+  mcpFactory?: (projectId: ProjectId) => McpTransport;
   /** The public base URL webhook endpoints are minted under. Defaults to the local dev address. */
   webhookBaseUrl?: string;
 }
@@ -50,7 +51,7 @@ export class ProjectRegistry {
   private readonly prims: PrimRunner;
   private readonly externalFactory: () => FfiTransport;
   private readonly httpFactory: () => HttpTransport;
-  private readonly mcpFactory: () => McpTransport;
+  private readonly mcpFactory: (projectId: ProjectId) => McpTransport;
   private readonly webhookBaseUrl: string;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
@@ -85,7 +86,7 @@ export class ProjectRegistry {
       blobs: this.blobs,
       external: this.externalFactory(),
       http: this.httpFactory(),
-      mcp: this.mcpFactory(),
+      mcp: this.mcpFactory(projectId),
       webhookBaseUrl: this.webhookBaseUrl,
       persistence: this.persistence,
     });
