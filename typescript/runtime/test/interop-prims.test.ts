@@ -26,7 +26,12 @@ const SNAPSHOT = "snapshot-interop" as SnapshotId;
 const prims = new PrimRegistry();
 
 function contextWith(ir: SnapshotRegistry = new SnapshotRegistry()): PrimContext {
-  return { projectId: PROJECT, ir, blobs: new InMemoryBlobStore() };
+  return {
+    projectId: PROJECT,
+    ir,
+    blobs: new InMemoryBlobStore(),
+    blobEntryOf: () => undefined,
+  };
 }
 
 /** A context whose delegate carried a `[T]` instantiation (what a call site stamps for `decode[T]`). */
@@ -658,75 +663,78 @@ describe("prelude.file", () => {
   // The PNG magic bytes — a recognisable fixture whose base64 is stable.
   const BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
-  /** A context whose blob store holds the fixture bytes, and the `file` handle naming them. */
-  async function fileContext(): Promise<{ context: PrimContext; file: Value }> {
+  /** A context whose byte store holds the fixture bytes and whose catalog holds its row, plus the
+   *  slim `file` handle naming them (identity only — metadata comes from the catalog). */
+  async function fileContext(contentType?: string): Promise<{ context: PrimContext; file: Value }> {
     const blobs = new InMemoryBlobStore();
     await blobs.put(PROJECT, BLOB, BYTES);
-    const context: PrimContext = { projectId: PROJECT, ir: new SnapshotRegistry(), blobs };
-    const file: Value = {
-      kind: "ref",
-      semanticKind: "file",
-      blobId: BLOB,
-      hash: "hash-file-prim",
-      size: BYTES.length,
-      contentType: "image/png",
+    const context: PrimContext = {
+      projectId: PROJECT,
+      ir: new SnapshotRegistry(),
+      blobs,
+      blobEntryOf: (blobId) =>
+        blobId === BLOB
+          ? {
+              owner: null,
+              hash: "hash-file-prim",
+              size: BYTES.length,
+              semanticKind: "file",
+              ...(contentType !== undefined ? { contentType } : {}),
+            }
+          : undefined,
     };
+    const file: Value = { kind: "ref", semanticKind: "file", blobId: BLOB };
     return { context, file };
   }
 
   test("read_base64 returns the blob's bytes base64-encoded", async () => {
-    const { context, file } = await fileContext();
+    const { context, file } = await fileContext("image/png");
     const result = await run("prelude.file.read_base64", { value: file }, context);
     expect(result).toEqual({ kind: "string", value: Buffer.from(BYTES).toString("base64") });
   });
 
-  test("content_type reads the handle's MIME type, degrading to \"\" when unrecorded", async () => {
-    const { context, file } = await fileContext();
-    await expect(run("prelude.file.content_type", { value: file }, context)).resolves.toEqual({
-      kind: "string",
-      value: "image/png",
-    });
-    if (file.kind !== "ref") throw new Error("fixture is a ref");
-    const { contentType: _dropped, ...bare } = file;
-    await expect(run("prelude.file.content_type", { value: bare }, context)).resolves.toEqual({
-      kind: "string",
-      value: "",
-    });
+  test("content_type reads the CATALOG row's MIME type, degrading to \"\" when unrecorded", async () => {
+    const withType = await fileContext("image/png");
+    await expect(
+      run("prelude.file.content_type", { value: withType.file }, withType.context),
+    ).resolves.toEqual({ kind: "string", value: "image/png" });
+    const without = await fileContext();
+    await expect(
+      run("prelude.file.content_type", { value: without.file }, without.context),
+    ).resolves.toEqual({ kind: "string", value: "" });
   });
 
-  test("size reads the handle's byte count without touching the store", async () => {
-    const { file } = await fileContext();
-    // An EMPTY store: the size must come from the handle alone (no download).
-    const context: PrimContext = {
-      projectId: PROJECT,
-      ir: new SnapshotRegistry(),
-      blobs: new InMemoryBlobStore(),
-    };
+  test("size reads the catalog row (the slim handle carries no metadata)", async () => {
+    const { context, file } = await fileContext();
     await expect(run("prelude.file.size", { value: file }, context)).resolves.toEqual({
       kind: "integer",
       value: BYTES.length,
     });
   });
 
-  test("decoding a PARTIAL $ref handle is a typed decode_error (never a panic), naming the fix", async () => {
-    // What an AI replaying just the `$ref` sends: { image: { "$ref": "..." } } as a json tree.
-    const partialHandle = jsonValueFromJson({ image: { $ref: "blob-someone-elses" } });
-    await expectThrows(
-      run("prelude.json.decode", { value: partialHandle }, contextWithT({})),
-      "prelude.json.decode_error",
-      /incomplete file handle.*FULL handle object/s,
+  test("a dangling handle (deleted, or a made-up id) fails loudly with the id", async () => {
+    const { context } = await fileContext();
+    const dangling: Value = { kind: "ref", semanticKind: "file", blobId: "blob-made-up" as BlobId };
+    await expect(run("prelude.file.size", { value: dangling }, context)).rejects.toThrow(
+      /blob-made-up does not exist/,
     );
+  });
+
+  test("a bare { $ref } handle decodes to a file value (what an AI replays suffices)", async () => {
+    const handle = jsonValueFromJson({ image: { $ref: "blob-someone-elses" } });
+    await expect(
+      run("prelude.json.decode", { value: handle }, contextWithT({})),
+    ).resolves.toEqual({
+      kind: "record",
+      fields: {
+        image: { kind: "ref", semanticKind: "file", blobId: "blob-someone-elses" },
+      },
+    });
   });
 
   test("a non-file argument is rejected (a blob-backed string is not a file)", async () => {
     const { context } = await fileContext();
-    const stringRef: Value = {
-      kind: "ref",
-      semanticKind: "string",
-      blobId: BLOB,
-      hash: "hash-file-prim",
-      size: BYTES.length,
-    };
+    const stringRef: Value = { kind: "ref", semanticKind: "string", blobId: BLOB };
     await expect(run("prelude.file.read_base64", { value: stringRef }, context)).rejects.toThrow(
       /expected a file/,
     );

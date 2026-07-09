@@ -412,6 +412,8 @@ async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> 
       projectId: ctx.projectId,
       ir: ctx.irSource,
       blobs: ctx.blobs,
+      // The warm blob catalog: a metadata prim (`file.size`) reads the row a slim ref points at.
+      blobEntryOf: (blobId) => ctx.store.blobs[blobId],
       ...(ctx.instance.ambientGenerics !== undefined
         ? { generics: ctx.instance.ambientGenerics }
         : {}),

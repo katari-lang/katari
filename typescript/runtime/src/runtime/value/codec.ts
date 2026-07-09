@@ -21,7 +21,6 @@ import {
   AGENT_KEY,
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
-  CONTENT_TYPE_KEY,
   CONTEXT_KEY,
   createAgentName,
   DESCRIPTION_KEY,
@@ -29,7 +28,6 @@ import {
   FILE_KEY,
   GENERICS_KEY,
   type GenericArgumentSchema,
-  HASH_KEY,
   INPUT_SCHEMA_KEY,
   type Json,
   type Literal,
@@ -39,7 +37,6 @@ import {
   REDACTED_KEY,
   SCOPE_KEY,
   SEMANTIC_KIND_KEY,
-  SIZE_KEY,
   SNAPSHOT_KEY,
   TOOL_KEY,
   type TypeTag,
@@ -218,18 +215,18 @@ function dataFromJson(json: { [key: string]: Json }): Value {
   return { kind: "record", fields, ctor: createAgentName(constructorTag) };
 }
 
-/** Reconstruct a blob `ref` from a `{ "$ref": blobId, size, hash, semanticKind?, contentType? }` handle. */
+/** Reconstruct a blob `ref` from a `{ "$ref": blobId, semanticKind? }` handle. The handle is identity
+ *  only — a bare `$ref` (what an AI replays) suffices; `semanticKind` defaults to `file` (the engine
+ *  always writes it, so a missing one means a hand-written handle, and those are files). Any other
+ *  field a wire happens to carry (an old full handle, a model's copy) is ignored: metadata lives on
+ *  the blob's row, never on the value. */
 function fileFromJson(json: { [key: string]: Json }): Value {
   const blobId = json[FILE_KEY];
-  const size = json[SIZE_KEY];
-  const hash = json[HASH_KEY];
-  if (typeof blobId !== "string" || typeof size !== "number" || typeof hash !== "string") {
-    throw new Error("a file handle must carry a string $ref, a numeric size, and a string hash");
+  if (typeof blobId !== "string") {
+    throw new Error("a file handle must carry a string $ref");
   }
   const semanticKind: SemanticKind = json[SEMANTIC_KIND_KEY] === "string" ? "string" : "file";
-  const contentType = json[CONTENT_TYPE_KEY];
-  const ref: Value = { kind: "ref", semanticKind, blobId: blobId as BlobId, hash, size };
-  return typeof contentType === "string" ? { ...ref, contentType } : ref;
+  return { kind: "ref", semanticKind, blobId: blobId as BlobId };
 }
 
 /** `{ "$agent": name, "snapshot": …, "generics"? }` -> a top-level agent reference value. */
@@ -345,13 +342,11 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
       return out;
     }
     case "ref": {
-      // A file / blob handle: expose the addressable metadata, not the bytes.
+      // A file / blob handle: identity only. Metadata (size / hash / contentType) lives on the blob's
+      // row — a wire reader that needs it asks the files API; a program asks the `prelude.file` prims.
       const out: { [key: string]: Json } = Object.create(null);
       out[FILE_KEY] = value.blobId;
       out[SEMANTIC_KIND_KEY] = value.semanticKind;
-      out[SIZE_KEY] = value.size;
-      out[HASH_KEY] = value.hash;
-      if (value.contentType !== undefined) out[CONTENT_TYPE_KEY] = value.contentType;
       return out;
     }
     case "agent": {
@@ -403,10 +398,12 @@ function recordFieldsToJson(
 // ─── value-level operations ──────────────────────────────────────────────────────────────────────
 
 /**
- * Structural equality for `==` and `PatternLiteral` matching. Scalars compare by value; a string
- * compares by content whether inline or a blob ref (refs carry a content `hash`, and an inline string
- * against a ref hashes — deferred: for now an inline/ref string mismatch in representation compares
- * unequal, which the >4KB promotion boundary makes rare). Records compare key-wise, arrays positionally.
+ * Structural equality for `==` and `PatternLiteral` matching. Scalars compare by value; records
+ * compare key-wise, arrays positionally. A blob ref compares by IDENTITY (same blob id) — a file is a
+ * resource, not a literal, so two uploads of the same bytes are distinct files. The one construct
+ * whose equality must stay structural is a promoted large *string*; that promotion does not exist
+ * yet, and its precondition is content-addressed blob ids (blobId = content hash), which makes this
+ * same identity compare structural for strings too (see docs/2026-07-09-slim-blob-ref.md).
  */
 export function valueEquals(left: Value, right: Value): boolean {
   switch (left.kind) {
@@ -422,7 +419,9 @@ export function valueEquals(left: Value, right: Value): boolean {
       return right.kind === "string" && left.value === right.value;
     case "ref":
       return (
-        right.kind === "ref" && left.semanticKind === right.semanticKind && left.hash === right.hash
+        right.kind === "ref" &&
+        left.semanticKind === right.semanticKind &&
+        left.blobId === right.blobId
       );
     case "array": {
       if (right.kind !== "array" || left.elements.length !== right.elements.length) return false;

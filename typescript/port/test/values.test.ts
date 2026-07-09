@@ -21,9 +21,9 @@ function makeBinding(bytesByRef: Record<string, string> = {}) {
   const binding: ValueBinding = {
     download: (ref) => {
       const content = bytesByRef[ref];
-      return content === undefined
-        ? Promise.reject(new Error(`no bytes for ${ref}`))
-        : Promise.resolve(new TextEncoder().encode(content));
+      if (content === undefined) return Promise.reject(new Error(`no bytes for ${ref}`));
+      const bytes = new TextEncoder().encode(content);
+      return Promise.resolve({ bytes, size: bytes.byteLength, contentType: "text/plain" });
     },
     callCallable: (target, argument) => {
       calls.push({ target, argument });
@@ -33,7 +33,7 @@ function makeBinding(bytesByRef: Record<string, string> = {}) {
   return { binding, calls };
 }
 
-const fileHandle: Json = { $ref: "blob-1", semanticKind: "file", size: 5, hash: "h1" };
+const fileHandle: Json = { $ref: "blob-1", semanticKind: "file" };
 
 describe("decodeWireValue", () => {
   test("scalars and arrays pass through; record keys are unescaped", () => {
@@ -60,17 +60,15 @@ describe("decodeWireValue", () => {
     const content = decoded.content;
     expect(content).toBeInstanceOf(KatariFile);
     if (!(content instanceof KatariFile)) throw new Error("unreachable");
-    expect(content.size).toBe(5);
-    expect(content.hash).toBe("h1");
+    // Metadata is async now — the slim handle carries none; it comes with the download.
+    await expect(content.size()).resolves.toBe(5);
+    await expect(content.contentType()).resolves.toBe("text/plain");
     await expect(content.text()).resolves.toBe("hello");
   });
 
   test("a blob-backed string becomes a KatariString, read uniformly via text()", async () => {
     const { binding } = makeBinding({ "blob-2": "big text" });
-    const decoded = decodeWireValue(
-      { $ref: "blob-2", semanticKind: "string", size: 8, hash: "h2" },
-      binding,
-    );
+    const decoded = decodeWireValue({ $ref: "blob-2", semanticKind: "string" }, binding);
     expect(decoded).toBeInstanceOf(KatariString);
     if (!(decoded instanceof KatariString)) throw new Error("unreachable");
     await expect(text(decoded)).resolves.toBe("big text");

@@ -94,16 +94,29 @@ describe("valueToJson / jsonToValue — total bijection", () => {
     expect(roundTrip(closure)).toEqual(closure);
   });
 
-  test("a file handle round-trips its metadata", () => {
+  test("a file handle round-trips as identity only ({ $ref, semanticKind })", () => {
     const file: Value = {
       kind: "ref",
       semanticKind: "file",
       blobId: "blob-7" as BlobId,
-      hash: "h7",
-      size: 128,
-      contentType: "image/png",
     };
+    // The wire form is deliberately slim: metadata lives on the blob row, never on the handle.
+    expect(valueToJson(file, "reveal")).toEqual({ $ref: "blob-7", semanticKind: "file" });
     expect(roundTrip(file)).toEqual(file);
+  });
+
+  test("a bare { $ref } handle (what an AI replays) lifts to a file ref", () => {
+    expect(jsonToValue({ $ref: "blob-8" })).toEqual({
+      kind: "ref",
+      semanticKind: "file",
+      blobId: "blob-8",
+    });
+    // Stale metadata a wire happens to carry is ignored, not trusted.
+    expect(jsonToValue({ $ref: "blob-8", size: 999, hash: "forged" })).toEqual({
+      kind: "ref",
+      semanticKind: "file",
+      blobId: "blob-8",
+    });
   });
 
   test("a non-finite number has no wire form", () => {

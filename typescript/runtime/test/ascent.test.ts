@@ -36,7 +36,7 @@ describe("reachableResources", () => {
           kind: "array",
           elements: [
             { kind: "integer", value: 1 },
-            { kind: "ref", semanticKind: "file", blobId: "blob-a" as BlobId, hash: "h", size: 9 },
+            { kind: "ref", semanticKind: "file", blobId: "blob-a" as BlobId },
           ],
         },
       },

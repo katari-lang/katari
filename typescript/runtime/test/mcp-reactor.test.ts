@@ -247,23 +247,16 @@ describe("mcp reactor", () => {
     const listing = await waitUntil(() => transport.dispatched[0]);
     transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
     const toolCall = await waitUntil(() => transport.dispatched[1]);
-    // What the SDK transport emits for an image-bearing result: the produced blob's `$ref` handle
-    // riding in `{ text, files }` (see `resolveToolResult`; the producer registered ownership).
+    // What the SDK transport emits for an image-bearing result: the produced blob's slim `$ref`
+    // handle riding in `{ text, files }` (see `resolveToolResult`; the producer registered
+    // ownership, and the blob's metadata lives on its row — never on the handle).
     transport.feed({
       delegation: toolCall.delegation,
       outcome: {
         kind: "result",
         value: {
           text: "rendered a chart",
-          files: [
-            {
-              $ref: "blob-mcp-image",
-              size: 4,
-              hash: "hash-mcp-image",
-              semanticKind: "file",
-              contentType: "image/png",
-            },
-          ],
+          files: [{ $ref: "blob-mcp-image", semanticKind: "file" }],
         },
       },
     });
@@ -273,16 +266,7 @@ describe("mcp reactor", () => {
         text: { kind: "string", value: "rendered a chart" },
         files: {
           kind: "array",
-          elements: [
-            {
-              kind: "ref",
-              semanticKind: "file",
-              blobId: "blob-mcp-image",
-              hash: "hash-mcp-image",
-              size: 4,
-              contentType: "image/png",
-            },
-          ],
+          elements: [{ kind: "ref", semanticKind: "file", blobId: "blob-mcp-image" }],
         },
       },
     });

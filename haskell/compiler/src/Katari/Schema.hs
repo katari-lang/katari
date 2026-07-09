@@ -175,24 +175,17 @@ buildSubstitution parameterGenericIds arguments =
 callableReferenceSchema :: JSONSchema
 callableReferenceSchema = referenceSchema callableReferenceKey
 
--- | The schema of a @file@ value: a @$ref@-tagged blob handle, requiring the FULL handle shape.
--- Unlike a callable, an AI *does* write file handles — it replays one from the conversation into a
--- tool call — and the runtime codec needs @size@ / @hash@ to reconstruct the value, so the schema must
--- demand what the decode requires: a model given only @required: [$ref]@ dutifully sends a bare
--- @{$ref}@ and the decode rejects it (observed in the field). @contentType@ stays optional (a handle
--- may legitimately lack one) and the object stays open.
+-- | The schema of a @file@ value: a slim @$ref@ blob handle — IDENTITY ONLY. The blob's metadata
+-- (size / hash / contentType) lives on its runtime row, never on the handle, so a bare
+-- @{"$ref": id}@ is a complete handle: exactly what an AI replays from a conversation into a tool
+-- call, with nothing to copy wrong. @semanticKind@ is accepted (the engine writes it; decode
+-- defaults a missing one to @file@) and the object stays open for older full handles.
 fileReferenceSchema :: JSONSchema
 fileReferenceSchema =
   SchemaObject
     ObjectSchema
-      { properties =
-          [ (fileReferenceKey, SchemaString),
-            ("semanticKind", SchemaString),
-            ("size", SchemaNumber),
-            ("hash", SchemaString),
-            ("contentType", SchemaString)
-          ],
-        required = [fileReferenceKey, "semanticKind", "size", "hash"],
+      { properties = [(fileReferenceKey, SchemaString), ("semanticKind", SchemaString)],
+        required = [fileReferenceKey],
         additionalProperties = AdditionalPropertiesBoolean True
       }
 

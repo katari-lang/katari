@@ -1,14 +1,16 @@
 // The `prelude.file` sub-module: read a `file` value's content and metadata in-runtime. A `file` is a
-// handle into the project's blob store (the value carries the reference; the bytes stay put), so
-// programs pass files around for free — these primitives are the bridge for the moments the content
-// itself must go on a wire, e.g. base64 for a multimodal model's `inline_data` part.
+// slim handle into the project's blob store — the value carries only the reference (identity); the
+// bytes AND the metadata stay runtime-side, so programs pass files around for free and nothing on the
+// handle can go stale or be forged. These primitives are the bridge for the moments content or
+// metadata must be read, e.g. base64 for a multimodal model's `inline_data` part.
 
 @"The file's bytes, base64-encoded — the inline shape multimodal model APIs take. The whole content
 materialises as one string, so mind the size (a large file makes a large request body)."
 primitive agent read_base64(value: file) -> string
 
-@"The file's recorded MIME type (e.g. \"image/png\"), or \"\" when none was recorded at upload."
+@"The file's recorded MIME type (e.g. \"image/png\"), read from the project's file catalog; \"\" when
+none was recorded at upload."
 primitive agent content_type(value: file) -> string
 
-@"The file's size in bytes, read from the handle (no content download)."
+@"The file's size in bytes, read from the project's file catalog (no content download)."
 primitive agent size(value: file) -> integer

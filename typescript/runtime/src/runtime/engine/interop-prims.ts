@@ -41,6 +41,7 @@ import {
 } from "./json-value.js";
 import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
 import { errorData, KatariThrow } from "./throw-signal.js";
+import type { BlobEntry } from "./types.js";
 
 // The domain error ctors the json prims throw (`prelude/json.ktr` declares them).
 const PARSE_ERROR = "prelude.json.parse_error";
@@ -76,6 +77,19 @@ function fileArgument(argument: Value, name: string): BlobRefValue {
   const value = field(argument, name);
   if (value.kind === "ref" && value.semanticKind === "file") return value;
   throw new Error(`expected a file, got ${value.kind}`);
+}
+
+/** The blob row behind a file value. A missing row is a dangling handle — the blob was deleted, or
+ *  the id was made up (an AI hallucinating a `$ref`); fail loudly with the id, so an AI loop's guard
+ *  feeds a correctable message back to the model. */
+function blobRowOf(context: PrimContext, file: BlobRefValue): BlobEntry {
+  const entry = context.blobEntryOf(file.blobId);
+  if (entry === undefined) {
+    throw new Error(
+      `file ${file.blobId} does not exist in this project (deleted, or a made-up id)`,
+    );
+  }
+  return entry;
 }
 
 export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
@@ -381,20 +395,21 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   },
 
   // ─── prelude.file ───────────────────────────────────────────────────────────────────────────
-  // A `file` value is a blob handle (the bytes stay in the store); these read it back. Privacy is
+  // A `file` value is a slim blob handle (identity only); content comes from the byte store and
+  // metadata from the project's blob catalog (the `blobs` rows — the source of truth). Privacy is
   // the prim layer's monotonic rule, like every reader here: a private file taints the result.
   "prelude.file.read_base64": async (argument, context) => {
     const file = fileArgument(argument, "value");
     const bytes = await context.blobs.get(context.projectId, file.blobId);
     return { kind: "string", value: Buffer.from(bytes).toString("base64") };
   },
-  "prelude.file.content_type": async (argument) => ({
+  "prelude.file.content_type": async (argument, context) => ({
     kind: "string",
-    value: fileArgument(argument, "value").contentType ?? "",
+    value: blobRowOf(context, fileArgument(argument, "value")).contentType ?? "",
   }),
-  "prelude.file.size": async (argument) => ({
+  "prelude.file.size": async (argument, context) => ({
     kind: "integer",
-    value: fileArgument(argument, "value").size,
+    value: blobRowOf(context, fileArgument(argument, "value")).size,
   }),
 
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────

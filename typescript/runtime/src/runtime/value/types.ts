@@ -40,18 +40,21 @@ export type Value = (
 ) &
   PrivacyMarker;
 
-/** The semantic kind of the bytes a blob holds. Distinguishes content compare / display. */
+/** The semantic kind of the bytes a blob holds: a promoted large `string`, or a `file` value. */
 export type SemanticKind = "string" | "file";
 
-/** A reference to a content-addressed blob (the second axis of the value model alongside the blob itself). */
+/** A reference to a project blob (the second axis of the value model alongside the blob itself).
+ *  DELIBERATELY minimal — identity only. The blob's metadata (hash / size / contentType / owner)
+ *  lives on its `blobs` row, the single source of truth, read through the actor's warm catalog
+ *  where needed (the `prelude.file` prims, the download API). Nothing here is a cache an untrusted
+ *  wire (an AI replaying a handle) could get wrong. Two consequences, recorded in
+ *  docs/2026-07-09-slim-blob-ref.md: `==` on refs is blob IDENTITY (same blob, not same bytes), and
+ *  a future large-string promotion must mint content-addressed blob ids so promoted-string equality
+ *  stays structural. */
 export type BlobRefValue = {
   kind: "ref";
   semanticKind: SemanticKind;
   blobId: BlobId;
-  /** Content hash — used for `string == string` content comparison without fetching the bytes. */
-  hash: string;
-  size: number;
-  contentType?: string;
 };
 
 /** A generic substitution attached to a callable value (from a `foo[T]` instantiation). */

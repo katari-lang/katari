@@ -63,8 +63,6 @@ describe("conformValue", () => {
       kind: "ref",
       semanticKind: "string",
       blobId: "blob-1" as BlobId,
-      hash: "h",
-      size: 10,
     };
     expect(conformValue(ref, { type: "string" }).ok).toBe(true);
   });
@@ -74,8 +72,6 @@ describe("conformValue", () => {
       kind: "ref",
       semanticKind: "file",
       blobId: "blob-2" as BlobId,
-      hash: "h",
-      size: 10,
     };
     const fileSchema: JSONSchema = {
       type: "object",

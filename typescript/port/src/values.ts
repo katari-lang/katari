@@ -10,7 +10,7 @@
 // reserved single-`$` discriminator key it carries:
 //
 //   data value      { "$constructor": name, "value": { …fields } }
-//   file handle     { "$ref": blobId, "semanticKind": …, "size": …, "hash": …, "contentType"? }
+//   file handle     { "$ref": blobId, "semanticKind"? }   (identity only; metadata lives runtime-side)
 //   agent reference { "$agent": name, "snapshot": …, "generics"? }
 //   closure         { "$closure": blockId, "scopeId": …, "snapshot": …, "module": …, "generics"? }
 //   tool            { "$tool": name, "description": …, "inputSchema": …, "target": <callable> }
@@ -32,7 +32,7 @@ import {
   unescapeRecordKey,
   VALUE_KEY,
 } from "@katari-lang/types";
-import type { FileHandle } from "./blob.js";
+import type { BlobDownload, FileHandle } from "./blob.js";
 
 /** What the decoded argument (and an inner call's decoded result) is made of. A handler's own argument type
  *  is a refinement of this — declared by the user and assumed, not validated. */
@@ -65,37 +65,49 @@ export function text(value: KatariText): Promise<string> {
 /** What the wrappers need from their dispatch context: the blob side channel (bound to the call's abort
  *  signal) and the inner agent-call channel (for `KatariAgent.call`). */
 export interface ValueBinding {
-  download(ref: string): Promise<Uint8Array>;
+  download(ref: string): Promise<BlobDownload>;
   /** Call a callable wire value (`$agent` / `$closure`, passed through verbatim) with an argument. */
   callCallable(target: Json, argument: unknown): Promise<KatariValue>;
 }
 
-/** A Katari `file` value: its metadata inline, its bytes behind the runtime's blob side channel. Returned
- *  from a handler (directly or inside a record), it becomes a `file` value for the calling agent — receive
- *  one from the argument, or produce one with `context.file(...)`. */
+/** A Katari `file` value: a slim handle (identity only) whose bytes AND metadata live behind the
+ *  runtime's blob side channel — `size()` / `contentType()` are async because the handle deliberately
+ *  carries nothing that could go stale. One download serves all of them (cached for the call's
+ *  lifetime). Returned from a handler (directly or inside a record), it becomes a `file` value for the
+ *  calling agent — receive one from the argument, or produce one with `context.file(...)`. */
 export class KatariFile {
+  private downloaded?: BlobDownload;
+
   constructor(
     private readonly fileHandle: FileHandle,
     private readonly binding: ValueBinding,
-    private cached?: Uint8Array,
-  ) {}
-
-  get size(): number {
-    return this.fileHandle.size;
-  }
-
-  get hash(): string {
-    return this.fileHandle.hash;
-  }
-
-  get contentType(): string | undefined {
-    return this.fileHandle.contentType;
+    known?: { bytes: Uint8Array; contentType?: string },
+  ) {
+    // A just-produced file (context.file) already knows its content — seed the cache so reading a
+    // file this handler created costs no round trip.
+    if (known !== undefined) {
+      this.downloaded = {
+        bytes: known.bytes,
+        size: known.bytes.byteLength,
+        ...(known.contentType !== undefined ? { contentType: known.contentType } : {}),
+      };
+    }
   }
 
   /** The file's bytes, downloaded from the runtime on first use (cached for the call's lifetime). */
   async bytes(): Promise<Uint8Array> {
-    this.cached ??= await this.binding.download(this.fileHandle.$ref);
-    return this.cached;
+    return (await this.download()).bytes;
+  }
+
+  /** The file's size in bytes (downloads the content on first use — the slim handle carries none). */
+  async size(): Promise<number> {
+    return (await this.download()).size;
+  }
+
+  /** The file's recorded MIME type (from the runtime's blob row, served as the download's
+   *  Content-Type), or `undefined` when none was recorded at upload. */
+  async contentType(): Promise<string | undefined> {
+    return (await this.download()).contentType;
   }
 
   /** The file's bytes decoded as UTF-8 text. */
@@ -106,6 +118,11 @@ export class KatariFile {
   /** The raw wire handle (for the encoder, and for advanced interop). */
   handle(): FileHandle {
     return this.fileHandle;
+  }
+
+  private async download(): Promise<BlobDownload> {
+    this.downloaded ??= await this.binding.download(this.fileHandle.$ref);
+    return this.downloaded;
   }
 }
 
@@ -119,17 +136,11 @@ export class KatariString {
     private cached?: string,
   ) {}
 
-  get size(): number {
-    return this.fileHandle.size;
-  }
-
-  get hash(): string {
-    return this.fileHandle.hash;
-  }
-
   /** The string's content, downloaded from the runtime on first use (cached for the call's lifetime). */
   async text(): Promise<string> {
-    this.cached ??= new TextDecoder().decode(await this.binding.download(this.fileHandle.$ref));
+    this.cached ??= new TextDecoder().decode(
+      (await this.binding.download(this.fileHandle.$ref)).bytes,
+    );
     return this.cached;
   }
 

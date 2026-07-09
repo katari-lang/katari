@@ -25,7 +25,6 @@ import {
   AGENT_KEY,
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
-  CONTENT_TYPE_KEY,
   CONTEXT_KEY,
   DESCRIPTION_KEY,
   escapeRecordKey,
@@ -33,14 +32,12 @@ import {
   GENERICS_KEY,
   genericsFromJson,
   genericsToJson,
-  HASH_KEY,
   INPUT_SCHEMA_KEY,
   MODULE_KEY,
   OUTPUT_SCHEMA_KEY,
   REACTOR_KEY,
   SCOPE_KEY,
   SEMANTIC_KIND_KEY,
-  SIZE_KEY,
   SNAPSHOT_KEY,
   TOOL_KEY,
   unescapeRecordKey,
@@ -198,12 +195,10 @@ export async function encodeValue(value: Value, readString: StringReader): Promi
       return jsonText(value.value);
     case "ref": {
       if (value.semanticKind === "string") return jsonText(await readString(value));
+      // A file's wire form is identity only ({ $ref, semanticKind }); metadata lives on the blob row.
       const entries: Record<string, Value> = Object.create(null);
       entries[FILE_KEY] = jsonText(value.blobId);
       entries[SEMANTIC_KIND_KEY] = jsonText(value.semanticKind);
-      entries[SIZE_KEY] = jsonInteger(value.size);
-      entries[HASH_KEY] = jsonText(value.hash);
-      if (value.contentType !== undefined) entries[CONTENT_TYPE_KEY] = jsonText(value.contentType);
       return jsonObject(entries);
     }
     case "agent": {
@@ -384,21 +379,13 @@ async function recordFrom(
 }
 
 function fileFromTree(entries: Record<string, Value>): Value {
-  // A partial handle (an AI replaying just the `$ref`) is the common failure here — name the full
-  // shape, so the message fed back to the model as a tool error is itself the correction.
-  if (entries[SIZE_KEY] === undefined || entries[HASH_KEY] === undefined) {
-    throw new Error(
-      'an incomplete file handle: replay the FULL handle object exactly as it appears, e.g. {"$ref": "...", "semanticKind": "file", "size": ..., "hash": "..."}',
-    );
-  }
+  // Identity only: a bare `$ref` (what an AI replays) is a complete handle. `semanticKind` defaults
+  // to `file` (the engine always writes it; a hand-written handle names a file). Any metadata a wire
+  // happens to carry is ignored — the blob's row is the source of truth.
   const blobId = leafText(entries[FILE_KEY]);
-  const size = leafNumber(entries[SIZE_KEY]);
-  const hash = leafText(entries[HASH_KEY]);
   const semanticKind: SemanticKind =
     leafTextMaybe(entries[SEMANTIC_KIND_KEY]) === "string" ? "string" : "file";
-  const contentType = leafTextMaybe(entries[CONTENT_TYPE_KEY]);
-  const ref: Value = { kind: "ref", semanticKind, blobId: blobId as BlobId, hash, size };
-  return contentType !== undefined ? { ...ref, contentType } : ref;
+  return { kind: "ref", semanticKind, blobId: blobId as BlobId };
 }
 
 async function agentFromTree(

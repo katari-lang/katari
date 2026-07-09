@@ -65,18 +65,12 @@ spec = do
       toJSONSchema noData (SemanticTypeAttribute SemanticTypeString SemanticAttributePrivate)
         `shouldBe` SchemaString
 
-    it "maps a file to a full $ref handle object (what the runtime decode requires)" $
+    it "maps a file to a slim $ref handle (identity only — a bare $ref is complete)" $
       toJSONSchema noData SemanticTypeFile
         `shouldBe` SchemaObject
           ObjectSchema
-            { properties =
-                [ ("$ref", SchemaString),
-                  ("semanticKind", SchemaString),
-                  ("size", SchemaNumber),
-                  ("hash", SchemaString),
-                  ("contentType", SchemaString)
-                ],
-              required = ["$ref", "semanticKind", "size", "hash"],
+            { properties = [("$ref", SchemaString), ("semanticKind", SchemaString)],
+              required = ["$ref"],
               additionalProperties = AdditionalPropertiesBoolean True
             }
 

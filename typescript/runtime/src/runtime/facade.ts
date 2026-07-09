@@ -136,13 +136,8 @@ const registry = new ProjectRegistry({
         const produced = await mintAndStoreBlob(projectId, bytes, contentType, (blobId, entry) =>
           registry.actorFor(projectId).registerProducedMcpBlob(delegation, blobId, entry),
         );
-        return {
-          $ref: produced.id,
-          size: produced.size,
-          hash: produced.hash,
-          semanticKind: "file",
-          ...(contentType !== undefined ? { contentType } : {}),
-        };
+        // The slim handle: identity only — the metadata just registered lives on the blob's row.
+        return { $ref: produced.id, semanticKind: "file" };
       } catch {
         return null;
       }

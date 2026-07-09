@@ -20,6 +20,7 @@ const CONTEXT: PrimContext = {
   projectId: PROJECT,
   ir: new SnapshotRegistry(),
   blobs: new InMemoryBlobStore(),
+  blobEntryOf: () => undefined,
 };
 
 /** A stub `EnvReader` over fixed secret / non-secret maps. */

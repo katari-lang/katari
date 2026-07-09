@@ -20,13 +20,8 @@ function recordingProducer(): {
   const calls: Array<{ bytes: Uint8Array; contentType: string | undefined }> = [];
   const producer: McpBlobProducer = async (_delegation, bytes, contentType) => {
     calls.push({ bytes, contentType });
-    return {
-      $ref: `blob-${calls.length}`,
-      size: bytes.byteLength,
-      hash: `hash-${calls.length}`,
-      semanticKind: "file",
-      ...(contentType !== undefined ? { contentType } : {}),
-    };
+    // The slim handle the real producer returns: identity only (metadata went to the blob's row).
+    return { $ref: `blob-${calls.length}`, semanticKind: "file" };
   };
   return { producer, calls };
 }
@@ -68,9 +63,7 @@ describe("resolveToolResult", () => {
     expect(calls[0]?.contentType).toBe("image/png");
     expect(value).toEqual({
       text: "your screenshot",
-      files: [
-        { $ref: "blob-1", size: 4, hash: "hash-1", semanticKind: "file", contentType: "image/png" },
-      ],
+      files: [{ $ref: "blob-1", semanticKind: "file" }],
     });
   });
 
