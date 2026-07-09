@@ -139,8 +139,24 @@ export type SequenceThread = ThreadBase & {
  * A primitive leaf body: runs the prim named on its block against its `input` variable and acks the
  * value. The run may be async (a bounded env / blob fetch), awaited inline within the turn; the prim has
  * no children, so it completes within its instance's turn.
+ *
+ * `inline` marks the CROSS-MODULE fast path: a named call whose callee resolved to a primitive-bodied
+ * agent runs as this in-instance leaf instead of summoning a child instance (see
+ * `operations.enterDelegate`) — no delegation, no outbox round trip, no journal rows. The thread then
+ * carries everything the run needs itself (the callee's block lives in a foreign module this instance
+ * cannot read): the prim name, the call's argument, and the call site's generic instantiation (what the
+ * delegate would have stamped as the child instance's ambient). Born and completed within one turn, so
+ * it never persists mid-flight.
  */
-export type PrimitiveThread = ThreadBase & { kind: "primitive" };
+export type PrimitiveThread = ThreadBase & {
+  kind: "primitive";
+  inline?: {
+    /** The prim registry key — the callee's primitive BLOCK's `name` (what the in-module path reads). */
+    name: string;
+    argument: Value;
+    generics?: GenericSubstitution;
+  };
+};
 
 /** A data-constructor leaf body: builds the tagged value of its constructor from `input` and acks it. */
 export type ConstructThread = ThreadBase & { kind: "construct" };

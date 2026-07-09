@@ -11,7 +11,7 @@ import type { AskKind, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { isTainted, markPrivate } from "../value/privacy.js";
-import type { Value } from "../value/types.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
 import {
   childrenOf,
   completeInstance,
@@ -38,6 +38,7 @@ import type {
   HandleThread,
   MatchThread,
   ParallelThread,
+  PrimitiveThread,
   RequestThread,
   SequenceThread,
   Thread,
@@ -399,24 +400,36 @@ function resumeSequence(
 
 // ─── leaf bodies (primitive / construct / request / external) ────────────────────────────────────
 
-async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> {
-  const block = getBlock(ctx, thread.blockId);
-  if (block.kind !== "primitive") throw new Error(`thread ${thread.id} is not a primitive block`);
-  const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
+async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promise<void> {
+  // The inlined cross-module fast path carries its own name / argument / generics (the callee's block
+  // lives in a foreign module); an in-module primitive body reads them off its block, and its generics
+  // are the instance's ambient (the delegate that summoned the instance stamped them).
+  let name: string;
+  let argument: Value;
+  let generics: GenericSubstitution | undefined;
+  if (thread.inline !== undefined) {
+    name = thread.inline.name;
+    argument = thread.inline.argument;
+    generics = thread.inline.generics;
+  } else {
+    const block = getBlock(ctx, thread.blockId);
+    if (block.kind !== "primitive") throw new Error(`thread ${thread.id} is not a primitive block`);
+    name = block.name;
+    argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
+    generics = ctx.instance.ambientGenerics;
+  }
   // A prim failure is never a crash: an anticipated, typed failure (`KatariThrow` — malformed JSON, a
   // schema mismatch) raises `prelude.throw` with its payload; any other JS error is a `panic` (a zero
   // divisor, an engine backstop). Both bubble toward a handler / the run — only the throw is catchable.
   let value: Value;
   try {
-    value = await ctx.prims.run(block.name, argument, {
+    value = await ctx.prims.run(name, argument, {
       projectId: ctx.projectId,
       ir: ctx.irSource,
       blobs: ctx.blobs,
       // The warm blob catalog: a metadata prim (`file.size`) reads the row a slim ref points at.
       blobEntryOf: (blobId) => ctx.store.blobs[blobId],
-      ...(ctx.instance.ambientGenerics !== undefined
-        ? { generics: ctx.instance.ambientGenerics }
-        : {}),
+      ...(generics !== undefined ? { generics } : {}),
     });
   } catch (error) {
     if (error instanceof KatariThrow) {

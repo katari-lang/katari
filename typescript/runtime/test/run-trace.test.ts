@@ -182,6 +182,111 @@ describe("run trace journal", () => {
   });
 });
 
+describe("leaf call inlining", () => {
+  /** agent main() { box(value = add(left = 2, right = 3)) } — where `add` is a primitive-bodied
+   *  agent and `box` a constructor, both in the foreign "leaf" module. Pre-inlining this journaled
+   *  THREE delegations (main, add, box — 6+ events); inlined, only main's own delegate/ack remain. */
+  function leafCallIr(): { main: IRModule; leaf: IRModule } {
+    const main: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: {
+          block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} },
+          parameters: {},
+        },
+        1: {
+          block: {
+            kind: "sequence",
+            result: 25,
+            operations: [
+              { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 2 } },
+              { kind: "loadLiteral", output: 21, value: { kind: "integer", value: 3 } },
+              {
+                kind: "makeRecord",
+                entries: [
+                  ["left", 20],
+                  ["right", 21],
+                ],
+                output: 22,
+              },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("leaf.add") },
+                argument: 22,
+                output: 23,
+              },
+              { kind: "makeRecord", entries: [["value", 23]], output: 24 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("leaf.box") },
+                argument: 24,
+                output: 25,
+              },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+      },
+      entries: { [createAgentName("main")]: 0 },
+      names: {},
+    };
+    const leaf: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: {
+          block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} },
+          parameters: {},
+        },
+        1: { block: { kind: "primitive", name: "prelude.add", input: 30 }, parameters: { parameter: 30 } },
+        2: {
+          block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, defaults: {} },
+          parameters: {},
+        },
+        3: {
+          block: { kind: "construct", name: createAgentName("leaf.box"), input: 40 },
+          parameters: { parameter: 40 },
+        },
+      },
+      entries: {
+        [createAgentName("leaf.add")]: 0,
+        [createAgentName("leaf.box")]: 2,
+      },
+      names: {},
+    };
+    return { main, leaf };
+  }
+
+  test("a primitive/constructor-bodied callee runs in-instance: no delegation, no journal rows", async () => {
+    const persistence = new StoringPersistence();
+    const { main, leaf } = leafCallIr();
+    const registry = new SnapshotRegistry();
+    registry.set(SNAPSHOT, "", main);
+    registry.set(SNAPSHOT, "leaf", leaf);
+    const actor = new ProjectActor({
+      projectId: PROJECT,
+      ir: registry,
+      prims: new PrimRegistry(),
+      blobs: new InMemoryBlobStore(),
+      external: new StubFfiTransport(),
+      http: new StubHttpTransport(),
+      persistence,
+    });
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    // The whole pipeline computed: add ran as an in-instance prim, box tagged the record in place.
+    await expect(result).resolves.toEqual({
+      kind: "record",
+      ctor: createAgentName("leaf.box"),
+      fields: { value: { kind: "integer", value: 5 } },
+    });
+    // The journal carries ONLY the run's own delegation — the leaf calls never crossed an instance
+    // boundary, so they produced no events (and no instance / outbox / delegation rows).
+    expect(persistence.journalFor(run).map((event) => event.kind)).toEqual([
+      "delegate",
+      "delegateAck",
+    ]);
+  });
+});
+
 describe("run event projection", () => {
   const RUN = "run-instance" as InstanceId;
   const DELEGATION = "delegation-1234abcd-rest" as DelegationId;

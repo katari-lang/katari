@@ -9,15 +9,17 @@
 // so a recovered turn resumes exactly where it left off.
 
 import type {
+  Block,
   CalleeReference,
   ContinueOperation,
   DelegateOperation,
   ExitOperation,
   Operation,
+  QualifiedName,
   VariableId,
 } from "@katari-lang/types";
 import type { AskKind, ModifierMap } from "../event/types.js";
-import { newDelegationId, type ScopeId } from "../ids.js";
+import { newDelegationId, type ScopeId, type SnapshotId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { liftPrivacy } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
@@ -124,8 +126,9 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
       enterCall(ctx, thread, operation.target, operation.output);
       return false;
     case "delegate":
-      enterDelegate(ctx, thread, operation);
-      return false;
+      // A leaf callee (a stdlib primitive, a data constructor) may complete synchronously — the op
+      // then advances like any value-producing op instead of suspending on a child instance.
+      return enterDelegate(ctx, thread, operation);
     case "exit":
       raiseExit(ctx, thread, operation);
       return false;
@@ -153,18 +156,21 @@ function enterCall(
   });
 }
 
-/** Summon a child instance: resolve the callee, spawn the proxy DelegateThread, emit the outbound delegate. */
+/** Summon a child instance: resolve the callee, spawn the proxy DelegateThread, emit the outbound
+ *  delegate. Returns `true` when the call completed synchronously instead (an inlined construct leaf
+ *  — the cursor advances), `false` when the thread suspended (a real delegation, an inlined primitive
+ *  leaf, or a raised dispatch error). */
 function enterDelegate(
   ctx: StepContext,
   thread: SequenceThread,
   operation: DelegateOperation,
-): void {
+): boolean {
   const resolved = resolveCallee(ctx, thread.scopeId, operation.target, operation.argument);
   if ("throwPayload" in resolved) {
     // The dynamic dispatch failed before anything ran — raise the catchable `reflection.call_error`
     // (the thread suspends on the ask; a handler breaks out, or the run fails with the payload).
     raiseThrow(ctx, thread, resolved.throwPayload);
-    return;
+    return false;
   }
   // The delegate merges two substitution sources: what the callee VALUE carries (an explicit
   // `callee[T]` applied earlier via `applyGenerics`) and what THIS call site instantiated (inferred
@@ -179,6 +185,24 @@ function enterDelegate(
     }
     generics = merged;
   }
+
+  // The leaf fast path: a named core callee whose body is a pure leaf (a stdlib primitive, a data
+  // constructor) runs IN THIS INSTANCE — no child instance, no outbox round trip, no journal rows.
+  // Measured to be the bulk of a run's events (thousands of `prelude.*` delegations per AI reply), so
+  // this is the difference between a run journaling ~10k events and ~100.
+  if (resolved.target.kind === "named" && resolved.to === "core") {
+    const inlined = tryInlineLeaf(
+      ctx,
+      thread,
+      operation.output,
+      resolved.target.name,
+      resolved.target.snapshot,
+      resolved.argument,
+      generics,
+    );
+    if (inlined !== "not-a-leaf") return inlined === "completed";
+  }
+
   const callId = allocateCallId(ctx.instance);
   thread.pending = { callId, output: operation.output };
 
@@ -210,6 +234,79 @@ function enterDelegate(
     },
     resolved.to,
   );
+  return false;
+}
+
+/** Try to run a named core callee as an in-instance leaf. Resolution reads the callee's module through
+ *  `irSource` (sync — the instance's snapshot is preloaded before its turns run); ANY resolution
+ *  hiccup — an unloaded foreign snapshot, a missing entry — falls back to the ordinary delegation,
+ *  which fails (or succeeds) with its existing semantics. A callee with argument DEFAULTS also falls
+ *  back: filling them is the delegation-acceptance seam's job, not worth duplicating here.
+ *
+ *  A `construct` body completes synchronously (`"completed"` — exactly `createConstruct`'s record). A
+ *  `primitive` body spawns an in-instance `primitive` leaf carrying the resolved name / argument /
+ *  generics on the thread (`"suspended"` — the prim may be async); it completes within this same turn,
+ *  so it never persists, and its failure path (typed throw / panic) bubbles from the leaf exactly like
+ *  an in-module primitive body's. */
+function tryInlineLeaf(
+  ctx: StepContext,
+  thread: SequenceThread,
+  output: VariableId | null,
+  name: QualifiedName,
+  snapshot: SnapshotId,
+  argument: Value | null,
+  generics: GenericSubstitution | undefined,
+): "completed" | "suspended" | "not-a-leaf" {
+  let body: Block;
+  let defaults: number;
+  try {
+    const located = ctx.irSource.locate(snapshot, name);
+    const access = ctx.irSource.access(snapshot, located.module);
+    const agent = access.block(located.blockId).block;
+    if (agent.kind !== "agent") return "not-a-leaf";
+    defaults = Object.keys(agent.defaults ?? {}).length;
+    body = access.block(agent.body).block;
+  } catch {
+    return "not-a-leaf";
+  }
+  if (defaults > 0) return "not-a-leaf";
+
+  if (body.kind === "construct") {
+    // `createConstruct`'s semantics, completed in place: tag the argument record with the ctor.
+    const argumentValue = argument ?? NULL_VALUE;
+    const fields = argumentValue.kind === "record" ? argumentValue.fields : {};
+    if (output !== null) {
+      writeVariable(ctx.store, thread.scopeId, output, { kind: "record", fields, ctor: body.name });
+    }
+    return "completed";
+  }
+
+  if (body.kind === "primitive") {
+    const callId = allocateCallId(ctx.instance);
+    thread.pending = { callId, output };
+    const leafId = allocateThreadId(ctx.instance);
+    ctx.instance.threads[leafId] = {
+      id: leafId,
+      parent: thread.id,
+      parentCallId: callId,
+      scopeId: thread.scopeId,
+      // Never read (the inline data carries everything); the spawning block is a valid placeholder.
+      blockId: thread.blockId,
+      status: "running",
+      forwardRoutes: {},
+      kind: "primitive",
+      inline: {
+        // The prim registry key is the primitive BLOCK's name (exactly what the in-module path reads).
+        name: body.name,
+        argument: argument ?? NULL_VALUE,
+        ...(generics !== undefined ? { generics } : {}),
+      },
+    };
+    ctx.enqueue({ kind: "create", thread: leafId });
+    return "suspended";
+  }
+
+  return "not-a-leaf";
 }
 
 /** Resolve a callee reference + its argument variable into the delegate it stands for. Dynamic dispatch
