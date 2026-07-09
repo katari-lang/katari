@@ -146,7 +146,24 @@ export interface CallRow<Payload> {
   innerCalls: InnerCallRow[];
 }
 
-export abstract class ExternalCallReactor<Payload> extends Reactor {
+/** The optional capability a call payload may carry: shaping its own `delegateAck` value. A call whose
+ *  result is assembled FROM the call rather than by the transport attaches `shapeResult` where its payload
+ *  variant is decided (`openPayload`) — the mcp listing mints its toolbox there, from the transport's tool
+ *  listing plus the call's original privacy-marked descriptor, which the wire cannot carry. A plain-data
+ *  payload simply omits it and the decoded transport value passes through unchanged. */
+export interface ResultShapingPayload {
+  shapeResult?: (value: Value) => Value;
+}
+
+/** Read a payload's optional ack shaper structurally. The class's payload parameter is constrained only to
+ *  `object` because constraining it to the all-optional `ResultShapingPayload` would trip TypeScript's
+ *  weak-type check for the plain-data payloads (ffi / http / webhook) that share no field with it. */
+function resultShaperOf(payload: object): ((value: Value) => Value) | undefined {
+  const shaping: ResultShapingPayload = payload;
+  return shaping.shapeResult;
+}
+
+export abstract class ExternalCallReactor<Payload extends object> extends Reactor {
   /** In-flight calls (warm SoT) keyed by their delegation, plus the per-turn dirty set `persist` upserts and
    *  the instance ids of calls resolved this turn (their envelopes are dropped, cascading the ext row). */
   private readonly calls = new Map<DelegationId, Call<Payload>>();
@@ -195,14 +212,6 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   /** A call resolved and is being dropped — a concrete reactor releases the per-call state it indexes
    *  outside the base (the webhook reactor's token registry). Default no-op. */
   protected onDropCall(_delegation: DelegationId): void {}
-
-  /** Shape a call's `result` completion into the value its `delegateAck` carries — a concrete reactor's
-   *  seam for results that are assembled FROM the call rather than by the transport (the mcp reactor
-   *  mints the toolbox here, from the transport's tool listing + the call's original argument values,
-   *  so privacy markers the wire cannot carry survive). Default: the decoded value unchanged. */
-  protected transformResult(_delegation: DelegationId, value: Value): Value {
-    return value;
-  }
 
   /** The instance handling `delegation`, or `undefined` — for a concrete reactor that owns per-call resources
    *  (an ffi call's produced blob) to attribute them to the right instance. Reads the base received edge. */
@@ -533,12 +542,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     if (outcome === undefined) return;
     call.pendingOutcome = undefined;
     switch (outcome.kind) {
-      case "result":
+      case "result": {
+        // A payload that shapes its own ack (see `ResultShapingPayload`) does so here, at the same seam
+        // the transport's Json lifts back into an engine value.
+        const decoded = jsonToValue(outcome.value);
+        const shape = resultShaperOf(call.payload);
         this.send(
           {
             kind: "delegateAck",
             delegation,
-            value: this.transformResult(delegation, jsonToValue(outcome.value)),
+            value: shape === undefined ? decoded : shape(decoded),
             from: this.name,
             to: caller,
             run,
@@ -547,6 +560,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         );
         this.drop(delegation);
         return;
+      }
       case "cancelled":
         this.send({ kind: "terminateAck", delegation, from: this.name, to: caller, run });
         this.drop(delegation);

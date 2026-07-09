@@ -2,9 +2,10 @@
 // download metadata (hash / size / content type), while the bytes live in the BlobStore. Reads go straight
 // to the committed row (the durable snapshot), like the run / escalation read paths.
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { blobs } from "../../db/tables/engine.js";
+import { listPageWithTotal } from "../../lib/paging.js";
 import { apiRootIdOf, type ProjectId } from "../../runtime/ids.js";
 
 const columns = {
@@ -45,15 +46,6 @@ export const fileRepository = {
       .where(where)
       // Newest first; `blob_id` breaks ties deterministically for stable offset paging.
       .orderBy(desc(blobs.createdAt), desc(blobs.blobId));
-    const limited = filter.limit === undefined ? page : page.limit(filter.limit);
-    const rows = await (filter.offset === undefined ? limited : limited.offset(filter.offset));
-
-    const total = await executor
-      .select({ value: sql<number>`count(*)::int` })
-      .from(blobs)
-      .where(where)
-      .then(([row]) => row?.value ?? 0);
-
-    return { rows, total };
+    return listPageWithTotal({ executor, query: page, window: filter, table: blobs, where });
   },
 };

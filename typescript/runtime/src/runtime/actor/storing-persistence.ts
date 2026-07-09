@@ -13,6 +13,7 @@ import {
   isTerminalRunState,
   type RunState,
 } from "../../db/tables/execution.js";
+import type { InstanceKind } from "../engine/types.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
@@ -27,17 +28,13 @@ import type {
   BaseTx,
   Loader,
   OutboxMessage,
+  PersistedCallEnvelope,
   PersistedDelegation,
-  PersistedFfiInstance,
   PersistedFfiInstanceRow,
-  PersistedHttpInstance,
-  PersistedHttpInstanceRow,
-  PersistedMcpInstance,
-  PersistedMcpInstanceRow,
   PersistedOpenEscalation,
   PersistedRun,
   PersistedRunEscalationAudit,
-  PersistedWebhookInstance,
+  PersistedStatusOnlyInstanceRow,
   PersistedWebhookInstanceRow,
   Persistence,
   PersistenceTx,
@@ -87,9 +84,9 @@ export class StoringPersistence implements Persistence {
   private readonly envelopes = new Map<InstanceId, PersistedInstanceEnvelope>();
   private readonly coreInstanceRows = new Map<InstanceId, PersistedCoreInstance>();
   private readonly ffiInstanceRows = new Map<InstanceId, PersistedFfiInstanceRow>();
-  private readonly httpInstanceRows = new Map<InstanceId, PersistedHttpInstanceRow>();
+  private readonly httpInstanceRows = new Map<InstanceId, PersistedStatusOnlyInstanceRow>();
   private readonly webhookInstanceRows = new Map<InstanceId, PersistedWebhookInstanceRow>();
-  private readonly mcpInstanceRows = new Map<InstanceId, PersistedMcpInstanceRow>();
+  private readonly mcpInstanceRows = new Map<InstanceId, PersistedStatusOnlyInstanceRow>();
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
   /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
@@ -196,114 +193,82 @@ export class StoringPersistence implements Persistence {
         answerableEscalations: async () => openEscalationsWhere({ to: "api" }),
       },
       ffi: {
-        instances: async () => {
-          const result: PersistedFfiInstance[] = [];
-          for (const [id, envelope] of this.envelopes) {
-            const ext = this.ffiInstanceRows.get(id);
-            if (
-              envelope.kind !== "ffi" ||
-              ext === undefined ||
-              envelope.delegationId === null ||
-              envelope.callerReactor === null ||
-              envelope.runId === null
-            )
-              continue;
-            result.push({
-              delegation: envelope.delegationId,
-              instance: id,
-              snapshot: ext.snapshotId,
-              key: ext.key,
-              caller: envelope.callerReactor,
-              run: envelope.runId,
-              status: ext.status,
-              relays: ext.relays,
-              innerCalls: ext.innerCalls,
-            });
-          }
-          return result;
-        },
+        instances: async () =>
+          this.instancesOf("ffi", this.ffiInstanceRows, (call, extension) => ({
+            ...call,
+            snapshot: extension.snapshotId,
+            key: extension.key,
+            status: extension.status,
+            relays: extension.relays,
+            innerCalls: extension.innerCalls,
+          })),
       },
       http: {
-        instances: async () => {
-          const result: PersistedHttpInstance[] = [];
-          for (const [id, envelope] of this.envelopes) {
-            const ext = this.httpInstanceRows.get(id);
-            if (
-              envelope.kind !== "http" ||
-              ext === undefined ||
-              envelope.delegationId === null ||
-              envelope.callerReactor === null ||
-              envelope.runId === null
-            )
-              continue;
-            result.push({
-              delegation: envelope.delegationId,
-              instance: id,
-              caller: envelope.callerReactor,
-              run: envelope.runId,
-              status: ext.status,
-            });
-          }
-          return result;
-        },
+        instances: async () =>
+          this.instancesOf("http", this.httpInstanceRows, (call, extension) => ({
+            ...call,
+            status: extension.status,
+          })),
       },
       webhook: {
-        instances: async () => {
-          const result: PersistedWebhookInstance[] = [];
-          for (const [id, envelope] of this.envelopes) {
-            const ext = this.webhookInstanceRows.get(id);
-            if (
-              envelope.kind !== "webhook" ||
-              ext === undefined ||
-              envelope.delegationId === null ||
-              envelope.callerReactor === null ||
-              envelope.runId === null
-            )
-              continue;
-            result.push({
-              delegation: envelope.delegationId,
-              instance: id,
-              snapshot: ext.snapshotId,
-              token: ext.token,
-              callback: ext.callback,
-              caller: envelope.callerReactor,
-              run: envelope.runId,
-              status: ext.status,
-              relays: ext.relays,
-              innerCalls: ext.innerCalls,
-            });
-          }
-          return result;
-        },
+        instances: async () =>
+          this.instancesOf("webhook", this.webhookInstanceRows, (call, extension) => ({
+            ...call,
+            snapshot: extension.snapshotId,
+            token: extension.token,
+            callback: extension.callback,
+            status: extension.status,
+            relays: extension.relays,
+            innerCalls: extension.innerCalls,
+          })),
       },
       mcp: {
-        instances: async () => {
-          const result: PersistedMcpInstance[] = [];
-          for (const [id, envelope] of this.envelopes) {
-            const ext = this.mcpInstanceRows.get(id);
-            if (
-              envelope.kind !== "mcp" ||
-              ext === undefined ||
-              envelope.delegationId === null ||
-              envelope.callerReactor === null ||
-              envelope.runId === null
-            )
-              continue;
-            result.push({
-              delegation: envelope.delegationId,
-              instance: id,
-              caller: envelope.callerReactor,
-              run: envelope.runId,
-              status: ext.status,
-            });
-          }
-          return result;
-        },
+        instances: async () =>
+          this.instancesOf("mcp", this.mcpInstanceRows, (call, extension) => ({
+            ...call,
+            status: extension.status,
+          })),
       },
       outbox: {
         pending: async () => [...this.outbox.values()],
       },
     };
+  }
+
+  /** Join the `kind` envelopes to their extension rows and project each live pair — the shared shape of
+   *  every call reactor's `instances()` loader. The guards are uniform across kinds: the extension must
+   *  exist (the join), and the envelope's delegation / caller / run must be present (they are written
+   *  together at delegate-receive, so a null in any means the row is not a loadable call) — leaving each
+   *  loader with only its projection. */
+  private instancesOf<Extension, Instance>(
+    kind: InstanceKind,
+    extensions: Map<InstanceId, Extension>,
+    project: (call: PersistedCallEnvelope, extension: Extension) => Instance,
+  ): Instance[] {
+    const result: Instance[] = [];
+    for (const [id, envelope] of this.envelopes) {
+      const extension = extensions.get(id);
+      if (
+        envelope.kind !== kind ||
+        extension === undefined ||
+        envelope.delegationId === null ||
+        envelope.callerReactor === null ||
+        envelope.runId === null
+      )
+        continue;
+      result.push(
+        project(
+          {
+            delegation: envelope.delegationId,
+            instance: id,
+            caller: envelope.callerReactor,
+            run: envelope.runId,
+          },
+          extension,
+        ),
+      );
+    }
+    return result;
   }
 
   /** How many commits (transactions) ran — what batching tests assert (one batch = one commit). */

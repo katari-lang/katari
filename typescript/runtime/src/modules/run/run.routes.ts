@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { projectIdParamSchema } from "../../lib/params.js";
-import { success } from "../../lib/response.js";
+import { pagedList, success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import { requireJsonBody } from "../../middleware/require-json.js";
 import type { AppEnv } from "../../types/app-env.js";
@@ -32,11 +32,7 @@ export const runRoutes = new Hono<AppEnv>()
     zValidator("query", listRunsQuerySchema),
     async (c) => {
       const { projectId } = c.req.valid("param");
-      // `data` stays the bare run array (the CLI decodes it as such); the filtered total rides on the
-      // `X-Total-Count` header, which the console's pager reads and other clients ignore.
-      const { items, total } = await runService.list(projectId, c.req.valid("query"));
-      c.header("X-Total-Count", String(total));
-      return c.json(success(items));
+      return c.json(pagedList(c, await runService.list(projectId, c.req.valid("query"))));
     },
   )
   .get("/projects/:projectId/runs/:runId", zValidator("param", runParamSchema), async (c) => {

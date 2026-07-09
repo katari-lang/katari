@@ -7,6 +7,7 @@
 import { and, asc, desc, eq, ilike, or, type SQL, sql } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { type RunState, runEscalationsAudit, runs } from "../../db/tables/execution.js";
+import { escapeLike, listPageWithTotal } from "../../lib/paging.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
 import type { Value } from "../../runtime/value/types.js";
 
@@ -101,20 +102,19 @@ export const runRepository = {
       );
       if (match !== undefined) conditions.push(match);
     }
+    const where = and(...conditions);
     const page = executor
       .select(projectionColumns)
       .from(runs)
-      .where(and(...conditions))
+      .where(where)
       .orderBy(desc(runs.createdAt), desc(runs.id));
-    const limited = filter.limit === undefined ? page : page.limit(filter.limit);
-    const rows = await (filter.offset === undefined ? limited : limited.offset(filter.offset));
-
-    const total = await executor
-      .select({ value: sql<number>`count(*)::int` })
-      .from(runs)
-      .where(and(...conditions))
-      .then(([row]) => row?.value ?? 0);
-
+    const { rows, total } = await listPageWithTotal({
+      executor,
+      query: page,
+      window: filter,
+      table: runs,
+      where,
+    });
     return { rows: rows.map((row) => projectRun(unsealRow(row))), total };
   },
 
@@ -156,12 +156,6 @@ export interface RunEscalationAuditView {
   question: Value | null;
   answer: Value | null;
   answeredAt: Date;
-}
-
-/** Escape a user substring for a LIKE pattern: the wildcards (`%` / `_`) and the escape char itself
- *  become literals, so a search reads as a plain substring rather than a pattern. */
-function escapeLike(term: string): string {
-  return term.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
 /** Decrypt a row's at-rest `argument` / `result` before projection (the inverse of the engine's seal-on-write). */

@@ -117,6 +117,11 @@ renderTypeError typeError =
         <> info.reactor
         <> "` in a `from` clause; the external reactors are "
         <> Text.intercalate ", " info.known
+    TypeErrorMalformedUse info -> case info.reason of
+      MalformedUseWrittenContinuation ->
+        "`continuation` is the argument `use` itself passes to its provider — a `use` application cannot also write one"
+      MalformedUseProviderShape ->
+        "a `use` provider must be a handler or an application — a handler literal, a (qualified) name, or a call; bind any other expression first (`let p = ...` then `use p`, or apply it: `use expression(...)`)"
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -158,6 +163,10 @@ data TypeError where
   -- (a typo, or an unimplemented reactor). Rejected at compile time rather than silently defaulting to
   -- the FFI reactor at runtime.
   TypeErrorUnknownReactor :: UnknownReactorErrorInfo -> TypeError
+  -- | A @use@ statement is written in a shape @use@ does not admit — see 'MalformedUseReason' for the
+  -- specific violation. Distinct from a malformed /type/ (K3011): the type expression is fine, the
+  -- @use@ construct itself is misused.
+  TypeErrorMalformedUse :: MalformedUseErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -177,6 +186,7 @@ typeErrorCode = \case
   TypeErrorCannotInferGeneric _ -> "K3016"
   TypeErrorWrongReferenceKind _ -> "K3017"
   TypeErrorUnknownReactor _ -> "K3018"
+  TypeErrorMalformedUse _ -> "K3019"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -197,6 +207,7 @@ typeErrorSeverity = \case
   TypeErrorCannotInferGeneric _ -> SeverityError
   TypeErrorWrongReferenceKind _ -> SeverityError
   TypeErrorUnknownReactor _ -> SeverityError
+  TypeErrorMalformedUse _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -301,6 +312,22 @@ data WrongReferenceKindErrorInfo = WrongReferenceKindErrorInfo
 data UnknownReactorErrorInfo = UnknownReactorErrorInfo
   { reactor :: Text,
     known :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | The specific way a @use@ statement is misused; rendered per case so each violation keeps its own
+-- guidance text.
+data MalformedUseReason
+  = -- | A @use@ application writes a @continuation@ argument, but that label is reserved: @use@ itself
+    -- passes the continuation (the rest of the block) under it.
+    MalformedUseWrittenContinuation
+  | -- | The provider expression has no application reading (it is not a handler literal, a name, an
+    -- instantiation, or a call), so admitting it would make @use@'s meaning depend on provider syntax.
+    MalformedUseProviderShape
+  deriving (Eq, Ord, Show)
+
+newtype MalformedUseErrorInfo = MalformedUseErrorInfo
+  { reason :: MalformedUseReason
   }
   deriving (Eq, Ord, Show)
 

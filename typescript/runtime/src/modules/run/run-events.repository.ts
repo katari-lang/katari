@@ -1,13 +1,15 @@
 // The execution trace of one run — the `run_events` journal, read back as the API presents it. The journal
-// row's `event` JSON is the source of truth; this module tails it by (run, seq > after) and projects each
-// event into a display view: the structured fields a client correlates on (delegation / escalation ids, the
-// delegate target, the escalated ask), the redacted payload it carried, and a one-line `summary` so a dumb
-// client (the CLI tail) can print the trace without knowing the event vocabulary.
+// row's `event` JSON is the source of truth; this module reads it either as a keyset tail (seq > after) or
+// as an offset browse page, and projects each event into a display view: the structured fields a client
+// correlates on (delegation / escalation ids, the delegate target, the escalated ask), the redacted payload
+// it carried, and a one-line `summary` so a dumb client (the CLI tail) can print the trace without knowing
+// the event vocabulary.
 
 import type { Json } from "@katari-lang/types";
 import { and, asc, desc, eq, gt, type SQL, sql } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { runEvents } from "../../db/tables/execution.js";
+import { countRows, escapeLike } from "../../lib/paging.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
 import {
   type DelegateTarget,
@@ -135,14 +137,15 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-/** How one trace page is selected. `after` is the keyset tail cursor (seq > after), `offset` the
- *  browse cursor; `after` wins when both are set. `kind` / `search` narrow the set; `order` is the seq
- *  direction. `total` in the result is the count of the filtered set (cursors ignored), so the console
- *  can size its pager — computed only in offset mode, since the keyset tail (CLI / live watch) never
- *  reads it and a count per poll would scan the whole run each time. */
-export interface RunEventsFilter {
-  after?: number;
-  offset?: number;
+/** How one trace page is positioned — a genuine sum, decided once by the service from the query:
+ *  `tail` is the keyset cursor (rows strictly after `after`) a watcher / the CLI polls with; `browse`
+ *  is the console's offset pager. Keeping the modes apart keeps the hot tail free of the count query
+ *  only the pager needs. */
+export type TraceCursor = { mode: "tail"; after: number } | { mode: "browse"; offset: number };
+
+/** The cursor-independent half of a trace query: `kind` / `search` narrow the set, `order` is the seq
+ *  direction (default oldest-first), `limit` bounds the page. */
+export interface TraceFilter {
   limit: number;
   kind?: ExternalEvent["kind"];
   search?: string;
@@ -154,17 +157,11 @@ export interface RunEventsPage {
   total: number;
 }
 
-/** Escape a user substring for a LIKE pattern: the wildcards (`%` / `_`) and the escape char itself
- *  become literals, so a search for "50%" matches the text "50%" rather than "50<anything>". */
-function escapeLike(term: string): string {
-  return term.replace(/[\\%_]/g, (character) => `\\${character}`);
-}
-
 /** The `kind` / `search` predicates shared by the page query and the count — everything but the paging
  *  cursor. `search` is a case-insensitive substring over the event JSON rendered to text: it matches the
  *  ids, reactor names, delegate targets, request names, and any public payload text, but never a sealed
  *  private value (which is opaque ciphertext at rest). */
-function filterConditions(projectId: string, runId: string, filter: RunEventsFilter): SQL[] {
+function filterConditions(projectId: string, runId: string, filter: TraceFilter): SQL[] {
   const conditions: SQL[] = [eq(runEvents.projectId, projectId), eq(runEvents.runId, runId)];
   if (filter.kind !== undefined) {
     conditions.push(sql`${runEvents.event} ->> 'kind' = ${filter.kind}`);
@@ -175,50 +172,51 @@ function filterConditions(projectId: string, runId: string, filter: RunEventsFil
   return conditions;
 }
 
+/** The page select both modes share: the projection, the filter, the seq order, and the page bound. */
+function selectTracePage(executor: Executor, conditions: SQL[], filter: TraceFilter) {
+  const direction = filter.order === "desc" ? desc : asc;
+  return executor
+    .select({ seq: runEvents.seq, event: runEvents.event, createdAt: runEvents.createdAt })
+    .from(runEvents)
+    .where(and(...conditions))
+    .orderBy(direction(runEvents.seq))
+    .limit(filter.limit);
+}
+
+/** Undo the at-rest seal on a journal row's event (sealed like any stored payload). */
+function unsealRunEventRow(row: RunEventRow): RunEventRow {
+  return { seq: row.seq, event: unsealFromStorage(row.event), createdAt: row.createdAt };
+}
+
 export const runEventsRepository = {
-  /** One page of a run's trace. In keyset mode the rows are those after `after` (exclusive), the tail a
-   *  watcher / the CLI streams; in offset mode they are the `offset`-th page of the filtered set, with a
-   *  `total` for the pager. Rows come back in `order` (default oldest-first). The caller scopes the run
-   *  to its project first, like the escalation audit. */
-  async list(
+  /** The keyset tail of a run's trace: the filtered rows strictly after `after`, in `order`. This is the
+   *  hot polling path (a watcher / the CLI streams it), so no total is computed here — a count per poll
+   *  would rescan the whole run each time, and the tail never reads it. The caller scopes the run to its
+   *  project first, like the escalation audit. */
+  async tail(
     executor: Executor,
     projectId: string,
     runId: string,
-    filter: RunEventsFilter,
+    after: number,
+    filter: TraceFilter,
+  ): Promise<RunEventRow[]> {
+    const conditions = [...filterConditions(projectId, runId, filter), gt(runEvents.seq, after)];
+    const rows = await selectTracePage(executor, conditions, filter);
+    return rows.map(unsealRunEventRow);
+  },
+
+  /** One browse page of a run's trace: the `offset`-th slice of the filtered set, plus the whole set's
+   *  `total` (the cursor ignored) so the console can size its pager. */
+  async browse(
+    executor: Executor,
+    projectId: string,
+    runId: string,
+    offset: number,
+    filter: TraceFilter,
   ): Promise<RunEventsPage> {
     const conditions = filterConditions(projectId, runId, filter);
-    // The keyset cursor applies to the page only, not the count (which sizes the whole filtered set).
-    const pageConditions = [...conditions];
-    if (filter.after !== undefined) pageConditions.push(gt(runEvents.seq, filter.after));
-
-    const direction = filter.order === "desc" ? desc : asc;
-    const page = executor
-      .select({ seq: runEvents.seq, event: runEvents.event, createdAt: runEvents.createdAt })
-      .from(runEvents)
-      .where(and(...pageConditions))
-      .orderBy(direction(runEvents.seq))
-      .limit(filter.limit);
-    // Offset only makes sense for the browse path; the keyset cursor already positions the tail.
-    const useOffset = filter.offset !== undefined && filter.after === undefined;
-    const rows = await (useOffset ? page.offset(filter.offset ?? 0) : page);
-
-    // A count per keyset poll would rescan the whole run, so skip it there — the tail never reads it.
-    const total =
-      filter.after !== undefined
-        ? rows.length
-        : await executor
-            .select({ value: sql<number>`count(*)::int` })
-            .from(runEvents)
-            .where(and(...conditions))
-            .then(([row]) => row?.value ?? 0);
-
-    return {
-      rows: rows.map((row) => ({
-        seq: row.seq,
-        event: unsealFromStorage(row.event),
-        createdAt: row.createdAt,
-      })),
-      total,
-    };
+    const rows = await selectTracePage(executor, conditions, filter).offset(offset);
+    const total = await countRows(executor, runEvents, and(...conditions));
+    return { rows: rows.map(unsealRunEventRow), total };
   },
 };

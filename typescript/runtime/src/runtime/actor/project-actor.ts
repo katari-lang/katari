@@ -219,37 +219,42 @@ export class ProjectActor {
     return this.api.deleteUploadedBlob(blobId);
   }
 
-  /** Register a blob an FFI handler produced mid-call as owned by that call's instance (bytes already in the
-   *  BlobStore) — so the call's return ascends it to the core caller, and a handler that dies before returning
-   *  has it reclaimed at teardown. Runs as a serial command turn so the ownership row commits before the
-   *  handler's result is processed; resolves once that commit is durable. Resolves to whether the blob was
-   *  registered (`false` when the call already vanished, so the caller can delete the orphaned bytes). */
+  /** Register a blob an FFI handler produced mid-call as owned by that call's instance (bytes already in
+   *  the BlobStore) — so the call's return ascends it to the core caller, and a handler that dies before
+   *  returning has it reclaimed at teardown. See `registerProducedBlobOn` for the commit contract. */
   registerProducedBlob(
     delegation: DelegationId,
     blobId: BlobId,
     entry: Omit<BlobEntry, "owner">,
   ): Promise<boolean> {
-    let registered = false;
-    return this.substrate
-      .enqueueCommand(this.ffi, () => {
-        registered = this.ffi.registerProducedBlob(delegation, blobId, entry);
-      })
-      .then(() => registered);
+    return this.registerProducedBlobOn(this.ffi, delegation, blobId, entry);
   }
 
   /** Like `registerProducedBlob`, for a blob the MCP transport produced from a tool result's image
-   *  content: owned by that mcp call's instance, so the result's `delegateAck` ascends it to the caller.
-   *  Same serial-command-turn contract — the ownership row commits durably before the completion (which
-   *  carries the blob's handle in its result) is processed. */
+   *  content: owned by that mcp call's instance, so the result's `delegateAck` ascends it to the caller. */
   registerProducedMcpBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): Promise<boolean> {
+    return this.registerProducedBlobOn(this.mcp, delegation, blobId, entry);
+  }
+
+  /** The shared contract behind the two produced-blob entry points (they differ only in which call reactor
+   *  owns the delegation): run as a serial command turn so the ownership row commits durably before the
+   *  transport's completion (which carries the blob's handle in its result) is processed. Resolves to
+   *  whether the blob was registered — `false` when the call already vanished, so the caller can delete
+   *  the orphaned bytes. */
+  private registerProducedBlobOn(
+    reactor: FfiReactor | McpReactor,
     delegation: DelegationId,
     blobId: BlobId,
     entry: Omit<BlobEntry, "owner">,
   ): Promise<boolean> {
     let registered = false;
     return this.substrate
-      .enqueueCommand(this.mcp, () => {
-        registered = this.mcp.registerProducedBlob(delegation, blobId, entry);
+      .enqueueCommand(reactor, () => {
+        registered = reactor.registerProducedBlob(delegation, blobId, entry);
       })
       .then(() => registered);
   }

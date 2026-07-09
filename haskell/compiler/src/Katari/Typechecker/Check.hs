@@ -33,7 +33,8 @@ import Katari.Error
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
     GenericNotAppliedErrorInfo (..),
-    MalformedTypeErrorInfo (..),
+    MalformedUseErrorInfo (..),
+    MalformedUseReason (..),
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     TypeError (..),
@@ -281,60 +282,32 @@ handleUseStatement useStmt = do
       withParameters bindings $
         synthBlock useStmt.body
   let continuationAgent = continuationAgentType bindingType resultType inferredContinuationEffect
-      -- The zero-argument case of the one rule: apply the provider to the continuation alone, through
-      -- the shared callee-application path — same world / effect discipline and generic inference as a
-      -- direct call (a provider generic in @R@ infers it from the continuation argument).
-      applyBareProvider = do
-        let providerExpectedArgument = continuationExpectedArgument bindingType resultType inferredContinuationEffect
-        (typedBareProvider, scheme) <- synthApplicationCallee useStmt.provider
-        argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
-        _ <- applyCallee useStmt.sourceSpan scheme providerExpectedArgument argumentAttribute
-        pure typedBareProvider
-  typedProvider <- case useStmt.provider of
-    -- An application: the continuation joins the written arguments (see the section comment). The typed
-    -- node stays an 'ExpressionCall' — carrying the inferred instantiation — so lowering emits the same
-    -- single delegate a direct call would.
+  -- Every admitted shape is normalized to ONE application here: a bare provider (a handler literal, a
+  -- (qualified) name, an explicit instantiation) becomes its zero-written-argument call, so a single
+  -- pipeline types every provider and a bare shape cannot drift from the call shape.
+  providerCall <- case useStmt.provider of
     ExpressionCall callExpression -> do
       when (any (\argument -> argument.name == "continuation") callExpression.arguments) $
         reportType
           callExpression.sourceSpan
-          ( TypeErrorMalformedType
-              MalformedTypeErrorInfo
-                { reason = "`continuation` is the argument `use` itself passes to its provider — a `use` application cannot also write one"
-                }
-          )
-      (typedCallee, scheme) <- synthApplicationCallee callExpression.callee
-      (typedArguments, argumentObject, argumentAttribute) <-
-        synthCallArgumentsWith callExpression.sourceSpan callExpression.arguments [("continuation", continuationAgent)]
-      (effectiveReturn, instantiation) <- applyCallee useStmt.sourceSpan scheme argumentObject argumentAttribute
-      (node, _) <-
-        typedExpression callExpression.sourceSpan effectiveReturn $ \semantic ->
-          ExpressionCall
-            CallExpression
-              { callee = typedCallee,
-                arguments = typedArguments,
-                instantiation = instantiation,
-                sourceSpan = callExpression.sourceSpan,
-                typeOf = semantic
-              }
-      pure node
-    -- The zero-argument shapes: a handler literal, a (qualified) name, an explicit instantiation.
-    ExpressionHandler _ -> applyBareProvider
-    ExpressionVariable _ -> applyBareProvider
-    ExpressionQualifiedReference _ -> applyBareProvider
-    ExpressionTypeApplication _ -> applyBareProvider
+          (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseWrittenContinuation})
+      pure callExpression
+    ExpressionHandler _ -> pure (zeroArgumentApplication useStmt.provider)
+    ExpressionVariable _ -> pure (zeroArgumentApplication useStmt.provider)
+    ExpressionQualifiedReference _ -> pure (zeroArgumentApplication useStmt.provider)
+    ExpressionTypeApplication _ -> pure (zeroArgumentApplication useStmt.provider)
     other -> do
       -- No application reading exists for this shape; admitting it would make `use` mean different
       -- things for different provider syntax. Reject, and still type the provider as if bare so
       -- downstream checking continues.
-      reportType
-        (sourceSpanOf other)
-        ( TypeErrorMalformedType
-            MalformedTypeErrorInfo
-              { reason = "a `use` provider must be a handler or an application — a handler literal, a (qualified) name, or a call; bind any other expression first (`let p = ...` then `use p`, or apply it: `use expression(...)`)"
-              }
-        )
-      applyBareProvider
+      reportType (sourceSpanOf other) (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseProviderShape})
+      pure (zeroArgumentApplication other)
+  -- The one rule: apply the provider to its written arguments joined with the continuation, through
+  -- the shared call path — same world / effect discipline, closed argument object, and generic
+  -- inference as a direct call (a provider generic in @R@ infers it from the continuation argument).
+  -- The typed node is always an 'ExpressionCall' — carrying the inferred instantiation — so lowering
+  -- emits the same single delegate a hand-written @provider(..., continuation = ...)@ would.
+  (typedProvider, _) <- synthCallExpressionWith [("continuation", continuationAgent)] providerCall
   pure
     UseStatement
       { binder = typedBinder,
@@ -342,6 +315,18 @@ handleUseStatement useStmt = do
         body = typedBody,
         sourceSpan = useStmt.sourceSpan
       }
+
+-- | A bare @use@ provider as its zero-written-argument application — the wrap that funnels every
+-- admitted provider shape into the one call-typed pipeline of 'handleUseStatement'.
+zeroArgumentApplication :: Expression Identified -> CallExpression Identified
+zeroArgumentApplication provider =
+  CallExpression
+    { callee = provider,
+      arguments = [],
+      instantiation = (),
+      sourceSpan = sourceSpanOf provider,
+      typeOf = ()
+    }
 
 ------------------------------------------------------------------------------------------------
 -- Per-expression synthesis (produces Typed AST + NormalizedType)
@@ -650,12 +635,18 @@ synthTemplateExpression expression = do
 ------------------------------------------------------------------------------------------------
 
 synthCallExpression :: CallExpression Identified -> Checker (Expression Typed, NormalizedType)
-synthCallExpression expression = do
+synthCallExpression = synthCallExpressionWith []
+
+-- | As 'synthCallExpression', with extra synthetic (label, type) fields joined into the argument
+-- object — the @use@ pipeline adds its @continuation@ this way, so a provider is applied to ONE
+-- closed object carrying both the written arguments and the continuation.
+synthCallExpressionWith :: List (Text, NormalizedType) -> CallExpression Identified -> Checker (Expression Typed, NormalizedType)
+synthCallExpressionWith extraFields expression = do
   -- Take the callee's full 'Scheme' (not a bare-instantiated type): a generic callee keeps its
   -- quantified parameters here so they can be inferred from the arguments below, rather than being
   -- rejected as an unapplied generic.
   (typedCallee, scheme) <- synthApplicationCallee expression.callee
-  (typedArgs, argumentObject, argumentAttribute) <- synthCallArguments expression.sourceSpan expression.arguments
+  (typedArgs, argumentObject, argumentAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments extraFields
   (effectiveReturn, instantiation) <- applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
   typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
     ExpressionCall
@@ -786,15 +777,9 @@ extractFunction sourceSpan normalizedType = do
     Just (attribute, layer) | Just function <- layer.functionLayer -> Just (attribute, function)
     _ -> Nothing
 
-synthCallArguments ::
-  SourceSpan ->
-  List (CallArgument Identified) ->
-  Checker (List (CallArgument Typed), NormalizedType, NormalizedAttribute)
-synthCallArguments sourceSpan arguments = synthCallArgumentsWith sourceSpan arguments []
-
--- | As 'synthCallArguments', with extra synthetic (label, type) fields joined into the argument
--- object — the @use@ call-provider path adds its @continuation@ this way, so the provider is applied
--- to ONE object carrying both the written arguments and the continuation.
+-- | Type a call's written arguments into the single argument object, joined with any extra synthetic
+-- (label, type) fields — the @use@ pipeline adds its @continuation@ this way, so the provider is
+-- applied to ONE object carrying both the written arguments and the continuation.
 synthCallArgumentsWith ::
   SourceSpan ->
   List (CallArgument Identified) ->
@@ -886,9 +871,9 @@ continuationAgentType :: NormalizedType -> NormalizedType -> NormalizedEffect ->
 continuationAgentType valueType =
   assembleAgent bottomAttribute (namedObjectType [("value", valueType)])
 
--- | The whole argument object a bare @use@ provider receives: @{continuation: agent({value: V}) -> R
--- with E}@ (a call provider receives its written arguments joined with the same @continuation@ field
--- instead — see 'handleUseStatement').
+-- | The parameter object a handler-shaped provider declares: @{continuation: agent({value: V}) -> R
+-- with E}@. Used by 'checkHandlerScheme' for the synthesized handler's outer parameter; a @use@ site
+-- builds its actual argument object through the shared call path ('synthCallExpressionWith') instead.
 continuationExpectedArgument :: NormalizedType -> NormalizedType -> NormalizedEffect -> NormalizedType
 continuationExpectedArgument valueType resultType effect =
   namedObjectType [("continuation", continuationAgentType valueType resultType effect)]

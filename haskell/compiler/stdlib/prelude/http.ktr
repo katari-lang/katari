@@ -35,24 +35,25 @@ external agent fetch(
 arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
 data status_error(status: integer, body: string)
 
-@"POST @body@ to @url@ as application/json with one auth header @auth_header_name: <auth_prefix><api_key>@
-(e.g. \"Authorization\" / \"Bearer \" for OpenAI, \"x-goog-api-key\" / \"\" for Gemini). Returns the
-response body text; a non-2xx status throws `status_error`, a transport failure `fetch_error`. The
-canonical one-call shape of a JSON API integration — build the body as `json` in Katari, post it, parse
-the reply as `json` in Katari."
+@"POST @body@ to @url@ as application/json with the given @headers@ (each value may be a secret, such
+as an auth token — an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\" for
+Gemini; build one with `record.set(target = record.empty(), key = ..., value = ...)`). A
+@Content-Type: application/json@ default is merged beneath the caller's headers — on a shared name
+the caller's value wins. Returns the response body text; a non-2xx status throws `status_error`, a
+transport failure `fetch_error`. The canonical one-call shape of a JSON API integration — build the
+body as `json` in Katari, post it, parse the reply as `json` in Katari."
 agent post_json(
   url: string,
   body: string,
-  auth_header_name: string,
-  auth_prefix: string,
-  api_key: string of private,
+  headers: record[string of private],
 ) -> string with io | prelude.throw[status_error | fetch_error] {
-  let headers = record.set(
-    target = record.set(target = record.empty(), key = "Content-Type", value = "application/json"),
-    key = auth_header_name,
-    value = auth_prefix ++ api_key,
+  // The caller's headers merge as `record.merge`'s right side, so on a shared name (a caller that
+  // sets its own Content-Type) the caller's value overrides the default.
+  let effective_headers = record.merge(
+    left = record.set(target = record.empty(), key = "Content-Type", value = "application/json"),
+    right = headers,
   )
-  let response = fetch(url = url, method = "POST", headers = headers, body = body)
+  let response = fetch(url = url, method = "POST", headers = effective_headers, body = body)
   if (response.status >= 200 && response.status < 300) {
     response.body
   } else {

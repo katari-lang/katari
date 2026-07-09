@@ -1,26 +1,25 @@
 // McpReactor: the `mcp` reactor — the built-in MCP client as a call reactor (see `ExternalCallReactor`
-// for the shared callee-call lifecycle). Two call shapes reach it:
-//   - `prelude.mcp.tools` (a compiled external): list the server's tools and MINT one agent value per
-//     tool — a `$tool` carrying the server-declared signature and, as its context, the server
-//     DESCRIPTOR (`{url, headers}`). The minting happens HERE, reactor-side, from the transport's
-//     listing plus the call's ORIGINAL argument values — so the headers' privacy markers survive into
-//     the minted tools (the wire to the transport reveals; the minted values must not).
-//   - a minted tool's call (an `external` target carrying that descriptor as `context`): the caller's
-//     argument passes to the transport verbatim, the descriptor rides out-of-band.
+// for the shared callee-call lifecycle). Two call shapes reach it, told apart ONCE at the `openPayload`
+// boundary (the compiled `prelude.mcp.tools` external arrives as its qualified name on the wire; every
+// other key is a minted tool's server-declared name):
+//   - `listTools` (the `prelude.mcp.tools` external): list the server's tools and MINT one agent value
+//     per tool — a `$tool` carrying the server-declared signature and, as its context, the server
+//     DESCRIPTOR (`{url, headers}`). The minting is the payload's own `shapeResult`, built here from the
+//     call's ORIGINAL argument values — so the headers' privacy markers survive into the minted tools
+//     (the wire to the transport reveals; the minted values must not).
+//   - `callTool` (a minted tool's call, an `external` target carrying that descriptor as `context`): the
+//     caller's argument passes to the transport verbatim, the descriptor rides out-of-band.
 //
 // Like http it owns its in-flight calls durably (`mcp_instances` — just the status; no argument is
-// persisted) and recovery never re-runs. Connections are the TRANSPORT's business (a lazy,
-// descriptor-keyed cache), not a program-visible resource: a restart empties the cache and the next
-// tool call reconnects — tools survive restarts. Every anticipated failure is a typed
+// persisted) and recovery never re-runs, so a reloaded call's payload is the explicit `recovered`
+// variant — nothing dispatch-shaped survives a restart by type. Connections are the TRANSPORT's business
+// (a lazy, descriptor-keyed cache), not a program-visible resource: a restart empties the cache and the
+// next tool call reconnects — tools survive restarts. Every anticipated failure is a typed
 // `throw[mcp.server_error]`.
 
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
-import {
-  MCP_TOOLS_KEY,
-  type McpToolListing,
-  type McpTransport,
-} from "../external/mcp-transport.js";
+import type { McpToolListing, McpTransport } from "../external/mcp-transport.js";
 import type { DelegationId, InstanceId, SnapshotId } from "../ids.js";
 import { valueToJson } from "../value/codec.js";
 import { jsonToSchema } from "../value/schema-json.js";
@@ -34,15 +33,34 @@ import {
 import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
-/** The transport data an mcp call holds: the dispatch key, the argument, a minted tool's descriptor
- *  context, and the calling snapshot (stamped on minted tools). Kept only to dispatch and to mint;
- *  recovery never re-runs (at-most-once), so none of it is persisted. */
-interface McpPayload {
-  key: string;
-  argument: Value | null;
-  context: Value | null;
-  snapshot: SnapshotId;
-}
+/** The reserved dispatch key the compiled `prelude.mcp.tools` external arrives under — compared exactly
+ *  here, at the payload boundary (tool names are server-scoped and never dotted like this, so the two
+ *  cannot collide). Past `openPayload` the two call shapes are distinct payload variants, not key sniffs. */
+const MCP_TOOLS_KEY = "prelude.mcp.tools";
+
+/** What an mcp call holds, decided once from the delegate target (see the module comment): a `listTools`
+ *  listing (its descriptor from the call's original marker-bearing argument, and the toolbox minting as
+ *  its own `shapeResult`), a `callTool` dispatch (the tool's name, the descriptor from the minted tool's
+ *  context, the caller's argument verbatim), or `recovered` — a reloaded call, which by construction can
+ *  never be re-dispatched (at-most-once; nothing dispatch-shaped is persisted). */
+type McpPayload =
+  | {
+      kind: "listTools";
+      /** The `{url, headers}` descriptor with privacy markers intact — the transport gets a revealed
+       *  copy, the minted tools get this one. */
+      descriptor: Value;
+      /** Mints the toolbox from the transport's listing (the base applies it to the settled result). */
+      shapeResult: (value: Value) => Value;
+    }
+  | {
+      kind: "callTool";
+      tool: string;
+      /** The minted tool's descriptor context; `null` only for a malformed target (no minted tool lacks
+       *  one), which the transport rejects as the typed descriptor error. */
+      descriptor: Value | null;
+      argument: Value | null;
+    }
+  | { kind: "recovered" };
 
 export class McpReactor extends ExternalCallReactor<McpPayload> {
   readonly name: ReactorName = "mcp";
@@ -55,23 +73,44 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   }
 
   protected openPayload(target: ExternalTarget, argument: Value | null): McpPayload {
-    return {
-      key: target.key,
-      argument,
-      context: target.context ?? null,
-      snapshot: target.snapshot,
-    };
+    if (target.key === MCP_TOOLS_KEY) {
+      const descriptor = descriptorOf(argument);
+      const snapshot = target.snapshot;
+      return {
+        kind: "listTools",
+        descriptor,
+        shapeResult: (value) => mintToolbox(value, descriptor, snapshot),
+      };
+    }
+    return { kind: "callTool", tool: target.key, descriptor: target.context ?? null, argument };
   }
 
   protected dispatch(delegation: DelegationId, payload: McpPayload): void {
-    this.transport.dispatch({
-      delegation,
-      key: payload.key,
-      // Lower the engine's Values to plain Json for the SDK; a secret header value is revealed here
-      // (an MCP server is an allowed sink, like an http auth header), unlike the user-facing API.
-      argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
-      context: payload.context === null ? null : valueToJson(payload.context, "reveal"),
-    });
+    // Lowering to plain Json for the SDK reveals a secret header value (an MCP server is an allowed
+    // sink, like an http auth header), unlike the user-facing API.
+    switch (payload.kind) {
+      case "listTools":
+        this.transport.dispatch({
+          kind: "listTools",
+          delegation,
+          descriptor: valueToJson(payload.descriptor, "reveal"),
+        });
+        return;
+      case "callTool":
+        this.transport.dispatch({
+          kind: "callTool",
+          delegation,
+          tool: payload.tool,
+          descriptor:
+            payload.descriptor === null ? null : valueToJson(payload.descriptor, "reveal"),
+          argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
+        });
+        return;
+      case "recovered":
+        // A reloaded call only ever goes through `recover` (at-most-once), so a recovered payload
+        // reaching the dispatch seam is a runtime bug — fail loudly rather than fabricate a call.
+        throw new Error(`mcp: refusing to dispatch recovered call ${delegation} (at-most-once)`);
+    }
   }
 
   protected recover(delegation: DelegationId): void {
@@ -94,31 +133,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.transport.abort(delegation);
   }
 
-  /** Mint the toolbox for a settled `tools` listing: one agent value per server tool, carrying the
-   *  server-declared signature and — as its context — the DESCRIPTOR from the call's original argument
-   *  (`{url, headers}` with privacy markers intact; the transport's revealed copy is never minted). */
-  protected override transformResult(delegation: DelegationId, value: Value): Value {
-    const payload = this.payloadOf(delegation);
-    if (payload === undefined || payload.key !== MCP_TOOLS_KEY) return value;
-    const context = descriptorOf(payload.argument);
-    const fields: Record<string, Value> = Object.create(null);
-    for (const listing of listingsOf(value)) {
-      fields[listing.name] = {
-        kind: "tool",
-        reactor: "mcp",
-        name: listing.name,
-        description: listing.description,
-        context,
-        snapshot: payload.snapshot,
-        inputSchema: jsonToSchema(listing.inputSchema),
-        ...(listing.outputSchema !== undefined
-          ? { outputSchema: jsonToSchema(listing.outputSchema) }
-          : {}),
-      };
-    }
-    return { kind: "record", fields };
-  }
-
   protected async persistCallRow(tx: PersistenceTx, row: CallRow<McpPayload>): Promise<void> {
     // The inner-delegation bridges are not persisted: an mcp transport surfaces no inner agent calls,
     // so both are empty by construction (mirroring http).
@@ -135,8 +149,8 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       caller: row.caller,
       run: row.run,
       status: row.status,
-      // Nothing dispatch-shaped is persisted (at-most-once recovery never re-runs).
-      payload: { key: "", argument: null, context: null, snapshot: "" as SnapshotId },
+      // Nothing dispatch-shaped is persisted (at-most-once recovery never re-runs), so the payload says so.
+      payload: { kind: "recovered" },
       relays: [],
       innerCalls: [],
     }));
@@ -154,6 +168,26 @@ function descriptorOf(argument: Value | null): Value {
   const fields: Record<string, Value> = Object.create(null);
   if (argument.fields.url !== undefined) fields.url = argument.fields.url;
   if (argument.fields.headers !== undefined) fields.headers = argument.fields.headers;
+  return { kind: "record", fields };
+}
+
+/** Mint the toolbox for a settled `tools` listing: one agent value per server tool, carrying the
+ *  server-declared signature and — as its context — the DESCRIPTOR from the call's original argument
+ *  (`{url, headers}` with privacy markers intact; the transport's revealed copy is never minted). */
+function mintToolbox(listing: Value, descriptor: Value, snapshot: SnapshotId): Value {
+  const fields: Record<string, Value> = Object.create(null);
+  for (const tool of listingsOf(listing)) {
+    fields[tool.name] = {
+      kind: "tool",
+      reactor: "mcp",
+      name: tool.name,
+      description: tool.description,
+      context: descriptor,
+      snapshot,
+      inputSchema: jsonToSchema(tool.inputSchema),
+      ...(tool.outputSchema !== undefined ? { outputSchema: jsonToSchema(tool.outputSchema) } : {}),
+    };
+  }
   return { kind: "record", fields };
 }
 

@@ -243,7 +243,8 @@ export const facade = {
     | { kind: "unknown" }
     | { kind: "gone" }
     | { kind: "result"; value: Json }
-    | { kind: "throw"; error: Json; badRequest: boolean }
+    | { kind: "rejected"; error: Json }
+    | { kind: "throw"; error: Json }
     | { kind: "error" }
   > {
     const [row] = await db
@@ -262,14 +263,13 @@ export const facade = {
         return { kind: outcome.kind };
       case "result":
         return { kind: "result", value: valueToJson(outcome.value, "redact") };
-      case "throw":
-        return {
-          kind: "throw",
-          error: valueToJson(outcome.value, "redact"),
-          // A schema violation at the dynamic-dispatch boundary is the caller's fault (a bad request);
-          // any other typed throw is the program failing on a well-formed delivery.
-          badRequest: isCallError(outcome.value),
-        };
+      case "throw": {
+        // A schema violation at the dynamic-dispatch boundary is the caller's fault — the callback never
+        // ran, so it surfaces as a distinct rejection (the route's 400) rather than as the throw variant
+        // a program failing on a well-formed delivery produces (the route's 500).
+        const error = valueToJson(outcome.value, "redact");
+        return isCallError(outcome.value) ? { kind: "rejected", error } : { kind: "throw", error };
+      }
       case "error":
         // The panic message stays server-side (it may name internals); the caller gets a bare 500.
         return { kind: "error" };

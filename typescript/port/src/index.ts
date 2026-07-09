@@ -347,9 +347,10 @@ export class Sidecar {
       file: async (content, options) => {
         const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
         const handle = await uploadBlob(message.delegation, bytes, options, signal);
-        // Seed the metadata cache with what this call just uploaded — reading it back costs nothing.
+        // Seed the download cache with what this call just uploaded — reading it back costs nothing.
         return new KatariFile(handle, binding, {
           bytes,
+          size: bytes.byteLength,
           ...(options?.contentType !== undefined ? { contentType: options.contentType } : {}),
         });
       },

@@ -45,7 +45,13 @@ import {
   wireKindOf,
 } from "../value/codec.js";
 import { jsonToSchema, schemaToJson } from "../value/schema-json.js";
-import type { AgentValue, ClosureValue, SemanticKind, Value } from "../value/types.js";
+import {
+  type AgentValue,
+  type ClosureValue,
+  type SemanticKind,
+  toToolReactorName,
+  type Value,
+} from "../value/types.js";
 
 export const JSON_NULL = "prelude.json.json_null";
 export const JSON_BOOLEAN = "prelude.json.json_boolean";
@@ -428,7 +434,9 @@ async function toolFromTree(
   const outputSchemaNode = entries[OUTPUT_SCHEMA_KEY];
   const tool: Value = {
     kind: "tool",
-    reactor: leafText(entries[REACTOR_KEY]),
+    // The wire is untrusted (an AI can replay a mutated tool), so the backing-reactor name is narrowed
+    // here — the decode boundary — which lets the dispatch route on the field without a runtime check.
+    reactor: toToolReactorName(leafText(entries[REACTOR_KEY])),
     name: leafText(entries[TOOL_KEY]),
     description: leafText(entries[DESCRIPTION_KEY]),
     context: await treeToValue(contextNode, readString),

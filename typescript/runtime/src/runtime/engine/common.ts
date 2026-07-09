@@ -66,6 +66,13 @@ export function panicArgument(message: string): Value {
   return { kind: "record", fields: { msg: { kind: "string", value: message } } };
 }
 
+/** A data constructor's semantics — tag the argument record's fields with the constructor's name — in
+ *  one place, so the `construct` leaf body and the delegate op's inlined construct cannot drift. */
+export function constructValue(argument: Value, constructorName: QualifiedName): Value {
+  const fields = argument.kind === "record" ? argument.fields : {};
+  return { kind: "record", fields, ctor: constructorName };
+}
+
 /** Raise a `panic` from a failing thread: an ask carrying `{ msg }` to its parent, escalating outward
  *  toward the nearest `panic` handler (or the run root). */
 export function raisePanic(ctx: StepContext, thread: Thread, message: string): void {

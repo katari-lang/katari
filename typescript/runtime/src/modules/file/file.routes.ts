@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { projectIdParamSchema } from "../../lib/params.js";
-import { success } from "../../lib/response.js";
+import { pagedList, success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import type { AppEnv } from "../../types/app-env.js";
 import { ffiBlobParamSchema, fileParamSchema, listFilesQuerySchema } from "./file.schema.js";
@@ -37,20 +37,19 @@ export const fileRoutes = new Hono<AppEnv>()
     zValidator("query", listFilesQuerySchema),
     async (c) => {
       const { projectId } = c.req.valid("param");
-      // `data` stays the bare file array; the total rides on `X-Total-Count` for the console's pager.
-      const { items, total } = await fileService.list(projectId, c.req.valid("query"));
-      c.header("X-Total-Count", String(total));
-      return c.json(success(items));
+      return c.json(pagedList(c, await fileService.list(projectId, c.req.valid("query"))));
     },
   )
   // Download: stream the blob's bytes with its stored content type (bytes are not JSON, so this is the one
-  // endpoint that does not use the `{ ok, data }` envelope).
+  // endpoint that does not use the `{ ok, data }` envelope). A row that records no content type sends no
+  // Content-Type header — absence travels as absence, so the sidecar's blob client can report "nothing
+  // recorded" honestly (a browser treats the missing header as octet-stream anyway).
   .get("/projects/:projectId/files/:fileId", zValidator("param", fileParamSchema), async (c) => {
     const { projectId, fileId } = c.req.valid("param");
     const file = await fileService.download(projectId, fileId);
     return new Response(file.bytes, {
       headers: {
-        "Content-Type": file.contentType ?? "application/octet-stream",
+        ...(file.contentType === null ? {} : { "Content-Type": file.contentType }),
         "Content-Length": String(file.size),
       },
     });

@@ -34,11 +34,9 @@ external agent tools(url: string, headers: record[string of private]) -> toolbox
 
 @"A toolbox's tools as a flat array — the shape an AI tool loop takes."
 agent tools_of(toolbox: toolbox) -> array[tool] {
-  for (let name in record.keys(target = toolbox)) {
-    let entry = match (record.get(target = toolbox, key = name)) {
-      case null -> prelude.throw(error = server_error(message = f"toolbox lost its \"${name}\" entry"))
-      case present -> present
-    }
-    next entry
+  // Iterating the entries directly (rather than keys + a re-lookup) keeps every read total: an
+  // entry's value is always present, so there is no impossible-null case to handle.
+  for (let [_, tool] in record.entries(target = toolbox)) {
+    next tool
   }
 }

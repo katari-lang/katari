@@ -1,8 +1,8 @@
 // The mcp transport: the `mcp` reactor's outbound side — a built-in MCP client over the official SDK
 // (in-runtime, like the http transport's fetch; nothing for the user to install). Two operations reach
-// it: `tools` (the `prelude.mcp.tools` external — list the server's tools, so the reactor can mint one
-// agent value per tool) and a TOOL CALL (a minted tool's delegate, carrying its server descriptor as
-// the target context and the caller's argument verbatim).
+// it, already told apart by the reactor (the `McpCall` union): `listTools` (the `prelude.mcp.tools`
+// external — list the server's tools, so the reactor can mint one agent value per tool) and `callTool`
+// (a minted tool's delegate, carrying its server descriptor and the caller's argument verbatim).
 //
 // Connections are NOT a user-visible resource: a tool carries its server DESCRIPTOR (url + headers),
 // and this transport keeps a lazy client cache keyed by it — connecting on first use, reusing across
@@ -20,16 +20,20 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { DelegationId } from "../ids.js";
 
 /** One mcp operation to perform, already lowered to plain Json (secret header values revealed at the
- *  reactor boundary — an MCP server is an allowed sink, like an http auth header):
- *    - a LISTING: `key = "prelude.mcp.tools"`, `argument = { url, headers }`, no context;
- *    - a TOOL CALL: `key = <the server tool's name>`, `argument = <the caller's args>`, and `context =
- *      { url, headers }` (the minted tool's descriptor, riding the delegate target). */
-export interface McpCall {
-  delegation: DelegationId;
-  key: string;
-  argument: Json | null;
-  context: Json | null;
-}
+ *  reactor boundary — an MCP server is an allowed sink, like an http auth header). Each variant carries
+ *  its `{ url, headers }` server descriptor itself: a listing's comes from the call's argument, a tool
+ *  call's from the minted tool's context — resolved reactor-side, so this seam never sniffs shapes. A
+ *  tool call's `descriptor` is `null` only for a malformed target (no minted tool lacks one); the
+ *  dispatch then fails as the typed descriptor error. */
+export type McpCall =
+  | { kind: "listTools"; delegation: DelegationId; descriptor: Json }
+  | {
+      kind: "callTool";
+      delegation: DelegationId;
+      tool: string;
+      descriptor: Json | null;
+      argument: Json | null;
+    };
 
 /** One listed tool, as the reactor needs it to mint an agent value: the server-declared name /
  *  description / schemas (schemas as plain JSON Schema documents). */
@@ -82,10 +86,6 @@ export class StubMcpTransport implements McpTransport {
   close(): void {}
 }
 
-/** The reserved dispatch key of the listing operation (the `prelude.mcp.tools` external's qualified
- *  name — tool names are server-scoped and never dotted like this, so the two cannot collide). */
-export const MCP_TOOLS_KEY = "prelude.mcp.tools";
-
 /** The blob-producer seam: store `bytes` as a project blob owned by `delegation`'s call instance and
  *  return its `$ref` handle Json (the wire form the reactor's decode lifts back into a `file` value),
  *  or `null` when the call is already gone (the block then degrades to its text placeholder). Wired by
@@ -115,27 +115,32 @@ export async function resolveToolResult(
   const texts: string[] = [];
   const files: Json[] = [];
   for (const block of blocks) {
-    if (typeof block !== "object" || block === null) continue;
-    const entry = block as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown };
-    if (entry.type === "text" && typeof entry.text === "string") {
-      texts.push(entry.text);
-      continue;
-    }
-    const binary =
-      (entry.type === "image" || entry.type === "audio") && typeof entry.data === "string";
-    if (binary && produceBlob !== undefined) {
-      const contentType = typeof entry.mimeType === "string" ? entry.mimeType : undefined;
-      const handle = await produceBlob(
-        delegation,
-        new Uint8Array(Buffer.from(entry.data as string, "base64")),
-        contentType,
-      );
-      if (handle !== null) {
-        files.push(handle);
+    const classified = classifyContentBlock(block);
+    switch (classified.kind) {
+      case "shapeless":
+        continue;
+      case "text":
+        texts.push(classified.text);
+        continue;
+      case "binary": {
+        if (produceBlob !== undefined) {
+          const handle = await produceBlob(
+            delegation,
+            new Uint8Array(Buffer.from(classified.data, "base64")),
+            classified.contentType,
+          );
+          if (handle !== null) {
+            files.push(handle);
+            continue;
+          }
+        }
+        texts.push(classified.placeholder);
         continue;
       }
+      case "other":
+        texts.push(classified.placeholder);
+        continue;
     }
-    if (typeof entry.type === "string") texts.push(`(${entry.type} content)`);
   }
   if (files.length > 0) {
     return { text: texts.join("\n"), files };
@@ -144,6 +149,34 @@ export async function resolveToolResult(
     return result.structuredContent as Json;
   }
   return texts.join("\n");
+}
+
+/** One SDK content block, classified once for both consumers (a result's shaping, an error's text): its
+ *  text, a binary (image / audio) payload to bridge into a blob, or the `(<type> content)` placeholder any
+ *  other typed block degrades to. A shapeless block (no string `type`) carries nothing renderable. */
+type ClassifiedContentBlock =
+  | { kind: "text"; text: string }
+  | { kind: "binary"; data: string; contentType: string | undefined; placeholder: string }
+  | { kind: "other"; placeholder: string }
+  | { kind: "shapeless" };
+
+function classifyContentBlock(block: unknown): ClassifiedContentBlock {
+  if (typeof block !== "object" || block === null) return { kind: "shapeless" };
+  const entry: { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown } = block;
+  if (entry.type === "text" && typeof entry.text === "string") {
+    return { kind: "text", text: entry.text };
+  }
+  if (typeof entry.type !== "string") return { kind: "shapeless" };
+  const placeholder = `(${entry.type} content)`;
+  if ((entry.type === "image" || entry.type === "audio") && typeof entry.data === "string") {
+    return {
+      kind: "binary",
+      data: entry.data,
+      contentType: typeof entry.mimeType === "string" ? entry.mimeType : undefined,
+      placeholder,
+    };
+  }
+  return { kind: "other", placeholder };
 }
 
 /** The wire form of a typed `prelude.mcp.server_error` throw (decoded back into the data value at the
@@ -227,11 +260,13 @@ export class SdkMcpTransport implements McpTransport {
   private async perform(call: McpCall, signal: AbortSignal): Promise<McpCompletion["outcome"]> {
     let descriptor: Descriptor | null = null;
     try {
-      descriptor = readDescriptor(call.context ?? call.argument);
-      if (call.key === MCP_TOOLS_KEY) {
-        return { kind: "result", value: await this.listTools(descriptor) };
+      descriptor = readDescriptor(call.descriptor);
+      switch (call.kind) {
+        case "listTools":
+          return { kind: "result", value: await this.listTools(descriptor) };
+        case "callTool":
+          return await this.callTool(call.delegation, descriptor, call.tool, call.argument, signal);
       }
-      return await this.callTool(call.delegation, descriptor, call.key, call.argument, signal);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         return { kind: "cancelled" };
@@ -330,7 +365,7 @@ function descriptorKey(descriptor: Descriptor): string {
   return `${descriptor.url}\n${headers}`;
 }
 
-/** Read a `{ url, headers }` descriptor out of lowered Json (a listing's argument, a tool's context). */
+/** Read a `{ url, headers }` descriptor out of a call's lowered Json descriptor. */
 function readDescriptor(source: Json | null): Descriptor {
   if (source === null || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("mcp: expected a { url, headers } descriptor");
@@ -349,15 +384,14 @@ function readDescriptor(source: Json | null): Descriptor {
   return { url, headers };
 }
 
-/** The text of a tool result's content blocks, joined (non-text blocks noted by type). */
+/** The text of a tool result's content blocks, joined (non-text blocks noted by their placeholder). */
 function contentText(content: unknown): string {
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content) {
-    if (typeof block !== "object" || block === null) continue;
-    const entry = block as { type?: unknown; text?: unknown };
-    if (entry.type === "text" && typeof entry.text === "string") parts.push(entry.text);
-    else if (typeof entry.type === "string") parts.push(`(${entry.type} content)`);
+    const classified = classifyContentBlock(block);
+    if (classified.kind === "text") parts.push(classified.text);
+    else if (classified.kind !== "shapeless") parts.push(classified.placeholder);
   }
   return parts.join("\n");
 }

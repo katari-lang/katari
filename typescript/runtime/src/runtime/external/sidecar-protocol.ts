@@ -21,18 +21,13 @@
 // line; `decodeSidecarMessage` returns `null` for a line it cannot parse (so a stray non-protocol line on
 // the channel is skipped, never fatal).
 
-import type { Json } from "@katari-lang/types";
+import type { DelegateCallee, DelegateOutcome, Json } from "@katari-lang/types";
 import { type DelegationId, toDelegationId } from "../ids.js";
 
-/** The outcome of one inner agent call, echoed to the sidecar: the callee's `result`, a `throw` (the
- *  callee raised a typed `prelude.throw` — its payload rides back so the handler catches, or rethrows, the
- *  typed error), an `error` (the callee panicked / could not be resolved), or `cancelled` (the callee was
- *  terminated — usually because the parent call itself is being cancelled). */
-export type DelegateOutcome =
-  | { kind: "result"; value: Json }
-  | { kind: "throw"; error: Json }
-  | { kind: "error"; message: string }
-  | { kind: "cancelled" };
+// The delegate vocabulary is defined once in `@katari-lang/types` (`wire.ts`) — shared with the port's
+// `protocol.ts`, so the two ends of the wire cannot drift — and re-exported here because the ffi
+// reactor and the runner import their protocol vocabulary from this file.
+export type { DelegateCallee, DelegateOutcome };
 
 /** Runtime → sidecar. `dispatch` runs the handler `key` against `argument` for one external call; `abort`
  *  asks the sidecar to stop an in-flight call; `delegateResult` settles one inner agent call the sidecar
@@ -47,17 +42,6 @@ export type RuntimeMessage =
     }
   | { kind: "abort"; delegation: DelegationId }
   | { kind: "delegateResult"; delegation: DelegationId; call: string; outcome: DelegateOutcome };
-
-/** What a handler's inner `delegate` calls, on the wire:
- *   - `named` — a static agent NAME (`context.call`): a qualified name for the `core` reactor, or an
- *     external key for a call reactor (`ffi` / `http`); `reactor` defaults to `core` when absent.
- *   - `value` — a first-class callable VALUE (`KatariAgent.call`): a `$agent` / `$closure` / `$tool` the
- *     handler received, riding as its own opaque wire `Json`. The ffi reactor decodes it and resolves it to
- *     a delegate target (a tool validates its argument against its schema), then dispatches on `core`. This
- *     replaces the former wired-in `prelude.reflection.call_agent` name — the port hardcodes nothing. */
-export type DelegateCallee =
-  | { kind: "named"; agent: string; reactor?: string }
-  | { kind: "value"; callable: Json };
 
 /** Sidecar → runtime: the outcome of one dispatched call — its `result`, a `throw` (a typed
  *  `prelude.throw` whose payload is `error`, caught by a katari-side handler), an `error` (becomes a

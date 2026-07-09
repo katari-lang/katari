@@ -130,12 +130,13 @@ export const RUN_EVENT_KINDS = [
 ] as const satisfies readonly RunEvent["kind"][];
 
 /** The events endpoint's payload: one page of the trace, with the run's state riding along so a single
- *  poll both extends the trace and answers "is it still running", and `total` = the filtered event count
- *  (for the pager). */
+ *  poll both extends the trace and answers "is it still running". `total` = the filtered event count
+ *  (for the pager); it is present only on an offset browse (the console's mode) — a keyset tail
+ *  (`after`) omits it, since counting the whole run on every poll would be wasted work. */
 export interface RunEventsPage {
   state: RunState;
   events: RunEvent[];
-  total: number;
+  total?: number;
 }
 
 /** A page of a listing whose total rides on the `X-Total-Count` header (runs / snapshots / files). */

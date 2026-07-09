@@ -399,13 +399,14 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
   async function expectDirectDispatch(direct: boolean): Promise<void> {
     const transport = new ControlledMcpTransport();
     const result = runMain(toolFixture(direct), toolArgument(CONFORMING), transport);
-    // The delegate reached the mcp reactor directly: the tool name as the key, the caller's args
-    // verbatim, and the descriptor as the out-of-band context with its secret header REVEALED at
-    // this (and only this) boundary.
+    // The delegate reached the mcp reactor directly: a `callTool` dispatch naming the tool, the
+    // caller's args verbatim, and the tool's descriptor with its secret header REVEALED at this (and
+    // only this) boundary.
     const call = await waitUntil(() => transport.dispatched[0]);
-    expect(call.key).toBe("greet_tool");
+    if (call.kind !== "callTool") throw new Error("expected a callTool dispatch");
+    expect(call.tool).toBe("greet_tool");
     expect(call.argument).toEqual({ name: "alice" });
-    expect(call.context).toEqual({
+    expect(call.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
       headers: { authorization: "sk-mcp" },
     });

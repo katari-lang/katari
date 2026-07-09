@@ -7,6 +7,7 @@
 // plus the live (running / cancelling) delegation rows and open escalations each reactor reloads as its own.
 
 import { and, asc, eq } from "drizzle-orm";
+import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
 import type { Database } from "../../db/client.js";
 import { blobs, scopes, threads } from "../../db/tables/engine.js";
 import {
@@ -24,6 +25,7 @@ import {
   runs,
   webhookInstances,
 } from "../../db/tables/execution.js";
+import type { InstanceKind } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
 import type {
   BlobId,
@@ -37,7 +39,10 @@ import type {
 import type {
   BaseTx,
   Loader,
+  PersistedCallEnvelope,
   PersistedDelegation,
+  PersistedEscalationRelay,
+  PersistedInnerCall,
   PersistedOpenEscalation,
   Persistence,
   PersistenceTx,
@@ -111,6 +116,49 @@ export class DbPersistence implements Persistence {
         request: row.request,
         argument: unsealFromStorage(row.argument),
       }));
+    };
+    // The shared "envelope ⋈ extension where kind" join every call reactor's `instances()` loader runs —
+    // the four extension tables differ only in their columns, so the select, the kind filter, and the
+    // null guards (a live call's delegation / caller / run are written together at delegate-receive, so
+    // a null in any is a dropped or corrupt row) live here once; each loader is only its projection.
+    const callInstancesOf = async <
+      ExtensionTable extends PgTable & { instanceId: AnyPgColumn },
+      Instance,
+    >(
+      kind: InstanceKind,
+      extensionTable: ExtensionTable,
+      project: (call: PersistedCallEnvelope, extension: ExtensionTable["$inferSelect"]) => Instance,
+    ): Promise<Instance[]> => {
+      // The join argument is widened to the concrete constraint: drizzle guards it with a conditional
+      // type that cannot reduce over an unresolved type parameter, while the concrete intersection
+      // reduces fine — and the selection keeps `extension` typed by `ExtensionTable`.
+      const joined: PgTable & { instanceId: AnyPgColumn } = extensionTable;
+      const rows = await this.db
+        .select({
+          delegation: instances.delegationId,
+          instance: instances.id,
+          caller: instances.callerReactor,
+          run: instances.runId,
+          extension: extensionTable,
+        })
+        .from(instances)
+        .innerJoin(joined, eq(instances.id, joined.instanceId))
+        .where(and(eq(instances.projectId, projectId), eq(instances.kind, kind)));
+      return rows.flatMap((row) =>
+        row.delegation === null || row.caller === null || row.run === null
+          ? []
+          : [
+              project(
+                {
+                  delegation: row.delegation as DelegationId,
+                  instance: row.instance as InstanceId,
+                  caller: row.caller,
+                  run: row.run as InstanceId,
+                },
+                row.extension,
+              ),
+            ],
+      );
     };
     return {
       base: {
@@ -216,160 +264,43 @@ export class DbPersistence implements Persistence {
         },
       },
       ffi: {
-        instances: async () => {
-          // The in-flight ffi calls are the `ffi` instances: the envelope (its `delegation_id` is the call's
-          // delegation) joined to its `ffi_instances` extension.
-          const rows = await this.db
-            .select({
-              delegation: instances.delegationId,
-              instance: instances.id,
-              caller: instances.callerReactor,
-              run: instances.runId,
-              snapshot: ffiInstances.snapshotId,
-              key: ffiInstances.key,
-              status: ffiInstances.status,
-              relays: ffiInstances.relays,
-              innerCalls: ffiInstances.innerCalls,
-            })
-            .from(instances)
-            .innerJoin(ffiInstances, eq(instances.id, ffiInstances.instanceId))
-            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "ffi")));
-          // The caller (reply-to) and run ride on the envelope now; they and the delegation are non-null for
-          // a live call (written together at delegate-receive), so a null in any is a dropped/corrupt row.
-          return rows.flatMap((row) =>
-            row.delegation === null || row.caller === null || row.run === null
-              ? []
-              : [
-                  {
-                    delegation: row.delegation as DelegationId,
-                    instance: row.instance as InstanceId,
-                    snapshot: row.snapshot as SnapshotId,
-                    key: row.key,
-                    caller: row.caller,
-                    run: row.run as InstanceId,
-                    status: row.status,
-                    relays: row.relays.map((relay) => ({
-                      escalation: relay.escalation as EscalationId,
-                      child: relay.child as DelegationId,
-                      childEscalation: relay.childEscalation as EscalationId,
-                    })),
-                    innerCalls: row.innerCalls.map((inner) => ({
-                      delegation: inner.delegation as DelegationId,
-                      call: inner.call,
-                    })),
-                  },
-                ],
-          );
-        },
+        instances: () =>
+          callInstancesOf("ffi", ffiInstances, (call, extension) => ({
+            ...call,
+            snapshot: extension.snapshotId as SnapshotId,
+            key: extension.key,
+            status: extension.status,
+            relays: brandedRelays(extension.relays),
+            innerCalls: brandedInnerCalls(extension.innerCalls),
+          })),
       },
       http: {
-        instances: async () => {
-          // The in-flight http calls are the `http` instances: the envelope (its `delegation_id` is the
-          // call's delegation) joined to its `http_instances` extension (which carries the precise status).
-          const rows = await this.db
-            .select({
-              delegation: instances.delegationId,
-              instance: instances.id,
-              caller: instances.callerReactor,
-              run: instances.runId,
-              status: httpInstances.status,
-            })
-            .from(instances)
-            .innerJoin(httpInstances, eq(instances.id, httpInstances.instanceId))
-            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "http")));
-          // The caller (reply-to) and run ride on the envelope now; non-null with the delegation for a live call.
-          return rows.flatMap((row) =>
-            row.delegation === null || row.caller === null || row.run === null
-              ? []
-              : [
-                  {
-                    delegation: row.delegation as DelegationId,
-                    instance: row.instance as InstanceId,
-                    caller: row.caller,
-                    run: row.run as InstanceId,
-                    status: row.status,
-                  },
-                ],
-          );
-        },
+        instances: () =>
+          callInstancesOf("http", httpInstances, (call, extension) => ({
+            ...call,
+            status: extension.status,
+          })),
       },
       mcp: {
-        instances: async () => {
-          // The in-flight mcp calls are the `mcp` instances: the envelope (its `delegation_id` is the
-          // call's delegation) joined to its `mcp_instances` extension (the precise status).
-          const rows = await this.db
-            .select({
-              delegation: instances.delegationId,
-              instance: instances.id,
-              caller: instances.callerReactor,
-              run: instances.runId,
-              status: mcpInstances.status,
-            })
-            .from(instances)
-            .innerJoin(mcpInstances, eq(instances.id, mcpInstances.instanceId))
-            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "mcp")));
-          return rows.flatMap((row) =>
-            row.delegation === null || row.caller === null || row.run === null
-              ? []
-              : [
-                  {
-                    delegation: row.delegation as DelegationId,
-                    instance: row.instance as InstanceId,
-                    caller: row.caller,
-                    run: row.run as InstanceId,
-                    status: row.status,
-                  },
-                ],
-          );
-        },
+        instances: () =>
+          callInstancesOf("mcp", mcpInstances, (call, extension) => ({
+            ...call,
+            status: extension.status,
+          })),
       },
       webhook: {
-        instances: async () => {
-          // The in-flight webhook calls are the `webhook` instances: the envelope joined to its
-          // `webhook_instances` extension, which — unlike ffi / http — carries the payload (token +
-          // callback) a reload re-registers, so an endpoint survives a restart.
-          const rows = await this.db
-            .select({
-              delegation: instances.delegationId,
-              instance: instances.id,
-              caller: instances.callerReactor,
-              run: instances.runId,
-              snapshot: webhookInstances.snapshotId,
-              token: webhookInstances.token,
-              callback: webhookInstances.callback,
-              status: webhookInstances.status,
-              relays: webhookInstances.relays,
-              innerCalls: webhookInstances.innerCalls,
-            })
-            .from(instances)
-            .innerJoin(webhookInstances, eq(instances.id, webhookInstances.instanceId))
-            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "webhook")));
-          return rows.flatMap((row) =>
-            row.delegation === null || row.caller === null || row.run === null
-              ? []
-              : [
-                  {
-                    delegation: row.delegation as DelegationId,
-                    instance: row.instance as InstanceId,
-                    snapshot: row.snapshot as SnapshotId,
-                    token: row.token,
-                    callback: unsealFromStorage(row.callback),
-                    caller: row.caller,
-                    run: row.run as InstanceId,
-                    status: row.status,
-                    relays: row.relays.map((relay) => ({
-                      escalation: relay.escalation as EscalationId,
-                      child: relay.child as DelegationId,
-                      childEscalation: relay.childEscalation as EscalationId,
-                    })),
-                    innerCalls: row.innerCalls.map((inner) => ({
-                      delegation: inner.delegation as DelegationId,
-                      call: inner.call,
-                    })),
-                  },
-                ],
-          );
-        },
+        // Unlike ffi / http the webhook extension carries the payload (token + callback) a reload
+        // re-registers, so an endpoint survives a restart; the sealed callback unseals here.
+        instances: () =>
+          callInstancesOf("webhook", webhookInstances, (call, extension) => ({
+            ...call,
+            snapshot: extension.snapshotId as SnapshotId,
+            token: extension.token,
+            callback: unsealFromStorage(extension.callback),
+            status: extension.status,
+            relays: brandedRelays(extension.relays),
+            innerCalls: brandedInnerCalls(extension.innerCalls),
+          })),
       },
     };
   }
@@ -693,4 +624,26 @@ export class DbPersistence implements Persistence {
       },
     };
   }
+}
+
+/** Rebrand a stored relay bridge's plain-string ids (the jsonb column shape) into the loaded row's ids —
+ *  shared by the ffi and webhook loaders, whose extensions persist the same bridge shape. */
+function brandedRelays(
+  relays: Array<{ escalation: string; child: string; childEscalation: string }>,
+): PersistedEscalationRelay[] {
+  return relays.map((relay) => ({
+    escalation: relay.escalation as EscalationId,
+    child: relay.child as DelegationId,
+    childEscalation: relay.childEscalation as EscalationId,
+  }));
+}
+
+/** Rebrand a stored inner-call bridge's plain-string delegation id, like `brandedRelays`. */
+function brandedInnerCalls(
+  innerCalls: Array<{ delegation: string; call: string }>,
+): PersistedInnerCall[] {
+  return innerCalls.map((inner) => ({
+    delegation: inner.delegation as DelegationId,
+    call: inner.call,
+  }));
 }

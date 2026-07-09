@@ -22,6 +22,7 @@ import {
 } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
+import { CALL_ERROR } from "../engine/dynamic-dispatch.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { rebuildScopeOwnerIndex } from "../engine/scope.js";
@@ -454,9 +455,6 @@ export class CoreReactor extends Reactor {
     }
   }
 }
-
-/** The domain error ctor a failed dynamic dispatch throws (`prelude/reflection.ktr` declares it). */
-const CALL_ERROR = "prelude.reflection.call_error";
 
 /** A target's user-facing label for a panic message (a closure has no qualified name). */
 function describeTarget(target: DelegateTarget): string {

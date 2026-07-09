@@ -46,12 +46,13 @@ import {
 } from "@katari-lang/types";
 import { type BlobId, toScopeId, toSnapshotId } from "../ids.js";
 import { jsonToRequests, jsonToSchema, requestsToJson, schemaToJson } from "./schema-json.js";
-import type {
-  AgentValue,
-  ClosureValue,
-  GenericSubstitution,
-  SemanticKind,
-  Value,
+import {
+  type AgentValue,
+  type ClosureValue,
+  type GenericSubstitution,
+  type SemanticKind,
+  toToolReactorName,
+  type Value,
 } from "./types.js";
 
 // ─── the wire conventions ─────────────────────────────────────────────────────────────────────────
@@ -63,13 +64,11 @@ export {
   AGENT_KEY,
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
-  CONTENT_TYPE_KEY,
   CONTEXT_KEY,
   DESCRIPTION_KEY,
   escapeRecordKey,
   FILE_KEY,
   GENERICS_KEY,
-  HASH_KEY,
   INPUT_SCHEMA_KEY,
   MODULE_KEY,
   OUTPUT_SCHEMA_KEY,
@@ -77,7 +76,6 @@ export {
   REDACTED_KEY,
   SCOPE_KEY,
   SEMANTIC_KIND_KEY,
-  SIZE_KEY,
   SNAPSHOT_KEY,
   TOOL_KEY,
   unescapeRecordKey,
@@ -293,7 +291,9 @@ function toolFromJson(json: { [key: string]: Json }): Value {
   }
   const tool: Value = {
     kind: "tool",
-    reactor,
+    // The wire is untrusted, so the backing-reactor name is narrowed here — the decode boundary —
+    // which lets the dispatch route on the field without a runtime check.
+    reactor: toToolReactorName(reactor),
     name,
     description,
     context: jsonToValue(context),

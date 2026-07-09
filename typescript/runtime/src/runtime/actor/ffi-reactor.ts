@@ -19,13 +19,13 @@
 // correlation) is the base's; the settled outcome comes back through `deliverInnerOutcome`, lowered here.
 
 import { createAgentName, type Json } from "@katari-lang/types";
-import { dispatchCallable } from "../engine/dynamic-dispatch.js";
-import type { DelegateTarget, ReactorName } from "../event/types.js";
+import { type DispatchResult, dispatchCallable } from "../engine/dynamic-dispatch.js";
+import type { ReactorName } from "../event/types.js";
 import type { FfiInnerDelegate, FfiTransport } from "../external/runner.js";
 import type { DelegateOutcome } from "../external/sidecar-protocol.js";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
-import type { GenericSubstitution, Value } from "../value/types.js";
+import type { Value } from "../value/types.js";
 import {
   type CallRow,
   ExternalCallReactor,
@@ -176,16 +176,6 @@ function lowerInnerOutcome(outcome: InnerDelivery["outcome"]): DelegateOutcome {
   }
 }
 
-/** One resolved inner call ready for `openInnerDelegation`: its delegate `target`, the reactor `to` runs it,
- *  the decoded `argument` (a tool wraps the caller's args under `arguments`), and any generic instantiation
- *  the callee value carried. */
-interface ResolvedInnerCall {
-  target: DelegateTarget;
-  to: ReactorName;
-  argument: Value | null;
-  generics?: GenericSubstitution;
-}
-
 /** Resolve an inner call the sidecar asked for. A `named` callee resolves against the parent call's
  *  snapshot — an agent and its FFI handlers deploy together, so the sidecar names siblings of its own
  *  version (`core` runs a named agent, `ffi` / `http` an external key; http ignores the snapshot; `api` is
@@ -197,7 +187,7 @@ interface ResolvedInnerCall {
 function resolveInnerCall(
   request: FfiInnerDelegate,
   snapshot: SnapshotId,
-): ResolvedInnerCall | { error: string } {
+): DispatchResult | { error: string } {
   const decoded = decodeArgument(request.argument);
   if ("error" in decoded) return decoded;
   const callee = request.callee;
@@ -230,14 +220,8 @@ function resolveInnerCall(
       } catch (error) {
         return { error: `the callable is not a decodable value: ${messageOf(error)}` };
       }
-      const dispatched = dispatchCallable(callable, decoded.value);
-      if ("error" in dispatched) return dispatched;
-      return {
-        target: dispatched.target,
-        to: dispatched.to,
-        argument: dispatched.argument,
-        ...(dispatched.generics !== undefined ? { generics: dispatched.generics } : {}),
-      };
+      // The shared dispatch already returns the exact `DispatchResult` this resolver promises.
+      return dispatchCallable(callable, decoded.value);
     }
   }
 }

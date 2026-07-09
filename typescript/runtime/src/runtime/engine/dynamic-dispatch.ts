@@ -21,9 +21,10 @@ export interface DispatchResult {
   generics?: GenericSubstitution;
 }
 
-/** The reactors that may back a tool value. Values are runtime-minted, so an unknown name here means a
- *  corrupted / drifted value — the dispatch fails rather than routing an event nowhere. */
-const TOOL_REACTORS = new Set<string>(["mcp"]);
+/** The domain error ctor a failed dynamic dispatch throws (`prelude/reflection.ktr` declares it). Every
+ *  boundary that surfaces a dispatch `error` wraps it under this one name, so it lives beside the
+ *  dispatch that produces those errors. */
+export const CALL_ERROR = "prelude.reflection.call_error";
 
 /** Resolve a callable value + its argument into the delegate it dispatches to, or `{ error }` when the
  *  value is not callable / a tool's argument violates its attached schema.
@@ -61,9 +62,6 @@ export function dispatchCallable(
     };
   }
   if (callable.kind === "tool") {
-    if (!TOOL_REACTORS.has(callable.reactor)) {
-      return { error: `tool "${callable.name}": unknown backing reactor "${callable.reactor}"` };
-    }
     const check = conformValue(args ?? { kind: "record", fields: {} }, callable.inputSchema);
     if (!check.ok) {
       return {
@@ -78,8 +76,9 @@ export function dispatchCallable(
         context: callable.context,
       },
       argument: args,
-      // The set membership above pins the string to a real reactor name.
-      to: callable.reactor as ReactorName,
+      // `ToolValue.reactor` is already the narrow tool-backing union — minting sites write the literal
+      // and the wire decoders validate — so the field routes directly.
+      to: callable.reactor,
     };
   }
   return { error: `not a callable value (got ${callable.kind})` };

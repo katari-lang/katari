@@ -2,15 +2,11 @@
 // Each takes an `Executor` so the deploy can run them all inside one transaction.
 
 import type { IRModule, SidecarBundle } from "@katari-lang/types";
-import { and, desc, eq, ilike, inArray, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { modules, projects, snapshots } from "../../db/tables/projects.js";
+import { escapeLike, listPageWithTotal } from "../../lib/paging.js";
 import type { ModuleHash } from "../../runtime/ids.js";
-
-/** Escape a user substring for a LIKE pattern (wildcards and the escape char become literals). */
-function escapeLike(term: string): string {
-  return term.replace(/[\\%_]/g, (character) => `\\${character}`);
-}
 
 export const snapshotRepository = {
   findProject(executor: Executor, projectId: string) {
@@ -104,21 +100,13 @@ export const snapshotRepository = {
     if (filter.search !== undefined) {
       conditions.push(ilike(snapshots.message, `%${escapeLike(filter.search)}%`));
     }
+    const where = and(...conditions);
     const page = executor
       .select({ id: snapshots.id, message: snapshots.message, createdAt: snapshots.createdAt })
       .from(snapshots)
-      .where(and(...conditions))
+      .where(where)
       // Newest deploy first; `id` breaks ties deterministically when two land in the same instant.
       .orderBy(desc(snapshots.createdAt), desc(snapshots.id));
-    const limited = filter.limit === undefined ? page : page.limit(filter.limit);
-    const rows = await (filter.offset === undefined ? limited : limited.offset(filter.offset));
-
-    const total = await executor
-      .select({ value: sql<number>`count(*)::int` })
-      .from(snapshots)
-      .where(and(...conditions))
-      .then(([row]) => row?.value ?? 0);
-
-    return { rows, total };
+    return listPageWithTotal({ executor, query: page, window: filter, table: snapshots, where });
   },
 };

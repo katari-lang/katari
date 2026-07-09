@@ -2,7 +2,7 @@
 // server — a controlled transport). Two call shapes are covered: `prelude.mcp.tools` (the listing —
 // the reactor MINTS one agent value per listed tool, carrying the server descriptor with its privacy
 // markers intact) and a minted tool's call (an external delegate straight to the reactor: the caller's
-// args verbatim, the descriptor as the target's context). Failures are typed
+// args verbatim, the tool's descriptor riding its own wire field). Failures are typed
 // `throw[mcp.server_error]`; recovery is at-most-once (an interrupted call fails typed — a katari
 // retry reconnects through the transport's descriptor cache).
 
@@ -216,22 +216,22 @@ describe("mcp reactor", () => {
     const actor = makeActor(transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // 1. The listing call: `prelude.mcp.tools` with the descriptor as its argument (no context).
+    // 1. The listing call: a `listTools` dispatch carrying the descriptor read from the argument.
     const listing = await waitUntil(() => transport.dispatched[0]);
-    expect(listing.key).toBe("prelude.mcp.tools");
-    expect(listing.context).toBeNull();
-    expect(listing.argument).toEqual({
+    expect(listing.kind).toBe("listTools");
+    expect(listing.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
       headers: { authorization: "sk-mcp" },
     });
     transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
 
-    // 2. The minted tool's call: dispatched by its server-declared name, the caller's args verbatim,
-    //    the descriptor riding as the context.
+    // 2. The minted tool's call: a `callTool` dispatch by its server-declared name, the caller's args
+    //    verbatim, the descriptor from the minted tool's context.
     const toolCall = await waitUntil(() => transport.dispatched[1]);
-    expect(toolCall.key).toBe("add");
+    if (toolCall.kind !== "callTool") throw new Error("expected a callTool dispatch");
+    expect(toolCall.tool).toBe("add");
     expect(toolCall.argument).toEqual({ x: 19, y: 23 });
-    expect(toolCall.context).toEqual({
+    expect(toolCall.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
       headers: { authorization: "sk-mcp" },
     });

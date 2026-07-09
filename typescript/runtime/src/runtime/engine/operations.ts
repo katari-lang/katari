@@ -14,6 +14,7 @@ import type {
   ContinueOperation,
   DelegateOperation,
   ExitOperation,
+  GenericArgumentSchema,
   Operation,
   QualifiedName,
   VariableId,
@@ -23,9 +24,9 @@ import { newDelegationId, type ScopeId, type SnapshotId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { liftPrivacy } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { CALL_AGENT_NAME, completeThread, raiseThrow } from "./common.js";
+import { CALL_AGENT_NAME, completeThread, constructValue, raiseThrow } from "./common.js";
 import type { StepContext } from "./context.js";
-import { type DispatchResult, dispatchCallable } from "./dynamic-dispatch.js";
+import { CALL_ERROR, type DispatchResult, dispatchCallable } from "./dynamic-dispatch.js";
 import { matchPattern } from "./pattern.js";
 import { readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
@@ -34,9 +35,6 @@ import { errorData } from "./throw-signal.js";
 import type { SequenceThread, Thread } from "./types.js";
 
 const NULL_VALUE: Value = { kind: "null" };
-
-/** The domain error ctor a failed dynamic dispatch throws (`prelude/reflection.ktr` declares it). */
-const CALL_ERROR = "prelude.reflection.call_error";
 
 /**
  * Drive a sequence thread from its cursor: run synchronous ops in a tight loop, stop at the first op
@@ -156,56 +154,187 @@ function enterCall(
   });
 }
 
-/** Summon a child instance: resolve the callee, spawn the proxy DelegateThread, emit the outbound
- *  delegate. Returns `true` when the call completed synchronously instead (an inlined construct leaf
- *  — the cursor advances), `false` when the thread suspended (a real delegation, an inlined primitive
- *  leaf, or a raised dispatch error). */
+/** Execute a `delegate` op by the plan its callee resolves to. Returns `true` when the op completed
+ *  synchronously (an inlined construct leaf — the cursor advances), `false` when the thread suspended
+ *  (a real delegation, an inlined primitive leaf, or a raised dispatch error). */
 function enterDelegate(
   ctx: StepContext,
   thread: SequenceThread,
   operation: DelegateOperation,
 ): boolean {
-  const resolved = resolveCallee(ctx, thread.scopeId, operation.target, operation.argument);
-  if ("throwPayload" in resolved) {
-    // The dynamic dispatch failed before anything ran — raise the catchable `reflection.call_error`
-    // (the thread suspends on the ask; a handler breaks out, or the run fails with the payload).
-    raiseThrow(ctx, thread, resolved.throwPayload);
-    return false;
+  const plan = planDelegate(ctx, thread.scopeId, operation);
+  switch (plan.kind) {
+    case "raise":
+      // The dynamic dispatch failed before anything ran — raise the catchable `reflection.call_error`
+      // (the thread suspends on the ask; a handler breaks out, or the run fails with the payload).
+      raiseThrow(ctx, thread, plan.payload);
+      return false;
+    case "construct":
+      // The inlined constructor completes in place, so the op advances like any value-producing op.
+      if (operation.output !== null) {
+        writeVariable(
+          ctx.store,
+          thread.scopeId,
+          operation.output,
+          constructValue(plan.argument, plan.constructorName),
+        );
+      }
+      return true;
+    case "primitive":
+      spawnInlinePrimitive(ctx, thread, operation.output, plan);
+      return false;
+    case "delegate":
+      emitDelegate(ctx, thread, operation.output, plan);
+      return false;
   }
-  // The delegate merges two substitution sources: what the callee VALUE carries (an explicit
-  // `callee[T]` applied earlier via `applyGenerics`) and what THIS call site instantiated (inferred
-  // by the checker, stamped on the operation). They are disjoint in practice — an already-applied
-  // callee is no longer generic at the call — but the call site wins on overlap (it is the more
-  // specific record).
-  let generics = resolved.generics;
-  if (operation.generics !== undefined && operation.generics.length > 0) {
-    const merged: GenericSubstitution = { ...(generics ?? {}) };
-    for (const [name, schema] of operation.generics) {
-      merged[name] = schema;
-    }
-    generics = merged;
-  }
+}
 
-  // The leaf fast path: a named core callee whose body is a pure leaf (a stdlib primitive, a data
-  // constructor) runs IN THIS INSTANCE — no child instance, no outbox round trip, no journal rows.
-  // Measured to be the bulk of a run's events (thousands of `prelude.*` delegations per AI reply), so
-  // this is the difference between a run journaling ~10k events and ~100.
+/** What a resolved `delegate` op executes: one of the two in-instance leaf runs (the fast path), the
+ *  ordinary child-instance delegation, or — for a dispatch that failed before anything ran — a raise. */
+type DelegatePlan =
+  /** A failed dynamic dispatch: raise `payload` as the catchable `reflection.call_error`. */
+  | { kind: "raise"; payload: Value }
+  /** A data-constructor leaf: tag `argument` with the ctor synchronously — no thread, no suspension.
+   *  (`constructorName`, not `constructor`, so the field never collides with the prototype property.) */
+  | { kind: "construct"; constructorName: QualifiedName; argument: Value }
+  /** A primitive leaf: run the prim on an in-instance leaf thread within this same turn. */
+  | { kind: "primitive"; name: string; argument: Value; generics?: GenericSubstitution }
+  /** A real delegation: the resolved dispatch, carrying the already-merged generic instantiation. */
+  | ({ kind: "delegate" } & DispatchResult);
+
+/** Resolve a `delegate` op — its callee, argument, and generic instantiation — into the plan it
+ *  executes. A named core callee whose body is a pure leaf (a stdlib primitive, a data constructor)
+ *  plans an IN-THIS-INSTANCE run — no child instance, no outbox round trip, no journal rows. Measured
+ *  to be the bulk of a run's events (thousands of `prelude.*` delegations per AI reply), so this is the
+ *  difference between a run journaling ~10k events and ~100. Every other callee plans the ordinary
+ *  delegation, and a failed dynamic dispatch plans a raise. */
+function planDelegate(
+  ctx: StepContext,
+  scope: ScopeId,
+  operation: DelegateOperation,
+): DelegatePlan {
+  const resolved = resolveCallee(ctx, scope, operation.target, operation.argument);
+  if ("throwPayload" in resolved) return { kind: "raise", payload: resolved.throwPayload };
+  const generics = mergeGenerics(resolved.generics, operation.generics);
   if (resolved.target.kind === "named" && resolved.to === "core") {
-    const inlined = tryInlineLeaf(
-      ctx,
-      thread,
-      operation.output,
-      resolved.target.name,
-      resolved.target.snapshot,
-      resolved.argument,
-      generics,
-    );
-    if (inlined !== "not-a-leaf") return inlined === "completed";
+    const leaf = resolveLeafBody(ctx, resolved.target.name, resolved.target.snapshot);
+    if (leaf !== null && leaf.kind === "construct") {
+      return {
+        kind: "construct",
+        constructorName: leaf.name,
+        argument: resolved.argument ?? NULL_VALUE,
+      };
+    }
+    if (leaf !== null && leaf.kind === "primitive") {
+      // The prim registry key is the primitive BLOCK's name (exactly what the in-module path reads).
+      return {
+        kind: "primitive",
+        name: leaf.name,
+        argument: resolved.argument ?? NULL_VALUE,
+        ...(generics !== undefined ? { generics } : {}),
+      };
+    }
   }
+  return {
+    kind: "delegate",
+    target: resolved.target,
+    argument: resolved.argument,
+    to: resolved.to,
+    ...(generics !== undefined ? { generics } : {}),
+  };
+}
 
+/** Merge a delegate's two substitution sources: what the callee VALUE carries (an explicit `callee[T]`
+ *  applied earlier via `applyGenerics`) and what THIS call site instantiated (inferred by the checker,
+ *  stamped on the operation). They are disjoint in practice — an already-applied callee is no longer
+ *  generic at the call — but the call site wins on overlap (it is the more specific record). */
+function mergeGenerics(
+  carried: GenericSubstitution | undefined,
+  stamped: Array<[string, GenericArgumentSchema]> | undefined,
+): GenericSubstitution | undefined {
+  if (stamped === undefined || stamped.length === 0) return carried;
+  const merged: GenericSubstitution = { ...(carried ?? {}) };
+  for (const [name, schema] of stamped) {
+    merged[name] = schema;
+  }
+  return merged;
+}
+
+/** Resolve a named core callee down to an inlinable leaf body (a `construct` / `primitive` block), or
+ *  `null` when it is not one. Resolution reads the callee's module through `irSource` (sync — the
+ *  instance's snapshot is preloaded before its turns run). A callee with argument DEFAULTS resolves to
+ *  `null`: filling them is the delegation-acceptance seam's job, not worth duplicating here. */
+function resolveLeafBody(
+  ctx: StepContext,
+  name: QualifiedName,
+  snapshot: SnapshotId,
+): Extract<Block, { kind: "construct" | "primitive" }> | null {
+  let agent: Block;
+  let body: Block;
+  // `IrSource` exposes only throwing lookups, so this catch is scoped to exactly these resolution
+  // reads: ANY hiccup there (an unloaded foreign snapshot, a missing entry / module / block) means
+  // "not a leaf", falling back to the ordinary delegation — which fails (or succeeds) with its
+  // existing semantics. A non-agent entry has no body to read, so it stands in for its own body and
+  // the kind checks below reject it.
+  try {
+    const located = ctx.irSource.locate(snapshot, name);
+    const access = ctx.irSource.access(snapshot, located.module);
+    agent = access.block(located.blockId).block;
+    body = agent.kind === "agent" ? access.block(agent.body).block : agent;
+  } catch {
+    return null;
+  }
+  if (agent.kind !== "agent" || Object.keys(agent.defaults ?? {}).length > 0) return null;
+  return body.kind === "construct" || body.kind === "primitive" ? body : null;
+}
+
+/** Spawn the in-instance leaf thread an inlined `primitive` plan runs on. The leaf's `invocation`
+ *  carries the resolved name / argument / generics itself (the callee's block lives in a foreign module
+ *  this instance cannot read); it completes within this same turn, so it never persists, and its
+ *  failure path (typed throw / panic) bubbles from the leaf exactly like an in-module primitive
+ *  body's. */
+function spawnInlinePrimitive(
+  ctx: StepContext,
+  thread: SequenceThread,
+  output: VariableId | null,
+  plan: Extract<DelegatePlan, { kind: "primitive" }>,
+): void {
   const callId = allocateCallId(ctx.instance);
-  thread.pending = { callId, output: operation.output };
+  thread.pending = { callId, output };
+  const leafId = allocateThreadId(ctx.instance);
+  ctx.instance.threads[leafId] = {
+    id: leafId,
+    parent: thread.id,
+    parentCallId: callId,
+    scopeId: thread.scopeId,
+    // Never read (the inline invocation carries everything); the spawning block is a valid placeholder.
+    blockId: thread.blockId,
+    status: "running",
+    forwardRoutes: {},
+    kind: "primitive",
+    invocation: {
+      kind: "inline",
+      name: plan.name,
+      argument: plan.argument,
+      ...(plan.generics !== undefined ? { generics: plan.generics } : {}),
+    },
+  };
+  ctx.enqueue({ kind: "create", thread: leafId });
+}
 
+/** Summon a child instance for a `delegate` plan: spawn the proxy DelegateThread and emit the outbound
+ *  `delegate`. It routes to the resolved executor: `core` for a compiled callable, the tool's own
+ *  reactor for a reactor-backed one (a `tool` value resolves to an `external` target + context, so its
+ *  call goes straight to the reactor — no wrapper hop). Compiled `external agent` calls still emit
+ *  their own `delegate` from `createExternal`; this site handles callee references and values. */
+function emitDelegate(
+  ctx: StepContext,
+  thread: SequenceThread,
+  output: VariableId | null,
+  plan: Extract<DelegatePlan, { kind: "delegate" }>,
+): void {
+  const callId = allocateCallId(ctx.instance);
+  thread.pending = { callId, output };
   const delegationId = newDelegationId();
   const proxyId = allocateThreadId(ctx.instance);
   ctx.instance.threads[proxyId] = {
@@ -220,131 +349,41 @@ function enterDelegate(
     delegationId,
     relays: {},
   };
-  // The delegate routes to the resolved executor: `core` for a compiled callable, the tool's own
-  // reactor for a reactor-backed one (a `tool` value resolves to an `external` target + context, so
-  // its call goes straight to the reactor — no wrapper hop). Compiled `external agent` calls still
-  // emit their own `delegate` from `createExternal`; this site handles callee references and values.
   ctx.emit(
     {
       kind: "delegate",
       delegation: delegationId,
-      target: resolved.target,
-      argument: resolved.argument,
-      ...(generics !== undefined ? { generics } : {}),
+      target: plan.target,
+      argument: plan.argument,
+      ...(plan.generics !== undefined ? { generics: plan.generics } : {}),
     },
-    resolved.to,
+    plan.to,
   );
-  return false;
-}
-
-/** Try to run a named core callee as an in-instance leaf. Resolution reads the callee's module through
- *  `irSource` (sync — the instance's snapshot is preloaded before its turns run); ANY resolution
- *  hiccup — an unloaded foreign snapshot, a missing entry — falls back to the ordinary delegation,
- *  which fails (or succeeds) with its existing semantics. A callee with argument DEFAULTS also falls
- *  back: filling them is the delegation-acceptance seam's job, not worth duplicating here.
- *
- *  A `construct` body completes synchronously (`"completed"` — exactly `createConstruct`'s record). A
- *  `primitive` body spawns an in-instance `primitive` leaf carrying the resolved name / argument /
- *  generics on the thread (`"suspended"` — the prim may be async); it completes within this same turn,
- *  so it never persists, and its failure path (typed throw / panic) bubbles from the leaf exactly like
- *  an in-module primitive body's. */
-function tryInlineLeaf(
-  ctx: StepContext,
-  thread: SequenceThread,
-  output: VariableId | null,
-  name: QualifiedName,
-  snapshot: SnapshotId,
-  argument: Value | null,
-  generics: GenericSubstitution | undefined,
-): "completed" | "suspended" | "not-a-leaf" {
-  let body: Block;
-  let defaults: number;
-  try {
-    const located = ctx.irSource.locate(snapshot, name);
-    const access = ctx.irSource.access(snapshot, located.module);
-    const agent = access.block(located.blockId).block;
-    if (agent.kind !== "agent") return "not-a-leaf";
-    defaults = Object.keys(agent.defaults ?? {}).length;
-    body = access.block(agent.body).block;
-  } catch {
-    return "not-a-leaf";
-  }
-  if (defaults > 0) return "not-a-leaf";
-
-  if (body.kind === "construct") {
-    // `createConstruct`'s semantics, completed in place: tag the argument record with the ctor.
-    const argumentValue = argument ?? NULL_VALUE;
-    const fields = argumentValue.kind === "record" ? argumentValue.fields : {};
-    if (output !== null) {
-      writeVariable(ctx.store, thread.scopeId, output, { kind: "record", fields, ctor: body.name });
-    }
-    return "completed";
-  }
-
-  if (body.kind === "primitive") {
-    const callId = allocateCallId(ctx.instance);
-    thread.pending = { callId, output };
-    const leafId = allocateThreadId(ctx.instance);
-    ctx.instance.threads[leafId] = {
-      id: leafId,
-      parent: thread.id,
-      parentCallId: callId,
-      scopeId: thread.scopeId,
-      // Never read (the inline data carries everything); the spawning block is a valid placeholder.
-      blockId: thread.blockId,
-      status: "running",
-      forwardRoutes: {},
-      kind: "primitive",
-      inline: {
-        // The prim registry key is the primitive BLOCK's name (exactly what the in-module path reads).
-        name: body.name,
-        argument: argument ?? NULL_VALUE,
-        ...(generics !== undefined ? { generics } : {}),
-      },
-    };
-    ctx.enqueue({ kind: "create", thread: leafId });
-    return "suspended";
-  }
-
-  return "not-a-leaf";
 }
 
 /** Resolve a callee reference + its argument variable into the delegate it stands for. Dynamic dispatch
- *  is resolved HERE, at the emit site: a callee VALUE (and `reflection.call_agent`, whose argument
- *  carries the callable) goes through the shared `dispatchCallable`, so a tool's runtime schema is
- *  validated before anything is emitted and the delegate routes straight to its executor. A dispatch
- *  failure (a non-callable value, a tool schema violation) is the anticipated dynamic-dispatch error:
- *  it resolves to `{ throwPayload }`, which `enterDelegate` raises as a catchable
- *  `reflection.call_error` instead of delegating. */
+ *  is resolved HERE, at the emit site: EVERY callee becomes a callable value (a static name wraps into
+ *  the `agent` value denoting it, which dispatches back to the same named core target) and runs the one
+ *  shared `dispatchCallable`, so a tool's runtime schema is validated before anything is emitted and
+ *  the delegate routes straight to its executor. A dispatch failure (a non-callable value, a tool
+ *  schema violation) is the anticipated dynamic-dispatch error: it resolves to `{ throwPayload }`,
+ *  which `enterDelegate` raises as a catchable `reflection.call_error` instead of delegating. */
 function resolveCallee(
   ctx: StepContext,
   scope: ScopeId,
   callee: CalleeReference,
   argumentVariable: VariableId,
 ): DispatchResult | { throwPayload: Value } {
-  const argument = requireVariable(ctx, scope, argumentVariable);
-  if (callee.kind === "name" && callee.name !== CALL_AGENT_NAME) {
-    return {
-      target: { kind: "named", name: callee.name, snapshot: ctx.ir.snapshot },
-      argument,
-      to: "core",
-    };
-  }
-  // The callable being dispatched: the callee value itself, or — for a `call_agent(target, args)`
-  // call — the callable its argument record carries. `call_agent` may nest (a tool list holding
-  // `call_agent` itself), so peeling loops.
-  let callable: Value;
-  let args: Value | null;
-  if (callee.kind === "name") {
-    const peeled = peelCallAgent(argument);
-    if ("error" in peeled) return { throwPayload: errorData(CALL_ERROR, peeled.error) };
-    callable = peeled.callable;
-    args = peeled.args;
-  } else {
-    callable = requireVariable(ctx, scope, callee.variable);
-    args = argument;
-  }
-  while (callable.kind === "agent" && String(callable.name) === CALL_AGENT_NAME) {
+  let args: Value | null = requireVariable(ctx, scope, argumentVariable);
+  let callable: Value =
+    callee.kind === "name"
+      ? { kind: "agent", name: callee.name, snapshot: ctx.ir.snapshot }
+      : requireVariable(ctx, scope, callee.variable);
+  // A `call_agent(target, args)` call carries its real callable in the argument record, so peel it out
+  // — in a loop, because `call_agent` may nest (a tool list holding `call_agent` itself). The magic
+  // name needs no callee-kind special case: a static `call_agent` callee is just an `agent` value that
+  // enters the loop on its first iteration.
+  while (callable.kind === "agent" && callable.name === CALL_AGENT_NAME) {
     const peeled = peelCallAgent(args);
     if ("error" in peeled) return { throwPayload: errorData(CALL_ERROR, peeled.error) };
     callable = peeled.callable;

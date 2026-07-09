@@ -146,10 +146,10 @@ spec = do
       codesFor (tickDecl <> supplyDecl <> "agent run() -> integer with tick { let x : integer = use supply(base = 1)\ntick() }") `shouldBe` []
     it "rejects a request the enclosing agent's declared effect excludes (K3001, via the inferred E)" $
       codesFor (tickDecl <> supplyDecl <> "agent run() -> integer with pure { let x : integer = use supply(base = 1)\ntick() }") `shouldContain` ["K3001"]
-    it "an explicitly written continuation label is reserved (K3011)" $
-      codesFor (supplyDecl <> noopDecl <> "agent run() -> string { let x : integer = use supply(base = 1, continuation = noop)\n\"result\" }") `shouldContain` ["K3011"]
-    it "rejects a provider shape with no application reading (K3011) — a field read must be bound or applied" $
-      codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p\n\"result\" }") `shouldContain` ["K3011"]
+    it "an explicitly written continuation label is reserved (K3019)" $
+      codesFor (supplyDecl <> noopDecl <> "agent run() -> string { let x : integer = use supply(base = 1, continuation = noop)\n\"result\" }") `shouldContain` ["K3019"]
+    it "rejects a provider shape with no application reading (K3019) — a field read must be bound or applied" $
+      codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p\n\"result\" }") `shouldContain` ["K3019"]
     it "a computed provider is still usable by applying it (a zero-argument call)" $
       codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p()\n\"result\" }") `shouldBe` []
 

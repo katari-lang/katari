@@ -66,23 +66,21 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
     case "sequence":
       return { ...base, kind: "sequence", cursor: 0, pending: null };
     case "primitive":
-      return { ...base, kind: "primitive" };
+      return { ...base, kind: "primitive", invocation: { kind: "block" } };
     case "construct":
       return { ...base, kind: "construct" };
     case "request":
       return { ...base, kind: "request" };
     case "external":
       // Born like a delegate proxy: a fresh delegation it will open on `create` when it emits its
-      // `delegate` to its reactor (`ffi` by default, or `http` when the leaf is so marked).
+      // `delegate` to its reactor. The block's marker is copied verbatim — the compiler already pins it
+      // to the known reactor names (and stamps `ffi` when the `from` clause is absent).
       return {
         ...base,
         kind: "external",
         delegationId: newDelegationId(),
         relays: {},
-        reactor:
-          block.reactor === "http" || block.reactor === "webhook" || block.reactor === "mcp"
-            ? block.reactor
-            : "ffi",
+        reactor: block.reactor,
       };
     case "match":
       return { ...base, kind: "match", pending: null };

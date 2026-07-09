@@ -4,7 +4,12 @@ import { facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
 import { type RunView, runRepository } from "./run.repository.js";
 import type { ListRunEventsQuery, ListRunsQuery, StartRunBody } from "./run.schema.js";
-import { projectRunEvent, runEventsRepository } from "./run-events.repository.js";
+import {
+  projectRunEvent,
+  runEventsRepository,
+  type TraceCursor,
+  type TraceFilter,
+} from "./run-events.repository.js";
 import { runTreeRepository } from "./run-tree.repository.js";
 
 /** The wire shape of a run: its projected view with the tagged `argument` / `result` `Value`s rendered
@@ -60,22 +65,31 @@ export const runService = {
     return { state: view.state, tree: await runTreeRepository.get(db, projectId, runId) };
   },
 
-  /** A run's execution trace: the journaled external events after `after` (a tail — a watcher polls with
-   *  the growing seq), oldest first. `state` rides along so one poll both extends the trace and tells the
-   *  watcher whether the run is still live (mirroring the delegation tree's `{ state, tree }`). */
+  /** A run's execution trace, in one of two paging modes decided here, once: an `after` keyset means
+   *  the tail a watcher / the CLI polls (no `total` — the hot path never reads it), anything else is
+   *  the console's offset browse, whose response carries the filtered `total` for the pager. `state`
+   *  rides along so one poll both extends the trace and tells the watcher whether the run is still
+   *  live (mirroring the delegation tree's `{ state, tree }`). */
   async listEvents(projectId: string, runId: string, query: ListRunEventsQuery = {}) {
     const view = await runRepository.get(db, projectId, runId);
     if (view === undefined) {
       throw new NotFoundError(`run ${runId} not found`);
     }
-    const { rows, total } = await runEventsRepository.list(db, projectId, runId, {
-      ...(query.after !== undefined ? { after: query.after } : {}),
-      ...(query.offset !== undefined ? { offset: query.offset } : {}),
-      ...(query.kind !== undefined ? { kind: query.kind } : {}),
-      ...(query.search !== undefined ? { search: query.search } : {}),
-      ...(query.order !== undefined ? { order: query.order } : {}),
-      limit: query.limit ?? 500,
-    });
+    const { after, offset, limit, ...narrowing } = query;
+    const filter: TraceFilter = { ...narrowing, limit: limit ?? 500 };
+    const cursor: TraceCursor =
+      after !== undefined ? { mode: "tail", after } : { mode: "browse", offset: offset ?? 0 };
+    if (cursor.mode === "tail") {
+      const rows = await runEventsRepository.tail(db, projectId, runId, cursor.after, filter);
+      return { state: view.state, events: rows.map(projectRunEvent) };
+    }
+    const { rows, total } = await runEventsRepository.browse(
+      db,
+      projectId,
+      runId,
+      cursor.offset,
+      filter,
+    );
     return { state: view.state, events: rows.map(projectRunEvent), total };
   },
 

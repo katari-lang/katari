@@ -5,16 +5,18 @@
 -- command that resolves each — the "why is my run stuck" question answered in one screen.
 module Katari.Cli.Command.Status
   ( Options (..),
+    TraceSelection (..),
     optionsParser,
     run,
   )
 where
 
 import Control.Monad (forM_, unless, when)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Cli.Api (EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), getRunDetail, listAllRunEvents, listEscalations)
+import GHC.List (List)
+import Katari.Cli.Api (EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
@@ -27,9 +29,18 @@ data Options = Options
     projectName :: Maybe Text,
     runId :: Maybe Text,
     json :: Bool,
-    search :: Maybe Text,
-    kind :: Maybe Text
+    traceSelection :: TraceSelection
   }
+  deriving stock (Show)
+
+-- | Which slice of the run's trace to render — decided once at the option parser, so the renderer
+-- dispatches on a real sum instead of re-deriving an "am I filtering" flag from raw options.
+data TraceSelection
+  = -- | No filter: the newest tail of the whole trace (enough to see how a run ended).
+    WholeTailView
+  | -- | A @--search@ / @--kind@ filter: every matching event, oldest first — a focused debugger view
+    -- where truncating to a tail would hide the events searched for.
+    MatchesView RunEventsQuery
   deriving stock (Show)
 
 optionsParser :: Parser Options
@@ -45,7 +56,12 @@ optionsParser =
       )
     <*> optional (strArgument (metavar "RUN" <> help "Run id, or a unique prefix of one (omit to pick interactively)"))
     <*> switch (long "json" <> help "Print the raw run JSON instead of the readable view")
-    <*> optional
+    <*> traceSelectionParser
+
+traceSelectionParser :: Parser TraceSelection
+traceSelectionParser =
+  buildSelection
+    <$> optional
       ( strOption
           ( long "search"
               <> metavar "TEXT"
@@ -59,6 +75,10 @@ optionsParser =
               <> help "Show only trace events of KIND (delegate | delegateAck | escalate | escalateAck | terminate | terminateAck)"
           )
       )
+  where
+    buildSelection search kind = case (search, kind) of
+      (Nothing, Nothing) -> WholeTailView
+      _ -> MatchesView RunEventsQuery {search = search, kind = kind}
 
 run :: Options -> IO ()
 run options = do
@@ -82,33 +102,35 @@ run options = do
                 <> "  — answer with: katari answer "
                 <> Text.take 8 escalation.id
             )
-      renderTrace context target (RunEventsQuery {search = options.search, kind = options.kind})
+      renderTrace context target options.traceSelection
 
 -- | The run's execution trace (its journaled external events), the "what actually happened" half of
--- the status screen. Unfiltered it shows only the newest tail (the full trace is one `GET .../events`
--- away); with a @--search@ / @--kind@ filter it shows *every* match, oldest first — a focused debugger
--- view where truncating to a tail would hide the events you searched for.
-renderTrace :: RuntimeContext -> Text -> RunEventsQuery -> IO ()
-renderTrace context target query = do
-  (_, events) <- listAllRunEvents context.client context.projectId target query
-  let filtering = isJust query.search || isJust query.kind
-  if filtering
-    then do
-      printText ""
-      printText ("Trace matches (" <> Text.pack (show (length events)) <> "):")
-      if null events
-        then printText "  (no events match)"
-        else forM_ events $ \event ->
-          printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
-    else unless (null events) $ do
+-- the status screen — rendered per 'TraceSelection' (the full trace is one `GET .../events` away).
+renderTrace :: RuntimeContext -> Text -> TraceSelection -> IO ()
+renderTrace context target selection = case selection of
+  WholeTailView -> do
+    (_, events) <- listAllRunEvents context.client context.projectId target emptyRunEventsQuery
+    unless (null events) $ do
       let shown = drop (length events - traceTailLength) events
           earlierCount = length events - length shown
       printText ""
       printText "Trace:"
       when (earlierCount > 0) $
         printText ("  (… " <> Text.pack (show earlierCount) <> " earlier events)")
-      forM_ shown $ \event ->
-        printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
+      printEventLines shown
+  MatchesView query -> do
+    (_, events) <- listAllRunEvents context.client context.projectId target query
+    printText ""
+    printText ("Trace matches (" <> Text.pack (show (length events)) <> "):")
+    if null events
+      then printText "  (no events match)"
+      else printEventLines events
+
+-- | The one-line-per-event rendering both trace views share.
+printEventLines :: List RunEventView -> IO ()
+printEventLines events =
+  forM_ events $ \event ->
+    printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
 
 -- | How many trace events `status` shows — enough to see how a run ended without flooding the screen.
 traceTailLength :: Int

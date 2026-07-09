@@ -43,9 +43,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** How `pump` proceeds after a turn: `ok` (continue), `retry` (back off, then replay from durable),
- *  `reload` (re-pump now — warm was dropped and any dead event consumed), `stop` (stay dormant). */
-type TurnOutcome = "ok" | "retry" | "reload" | "stop";
+/** How `pump` proceeds after a batch. The failure variants carry their own follow-up data so no mutable
+ *  side channel has to smuggle it to the next pump: `ok` continues; `retry` waits `backoffMs`, then
+ *  replays the batch from its durable inputs; `reload` re-pumps now (warm was dropped and any dead event
+ *  consumed), with `nextBatchLimit` capping the next batch so a failed batch's good prefix replays alone;
+ *  `stop` leaves the actor dormant. */
+type BatchOutcome =
+  | { kind: "ok" }
+  | { kind: "retry"; backoffMs: number }
+  | { kind: "reload"; nextBatchLimit?: number }
+  | { kind: "stop" };
 
 /** The substrate's collaborators on its owner: how to rebuild the project's warm domain state from durable
  *  rows (and replay the undrained outbox) on first use, and how to discard the non-durable in-process state
@@ -97,9 +104,10 @@ export class Substrate {
   /** The in-flight reactivation, so concurrent first-use callers share one load. Loading MUST complete before
    *  any commit — otherwise a just-produced outbox row would be re-read by `reactivate` and replayed. */
   private loadingPromise: Promise<void> | null = null;
-  /** Per durable inbound event (its outbox seq), how many times its turn has hit a retryable failure (a commit
-   *  throw, or a transient infra throw out of react). Survives reactivation (the substrate object persists;
-   *  only warm reactor state is dropped), so the retry bound spans replays. */
+  /** Per durable inbound event (its outbox seq), how many times a batch it originated has hit a retryable
+   *  failure — a commit throw, or a transient infra throw out of react (see `onRetryableBatchFailure`).
+   *  Survives reactivation (the substrate object persists; only warm reactor state is dropped), so the
+   *  retry bound spans replays. */
   private readonly commitRetries = new Map<OutboxSeq, number>();
 
   constructor(
@@ -176,17 +184,25 @@ export class Substrate {
    *  other pending command, drop the warm state, and reactivate from durable (the batch's unconsumed
    *  inbound rows replay the lost work). A `reactivate` failure (e.g. the DB is unreachable) is caught the
    *  same way — pending commands reject, the load is retried on the next call — so a commit / load error
-   *  is never an unhandled rejection. */
-  private async pump(): Promise<void> {
+   *  is never an unhandled rejection.
+   *
+   *  `firstBatchLimit` caps only the FIRST batch of this pump: a `reload` after a mid-batch failure passes
+   *  the failed batch's good-prefix length here, so the prefix replays as its own batch and the offending
+   *  event lands at position 0 of the following one (where the single-turn policies apply precisely). The
+   *  reload re-pump follows the failing pump synchronously, so no other caller can slip in and pump
+   *  without the bound. */
+  private async pump(firstBatchLimit?: number): Promise<void> {
     if (this.pumping) return;
     this.pumping = true;
-    let after: TurnOutcome | null = null;
+    let interruption: BatchOutcome | null = null;
     try {
       await this.ensureLoaded();
+      let batchLimit = firstBatchLimit;
       while (this.mailbox.length > 0) {
-        const outcome = await this.runBatch();
-        if (outcome !== "ok") {
-          after = outcome;
+        const outcome = await this.runBatch(batchLimit);
+        batchLimit = undefined;
+        if (outcome.kind !== "ok") {
+          interruption = outcome;
           break;
         }
       }
@@ -200,31 +216,25 @@ export class Substrate {
     } finally {
       this.pumping = false;
     }
-    // Re-enter as the outcome dictates. `retry` backs off first (a transient commit failure replays from the
-    // durable outbox); `reload` re-pumps immediately (state was dropped + the dead event consumed); `stop`
-    // leaves the actor dormant (the event stays durable, retried on the next activation).
-    if (after === "retry") {
-      await delay(this.pendingBackoffMs);
-      this.pendingBackoffMs = 0;
+    if (interruption === null) return;
+    // Re-enter as the outcome dictates. `retry` backs off first (a transient failure replays the batch
+    // from its durable inputs); `reload` re-pumps immediately (state was dropped + any dead event
+    // consumed), carrying the prefix-replay bound; `stop` leaves the actor dormant (the events stay
+    // durable, retried on the next activation).
+    if (interruption.kind === "retry") {
+      await delay(interruption.backoffMs);
       void this.pump();
-    } else if (after === "reload") {
-      void this.pump();
+    } else if (interruption.kind === "reload") {
+      void this.pump(interruption.nextBatchLimit);
     }
   }
 
-  /** The backoff (ms) the next `retry` re-pump waits — set by `onRetryableFailure`, consumed by `pump`. */
-  private pendingBackoffMs = 0;
-
-  /** A one-shot bound for the NEXT batch, set after a mid-batch react failure: replaying just the good
-   *  prefix isolates the offending event at position 0 of a following batch, where the precise
-   *  single-turn policies (dead-event consumption, bounded commit retries) apply. */
-  private nextBatchLimit: number | null = null;
-
   /** Run one batch through its three phases — the react loop / one commit / the afterCommits — each with
    *  its own failure policy. Returns how `pump` should proceed. */
-  private async runBatch(): Promise<TurnOutcome> {
-    const limit = Math.max(1, this.nextBatchLimit ?? MAX_BATCH_TURNS);
-    this.nextBatchLimit = null;
+  private async runBatch(turnLimit?: number): Promise<BatchOutcome> {
+    // A non-positive bound would make the react loop run zero turns and report `ok`, spinning `pump` on a
+    // non-empty mailbox forever — so the bound is clamped to at least one turn.
+    const limit = Math.max(1, turnLimit ?? MAX_BATCH_TURNS);
     const batch: Batch = {
       touched: new Set(),
       consumed: [],
@@ -251,13 +261,18 @@ export class Substrate {
       try {
         await turn.run();
       } catch (reactError) {
-        if (position === 0) {
-          // Nothing else is in flight: the single-turn policies apply precisely.
-          if (isTransientError(reactError))
-            return this.onRetryableFailure(turn, reactError, "react");
-          return this.onReactFailure(turn, reactError);
+        // A failure deeper in the batch replays the good prefix as its own batch first, which lands the
+        // offender at position 0 of a following batch — so only two cases remain here. At position 0
+        // nothing else is in flight and the batch degenerates to this one turn (`batch.consumed` holds at
+        // most its row, `batch.settles` is empty): a transient infra throw goes through the same
+        // retryable policy as a commit failure, and any other throw is a deterministic bug, never
+        // replay-looped.
+        if (position > 0) return this.onMidBatchFailure(batch, turn, reactError, position);
+        if (isTransientError(reactError)) {
+          const settles = turn.settle === null ? [] : [turn.settle];
+          return this.onRetryableBatchFailure(settles, batch.consumed[0], reactError, "react");
         }
-        return this.onMidBatchFailure(batch, turn, reactError, position);
+        return this.onReactFailure(turn, reactError);
       }
       batch.touched.add(turn.reactor);
       for (const event of turn.reactor.drainSends()) {
@@ -271,13 +286,13 @@ export class Substrate {
       if (turn.settle !== null) batch.settles.push(turn.settle);
       position += 1;
     }
-    if (position === 0) return "ok";
+    if (position === 0) return { kind: "ok" };
     // Phase 2 — commit: the one atomic durable write for the whole batch. A failure here means the warm
     // store advanced past durable, so it must be dropped + rebuilt; the (unconsumed) inbound rows replay.
     try {
       await this.commitBatch(batch);
     } catch (commitError) {
-      return this.onBatchCommitFailure(batch, commitError);
+      return this.onRetryableBatchFailure(batch.settles, batch.consumed[0], commitError, "commit");
     }
     for (const seq of batch.consumed) this.commitRetries.delete(seq); // committed → clear retry counts
     // Phase 3 — afterCommit: strictly-post-commit side effects (FFI dispatch, run-promise settlement).
@@ -294,13 +309,13 @@ export class Substrate {
       }
     }
     for (const settle of batch.settles) settle.resolve();
-    return "ok";
+    return { kind: "ok" };
   }
 
   /** A `react` throw: a deterministic failure should have surfaced as a panic, so this is a bug. Do not
    *  poison-loop it — log loudly, reject the awaiter, consume the dead inbound event so it cannot replay into
    *  the same throw, and drop + reload the (possibly partially mutated) warm state. */
-  private async onReactFailure(turn: Turn, error: unknown): Promise<TurnOutcome> {
+  private async onReactFailure(turn: Turn, error: unknown): Promise<BatchOutcome> {
     this.logger.error(
       "reactor threw while computing a turn (a bug: a deterministic failure should panic, not throw) — dropping the event",
       { to: turn.event?.to, kind: turn.event?.kind, error: messageOf(error) },
@@ -308,56 +323,58 @@ export class Substrate {
     turn.settle?.reject(error);
     if (turn.consumed !== null) await this.consumeDeadEvent(turn.consumed);
     this.dropWarm(error);
-    return "reload";
+    return { kind: "reload" };
   }
 
-  /** A retryable failure: a `commit` throw, or a *transient* infra throw out of `react` (a `TransientError`).
-   *  Either way the warm store may have advanced past durable, so drop + reload; the unconsumed event replays
-   *  as the retry. Bounded with backoff so a non-transient failure does not spin — on exhaustion it stops
-   *  in-process (the event stays durable, retried on the next activation). An originated turn (a command / FFI
-   *  completion) has nothing durable to replay, so its rejected caller retries it. */
-  private async onRetryableFailure(
-    turn: Turn,
+  /** THE retryable policy — a batch of one turn is still a batch, so a `commit` throw and a *transient*
+   *  infra throw out of a first-turn `react` (a `TransientError`) share it. Either way the warm store may
+   *  have advanced past durable, so drop + reload; the batch's unconsumed durable inputs replay as the
+   *  retry. Bounded with backoff so a non-transient failure does not spin, counting against `origin` (the
+   *  batch's first consumed row) — on exhaustion it stops in-process, and the events stay durable for the
+   *  next activation. An originated-only batch (commands / FFI completions) has nothing durable to replay
+   *  or count against, so it just reloads and its rejected callers retry. */
+  private onRetryableBatchFailure(
+    settles: Array<NonNullable<Turn["settle"]>>,
+    origin: OutboxSeq | undefined,
     error: unknown,
     phase: "react" | "commit",
-  ): Promise<TurnOutcome> {
-    turn.settle?.reject(error);
+  ): BatchOutcome {
+    for (const settle of settles) settle.reject(error);
     this.dropWarm(error);
-    if (turn.consumed === null) {
-      this.logger.warn(`${phase} failed for an originated turn; reloading`, {
+    if (origin === undefined) {
+      this.logger.warn(`${phase} failed for an originated-only batch; reloading`, {
         error: messageOf(error),
       });
-      return "reload";
+      return { kind: "reload" };
     }
-    const attempts = (this.commitRetries.get(turn.consumed) ?? 0) + 1;
+    const attempts = (this.commitRetries.get(origin) ?? 0) + 1;
     if (attempts <= MAX_COMMIT_RETRIES) {
-      this.commitRetries.set(turn.consumed, attempts);
-      this.pendingBackoffMs = commitBackoffMs(attempts);
-      this.logger.warn(`${phase} failed; will replay the event`, {
+      this.commitRetries.set(origin, attempts);
+      this.logger.warn(`${phase} failed; will replay the batch from its durable inputs`, {
         attempts,
         error: messageOf(error),
       });
-      return "retry";
+      return { kind: "retry", backoffMs: commitBackoffMs(attempts) };
     }
-    this.commitRetries.delete(turn.consumed);
+    this.commitRetries.delete(origin);
     this.logger.error(`${phase} kept failing; giving up in-process (retries on next activation)`, {
       attempts,
       error: messageOf(error),
     });
-    return "stop";
+    return { kind: "stop" };
   }
 
   /** A react failure at batch position N > 0: the earlier turns' warm effects are uncommitted, so
-   *  everything drops and replays — bounded, by replaying the good PREFIX as its own batch first
-   *  (`nextBatchLimit`). The offending event then sits at position 0 of a following batch, where the
-   *  precise single-turn policies (dead-event consumption for a deterministic bug, bounded retries for a
-   *  transient) take over. */
+   *  everything drops and replays — bounded, by replaying the good PREFIX as its own batch first (the
+   *  outcome's `nextBatchLimit`). The offending event then sits at position 0 of a following batch, where
+   *  the precise single-turn policies (dead-event consumption for a deterministic bug, bounded retries
+   *  for a transient) take over. */
   private onMidBatchFailure(
     batch: Batch,
     turn: Turn,
     error: unknown,
     position: number,
-  ): TurnOutcome {
+  ): BatchOutcome {
     this.logger.warn("a turn failed mid-batch; replaying the prefix as its own batch", {
       position,
       error: messageOf(error),
@@ -365,42 +382,7 @@ export class Substrate {
     turn.settle?.reject(error);
     for (const settle of batch.settles) settle.reject(error);
     this.dropWarm(error);
-    this.nextBatchLimit = Math.max(1, position);
-    return "reload";
-  }
-
-  /** A batch commit failure: like a single turn's — drop + reload, replaying from the batch's durable
-   *  inputs — with the bounded retry count attributed to the batch's first consumed row (an
-   *  originated-only batch has nothing durable to count against; its rejected callers retry). */
-  private onBatchCommitFailure(batch: Batch, error: unknown): TurnOutcome {
-    for (const settle of batch.settles) settle.reject(error);
-    this.dropWarm(error);
-    const origin = batch.consumed[0];
-    if (origin === undefined) {
-      this.logger.warn("commit failed for an originated-only batch; reloading", {
-        error: messageOf(error),
-      });
-      return "reload";
-    }
-    const attempts = (this.commitRetries.get(origin) ?? 0) + 1;
-    if (attempts <= MAX_COMMIT_RETRIES) {
-      this.commitRetries.set(origin, attempts);
-      this.pendingBackoffMs = commitBackoffMs(attempts);
-      this.logger.warn("batch commit failed; will replay from durable inputs", {
-        attempts,
-        error: messageOf(error),
-      });
-      return "retry";
-    }
-    this.commitRetries.delete(origin);
-    this.logger.error(
-      "batch commit kept failing; giving up in-process (retries on next activation)",
-      {
-        attempts,
-        error: messageOf(error),
-      },
-    );
-    return "stop";
+    return { kind: "reload", nextBatchLimit: position };
   }
 
   /** Consume a dead inbound event (a minimal commit) so reactivation does not replay it. If even this fails

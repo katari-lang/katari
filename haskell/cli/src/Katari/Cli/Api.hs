@@ -193,26 +193,21 @@ getWithRaw client path = do
     Aeson.Success typed -> pure (raw, typed)
     Aeson.Error message -> throwIO (RuntimeDecodeError (Text.pack message))
 
--- | Render optional query parameters, dropping the absent ones. Values here are ids, enum words and
--- numbers — nothing needing percent-escaping.
+-- | Render optional query parameters, dropping the absent ones. Every value is percent-encoded here
+-- (a user-supplied trace search term carries spaces and non-ASCII, e.g. "立川 天気"), so no call site
+-- can forget it; an id / enum / number value contains only unreserved characters and passes through
+-- unchanged.
 queryString :: List (Text, Maybe Text) -> Text
-queryString parameters = case [name <> "=" <> value | (name, Just value) <- parameters] of
+queryString parameters = case [name <> "=" <> encodePathSegment value | (name, Just value) <- parameters] of
   [] -> ""
   pairs -> "?" <> Text.intercalate "&" pairs
 
--- | Percent-encode one user-supplied path segment so it survives intact as a single segment. Without
--- this a space raises an @InvalidUrlException@ (surfacing as a misleading "network error") and a @/@
--- or @#@ silently retargets the request; encoding reserved characters (the @True@) keeps an env key
--- or a qualified agent name that contains any of them addressing the row it names.
+-- | Percent-encode one user-supplied path segment (or query value) so it survives intact as a single
+-- segment. Without this a space raises an @InvalidUrlException@ (surfacing as a misleading "network
+-- error") and a @/@ or @#@ silently retargets the request; encoding reserved characters (the @True@)
+-- keeps an env key or a qualified agent name that contains any of them addressing the row it names.
 encodePathSegment :: Text -> Text
 encodePathSegment = TextEncoding.decodeUtf8Lenient . urlEncode True . TextEncoding.encodeUtf8
-
--- | Percent-encode a query-parameter *value* (a trace search term carries spaces and non-ASCII, e.g.
--- "立川 天気"). Same encoding as a path segment — reserved characters become literals, so a space,
--- @&@ or @=@ in the value cannot break the URL. @queryString@ does not encode, so values pass through
--- this first.
-encodeQueryValue :: Text -> Text
-encodeQueryValue = encodePathSegment
 
 -- ===========================================================================
 -- Projects
@@ -556,8 +551,8 @@ listRunEvents client projectId runId query after =
         <> "/events"
         <> queryString
           [ ("after", Just (Text.pack (show after))),
-            ("search", fmap encodeQueryValue query.search),
-            ("kind", fmap encodeQueryValue query.kind)
+            ("search", query.search),
+            ("kind", query.kind)
           ]
     )
 

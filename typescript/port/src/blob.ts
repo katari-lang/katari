@@ -76,8 +76,9 @@ export async function downloadBlob(
   return {
     bytes,
     size: bytes.byteLength,
-    // The generic fallback means "nothing recorded" — surface that as absent, like the runtime does.
-    ...(contentType !== null && contentType !== "application/octet-stream" ? { contentType } : {}),
+    // The runtime sends a Content-Type only when the blob row records one, so a missing header IS
+    // "nothing recorded" — absence travels as absence, no sentinel to sniff.
+    ...(contentType !== null ? { contentType } : {}),
   };
 }
 

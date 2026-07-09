@@ -16,6 +16,7 @@ import {
   childrenOf,
   completeInstance,
   completeThread,
+  constructValue,
   escapeAsk,
   proxyAsk,
   raisePanic,
@@ -401,22 +402,29 @@ function resumeSequence(
 // ─── leaf bodies (primitive / construct / request / external) ────────────────────────────────────
 
 async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promise<void> {
-  // The inlined cross-module fast path carries its own name / argument / generics (the callee's block
-  // lives in a foreign module); an in-module primitive body reads them off its block, and its generics
-  // are the instance's ambient (the delegate that summoned the instance stamped them).
+  // An `inline` invocation (the cross-module fast path) carries its own name / argument / generics —
+  // the callee's block lives in a foreign module this instance cannot read. A `block` invocation reads
+  // them off its block, and its generics are the instance's ambient (the delegate that summoned the
+  // instance stamped them).
   let name: string;
   let argument: Value;
   let generics: GenericSubstitution | undefined;
-  if (thread.inline !== undefined) {
-    name = thread.inline.name;
-    argument = thread.inline.argument;
-    generics = thread.inline.generics;
-  } else {
-    const block = getBlock(ctx, thread.blockId);
-    if (block.kind !== "primitive") throw new Error(`thread ${thread.id} is not a primitive block`);
-    name = block.name;
-    argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
-    generics = ctx.instance.ambientGenerics;
+  switch (thread.invocation.kind) {
+    case "inline":
+      name = thread.invocation.name;
+      argument = thread.invocation.argument;
+      generics = thread.invocation.generics;
+      break;
+    case "block": {
+      const block = getBlock(ctx, thread.blockId);
+      if (block.kind !== "primitive") {
+        throw new Error(`thread ${thread.id} is not a primitive block`);
+      }
+      name = block.name;
+      argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
+      generics = ctx.instance.ambientGenerics;
+      break;
+    }
   }
   // A prim failure is never a crash: an anticipated, typed failure (`KatariThrow` — malformed JSON, a
   // schema mismatch) raises `prelude.throw` with its payload; any other JS error is a `panic` (a zero
@@ -450,8 +458,7 @@ function createConstruct(ctx: StepContext, thread: Thread): void {
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "construct") throw new Error(`thread ${thread.id} is not a construct block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
-  const fields = argument.kind === "record" ? argument.fields : {};
-  completeThread(ctx, thread, { kind: "record", fields, ctor: block.name });
+  completeThread(ctx, thread, constructValue(argument, block.name));
 }
 
 /** A request leaf raises its request as an ask to its parent (the instance root agent), which has no

@@ -21,7 +21,7 @@
 // released. Either way the endpoint deactivates atomically with the call.
 
 import { randomBytes } from "node:crypto";
-import { dispatchCallable } from "../engine/dynamic-dispatch.js";
+import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { DelegationId, SnapshotId } from "../ids.js";
@@ -65,10 +65,6 @@ export type WebhookDeliveryOutcome =
 
 /** The subscriber's reserved inner-call token; deliveries use fresh `delivery:` tokens. */
 const SUBSCRIBER_CALL = "subscriber";
-
-/** The domain error a schema-violating delivery answers with (the same `reflection.call_error` any
- *  dynamic dispatch throws — the route maps it to HTTP 400). */
-const CALL_ERROR = "prelude.reflection.call_error";
 
 export class WebhookReactor extends ExternalCallReactor<WebhookPayload> {
   readonly name: ReactorName = "webhook";

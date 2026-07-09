@@ -9,7 +9,6 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -259,7 +258,9 @@ test("mcp_demo.main: the built-in MCP client mints the server's tools as agents"
   });
   await new Promise<void>((resolve) => mcpHttp.listen(0, "127.0.0.1", resolve));
   try {
-    const port = (mcpHttp.address() as AddressInfo).port;
+    const address = mcpHttp.address();
+    if (address === null || typeof address === "string") throw new Error("expected a TCP address");
+    const port = address.port;
     const { stdout } = await katari([
       "run",
       "mcp_demo.main",

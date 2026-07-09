@@ -42,6 +42,25 @@ describe("downloadBlob (blob side channel)", () => {
     expect(auths).toEqual(["Bearer test-key", "Bearer test-key"]);
   });
 
+  test("surfaces the served Content-Type verbatim, and its absence as absence", async () => {
+    const bytes = new Uint8Array([1]);
+    vi.stubGlobal("fetch", (url: string | URL) =>
+      Promise.resolve(
+        String(url).endsWith("/recorded")
+          ? // The runtime sends the header only when the blob row records a type — even the generic
+            // octet-stream is a genuine recording, not a sentinel to strip.
+            new Response(bytes, { headers: { "content-type": "application/octet-stream" } })
+          : new Response(bytes),
+      ),
+    );
+
+    const recorded = await downloadBlob("recorded");
+    const unrecorded = await downloadBlob("unrecorded");
+
+    expect(recorded.contentType).toBe("application/octet-stream");
+    expect(unrecorded.contentType).toBeUndefined();
+  });
+
   test("throws on a non-ok response", async () => {
     vi.stubGlobal("fetch", () =>
       Promise.resolve(new Response("nope", { status: 404, statusText: "Not Found" })),

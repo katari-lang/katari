@@ -5,19 +5,12 @@
 // record keys are unescaped — and the handler's declared TypeScript type is *assumed* to match, exactly like
 // the katari-side call site was checked to. No runtime validation happens here.
 //
-// The wire conventions mirror the runtime codec (`runtime/value/codec.ts` — the single source of the
-// convention; this file must stay in lockstep). A JSON object is exactly one variant, chosen by which
-// reserved single-`$` discriminator key it carries:
-//
-//   data value      { "$constructor": name, "value": { …fields } }
-//   file handle     { "$ref": blobId, "semanticKind"? }   (identity only; metadata lives runtime-side)
-//   agent reference { "$agent": name, "snapshot": …, "generics"? }
-//   closure         { "$closure": blockId, "scopeId": …, "snapshot": …, "module": …, "generics"? }
-//   tool            { "$tool": name, "description": …, "inputSchema": …, "target": <callable> }
-//   bare record     { …escaped keys }              (no reserved key present)
-//
-// A bare record's own `$`-keys travel escaped (leading `$` doubled); this layer unescapes on decode and
-// re-escapes on encode, so handler code sees natural keys.
+// The wire conventions — the reserved `$` discriminator keys, each variant's exact shape, and `$`-key
+// escaping — are defined once in `@katari-lang/types` (`wire.ts`, imported below) and shared with the
+// runtime codec, so this layer cannot drift from what the runtime emits. The port-specific notes on top:
+// a bare record's own `$`-keys travel escaped (leading `$` doubled) — this layer unescapes on decode and
+// re-escapes on encode, so handler code sees natural keys — and a file handle is identity only, so
+// `KatariFile`'s metadata accessors download on demand instead of reading wire fields.
 
 import {
   AGENT_KEY,
@@ -76,23 +69,13 @@ export interface ValueBinding {
  *  lifetime). Returned from a handler (directly or inside a record), it becomes a `file` value for the
  *  calling agent — receive one from the argument, or produce one with `context.file(...)`. */
 export class KatariFile {
-  private downloaded?: BlobDownload;
-
   constructor(
     private readonly fileHandle: FileHandle,
     private readonly binding: ValueBinding,
-    known?: { bytes: Uint8Array; contentType?: string },
-  ) {
-    // A just-produced file (context.file) already knows its content — seed the cache so reading a
-    // file this handler created costs no round trip.
-    if (known !== undefined) {
-      this.downloaded = {
-        bytes: known.bytes,
-        size: known.bytes.byteLength,
-        ...(known.contentType !== undefined ? { contentType: known.contentType } : {}),
-      };
-    }
-  }
+    /** A just-produced file (`context.file`) already knows its content, so its producer seeds the
+     *  download cache — reading back a file this handler created costs no round trip. */
+    private downloaded?: BlobDownload,
+  ) {}
 
   /** The file's bytes, downloaded from the runtime on first use (cached for the call's lifetime). */
   async bytes(): Promise<Uint8Array> {
@@ -195,9 +178,6 @@ export class KatariAgent {
       : undefined;
   }
 }
-
-// The wire-convention constants (`CONSTRUCTOR_KEY`, `$`-key escaping, …) live in `@katari-lang/types`
-// (`wire.ts`), shared with the runtime codec so the two sides cannot drift — imported at the top.
 
 // ─── decode: wire Json → the handler's value model ────────────────────────────────────────────────
 

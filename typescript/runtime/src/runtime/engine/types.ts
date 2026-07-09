@@ -7,7 +7,7 @@
 // `engine.ts` header for why they are not their own table). The per-thread execution state below is
 // the engine's working set; its exact fields will firm up in the engine phase.
 
-import type { BlockId, QualifiedName } from "@katari-lang/types";
+import type { BlockId, ExternalReactorName, QualifiedName } from "@katari-lang/types";
 import type { DelegateTarget, ReactorName } from "../event/types.js";
 import type {
   AskId,
@@ -136,27 +136,38 @@ export type SequenceThread = ThreadBase & {
 // tracks its dispatch lifecycle (below).
 
 /**
- * A primitive leaf body: runs the prim named on its block against its `input` variable and acks the
- * value. The run may be async (a bounded env / blob fetch), awaited inline within the turn; the prim has
- * no children, so it completes within its instance's turn.
- *
- * `inline` marks the CROSS-MODULE fast path: a named call whose callee resolved to a primitive-bodied
- * agent runs as this in-instance leaf instead of summoning a child instance (see
- * `operations.enterDelegate`) — no delegation, no outbox round trip, no journal rows. The thread then
- * carries everything the run needs itself (the callee's block lives in a foreign module this instance
- * cannot read): the prim name, the call's argument, and the call site's generic instantiation (what the
- * delegate would have stamped as the child instance's ambient). Born and completed within one turn, so
- * it never persists mid-flight.
+ * A primitive leaf body: runs a prim against an argument and acks the value. The run may be async (a
+ * bounded env / blob fetch), awaited inline within the turn; the prim has no children, so it completes
+ * within its instance's turn. `invocation` declares where the run's inputs come from, so `createPrimitive`
+ * dispatches over the union instead of sniffing an optional field's presence.
  */
 export type PrimitiveThread = ThreadBase & {
   kind: "primitive";
-  inline?: {
-    /** The prim registry key — the callee's primitive BLOCK's `name` (what the in-module path reads). */
-    name: string;
-    argument: Value;
-    generics?: GenericSubstitution;
-  };
+  invocation: PrimitiveInvocation;
 };
+
+/**
+ * How a primitive thread sources its prim name / argument / generics:
+ *   - `block` — the ordinary in-module leaf body: the prim name and input variable live on the thread's
+ *     block (resolved from `blockId`), and its generics are the instance's ambient (the delegate that
+ *     summoned the instance stamped them).
+ *   - `inline` — the CROSS-MODULE fast path: a named call whose callee resolved to a primitive-bodied
+ *     agent runs as this in-instance leaf instead of summoning a child instance (see
+ *     `operations.enterDelegate`) — no delegation, no outbox round trip, no journal rows. The invocation
+ *     then carries everything the run needs itself (the callee's block lives in a foreign module this
+ *     instance cannot read): the prim name, the call's argument, and the call site's generic
+ *     instantiation (what the delegate would have stamped as the child instance's ambient). Born and
+ *     completed within one turn, so it never persists mid-flight.
+ */
+export type PrimitiveInvocation =
+  | { kind: "block" }
+  | {
+      kind: "inline";
+      /** The prim registry key — the callee's primitive BLOCK's `name` (what the block path reads). */
+      name: string;
+      argument: Value;
+      generics?: GenericSubstitution;
+    };
 
 /** A data-constructor leaf body: builds the tagged value of its constructor from `input` and acks it. */
 export type ConstructThread = ThreadBase & { kind: "construct" };
@@ -270,10 +281,11 @@ export type ExternalThread = ThreadBase & {
   kind: "external";
   delegationId: DelegationId;
   relays: Record<number, EscalationId>;
-  /** The reactor this proxy's callee runs in — `ffi` (a sidecar handler) or `http` (the built-in fetch).
-   *  Copied from the external block's `reactor` marker at spawn, so the proxy's downward legs (its
-   *  `delegate` / `terminate`) route to the right reactor without re-reading the block. */
-  reactor: "ffi" | "http" | "webhook" | "mcp";
+  /** The reactor this proxy's callee runs in — e.g. `ffi` (a sidecar handler) or `http` (the built-in
+   *  fetch). Copied from the external block's `reactor` marker at spawn (the compiler guarantees the
+   *  marker is one of these names), so the proxy's downward legs (its `delegate` / `terminate`) route to
+   *  the right reactor without re-reading the block. */
+  reactor: ExternalReactorName;
 };
 
 // ─── Cancel exits ─────────────────────────────────────────────────────────────────────────────

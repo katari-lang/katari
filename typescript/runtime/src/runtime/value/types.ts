@@ -57,6 +57,19 @@ export type BlobRefValue = {
   blobId: BlobId;
 };
 
+/** The reactors that may back a `tool` value (`"mcp"` today). Named so adding one later is a single
+ *  edit here: minting sites write the literal, and the wire decoders narrow through
+ *  `toToolReactorName`, so `dispatchCallable` can route on the field with no runtime whitelist. */
+export type ToolReactorName = "mcp";
+
+/** Narrow a wire-decoded reactor string to the tool-backing union. Tool values are runtime-minted, so
+ *  an unknown name here means a corrupted / drifted value — refused at the decode boundary rather than
+ *  routing a delegate event nowhere at dispatch time. */
+export function toToolReactorName(name: string): ToolReactorName {
+  if (name === "mcp") return name;
+  throw new Error(`a tool value names an unknown backing reactor "${name}"`);
+}
+
 /** A generic substitution attached to a callable value (from a `foo[T]` instantiation). */
 export type GenericSubstitution = Record<string, GenericArgumentSchema>;
 
@@ -98,8 +111,8 @@ export type AgentValue = {
  */
 export type ToolValue = {
   kind: "tool";
-  /** The reactor that executes a call — the tool's implementation home (`"mcp"` today). */
-  reactor: string;
+  /** The reactor that executes a call — the tool's implementation home. */
+  reactor: ToolReactorName;
   /** The reactor-scoped dispatch key AND the public metadata name (an MCP server's tool name). */
   name: string;
   description: string;

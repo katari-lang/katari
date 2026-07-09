@@ -40,8 +40,11 @@ export const inboundRoutes = new Hono<AppEnv>().post("/:token", async (c) => {
       return c.newResponse(JSON.stringify(outcome.value), 200, {
         "Content-Type": "application/json",
       });
+    case "rejected":
+      // Rejected at the schema boundary — the callback never ran, so the delivery itself was bad.
+      return c.json({ error: outcome.error }, 400);
     case "throw":
-      return c.json({ error: outcome.error }, outcome.badRequest ? 400 : 500);
+      return c.json({ error: outcome.error }, 500);
     case "error":
       return c.json({ error: "the callback failed" }, 500);
   }

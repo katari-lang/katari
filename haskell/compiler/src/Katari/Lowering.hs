@@ -724,8 +724,8 @@ lowerCall :: AST.CallExpression AST.Typed -> Lower VariableId
 lowerCall callExpression = delegateCall callExpression []
 
 -- | Delegate a call expression's callee with the argument record built from its labelled arguments
--- joined with any synthetic extra entries — the @use@ call-provider path adds its continuation closure
--- this way, so it emits the exact delegate a directly written call would.
+-- joined with any synthetic extra entries — the @use@ statement adds its continuation closure this
+-- way, so it emits the exact delegate a directly written call would.
 delegateCall :: AST.CallExpression AST.Typed -> List (Text, VariableId) -> Lower VariableId
 delegateCall callExpression extraEntries = do
   target <- calleeReference callExpression.callee
@@ -1074,21 +1074,14 @@ lowerUse useStatement = do
   recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema, description = "", defaults = mempty}) mempty (Just "use.continuation")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = continuationBlock})
+  -- The checker types every provider as ONE application (a bare provider is wrapped into its
+  -- zero-written-argument call), so the callee was checked against the written arguments joined
+  -- with the continuation and the same joined record is delegated here — @use p(x = 1)@ emits
+  -- exactly the delegate of @p(x = 1, continuation = <closure>)@ (generics stamped and all).
   case useStatement.provider of
-    -- A call provider is ONE application: the checker typed the callee against the written arguments
-    -- joined with the continuation, so the same joined record is delegated here — @use p(x = 1)@ emits
-    -- exactly the delegate of @p(x = 1, continuation = <closure>)@ (generics stamped and all).
     AST.ExpressionCall callExpression ->
       delegateCall callExpression [("continuation", closureVariable)]
-    _ -> do
-      provider <- lowerExpression useStatement.provider
-      -- The provider is called like any agent: its argument record carries the continuation under the
-      -- protocol field @continuation@ (matching its declared type, which the delegate boundary validates).
-      wrappedVariable <- freshVariableId
-      emit (OperationMakeRecord MakeRecordOperation {entries = [("continuation", closureVariable)], output = wrappedVariable})
-      output <- freshVariableId
-      emit (OperationDelegate DelegateOperation {target = CalleeValue provider, argument = wrappedVariable, output = Just output, generics = mempty})
-      pure output
+    _ -> panic "lowering: a typed `use` provider is always a call (the checker normalizes bare providers)"
 
 ---------------------------------------------------------------------------------------------------
 -- Patterns

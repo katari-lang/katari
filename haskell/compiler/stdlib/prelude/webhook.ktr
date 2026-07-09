@@ -25,10 +25,10 @@
 
 @"Serve a fresh, dynamically generated public webhook URL for the extent of @subscriber@. The
 runtime converts every POST to the URL into a call of @callback@ (JSON body in, JSON result out,
-validated against @callback@'s input schema — pair with `reflection.as_tool` to pin a runtime-built
-schema). @subscriber@ receives the URL, registers it wherever deliveries should come from, and stays
-alive while they flow; when it returns, the URL is deactivated and its result becomes `inbound`'s
-result. Both callables' effects flow to the caller's handlers unchanged."
+validated against @callback@'s input schema). @subscriber@ receives the URL, registers it wherever
+deliveries should come from, and stays alive while they flow; when it returns, the URL is
+deactivated and its result becomes `inbound`'s result. Both callables' effects flow to the caller's
+handlers unchanged."
 external agent inbound[R, effect E](
   callback: agent never -> unknown with E,
   subscriber: agent (url: string) -> R with E,
