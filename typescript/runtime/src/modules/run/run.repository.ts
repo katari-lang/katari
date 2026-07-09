@@ -4,7 +4,7 @@
 // routing (deleted on terminal), so the read side never touches it; the API reads `runs` directly, and a
 // run reflects the engine's durable state even after a crash + recovery.
 
-import { and, asc, desc, eq, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, or, type SQL, sql } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { type RunState, runEscalationsAudit, runs } from "../../db/tables/execution.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
@@ -79,22 +79,43 @@ export const runRepository = {
   // with the run's events (see `ApiReactor` / `PersistenceTx.putRun` / `setRunOutcome`), not here — this
   // module is the read side only (the projection + the list / get queries).
 
+  /** A project's runs, newest first, plus the `total` matching the filter (for the pager). `search` is a
+   *  case-insensitive substring over the run name / qualified name / id. `limit` omitted returns the whole
+   *  filtered history (the CLI, and the console's snapshot selector, rely on this); `offset` pages it. */
   async list(
     executor: Executor,
     projectId: string,
-    filter: { state?: RunState; limit?: number } = {},
-  ): Promise<RunView[]> {
+    filter: { state?: RunState; search?: string; limit?: number; offset?: number } = {},
+  ): Promise<{ rows: RunView[]; total: number }> {
     const conditions: SQL[] = [eq(runs.projectId, projectId)];
     if (filter.state !== undefined) {
       conditions.push(eq(runs.state, filter.state));
     }
-    const query = executor
+    if (filter.search !== undefined) {
+      const pattern = `%${escapeLike(filter.search)}%`;
+      // A non-null `or(...)` is guaranteed here (three operands), so the push is well-typed.
+      const match = or(
+        ilike(runs.name, pattern),
+        ilike(runs.qualifiedName, pattern),
+        sql`${runs.id}::text ILIKE ${pattern}`,
+      );
+      if (match !== undefined) conditions.push(match);
+    }
+    const page = executor
       .select(projectionColumns)
       .from(runs)
       .where(and(...conditions))
-      .orderBy(desc(runs.createdAt));
-    const rows = await (filter.limit === undefined ? query : query.limit(filter.limit));
-    return rows.map((row) => projectRun(unsealRow(row)));
+      .orderBy(desc(runs.createdAt), desc(runs.id));
+    const limited = filter.limit === undefined ? page : page.limit(filter.limit);
+    const rows = await (filter.offset === undefined ? limited : limited.offset(filter.offset));
+
+    const total = await executor
+      .select({ value: sql<number>`count(*)::int` })
+      .from(runs)
+      .where(and(...conditions))
+      .then(([row]) => row?.value ?? 0);
+
+    return { rows: rows.map((row) => projectRun(unsealRow(row))), total };
   },
 
   async get(executor: Executor, projectId: string, runId: string): Promise<RunView | undefined> {
@@ -135,6 +156,12 @@ export interface RunEscalationAuditView {
   question: Value | null;
   answer: Value | null;
   answeredAt: Date;
+}
+
+/** Escape a user substring for a LIKE pattern: the wildcards (`%` / `_`) and the escape char itself
+ *  become literals, so a search reads as a plain substring rather than a pattern. */
+function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
 /** Decrypt a row's at-rest `argument` / `result` before projection (the inverse of the engine's seal-on-write). */

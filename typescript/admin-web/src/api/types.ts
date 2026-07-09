@@ -119,11 +119,29 @@ export interface RunEvent {
   createdAt: string;
 }
 
+/** The six external-event kinds a trace is made of — the trace `kind` filter's domain. */
+export const RUN_EVENT_KINDS = [
+  "delegate",
+  "delegateAck",
+  "escalate",
+  "escalateAck",
+  "terminate",
+  "terminateAck",
+] as const satisfies readonly RunEvent["kind"][];
+
 /** The events endpoint's payload: one page of the trace, with the run's state riding along so a single
- *  poll both extends the trace and answers "is it still running". */
+ *  poll both extends the trace and answers "is it still running", and `total` = the filtered event count
+ *  (for the pager). */
 export interface RunEventsPage {
   state: RunState;
   events: RunEvent[];
+  total: number;
+}
+
+/** A page of a listing whose total rides on the `X-Total-Count` header (runs / snapshots / files). */
+export interface Page<T> {
+  items: T[];
+  total: number;
 }
 
 export interface AgentEntry {

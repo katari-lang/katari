@@ -41,6 +41,7 @@ import Katari.Cli.Api
     RunView (..),
     StartRunRequest (..),
     answerEscalation,
+    emptyRunEventsQuery,
     getAgent,
     getRun,
     listAgents,
@@ -236,7 +237,8 @@ waitForRun context runId = loop initialDelayMicroseconds Set.empty 0
     -- endpoint returns one server-capped page per call), and return the run's state as of the last page
     -- with the new tail cursor.
     drainTrace lastSeq = do
-      (_, trace) <- listRunEvents context.client context.projectId runId lastSeq
+      -- The live tail is unfiltered: it streams every event as it lands.
+      (_, trace) <- listRunEvents context.client context.projectId runId emptyRunEventsQuery lastSeq
       mapM_ (printEvent context.output) trace.events
       case trace.events of
         [] -> pure (trace.state, lastSeq)

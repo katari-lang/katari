@@ -15,21 +15,25 @@ import { CopyableId } from "../components/ui/Copy";
 import { ConfirmDialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
+import { Pagination } from "../components/ui/Pagination";
 import { LoadingBlock } from "../components/ui/Spinner";
 import { formatDateTime, shortId } from "../lib/format";
 import { useToast } from "../lib/toast";
 
+const PAGE_SIZE = 25;
+
 export function SnapshotsPage() {
   const { projectId = "" } = useParams();
-  const snapshots = useSnapshots(projectId);
+  const [offset, setOffset] = useState(0);
+  const snapshots = useSnapshots(projectId, { limit: PAGE_SIZE, offset });
   const head = useHeadSnapshot(projectId);
   const toast = useToast();
   const queryClient = useQueryClient();
   const [rollingBack, setRollingBack] = useState<{ id: string; message: string } | null>(null);
 
-  const ordered = [...(snapshots.data ?? [])].sort(
-    (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
-  );
+  // The list arrives newest-first from the runtime; the page shows it as-is.
+  const ordered = snapshots.data?.items ?? [];
+  const total = snapshots.data?.total ?? 0;
 
   return (
     <>
@@ -90,6 +94,13 @@ export function SnapshotsPage() {
               )}
             </Card>
           ))}
+          <Pagination
+            offset={offset}
+            limit={PAGE_SIZE}
+            total={total}
+            onOffset={setOffset}
+            unit="snapshots"
+          />
         </div>
       )}
       <ConfirmDialog

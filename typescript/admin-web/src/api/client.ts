@@ -13,9 +13,11 @@ import type {
   HeadSnapshot,
   Health,
   Json,
+  Page,
   Project,
   Run,
   RunEscalationAudit,
+  RunEvent,
   RunEventsPage,
   RunState,
   RunTree,
@@ -83,6 +85,25 @@ async function requestJson<T>(method: string, path: string, body?: unknown): Pro
 
 const get = <T>(path: string) => requestJson<T>("GET", path);
 
+/** GET a paged list: the `data` array plus the `X-Total-Count` header the paged endpoints set (falling
+ *  back to the page length when the header is absent, so a non-paged deployment still reads sanely). */
+async function getPage<T>(path: string): Promise<Page<T>> {
+  const response = await fetch(`${BASE}${path}`, { headers: headers() });
+  const items = await unwrap<T[]>(response);
+  const header = response.headers.get("X-Total-Count");
+  const total = header === null ? items.length : Number(header);
+  return { items, total };
+}
+
+/** Build a `?a=1&b=2` suffix from defined params (numbers stringified), or "" when none are set. */
+function querySuffix(params: Record<string, string | number | undefined>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) query.set(key, String(value));
+  }
+  return query.size === 0 ? "" : `?${query.toString()}`;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
 
@@ -93,20 +114,20 @@ export const api = {
   deleteProject: (projectId: string) =>
     requestJson<{ id: string }>("DELETE", `/projects/${projectId}`),
 
-  listSnapshots: (projectId: string) => get<SnapshotSummary[]>(`/projects/${projectId}/snapshots`),
+  listSnapshots: (
+    projectId: string,
+    filter: { search?: string; limit?: number; offset?: number } = {},
+  ) => getPage<SnapshotSummary>(`/projects/${projectId}/snapshots${querySuffix(filter)}`),
   getHeadSnapshot: (projectId: string) =>
     get<HeadSnapshot>(`/projects/${projectId}/snapshots/head`),
   /** Rollback (or roll-forward): move the live head; only new runs follow it. */
   setSnapshotHead: (projectId: string, snapshotId: string) =>
     requestJson<{ id: string }>("PUT", `/projects/${projectId}/snapshots/head`, { snapshotId }),
 
-  listRuns: (projectId: string, filter: { state?: RunState; limit?: number } = {}) => {
-    const query = new URLSearchParams();
-    if (filter.state !== undefined) query.set("state", filter.state);
-    if (filter.limit !== undefined) query.set("limit", String(filter.limit));
-    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return get<Run[]>(`/projects/${projectId}/runs${suffix}`);
-  },
+  listRuns: (
+    projectId: string,
+    filter: { state?: RunState; search?: string; limit?: number; offset?: number } = {},
+  ) => getPage<Run>(`/projects/${projectId}/runs${querySuffix(filter)}`),
   getRun: (projectId: string, runId: string) => get<Run>(`/projects/${projectId}/runs/${runId}`),
   startRun: (
     projectId: string,
@@ -123,14 +144,15 @@ export const api = {
   listRunEvents: (
     projectId: string,
     runId: string,
-    options: { after?: number; limit?: number } = {},
-  ) => {
-    const query = new URLSearchParams();
-    if (options.after !== undefined) query.set("after", String(options.after));
-    if (options.limit !== undefined) query.set("limit", String(options.limit));
-    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${suffix}`);
-  },
+    options: {
+      after?: number;
+      offset?: number;
+      limit?: number;
+      kind?: RunEvent["kind"];
+      search?: string;
+      order?: "asc" | "desc";
+    } = {},
+  ) => get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${querySuffix(options)}`),
 
   listEscalations: (projectId: string) => get<Escalation[]>(`/projects/${projectId}/escalations`),
   answerEscalation: (projectId: string, escalationId: string, value: Json) =>
@@ -153,7 +175,8 @@ export const api = {
       }`,
     ),
 
-  listFiles: (projectId: string) => get<FileEntry[]>(`/projects/${projectId}/files`),
+  listFiles: (projectId: string, filter: { limit?: number; offset?: number } = {}) =>
+    getPage<FileEntry>(`/projects/${projectId}/files${querySuffix(filter)}`),
   uploadFile: async (projectId: string, file: File) => {
     const response = await fetch(`${BASE}/projects/${projectId}/files`, {
       method: "POST",

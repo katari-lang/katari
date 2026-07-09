@@ -54,7 +54,7 @@ export function AgentsPage() {
               onChange={(event) => updateParams({ snapshot: event.target.value })}
             >
               <option value="">head (latest)</option>
-              {(snapshots.data ?? []).map((snapshot) => (
+              {(snapshots.data?.items ?? []).map((snapshot) => (
                 <option key={snapshot.id} value={snapshot.id}>
                   {shortId(snapshot.id)} — {snapshot.message}
                 </option>

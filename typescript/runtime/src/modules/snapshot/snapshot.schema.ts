@@ -49,5 +49,15 @@ export type DeploySnapshotInput = z.infer<typeof deploySnapshotSchema>;
 
 export const snapshotParamSchema = projectIdParamSchema.extend({ snapshotId: z.uuid() });
 
+/** Deploy-history list filters, all optional so the bare list stays the full history (the agents-page
+ *  snapshot selector needs every version). `limit` + `offset` page it for the console's history view;
+ *  `search` matches an ILIKE over the deploy message. */
+export const listSnapshotsQuerySchema = z.object({
+  search: z.string().trim().min(1).max(200).optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+  offset: z.coerce.number().int().nonnegative().optional(),
+});
+export type ListSnapshotsQuery = z.infer<typeof listSnapshotsQuerySchema>;
+
 /** `PUT .../snapshots/head` — move the live head to an existing snapshot (a rollback / roll-forward). */
 export const setHeadSchema = z.object({ snapshotId: z.uuid() });

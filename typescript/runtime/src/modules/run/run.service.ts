@@ -35,9 +35,11 @@ export const runService = {
     return facade.cancel({ projectId, runId, reason });
   },
 
+  /** A project's runs, newest first, one page at a time. Returns the page plus the filtered `total` so
+   *  the caller (the route) can advertise it (the `X-Total-Count` header the console's pager reads). */
   async list(projectId: string, query: ListRunsQuery = {}) {
-    const views = await runRepository.list(db, projectId, query);
-    return views.map(toRunResponse);
+    const { rows, total } = await runRepository.list(db, projectId, query);
+    return { items: rows.map(toRunResponse), total };
   },
 
   async getById(projectId: string, runId: string) {
@@ -66,11 +68,15 @@ export const runService = {
     if (view === undefined) {
       throw new NotFoundError(`run ${runId} not found`);
     }
-    const rows = await runEventsRepository.list(db, projectId, runId, {
+    const { rows, total } = await runEventsRepository.list(db, projectId, runId, {
       ...(query.after !== undefined ? { after: query.after } : {}),
+      ...(query.offset !== undefined ? { offset: query.offset } : {}),
+      ...(query.kind !== undefined ? { kind: query.kind } : {}),
+      ...(query.search !== undefined ? { search: query.search } : {}),
+      ...(query.order !== undefined ? { order: query.order } : {}),
       limit: query.limit ?? 500,
     });
-    return { state: view.state, events: rows.map(projectRunEvent) };
+    return { state: view.state, events: rows.map(projectRunEvent), total };
   },
 
   /** A run's answered-escalation transcript. Open escalations are the escalation resource's concern;

@@ -11,10 +11,10 @@ module Katari.Cli.Command.Status
 where
 
 import Control.Monad (forM_, unless, when)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Katari.Cli.Api (EscalationView (..), RunDetail (..), RunEventView (..), getRunDetail, listAllRunEvents, listEscalations)
+import Katari.Cli.Api (EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), getRunDetail, listAllRunEvents, listEscalations)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
@@ -26,7 +26,9 @@ data Options = Options
   { global :: GlobalOptions,
     projectName :: Maybe Text,
     runId :: Maybe Text,
-    json :: Bool
+    json :: Bool,
+    search :: Maybe Text,
+    kind :: Maybe Text
   }
   deriving stock (Show)
 
@@ -43,6 +45,20 @@ optionsParser =
       )
     <*> optional (strArgument (metavar "RUN" <> help "Run id, or a unique prefix of one (omit to pick interactively)"))
     <*> switch (long "json" <> help "Print the raw run JSON instead of the readable view")
+    <*> optional
+      ( strOption
+          ( long "search"
+              <> metavar "TEXT"
+              <> help "Show only trace events matching TEXT (a case-insensitive substring over each event — its ids, targets, request names, and public payload text)"
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "kind"
+              <> metavar "KIND"
+              <> help "Show only trace events of KIND (delegate | delegateAck | escalate | escalateAck | terminate | terminateAck)"
+          )
+      )
 
 run :: Options -> IO ()
 run options = do
@@ -66,22 +82,33 @@ run options = do
                 <> "  — answer with: katari answer "
                 <> Text.take 8 escalation.id
             )
-      renderTrace context target
+      renderTrace context target (RunEventsQuery {search = options.search, kind = options.kind})
 
--- | The run's execution trace (its journaled external events), truncated to the newest tail — the
--- "what actually happened" half of the status screen. The full trace is one `GET .../events` away.
-renderTrace :: RuntimeContext -> Text -> IO ()
-renderTrace context target = do
-  (_, events) <- listAllRunEvents context.client context.projectId target
-  unless (null events) $ do
-    let shown = drop (length events - traceTailLength) events
-        hidden = length events - length shown
-    printText ""
-    printText "Trace:"
-    when (hidden > 0) $
-      printText ("  (… " <> Text.pack (show hidden) <> " earlier events)")
-    forM_ shown $ \event ->
-      printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
+-- | The run's execution trace (its journaled external events), the "what actually happened" half of
+-- the status screen. Unfiltered it shows only the newest tail (the full trace is one `GET .../events`
+-- away); with a @--search@ / @--kind@ filter it shows *every* match, oldest first — a focused debugger
+-- view where truncating to a tail would hide the events you searched for.
+renderTrace :: RuntimeContext -> Text -> RunEventsQuery -> IO ()
+renderTrace context target query = do
+  (_, events) <- listAllRunEvents context.client context.projectId target query
+  let filtering = isJust query.search || isJust query.kind
+  if filtering
+    then do
+      printText ""
+      printText ("Trace matches (" <> Text.pack (show (length events)) <> "):")
+      if null events
+        then printText "  (no events match)"
+        else forM_ events $ \event ->
+          printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
+    else unless (null events) $ do
+      let shown = drop (length events - traceTailLength) events
+          earlierCount = length events - length shown
+      printText ""
+      printText "Trace:"
+      when (earlierCount > 0) $
+        printText ("  (… " <> Text.pack (show earlierCount) <> " earlier events)")
+      forM_ shown $ \event ->
+        printText ("  " <> compactTime event.createdAt <> "  " <> event.summary)
 
 -- | How many trace events `status` shows — enough to see how a run ended without flooding the screen.
 traceTailLength :: Int

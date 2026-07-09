@@ -32,7 +32,11 @@ export const runRoutes = new Hono<AppEnv>()
     zValidator("query", listRunsQuerySchema),
     async (c) => {
       const { projectId } = c.req.valid("param");
-      return c.json(success(await runService.list(projectId, c.req.valid("query"))));
+      // `data` stays the bare run array (the CLI decodes it as such); the filtered total rides on the
+      // `X-Total-Count` header, which the console's pager reads and other clients ignore.
+      const { items, total } = await runService.list(projectId, c.req.valid("query"));
+      c.header("X-Total-Count", String(total));
+      return c.json(success(items));
     },
   )
   .get("/projects/:projectId/runs/:runId", zValidator("param", runParamSchema), async (c) => {

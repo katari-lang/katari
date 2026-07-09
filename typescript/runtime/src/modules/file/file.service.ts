@@ -7,6 +7,7 @@ import { NotFoundError } from "../../lib/errors.js";
 import { blobStore, facade } from "../../runtime/facade.js";
 import type { BlobId, ProjectId } from "../../runtime/ids.js";
 import { fileRepository } from "./file.repository.js";
+import type { ListFilesQuery } from "./file.schema.js";
 
 export interface DownloadedFile {
   bytes: Uint8Array;
@@ -26,9 +27,11 @@ export const fileService = {
     return facade.produceFfiBlob({ projectId, delegation, bytes, contentType });
   },
 
-  /** Every file (blob) the project holds. */
-  list(projectId: string) {
-    return fileRepository.list(db, projectId);
+  /** A page of the files (blobs) the project holds, plus the `total` (surfaced by the route as
+   *  `X-Total-Count` for the console's pager). */
+  async list(projectId: string, query: ListFilesQuery = {}) {
+    const { rows, total } = await fileRepository.list(db, projectId, query);
+    return { items: rows, total };
   },
 
   /** A file's bytes + content type, or a 404 when it does not exist. */

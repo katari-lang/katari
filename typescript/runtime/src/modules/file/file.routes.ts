@@ -3,7 +3,7 @@ import { projectIdParamSchema } from "../../lib/params.js";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
 import type { AppEnv } from "../../types/app-env.js";
-import { ffiBlobParamSchema, fileParamSchema } from "./file.schema.js";
+import { ffiBlobParamSchema, fileParamSchema, listFilesQuerySchema } from "./file.schema.js";
 import { fileService } from "./file.service.js";
 
 export const fileRoutes = new Hono<AppEnv>()
@@ -31,10 +31,18 @@ export const fileRoutes = new Hono<AppEnv>()
       );
     },
   )
-  .get("/projects/:projectId/files", zValidator("param", projectIdParamSchema), async (c) => {
-    const { projectId } = c.req.valid("param");
-    return c.json(success(await fileService.list(projectId)));
-  })
+  .get(
+    "/projects/:projectId/files",
+    zValidator("param", projectIdParamSchema),
+    zValidator("query", listFilesQuerySchema),
+    async (c) => {
+      const { projectId } = c.req.valid("param");
+      // `data` stays the bare file array; the total rides on `X-Total-Count` for the console's pager.
+      const { items, total } = await fileService.list(projectId, c.req.valid("query"));
+      c.header("X-Total-Count", String(total));
+      return c.json(success(items));
+    },
+  )
   // Download: stream the blob's bytes with its stored content type (bytes are not JSON, so this is the one
   // endpoint that does not use the `{ ok, data }` envelope).
   .get("/projects/:projectId/files/:fileId", zValidator("param", fileParamSchema), async (c) => {

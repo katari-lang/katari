@@ -45,6 +45,8 @@ module Katari.Cli.Api
     RunListQuery (..),
     RunEventView (..),
     RunEventsResponse (..),
+    RunEventsQuery (..),
+    emptyRunEventsQuery,
     startRun,
     getRun,
     getRunDetail,
@@ -204,6 +206,13 @@ queryString parameters = case [name <> "=" <> value | (name, Just value) <- para
 -- or a qualified agent name that contains any of them addressing the row it names.
 encodePathSegment :: Text -> Text
 encodePathSegment = TextEncoding.decodeUtf8Lenient . urlEncode True . TextEncoding.encodeUtf8
+
+-- | Percent-encode a query-parameter *value* (a trace search term carries spaces and non-ASCII, e.g.
+-- "立川 天気"). Same encoding as a path segment — reserved characters become literals, so a space,
+-- @&@ or @=@ in the value cannot break the URL. @queryString@ does not encode, so values pass through
+-- this first.
+encodeQueryValue :: Text -> Text
+encodeQueryValue = encodePathSegment
 
 -- ===========================================================================
 -- Projects
@@ -520,10 +529,24 @@ instance FromJSON RunEventsResponse where
   parseJSON = withObject "RunEventsResponse" $ \object' ->
     RunEventsResponse <$> object' .: "state" <*> object' .: "events"
 
+-- | Server-side trace filters, passed straight through to the events endpoint (the runtime does the
+-- matching — see @run-events.repository@). @search@ is a case-insensitive substring over the whole
+-- event (ids, delegate targets, request names, and any public payload text — reaching what a
+-- summary-line @grep@ cannot; sealed private values never match); @kind@ narrows to one event kind.
+data RunEventsQuery = RunEventsQuery
+  { search :: Maybe Text,
+    kind :: Maybe Text
+  }
+  deriving stock (Show)
+
+-- | No filter — the plain tail (the live @run@ watcher, and @status@ without @--search@/@--kind@).
+emptyRunEventsQuery :: RunEventsQuery
+emptyRunEventsQuery = RunEventsQuery {search = Nothing, kind = Nothing}
+
 -- | Tail a run's execution trace: the journaled events after @after@ (exclusive; 0 for the start),
--- oldest first, one server-capped page per call.
-listRunEvents :: RuntimeClient -> Text -> Text -> Int -> IO (Value, RunEventsResponse)
-listRunEvents client projectId runId after =
+-- oldest first, one server-capped page per call. @query@ narrows the set server-side.
+listRunEvents :: RuntimeClient -> Text -> Text -> RunEventsQuery -> Int -> IO (Value, RunEventsResponse)
+listRunEvents client projectId runId query after =
   getWithRaw
     client
     ( "/projects/"
@@ -531,16 +554,20 @@ listRunEvents client projectId runId after =
         <> "/runs/"
         <> runId
         <> "/events"
-        <> queryString [("after", Just (Text.pack (show after)))]
+        <> queryString
+          [ ("after", Just (Text.pack (show after))),
+            ("search", fmap encodeQueryValue query.search),
+            ("kind", fmap encodeQueryValue query.kind)
+          ]
     )
 
--- | A run's whole trace, following pages until the tail is drained (the endpoint returns at most one
--- page per call). Returns the run's state as of the last page.
-listAllRunEvents :: RuntimeClient -> Text -> Text -> IO (Text, List RunEventView)
-listAllRunEvents client projectId runId = go 0 []
+-- | A run's whole (optionally filtered) trace, following pages until the tail is drained (the endpoint
+-- returns at most one page per call). Returns the run's state as of the last page.
+listAllRunEvents :: RuntimeClient -> Text -> Text -> RunEventsQuery -> IO (Text, List RunEventView)
+listAllRunEvents client projectId runId query = go 0 []
   where
     go after collected = do
-      (_, response) <- listRunEvents client projectId runId after
+      (_, response) <- listRunEvents client projectId runId query after
       case response.events of
         [] -> pure (response.state, collected)
         events -> go (maximum (map (.seq) events)) (collected <> events)
