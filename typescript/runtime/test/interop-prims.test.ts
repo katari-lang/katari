@@ -708,6 +708,16 @@ describe("prelude.file", () => {
     });
   });
 
+  test("decoding a PARTIAL $ref handle is a typed decode_error (never a panic), naming the fix", async () => {
+    // What an AI replaying just the `$ref` sends: { image: { "$ref": "..." } } as a json tree.
+    const partialHandle = jsonValueFromJson({ image: { $ref: "blob-someone-elses" } });
+    await expectThrows(
+      run("prelude.json.decode", { value: partialHandle }, contextWithT({})),
+      "prelude.json.decode_error",
+      /incomplete file handle.*FULL handle object/s,
+    );
+  });
+
   test("a non-file argument is rejected (a blob-backed string is not a file)", async () => {
     const { context } = await fileContext();
     const stringRef: Value = {

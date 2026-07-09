@@ -110,19 +110,31 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return { kind: "string", value: JSON.stringify(await jsonValueToJson(tree, reader)) };
   },
   "prelude.json.decode": async (argument, context) => {
-    // The call site's [T] instantiation carried T's schema here. Decode the tree to a value (the blind,
-    // total codec), then check it against T as a *separate* pass.
+    // The call site's [T] instantiation carried T's schema here. Decode the tree to a value (the blind
+    // codec), then check it against T as a *separate* pass. Reconstruction CAN reject — a malformed
+    // wire object (an AI replaying a partial `$ref` file handle is the common case) — and that is the
+    // declared, catchable decode_error, not a panic: an AI loop feeds it back and the model corrects.
     const schema = instantiatedSchema(context, "json.decode");
-    const value = await treeToValue(field(argument, "value"), stringReaderOf(context));
+    let value: Value;
+    try {
+      value = await treeToValue(field(argument, "value"), stringReaderOf(context));
+    } catch (error) {
+      throw new KatariThrow(
+        errorData(
+          DECODE_ERROR,
+          `json.decode: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    }
     return conformedOrThrow(value, schema, "json.decode");
   },
   "prelude.json.parse_as": async (argument, context) => {
     // The fused typed text boundary: `decode[T](parse(text))` — JSON.parse -> value lift -> check.
     const schema = instantiatedSchema(context, "json.parse_as");
     const text = await readStringField(argument, "text", context);
-    let value: Value;
+    let parsed: Json;
     try {
-      value = jsonToValue(JSON.parse(text) as Json);
+      parsed = JSON.parse(text) as Json;
     } catch (error) {
       throw new KatariThrow(
         errorData(
@@ -131,7 +143,20 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
         ),
       );
     }
-    return conformedOrThrow(value, schema, "json.parse_as");
+    let lifted: Value;
+    try {
+      // The lift can reject like `decode`'s reconstruction (a malformed wire object, e.g. a partial
+      // `$ref` handle) — same declared decode_error, same catchability.
+      lifted = jsonToValue(parsed);
+    } catch (error) {
+      throw new KatariThrow(
+        errorData(
+          DECODE_ERROR,
+          `json.parse_as: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    }
+    return conformedOrThrow(lifted, schema, "json.parse_as");
   },
 
   // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //

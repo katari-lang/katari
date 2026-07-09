@@ -384,6 +384,13 @@ async function recordFrom(
 }
 
 function fileFromTree(entries: Record<string, Value>): Value {
+  // A partial handle (an AI replaying just the `$ref`) is the common failure here — name the full
+  // shape, so the message fed back to the model as a tool error is itself the correction.
+  if (entries[SIZE_KEY] === undefined || entries[HASH_KEY] === undefined) {
+    throw new Error(
+      'an incomplete file handle: replay the FULL handle object exactly as it appears, e.g. {"$ref": "...", "semanticKind": "file", "size": ..., "hash": "..."}',
+    );
+  }
   const blobId = leafText(entries[FILE_KEY]);
   const size = leafNumber(entries[SIZE_KEY]);
   const hash = leafText(entries[HASH_KEY]);

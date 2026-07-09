@@ -175,13 +175,30 @@ buildSubstitution parameterGenericIds arguments =
 callableReferenceSchema :: JSONSchema
 callableReferenceSchema = referenceSchema callableReferenceKey
 
--- | The schema of a @file@ value: a @$ref@-tagged blob handle. Loose by design, like
--- 'callableReferenceSchema'.
+-- | The schema of a @file@ value: a @$ref@-tagged blob handle, requiring the FULL handle shape.
+-- Unlike a callable, an AI *does* write file handles — it replays one from the conversation into a
+-- tool call — and the runtime codec needs @size@ / @hash@ to reconstruct the value, so the schema must
+-- demand what the decode requires: a model given only @required: [$ref]@ dutifully sends a bare
+-- @{$ref}@ and the decode rejects it (observed in the field). @contentType@ stays optional (a handle
+-- may legitimately lack one) and the object stays open.
 fileReferenceSchema :: JSONSchema
-fileReferenceSchema = referenceSchema fileReferenceKey
+fileReferenceSchema =
+  SchemaObject
+    ObjectSchema
+      { properties =
+          [ (fileReferenceKey, SchemaString),
+            ("semanticKind", SchemaString),
+            ("size", SchemaNumber),
+            ("hash", SchemaString),
+            ("contentType", SchemaString)
+          ],
+        required = [fileReferenceKey, "semanticKind", "size", "hash"],
+        additionalProperties = AdditionalPropertiesBoolean True
+      }
 
 -- | An open object requiring just one @$@-prefixed discriminator property (whose value is left
--- unconstrained). The shared shape behind 'callableReferenceSchema' and 'fileReferenceSchema'.
+-- unconstrained). The shape behind 'callableReferenceSchema' (loose by design — the AI does not
+-- construct callables; they are runtime-supplied).
 referenceSchema :: Text -> JSONSchema
 referenceSchema discriminatorKey =
   SchemaObject
