@@ -10,6 +10,7 @@ import {
   defaultSidecar,
   type HandlerContext,
   katari,
+  KatariAgent,
   KatariCallError,
   KatariCancelledError,
   KatariData,
@@ -178,7 +179,12 @@ describe("context.call (the inner agent-call channel)", () => {
     await tick();
     // The inner call went out; the handler is suspended on it.
     expect(messages).toMatchObject([
-      { kind: "delegate", delegation: "d1", agent: "main.add", argument: { a: 1, b: 2 } },
+      {
+        kind: "delegate",
+        delegation: "d1",
+        callee: { kind: "named", agent: "main.add" },
+        argument: { a: 1, b: 2 },
+      },
     ]);
     const delegate = messages[0];
     if (delegate?.kind !== "delegate") throw new Error("expected a delegate message");
@@ -195,7 +201,7 @@ describe("context.call (the inner agent-call channel)", () => {
     expect(messages[1]).toEqual({ kind: "result", delegation: "d1", value: 13 });
   });
 
-  test("carries an explicit reactor and defaults to none (core) otherwise", async () => {
+  test("a named callee carries an explicit reactor and defaults to none (core) otherwise", async () => {
     const sidecar = new Sidecar();
     sidecar.register("ext.caller", (_argument, context) => {
       void context.call("main.sibling", null, { reactor: "ffi" }).catch(() => {});
@@ -206,9 +212,45 @@ describe("context.call (the inner agent-call channel)", () => {
     sidecar.handle(dispatch("d1", "ext.caller"), send);
     await tick();
     const delegates = messages.filter((message) => message.kind === "delegate");
-    expect(delegates[0]).toMatchObject({ agent: "main.sibling", reactor: "ffi" });
-    expect(delegates[1]).toMatchObject({ agent: "main.plain" });
-    expect(delegates[1]).not.toHaveProperty("reactor");
+    expect(delegates[0]).toMatchObject({ callee: { kind: "named", agent: "main.sibling", reactor: "ffi" } });
+    expect(delegates[1]).toMatchObject({ callee: { kind: "named", agent: "main.plain" } });
+    const plainCallee = delegates[1]?.kind === "delegate" ? delegates[1].callee : undefined;
+    expect(plainCallee).not.toHaveProperty("reactor");
+  });
+
+  test("KatariAgent.call dispatches the received callable as a `value` callee (no call_agent name)", async () => {
+    const sidecar = new Sidecar();
+    // A callable the handler received as its argument (an `$agent` reference decodes to a KatariAgent).
+    const callable: Json = { $agent: "main.greeter", snapshot: "s1" };
+    sidecar.register<{ target: KatariAgent }>("ext.caller", async ({ target }) => {
+      const reply = await target.call<string>({ name: "world" });
+      return `got: ${reply}`;
+    });
+    const { messages, send } = collector();
+    sidecar.handle(dispatch("d1", "ext.caller", { target: callable }), send);
+    await tick();
+    // The inner call went out carrying the callable's raw wire verbatim — no wired-in agent name.
+    expect(messages).toMatchObject([
+      {
+        kind: "delegate",
+        delegation: "d1",
+        callee: { kind: "value", callable },
+        argument: { name: "world" },
+      },
+    ]);
+    const delegate = messages[0];
+    if (delegate?.kind !== "delegate") throw new Error("expected a delegate message");
+    sidecar.handle(
+      {
+        kind: "delegateResult",
+        delegation: "d1",
+        call: delegate.call,
+        outcome: { kind: "result", value: "hi" },
+      },
+      send,
+    );
+    await tick();
+    expect(messages[1]).toEqual({ kind: "result", delegation: "d1", value: "got: hi" });
   });
 
   test("rejects the awaiting handler with KatariCallError on an error outcome", async () => {

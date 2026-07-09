@@ -3,14 +3,15 @@
 // callable its argument carries — so the dynamically dispatched args hit the same validation). Driven
 // through the actor over hand-built IR, like `engine-smoke.test.ts`.
 
-import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
+import { createAgentName, type IRModule, type JSONSchema, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import type { McpCall, McpCompletion, McpTransport } from "../src/runtime/external/mcp-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
-import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -63,7 +64,7 @@ function fixture(): IRModule {
             },
             {
               kind: "delegate",
-              target: { kind: "name", name: createAgentName("prelude.ai.call_agent") },
+              target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
               argument: 13,
               output: 14,
             },
@@ -91,20 +92,20 @@ function fixture(): IRModule {
         parameters: {},
       },
       5: {
-        block: { kind: "primitive", name: "prelude.ai.call_agent", input: 50 },
+        block: { kind: "primitive", name: "prelude.reflection.call_agent", input: 50 },
         parameters: { parameter: 50 },
       },
     },
     entries: {
       [createAgentName("main")]: 0,
       [createAgentName("greeter")]: 2,
-      [createAgentName("prelude.ai.call_agent")]: 4,
+      [createAgentName("prelude.reflection.call_agent")]: 4,
     },
     names: {},
   };
 }
 
-function actorFor(ir: IRModule): ProjectActor {
+function actorFor(ir: IRModule, mcp?: McpTransport): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(ir.entries)) {
     registry.set(SNAPSHOT, moduleOfName(createAgentName(name)), ir);
@@ -116,12 +117,13 @@ function actorFor(ir: IRModule): ProjectActor {
     blobs: new InMemoryBlobStore(),
     external: new StubFfiTransport(),
     http: new StubHttpTransport(),
+    ...(mcp !== undefined ? { mcp } : {}),
     persistence: new InMemoryPersistence(),
   });
 }
 
-function runMain(ir: IRModule, argument: Value | null): Promise<Value> {
-  return actorFor(ir).startRun(createAgentName("main"), SNAPSHOT, argument).result;
+function runMain(ir: IRModule, argument: Value | null, mcp?: McpTransport): Promise<Value> {
+  return actorFor(ir, mcp).startRun(createAgentName("main"), SNAPSHOT, argument).result;
 }
 
 function argsOf(fields: Record<string, Value>): Value {
@@ -135,11 +137,11 @@ describe("call_agent dispatch", () => {
     ).resolves.toEqual({ kind: "string", value: "alice" });
   });
 
-  test("throws a typed `ai.call_error` when the args do not conform to the target's input schema", async () => {
-    // A dynamic dispatch fails as `throw[ai.call_error]`; unhandled, the run's error carries the
+  test("throws a typed `reflection.call_error` when the args do not conform to the target's input schema", async () => {
+    // A dynamic dispatch fails as `throw[reflection.call_error]`; unhandled, the run's error carries the
     // payload serialized through the codec (so the quotes inside the message arrive JSON-escaped).
     await expect(runMain(fixture(), argsOf({ wrong: { kind: "string", value: "oops" } }))).rejects.toThrow(
-      /throw: .*prelude\.ai\.call_error.*greeter.*input schema.*missing required field/,
+      /throw: .*prelude\.reflection\.call_error.*greeter.*input schema.*missing required field/,
     );
   });
 
@@ -149,7 +151,7 @@ describe("call_agent dispatch", () => {
     );
   });
 
-  test("panics when the target is not a callable value", async () => {
+  test("throws a typed `reflection.call_error` when the target is not a callable value", async () => {
     // main variant: `call_agent(target = 42, args = {})` — the target field is a plain integer.
     const ir = fixture();
     ir.blocks[1] = {
@@ -169,7 +171,7 @@ describe("call_agent dispatch", () => {
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.ai.call_agent") },
+            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
             argument: 13,
             output: 14,
           },
@@ -178,7 +180,11 @@ describe("call_agent dispatch", () => {
       },
       parameters: { parameter: 10 },
     };
-    await expect(runMain(ir, null)).rejects.toThrow(/call_agent.*not a callable value/);
+    // The dynamic dispatch failed before anything ran — the same catchable `call_error` a schema
+    // violation raises (resolved at the emit site, like every dynamic dispatch).
+    await expect(runMain(ir, null)).rejects.toThrow(
+      /throw: .*prelude\.reflection\.call_error.*not a callable value/,
+    );
   });
 });
 
@@ -257,9 +263,173 @@ describe("call-site generics on the delegate operation", () => {
     });
   });
 
-  test("rejects an argument violating the instantiated schema", async () => {
+  test("rejects an argument violating the instantiated schema (as reflection.call_error)", async () => {
     await expect(runMain(genericFixture({ kind: "string", value: "seven" }), null)).rejects.toThrow(
-      /pick.*\$\.x: expected a value of type integer/,
+      /reflection\.call_error.*pick.*\$\.x: expected a value of type integer/,
+    );
+  });
+});
+
+describe("tool dispatch (reactor-backed tool agents)", () => {
+  // A tool's attached input schema — what the emit-site dispatch validates the caller's args against.
+  const TOOL_INPUT_SCHEMA: JSONSchema = {
+    type: "object",
+    properties: { name: { type: "string" } },
+    required: ["name"],
+    additionalProperties: false,
+  };
+
+  /** The server descriptor the tool carries as its reactor context (its `headers` value private, the
+   *  way `prelude.mcp.tools` mints it — the reveal at the transport boundary is asserted below). */
+  function descriptor(): Value {
+    return {
+      kind: "record",
+      fields: {
+        url: { kind: "string", value: "https://mcp.example.test/mcp" },
+        headers: {
+          kind: "record",
+          fields: { authorization: { kind: "string", value: "sk-mcp", private: true } },
+        },
+      },
+    };
+  }
+
+  function toolValue(): Value {
+    return {
+      kind: "tool",
+      reactor: "mcp",
+      name: "greet_tool",
+      description: "greets, via a runtime-decided schema",
+      context: descriptor(),
+      snapshot: SNAPSHOT,
+      inputSchema: TOOL_INPUT_SCHEMA,
+    };
+  }
+
+  /** A transport the test drives by hand: dispatched tool calls are recorded, completions fed back. */
+  class ControlledMcpTransport implements McpTransport {
+    readonly dispatched: McpCall[] = [];
+    private sink: ((completion: McpCompletion) => void) | null = null;
+    onComplete(sink: (completion: McpCompletion) => void): void {
+      this.sink = sink;
+    }
+    dispatch(call: McpCall): void {
+      this.dispatched.push(call);
+    }
+    recover(): void {}
+    abort(delegation: DelegationId): void {
+      this.sink?.({ delegation, outcome: { kind: "cancelled" } });
+    }
+    close(): void {}
+    feed(completion: McpCompletion): void {
+      if (this.sink === null) throw new Error("no sink registered");
+      this.sink(completion);
+    }
+  }
+
+  /**
+   * main receives { tool, args } and dispatches the tool — through `call_agent` or (the `direct`
+   * variant) by delegating the tool VALUE itself. Either way the emit site validates args against the
+   * tool's schema and the delegate goes STRAIGHT to the mcp reactor (no wrapper hop): the argument
+   * verbatim, the descriptor riding the target as its context.
+   */
+  function toolFixture(direct: boolean): IRModule {
+    const dispatchOperations = direct
+      ? [
+          { kind: "getField", source: 10, field: "tool", output: 11 },
+          { kind: "getField", source: 10, field: "args", output: 12 },
+          { kind: "delegate", target: { kind: "value", variable: 11 }, argument: 12, output: 13 },
+          { kind: "exit", target: 0, value: 13 },
+        ]
+      : [
+          { kind: "getField", source: 10, field: "tool", output: 11 },
+          { kind: "getField", source: 10, field: "args", output: 12 },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["target", 11],
+              ["args", 12],
+            ],
+            output: 13,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
+            argument: 13,
+            output: 14,
+          },
+          { kind: "exit", target: 0, value: 14 },
+        ];
+    return {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: {
+          block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+          parameters: {},
+        },
+        1: {
+          block: { kind: "sequence", result: null, operations: dispatchOperations },
+          parameters: { parameter: 10 },
+        },
+      },
+      entries: { [createAgentName("main")]: 0 },
+      names: {},
+    } as IRModule;
+  }
+
+  function toolArgument(args: Value): Value {
+    return { kind: "record", fields: { tool: toolValue(), args } };
+  }
+
+  const CONFORMING: Value = {
+    kind: "record",
+    fields: { name: { kind: "string", value: "alice" } },
+  };
+  const VIOLATING: Value = { kind: "record", fields: { wrong: { kind: "integer", value: 1 } } };
+
+  async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
+    for (let attempt = 0; attempt < 1000; attempt++) {
+      const value = predicate();
+      if (value !== undefined) return value;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    throw new Error("waitUntil: predicate never held");
+  }
+
+  async function expectDirectDispatch(direct: boolean): Promise<void> {
+    const transport = new ControlledMcpTransport();
+    const result = runMain(toolFixture(direct), toolArgument(CONFORMING), transport);
+    // The delegate reached the mcp reactor directly: the tool name as the key, the caller's args
+    // verbatim, and the descriptor as the out-of-band context with its secret header REVEALED at
+    // this (and only this) boundary.
+    const call = await waitUntil(() => transport.dispatched[0]);
+    expect(call.key).toBe("greet_tool");
+    expect(call.argument).toEqual({ name: "alice" });
+    expect(call.context).toEqual({
+      url: "https://mcp.example.test/mcp",
+      headers: { authorization: "sk-mcp" },
+    });
+    transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "hi alice" } });
+    await expect(result).resolves.toEqual({ kind: "string", value: "hi alice" });
+  }
+
+  test("call_agent on a tool validates, then delegates straight to the tool's reactor", async () => {
+    await expectDirectDispatch(false);
+  });
+
+  test("delegating a tool VALUE directly behaves exactly like the call_agent form", async () => {
+    await expectDirectDispatch(true);
+  });
+
+  test("call_agent on a tool throws `reflection.call_error` naming the tool on a schema violation", async () => {
+    await expect(runMain(toolFixture(false), toolArgument(VIOLATING))).rejects.toThrow(
+      /throw: .*prelude\.reflection\.call_error.*greet_tool.*input schema/,
+    );
+  });
+
+  test("a direct tool delegation still validates (and fails) against the tool's schema", async () => {
+    await expect(runMain(toolFixture(true), toolArgument(VIOLATING))).rejects.toThrow(
+      /throw: .*prelude\.reflection\.call_error.*greet_tool.*input schema/,
     );
   });
 });
@@ -276,13 +446,16 @@ describe("delegate argument validation", () => {
     ).resolves.toEqual({ kind: "string", value: "bob" });
   });
 
-  test("a run whose argument violates the entry agent's schema fails as a panic", async () => {
+  test("a run whose argument violates the entry agent's schema fails with reflection.call_error", async () => {
+    // A non-conforming argument at the delegation boundary is the callee's schema rejecting an input —
+    // always `reflection.call_error` (recoverable), whoever the caller is. Unhandled here (no handler
+    // above the run root), it still fails the run, carrying the schema-mismatch message.
     await expect(
       actorFor(fixture()).startRun(createAgentName("greeter"), SNAPSHOT, {
         kind: "record",
         fields: { name: { kind: "integer", value: 7 } },
       }).result,
-    ).rejects.toThrow(/greeter.*input schema/);
+    ).rejects.toThrow(/reflection\.call_error.*greeter.*input schema/);
   });
 
   test("the call_error is catchable by a throw handle around the call_agent call site", async () => {
@@ -316,7 +489,7 @@ describe("delegate argument validation", () => {
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.ai.call_agent") },
+            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
             argument: 73,
             output: 74,
           },

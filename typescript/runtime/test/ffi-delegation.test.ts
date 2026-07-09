@@ -157,6 +157,42 @@ describe("FFI inner delegation", () => {
     await expect(result).resolves.toEqual({ kind: "integer", value: 42 });
   });
 
+  test("a handler dispatches a received callable VALUE (an agent reference) directly on core", async () => {
+    const result = run({
+      // `context.callValue` is the in-process analogue of the port's `KatariAgent.call`: the handler holds
+      // a callable value (here an `$agent` reference — the port would have decoded it from an argument) and
+      // dispatches it. The runtime resolves the value to its target itself; no `call_agent` name is used.
+      compute: async (_argument, context) => {
+        const sum = await context.callValue(
+          { $agent: "prelude.add", snapshot: SNAPSHOT },
+          { left: 1, right: 2 },
+        );
+        return sum;
+      },
+    });
+    await expect(result).resolves.toEqual({ kind: "integer", value: 3 });
+  });
+
+  test("dispatching a non-callable VALUE fails the inner call as an error the handler can catch", async () => {
+    // A malformed callable crossing the FFI boundary is a bug, so — unlike the katari `call_agent`
+    // primitive, which raises a catchable `reflection.call_error` — it is a plain error (a panic): it
+    // reaches the handler as a rejected promise (uncaught, it would fail the handler and the run).
+    let caught = "";
+    const result = run({
+      compute: async (_argument, context) => {
+        try {
+          await context.callValue(42, {});
+          return "unreachable";
+        } catch (error) {
+          caught = error instanceof Error ? error.message : String(error);
+          return "fallback";
+        }
+      },
+    });
+    await expect(result).resolves.toEqual({ kind: "string", value: "fallback" });
+    expect(caught).toMatch(/not a callable value/);
+  });
+
   test("a callee's panic settles the inner call as an error the handler can catch", async () => {
     let caught = "";
     const result = run({

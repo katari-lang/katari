@@ -5,7 +5,10 @@
 //   runtime → sidecar: `dispatch` (run this handler against this argument), `abort` (stop an in-flight
 //     call), and `delegateResult` (the outcome of an inner agent call the sidecar asked for).
 //   sidecar → runtime: the call's outcome (`result` / `throw` / `error` / `cancelled`), and `delegate`
-//     (call another agent on the handler's behalf — the generic agent-call channel, routed by name).
+//     (call another agent on the handler's behalf — the generic agent-call channel). A delegate's `callee`
+//     is either a static agent NAME (`context.call`) or a first-class callable VALUE (`KatariAgent.call` —
+//     the value rides as its own wire JSON and the ffi reactor resolves it to a target; no wired-in
+//     `call_agent` indirection).
 //
 // A call is correlated by its `delegation` — the same id core's external proxy thread and the ffi reactor's
 // pending-call use — which the sidecar echoes back, so the transport never needs a separate request-id
@@ -45,11 +48,21 @@ export type RuntimeMessage =
   | { kind: "abort"; delegation: DelegationId }
   | { kind: "delegateResult"; delegation: DelegationId; call: string; outcome: DelegateOutcome };
 
+/** What a handler's inner `delegate` calls, on the wire:
+ *   - `named` — a static agent NAME (`context.call`): a qualified name for the `core` reactor, or an
+ *     external key for a call reactor (`ffi` / `http`); `reactor` defaults to `core` when absent.
+ *   - `value` — a first-class callable VALUE (`KatariAgent.call`): a `$agent` / `$closure` / `$tool` the
+ *     handler received, riding as its own opaque wire `Json`. The ffi reactor decodes it and resolves it to
+ *     a delegate target (a tool validates its argument against its schema), then dispatches on `core`. This
+ *     replaces the former wired-in `prelude.reflection.call_agent` name — the port hardcodes nothing. */
+export type DelegateCallee =
+  | { kind: "named"; agent: string; reactor?: string }
+  | { kind: "value"; callable: Json };
+
 /** Sidecar → runtime: the outcome of one dispatched call — its `result`, a `throw` (a typed
  *  `prelude.throw` whose payload is `error`, caught by a katari-side handler), an `error` (becomes a
- *  panic), or a `cancelled` confirmation (the abort completed) — or a `delegate`: run another agent on the
- *  in-flight handler's behalf. `agent` is a qualified agent name for the `core` reactor, or an external key
- *  for a call reactor (`ffi` / `http`); `reactor` defaults to `core` when absent. */
+ *  panic), or a `cancelled` confirmation (the abort completed) — or a `delegate`: run another agent
+ *  (`callee`) on the in-flight handler's behalf. */
 export type SidecarMessage =
   | { kind: "result"; delegation: DelegationId; value: Json }
   | { kind: "throw"; delegation: DelegationId; error: Json }
@@ -59,8 +72,7 @@ export type SidecarMessage =
       kind: "delegate";
       delegation: DelegationId;
       call: string;
-      agent: string;
-      reactor?: string;
+      callee: DelegateCallee;
       argument: Json | null;
     };
 
@@ -98,16 +110,39 @@ export function decodeSidecarMessage(line: string): SidecarMessage | null {
         : null;
     case "cancelled":
       return { kind, delegation: id };
-    case "delegate":
-      return typeof parsed.call === "string" && typeof parsed.agent === "string"
+    case "delegate": {
+      const callee = decodeCallee(parsed.callee);
+      return typeof parsed.call === "string" && callee !== null
         ? {
             kind,
             delegation: id,
             call: parsed.call,
-            agent: parsed.agent,
-            ...(typeof parsed.reactor === "string" ? { reactor: parsed.reactor } : {}),
+            callee,
             argument: (parsed.argument ?? null) as Json,
           }
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Parse a delegate's `callee`, or `null` if malformed. A `value` callee's `callable` rides through as
+ *  trusted wire `Json` (the ffi reactor decodes it, like an argument). */
+function decodeCallee(value: unknown): DelegateCallee | null {
+  if (!isRecord(value)) return null;
+  switch (value.kind) {
+    case "named":
+      return typeof value.agent === "string"
+        ? {
+            kind: "named",
+            agent: value.agent,
+            ...(typeof value.reactor === "string" ? { reactor: value.reactor } : {}),
+          }
+        : null;
+    case "value":
+      return value.callable !== undefined
+        ? { kind: "value", callable: value.callable as Json }
         : null;
     default:
       return null;

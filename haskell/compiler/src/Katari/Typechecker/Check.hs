@@ -33,6 +33,7 @@ import Katari.Error
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
     GenericNotAppliedErrorInfo (..),
+    MalformedTypeErrorInfo (..),
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     TypeError (..),
@@ -233,8 +234,23 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 ------------------------------------------------------------------------------------------------
 -- @use@ statement
 --
--- @{ stmts_before; let x : A = use h; stmts_after; return e }@ is typed as if it desugared into
--- @{ stmts_before; h(continuation = agent({value: A}) -> R with E' { stmts_after; e }) }@.
+-- @use@ is an APPLICATION form: it applies a provider ONCE to the written arguments joined with the
+-- continuation. @{ stmts_before; let x : A = use p(args…); stmts_after; return e }@ is typed as
+-- @{ stmts_before; p(args…, continuation = agent({value: A}) -> R with E' { stmts_after; e }) }@ —
+-- one rule for every admitted shape:
+--
+--   use handler {…}       a handler literal            (no written arguments)
+--   use p / use m.p       a (qualified) name           (no written arguments)
+--   use p[T]              an explicit instantiation    (no written arguments)
+--   use <callee>(args…)   an application               (the continuation joins @args@)
+--
+-- The bare shapes are the zero-argument case of the same rule, so a parameterised provider stays an
+-- ordinary generic agent: the continuation is an argument of the single application site, and @R@ /
+-- @E@ infer there exactly as for @use handler@. @continuation@ is therefore a reserved label in a
+-- @use@ application. Any OTHER expression (a field read, a match, …) is rejected: it has no
+-- application reading, and admitting it would make the meaning depend on the provider's syntactic
+-- shape. Bind it first (@let p = …; use p@) or apply it (@use expr(args…)@).
+--
 -- @x@'s annotation is required (the continuation's value type A), R is the continuation body's /tail/
 -- (its trailing value — a @return@ inside it short-circuits the enclosing agent, not the continuation,
 -- so it does not contribute to R), and E' is the continuation body's /inferred/ effect (so the subtype
@@ -264,14 +280,61 @@ handleUseStatement useStmt = do
     withEffectInference $
       withParameters bindings $
         synthBlock useStmt.body
-  let providerExpectedArgument = continuationExpectedArgument bindingType resultType inferredContinuationEffect
-  -- Apply the provider to the continuation argument through the shared callee-application rule, so a
-  -- @use@ provider is held to the same world / effect discipline as a direct call AND gets the same
-  -- generic-argument inference: a provider generic in its continuation result @R@ has @R@ inferred from
-  -- this continuation argument (whose return type is the continuation body's tail).
-  (typedProvider, scheme) <- synthApplicationCallee useStmt.provider
-  argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
-  _ <- applyCallee useStmt.sourceSpan scheme providerExpectedArgument argumentAttribute
+  let continuationAgent = continuationAgentType bindingType resultType inferredContinuationEffect
+      -- The zero-argument case of the one rule: apply the provider to the continuation alone, through
+      -- the shared callee-application path — same world / effect discipline and generic inference as a
+      -- direct call (a provider generic in @R@ infers it from the continuation argument).
+      applyBareProvider = do
+        let providerExpectedArgument = continuationExpectedArgument bindingType resultType inferredContinuationEffect
+        (typedBareProvider, scheme) <- synthApplicationCallee useStmt.provider
+        argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
+        _ <- applyCallee useStmt.sourceSpan scheme providerExpectedArgument argumentAttribute
+        pure typedBareProvider
+  typedProvider <- case useStmt.provider of
+    -- An application: the continuation joins the written arguments (see the section comment). The typed
+    -- node stays an 'ExpressionCall' — carrying the inferred instantiation — so lowering emits the same
+    -- single delegate a direct call would.
+    ExpressionCall callExpression -> do
+      when (any (\argument -> argument.name == "continuation") callExpression.arguments) $
+        reportType
+          callExpression.sourceSpan
+          ( TypeErrorMalformedType
+              MalformedTypeErrorInfo
+                { reason = "`continuation` is the argument `use` itself passes to its provider — a `use` application cannot also write one"
+                }
+          )
+      (typedCallee, scheme) <- synthApplicationCallee callExpression.callee
+      (typedArguments, argumentObject, argumentAttribute) <-
+        synthCallArgumentsWith callExpression.sourceSpan callExpression.arguments [("continuation", continuationAgent)]
+      (effectiveReturn, instantiation) <- applyCallee useStmt.sourceSpan scheme argumentObject argumentAttribute
+      (node, _) <-
+        typedExpression callExpression.sourceSpan effectiveReturn $ \semantic ->
+          ExpressionCall
+            CallExpression
+              { callee = typedCallee,
+                arguments = typedArguments,
+                instantiation = instantiation,
+                sourceSpan = callExpression.sourceSpan,
+                typeOf = semantic
+              }
+      pure node
+    -- The zero-argument shapes: a handler literal, a (qualified) name, an explicit instantiation.
+    ExpressionHandler _ -> applyBareProvider
+    ExpressionVariable _ -> applyBareProvider
+    ExpressionQualifiedReference _ -> applyBareProvider
+    ExpressionTypeApplication _ -> applyBareProvider
+    other -> do
+      -- No application reading exists for this shape; admitting it would make `use` mean different
+      -- things for different provider syntax. Reject, and still type the provider as if bare so
+      -- downstream checking continues.
+      reportType
+        (sourceSpanOf other)
+        ( TypeErrorMalformedType
+            MalformedTypeErrorInfo
+              { reason = "a `use` provider must be a handler or an application — a handler literal, a (qualified) name, or a call; bind any other expression first (`let p = ...` then `use p`, or apply it: `use expression(...)`)"
+              }
+        )
+      applyBareProvider
   pure
     UseStatement
       { binder = typedBinder,
@@ -727,16 +790,27 @@ synthCallArguments ::
   SourceSpan ->
   List (CallArgument Identified) ->
   Checker (List (CallArgument Typed), NormalizedType, NormalizedAttribute)
-synthCallArguments sourceSpan arguments = do
+synthCallArguments sourceSpan arguments = synthCallArgumentsWith sourceSpan arguments []
+
+-- | As 'synthCallArguments', with extra synthetic (label, type) fields joined into the argument
+-- object — the @use@ call-provider path adds its @continuation@ this way, so the provider is applied
+-- to ONE object carrying both the written arguments and the continuation.
+synthCallArgumentsWith ::
+  SourceSpan ->
+  List (CallArgument Identified) ->
+  List (Text, NormalizedType) ->
+  Checker (List (CallArgument Typed), NormalizedType, NormalizedAttribute)
+synthCallArgumentsWith sourceSpan arguments extraFields = do
   entries <- traverse synthEntry arguments
   let typedArguments = [typedArg | (typedArg, _, _) <- entries]
+      fields = [(name, normalizedType) | (_, name, normalizedType) <- entries] <> extraFields
       -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
       -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
       -- parameter match (against a required parameter it still fails the optional<:required check).
-      object = namedObjectTypeWithRest bottomType [(name, normalizedType) | (_, name, normalizedType) <- entries]
+      object = namedObjectTypeWithRest bottomType fields
   liftAmount <-
     runNormalizer sourceSpan $
-      foldr joinAttribute bottomAttribute <$> traverse foldAttribute [normalizedType | (_, _, normalizedType) <- entries]
+      foldr joinAttribute bottomAttribute <$> traverse (foldAttribute . snd) fields
   pure (typedArguments, object, liftAmount)
   where
     synthEntry argument = do
@@ -805,12 +879,19 @@ applyAgent sourceSpan functionAttribute function argumentType argumentAttribute 
     emitEffect sourceSpan function.effect
   pure effectiveReturn
 
--- | The @continuation@ argument a @use@ provider / handler receives: @{continuation: agent({value: V})
--- -> R with E}@. The single home of the continuation ABI (the @value@ / @continuation@ field names and
--- the agent shape) shared by 'handleUseStatement' and 'synthHandlerExpression'.
+-- | The continuation agent a @use@ provider / handler receives: @agent({value: V}) -> R with E@. The
+-- single home of the continuation ABI (the @value@ field name and the agent shape) shared by
+-- 'handleUseStatement' and 'synthHandlerExpression'.
+continuationAgentType :: NormalizedType -> NormalizedType -> NormalizedEffect -> NormalizedType
+continuationAgentType valueType =
+  assembleAgent bottomAttribute (namedObjectType [("value", valueType)])
+
+-- | The whole argument object a bare @use@ provider receives: @{continuation: agent({value: V}) -> R
+-- with E}@ (a call provider receives its written arguments joined with the same @continuation@ field
+-- instead — see 'handleUseStatement').
 continuationExpectedArgument :: NormalizedType -> NormalizedType -> NormalizedEffect -> NormalizedType
 continuationExpectedArgument valueType resultType effect =
-  namedObjectType [("continuation", assembleAgent bottomAttribute (namedObjectType [("value", valueType)]) resultType effect)]
+  namedObjectType [("continuation", continuationAgentType valueType resultType effect)]
 
 ------------------------------------------------------------------------------------------------
 -- Generic-argument inference at call sites
@@ -2264,7 +2345,7 @@ signatureValueScheme ::
 -- on these. Kept in one place so adding a reactor is a single edit here; the runtime's routing must stay
 -- in step with this set.
 externalReactorNames :: List Text
-externalReactorNames = ["ffi", "http"]
+externalReactorNames = ["ffi", "http", "webhook", "mcp"]
 
 -- | Reject an @external@'s @from "name"@ clause when it names a reactor that does not exist (a typo, or an
 -- unimplemented reactor) — K3018, at compile time rather than a silent runtime fallback to the FFI reactor.

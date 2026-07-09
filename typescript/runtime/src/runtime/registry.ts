@@ -13,6 +13,7 @@ import { ProjectActor } from "./actor/project-actor.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
 import { type HttpTransport, StubHttpTransport } from "./external/http-transport.js";
+import { type McpTransport, StubMcpTransport } from "./external/mcp-transport.js";
 import { type FfiTransport, StubFfiTransport } from "./external/runner.js";
 import type { ProjectId, SnapshotId } from "./ids.js";
 import { type IrSource, SnapshotRegistry } from "./ir.js";
@@ -33,6 +34,11 @@ export interface ProjectRegistryDependencies {
   /** Builds a fresh `HttpTransport` per project actor (each needs its own completion sink). Defaults to the
    *  stub (http fails loudly until a real `fetch`-backed transport is injected). */
   httpFactory?: () => HttpTransport;
+  /** Builds a fresh `McpTransport` per project actor (each needs its own completion sink). Defaults to
+   *  the stub (mcp fails loudly until the SDK-backed transport is injected). */
+  mcpFactory?: () => McpTransport;
+  /** The public base URL webhook endpoints are minted under. Defaults to the local dev address. */
+  webhookBaseUrl?: string;
 }
 
 export class ProjectRegistry {
@@ -44,6 +50,8 @@ export class ProjectRegistry {
   private readonly prims: PrimRunner;
   private readonly externalFactory: () => FfiTransport;
   private readonly httpFactory: () => HttpTransport;
+  private readonly mcpFactory: () => McpTransport;
+  private readonly webhookBaseUrl: string;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
     this.ir = dependencies.ir ?? new SnapshotRegistry();
@@ -52,6 +60,8 @@ export class ProjectRegistry {
     this.prims = dependencies.prims ?? new PrimRegistry();
     this.externalFactory = dependencies.externalFactory ?? (() => new StubFfiTransport());
     this.httpFactory = dependencies.httpFactory ?? (() => new StubHttpTransport());
+    this.mcpFactory = dependencies.mcpFactory ?? (() => new StubMcpTransport());
+    this.webhookBaseUrl = dependencies.webhookBaseUrl ?? "http://localhost:3000";
   }
 
   /** Register one module's IR within a snapshot — only on the default in-memory source (tests); the
@@ -75,6 +85,8 @@ export class ProjectRegistry {
       blobs: this.blobs,
       external: this.externalFactory(),
       http: this.httpFactory(),
+      mcp: this.mcpFactory(),
+      webhookBaseUrl: this.webhookBaseUrl,
       persistence: this.persistence,
     });
     this.actors.set(projectId, actor);

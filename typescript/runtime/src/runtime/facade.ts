@@ -14,7 +14,7 @@ import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/typ
 import { and, eq, notInArray } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
-import { runs, TERMINAL_RUN_STATES } from "../db/tables/execution.js";
+import { instances, runs, TERMINAL_RUN_STATES, webhookInstances } from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
@@ -26,6 +26,7 @@ import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry } from "./engine/types.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
+import { SdkMcpTransport } from "./external/mcp-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
   type BlobId,
@@ -38,7 +39,7 @@ import {
 } from "./ids.js";
 import { ProjectRegistry } from "./registry.js";
 import { createBlobStore } from "./value/blob-store.js";
-import { jsonToValue } from "./value/codec.js";
+import { jsonToValue, valueToJson } from "./value/codec.js";
 import type { Value } from "./value/types.js";
 
 /** Decode client-supplied `Json` (a run argument, an escalation answer) into an engine `Value`, mapping a
@@ -124,6 +125,10 @@ const registry = new ProjectRegistry({
   // The built-in http client: a fresh in-runtime `fetch` transport per project actor (its own completion
   // sink). The api root performs `http.fetch` requests through it.
   httpFactory: () => new FetchHttpTransport(),
+  // The built-in MCP client: the SDK-backed transport, one per project actor (its own connections).
+  mcpFactory: () => new SdkMcpTransport(),
+  // The public base `webhook.inbound` mints its URLs under (KATARI_PUBLIC_URL, or the local port).
+  webhookBaseUrl: config.publicUrl,
 });
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
@@ -211,6 +216,51 @@ export const facade = {
     registry.evict(projectId as ProjectId);
   },
 
+  /** Deliver one inbound webhook POST. The token alone locates its endpoint — the durable
+   *  `webhook_instances` row resolves it to a project (waking a cold actor, whose reload re-registers the
+   *  token), and the actor's webhook reactor converts the body into a delegation of the endpoint's
+   *  callback. Returns the callback's outcome with its values lowered at THIS user-facing boundary
+   *  (private content redacts — a webhook caller is outside the trust boundary). */
+  async deliverWebhook(input: {
+    token: string;
+    body: Json;
+  }): Promise<
+    | { kind: "unknown" }
+    | { kind: "gone" }
+    | { kind: "result"; value: Json }
+    | { kind: "throw"; error: Json; badRequest: boolean }
+    | { kind: "error" }
+  > {
+    const [row] = await db
+      .select({ projectId: instances.projectId })
+      .from(webhookInstances)
+      .innerJoin(instances, eq(webhookInstances.instanceId, instances.id))
+      .where(eq(webhookInstances.token, input.token))
+      .limit(1);
+    if (row === undefined) return { kind: "unknown" };
+    const outcome = await registry
+      .actorFor(row.projectId as ProjectId)
+      .deliverWebhook(input.token, decodeClientJson(input.body, "the webhook body"));
+    switch (outcome.kind) {
+      case "unknown":
+      case "gone":
+        return { kind: outcome.kind };
+      case "result":
+        return { kind: "result", value: valueToJson(outcome.value, "redact") };
+      case "throw":
+        return {
+          kind: "throw",
+          error: valueToJson(outcome.value, "redact"),
+          // A schema violation at the dynamic-dispatch boundary is the caller's fault (a bad request);
+          // any other typed throw is the program failing on a well-formed delivery.
+          badRequest: isCallError(outcome.value),
+        };
+      case "error":
+        // The panic message stays server-side (it may name internals); the caller gets a bare 500.
+        return { kind: "error" };
+    }
+  },
+
   /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob
    *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Returns
    *  the blob handle the sidecar lifts into a `File` value; throws a `ConflictError` (so the upload fails) when
@@ -229,6 +279,11 @@ export const facade = {
     );
   },
 };
+
+/** Whether a thrown payload is the dynamic-dispatch schema violation (`reflection.call_error`). */
+function isCallError(value: Value): boolean {
+  return value.kind === "record" && String(value.ctor) === "prelude.reflection.call_error";
+}
 
 /** Resume every project that still has an in-flight run — the boot half of recovery. Reactivation is
  *  otherwise lazy (a project reloads when next touched), so after a restart a long-running run would stay

@@ -499,7 +499,7 @@ describe("prelude.math", () => {
   });
 });
 
-describe("prelude.ai.get_metadata", () => {
+describe("prelude.reflection.get_metadata", () => {
   const GREETER_SCHEMA: SchemaInfo = {
     input: {
       type: "object",
@@ -559,13 +559,13 @@ describe("prelude.ai.get_metadata", () => {
   test("derives name / description / schemas as json values", async () => {
     const context = contextWith(irWith());
     const metadata = await run(
-      "prelude.ai.get_metadata",
+      "prelude.reflection.get_metadata",
       { value: { kind: "agent", name: createAgentName("main.greeter"), snapshot: SNAPSHOT } },
       context,
     );
     expect(metadata.kind).toBe("record");
     if (metadata.kind !== "record") return;
-    expect(metadata.ctor).toBe("prelude.ai.agent_metadata");
+    expect(metadata.ctor).toBe("prelude.reflection.agent_metadata");
     expect(metadata.fields.name).toEqual(str("main.greeter"));
     expect(metadata.fields.description).toEqual(str("Returns a greeting."));
     const input = metadata.fields.input;
@@ -587,7 +587,7 @@ describe("prelude.ai.get_metadata", () => {
   test("specialises a generic callable's schemas through its carried substitution", async () => {
     const context = contextWith(irWith());
     const metadata = await run(
-      "prelude.ai.get_metadata",
+      "prelude.reflection.get_metadata",
       {
         value: {
           kind: "agent",
@@ -605,8 +605,50 @@ describe("prelude.ai.get_metadata", () => {
   });
 
   test("refuses a non-callable value", async () => {
-    await expect(run("prelude.ai.get_metadata", { value: int(1) }, contextWith(irWith()))).rejects.toThrow(
+    await expect(run("prelude.reflection.get_metadata", { value: int(1) }, contextWith(irWith()))).rejects.toThrow(
       /callable/,
     );
+  });
+
+  test("a reactor-backed tool presents its minted name / description / schemas", async () => {
+    const context = contextWith(irWith());
+    const toolSchema = {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    };
+    // The shape `prelude.mcp.tools` mints: a $tool value carrying its server descriptor as context
+    // and the server-declared signature (output schema optional — `{}`/unknown when undeclared).
+    const tool: Value = {
+      kind: "tool",
+      reactor: "mcp",
+      name: "weather",
+      description: "Looks up the weather.",
+      context: { kind: "record", fields: { url: str("https://mcp.example.test/mcp") } },
+      snapshot: SNAPSHOT,
+      inputSchema: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+      },
+      outputSchema: { type: "string" },
+    };
+    const metadata = await run("prelude.reflection.get_metadata", { value: tool }, context);
+    if (metadata.kind !== "record") throw new Error("expected a record");
+    expect(metadata.fields.name).toEqual(str("weather"));
+    expect(metadata.fields.description).toEqual(str("Looks up the weather."));
+    const input = metadata.fields.input;
+    const output = metadata.fields.output;
+    if (input === undefined || output === undefined) throw new Error("metadata is missing schemas");
+    await expect(asJson(input)).resolves.toEqual(toolSchema);
+    await expect(asJson(output)).resolves.toEqual({ type: "string" });
+    // Without a declared output schema, the output is unknown (`{}`).
+    const bare = await run(
+      "prelude.reflection.get_metadata",
+      { value: { ...tool, outputSchema: undefined } },
+      context,
+    );
+    if (bare.kind !== "record" || bare.fields.output === undefined) throw new Error("expected output");
+    await expect(asJson(bare.fields.output)).resolves.toEqual({});
   });
 });

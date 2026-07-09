@@ -32,9 +32,13 @@ import type {
   PersistedFfiInstanceRow,
   PersistedHttpInstance,
   PersistedHttpInstanceRow,
+  PersistedMcpInstance,
+  PersistedMcpInstanceRow,
   PersistedOpenEscalation,
   PersistedRun,
   PersistedRunEscalationAudit,
+  PersistedWebhookInstance,
+  PersistedWebhookInstanceRow,
   Persistence,
   PersistenceTx,
 } from "./persistence.js";
@@ -84,6 +88,8 @@ export class StoringPersistence implements Persistence {
   private readonly coreInstanceRows = new Map<InstanceId, PersistedCoreInstance>();
   private readonly ffiInstanceRows = new Map<InstanceId, PersistedFfiInstanceRow>();
   private readonly httpInstanceRows = new Map<InstanceId, PersistedHttpInstanceRow>();
+  private readonly webhookInstanceRows = new Map<InstanceId, PersistedWebhookInstanceRow>();
+  private readonly mcpInstanceRows = new Map<InstanceId, PersistedMcpInstanceRow>();
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
   /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
@@ -241,6 +247,59 @@ export class StoringPersistence implements Persistence {
           return result;
         },
       },
+      webhook: {
+        instances: async () => {
+          const result: PersistedWebhookInstance[] = [];
+          for (const [id, envelope] of this.envelopes) {
+            const ext = this.webhookInstanceRows.get(id);
+            if (
+              envelope.kind !== "webhook" ||
+              ext === undefined ||
+              envelope.delegationId === null ||
+              envelope.callerReactor === null ||
+              envelope.runId === null
+            )
+              continue;
+            result.push({
+              delegation: envelope.delegationId,
+              instance: id,
+              snapshot: ext.snapshotId,
+              token: ext.token,
+              callback: ext.callback,
+              caller: envelope.callerReactor,
+              run: envelope.runId,
+              status: ext.status,
+              relays: ext.relays,
+              innerCalls: ext.innerCalls,
+            });
+          }
+          return result;
+        },
+      },
+      mcp: {
+        instances: async () => {
+          const result: PersistedMcpInstance[] = [];
+          for (const [id, envelope] of this.envelopes) {
+            const ext = this.mcpInstanceRows.get(id);
+            if (
+              envelope.kind !== "mcp" ||
+              ext === undefined ||
+              envelope.delegationId === null ||
+              envelope.callerReactor === null ||
+              envelope.runId === null
+            )
+              continue;
+            result.push({
+              delegation: envelope.delegationId,
+              instance: id,
+              caller: envelope.callerReactor,
+              run: envelope.runId,
+              status: ext.status,
+            });
+          }
+          return result;
+        },
+      },
       outbox: {
         pending: async () => [...this.outbox.values()],
       },
@@ -337,6 +396,16 @@ export class StoringPersistence implements Persistence {
           this.httpInstanceRows.set(row.instanceId, row);
         },
       },
+      webhook: {
+        putWebhookInstance: async (row) => {
+          this.webhookInstanceRows.set(row.instanceId, row);
+        },
+      },
+      mcp: {
+        putMcpInstance: async (row) => {
+          this.mcpInstanceRows.set(row.instanceId, row);
+        },
+      },
       pool: {
         putScope: async (scope) => {
           this.scopes.set(scope.scopeId, scope);
@@ -373,6 +442,8 @@ export class StoringPersistence implements Persistence {
     this.coreInstanceRows.delete(instanceId);
     this.ffiInstanceRows.delete(instanceId);
     this.httpInstanceRows.delete(instanceId);
+    this.webhookInstanceRows.delete(instanceId);
+    this.mcpInstanceRows.delete(instanceId);
     this.threads.delete(instanceId);
     for (const [id, scope] of this.scopes) {
       if (scope.ownerInstanceId === instanceId) this.scopes.delete(id);

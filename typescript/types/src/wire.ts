@@ -9,6 +9,8 @@
 //   file handle     { "$ref": blobId, "semanticKind": …, "size": …, "hash": …, "contentType"? }
 //   agent reference { "$agent": name, "snapshot": …, "generics"? }
 //   closure         { "$closure": blockId, "scopeId": …, "snapshot": …, "module": …, "generics"? }
+//   tool            { "$tool": name, "reactor": …, "context": <value>, "snapshot": …,
+//                     "description": …, "inputSchema": …, "outputSchema"? }
 //   bare record     { …escaped keys }              (no reserved key present)
 //
 // A data value's fields nest under `VALUE_KEY`, so no field name can collide with a discriminator. A bare
@@ -26,6 +28,8 @@ export const FILE_KEY = "$ref";
 export const AGENT_KEY = "$agent";
 /** A closure reference's block id. */
 export const CLOSURE_KEY = "$closure";
+/** A runtime-minted tool agent's runtime-decided name; its metadata rides in the plain sibling keys. */
+export const TOOL_KEY = "$tool";
 /** The placeholder a private subtree collapses to under the `redact` policy (one-way, not decoded). */
 export const REDACTED_KEY = "$redacted";
 
@@ -39,6 +43,11 @@ export const SNAPSHOT_KEY = "snapshot";
 export const GENERICS_KEY = "generics";
 export const SCOPE_KEY = "scopeId";
 export const MODULE_KEY = "module";
+export const DESCRIPTION_KEY = "description";
+export const INPUT_SCHEMA_KEY = "inputSchema";
+export const OUTPUT_SCHEMA_KEY = "outputSchema";
+export const REACTOR_KEY = "reactor";
+export const CONTEXT_KEY = "context";
 
 /** Escape a bare-record key for the wire: a key starting with `$` gets its leading `$` doubled, so a
  *  record can never emit a single-`$` key (that namespace is the reserved discriminators'). */
@@ -53,7 +62,7 @@ export function unescapeRecordKey(key: string): string {
   return key.startsWith("$$") ? key.slice(1) : key;
 }
 
-export type WireKind = "data" | "file" | "agent" | "closure" | "redacted";
+export type WireKind = "data" | "file" | "agent" | "closure" | "tool" | "redacted";
 
 /** Which variant a JSON object denotes, from which reserved discriminator key it carries (checked in a
  *  fixed order; the keys are mutually exclusive in well-formed input). `undefined` means a bare record. */
@@ -62,6 +71,7 @@ export function wireKindOf(hasKey: (key: string) => boolean): WireKind | undefin
   if (hasKey(FILE_KEY)) return "file";
   if (hasKey(AGENT_KEY)) return "agent";
   if (hasKey(CLOSURE_KEY)) return "closure";
+  if (hasKey(TOOL_KEY)) return "tool";
   if (hasKey(REDACTED_KEY)) return "redacted";
   return undefined;
 }

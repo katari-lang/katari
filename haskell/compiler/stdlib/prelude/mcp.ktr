@@ -1,0 +1,44 @@
+// The `prelude.mcp` sub-module: plug any MCP server's tools into a program as ordinary agent
+// values. `tools` routes to the runtime's `mcp` reactor (an in-runtime MCP client, like
+// `http.fetch`'s in-runtime fetch — no FFI sidecar, nothing for the user to install). The whole
+// integration is one line:
+//
+//   let tools = mcp.tools(url = "https://...", headers = record.empty())
+//
+// A tool IS an agent: the runtime mints one agent value per server tool, carrying the
+// server-declared name / description / input schema (and output schema when the server declares
+// one) — `reflection.get_metadata` reads them (that is what an AI loop advertises), and a call is
+// validated against that schema before anything runs (a bad argument throws
+// `reflection.call_error` without the server ever being contacted).
+//
+// There is no connection to manage: each minted tool carries its server DESCRIPTOR (the url +
+// headers it was listed with), and the runtime (re)connects lazily per descriptor — reusing a live
+// connection across calls, reconnecting transparently after a failure or a runtime restart. A
+// header value may be a secret (`string of private`); it stays private inside the tool value
+// (sealed at rest, redacted at user-facing boundaries) and is revealed only to the server itself.
+
+@"The MCP server rejected a listing or a tool call, or the transport failed (the server-reported or
+transport message). Catch it to control retry — a retried call reconnects."
+data server_error(message: string)
+
+// One server tool, as an ordinary agent value. (Type synonyms take no docs.)
+type tool = agent never -> unknown with io | prelude.throw[server_error]
+
+// A server's tools, keyed by tool name — call one by key, or hand `tools_of` to an AI loop wholesale.
+type toolbox = record[tool]
+
+@"The MCP server's tools, one runtime-minted agent per tool. Each carries the server-declared
+signature (for `reflection.get_metadata` and call-site validation) and the server descriptor it was
+listed with (@url@ + @headers@ — a value may be a secret), so calling it needs no further setup."
+external agent tools(url: string, headers: record[string of private]) -> toolbox with prelude.throw[server_error] from "mcp"
+
+@"A toolbox's tools as a flat array — the shape an AI tool loop takes."
+agent tools_of(toolbox: toolbox) -> array[tool] {
+  for (let name in record.keys(target = toolbox)) {
+    let entry = match (record.get(target = toolbox, key = name)) {
+      case null -> prelude.throw(error = server_error(message = f"toolbox lost its \"${name}\" entry"))
+      case present -> present
+    }
+    next entry
+  }
+}

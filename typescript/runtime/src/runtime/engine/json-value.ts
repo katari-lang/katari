@@ -26,21 +26,28 @@ import {
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
   CONTENT_TYPE_KEY,
+  CONTEXT_KEY,
+  DESCRIPTION_KEY,
   escapeRecordKey,
   FILE_KEY,
   GENERICS_KEY,
   genericsFromJson,
   genericsToJson,
   HASH_KEY,
+  INPUT_SCHEMA_KEY,
   MODULE_KEY,
+  OUTPUT_SCHEMA_KEY,
+  REACTOR_KEY,
   SCOPE_KEY,
   SEMANTIC_KIND_KEY,
   SIZE_KEY,
   SNAPSHOT_KEY,
+  TOOL_KEY,
   unescapeRecordKey,
   VALUE_KEY,
   wireKindOf,
 } from "../value/codec.js";
+import { jsonToSchema, schemaToJson } from "../value/schema-json.js";
 import type { AgentValue, ClosureValue, SemanticKind, Value } from "../value/types.js";
 
 export const JSON_NULL = "prelude.json.json_null";
@@ -219,6 +226,19 @@ export async function encodeValue(value: Value, readString: StringReader): Promi
       }
       return jsonObject(entries);
     }
+    case "tool": {
+      const entries: Record<string, Value> = Object.create(null);
+      entries[TOOL_KEY] = jsonText(value.name);
+      entries[REACTOR_KEY] = jsonText(value.reactor);
+      entries[CONTEXT_KEY] = await encodeValue(value.context, readString);
+      entries[SNAPSHOT_KEY] = jsonText(String(value.snapshot));
+      entries[DESCRIPTION_KEY] = jsonText(value.description);
+      entries[INPUT_SCHEMA_KEY] = jsonValueFromJson(schemaToJson(value.inputSchema));
+      if (value.outputSchema !== undefined) {
+        entries[OUTPUT_SCHEMA_KEY] = jsonValueFromJson(schemaToJson(value.outputSchema));
+      }
+      return jsonObject(entries);
+    }
     case "array": {
       const elements: Value[] = [];
       for (const element of value.elements) {
@@ -332,6 +352,8 @@ async function objectTreeToValue(
       return agentFromTree(entries, readString);
     case "closure":
       return closureFromTree(entries, readString);
+    case "tool":
+      return toolFromTree(entries, readString);
     case "redacted":
       throw new Error(
         "a redacted value cannot be decoded (its content was withheld at a boundary)",
@@ -400,6 +422,33 @@ async function closureFromTree(
   const generics = entries[GENERICS_KEY];
   if (generics === undefined) return closure;
   return { ...closure, generics: genericsFromJson(await jsonValueToJson(generics, readString)) };
+}
+
+async function toolFromTree(
+  entries: Record<string, Value>,
+  readString: StringReader,
+): Promise<Value> {
+  const contextNode = entries[CONTEXT_KEY];
+  if (contextNode === undefined) throw new Error("a tool carries no context");
+  const inputSchemaNode = entries[INPUT_SCHEMA_KEY];
+  const outputSchemaNode = entries[OUTPUT_SCHEMA_KEY];
+  const tool: Value = {
+    kind: "tool",
+    reactor: leafText(entries[REACTOR_KEY]),
+    name: leafText(entries[TOOL_KEY]),
+    description: leafText(entries[DESCRIPTION_KEY]),
+    context: await treeToValue(contextNode, readString),
+    snapshot: toSnapshotId(leafText(entries[SNAPSHOT_KEY])),
+    inputSchema:
+      inputSchemaNode === undefined
+        ? {}
+        : jsonToSchema(await jsonValueToJson(inputSchemaNode, readString)),
+  };
+  if (outputSchemaNode === undefined) return tool;
+  return {
+    ...tool,
+    outputSchema: jsonToSchema(await jsonValueToJson(outputSchemaNode, readString)),
+  };
 }
 
 // ─── leaf extractors (a `json_string` / `json_integer` tree node -> its scalar) ─────────────────────

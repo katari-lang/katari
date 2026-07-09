@@ -2,7 +2,7 @@
 // the shared callee-call lifecycle). An `http.fetch` call reaches it as a `delegate` (an external leaf marked
 // `reactor: "http"`) routed from core's `ExternalThread` proxy, exactly like an FFI call; it performs the
 // request through its transport (an in-runtime `fetch`) and the base turns the outcome into the call's
-// `delegateAck` (the `{ status, body }` response), an `escalate` (a request that produced no response → a
+// `delegateAck` (the `{ status, headers, body }` response), an `escalate` (a request that produced no response → a
 // `throw[http.fetch_error]` that bubbles to the caller's handler), or a `terminateAck` (an abort confirmed).
 //
 // It owns its in-flight calls durably as `http`-kind instances (`http_instances` — the call's status + caller),

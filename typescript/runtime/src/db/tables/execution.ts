@@ -28,6 +28,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
@@ -98,7 +99,10 @@ export const instances = pgTable(
     // `set null` on delegation delete must find the referencing instances without scanning the table.
     index("instances_delegation_id_idx").on(table.delegationId),
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
-    check("instances_kind_check", sql`${table.kind} in ('core', 'api', 'ffi', 'http')`),
+    check(
+      "instances_kind_check",
+      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp')`,
+    ),
   ],
 );
 
@@ -167,6 +171,59 @@ export const httpInstances = pgTable("http_instances", {
    *  is aborted, an awaitingAnswer one waits. */
   status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
 });
+
+// The `mcp` instance extension: an in-flight mcp call (a `prelude.mcp.tools` listing or a minted
+// tool's call). Like `http_instances` it stores no argument (recovery never re-sends; gone work fails
+// as a typed `mcp.server_error`, and a katari-level retry reconnects through the transport's
+// descriptor cache); it carries only the call-specific `status` the envelope cannot.
+export const mcpInstances = pgTable("mcp_instances", {
+  instanceId: uuid("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  /** running (request in flight) | cancelling (aborting) | awaitingAnswer (errored, the throw escalated,
+   *  awaiting a caught answer or the run's terminate). */
+  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+});
+
+// The `webhook` instance extension: an in-flight `webhook.inbound` call — a dynamically generated public
+// endpoint serving for the extent of its subscriber. Cascades with its envelope; pins its snapshot (the
+// version the callback / subscriber dispatch against). Unlike `ffi` / `http` it persists its payload: the
+// `token` must survive a restart (the URL is the capability an external caller holds) and the `callback`
+// must too (future deliveries dispatch it) — the subscriber does not (dispatched exactly once; its inner
+// delegation is durable core work that resumes on its own).
+export const webhookInstances = pgTable(
+  "webhook_instances",
+  {
+    instanceId: uuid("instance_id")
+      .primaryKey()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    /** The snapshot the call was dispatched against — the callback / subscriber delegations pin it. */
+    snapshotId: uuid("snapshot_id")
+      .notNull()
+      .references(() => snapshots.id),
+    /** The unguessable URL token (`POST /inbound/<token>`) — the endpoint's capability. Globally unique, so
+     *  the public route resolves a token to its project without any other key. */
+    token: text("token").notNull(),
+    /** The callback value each delivery dispatches (an agent / closure / tool reference). Sealed like every
+     *  stored value; a closure's captured scope is durable core state, so the reference stays resolvable. */
+    callback: jsonb("callback").$type<Value>().notNull(),
+    /** running (serving) | cancelling (tearing down) | awaitingAnswer (the subscriber failed, its panic /
+     *  throw escalated, awaiting an answer or the run's terminate). */
+    status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+    /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`). */
+    relays: jsonb("relays")
+      .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
+      .notNull()
+      .default([]),
+    /** The call's open inner delegations (the subscriber, in-flight deliveries) and the local token each
+     *  settles under — so a delivery landing after a warm reset still finds its consumer. */
+    innerCalls: jsonb("inner_calls")
+      .$type<Array<{ delegation: string; call: string }>>()
+      .notNull()
+      .default([]),
+  },
+  (table) => [uniqueIndex("webhook_instances_token_idx").on(table.token)],
+);
 
 /** The parent→child edge and recovery outbox: the issuer's durable record of a child it summoned, and
  *  the correlation id its `delegateAck` carries. Cascades with the caller (it is meaningless without it). */

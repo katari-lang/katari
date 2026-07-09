@@ -22,20 +22,26 @@ import {
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
   CONTENT_TYPE_KEY,
+  CONTEXT_KEY,
   createAgentName,
+  DESCRIPTION_KEY,
   escapeRecordKey,
   FILE_KEY,
   GENERICS_KEY,
   type GenericArgumentSchema,
   HASH_KEY,
+  INPUT_SCHEMA_KEY,
   type Json,
   type Literal,
   MODULE_KEY,
+  OUTPUT_SCHEMA_KEY,
+  REACTOR_KEY,
   REDACTED_KEY,
   SCOPE_KEY,
   SEMANTIC_KIND_KEY,
   SIZE_KEY,
   SNAPSHOT_KEY,
+  TOOL_KEY,
   type TypeTag,
   unescapeRecordKey,
   VALUE_KEY,
@@ -61,16 +67,22 @@ export {
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
   CONTENT_TYPE_KEY,
+  CONTEXT_KEY,
+  DESCRIPTION_KEY,
   escapeRecordKey,
   FILE_KEY,
   GENERICS_KEY,
   HASH_KEY,
+  INPUT_SCHEMA_KEY,
   MODULE_KEY,
+  OUTPUT_SCHEMA_KEY,
+  REACTOR_KEY,
   REDACTED_KEY,
   SCOPE_KEY,
   SEMANTIC_KIND_KEY,
   SIZE_KEY,
   SNAPSHOT_KEY,
+  TOOL_KEY,
   unescapeRecordKey,
   VALUE_KEY,
   type WireKind,
@@ -169,6 +181,8 @@ export function jsonToValue(json: Json): Value {
       return agentFromJson(json);
     case "closure":
       return closureFromJson(json);
+    case "tool":
+      return toolFromJson(json);
     case "redacted":
       // `$redacted` marks content the `redact` policy withheld — it was never encodable, so it is not
       // decodable either. Reaching it means feeding a redacted document back in; fail loudly.
@@ -261,6 +275,38 @@ function closureFromJson(json: { [key: string]: Json }): Value {
   return generics !== undefined ? { ...closure, generics: genericsFromJson(generics) } : closure;
 }
 
+/** `{ "$tool": name, "reactor", "context", "snapshot", "description", "inputSchema", "outputSchema"? }`
+ *  -> a tool value (a reactor-backed agent). */
+function toolFromJson(json: { [key: string]: Json }): Value {
+  const name = json[TOOL_KEY];
+  const reactor = json[REACTOR_KEY];
+  const description = json[DESCRIPTION_KEY];
+  const snapshot = json[SNAPSHOT_KEY];
+  const context = json[CONTEXT_KEY];
+  if (
+    typeof name !== "string" ||
+    typeof reactor !== "string" ||
+    typeof description !== "string" ||
+    typeof snapshot !== "string" ||
+    context === undefined
+  ) {
+    throw new Error(
+      "a tool must carry a string $tool name, a string reactor, a string description, a string snapshot, and a context",
+    );
+  }
+  const tool: Value = {
+    kind: "tool",
+    reactor,
+    name,
+    description,
+    context: jsonToValue(context),
+    snapshot: toSnapshotId(snapshot),
+    inputSchema: jsonToSchema(json[INPUT_SCHEMA_KEY] ?? {}),
+  };
+  const outputSchema = json[OUTPUT_SCHEMA_KEY];
+  return outputSchema === undefined ? tool : { ...tool, outputSchema: jsonToSchema(outputSchema) };
+}
+
 // ─── Value → bare Json (façade / FFI output boundary) ────────────────────────────────────────────
 
 /**
@@ -324,6 +370,18 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
       out[SNAPSHOT_KEY] = value.snapshot;
       out[MODULE_KEY] = value.module;
       if (value.generics !== undefined) out[GENERICS_KEY] = genericsToJson(value.generics);
+      return out;
+    }
+    case "tool": {
+      const out: { [key: string]: Json } = Object.create(null);
+      out[TOOL_KEY] = value.name;
+      out[REACTOR_KEY] = value.reactor;
+      out[CONTEXT_KEY] = valueToJson(value.context, policy);
+      out[SNAPSHOT_KEY] = value.snapshot;
+      out[DESCRIPTION_KEY] = value.description;
+      out[INPUT_SCHEMA_KEY] = schemaToJson(value.inputSchema);
+      if (value.outputSchema !== undefined)
+        out[OUTPUT_SCHEMA_KEY] = schemaToJson(value.outputSchema);
       return out;
     }
   }
@@ -391,6 +449,8 @@ export function valueEquals(left: Value, right: Value): boolean {
       return right.kind === "closure" && left === right;
     case "agent":
       return right.kind === "agent" && left === right;
+    case "tool":
+      return right.kind === "tool" && left === right;
   }
 }
 
@@ -418,6 +478,6 @@ export function valueMatchesTag(value: Value, tag: TypeTag): boolean {
     case "record":
       return value.kind === "record";
     case "agent":
-      return value.kind === "closure" || value.kind === "agent";
+      return value.kind === "closure" || value.kind === "agent" || value.kind === "tool";
   }
 }

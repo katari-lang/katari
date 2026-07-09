@@ -22,7 +22,7 @@
 
 import type { Json } from "@katari-lang/types";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
-import type { DelegateOutcome } from "./sidecar-protocol.js";
+import type { DelegateCallee, DelegateOutcome } from "./sidecar-protocol.js";
 
 /** The `error` a recovery dispatch fails with when the handler's process is gone — the at-most-once refusal
  *  (never a silent re-run). Surfaces as a catchable panic, so katari code decides whether to retry. */
@@ -58,13 +58,12 @@ export interface FfiCompletion {
 
 /** One inner agent call a running handler asked for, fed to the ffi reactor's delegate sink. `delegation`
  *  is the in-flight parent call it originates from; `call` is the sidecar's own correlation token (echoed
- *  back on the result). `agent` is a qualified agent name (`core`) or an external key (`ffi` / `http`);
- *  `reactor` defaults to `core` when absent. */
+ *  back on the result). `callee` is either a static agent NAME (routed by reactor) or a first-class
+ *  callable VALUE the handler received (resolved to a target on `core`). */
 export interface FfiInnerDelegate {
   delegation: DelegationId;
   call: string;
-  agent: string;
-  reactor?: string;
+  callee: DelegateCallee;
   argument: Json | null;
 }
 
@@ -139,9 +138,14 @@ export class FfiThrow extends Error {
 }
 
 /** The context an in-process FFI handler gets alongside its argument: the inner agent-call channel the real
- *  port exposes (plain `Json` in and out; `reactor` defaults to `core`). */
+ *  port exposes (plain `Json` in and out). */
 export interface FfiHandlerContext {
+  /** Call an agent by NAME; `reactor` defaults to `core` (`ffi` / `http` for a call reactor). */
   call(agent: string, argument?: Json | null, options?: { reactor?: string }): Promise<Json>;
+  /** Call a first-class callable VALUE the handler received (its `$agent` / `$closure` / `$tool` wire
+   *  JSON) — the in-process analogue of the port's `KatariAgent.call`. The runtime resolves it to a
+   *  target and dispatches on `core`. */
+  callValue(callable: Json, argument?: Json | null): Promise<Json>;
 }
 
 /** A handler an in-process external call runs against its (plain `Json`) argument (the test / dev injection
@@ -273,29 +277,33 @@ export class InProcessFfiTransport implements FfiTransport {
   }
 
   private contextFor(delegation: DelegationId): FfiHandlerContext {
+    const sendDelegate = (callee: DelegateCallee, argument: Json | null): Promise<Json> => {
+      const delegateSink = this.delegateSink;
+      if (delegateSink === null) {
+        return Promise.reject(
+          new Error("InProcessFfiTransport: no delegate sink registered (onDelegate not wired)"),
+        );
+      }
+      // Unique across transport instances (a fresh "process"), not just within one: the runtime's bridge
+      // rows are durable, so a stale bridge from a previous instance still delivers under its old token —
+      // a counter would collide with this instance's first calls.
+      const token = crypto.randomUUID();
+      return new Promise<Json>((resolve, reject) => {
+        this.pendingCalls.set(token, { delegation, resolve, reject });
+        delegateSink({ delegation, call: token, callee, argument });
+      });
+    };
     return {
-      call: (agent, argument = null, options) => {
-        const delegateSink = this.delegateSink;
-        if (delegateSink === null) {
-          return Promise.reject(
-            new Error("InProcessFfiTransport: no delegate sink registered (onDelegate not wired)"),
-          );
-        }
-        // Unique across transport instances (a fresh "process"), not just within one: the runtime's bridge
-        // rows are durable, so a stale bridge from a previous instance still delivers under its old token —
-        // a counter would collide with this instance's first calls.
-        const token = crypto.randomUUID();
-        return new Promise<Json>((resolve, reject) => {
-          this.pendingCalls.set(token, { delegation, resolve, reject });
-          delegateSink({
-            delegation,
-            call: token,
+      call: (agent, argument = null, options) =>
+        sendDelegate(
+          {
+            kind: "named",
             agent,
             ...(options?.reactor !== undefined ? { reactor: options.reactor } : {}),
-            argument,
-          });
-        });
-      },
+          },
+          argument,
+        ),
+      callValue: (callable, argument = null) => sendDelegate({ kind: "value", callable }, argument),
     };
   }
 

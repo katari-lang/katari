@@ -70,6 +70,17 @@ spec = describe "lowerModule (via compile)" $ do
               "agent helper(x: integer) -> integer { x }\nagent caller(y: integer) -> integer { helper(x = y) }"
       delegateGenericsTo irModule (testName "helper") `shouldBe` Just []
 
+  describe "the use call-provider (one delegate, the continuation joined with the written arguments)" $ do
+    let source =
+          "agent supply[R, effect E](base: integer, continuation: agent(value: integer) -> R with E) -> R with E { continuation(value = base) }\n"
+            <> "agent run() -> string { let x : integer = use supply(base = 1)\n\"result\" }"
+    it "delegates the provider BY NAME, its argument record carrying base and the continuation" $
+      delegateArgumentEntriesTo (loweredTestModule source) (testName "supply") `shouldBe` Just ["base", "continuation"]
+    it "binds the use binder to the continuation argument's `value` field (not the protocol record)" $
+      -- The provider calls the continuation with `{value: A}`; the binder must project `value` out,
+      -- or `let x = use p(...)` observes the protocol wrapper instead of the provided value.
+      continuationFirstFields (loweredTestModule source) `shouldBe` ["value"]
+
   -- The typed error model: `prelude.throw` is an ordinary generic request, so a raise lowers to a
   -- request leaf and a handler to a handle node carrying the qualified name — the runtime matches
   -- handlers by exactly this name (the payload type is erased; the payload value carries its ctor tag).
@@ -266,6 +277,37 @@ delegateGenericsTo irModule name =
        ] of
     (generics : _) -> Just generics
     [] -> Nothing
+
+-- | The labels of the argument record built for the first @delegate@ targeting @name@ (Nothing when
+-- no such delegate, or its argument is not a record built in the same sequence).
+delegateArgumentEntriesTo :: IRModule -> QualifiedName -> Maybe (List Text)
+delegateArgumentEntriesTo irModule name =
+  case [ (sequence', operation)
+         | information <- Map.elems irModule.blocks,
+           BlockSequence sequence' <- [information.block],
+           OperationDelegate operation <- sequence'.operations,
+           CalleeName target <- [operation.target],
+           target == name
+       ] of
+    ((sequence', operation) : _) ->
+      Just
+        [ label
+          | OperationMakeRecord recordOperation <- sequence'.operations,
+            recordOperation.output == operation.argument,
+            (label, _) <- recordOperation.entries
+        ]
+    [] -> Nothing
+
+-- | The field each `use.continuation.body` block projects FIRST (the use binder's `value` read).
+continuationFirstFields :: IRModule -> List Text
+continuationFirstFields irModule =
+  [ operation.field
+    | (blockId, label) <- Map.toList irModule.names,
+      label == "use.continuation.body",
+      Just information <- [Map.lookup blockId irModule.blocks],
+      BlockSequence sequence' <- [information.block],
+      (OperationGetField operation : _) <- [sequence'.operations]
+  ]
 
 -- | The request names every handle node's handlers match, across the module.
 handledRequestNames :: IRModule -> List QualifiedName

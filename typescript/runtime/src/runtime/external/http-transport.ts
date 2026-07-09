@@ -21,7 +21,7 @@ export interface HttpCall {
 }
 
 /** The outcome of one dispatched http call, fed back to the reactor: a `result` (any HTTP response —
- *  `{ status, body }`, 2xx or not — → a delegateAck), an `error` (the request produced no response: DNS /
+ *  `{ status, headers, body }`, 2xx or not — → a delegateAck), an `error` (the request produced no response: DNS /
  *  connection / timeout / a refused recovery → a panic the reactor escalates), or a `cancelled`
  *  confirmation (→ terminateAck, after an `abort`). A late completion for an aborted call is harmless. */
 export interface HttpCompletion {
@@ -134,7 +134,16 @@ export class FetchHttpTransport implements HttpTransport {
       }
       const response = await fetch(request.url, init);
       const body = await response.text();
-      return { kind: "result", value: { status: response.status, body } };
+      // Response headers ride along (names lowercased by the platform; repeated headers arrive joined
+      // with ", ") — how a program reads a session token, a rate-limit hint, a redirect location.
+      const responseHeaders: { [name: string]: Json } = {};
+      response.headers.forEach((value, name) => {
+        responseHeaders[name] = value;
+      });
+      return {
+        kind: "result",
+        value: { status: response.status, headers: responseHeaders, body },
+      };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         return { kind: "cancelled" };

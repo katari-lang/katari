@@ -8,6 +8,20 @@
       "when": 1783346286513,
       "tag": "0000_initial_runtime_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1783409334595,
+      "tag": "0001_strong_gladiator",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783492847875,
+      "tag": "0002_polite_the_spike",
+      "breakpoints": true
     }
   ]
 }

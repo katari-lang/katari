@@ -171,6 +171,56 @@ export interface PersistedHttpInstance {
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
+/** The `mcp` instance extension write (`mcp_instances`) — just the call-specific `status`, behind an
+ *  `mcp`-kind instance envelope. Mirrors 'PersistedHttpInstanceRow': no argument is stored (recovery
+ *  never re-sends, and the connection is process-local anyway). */
+export interface PersistedMcpInstanceRow {
+  instanceId: InstanceId;
+  status: "running" | "cancelling" | "awaitingAnswer";
+}
+
+/** One in-flight mcp call a reactivation reads (envelope ⋈ `mcp_instances`), to fail at-most-once on
+ *  recovery (the connection died with the process, so gone work reports a typed `mcp.server_error`). */
+export interface PersistedMcpInstance {
+  delegation: DelegationId;
+  instance: InstanceId;
+  caller: ReactorName;
+  /** The run the call belongs to (its trace context), from the envelope. */
+  run: InstanceId;
+  status: "running" | "cancelling" | "awaitingAnswer";
+}
+
+/** The `webhook` instance extension write (`webhook_instances`) — the call-specific state behind a
+ *  `webhook`-kind instance envelope. Unlike `ffi` / `http` the payload IS persisted: the `token` (the
+ *  public URL's capability) and the `callback` (dispatched per delivery) must survive a restart; the
+ *  subscriber is not stored (dispatched exactly once — its inner delegation is durable core work). */
+export interface PersistedWebhookInstanceRow {
+  instanceId: InstanceId;
+  /** The snapshot the call dispatches its callback / subscriber against. */
+  snapshotId: SnapshotId;
+  token: string;
+  callback: Value;
+  status: "running" | "cancelling" | "awaitingAnswer";
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
+}
+
+/** One in-flight webhook call a reactivation reads (envelope ⋈ `webhook_instances`): the webhook reactor
+ *  rebuilds its warm call — and re-registers the token — keyed by `delegation` (from the envelope). */
+export interface PersistedWebhookInstance {
+  delegation: DelegationId;
+  instance: InstanceId;
+  snapshot: SnapshotId;
+  token: string;
+  callback: Value;
+  caller: ReactorName;
+  /** The run the call belongs to (its trace context), from the envelope. */
+  run: InstanceId;
+  status: "running" | "cancelling" | "awaitingAnswer";
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
+}
+
 /** The base-class write surface: the generic state every reactor's base owns — the instance envelope, the
  *  caller-owned delegations, the raiser-owned escalations, and the cascade drop. A concrete reactor never
  *  touches this directly; it goes through `Reactor.persistBase`, so the protocol is uniform (and a reactor
@@ -223,6 +273,17 @@ export interface HttpTx {
   putHttpInstance(row: PersistedHttpInstanceRow): Promise<void>;
 }
 
+/** The `webhook` reactor's *own-data* write surface — its `webhook_instances` extension (the envelope is
+ *  base). */
+export interface WebhookTx {
+  putWebhookInstance(row: PersistedWebhookInstanceRow): Promise<void>;
+}
+
+/** The `mcp` reactor's *own-data* write surface — its `mcp_instances` extension (the envelope is base). */
+export interface McpTx {
+  putMcpInstance(row: PersistedMcpInstanceRow): Promise<void>;
+}
+
 /** The `ResourcePool`'s write surface: the independent scope / blob-ownership resource. `owner` may be `null`
  *  (a value in transit between owners mid-ascent). */
 export interface PoolTx {
@@ -261,6 +322,8 @@ export interface PersistenceTx {
   api: ApiTx;
   ffi: FfiTx;
   http: HttpTx;
+  webhook: WebhookTx;
+  mcp: McpTx;
   pool: PoolTx;
   outbox: OutboxTx;
   journal: JournalTx;
@@ -317,6 +380,19 @@ export interface HttpLoader {
   instances(): Promise<PersistedHttpInstance[]>;
 }
 
+/** The `webhook` reactor's own-data read surface: its in-flight calls (envelope ⋈ `webhook_instances`),
+ *  to re-register their tokens (the endpoint survives a restart — unlike ffi / http there is no external
+ *  process to reconcile with; the subscriber resumes as durable core work). */
+export interface WebhookLoader {
+  instances(): Promise<PersistedWebhookInstance[]>;
+}
+
+/** The `mcp` reactor's own-data read surface: its in-flight calls (envelope ⋈ `mcp_instances`), to fail
+ *  at-most-once on recovery. */
+export interface McpLoader {
+  instances(): Promise<PersistedMcpInstance[]>;
+}
+
 /** The substrate's read surface: the undrained outbox, replayed into the mailbox so an in-flight event is not
  *  lost across a restart. */
 export interface OutboxLoader {
@@ -334,6 +410,8 @@ export interface Loader {
   api: ApiLoader;
   ffi: FfiLoader;
   http: HttpLoader;
+  webhook: WebhookLoader;
+  mcp: McpLoader;
   outbox: OutboxLoader;
 }
 
@@ -387,6 +465,12 @@ export const NO_OP_TX: PersistenceTx = {
   http: {
     async putHttpInstance() {},
   },
+  webhook: {
+    async putWebhookInstance() {},
+  },
+  mcp: {
+    async putMcpInstance() {},
+  },
   pool: {
     async putScope() {},
     async deleteScope() {},
@@ -427,6 +511,16 @@ const EMPTY_LOADER: Loader = {
     },
   },
   http: {
+    async instances() {
+      return [];
+    },
+  },
+  webhook: {
+    async instances() {
+      return [];
+    },
+  },
+  mcp: {
     async instances() {
       return [];
     },

@@ -1,0 +1,38 @@
+// Dynamic inbound endpoints, end to end — self-contained: `webhook.inbound` mints a fresh public
+// URL and serves it for the extent of a SUBSCRIBER, converting every POST into a call of a CALLBACK
+// (the JSON body validated against the callback's signature, the callback's result the JSON
+// response). Here the subscriber "registers" the URL by calling it itself with the built-in http
+// client, so the whole loop — mint → deliver → validate → run → respond → deactivate — runs with no
+// external service. A real subscriber registers the URL with a push API instead (a calendar, a
+// repository's webhook settings) and stays subscribed until cancelled.
+
+@"The delivery handler: doubles the delivered value. A POST whose body is not `{\"value\": <integer>}`
+is rejected with 400 at the boundary — this never runs on a malformed delivery."
+agent double(value: integer) -> integer {
+  value * 2
+}
+
+@"The subscriber: receives the minted URL, POSTs to it twice (each delivery runs `double` and the
+response body is its result), then returns — which deactivates the endpoint and makes this summary
+the run's result."
+agent self_subscriber(url: string) -> string {
+  let first = deliver(url = url, value = 21)
+  let second = deliver(url = url, value = 4)
+  f"delivered: ${first} and ${second}"
+}
+
+@"POST one `{\"value\": …}` body to the endpoint and return the response body text."
+agent deliver(url: string, value: integer) -> string {
+  let response = http.fetch(
+    url = url,
+    method = "POST",
+    headers = record.empty(),
+    body = json.to_text(value = { value = value }),
+  )
+  response.body
+}
+
+@"Serve a fresh endpoint for the extent of `self_subscriber`: expect `delivered: 42 and 8`."
+agent main() -> string {
+  webhook.inbound(callback = double, subscriber = self_subscriber)
+}

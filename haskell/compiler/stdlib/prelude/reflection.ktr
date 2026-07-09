@@ -1,5 +1,12 @@
-// The `prelude.ai` sub-module: the bridge that lets an AI treat agents as tools. Called qualified
-// via the default import — `ai.get_metadata`, `ai.call_agent`, type `ai.agent_metadata`.
+// The `prelude.reflection` sub-module: agents as first-class, inspectable values. Called qualified
+// via the default import — `reflection.get_metadata`, `reflection.call_agent`, type
+// `reflection.agent_metadata`.
+//
+// The two primitives close one loop: `get_metadata` reads a callable's public signature (so an AI
+// can be shown what a tool accepts) and `call_agent` dispatches a callable value with a
+// runtime-built argument (so an AI's pick can be invoked). Callables whose public signature is
+// decided at RUNTIME — an MCP server's tools (`prelude.mcp`) — are minted by the runtime itself and
+// participate in both exactly like compiled agents: a tool IS an agent.
 //
 // `get_metadata` derives a callable value's public signature — its qualified name, its `@"..."`
 // description, and the JSON Schemas of its input / output / requests, each schema already a `json`
@@ -27,8 +34,9 @@ data agent_metadata(
 )
 
 @"Derive `agent_metadata` from a callable value (a top-level agent, a data constructor, a request, an
-external, or a local closure). A generic callable instantiated with `[T]` yields schemas specialised
-to the instantiation."
+external, a local closure, or a runtime-minted tool such as an MCP server's). A generic callable
+instantiated with `[T]` yields schemas specialised to the instantiation; a runtime-minted tool yields
+the name / description / input schema its provider declared."
 primitive agent get_metadata(value: agent never -> unknown with all) -> agent_metadata
 
 @"A dynamic dispatch failed before the target ran: the target is not a callable, or `args` does not

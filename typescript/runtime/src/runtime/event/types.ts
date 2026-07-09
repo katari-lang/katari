@@ -68,14 +68,23 @@ export type InternalEvent =
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
   | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string }
-  | { kind: "external"; key: string; snapshot: SnapshotId };
+  | {
+      kind: "external";
+      key: string;
+      snapshot: SnapshotId;
+      /** A reactor-backed `tool` value's execution context, riding the target out-of-band (the value
+       *  analog of a closure's `scopeId`). Absent for a compiled `external agent` call. */
+      context?: Value;
+    };
 
 /** Which reactor an external event originates from / is destined for. An event is self-routing: the
  *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
  *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. `ffi` runs FFI
  *  (sidecar) handlers, `http` the built-in http client — an external call is a `delegate` to one of them,
- *  exactly like a core sub-call. */
-export type ReactorName = "core" | "api" | "ffi" | "http";
+ *  exactly like a core sub-call, `webhook` the dynamically generated inbound endpoints
+ *  (`webhook.inbound` — the outside world calling the program), and `mcp` the built-in MCP client
+ *  (`prelude.mcp.*` — connect / list / call against an MCP server). */
+export type ReactorName = "core" | "api" | "ffi" | "http" | "webhook" | "mcp";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =

@@ -13,6 +13,7 @@
 //   file handle     { "$ref": blobId, "semanticKind": …, "size": …, "hash": …, "contentType"? }
 //   agent reference { "$agent": name, "snapshot": …, "generics"? }
 //   closure         { "$closure": blockId, "scopeId": …, "snapshot": …, "module": …, "generics"? }
+//   tool            { "$tool": name, "description": …, "inputSchema": …, "target": <callable> }
 //   bare record     { …escaped keys }              (no reserved key present)
 //
 // A bare record's own `$`-keys travel escaped (leading `$` doubled); this layer unescapes on decode and
@@ -27,6 +28,7 @@ import {
   type Json,
   REDACTED_KEY,
   SEMANTIC_KIND_KEY,
+  TOOL_KEY,
   unescapeRecordKey,
   VALUE_KEY,
 } from "@katari-lang/types";
@@ -146,19 +148,21 @@ export class KatariData<Value = unknown> {
   ) {}
 }
 
-/** A callable Katari value (a top-level agent reference or a closure) received across the FFI boundary.
- *  `call` runs it back inside the runtime — the generic dynamic dispatch, carrying the reference's own
- *  snapshot and generics — and resolves with the decoded result. */
+/** A callable Katari value (a top-level agent reference, a closure, or an `as_tool` tool) received
+ *  across the FFI boundary. `call` runs it back inside the runtime — the generic dynamic dispatch,
+ *  carrying the reference's own snapshot and generics (a tool validates the argument against its
+ *  attached schema at the runtime's delegation boundary) — and resolves with the decoded result. */
 export class KatariAgent {
   constructor(
     private readonly raw: Json,
     private readonly binding: ValueBinding,
   ) {}
 
-  /** The agent's qualified name, when this is a named reference (`undefined` for a closure). */
+  /** The callable's name: an agent reference's qualified name, or a tool's attached name
+   *  (`undefined` for a closure). */
   get name(): string | undefined {
     const wire = this.wire();
-    const name = wire === undefined ? undefined : wire[AGENT_KEY];
+    const name = wire === undefined ? undefined : (wire[AGENT_KEY] ?? wire[TOOL_KEY]);
     return typeof name === "string" ? name : undefined;
   }
 
@@ -207,7 +211,11 @@ export function decodeWireValue(json: Json, binding: ValueBinding): KatariValue 
       ? new KatariString(handle, binding)
       : new KatariFile(handle, binding);
   }
-  if (Object.hasOwn(json, AGENT_KEY) || Object.hasOwn(json, CLOSURE_KEY)) {
+  if (
+    Object.hasOwn(json, AGENT_KEY) ||
+    Object.hasOwn(json, CLOSURE_KEY) ||
+    Object.hasOwn(json, TOOL_KEY)
+  ) {
     return new KatariAgent(json, binding);
   }
   if (Object.hasOwn(json, REDACTED_KEY)) {

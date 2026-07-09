@@ -721,9 +721,15 @@ buildElementBlock element = do
 -- the callee value via 'lowerTypeApplication' instead) is stamped onto the delegate as runtime schemas,
 -- exactly like an 'OperationApplyGenerics' would carry them.
 lowerCall :: AST.CallExpression AST.Typed -> Lower VariableId
-lowerCall callExpression = do
+lowerCall callExpression = delegateCall callExpression []
+
+-- | Delegate a call expression's callee with the argument record built from its labelled arguments
+-- joined with any synthetic extra entries — the @use@ call-provider path adds its continuation closure
+-- this way, so it emits the exact delegate a directly written call would.
+delegateCall :: AST.CallExpression AST.Typed -> List (Text, VariableId) -> Lower VariableId
+delegateCall callExpression extraEntries = do
   target <- calleeReference callExpression.callee
-  argumentVariable <- buildArgumentRecord callExpression.arguments
+  argumentVariable <- buildArgumentRecord callExpression.arguments extraEntries
   context <- asks (.context)
   let generics =
         mapMaybe
@@ -738,11 +744,11 @@ calleeReference callee = case topLevelCalleeName callee of
   Just qualifiedName -> pure (CalleeName qualifiedName)
   Nothing -> CalleeValue <$> lowerExpression callee
 
-buildArgumentRecord :: List (AST.CallArgument AST.Typed) -> Lower VariableId
-buildArgumentRecord arguments = do
+buildArgumentRecord :: List (AST.CallArgument AST.Typed) -> List (Text, VariableId) -> Lower VariableId
+buildArgumentRecord arguments extraEntries = do
   entries <- mapM (\argument -> do value <- lowerExpression argument.value; pure (argument.name, value)) arguments
   output <- freshVariableId
-  emit (OperationMakeRecord MakeRecordOperation {entries = entries, output = output})
+  emit (OperationMakeRecord MakeRecordOperation {entries = entries <> extraEntries, output = output})
   pure output
 
 -- | @callee[args]@: attach the generic substitution to the callee value (for @get_metadata@ schema
@@ -1050,7 +1056,14 @@ lowerUse useStatement = do
   continuationBlock <- freshBlockId
   argumentVariable <- freshVariableId
   (completion, operations) <- withFreshOperations $ do
-    binderLocals <- maybe (pure []) (destructurePattern argumentVariable) useStatement.binder
+    -- The continuation is called with the protocol record @{value: A}@ (see the checker's
+    -- 'continuationAgentType'); the binder binds the @value@ FIELD, not the whole protocol record.
+    binderLocals <- case useStatement.binder of
+      Nothing -> pure []
+      Just binderPattern -> do
+        valueVariable <- freshVariableId
+        emit (OperationGetField GetFieldOperation {source = argumentVariable, field = "value", output = valueVariable})
+        destructurePattern valueVariable binderPattern
     withLocals binderLocals (lowerBlockValue useStatement.body)
   continuationBodyBlock <- freshBlockId
   recordBlock
@@ -1061,14 +1074,21 @@ lowerUse useStatement = do
   recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema, description = "", defaults = mempty}) mempty (Just "use.continuation")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = continuationBlock})
-  provider <- lowerExpression useStatement.provider
-  -- The provider is called like any agent: its argument record carries the continuation under the
-  -- protocol field @continuation@ (matching its declared type, which the delegate boundary validates).
-  wrappedVariable <- freshVariableId
-  emit (OperationMakeRecord MakeRecordOperation {entries = [("continuation", closureVariable)], output = wrappedVariable})
-  output <- freshVariableId
-  emit (OperationDelegate DelegateOperation {target = CalleeValue provider, argument = wrappedVariable, output = Just output, generics = mempty})
-  pure output
+  case useStatement.provider of
+    -- A call provider is ONE application: the checker typed the callee against the written arguments
+    -- joined with the continuation, so the same joined record is delegated here — @use p(x = 1)@ emits
+    -- exactly the delegate of @p(x = 1, continuation = <closure>)@ (generics stamped and all).
+    AST.ExpressionCall callExpression ->
+      delegateCall callExpression [("continuation", closureVariable)]
+    _ -> do
+      provider <- lowerExpression useStatement.provider
+      -- The provider is called like any agent: its argument record carries the continuation under the
+      -- protocol field @continuation@ (matching its declared type, which the delegate boundary validates).
+      wrappedVariable <- freshVariableId
+      emit (OperationMakeRecord MakeRecordOperation {entries = [("continuation", closureVariable)], output = wrappedVariable})
+      output <- freshVariableId
+      emit (OperationDelegate DelegateOperation {target = CalleeValue provider, argument = wrappedVariable, output = Just output, generics = mempty})
+      pure output
 
 ---------------------------------------------------------------------------------------------------
 -- Patterns

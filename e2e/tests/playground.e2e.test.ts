@@ -8,11 +8,16 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
 
@@ -204,6 +209,74 @@ test("basics.main: data/match, for, parallel for, handlers, prelude", async () =
 test("tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
   const { stdout } = await katari(["run", "tools.main", "--project", "playground"]);
   expect(stdout).toContain("result=5");
+});
+
+test("webhook.main: a minted inbound URL serves validated deliveries, then deactivates", async () => {
+  const { stdout } = await katari(["run", "webhook.main", "--project", "playground"]);
+  // The subscriber POSTed {value:21} and {value:4} to its own minted URL; each delivery ran the
+  // callback (doubling) and the response body came back as the result text.
+  expect(stdout).toContain("delivered: 42 and 8");
+});
+
+test("mcp_demo.main: the built-in MCP client mints the server's tools as agents", async () => {
+  // A real MCP server on a loopback port (stateless streamable HTTP: a fresh server + transport per
+  // request), exposing one `add` tool. The playground program lists it with `mcp.tools(url = ...)`,
+  // reads each minted agent's metadata, and dispatches `add` through `reflection.call_agent`.
+  const readBody = (request: IncomingMessage): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      let raw = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => {
+        raw += chunk;
+      });
+      request.on("end", () => {
+        try {
+          resolve(raw === "" ? undefined : JSON.parse(raw));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+      request.on("error", reject);
+    });
+  const mcpHttp = createServer((request, response) => {
+    void (async () => {
+      const mcp = new McpServer({ name: "katari-e2e", version: "1.0.0" });
+      mcp.registerTool(
+        "add",
+        { description: "Adds two integers.", inputSchema: { x: z.number(), y: z.number() } },
+        ({ x, y }) => ({ content: [{ type: "text", text: String(x + y) }] }),
+      );
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      response.on("close", () => {
+        void transport.close();
+        void mcp.close();
+      });
+      await mcp.connect(transport);
+      await transport.handleRequest(request, response, await readBody(request));
+    })().catch(() => {
+      if (!response.headersSent) response.writeHead(500).end();
+    });
+  });
+  await new Promise<void>((resolve) => mcpHttp.listen(0, "127.0.0.1", resolve));
+  try {
+    const port = (mcpHttp.address() as AddressInfo).port;
+    const { stdout } = await katari([
+      "run",
+      "mcp_demo.main",
+      "--project",
+      "playground",
+      "--arg",
+      JSON.stringify({ url: `http://127.0.0.1:${port}/mcp` }),
+    ]);
+    // The minted agent advertised the server-declared name, and the dynamic dispatch returned 19+23.
+    expect(stdout).toContain("tools=add");
+    expect(stdout).toContain("42");
+  } finally {
+    mcpHttp.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      mcpHttp.close(() => resolve());
+    });
+  }
 });
 
 test("errors.main: typed throw caught, panic caught, missing-secret fallback", async () => {

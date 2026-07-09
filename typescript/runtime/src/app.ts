@@ -8,6 +8,7 @@ import { bearerAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { requestContext } from "./middleware/request-context.js";
+import { inboundRoutes } from "./modules/webhook/webhook.routes.js";
 import { apiRoutes } from "./routes.js";
 import type { AppEnv } from "./types/app-env.js";
 
@@ -22,7 +23,9 @@ export function createApp() {
   // Global middleware (order matters: context first so logging/ids are set).
   app.use("*", requestContext);
   app.use("*", secureHeaders());
-  app.use("*", cors({ origin: config.corsOrigin }));
+  // `X-Total-Count` (the paged-list total) must be exposed, or a cross-origin console cannot read it off
+  // the response — same-origin (the baked-in console) can already, but a separately-hosted one needs this.
+  app.use("*", cors({ origin: config.corsOrigin, exposeHeaders: ["X-Total-Count"] }));
 
   // Bearer auth on every request (KATARI_API_KEY is required at boot). It exempts /api/v1/health and the
   // console's static assets — see `auth.ts`.
@@ -31,6 +34,10 @@ export function createApp() {
   // Boundaries.
   app.onError(errorHandler);
   app.notFound(notFound);
+
+  // The public inbound-webhook endpoints (`webhook.inbound`'s minted URLs). Outside `/api`, so
+  // `bearerAuth` passes them through — the unguessable token is the capability (see `webhook.routes.ts`).
+  app.route("/inbound", inboundRoutes);
 
   const api = app.route("/api/v1", apiRoutes);
 

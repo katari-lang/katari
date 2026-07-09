@@ -47,7 +47,7 @@ import {
   newInstanceId,
 } from "../ids.js";
 import { jsonToValue } from "../value/codec.js";
-import type { Value } from "../value/types.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
 import { messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { Reactor } from "./reactor.js";
@@ -190,6 +190,18 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
    *  whose transport never opens inner delegations (http) never has one staged. */
   protected deliverInnerOutcome(_delivery: InnerDelivery): void {}
 
+  /** A call resolved and is being dropped — a concrete reactor releases the per-call state it indexes
+   *  outside the base (the webhook reactor's token registry). Default no-op. */
+  protected onDropCall(_delegation: DelegationId): void {}
+
+  /** Shape a call's `result` completion into the value its `delegateAck` carries — a concrete reactor's
+   *  seam for results that are assembled FROM the call rather than by the transport (the mcp reactor
+   *  mints the toolbox here, from the transport's tool listing + the call's original argument values,
+   *  so privacy markers the wire cannot carry survive). Default: the decoded value unchanged. */
+  protected transformResult(_delegation: DelegationId, value: Value): Value {
+    return value;
+  }
+
   /** The instance handling `delegation`, or `undefined` — for a concrete reactor that owns per-call resources
    *  (an ffi call's produced blob) to attribute them to the right instance. Reads the base received edge. */
   protected callInstance(delegation: DelegationId): InstanceId | undefined {
@@ -223,15 +235,17 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   // ─── inner delegations (the callee calling other agents) ────────────────────────────────────────
 
   /** Open an inner delegation from a live call: issue an ordinary `delegate` with the call's instance as its
-   *  caller (the base opens the caller-owned row) and bridge it to the transport's `call` token. Returns the
-   *  delegation id, or `null` when the call cannot accept new work (gone, cancelling, or already settled) —
-   *  the concrete then fails the token back to the transport directly. */
+   *  caller (the base opens the caller-owned row) and bridge it to the transport's `call` token. `generics`
+   *  is the callee value's resolved instantiation (a `value` callee carries its own), recorded as the new
+   *  instance's ambient substitution. Returns the delegation id, or `null` when the call cannot accept new
+   *  work (gone, cancelling, or already settled) — the concrete then fails the token back to the transport. */
   protected openInnerDelegation(
     parent: DelegationId,
     target: DelegateTarget,
     to: ReactorName,
     argument: Value | null,
     call: string,
+    generics?: GenericSubstitution,
   ): DelegationId | null {
     const parentCall = this.calls.get(parent);
     if (
@@ -248,7 +262,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.dirty.add(parent);
     // An inner delegation stays inside the parent call's run — its trace context is the call's ambient.
     this.send(
-      { kind: "delegate", delegation, target, argument, from: this.name, to, run },
+      {
+        kind: "delegate",
+        delegation,
+        target,
+        argument,
+        ...(generics !== undefined ? { generics } : {}),
+        from: this.name,
+        to,
+        run,
+      },
       instance,
     );
     return delegation;
@@ -496,7 +519,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
           {
             kind: "delegateAck",
             delegation,
-            value: jsonToValue(outcome.value),
+            value: this.transformResult(delegation, jsonToValue(outcome.value)),
             from: this.name,
             to: caller,
             run,
@@ -711,6 +734,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   }
 
   private drop(delegation: DelegationId): void {
+    this.onDropCall(delegation);
     const instance = this.handledInstanceOf(delegation);
     if (instance !== undefined) {
       this.droppedInstances.push(instance);

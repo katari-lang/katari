@@ -47,7 +47,14 @@ describe("FetchHttpTransport", () => {
       requestCall({ url: "https://example.test/ping", method: "GET", headers: {}, body: "" }),
     );
 
-    expect(completion.outcome).toEqual({ kind: "result", value: { status: 200, body: "pong" } });
+    expect(completion.outcome).toEqual({
+      kind: "result",
+      value: {
+        status: 200,
+        headers: { "content-type": "text/plain;charset=UTF-8" },
+        body: "pong",
+      },
+    });
     const init = fetchMock.mock.calls[0]?.[1];
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://example.test/ping");
     expect(init?.method).toBe("GET");
@@ -93,7 +100,14 @@ describe("FetchHttpTransport", () => {
       transport,
       requestCall({ url: "https://example.test/missing", method: "GET", headers: {}, body: "" }),
     );
-    expect(completion.outcome).toEqual({ kind: "result", value: { status: 404, body: "nope" } });
+    expect(completion.outcome).toEqual({
+      kind: "result",
+      value: {
+        status: 404,
+        headers: { "content-type": "text/plain;charset=UTF-8" },
+        body: "nope",
+      },
+    });
   });
 
   test("a request that produces no response is an error", async () => {
@@ -154,7 +168,11 @@ describe("FetchHttpTransport", () => {
     await vi.waitFor(() => expect(completions).toHaveLength(1));
     expect(completions[0]?.outcome).toEqual({
       kind: "result",
-      value: { status: 200, body: "late" },
+      value: {
+        status: 200,
+        headers: { "content-type": "text/plain;charset=UTF-8" },
+        body: "late",
+      },
     });
   });
 

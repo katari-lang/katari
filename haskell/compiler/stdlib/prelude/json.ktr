@@ -99,3 +99,45 @@ validate the result against T's schema as a separate strict check. Instantiate T
 appears only in the result, so it cannot be inferred) — `json.decode[unknown]` reads without a
 shape. A schema mismatch throws `decode_error` naming the offending path."
 primitive agent decode[T](value: json) -> T with prelude.throw[decode_error]
+
+// The tree readers — plain Katari over the `json` union, for picking values out of a document of
+// unknown or irregular shape (an AI reply, a third-party API response) without a `match` dance at
+// every step. Each reader is TOTAL: a missing key, an out-of-range index or a wrong shape yields
+// `json_null()` / `""` rather than an error, so probes chain freely — `text(node = field(node =
+// element(node = parsed, index = 0), key = "content"))` — and absence is checked once, at the end,
+// where it matters. For a document whose shape IS known, prefer the typed boundary
+// (`parse_as[T]` / `decode[T]`), which validates instead of defaulting.
+
+@"Fold a nullable json read (`record.get` / `array.get`, typed `json | null`) back into `json`:
+a missing value becomes `json_null()`. Matching the `null` arm narrows the residual to `json`, so the
+fallthrough binds `present` at `json` and returns it unchanged."
+agent or_null(value: json | null) -> json {
+  match (value) {
+    case null -> json_null()
+    case present -> present
+  }
+}
+
+@"The child at object key @key@ (`json_null()` if @node@ is not an object or has no such key)."
+agent field(node: json, key: string) -> json {
+  match (node) {
+    case json_object(entries => entries) -> or_null(value = record.get(target = entries, key = key))
+    case _ -> json_null()
+  }
+}
+
+@"The element at array index @index@ (`json_null()` if @node@ is not an array or @index@ is out of range)."
+agent element(node: json, index: integer) -> json {
+  match (node) {
+    case json_array(items => items) -> or_null(value = array.get(target = items, index = index))
+    case _ -> json_null()
+  }
+}
+
+@"The string @node@ holds (the empty string if it is not a `json_string`)."
+agent text(node: json) -> string {
+  match (node) {
+    case json_string(value => string_value) -> string_value
+    case _ -> ""
+  }
+}

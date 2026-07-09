@@ -257,7 +257,7 @@ export type ExternalThread = ThreadBase & {
   /** The reactor this proxy's callee runs in — `ffi` (a sidecar handler) or `http` (the built-in fetch).
    *  Copied from the external block's `reactor` marker at spawn, so the proxy's downward legs (its
    *  `delegate` / `terminate`) route to the right reactor without re-reading the block. */
-  reactor: "ffi" | "http";
+  reactor: "ffi" | "http" | "webhook" | "mcp";
 };
 
 // ─── Cancel exits ─────────────────────────────────────────────────────────────────────────────
@@ -289,7 +289,7 @@ export type InstanceStatus = "running" | "cancelling";
  *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. Api-targeted events
  *  route to the `ApiReactor` by the substrate's `event.to`, not by any caller-id comparison here; that is
  *  why there is no `ApiInstance` in the engine model below. */
-export type InstanceKind = "core" | "api" | "ffi" | "http";
+export type InstanceKind = "core" | "api" | "ffi" | "http" | "webhook" | "mcp";
 
 /**
  * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right

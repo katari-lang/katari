@@ -116,10 +116,12 @@ describe("SnapshotFfiTransport", () => {
       kind: "delegate",
       delegation: "d1" as DelegationId,
       call: "t1",
-      agent: "main.helper",
+      callee: { kind: "named", agent: "main.helper" },
       argument: null,
     });
-    expect(delegates).toMatchObject([{ delegation: "d1", call: "t1", agent: "main.helper" }]);
+    expect(delegates).toMatchObject([
+      { delegation: "d1", call: "t1", callee: { kind: "named", agent: "main.helper" } },
+    ]);
 
     transport.deliverDelegateResult({
       delegation: "d1" as DelegationId,

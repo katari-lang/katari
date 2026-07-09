@@ -36,7 +36,6 @@ import {
   type ReactorName,
 } from "../event/types.js";
 import {
-  type DelegationId,
   type InstanceId,
   newEscalationId,
   type ProjectId,
@@ -45,7 +44,7 @@ import {
 } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
-import type { GenericSubstitution, Value } from "../value/types.js";
+import type { Value } from "../value/types.js";
 import {
   conformValue,
   fillGenericSchema,
@@ -155,36 +154,16 @@ export class CoreReactor extends Reactor {
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
   protected async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
-    // A `call_agent` delegate is pure indirection: unwrap it to the callable its argument carries and run
-    // *that*, under the same delegation (so the caller's proxy, escalation relays and cancel cascade see an
-    // ordinary sub-call). The loop unwraps a nested `call_agent(target = call_agent, ...)` too; each round
-    // descends into the argument record, so it terminates. A malformed argument throws `ai.call_error` —
-    // the dynamic dispatch failed before the target ran, which a tool loop anticipates (and may retry).
-    let target = event.target;
-    let argument = event.argument;
-    let generics = event.generics;
-    let dynamicDispatch = false;
-    while (target.kind === "named" && target.name === CALL_AGENT_NAME) {
-      dynamicDispatch = true;
-      const unwrapped = unwrapCallAgent(argument);
-      if ("error" in unwrapped) {
-        this.raiseThrow(
-          event.delegation,
-          errorData(CALL_ERROR, unwrapped.error),
-          event.from,
-          event.run,
-        );
-        return;
-      }
-      target = unwrapped.target;
-      argument = unwrapped.argument;
-      generics = unwrapped.generics;
-    }
-    // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
+    // Dynamic dispatch (`call_agent`, a callee VALUE, a tool) is resolved where the call is EMITTED —
+    // the engine's delegate operation, the FFI / webhook boundaries — so a delegate arriving here is
+    // already a concrete named / closure target for core to summon. (An external target routes to its
+    // own reactor, never here.)
+    const target = event.target;
+    const argument = event.argument;
+    const generics = event.generics;
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
-    // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it to the caller:
-    // a panic for a static entry, `ai.call_error` when the name arrived through a `call_agent` unwrap (the
-    // AI-supplied target is the anticipated failure). A *transient* infra failure (a `TransientError` — an
+    // agent — e.g. a bad qualified name from a run command, or a stale `$agent` reference) is a program
+    // failure, so fail it to the caller as a panic. A *transient* infra failure (a `TransientError` — an
     // IR DB read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from
     // durable state (failing it would wrongly fail the run forever). Neither failure path opens a row or
     // needs a turn owner, so it births no instance.
@@ -194,30 +173,32 @@ export class CoreReactor extends Reactor {
       resolved = this.resolveTarget(target);
     } catch (error) {
       if (isTransientError(error)) throw error;
-      this.failDelegate(dynamicDispatch, event.delegation, messageOf(error), event.from, event.run);
+      this.raisePanic(event.delegation, messageOf(error), event.from, event.run);
       return;
     }
-    // The delegate acceptance check: the argument must conform to the target's input schema. Statically
-    // checked call sites conform by construction; this is the enforcement point for every *dynamic* entry —
-    // a run command's JSON argument (violation = panic; there is no handler above the root anyway) or a
-    // `call_agent` args record (violation = `ai.call_error`, so the tool loop can catch it and retry).
-    // The argument is passed through unchanged: the codec already decoded it, and this is a pure check,
-    // never a rewrite.
+    // The delegate acceptance check: the argument must conform to the target's input schema. This is the
+    // enforcement point for every *dynamic* entry — a `call_agent` args record, a run command's JSON
+    // argument, a webhook delivery's body — and it validates the argument against the CALLEE's own schema
+    // as the callee is summoned, so validation is the callee's regardless of who is calling. A mismatch is
+    // an anticipated, recoverable error (`reflection.call_error`, a throw a caller may catch), never a panic;
+    // a statically checked call site conforms by construction, so this never fires for one. The argument is
+    // passed through unchanged: the codec already decoded it, and this is a pure check, never a rewrite.
     const targetBlock = this.ir
       .access(resolved.snapshot, moduleOf(target))
       .block(resolved.agentBlockId).block;
     if (targetBlock.kind === "agent") {
       const substitution = typeSubstitutionOf(targetBlock.schema.genericBindings, generics);
       const inputSchema = fillGenericSchema(substitution, targetBlock.schema.input);
-      // Strict acceptance: the codec already decoded the argument (a total, blind bijection); this only
-      // checks it against the input schema, never rewrites it. A missing argument is checked as an empty
-      // record — an agent with no required input accepts it, a data / required-field input rightly fails.
+      // A missing argument is checked as an empty record — an agent with no required input accepts it, a
+      // data / required-field input rightly fails.
       const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
       if (!check.ok) {
-        this.failDelegate(
-          dynamicDispatch,
+        this.raiseThrow(
           event.delegation,
-          `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
+          errorData(
+            CALL_ERROR,
+            `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
+          ),
           event.from,
           event.run,
         );
@@ -244,23 +225,6 @@ export class CoreReactor extends Reactor {
     // the child and runs it.
     this.acceptDelegation(event.delegation, instance.id, event.from, event.run);
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
-  }
-
-  /** Fail a delegate at the acceptance surface: `ai.call_error` when the target arrived through a
-   *  `call_agent` unwrap (a dynamic dispatch a tool loop anticipates and may catch), a panic otherwise
-   *  (a static call site conforms by construction, so reaching here means the program is broken). */
-  private failDelegate(
-    dynamicDispatch: boolean,
-    delegation: DelegationId,
-    message: string,
-    to: ReactorName,
-    run: InstanceId,
-  ): void {
-    if (dynamicDispatch) {
-      this.raiseThrow(delegation, errorData(CALL_ERROR, message), to, run);
-    } else {
-      this.raisePanic(delegation, message, to, run);
-    }
   }
 
   /** A core sub-call returned: the base has already retired the delegation; hand its value to the caller's
@@ -491,50 +455,8 @@ export class CoreReactor extends Reactor {
   }
 }
 
-/** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the acceptance surface, never
- *  summoned as an instance (its `BlockPrimitive` body exists only as a schema carrier). */
-const CALL_AGENT_NAME = "prelude.ai.call_agent";
-
-/** The domain error ctor a failed dynamic dispatch throws (`prelude/ai.ktr` declares it). */
-const CALL_ERROR = "prelude.ai.call_error";
-
-/** Read a `call_agent` argument record into the delegate it stands for: `target` (a callable value)
- *  becomes the delegate target (carrying its own generics), `args` becomes the argument. */
-function unwrapCallAgent(
-  argument: Value | null,
-):
-  | { target: DelegateTarget; argument: Value | null; generics?: GenericSubstitution }
-  | { error: string } {
-  if (argument === null || argument.kind !== "record") {
-    return { error: "call_agent: expected an argument record carrying { target, args }" };
-  }
-  const callable = argument.fields.target;
-  const args = argument.fields.args ?? null;
-  if (callable === undefined) {
-    return { error: 'call_agent: the argument record is missing "target"' };
-  }
-  if (callable.kind === "agent") {
-    return {
-      target: { kind: "named", name: callable.name, snapshot: callable.snapshot },
-      argument: args,
-      ...(callable.generics !== undefined ? { generics: callable.generics } : {}),
-    };
-  }
-  if (callable.kind === "closure") {
-    return {
-      target: {
-        kind: "closure",
-        blockId: callable.blockId,
-        scopeId: callable.scopeId,
-        snapshot: callable.snapshot,
-        module: callable.module,
-      },
-      argument: args,
-      ...(callable.generics !== undefined ? { generics: callable.generics } : {}),
-    };
-  }
-  return { error: `call_agent: "target" is not a callable value (got ${callable.kind})` };
-}
+/** The domain error ctor a failed dynamic dispatch throws (`prelude/reflection.ktr` declares it). */
+const CALL_ERROR = "prelude.reflection.call_error";
 
 /** A target's user-facing label for a panic message (a closure has no qualified name). */
 function describeTarget(target: DelegateTarget): string {

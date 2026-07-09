@@ -16,20 +16,25 @@ import type {
   Operation,
   VariableId,
 } from "@katari-lang/types";
-import type { AskKind, DelegateTarget, ModifierMap } from "../event/types.js";
+import type { AskKind, ModifierMap } from "../event/types.js";
 import { newDelegationId, type ScopeId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { liftPrivacy } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { completeThread } from "./common.js";
+import { CALL_AGENT_NAME, completeThread, raiseThrow } from "./common.js";
 import type { StepContext } from "./context.js";
+import { type DispatchResult, dispatchCallable } from "./dynamic-dispatch.js";
 import { matchPattern } from "./pattern.js";
 import { readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
 import { allocateAskId, allocateCallId, allocateThreadId } from "./store.js";
+import { errorData } from "./throw-signal.js";
 import type { SequenceThread, Thread } from "./types.js";
 
 const NULL_VALUE: Value = { kind: "null" };
+
+/** The domain error ctor a failed dynamic dispatch throws (`prelude/reflection.ktr` declares it). */
+const CALL_ERROR = "prelude.reflection.call_error";
 
 /**
  * Drive a sequence thread from its cursor: run synchronous ops in a tight loop, stop at the first op
@@ -155,6 +160,12 @@ function enterDelegate(
   operation: DelegateOperation,
 ): void {
   const resolved = resolveCallee(ctx, thread.scopeId, operation.target, operation.argument);
+  if ("throwPayload" in resolved) {
+    // The dynamic dispatch failed before anything ran — raise the catchable `reflection.call_error`
+    // (the thread suspends on the ask; a handler breaks out, or the run fails with the payload).
+    raiseThrow(ctx, thread, resolved.throwPayload);
+    return;
+  }
   // The delegate merges two substitution sources: what the callee VALUE carries (an explicit
   // `callee[T]` applied earlier via `applyGenerics`) and what THIS call site instantiated (inferred
   // by the checker, stamped on the operation). They are disjoint in practice — an already-applied
@@ -185,8 +196,10 @@ function enterDelegate(
     delegationId,
     relays: {},
   };
-  // A delegate emitted here is always a core sub-call: `resolveCallee` only yields `named` / `closure`
-  // targets, never `external` (external calls emit their own `delegate` to `ffi` / `http` from `createExternal`).
+  // The delegate routes to the resolved executor: `core` for a compiled callable, the tool's own
+  // reactor for a reactor-backed one (a `tool` value resolves to an `external` target + context, so
+  // its call goes straight to the reactor — no wrapper hop). Compiled `external agent` calls still
+  // emit their own `delegate` from `createExternal`; this site handles callee references and values.
   ctx.emit(
     {
       kind: "delegate",
@@ -195,47 +208,70 @@ function enterDelegate(
       argument: resolved.argument,
       ...(generics !== undefined ? { generics } : {}),
     },
-    "core",
+    resolved.to,
   );
 }
 
-/** Resolve a callee reference + its argument variable into a delegate target. A name resolves within
- *  this instance's snapshot; a value is an agent / closure carrying its own snapshot and generics. */
+/** Resolve a callee reference + its argument variable into the delegate it stands for. Dynamic dispatch
+ *  is resolved HERE, at the emit site: a callee VALUE (and `reflection.call_agent`, whose argument
+ *  carries the callable) goes through the shared `dispatchCallable`, so a tool's runtime schema is
+ *  validated before anything is emitted and the delegate routes straight to its executor. A dispatch
+ *  failure (a non-callable value, a tool schema violation) is the anticipated dynamic-dispatch error:
+ *  it resolves to `{ throwPayload }`, which `enterDelegate` raises as a catchable
+ *  `reflection.call_error` instead of delegating. */
 function resolveCallee(
   ctx: StepContext,
   scope: ScopeId,
   callee: CalleeReference,
   argumentVariable: VariableId,
-): { target: DelegateTarget; argument: Value; generics?: GenericSubstitution } {
+): DispatchResult | { throwPayload: Value } {
   const argument = requireVariable(ctx, scope, argumentVariable);
-  if (callee.kind === "name") {
+  if (callee.kind === "name" && callee.name !== CALL_AGENT_NAME) {
     return {
       target: { kind: "named", name: callee.name, snapshot: ctx.ir.snapshot },
       argument,
+      to: "core",
     };
   }
-  const value = requireVariable(ctx, scope, callee.variable);
-  if (value.kind === "agent") {
-    return {
-      target: { kind: "named", name: value.name, snapshot: value.snapshot },
-      argument,
-      ...(value.generics !== undefined ? { generics: value.generics } : {}),
-    };
+  // The callable being dispatched: the callee value itself, or — for a `call_agent(target, args)`
+  // call — the callable its argument record carries. `call_agent` may nest (a tool list holding
+  // `call_agent` itself), so peeling loops.
+  let callable: Value;
+  let args: Value | null;
+  if (callee.kind === "name") {
+    const peeled = peelCallAgent(argument);
+    if ("error" in peeled) return { throwPayload: errorData(CALL_ERROR, peeled.error) };
+    callable = peeled.callable;
+    args = peeled.args;
+  } else {
+    callable = requireVariable(ctx, scope, callee.variable);
+    args = argument;
   }
-  if (value.kind === "closure") {
-    return {
-      target: {
-        kind: "closure",
-        blockId: value.blockId,
-        scopeId: value.scopeId,
-        snapshot: value.snapshot,
-        module: value.module,
-      },
-      argument,
-      ...(value.generics !== undefined ? { generics: value.generics } : {}),
-    };
+  while (callable.kind === "agent" && String(callable.name) === CALL_AGENT_NAME) {
+    const peeled = peelCallAgent(args);
+    if ("error" in peeled) return { throwPayload: errorData(CALL_ERROR, peeled.error) };
+    callable = peeled.callable;
+    args = peeled.args;
   }
-  throw new Error(`delegate target is not a callable value (kind "${value.kind}")`);
+  const dispatched = dispatchCallable(callable, args);
+  if ("error" in dispatched) {
+    return { throwPayload: errorData(CALL_ERROR, dispatched.error) };
+  }
+  return dispatched;
+}
+
+/** Read a `call_agent` argument record into the callable + args it carries. */
+function peelCallAgent(
+  argument: Value | null,
+): { callable: Value; args: Value | null } | { error: string } {
+  if (argument === null || argument.kind !== "record") {
+    return { error: "call_agent: expected an argument record carrying { target, args }" };
+  }
+  const callable = argument.fields.target;
+  if (callable === undefined) {
+    return { error: 'call_agent: the argument record is missing "target"' };
+  }
+  return { callable, args: argument.fields.args ?? null };
 }
 
 /** Raise a `return` / `break` / `break-for` exit, by the role of the block it targets. */

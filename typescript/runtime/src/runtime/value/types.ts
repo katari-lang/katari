@@ -12,7 +12,7 @@
 // transport (warn / redact on emission), and by logging (redaction). The flag is preserved across
 // every operation that reproduces the value as-is.
 
-import type { BlockId, GenericArgumentSchema, QualifiedName } from "@katari-lang/types";
+import type { BlockId, GenericArgumentSchema, JSONSchema, QualifiedName } from "@katari-lang/types";
 import type { BlobId, ScopeId, SnapshotId } from "../ids.js";
 
 /** The privacy SSoT: when true, the value is treated as private at rest, in transit, and in logs. */
@@ -36,6 +36,7 @@ export type Value = (
   | BlobRefValue
   | ClosureValue
   | AgentValue
+  | ToolValue
 ) &
   PrivacyMarker;
 
@@ -79,4 +80,33 @@ export type AgentValue = {
   name: QualifiedName;
   snapshot: SnapshotId;
   generics?: GenericSubstitution;
+};
+
+/**
+ * A reactor-backed agent: the value-level mirror of an `external agent` declaration, minted only by
+ * the runtime (an MCP server's tool — `prelude.mcp.tools` mints one per server tool). Where a named
+ * agent references compiled code and a closure references a block + captured scope, a tool references
+ * a REACTOR (`reactor` + the reactor-scoped `name`) + an opaque `context` the reactor needs to
+ * execute (an MCP tool carries its server descriptor — url + headers). `get_metadata` reads the
+ * attached runtime-decided signature; a call validates its argument against `inputSchema` where the
+ * dispatch is emitted (mismatch = `reflection.call_error`), then delegates DIRECTLY to the reactor —
+ * the argument passes through verbatim, the context rides the delegate target out-of-band (exactly
+ * like a closure's captured scope).
+ */
+export type ToolValue = {
+  kind: "tool";
+  /** The reactor that executes a call — the tool's implementation home (`"mcp"` today). */
+  reactor: string;
+  /** The reactor-scoped dispatch key AND the public metadata name (an MCP server's tool name). */
+  name: string;
+  description: string;
+  /** Opaque, reactor-owned execution context (an MCP tool: `{url, headers}`, headers private —
+   *  the privacy marker rides, so persistence seals it and user-facing boundaries redact it). */
+  context: Value;
+  /** The snapshot the tool was minted under (rides the external delegate target; informational). */
+  snapshot: SnapshotId;
+  inputSchema: JSONSchema;
+  /** The provider-declared output schema, when it declares one (MCP `outputSchema`) — metadata for
+   *  `get_metadata`; results are not validated against it. Absent means unknown. */
+  outputSchema?: JSONSchema;
 };

@@ -13,6 +13,7 @@ import { createProjectStore } from "../engine/store.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
 import type { HttpTransport } from "../external/http-transport.js";
+import { type McpTransport, StubMcpTransport } from "../external/mcp-transport.js";
 import type { FfiTransport } from "../external/runner.js";
 import {
   apiRootIdOf,
@@ -30,10 +31,12 @@ import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
 import { FfiReactor } from "./ffi-reactor.js";
 import { HttpReactor } from "./http-reactor.js";
+import { McpReactor } from "./mcp-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { ResourcePool } from "./resource-pool.js";
 import { Substrate } from "./substrate.js";
+import { type WebhookDeliveryOutcome, WebhookReactor } from "./webhook-reactor.js";
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
 // so existing importers (tests, callers) keep their entry point.
@@ -48,6 +51,12 @@ export interface ProjectActorDependencies {
   external: FfiTransport;
   /** The transport the `http` reactor performs built-in `http.fetch` requests through (an in-runtime fetch). */
   http: HttpTransport;
+  /** The transport the `mcp` reactor performs built-in `prelude.mcp.*` calls through (the SDK client).
+   *  Defaults to the loud stub (fine for tests; the facade injects the SDK-backed one). */
+  mcp?: McpTransport;
+  /** The public base URL the `webhook` reactor mints inbound endpoints under (`<base>/inbound/<token>`).
+   *  Defaults to the local dev address (fine for tests; the facade injects the configured one). */
+  webhookBaseUrl?: string;
   persistence: Persistence;
 }
 
@@ -67,6 +76,11 @@ export class ProjectActor {
   private readonly ffi: FfiReactor;
   /** The http reactor: built-in `http.fetch` calls — a `delegate` to it, an in-runtime fetch, its records. */
   private readonly http: HttpReactor;
+  /** The webhook reactor: `webhook.inbound` calls — dynamically generated public endpoints whose deliveries
+   *  become callback delegations. */
+  private readonly webhook: WebhookReactor;
+  /** The mcp reactor: built-in `prelude.mcp.*` calls — a `delegate` to it, the SDK client, its records. */
+  private readonly mcp: McpReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -74,6 +88,7 @@ export class ProjectActor {
   /** The injected transports, kept for disposal (their reactors hold them too, but teardown is actor-level). */
   private readonly externalTransport: FfiTransport;
   private readonly httpTransport: HttpTransport;
+  private readonly mcpTransport: McpTransport;
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
@@ -81,6 +96,7 @@ export class ProjectActor {
     this.persistence = dependencies.persistence;
     this.externalTransport = dependencies.external;
     this.httpTransport = dependencies.http;
+    this.mcpTransport = dependencies.mcp ?? new StubMcpTransport();
     // The shared scope store + the pool that wraps it: the engine reads / writes scopes in place, while every
     // reactor reowns through the same pool (so a run result crosses from a core instance to the api root).
     const store = createProjectStore();
@@ -100,6 +116,17 @@ export class ProjectActor {
     // The http reactor performs built-in `http.fetch` calls through the injected transport (an in-runtime
     // fetch); an http call reaches it as a `delegate` from core's external proxy, exactly like ffi.
     this.http = new HttpReactor(dependencies.http, pool);
+    // The mcp reactor performs built-in `prelude.mcp.*` calls through the injected transport (the SDK
+    // client); an mcp call reaches it as a `delegate` from core's external proxy, exactly like http.
+    this.mcp = new McpReactor(this.mcpTransport, pool);
+    // The webhook reactor serves `webhook.inbound` calls: it mints tokens and re-enters the serial loop for
+    // its post-commit work (the subscriber dispatch, synthesised completions) through the scheduler closure —
+    // which reads `this.substrate`, assigned just below, only when work actually runs.
+    this.webhook = new WebhookReactor(
+      dependencies.webhookBaseUrl ?? "http://localhost:3000",
+      (work) => this.substrate.submit(this.webhook, work),
+      pool,
+    );
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
@@ -112,6 +139,8 @@ export class ProjectActor {
       api: this.api,
       ffi: this.ffi,
       http: this.http,
+      webhook: this.webhook,
+      mcp: this.mcp,
     };
     this.substrate = new Substrate(
       this.projectId,
@@ -146,6 +175,10 @@ export class ProjectActor {
     // call's delegateAck / escalate / terminateAck.
     dependencies.http.onComplete((completion) =>
       this.substrate.submit(this.http, () => this.http.complete(completion)),
+    );
+    // An mcp transport completion re-enters the same way, as an mcp reactor turn.
+    this.mcpTransport.onComplete((completion) =>
+      this.substrate.submit(this.mcp, () => this.mcp.complete(completion)),
     );
   }
 
@@ -209,6 +242,15 @@ export class ProjectActor {
     return this.api.listOpenEscalations();
   }
 
+  /** Deliver one inbound webhook POST to the endpoint serving `token`: the webhook reactor converts it into
+   *  a delegation of the endpoint's callback on a serial turn, and the returned promise resolves with the
+   *  callback's outcome (or `unknown` / `gone` for a dead endpoint) once it settles. */
+  deliverWebhook(token: string, argument: Value): Promise<WebhookDeliveryOutcome> {
+    return new Promise((resolve) => {
+      this.substrate.submit(this.webhook, () => this.webhook.deliver(token, argument, resolve));
+    });
+  }
+
   /** Activate a (possibly recovered) actor: reload persisted state and reconcile in-flight external work,
    *  without an inbound message to trigger it. Idempotent — the warm actor also self-activates on its first
    *  command; a host calls this on boot to resume a project whose process went down mid-flight. */
@@ -223,6 +265,7 @@ export class ProjectActor {
   dispose(): void {
     this.externalTransport.close();
     this.httpTransport.close();
+    this.mcpTransport.close();
     this.api.poisonRunPromises(new Error("the project was deleted"));
   }
 
@@ -241,6 +284,8 @@ export class ProjectActor {
     this.api.reset();
     this.ffi.reset();
     this.http.reset();
+    this.webhook.reset();
+    this.mcp.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
@@ -249,7 +294,14 @@ export class ProjectActor {
       // run only after the pure reads have succeeded — but concurrently with each other. Both are
       // at-most-once: work the transport still holds is left running (a warm reset), gone work fails as a
       // panic (never re-run), a cancelling call re-aborts.
-      await Promise.all([this.ffi.load(loader), this.http.load(loader)]);
+      // The webhook load re-registers each endpoint's token — no external process to reconcile with, so
+      // (unlike ffi / http) a webhook call survives a restart completely.
+      await Promise.all([
+        this.ffi.load(loader),
+        this.http.load(loader),
+        this.webhook.load(loader),
+        this.mcp.load(loader),
+      ]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {
         this.substrate.enqueueOutbox(message.event, message.seq);

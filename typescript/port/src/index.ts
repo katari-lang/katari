@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type { Json } from "@katari-lang/types";
 import { downloadBlob, uploadBlob } from "./blob.js";
 import {
+  type DelegateCallee,
   decodeRuntimeMessage,
   encodeSidecarMessage,
   LineBuffer,
@@ -29,10 +30,6 @@ import {
   type KatariValue,
   type ValueBinding,
 } from "./values.js";
-
-/** The wired-in dynamic-dispatch agent `KatariAgent.call` goes through: it re-materialises the callable
- *  value (with its own snapshot + generics) and runs it — see the runtime's `call_agent` unwrap. */
-const CALL_AGENT = "prelude.ai.call_agent";
 
 /** An inner agent call failed: the callee panicked, or the call could not be resolved (an unknown agent /
  *  reactor). The message is the runtime's failure message. */
@@ -307,9 +304,8 @@ export class Sidecar {
   ): { context: HandlerContext; binding: ValueBinding } {
     const signal = dispatch.controller.signal;
     const sendDelegate = (
-      agent: string,
+      callee: DelegateCallee,
       wireArgument: Json | null,
-      reactor?: string,
     ): Promise<KatariValue> => {
       if (signal.aborted) return Promise.reject(new KatariCancelledError());
       // The token is unique ACROSS sidecar processes, not just within one: the runtime's bridge rows are
@@ -324,24 +320,30 @@ export class Sidecar {
           kind: "delegate",
           delegation: message.delegation,
           call: token,
-          agent,
-          ...(reactor !== undefined ? { reactor } : {}),
+          callee,
           argument: wireArgument,
         });
       });
     };
     const binding: ValueBinding = {
       download: (ref) => downloadBlob(ref, signal),
-      // A received callable runs through the dynamic-dispatch agent: the raw reference rides verbatim as
-      // `target` (it is already wire JSON — re-encoding would escape its `$`-keys), the argument is encoded.
+      // A received callable dispatches itself: the raw reference rides verbatim as the `value` callee (it is
+      // already wire JSON — re-encoding would escape its `$`-keys), and the runtime resolves it to a target.
       callCallable: (target, argument) =>
-        sendDelegate(CALL_AGENT, { target, args: encodeWireValue(argument) }),
+        sendDelegate({ kind: "value", callable: target }, encodeWireValue(argument)),
     };
     const context: HandlerContext = {
       signal,
       call: <Result>(agent: string, argument?: unknown, options?: CallOptions) =>
         // The declared Result is assumed (the typed-boundary assertion, like the argument type).
-        sendDelegate(agent, encodeWireValue(argument), options?.reactor) as Promise<Result>,
+        sendDelegate(
+          {
+            kind: "named",
+            agent,
+            ...(options?.reactor !== undefined ? { reactor: options.reactor } : {}),
+          },
+          encodeWireValue(argument),
+        ) as Promise<Result>,
       file: async (content, options) => {
         const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
         const handle = await uploadBlob(message.delegation, bytes, options, signal);
@@ -524,7 +526,12 @@ function formatConsoleArguments(args: readonly unknown[]): string {
 }
 
 export type { FileHandle } from "./blob.js";
-export type { DelegateOutcome, RuntimeMessage, SidecarMessage } from "./protocol.js";
+export type {
+  DelegateCallee,
+  DelegateOutcome,
+  RuntimeMessage,
+  SidecarMessage,
+} from "./protocol.js";
 export {
   KatariAgent,
   KatariData,

@@ -1,0 +1,28 @@
+// The built-in MCP client, end to end: `mcp.tools(url = ...)` lists any MCP server's tools as a
+// toolbox of AGENTS — one per server tool, minted by the runtime with the server-declared name /
+// description / input schema. `reflection.get_metadata` reads that signature (what an AI loop
+// advertises) and `reflection.call_agent` dispatches one with runtime-built args, validated against
+// the server's schema before the server is contacted — a tool IS an agent. There is no connection to
+// manage: each tool carries its server descriptor and the runtime (re)connects lazily.
+//
+// Deterministic given a server: the e2e suite starts a local MCP server exposing one `add` tool and
+// passes its URL as the argument.
+
+@"List the MCP server at @url@, report its tool names (from each minted agent's metadata), and call
+its `add` tool through the same dynamic dispatch an AI loop uses."
+agent main(url: string) -> string {
+  use handler {
+    request prelude.throw(error: mcp.server_error | reflection.call_error) -> never {
+      break f"mcp failed: ${json.to_text(value = error)}"
+    }
+  }
+  let tools = mcp.tools(url = url, headers = record.empty())
+  let names = for (let tool in mcp.tools_of(toolbox = tools)) {
+    next reflection.get_metadata(value = tool).name
+  }
+  let added = match (record.get(target = tools, key = "add")) {
+    case null -> "(no add tool)"
+    case tool -> json.to_text(value = reflection.call_agent(target = tool, args = { x = 19, y = 23 }))
+  }
+  f"tools=${string.join(parts = names, separator = ",")}; add=${added}"
+}

@@ -349,31 +349,21 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   },
 
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────
-  "prelude.ai.get_metadata": async (argument, context) => {
-    const value = field(argument, "value");
-    const callable = await locateCallable(value, context.ir);
-    const typeSubstitution = typeSubstitutionOf(callable.schema.genericBindings, callable.generics);
-    const requestSubstitution = requestSubstitutionOf(
-      callable.schema.genericBindings,
-      callable.generics,
-    );
-    const input = fillGenericSchema(typeSubstitution, callable.schema.input);
-    const output = fillGenericSchema(typeSubstitution, callable.schema.output);
+  "prelude.reflection.get_metadata": async (argument, context) => {
+    const metadata = await callableMetadata(field(argument, "value"), context.ir);
     return {
       kind: "record",
-      ctor: createAgentName("prelude.ai.agent_metadata"),
+      ctor: createAgentName("prelude.reflection.agent_metadata"),
       fields: {
-        name: { kind: "string", value: callable.name },
-        description: { kind: "string", value: callable.description },
-        input: jsonValueFromJson(schemaToJson(input)),
-        output: jsonValueFromJson(schemaToJson(output)),
-        requests: jsonValueFromJson(
-          requestsToJson(callable.schema.requests, typeSubstitution, requestSubstitution),
-        ),
+        name: { kind: "string", value: metadata.name },
+        description: { kind: "string", value: metadata.description },
+        input: jsonValueFromJson(schemaToJson(metadata.input)),
+        output: jsonValueFromJson(schemaToJson(metadata.output)),
+        requests: jsonValueFromJson(metadata.requests),
       },
     };
   },
-  "prelude.ai.call_agent": () => {
+  "prelude.reflection.call_agent": () => {
     // Unreachable by construction: `CoreReactor.onDelegate` unwraps a `call_agent` delegate before
     // any instance is summoned, so this body block never runs.
     throw new Error("call_agent must be dispatched at the delegation boundary (engine bug)");
@@ -413,6 +403,44 @@ function conformedOrThrow(value: Value, schema: JSONSchema, label: string): Valu
     );
   }
   return value;
+}
+
+/** A callable value's public metadata, ready for `agent_metadata`. A `tool` (a reactor-backed agent)
+ *  presents the runtime-decided signature it was minted with: the provider-declared name / description
+ *  / input schema, its output schema when the provider declared one (`{}` — unknown — otherwise), and
+ *  no requests (a reactor call performs io, not katari requests). */
+async function callableMetadata(
+  value: Value,
+  ir: IrSource,
+): Promise<{
+  name: string;
+  description: string;
+  input: JSONSchema;
+  output: JSONSchema;
+  requests: Json;
+}> {
+  if (value.kind === "tool") {
+    return {
+      name: value.name,
+      description: value.description,
+      input: value.inputSchema,
+      output: value.outputSchema ?? {},
+      requests: [],
+    };
+  }
+  const callable = await locateCallable(value, ir);
+  const typeSubstitution = typeSubstitutionOf(callable.schema.genericBindings, callable.generics);
+  const requestSubstitution = requestSubstitutionOf(
+    callable.schema.genericBindings,
+    callable.generics,
+  );
+  return {
+    name: callable.name,
+    description: callable.description,
+    input: fillGenericSchema(typeSubstitution, callable.schema.input),
+    output: fillGenericSchema(typeSubstitution, callable.schema.output),
+    requests: requestsToJson(callable.schema.requests, typeSubstitution, requestSubstitution),
+  };
 }
 
 /** Resolve a callable value to its agent block's schema / description (following the value's own

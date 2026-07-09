@@ -20,12 +20,42 @@ restart. Thrown by `fetch`. (A response that did arrive is never an error — br
 data fetch_error(message: string)
 
 @"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
-may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text. A
-request that never completes throws `fetch_error` (catchable with `use handler { request throw(error:
-http.fetch_error) -> never { ... } }`)."
+may be a secret, such as an auth token), and @body@. Returns the response @status@ code, its @headers@
+(names lowercased; repeated headers joined with \", \") and its @body@ text. A request that never
+completes throws `fetch_error` (catchable with `use handler { request throw(error: http.fetch_error) ->
+never { ... } }`)."
 external agent fetch(
   url: string,
   method: string,
   headers: record[string of private],
   body: string,
-) -> { status: integer, body: string } with prelude.throw[fetch_error] from "http"
+) -> { status: integer, headers: record[string], body: string } with prelude.throw[fetch_error] from "http"
+
+@"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
+arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
+data status_error(status: integer, body: string)
+
+@"POST @body@ to @url@ as application/json with one auth header @auth_header_name: <auth_prefix><api_key>@
+(e.g. \"Authorization\" / \"Bearer \" for OpenAI, \"x-goog-api-key\" / \"\" for Gemini). Returns the
+response body text; a non-2xx status throws `status_error`, a transport failure `fetch_error`. The
+canonical one-call shape of a JSON API integration — build the body as `json` in Katari, post it, parse
+the reply as `json` in Katari."
+agent post_json(
+  url: string,
+  body: string,
+  auth_header_name: string,
+  auth_prefix: string,
+  api_key: string of private,
+) -> string with io | prelude.throw[status_error | fetch_error] {
+  let headers = record.set(
+    target = record.set(target = record.empty(), key = "Content-Type", value = "application/json"),
+    key = auth_header_name,
+    value = auth_prefix ++ api_key,
+  )
+  let response = fetch(url = url, method = "POST", headers = headers, body = body)
+  if (response.status >= 200 && response.status < 300) {
+    response.body
+  } else {
+    prelude.throw(error = status_error(status = response.status, body = response.body))
+  }
+}

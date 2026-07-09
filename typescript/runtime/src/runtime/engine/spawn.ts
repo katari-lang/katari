@@ -79,7 +79,10 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
         kind: "external",
         delegationId: newDelegationId(),
         relays: {},
-        reactor: block.reactor === "http" ? "http" : "ffi",
+        reactor:
+          block.reactor === "http" || block.reactor === "webhook" || block.reactor === "mcp"
+            ? block.reactor
+            : "ffi",
       };
     case "match":
       return { ...base, kind: "match", pending: null };

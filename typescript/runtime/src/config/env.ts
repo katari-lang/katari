@@ -46,6 +46,10 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  /** The public base URL external services reach this runtime at — what `webhook.inbound` mints its
+   *  URLs under (`<base>/inbound/<token>`). Behind a reverse proxy / tunnel, set it to the outside
+   *  address; defaults to the local port, which only same-host callers can reach. */
+  KATARI_PUBLIC_URL: z.url().optional(),
   /** The bearer token the API requires — every caller (the CLI, the web console) sends
    *  `Authorization: Bearer <this>`. Required (no default): the runtime refuses to boot without it, so an
    *  API is never accidentally left open. Distinct from KATARI_SECRET_KEY, which only encrypts secrets at

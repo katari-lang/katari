@@ -179,7 +179,7 @@ function conform(value: Value, schema: JSONSchema, path: string, failures: Confo
 
   // A callable or a blob handle satisfies its `$`-keyed reference schema (and an unconstrained one);
   // any other constraint cannot hold for it.
-  if (value.kind === "agent" || value.kind === "closure") {
+  if (value.kind === "agent" || value.kind === "closure" || value.kind === "tool") {
     if (!(isUnconstrained(schema) || referenceKeyOf(schema) === AGENT_KEY)) {
       failures.push({ path, message: `expected ${describeSchema(schema)}, got a callable value` });
     }
@@ -393,6 +393,7 @@ function describeValue(value: Value): string {
       return value.semanticKind === "string" ? "a string" : "a file handle";
     case "closure":
     case "agent":
+    case "tool":
       return "a callable value";
     default:
       return `a value of type ${value.kind}`;

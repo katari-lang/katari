@@ -17,10 +17,12 @@ import {
   httpInstances,
   instances,
   isTerminalRunState,
+  mcpInstances,
   outbox,
   runEscalationsAudit,
   runEvents,
   runs,
+  webhookInstances,
 } from "../../db/tables/execution.js";
 import type { ReactorName } from "../event/types.js";
 import type {
@@ -291,6 +293,84 @@ export class DbPersistence implements Persistence {
           );
         },
       },
+      mcp: {
+        instances: async () => {
+          // The in-flight mcp calls are the `mcp` instances: the envelope (its `delegation_id` is the
+          // call's delegation) joined to its `mcp_instances` extension (the precise status).
+          const rows = await this.db
+            .select({
+              delegation: instances.delegationId,
+              instance: instances.id,
+              caller: instances.callerReactor,
+              run: instances.runId,
+              status: mcpInstances.status,
+            })
+            .from(instances)
+            .innerJoin(mcpInstances, eq(instances.id, mcpInstances.instanceId))
+            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "mcp")));
+          return rows.flatMap((row) =>
+            row.delegation === null || row.caller === null || row.run === null
+              ? []
+              : [
+                  {
+                    delegation: row.delegation as DelegationId,
+                    instance: row.instance as InstanceId,
+                    caller: row.caller,
+                    run: row.run as InstanceId,
+                    status: row.status,
+                  },
+                ],
+          );
+        },
+      },
+      webhook: {
+        instances: async () => {
+          // The in-flight webhook calls are the `webhook` instances: the envelope joined to its
+          // `webhook_instances` extension, which — unlike ffi / http — carries the payload (token +
+          // callback) a reload re-registers, so an endpoint survives a restart.
+          const rows = await this.db
+            .select({
+              delegation: instances.delegationId,
+              instance: instances.id,
+              caller: instances.callerReactor,
+              run: instances.runId,
+              snapshot: webhookInstances.snapshotId,
+              token: webhookInstances.token,
+              callback: webhookInstances.callback,
+              status: webhookInstances.status,
+              relays: webhookInstances.relays,
+              innerCalls: webhookInstances.innerCalls,
+            })
+            .from(instances)
+            .innerJoin(webhookInstances, eq(instances.id, webhookInstances.instanceId))
+            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "webhook")));
+          return rows.flatMap((row) =>
+            row.delegation === null || row.caller === null || row.run === null
+              ? []
+              : [
+                  {
+                    delegation: row.delegation as DelegationId,
+                    instance: row.instance as InstanceId,
+                    snapshot: row.snapshot as SnapshotId,
+                    token: row.token,
+                    callback: unsealFromStorage(row.callback),
+                    caller: row.caller,
+                    run: row.run as InstanceId,
+                    status: row.status,
+                    relays: row.relays.map((relay) => ({
+                      escalation: relay.escalation as EscalationId,
+                      child: relay.child as DelegationId,
+                      childEscalation: relay.childEscalation as EscalationId,
+                    })),
+                    innerCalls: row.innerCalls.map((inner) => ({
+                      delegation: inner.delegation as DelegationId,
+                      call: inner.call,
+                    })),
+                  },
+                ],
+          );
+        },
+      },
     };
   }
 
@@ -489,6 +569,47 @@ export class DbPersistence implements Persistence {
               status: row.status,
             })
             .onConflictDoUpdate({ target: httpInstances.instanceId, set: { status: row.status } });
+        },
+      },
+      webhook: {
+        putWebhookInstance: async (row) => {
+          const relays = row.relays.map((relay) => ({
+            escalation: relay.escalation as string,
+            child: relay.child as string,
+            childEscalation: relay.childEscalation as string,
+          }));
+          const innerCalls = row.innerCalls.map((inner) => ({
+            delegation: inner.delegation as string,
+            call: inner.call,
+          }));
+          // The callback may capture private values (a closure over a secret), so it seals like a scope.
+          const callback = sealForStorage(row.callback);
+          await drizzleTx
+            .insert(webhookInstances)
+            .values({
+              instanceId: row.instanceId,
+              snapshotId: row.snapshotId,
+              token: row.token,
+              callback,
+              status: row.status,
+              relays,
+              innerCalls,
+            })
+            .onConflictDoUpdate({
+              target: webhookInstances.instanceId,
+              set: { status: row.status, relays, innerCalls },
+            });
+        },
+      },
+      mcp: {
+        putMcpInstance: async (row) => {
+          await drizzleTx
+            .insert(mcpInstances)
+            .values({
+              instanceId: row.instanceId,
+              status: row.status,
+            })
+            .onConflictDoUpdate({ target: mcpInstances.instanceId, set: { status: row.status } });
         },
       },
       pool: {

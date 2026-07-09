@@ -55,6 +55,11 @@ export function delegateProxyOf(
  *  run root unhandled, it fails the run with its message. */
 export const PANIC_REQUEST = "prelude.panic" as QualifiedName;
 
+/** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the core acceptance surface
+ *  (`CoreReactor.onDelegate`), never summoned as an instance. The engine re-shapes a direct call of a
+ *  `tool` value into this form, so the acceptance surface is the single home of dynamic dispatch. */
+export const CALL_AGENT_NAME = "prelude.reflection.call_agent" as QualifiedName;
+
 /** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
  *  reactor-level panic (an ffi error, an unresolvable delegate target). */
 export function panicArgument(message: string): Value {

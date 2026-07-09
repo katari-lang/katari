@@ -135,6 +135,24 @@ spec = do
       -- continuation effect, accepts one (then the escape rides E to the enclosing agent).
       codesFor (providerDecl <> "agent run() -> integer { let x : integer = use foo\nreturn 5 }") `shouldContain` ["K3001"]
 
+  describe "use call-provider (the written arguments joined with the continuation, one application)" $ do
+    it "a parameterised provider infers R / E from the continuation at the single call site" $
+      codesFor (supplyDecl <> "agent run() -> string { let x : integer = use supply(base = 1)\n\"result\" }") `shouldBe` []
+    it "the provider's written arguments still typecheck (K3001 on a mismatch)" $
+      codesFor (supplyDecl <> "agent run() -> string { let x : integer = use supply(base = \"one\")\n\"result\" }") `shouldContain` ["K3001"]
+    it "rejects a use binder the call provider's continuation does not accept (K3001)" $
+      codesFor (supplyDecl <> "agent run() -> string { let x : string = use supply(base = 1)\n\"result\" }") `shouldContain` ["K3001"]
+    it "the continuation's requests ride the inferred E to the enclosing agent" $
+      codesFor (tickDecl <> supplyDecl <> "agent run() -> integer with tick { let x : integer = use supply(base = 1)\ntick() }") `shouldBe` []
+    it "rejects a request the enclosing agent's declared effect excludes (K3001, via the inferred E)" $
+      codesFor (tickDecl <> supplyDecl <> "agent run() -> integer with pure { let x : integer = use supply(base = 1)\ntick() }") `shouldContain` ["K3001"]
+    it "an explicitly written continuation label is reserved (K3011)" $
+      codesFor (supplyDecl <> noopDecl <> "agent run() -> string { let x : integer = use supply(base = 1, continuation = noop)\n\"result\" }") `shouldContain` ["K3011"]
+    it "rejects a provider shape with no application reading (K3011) — a field read must be bound or applied" $
+      codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p\n\"result\" }") `shouldContain` ["K3011"]
+    it "a computed provider is still usable by applying it (a zero-argument call)" $
+      codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p()\n\"result\" }") `shouldBe` []
+
   describe "request handler generic inference (param-derived)" $ do
     it "infers the request's generic from a handler parameter annotation" $
       codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo(x : integer) { next x } }\n0 }" `shouldBe` []
@@ -315,6 +333,18 @@ boundedRequestDecl = "request num[a extends number](value: a) -> a\n"
 -- inference targets.
 providerDecl :: Text
 providerDecl = "external agent foo[R](continuation: agent(value: integer) -> R) -> R\n"
+
+-- | A parameterised provider written in Katari: config argument + continuation in ONE parameter
+-- record, so @use supply(base = 1)@ applies it once with the continuation joined in.
+supplyDecl :: Text
+supplyDecl = "agent supply[R, effect E](base: integer, continuation: agent(value: integer) -> R with E) -> R with E { continuation(value = base) }\n"
+
+noopDecl :: Text
+noopDecl = "agent noop(value: integer) -> integer { value }\n"
+
+-- | A non-generic provider (concrete R), so it can be carried in a record without an instantiation.
+monoProviderDecl :: Text
+monoProviderDecl = "external agent bar(continuation: agent(value: integer) -> string) -> string\n"
 
 ------------------------------------------------------------------------------------------------
 -- White-box helpers

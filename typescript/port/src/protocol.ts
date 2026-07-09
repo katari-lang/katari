@@ -39,10 +39,19 @@ export type RuntimeMessage =
   | { kind: "abort"; delegation: string }
   | { kind: "delegateResult"; delegation: string; call: string; outcome: DelegateOutcome };
 
+/** What a handler's inner `delegate` calls, on the wire (mirror of the runtime's `DelegateCallee`):
+ *   - `named` — a static agent NAME (`context.call`): a qualified name for the `core` reactor, or an
+ *     external key for a call reactor (`ffi` / `http`); an absent `reactor` means `core`.
+ *   - `value` — a first-class callable VALUE (`KatariAgent.call`): the received callable's own wire JSON
+ *     (`$agent` / `$closure` / `$tool`), which the runtime resolves to a delegate target. No wired-in
+ *     `call_agent` name — the callable dispatches itself. */
+export type DelegateCallee =
+  | { kind: "named"; agent: string; reactor?: string }
+  | { kind: "value"; callable: Json };
+
 /** Sidecar → runtime. A `throw` fails the call as a typed `prelude.throw` with `error` as its payload
- *  (caught by a katari-side handler); an `error` becomes a panic. `delegate.agent` is a qualified agent
- *  name for the `core` reactor, or an external key for a call reactor (`ffi` / `http`); an absent
- *  `reactor` means `core`. */
+ *  (caught by a katari-side handler); an `error` becomes a panic. A `delegate` runs another agent
+ *  (`callee`) on the in-flight handler's behalf. */
 export type SidecarMessage =
   | { kind: "result"; delegation: string; value: Json }
   | { kind: "throw"; delegation: string; error: Json }
@@ -52,8 +61,7 @@ export type SidecarMessage =
       kind: "delegate";
       delegation: string;
       call: string;
-      agent: string;
-      reactor?: string;
+      callee: DelegateCallee;
       argument: Json | null;
     };
 
