@@ -70,7 +70,10 @@ export const instances = pgTable(
       .references(() => projects.id, { onDelete: "cascade" }),
     /** The delegation that summoned this instance; `null` for the `api` root. It both correlates this
      *  instance's `delegateAck` and, via `delegations.caller_instance_id`, recovers the parent. Set null
-     *  if its delegation row is dropped (which only happens after this instance has already self-deleted). */
+     *  if its delegation row is dropped (which only happens after this instance has already self-deleted).
+     *  This reference and `delegations.caller_instance_id` form a cycle, and a batched commit can carry a
+     *  whole causal chain (caller instance, its delegation, the callee instance), so both constraints are
+     *  DEFERRABLE INITIALLY DEFERRED (migration 0003 — the DSL cannot express deferral). */
     delegationId: uuid("delegation_id").references((): AnyPgColumn => delegations.id, {
       onDelete: "set null",
     }),
@@ -234,7 +237,9 @@ export const delegations = pgTable(
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    /** The parent that issued this delegation — the recovered parent→child link. */
+    /** The parent that issued this delegation — the recovered parent→child link. Checked at commit
+     *  time, not statement time (DEFERRABLE INITIALLY DEFERRED, migration 0003): see
+     *  `instances.delegation_id` for the cycle this breaks under batched commits. */
     callerInstanceId: uuid("caller_instance_id").references(() => instances.id, {
       onDelete: "cascade",
     }),
