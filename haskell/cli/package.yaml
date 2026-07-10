@@ -75,6 +75,7 @@ library:
     - Katari.Cli.Command.Ls
     - Katari.Cli.Command.Env
     - Katari.Cli.Command.File
+    - Katari.Cli.Command.Mcp
     - Katari.Cli.Command.Project
 
 executables:

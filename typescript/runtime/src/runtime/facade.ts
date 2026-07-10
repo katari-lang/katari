@@ -18,7 +18,7 @@ import { instances, runs, TERMINAL_RUN_STATES, webhookInstances } from "../db/ta
 import { projects, snapshots } from "../db/tables/projects.js";
 import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
-import { envReader } from "../modules/env/env.service.js";
+import { envReader, envService } from "../modules/env/env.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { messageOf } from "./actor/failure.js";
@@ -26,6 +26,11 @@ import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry } from "./engine/types.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
+import {
+  decodeMcpOAuthCredential,
+  type McpCredentialStore,
+  mcpOAuthEnvKey,
+} from "./external/mcp-oauth.js";
 import { SdkMcpTransport } from "./external/mcp-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
@@ -112,6 +117,25 @@ const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 const prims = new PrimRegistry();
 registerHostPrims(prims, { env: envReader });
 
+/** The per-project OAuth credential store the mcp transport authenticates through: the `env_entries`
+ *  table under the reserved `mcp.oauth.<name>` keys, secret (AES-GCM at rest, write-only over the
+ *  admin API) like any secret — exactly where `katari mcp login` puts a credential, and where a token
+ *  refresh writes the rotated set back. */
+function mcpCredentialStoreFor(projectId: ProjectId): McpCredentialStore {
+  return {
+    async load(name) {
+      const raw = await envReader.readSecret(projectId, mcpOAuthEnvKey(name));
+      return raw === null ? null : decodeMcpOAuthCredential(name, raw);
+    },
+    async save(name, credential) {
+      await envService.set(projectId, mcpOAuthEnvKey(name), {
+        value: JSON.stringify(credential),
+        isSecret: true,
+      });
+    },
+  };
+}
+
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
@@ -129,18 +153,22 @@ const registry = new ProjectRegistry({
   // Its blob producer bridges a tool result's binary content (an image block) into a project blob owned
   // by the mcp call's instance — the exact ownership + ascent path an FFI handler's mid-call upload
   // takes (`produceFfiBlob`), just in-process. A vanished call (ConflictError) returns null, so the
-  // transport degrades that block to its text placeholder instead of failing the whole result.
+  // transport degrades that block to its text placeholder instead of failing the whole result. Its
+  // credential store resolves `mcp.oauth(...)` names against the project's env secrets.
   mcpFactory: (projectId) =>
-    new SdkMcpTransport(async (delegation, bytes, contentType) => {
-      try {
-        const produced = await mintAndStoreBlob(projectId, bytes, contentType, (blobId, entry) =>
-          registry.actorFor(projectId).registerProducedMcpBlob(delegation, blobId, entry),
-        );
-        // The slim handle: identity only — the metadata just registered lives on the blob's row.
-        return { $ref: produced.id, semanticKind: "file" };
-      } catch {
-        return null;
-      }
+    new SdkMcpTransport({
+      produceBlob: async (delegation, bytes, contentType) => {
+        try {
+          const produced = await mintAndStoreBlob(projectId, bytes, contentType, (blobId, entry) =>
+            registry.actorFor(projectId).registerProducedMcpBlob(delegation, blobId, entry),
+          );
+          // The slim handle: identity only — the metadata just registered lives on the blob's row.
+          return { $ref: produced.id, semanticKind: "file" };
+        } catch {
+          return null;
+        }
+      },
+      credentials: mcpCredentialStoreFor(projectId),
     }),
   // The public base `webhook.inbound` mints its URLs under (KATARI_PUBLIC_URL, or the local port).
   webhookBaseUrl: config.publicUrl,

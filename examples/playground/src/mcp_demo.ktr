@@ -12,11 +12,11 @@
 its `add` tool through the same dynamic dispatch an AI loop uses."
 agent main(url: string) -> string {
   use handler {
-    request prelude.throw(error: mcp.server_error | reflection.call_error) -> never {
+    request prelude.throw(error: mcp.server_error | mcp.auth_error | reflection.call_error) -> never {
       break f"mcp failed: ${json.to_text(value = error)}"
     }
   }
-  let tools = mcp.tools(url = url, headers = record.empty())
+  let tools = mcp.tools(url = url, auth = mcp.headers(values = record.empty()))
   let names = for (let tool in mcp.tools_of(toolbox = tools)) {
     next reflection.get_metadata(value = tool).name
   }

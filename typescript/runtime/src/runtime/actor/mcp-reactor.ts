@@ -4,9 +4,11 @@
 // other key is a minted tool's server-declared name):
 //   - `listTools` (the `prelude.mcp.tools` external): list the server's tools and MINT one agent value
 //     per tool — a `$tool` carrying the server-declared signature and, as its context, the server
-//     DESCRIPTOR (`{url, headers}`). The minting is the payload's own `shapeResult`, built here from the
-//     call's ORIGINAL argument values — so the headers' privacy markers survive into the minted tools
-//     (the wire to the transport reveals; the minted values must not).
+//     DESCRIPTOR (`{url, auth}`; the auth sum — explicit headers or a named OAuth credential — rides
+//     inside it and is dispatched at the TRANSPORT boundary, never here). The minting is the payload's
+//     own `shapeResult`, built here from the call's ORIGINAL argument values — so a header value's
+//     privacy markers survive into the minted tools (the wire to the transport reveals; the minted
+//     values must not; an oauth credential NAME is not secret).
 //   - `callTool` (a minted tool's call, an `external` target carrying that descriptor as `context`): the
 //     caller's argument passes to the transport verbatim, the descriptor rides out-of-band.
 //
@@ -46,7 +48,7 @@ const MCP_TOOLS_KEY = "prelude.mcp.tools";
 type McpPayload =
   | {
       kind: "listTools";
-      /** The `{url, headers}` descriptor with privacy markers intact — the transport gets a revealed
+      /** The `{url, auth}` descriptor with privacy markers intact — the transport gets a revealed
        *  copy, the minted tools get this one. */
       descriptor: Value;
       /** Mints the toolbox from the transport's listing (the base applies it to the settled result). */
@@ -160,20 +162,20 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
 /** The domain error ctor every anticipated mcp failure throws (`prelude/mcp.ktr` declares it). */
 const SERVER_ERROR = "prelude.mcp.server_error";
 
-/** The `{url, headers}` descriptor of a `tools` call, from its original (marker-bearing) argument. */
+/** The `{url, auth}` descriptor of a `tools` call, from its original (marker-bearing) argument. */
 function descriptorOf(argument: Value | null): Value {
   if (argument === null || argument.kind !== "record") {
     return { kind: "record", fields: {} };
   }
   const fields: Record<string, Value> = Object.create(null);
   if (argument.fields.url !== undefined) fields.url = argument.fields.url;
-  if (argument.fields.headers !== undefined) fields.headers = argument.fields.headers;
+  if (argument.fields.auth !== undefined) fields.auth = argument.fields.auth;
   return { kind: "record", fields };
 }
 
 /** Mint the toolbox for a settled `tools` listing: one agent value per server tool, carrying the
  *  server-declared signature and — as its context — the DESCRIPTOR from the call's original argument
- *  (`{url, headers}` with privacy markers intact; the transport's revealed copy is never minted). */
+ *  (`{url, auth}` with privacy markers intact; the transport's revealed copy is never minted). */
 function mintToolbox(listing: Value, descriptor: Value, snapshot: SnapshotId): Value {
   const fields: Record<string, Value> = Object.create(null);
   for (const tool of listingsOf(listing)) {

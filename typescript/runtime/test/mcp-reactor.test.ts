@@ -35,7 +35,7 @@ const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericB
 
 // agent main() {
 //   let toolbox = prelude.mcp.tools({ url: "https://mcp.example.test/mcp",
-//                                     headers: { authorization: <private "sk-mcp"> } })
+//                                     auth: prelude.mcp.headers({ values: { authorization: <private "sk-mcp"> } }) })
 //   return reflection.call_agent({ target: toolbox.add, args: { x: 19, y: 23 } })
 // }
 const TOOLS_IR: IRModule = {
@@ -57,46 +57,53 @@ const TOOLS_IR: IRModule = {
           },
           { kind: "loadLiteral", output: 12, value: { kind: "string", value: "sk-mcp" } },
           { kind: "makeRecord", entries: [["authorization", 12]], output: 13 },
+          { kind: "makeRecord", entries: [["values", 13]], output: 14 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 14,
+            output: 15,
+          },
           {
             kind: "makeRecord",
             entries: [
               ["url", 11],
-              ["headers", 13],
+              ["auth", 15],
             ],
-            output: 14,
+            output: 16,
           },
           {
             kind: "delegate",
             target: { kind: "name", name: createAgentName("prelude.mcp.tools") },
-            argument: 14,
-            output: 15,
+            argument: 16,
+            output: 17,
           },
-          { kind: "getField", source: 15, field: "add", output: 16 },
-          { kind: "loadLiteral", output: 17, value: { kind: "integer", value: 19 } },
-          { kind: "loadLiteral", output: 18, value: { kind: "integer", value: 23 } },
+          { kind: "getField", source: 17, field: "add", output: 18 },
+          { kind: "loadLiteral", output: 19, value: { kind: "integer", value: 19 } },
+          { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 23 } },
           {
             kind: "makeRecord",
             entries: [
-              ["x", 17],
-              ["y", 18],
+              ["x", 19],
+              ["y", 20],
             ],
-            output: 19,
+            output: 21,
           },
           {
             kind: "makeRecord",
             entries: [
-              ["target", 16],
-              ["args", 19],
+              ["target", 18],
+              ["args", 21],
             ],
-            output: 20,
+            output: 22,
           },
           {
             kind: "delegate",
             target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
-            argument: 20,
-            output: 21,
+            argument: 22,
+            output: 23,
           },
-          { kind: "exit", target: 0, value: 21 },
+          { kind: "exit", target: 0, value: 23 },
         ],
       },
       parameters: { parameter: 10 },
@@ -109,10 +116,19 @@ const TOOLS_IR: IRModule = {
       block: { kind: "external", key: "prelude.mcp.tools", input: 30, reactor: "mcp" },
       parameters: { parameter: 30 },
     },
+    4: {
+      block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    5: {
+      block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
+      parameters: { parameter: 50 },
+    },
   },
   entries: {
     [createAgentName("main")]: 0,
     [createAgentName("prelude.mcp.tools")]: 2,
+    [createAgentName("prelude.mcp.headers")]: 4,
   },
   names: {},
 };
@@ -216,12 +232,17 @@ describe("mcp reactor", () => {
     const actor = makeActor(transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // 1. The listing call: a `listTools` dispatch carrying the descriptor read from the argument.
+    // 1. The listing call: a `listTools` dispatch carrying the descriptor read from the argument —
+    //    the auth sum rides inside it as its `$constructor` wire form, headers revealed for the
+    //    transport (an MCP server is an allowed sink).
     const listing = await waitUntil(() => transport.dispatched[0]);
     expect(listing.kind).toBe("listTools");
     expect(listing.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
-      headers: { authorization: "sk-mcp" },
+      auth: {
+        $constructor: "prelude.mcp.headers",
+        value: { values: { authorization: "sk-mcp" } },
+      },
     });
     transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
 
@@ -233,7 +254,10 @@ describe("mcp reactor", () => {
     expect(toolCall.argument).toEqual({ x: 19, y: 23 });
     expect(toolCall.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
-      headers: { authorization: "sk-mcp" },
+      auth: {
+        $constructor: "prelude.mcp.headers",
+        value: { values: { authorization: "sk-mcp" } },
+      },
     });
     transport.feed({ delegation: toolCall.delegation, outcome: { kind: "result", value: "42" } });
     await expect(result).resolves.toEqual({ kind: "string", value: "42" });

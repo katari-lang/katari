@@ -4,24 +4,40 @@
 // external — list the server's tools, so the reactor can mint one agent value per tool) and `callTool`
 // (a minted tool's delegate, carrying its server descriptor and the caller's argument verbatim).
 //
-// Connections are NOT a user-visible resource: a tool carries its server DESCRIPTOR (url + headers),
+// Connections are NOT a user-visible resource: a tool carries its server DESCRIPTOR (url + auth),
 // and this transport keeps a lazy client cache keyed by it — connecting on first use, reusing across
 // calls, evicting on failure so the next call reconnects. A runtime restart just empties the cache;
 // tool values that survived in scopes reconnect transparently on their next call.
 //
+// Auth is a SUM riding inside the descriptor (the `prelude.mcp.auth` data union, arriving as its
+// `$constructor` wire tag): `headers` sends the given headers on every request (anonymous access is
+// the empty map), `oauth` names a stored credential — the SDK transport then authenticates through a
+// store-backed `OAuthClientProvider` (see `mcp-oauth.ts`), which injects the access token and writes
+// refreshed tokens back. The cache key carries the auth IDENTITY (the header map, or the credential
+// NAME — never token material).
+//
 // Every anticipated failure — the server rejecting a connect, a tool reporting `isError`, a transport
 // drop — completes as a TYPED throw of `prelude.mcp.server_error`, matching the effect the
-// `prelude.mcp` externals declare; a Katari handler catches it like any stdlib throw.
+// `prelude.mcp` externals declare; a Katari handler catches it like any stdlib throw. A dead OAuth
+// credential (missing, unreadable, or rejected beyond refresh) is the distinct
+// `prelude.mcp.auth_error` — retrying cannot fix it, a human re-running `katari mcp login` can.
 
 import type { Json } from "@katari-lang/types";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { DelegationId } from "../ids.js";
+import {
+  loadStoredCredential,
+  McpAuthError,
+  type McpCredentialStore,
+  StoredMcpOAuthProvider,
+} from "./mcp-oauth.js";
 
 /** One mcp operation to perform, already lowered to plain Json (secret header values revealed at the
  *  reactor boundary — an MCP server is an allowed sink, like an http auth header). Each variant carries
- *  its `{ url, headers }` server descriptor itself: a listing's comes from the call's argument, a tool
+ *  its `{ url, auth }` server descriptor itself: a listing's comes from the call's argument, a tool
  *  call's from the minted tool's context — resolved reactor-side, so this seam never sniffs shapes. A
  *  tool call's `descriptor` is `null` only for a malformed target (no minted tool lacks one); the
  *  dispatch then fails as the typed descriptor error. */
@@ -185,10 +201,33 @@ function serverError(message: string): Json {
   return { $constructor: "prelude.mcp.server_error", value: { message } };
 }
 
-/** A server descriptor, read out of a lowered `{ url, headers }` record. */
+/** The wire form of the typed `prelude.mcp.auth_error` throw — the OAuth credential lifecycle failure
+ *  a retry cannot fix (as opposed to `server_error`, whose contract IS "retry reconnects"). */
+function authError(message: string): Json {
+  return { $constructor: "prelude.mcp.auth_error", value: { message } };
+}
+
+/** The descriptor's auth sum, decoded from its `$constructor` wire tag: explicit request headers, or
+ *  a named stored OAuth credential (the name is identity, not secret material). */
+type DescriptorAuth =
+  | { kind: "headers"; headers: Record<string, string> }
+  | { kind: "oauth"; name: string };
+
+/** A server descriptor, read out of a lowered `{ url, auth }` record. */
 interface Descriptor {
   url: string;
-  headers: Record<string, string>;
+  auth: DescriptorAuth;
+}
+
+/** What the host wires into an `SdkMcpTransport` (both parts optional so tests and stub deployments
+ *  can run without them, degrading loudly at the exact feature that needs the missing part). */
+export interface SdkMcpTransportDependencies {
+  /** Bridges a tool result's binary content into project blobs (see `McpBlobProducer`); without it
+   *  every binary block degrades to its text placeholder. */
+  produceBlob?: McpBlobProducer;
+  /** Resolves `oauth`-variant descriptors to stored credentials (see `McpCredentialStore`); without
+   *  it every `oauth` dispatch fails as the typed `auth_error`. */
+  credentials?: McpCredentialStore;
 }
 
 /** The production transport: the official MCP SDK behind a lazy, descriptor-keyed client cache.
@@ -200,10 +239,13 @@ export class SdkMcpTransport implements McpTransport {
    *  share one connect; a rejected connect evicts itself, so nothing caches a dead entry. */
   private readonly clients = new Map<string, Promise<Client>>();
   private readonly controllers = new Map<DelegationId, AbortController>();
+  private readonly produceBlob?: McpBlobProducer;
+  private readonly credentials?: McpCredentialStore;
 
-  /** `produceBlob` bridges a tool result's binary content into project blobs (see `McpBlobProducer`);
-   *  without it every binary block degrades to its text placeholder. */
-  constructor(private readonly produceBlob?: McpBlobProducer) {}
+  constructor(dependencies: SdkMcpTransportDependencies = {}) {
+    this.produceBlob = dependencies.produceBlob;
+    this.credentials = dependencies.credentials;
+  }
 
   onComplete(sink: (completion: McpCompletion) => void): void {
     this.sink = sink;
@@ -255,8 +297,10 @@ export class SdkMcpTransport implements McpTransport {
   }
 
   /** Run one operation. Any anticipated failure — a rejected connect, a server-reported tool error, a
-   *  dropped transport — is the typed `server_error` throw; the descriptor's cache entry is evicted so
-   *  the next call reconnects fresh. */
+   *  dropped transport — is the typed `server_error` throw; a dead OAuth credential (missing, or the
+   *  SDK's `UnauthorizedError` after refresh failed) is the typed `auth_error` instead. Either way the
+   *  descriptor's cache entry is evicted so the next call starts fresh — after `auth_error`, that next
+   *  call picks up whatever a re-run `katari mcp login` stored. */
   private async perform(call: McpCall, signal: AbortSignal): Promise<McpCompletion["outcome"]> {
     let descriptor: Descriptor | null = null;
     try {
@@ -273,6 +317,9 @@ export class SdkMcpTransport implements McpTransport {
       }
       // The connection may be the broken part — evict so the next call re-establishes it.
       if (descriptor !== null) this.clients.delete(descriptorKey(descriptor));
+      if (error instanceof McpAuthError || error instanceof UnauthorizedError) {
+        return { kind: "throw", error: authError(error.message) };
+      }
       return {
         kind: "throw",
         error: serverError(error instanceof Error ? error.message : String(error)),
@@ -326,20 +373,27 @@ export class SdkMcpTransport implements McpTransport {
     const key = descriptorKey(descriptor);
     const cached = this.clients.get(key);
     if (cached !== undefined) return cached;
-    const requestInit =
-      Object.keys(descriptor.headers).length > 0 ? { headers: descriptor.headers } : undefined;
     const attempt = async (kind: "streamable" | "sse"): Promise<Client> => {
+      const options = await this.connectionOptions(descriptor.auth);
       const client = new Client({ name: "katari-runtime", version: "0.1.0" });
       const target = new URL(descriptor.url);
       await client.connect(
         kind === "streamable"
-          ? new StreamableHTTPClientTransport(target, { requestInit })
-          : new SSEClientTransport(target, { requestInit }),
+          ? new StreamableHTTPClientTransport(target, options)
+          : new SSEClientTransport(target, options),
       );
       return client;
     };
     const pending = attempt("streamable")
       .catch(async (streamableError) => {
+        // A dead credential fails identically over SSE, so the fallback would only repeat the same
+        // typed failure with a laggier path — rethrow the honest error instead.
+        if (
+          streamableError instanceof McpAuthError ||
+          streamableError instanceof UnauthorizedError
+        ) {
+          throw streamableError;
+        }
         try {
           return await attempt("sse");
         } catch {
@@ -354,34 +408,106 @@ export class SdkMcpTransport implements McpTransport {
     this.clients.set(key, pending);
     return pending;
   }
+
+  /** The SDK transport options one auth variant needs: explicit headers ride as `requestInit`, an
+   *  OAuth credential becomes a store-backed `authProvider` (loaded HERE, so a missing credential is
+   *  the typed `auth_error` before any network I/O). The option shape is the common subset both the
+   *  streamable and the SSE transports accept. */
+  private async connectionOptions(
+    auth: DescriptorAuth,
+  ): Promise<{ requestInit?: RequestInit; authProvider?: StoredMcpOAuthProvider }> {
+    switch (auth.kind) {
+      case "headers":
+        return Object.keys(auth.headers).length > 0
+          ? { requestInit: { headers: auth.headers } }
+          : {};
+      case "oauth": {
+        const store = this.credentials;
+        if (store === undefined) {
+          throw new McpAuthError(
+            "this runtime has no OAuth credential store configured, so mcp.oauth(...) cannot resolve a credential",
+          );
+        }
+        const credential = await loadStoredCredential(auth.name, store);
+        return { authProvider: new StoredMcpOAuthProvider(auth.name, store, credential) };
+      }
+    }
+  }
 }
 
-/** A stable cache key for a server descriptor (headers key-sorted so ordering never splits entries). */
+/** A stable cache key for a server descriptor: the url plus the auth IDENTITY — the key-sorted header
+ *  map, or the OAuth credential's name (never its token material, which rotates under refresh). The
+ *  variant tag keeps the two families disjoint by construction. */
 function descriptorKey(descriptor: Descriptor): string {
-  const headers = Object.keys(descriptor.headers)
-    .sort()
-    .map((name) => `${name}:${descriptor.headers[name]}`)
-    .join("\n");
-  return `${descriptor.url}\n${headers}`;
+  const auth = descriptor.auth;
+  switch (auth.kind) {
+    case "headers": {
+      const headers = Object.keys(auth.headers)
+        .sort()
+        .map((name) => `${name}:${auth.headers[name]}`)
+        .join("\n");
+      return `${descriptor.url}\nheaders\n${headers}`;
+    }
+    case "oauth":
+      return `${descriptor.url}\noauth\n${auth.name}`;
+  }
 }
 
-/** Read a `{ url, headers }` descriptor out of a call's lowered Json descriptor. */
+/** Read a `{ url, auth }` descriptor out of a call's lowered Json descriptor. */
 function readDescriptor(source: Json | null): Descriptor {
   if (source === null || typeof source !== "object" || Array.isArray(source)) {
-    throw new Error("mcp: expected a { url, headers } descriptor");
+    throw new Error("mcp: expected a { url, auth } descriptor");
   }
   const url = source.url;
   if (typeof url !== "string") {
     throw new Error('mcp: the descriptor\'s "url" must be a string');
   }
-  const headers: Record<string, string> = {};
-  const rawHeaders = source.headers;
-  if (rawHeaders !== null && typeof rawHeaders === "object" && !Array.isArray(rawHeaders)) {
-    for (const [name, value] of Object.entries(rawHeaders)) {
-      if (typeof value === "string") headers[name] = value;
-    }
+  return { url, auth: readDescriptorAuth(source.auth) };
+}
+
+/** Decode the descriptor's auth sum from its wire form — the `$constructor`-tagged `data` value the
+ *  program built (`mcp.headers(...)` / `mcp.oauth(...)`). This is the ONE place the tag is dispatched
+ *  on; past here the variants are distinct union members. A malformed shape is wire drift, reported as
+ *  the typed descriptor error (the catch in `perform` makes it a `server_error` throw). */
+function readDescriptorAuth(source: Json | undefined): DescriptorAuth {
+  if (
+    source === null ||
+    source === undefined ||
+    typeof source !== "object" ||
+    Array.isArray(source)
+  ) {
+    throw new Error(
+      'mcp: the descriptor\'s "auth" must be an mcp.headers(...) or mcp.oauth(...) value',
+    );
   }
-  return { url, headers };
+  const fieldsSource = source.value;
+  const fields =
+    fieldsSource !== null && typeof fieldsSource === "object" && !Array.isArray(fieldsSource)
+      ? fieldsSource
+      : {};
+  switch (source.$constructor) {
+    case "prelude.mcp.headers": {
+      const headers: Record<string, string> = {};
+      const rawValues = fields.values;
+      if (rawValues !== null && typeof rawValues === "object" && !Array.isArray(rawValues)) {
+        for (const [name, value] of Object.entries(rawValues)) {
+          if (typeof value === "string") headers[name] = value;
+        }
+      }
+      return { kind: "headers", headers };
+    }
+    case "prelude.mcp.oauth": {
+      const name = fields.name;
+      if (typeof name !== "string" || name === "") {
+        throw new Error("mcp: an mcp.oauth(...) auth value must carry its credential name");
+      }
+      return { kind: "oauth", name };
+    }
+    default:
+      throw new Error(
+        'mcp: the descriptor\'s "auth" must be an mcp.headers(...) or mcp.oauth(...) value',
+      );
+  }
 }
 
 /** The text of a tool result's content blocks, joined (non-text blocks noted by their placeholder). */

@@ -27,7 +27,7 @@ const SNAPSHOT = "snapshot-mcp-integration" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
 // agent main(url) {
-//   let toolbox = prelude.mcp.tools({ url, headers: {} })
+//   let toolbox = prelude.mcp.tools({ url, auth: prelude.mcp.headers({ values: {} }) })
 //   return reflection.call_agent({ target: toolbox.add, args: { x: 19, y: 23 } })
 // }
 // No connect / close: a tool carries its server DESCRIPTOR, and the transport's descriptor-keyed
@@ -46,46 +46,53 @@ const MCP_IR: IRModule = {
         operations: [
           { kind: "getField", source: 10, field: "url", output: 11 },
           { kind: "makeRecord", entries: [], output: 12 },
+          { kind: "makeRecord", entries: [["values", 12]], output: 13 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 13,
+            output: 14,
+          },
           {
             kind: "makeRecord",
             entries: [
               ["url", 11],
-              ["headers", 12],
+              ["auth", 14],
             ],
-            output: 13,
+            output: 15,
           },
           {
             kind: "delegate",
             target: { kind: "name", name: createAgentName("prelude.mcp.tools") },
-            argument: 13,
-            output: 14,
+            argument: 15,
+            output: 16,
           },
-          { kind: "getField", source: 14, field: "add", output: 15 },
-          { kind: "loadLiteral", output: 16, value: { kind: "integer", value: 19 } },
-          { kind: "loadLiteral", output: 17, value: { kind: "integer", value: 23 } },
+          { kind: "getField", source: 16, field: "add", output: 17 },
+          { kind: "loadLiteral", output: 18, value: { kind: "integer", value: 19 } },
+          { kind: "loadLiteral", output: 19, value: { kind: "integer", value: 23 } },
           {
             kind: "makeRecord",
             entries: [
-              ["x", 16],
-              ["y", 17],
+              ["x", 18],
+              ["y", 19],
             ],
-            output: 18,
+            output: 20,
           },
           {
             kind: "makeRecord",
             entries: [
-              ["target", 15],
-              ["args", 18],
+              ["target", 17],
+              ["args", 20],
             ],
-            output: 19,
+            output: 21,
           },
           {
             kind: "delegate",
             target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
-            argument: 19,
-            output: 20,
+            argument: 21,
+            output: 22,
           },
-          { kind: "exit", target: 0, value: 20 },
+          { kind: "exit", target: 0, value: 22 },
         ],
       },
       parameters: { parameter: 10 },
@@ -98,10 +105,19 @@ const MCP_IR: IRModule = {
       block: { kind: "external", key: "prelude.mcp.tools", input: 30, reactor: "mcp" },
       parameters: { parameter: 30 },
     },
+    4: {
+      block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    5: {
+      block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
+      parameters: { parameter: 50 },
+    },
   },
   entries: {
     [createAgentName("main")]: 0,
     [createAgentName("prelude.mcp.tools")]: 2,
+    [createAgentName("prelude.mcp.headers")]: 4,
   },
   names: {},
 };
@@ -173,7 +189,7 @@ describe("the built-in mcp path through the actor", () => {
       blobs: new InMemoryBlobStore(),
       external: new StubFfiTransport(),
       http: new StubHttpTransport(),
-      mcp: new SdkMcpTransport(),
+      mcp: new SdkMcpTransport({}),
       persistence: new InMemoryPersistence(),
     });
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, {

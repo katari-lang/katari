@@ -116,7 +116,7 @@ export type ToolValue = {
   /** The reactor-scoped dispatch key AND the public metadata name (an MCP server's tool name). */
   name: string;
   description: string;
-  /** Opaque, reactor-owned execution context (an MCP tool: `{url, headers}`, headers private —
+  /** Opaque, reactor-owned execution context (an MCP tool: `{url, auth}`, a header value private —
    *  the privacy marker rides, so persistence seals it and user-facing boundaries redact it). */
   context: Value;
   /** The snapshot the tool was minted under (rides the external delegate target; informational). */

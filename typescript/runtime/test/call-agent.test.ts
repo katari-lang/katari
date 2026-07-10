@@ -279,16 +279,23 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
     additionalProperties: false,
   };
 
-  /** The server descriptor the tool carries as its reactor context (its `headers` value private, the
-   *  way `prelude.mcp.tools` mints it — the reveal at the transport boundary is asserted below). */
+  /** The server descriptor the tool carries as its reactor context (a `headers`-variant auth sum
+   *  with a private header value, the way `prelude.mcp.tools` mints it — the reveal at the
+   *  transport boundary is asserted below). */
   function descriptor(): Value {
     return {
       kind: "record",
       fields: {
         url: { kind: "string", value: "https://mcp.example.test/mcp" },
-        headers: {
+        auth: {
           kind: "record",
-          fields: { authorization: { kind: "string", value: "sk-mcp", private: true } },
+          ctor: createAgentName("prelude.mcp.headers"),
+          fields: {
+            values: {
+              kind: "record",
+              fields: { authorization: { kind: "string", value: "sk-mcp", private: true } },
+            },
+          },
         },
       },
     };
@@ -408,7 +415,10 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
     expect(call.argument).toEqual({ name: "alice" });
     expect(call.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
-      headers: { authorization: "sk-mcp" },
+      auth: {
+        $constructor: "prelude.mcp.headers",
+        value: { values: { authorization: "sk-mcp" } },
+      },
     });
     transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "hi alice" } });
     await expect(result).resolves.toEqual({ kind: "string", value: "hi alice" });

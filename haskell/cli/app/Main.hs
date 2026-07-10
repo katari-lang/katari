@@ -17,6 +17,7 @@ import Katari.Cli.Command.Env qualified as Env
 import Katari.Cli.Command.File qualified as File
 import Katari.Cli.Command.Init qualified as Init
 import Katari.Cli.Command.Ls qualified as Ls
+import Katari.Cli.Command.Mcp qualified as Mcp
 import Katari.Cli.Command.Project qualified as Project
 import Katari.Cli.Command.Run qualified as Run
 import Katari.Cli.Command.Status qualified as Status
@@ -37,6 +38,7 @@ data Command
   | CommandLs Ls.Options
   | CommandEnv Env.Options
   | CommandFile File.Options
+  | CommandMcp Mcp.Options
   | CommandProject Project.Options
 
 commandParser :: Parser Command
@@ -55,6 +57,7 @@ commandParser =
         <> command "ls" (info (CommandLs <$> Ls.optionsParser) (progDesc "List runs (default), agents, snapshots, projects, escalations, files or env"))
         <> command "env" (info (CommandEnv <$> Env.optionsParser) (progDesc "Manage the project's env entries (get / set / unset)"))
         <> command "file" (info (CommandFile <$> File.optionsParser) (progDesc "Upload / download project files"))
+        <> command "mcp" (info (CommandMcp <$> Mcp.optionsParser) (progDesc "Manage MCP server credentials (login)"))
         <> command "project" (info (CommandProject <$> Project.optionsParser) (progDesc "Manage projects on the runtime (remove, rollback)"))
     )
 
@@ -103,4 +106,5 @@ dispatch = \case
   CommandLs options -> ("ls", Ls.run options)
   CommandEnv options -> ("env", Env.run options)
   CommandFile options -> ("file", File.run options)
+  CommandMcp options -> ("mcp", Mcp.run options)
   CommandProject options -> ("project", Project.run options)

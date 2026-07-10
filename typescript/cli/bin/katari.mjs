@@ -3,12 +3,13 @@
 // inside the matching `@katari-lang/cli-<platform>` optionalDependency
 // and forwards stdio + arguments + exit code.
 //
-// Bundle wiring: the Haskell binary resolves `katari-bundle` in this
-// order — KATARI_BUNDLE_BIN, then `node_modules/.bin/katari-bundle`
+// Helper wiring: the Haskell binary resolves its node helpers —
+// `katari-bundle` (apply) and `katari-mcp` (mcp login) — in this
+// order: the KATARI_*_BIN override, then `node_modules/.bin/<name>`
 // walking up from the project directory, then PATH. When the user runs
-// through this shim we know exactly where @katari-lang/bundle lives
-// (it is our optionalDependency), so we export KATARI_BUNDLE_BIN
-// directly instead of hoping the project-local walk or PATH finds it.
+// through this shim we know exactly where the helper packages live
+// (they are our dependencies), so we export the overrides directly
+// instead of hoping the project-local walk or PATH finds them.
 //
 // PATH enrichment: walks ancestors of the shim file for any
 // `node_modules/.bin/` directories and prepends them to PATH before
@@ -76,19 +77,24 @@ function collectBinDirs(startFile) {
   return dirs;
 }
 
-// @katari-lang/bundle is a regular dependency of this package, so `apply`
-// always has a bundler. Point KATARI_BUNDLE_BIN at its CLI entry (next to the
-// resolved module inside dist/) so the katari binary uses this exact copy —
-// this is what makes a global install work, where the project directory has no
-// local node_modules/.bin/katari-bundle to walk to. If resolution somehow
-// fails, the katari binary resolves the bundler itself and owns the precise
-// "bundler not found" error, so we do not second-guess it here.
-let bundleBin = null;
-try {
-  bundleBin = join(dirname(require.resolve("@katari-lang/bundle")), "cli.mjs");
-} catch {
-  // Unresolvable (a broken install); leave it to the katari binary.
+// @katari-lang/bundle and @katari-lang/mcp are regular dependencies of this
+// package, so `apply` always has a bundler and `mcp login` always has its
+// OAuth helper. Point KATARI_BUNDLE_BIN / KATARI_MCP_BIN at their CLI entries
+// (next to the resolved module inside dist/) so the katari binary uses these
+// exact copies — this is what makes a global install work, where the project
+// directory has no local node_modules/.bin/ to walk to. If resolution somehow
+// fails, the katari binary resolves the helper itself and owns the precise
+// "not found" error, so we do not second-guess it here.
+function resolveHelperCli(packageName) {
+  try {
+    return join(dirname(require.resolve(packageName)), "cli.mjs");
+  } catch {
+    // Unresolvable (a broken install); leave it to the katari binary.
+    return null;
+  }
 }
+const bundleBin = resolveHelperCli("@katari-lang/bundle");
+const mcpBin = resolveHelperCli("@katari-lang/mcp");
 
 const env = { ...process.env };
 const binDirs = collectBinDirs(fileURLToPath(import.meta.url));
@@ -97,6 +103,9 @@ if (binDirs.length > 0) {
 }
 if (bundleBin !== null && env.KATARI_BUNDLE_BIN === undefined) {
   env.KATARI_BUNDLE_BIN = bundleBin;
+}
+if (mcpBin !== null && env.KATARI_MCP_BIN === undefined) {
+  env.KATARI_MCP_BIN = mcpBin;
 }
 
 const child = spawn(binaryPath, process.argv.slice(2), {
