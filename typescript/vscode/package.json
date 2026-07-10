@@ -20,6 +20,13 @@
   "categories": [
     "Programming Languages"
   ],
+  "keywords": [
+    "katari",
+    "agent orchestration",
+    "ai agents",
+    "language server",
+    "lsp"
+  ],
   "contributes": {
     "commands": [
       {
