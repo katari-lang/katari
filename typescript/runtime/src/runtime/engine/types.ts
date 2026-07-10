@@ -42,6 +42,15 @@ export type Scope = {
 
 export type ThreadStatus = "running" | "cancelling";
 
+/**
+ * Where a thread structurally comes from: ordinary user execution, or the instance's `finally` drain. The
+ * distinction is load-bearing and lives on the thread (never sniffed from an unrelated field): a user cancel
+ * cascade never crosses into a finalizer subtree, and a finalizer performing a user-facing escalation is a
+ * compile-time-forbidden move the runtime backstops with a panic. Every spawn inherits its parent's origin,
+ * so a finalizer's own sub-threads are `finalizer` too; only the finalizer roots are stamped explicitly.
+ */
+export type ThreadOrigin = "user" | "finalizer";
+
 /** Fields every thread carries regardless of which block it runs. */
 export type ThreadBase = {
   id: ThreadId;
@@ -54,6 +63,8 @@ export type ThreadBase = {
   /** The block this thread runs. */
   blockId: BlockId;
   status: ThreadStatus;
+  /** User execution or a finalizer subtree — see `ThreadOrigin`. */
+  origin: ThreadOrigin;
   /**
    * For each ask this thread bubbled up under its own local `askId`, the child `(thread, askId)` to send
    * the answer back to — one hop down. When a thread receives an ask it does not consume, it re-raises a
@@ -307,6 +318,38 @@ export type CancelExit =
    *  parent) with the break `value` — bypassing any then-clause. */
   | { kind: "completeWith"; value: Value };
 
+// ─── Finalizers (the `finally` terminal) ──────────────────────────────────────────────────────────
+
+/**
+ * One `finally` block armed by a `defer` op, awaiting the instance's terminal: the finalizer BLOCK to run
+ * and the SCOPE it was armed in (the executing thread's scope). The spawned finalizer chains to that scope,
+ * so it reads the enclosing bindings and carries no parameters of its own. Armed in source order (pushed);
+ * drained in reverse (popped, LIFO) at the terminal.
+ */
+export type ArmedFinalizer = { block: BlockId; scopeId: ScopeId };
+
+/**
+ * The terminal an instance is heading toward once its finalizers drain — the outcome the drain defers.
+ * `completed` acks the original result (the `delegateAck`); `cancelled` discards it and acks a cancel (the
+ * `terminateAck`). A cancel arriving mid-drain flips a `completed` disposition to `cancelled` in place, so
+ * the completed result is discarded (the atomicity rule).
+ */
+export type FinalizerDisposition = { kind: "completed"; value: Value } | { kind: "cancelled" };
+
+/**
+ * An instance's control phase — a sum type rather than a pair of flags, so an impossible combination is
+ * unrepresentable and a recovery restores exactly one clear state:
+ *   - `running`: ordinary execution (finalizers may still be arming);
+ *   - `finalizing`: the post-terminal drain — the user tree is gone and the armed finalizers run one at a
+ *     time toward `disposition`, before the deferred ack;
+ *   - `failed`: a panic escaped this instance, so its state is not trusted — its terminal skips finalizers
+ *     entirely (whether the panic struck user code or a finalizer body).
+ */
+export type InstancePhase =
+  | { kind: "running" }
+  | { kind: "finalizing"; disposition: FinalizerDisposition }
+  | { kind: "failed" };
+
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 
 export type InstanceStatus = "running" | "cancelling";
@@ -363,6 +406,10 @@ export type CoreInstance = {
   // that root thread. The actor routes the round trip by `delegation` (→ `delegationChild` = the raiser).
   /** A cancelling thread's id -> the exit it performs once its subtree's teardown is confirmed. */
   cancelExits: Record<number, CancelExit>;
+  /** `finally` blocks armed by `defer` ops in source order; drained in reverse (LIFO) at the terminal. */
+  finalizers: ArmedFinalizer[];
+  /** Whether the instance is running, draining finalizers, or failed — see `InstancePhase`. */
+  phase: InstancePhase;
   // Instance-local id counters.
   nextThreadId: number;
   nextCallId: number;
@@ -416,6 +463,10 @@ export type EngineState = {
   // `delegationId` is its source of truth. Answer routing rides per-thread in `Thread.forwardRoutes`. The
   // actor needs no escalation mirror (a returning `escalateAck` routes to the raiser via `delegationChild`).
   cancelExits: Record<number, CancelExit>;
+  /** The armed-but-not-yet-run `finally` blocks and the drain's phase ride the persisted engine state, so a
+   *  restart mid-finalization resumes the drain toward the same deferred terminal (result-or-cancel). */
+  finalizers: ArmedFinalizer[];
+  phase: InstancePhase;
   nextThreadId: number;
   nextCallId: number;
   nextAskId: number;

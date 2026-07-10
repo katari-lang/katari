@@ -116,6 +116,12 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
         dropVariable(ctx.store, scope, variable);
       }
       return true;
+    case "defer":
+      // Arm a `finally` block as a finalizer of THIS instance: push (block, this thread's scope) onto the
+      // instance's finalizer stack. The scope is captured so the finalizer chains to it (reads the enclosing
+      // bindings) when the drain spawns it at the terminal. Arming is synchronous — the cursor advances.
+      ctx.instance.finalizers.push({ block: operation.block, scopeId: scope });
+      return true;
     case "applyGenerics": {
       const substitution: GenericSubstitution = {};
       for (const [name, schema] of operation.generics) {
@@ -319,6 +325,8 @@ function spawnInlinePrimitive(
     // Never read (the inline invocation carries everything); the spawning block is a valid placeholder.
     blockId: thread.blockId,
     status: "running",
+    // An inlined leaf runs within the spawning thread's subtree — it shares its origin.
+    origin: thread.origin,
     forwardRoutes: {},
     kind: "primitive",
     invocation: {
@@ -353,6 +361,8 @@ function emitDelegate(
     scopeId: thread.scopeId,
     blockId: thread.blockId,
     status: "running",
+    // The proxy for an outbound delegate shares the spawning thread's origin (a finalizer's sub-calls too).
+    origin: thread.origin,
     forwardRoutes: {},
     kind: "delegate",
     delegationId,

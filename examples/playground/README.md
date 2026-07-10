@@ -1,6 +1,6 @@
 # playground — a tour of Katari's standard features
 
-One project, six modules, each independently runnable. Use it to smoke-test a runtime and to see
+One project, seven modules, each independently runnable. Use it to smoke-test a runtime and to see
 every core feature in a small, deterministic form.
 
 | Module                                   | Entry              | Shows                                                                                                                              |
@@ -11,6 +11,7 @@ every core feature in a small, deterministic form.
 | [`interactive.ktr`](src/interactive.ktr) | `interactive.main` | escalation: unanswered `request`s bubble out as open questions; parallel delegations — watch the **delegation tree** on the run page |
 | [`ffi.ktr`](src/ffi.ktr) + [`ffi.ts`](src/ffi.ts) | `ffi.main` | the FFI: plain values, `file` blobs both directions, inner delegation (`context.call`), typed throws (`katari.throw`)               |
 | [`webhook.ktr`](src/webhook.ktr)         | `webhook.main`     | dynamic inbound endpoints: `webhook.inbound` mints a public URL, POSTs become validated callback calls — self-contained (the subscriber POSTs to its own URL) |
+| [`finalizers.ktr`](src/finalizers.ktr)   | `finalizers.run`   | `finally { ... }` arms instance finalizers (Go-`defer`-like): reverse arming order, run at the terminal, never on a panic; a finalizer's net effect must stay within `io` (a locally-handled request is fine, an escalating one is rejected K3021) |
 
 ## Run it
 

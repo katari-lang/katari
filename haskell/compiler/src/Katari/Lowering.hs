@@ -625,6 +625,13 @@ lowerStatement = \case
   AST.StatementExpression expression -> do
     _ <- lowerExpression expression
     pure False
+  -- @finally { ... }@ lowers the body to its own parameterless 'Sequence' block (the finalizer reads
+  -- the enclosing scope through the parent chain) and arms it with an 'OperationDefer'. Arming does not
+  -- transfer control, so the rest of the block still runs.
+  AST.StatementFinally statement -> do
+    blockId <- buildBlockSequence statement.body
+    emit (OperationDefer DeferOperation {block = blockId})
+    pure False
   AST.StatementError _ -> pure False
   AST.StatementLet _ -> panic "lowering: StatementLet must be handled by lowerBlockValue"
   AST.StatementAgent _ -> panic "lowering: StatementAgent must be handled by lowerBlockValue"

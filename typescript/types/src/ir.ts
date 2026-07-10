@@ -33,7 +33,8 @@ export type GenericId = number;
 
 export type Metadata = {
   /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles.
-   *  Version 2 added the `drop` operation, which a version-1 runtime cannot execute. */
+   *  Version 2 added the `drop` operation and version 3 the `defer` operation, each of which an
+   *  older runtime cannot execute. */
   schemaVersion: number;
 };
 
@@ -230,7 +231,8 @@ export type Operation =
   | ApplyGenericsOperation
   | ExitOperation
   | ContinueOperation
-  | DropOperation;
+  | DropOperation
+  | DeferOperation;
 
 /** Enter a local structural node (`match` / `for` / `handle` / `par`) in the current scope. */
 export type CallOperation = { kind: "call"; target: BlockId; output: VariableId | null };
@@ -311,6 +313,15 @@ export type ContinueOperation = {
  * the backstop for anything the pass could not prove dead. The list is non-empty and sorted by id.
  */
 export type DropOperation = { kind: "drop"; variables: VariableId[] };
+
+/**
+ * Arm a `finally` block as a finalizer of the CURRENT INSTANCE: the runtime pushes (block, the
+ * executing thread's scope) onto the instance's finalizer stack and runs the stack in reverse arming
+ * order right before the instance acknowledges its terminal (a normal completion's delegateAck or a
+ * cancellation's cancelAck) — never on a panic. The armed block reads the enclosing scope through the
+ * ordinary parent chain, so it carries no parameters of its own.
+ */
+export type DeferOperation = { kind: "defer"; block: BlockId };
 
 /** A callable-invocation target: a name (via `entries`) or a runtime value (an agent / closure). */
 export type CalleeReference =

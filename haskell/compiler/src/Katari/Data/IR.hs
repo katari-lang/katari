@@ -50,11 +50,12 @@ newtype Metadata = Metadata
   }
   deriving stock (Eq, Show)
 
--- | The metadata the compiler stamps on every emitted 'IRModule'. Version 2 added 'OperationDrop':
--- the wire shape gained an operation a pre-drop runtime cannot execute, and this constant is exactly
--- that contract — a runtime rejects IR whose version it does not understand.
+-- | The metadata the compiler stamps on every emitted 'IRModule'. Version 2 added 'OperationDrop'
+-- and version 3 'OperationDefer': each time the wire shape gained an operation an older runtime
+-- cannot execute, and this constant is exactly that contract — a runtime rejects IR whose version
+-- it does not understand.
 currentMetadata :: Metadata
-currentMetadata = Metadata {schemaVersion = 2}
+currentMetadata = Metadata {schemaVersion = 3}
 
 -- | One module's lowered output. The runtime loads it and resolves callables by 'QualifiedName'
 -- through 'entries'
@@ -278,6 +279,12 @@ data Operation where
   -- deletes each binding from the thread's local scope, shrinking the scope row it persists every
   -- turn. Scope-level GC remains the backstop for everything the pass cannot prove dead.
   OperationDrop :: DropOperation -> Operation
+  -- | Arm a @finally@ block as a finalizer of the CURRENT INSTANCE: the runtime pushes
+  -- (block, the executing thread's scope) onto the instance's finalizer stack and runs the stack in
+  -- reverse arming order right before the instance acknowledges its terminal (a normal completion's
+  -- @delegateAck@ or a cancellation's @cancelAck@) — never on a panic. Passing the statement twice
+  -- (a loop body) arms twice; that is the stack discipline, not a defect.
+  OperationDefer :: DeferOperation -> Operation
   deriving stock (Eq, Show)
 
 data CallOperation = CallOperation
@@ -366,6 +373,14 @@ data ContinueOperation = ContinueOperation
     value :: Maybe VariableId,
     -- | @with (name = e, ...)@ state updates: (state var in the target's scope, new-value var here).
     modifiers :: List (VariableId, VariableId)
+  }
+  deriving stock (Eq, Show)
+
+-- | See 'OperationDefer'. The armed block reads the enclosing scope through the ordinary parent
+-- chain (its finalizer thread spawns with the arming scope as its parent), so it carries no
+-- parameters of its own.
+newtype DeferOperation = DeferOperation
+  { block :: BlockId
   }
   deriving stock (Eq, Show)
 
@@ -571,6 +586,7 @@ instance ToJSON Operation where
     OperationContinue op ->
       taggedObject "continue" ["target" .= op.target, "value" .= op.value, "modifiers" .= op.modifiers]
     OperationDrop op -> taggedObject "drop" ["variables" .= op.variables]
+    OperationDefer op -> taggedObject "defer" ["block" .= op.block]
 
 instance ToJSON CalleeReference where
   toJSON reference = case reference of

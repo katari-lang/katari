@@ -980,6 +980,46 @@ spec = do
         )
         `shouldContain` ["K3019"]
 
+  -- A finalizer runs at instance termination — the parent may already be awaiting the instance's
+  -- cancellation — so its net effect must be within `io`: it may not escalate a request through that
+  -- parent. The rule is checked on the finally body's residual effect (a request handled locally
+  -- inside the body is discharged before it counts).
+  describe "finally" $ do
+    it "accepts a pure finalizer body" $
+      compiledCodes "agent main() -> integer { finally { let cleanup = 1 }\n7 }" `shouldBe` []
+
+    it "accepts an io finalizer body, joining its io into the enclosing effect row" $
+      compiledCodes
+        ( "primitive agent log(message: string) -> null with io\n"
+            <> "agent main() -> integer with io { finally { log(message = \"bye\") }\n7 }"
+        )
+        `shouldBe` []
+
+    it "leaks the finalizer's io into the enclosing row, so a `pure` agent is rejected (K3001)" $
+      compiledCodes
+        ( "primitive agent log(message: string) -> null with io\n"
+            <> "agent main() -> integer with pure { finally { log(message = \"bye\") }\n7 }"
+        )
+        `shouldContain` ["K3001"]
+
+    it "accepts a finalizer that raises a request it handles locally" $
+      compiledCodes
+        ( "request ping() -> integer\n"
+            <> "agent main() -> integer { finally { use handler { request ping() { next 1 } }\nlet answer = ping() }\n7 }"
+        )
+        `shouldBe` []
+
+    it "rejects a finalizer that escalates an unhandled throw (K3021)" $
+      compiledCodes "agent main() -> integer { finally { prelude.throw(error = \"boom\") }\n7 }"
+        `shouldContain` ["K3021"]
+
+    it "rejects a finalizer that escalates a custom request (K3021)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer with io { finally { let counted = tick() }\n7 }"
+        )
+        `shouldContain` ["K3021"]
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------

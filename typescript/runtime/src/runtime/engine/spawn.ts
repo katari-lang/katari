@@ -13,7 +13,7 @@ import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateScope, writeVariable } from "./scope.js";
 import { allocateThreadId } from "./store.js";
-import type { Thread, ThreadBase } from "./types.js";
+import type { Thread, ThreadBase, ThreadOrigin } from "./types.js";
 
 /** Resolve a block by id within the running instance's snapshot (unwrapping its `BlockInformation`). */
 export function getBlock(ctx: StepContext, blockId: BlockId): Block {
@@ -33,6 +33,9 @@ export function spawnThread(
     parentScopeId: ScopeId;
     blockId: BlockId;
     parameters: Record<string, Value>;
+    /** Override the origin the child would otherwise inherit from its parent — supplied only when spawning a
+     *  finalizer root under the (user) agent root, to stamp the whole finalizer subtree `finalizer`. */
+    origin?: ThreadOrigin;
   },
 ): ThreadId {
   const information = ctx.ir.block(args.blockId);
@@ -52,6 +55,9 @@ export function spawnThread(
     scopeId,
     blockId: args.blockId,
     status: "running",
+    // Inherit the spawning parent's origin (a finalizer's sub-threads are finalizers too), unless the caller
+    // stamps one explicitly (the finalizer root spawned under the user agent root).
+    origin: args.origin ?? ctx.instance.threads[args.parent]?.origin ?? "user",
     forwardRoutes: {},
   };
   ctx.instance.threads[threadId] = threadForBlock(information.block, base);

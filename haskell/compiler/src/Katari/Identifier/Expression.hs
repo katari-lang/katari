@@ -417,6 +417,11 @@ resolveStatement blockSpan statement continueRest = case statement of
   StatementForBreak node -> do
     value <- resolveExpression node.value
     prepend (StatementForBreak ForBreakStatement {value = value, sourceSpan = node.sourceSpan}) continueRest
+  -- The finalizer body is a nested block scope (it reads the enclosing scope through the parent chain
+  -- but binds its own @let@s within itself); it introduces no binding into the rest of the block.
+  StatementFinally node -> do
+    body <- resolveBlock node.body
+    prepend (StatementFinally FinallyStatement {body = body, sourceSpan = node.sourceSpan}) continueRest
   StatementError sourceSpan -> prepend (StatementError sourceSpan) continueRest
 
 prepend ::

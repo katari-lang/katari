@@ -51,6 +51,7 @@ describe("persistence codec", () => {
           scopeId: toScopeId(0),
           blockId: 0,
           status: "running",
+          origin: "user",
           // The root's forward route for an in-flight escape, plus the escalation→askId bridge that
           // converts its returning escalateAck — both ride in the root thread payload now (was the
           // instance's engine_state) and must survive the round-trip.
@@ -66,6 +67,7 @@ describe("persistence codec", () => {
           scopeId: toScopeId(0),
           blockId: 1,
           status: "running",
+          origin: "user",
           forwardRoutes: {},
           kind: "sequence",
           cursor: 3,
@@ -78,6 +80,7 @@ describe("persistence codec", () => {
           scopeId: toScopeId(0),
           blockId: 1,
           status: "running",
+          origin: "user",
           forwardRoutes: {},
           kind: "delegate",
           delegationId: "delegation-child" as DelegationId,
@@ -87,6 +90,8 @@ describe("persistence codec", () => {
         },
       },
       cancelExits: {},
+      finalizers: [],
+      phase: { kind: "running" },
       nextThreadId: 3,
       nextCallId: 2,
       nextAskId: 0,

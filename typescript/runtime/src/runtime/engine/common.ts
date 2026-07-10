@@ -156,6 +156,11 @@ export function proxyAsk(
  * `escalateAck` is converted back to an internal `askAck` here, in `resumeEscalation`.
  */
 export function escapeAsk(ctx: StepContext, from: ThreadId, fromAskId: AskId, ask: AskKind): void {
+  if (ask.kind === "request" && ask.request === PANIC_REQUEST) {
+    // A panic leaving the instance means its state is no longer trusted: mark it failed so its terminal
+    // skips finalizers, whether the panic struck user code or a finalizer body (which lands here too).
+    ctx.instance.phase = { kind: "failed" };
+  }
   const delegation = ctx.instance.delegationId;
   if (delegation === null) {
     throw new Error("an instance with no delegation cannot escalate (engine bug)");

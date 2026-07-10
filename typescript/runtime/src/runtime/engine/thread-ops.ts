@@ -7,6 +7,7 @@
 // inbound ones via the actor.
 
 import type { Block } from "@katari-lang/types";
+import { isUserFacingRequest } from "../escalation-filter.js";
 import type { AskKind, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
@@ -35,6 +36,7 @@ import type {
   AgentThread,
   CancelExit,
   ExternalThread,
+  FinalizerDisposition,
   ForThread,
   HandleThread,
   MatchThread,
@@ -111,7 +113,13 @@ export function dispatchCallAck(
   }
   switch (thread.kind) {
     case "agent":
-      completeInstance(ctx, value); // the body completed normally (no explicit return)
+      if (ctx.instance.phase.kind === "finalizing") {
+        // A finalizer thread completed: run the next armed one, or emit the deferred terminal ack.
+        runNextFinalizer(ctx);
+        return;
+      }
+      // The body completed normally (no explicit return): reach the terminal, running finalizers first.
+      beginTerminal(ctx, { kind: "completed", value });
       return;
     case "sequence":
       resumeSequence(ctx, thread, callId, value);
@@ -243,10 +251,13 @@ function finishCancel(ctx: StepContext, thread: Thread): void {
       removeThread(ctx, thread.id);
       return;
     case "returnInstance":
-      completeInstance(ctx, exit.value);
+      // An explicit `return` completed the instance: reach the terminal, running finalizers first.
+      beginTerminal(ctx, { kind: "completed", value: exit.value });
       return;
     case "terminateInstance":
-      terminateInstance(ctx);
+      // The user body's cancel cascade cleared: reach the cancel terminal, running finalizers first (unless
+      // the instance failed, in which case `beginTerminal` skips them).
+      beginTerminal(ctx, { kind: "cancelled" });
       return;
     case "completeWith":
       completeThread(ctx, thread, exit.value);
@@ -270,7 +281,16 @@ function noteChildGone(ctx: StepContext, parentId: ThreadId): void {
 export function dispatchCancel(ctx: StepContext, thread: Thread): void {
   switch (thread.kind) {
     case "agent":
-      // The instance is being terminated: tear down the body, then terminateAck.
+      if (ctx.instance.phase.kind === "finalizing") {
+        // Atomicity: a cancel arriving mid-drain neither cancels the running finalizers nor restarts
+        // anything. Flip the deferred terminal to `cancelled` in place and let the drain finish — its
+        // terminal then acks the cancel and discards the completed result. (`finalizing` implies not
+        // failed: a panic escaping mid-drain would have moved the phase to `failed`.)
+        ctx.instance.phase = { kind: "finalizing", disposition: { kind: "cancelled" } };
+        return;
+      }
+      // The instance is being terminated: tear down the user body, then (unless it failed) run finalizers
+      // before the terminateAck. A failed instance takes this path too — `beginTerminal` skips its finalizers.
       beginCancel(ctx, thread, { kind: "terminateInstance" });
       return;
     case "delegate":
@@ -358,6 +378,18 @@ function agentAsk(
     beginCancel(ctx, thread, { kind: "returnInstance", value: ask.value });
     return;
   }
+  // Runtime backstop for the `finally` io-only rule (the compiler forbids this statically): a finalizer may
+  // not perform a user-facing escalation that would proxy through the parent — io-effect delegations
+  // (http / mcp / webhook, in-instance leaf prims) go straight to their reactor and never reach here, but a
+  // capability request would. Panic naming the restriction rather than escaping to a handler / the user. The
+  // panic itself is a failure request (not user-facing), so it escapes normally — the instance then fails.
+  if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
+    const child = ctx.instance.threads[from];
+    if (child !== undefined && child.origin === "finalizer") {
+      raisePanic(ctx, child, FINALLY_ESCALATION_PANIC);
+      return;
+    }
+  }
   // A request, or a control ask targeting a lexical ancestor instance: escape as an outbound escalate.
   escapeAsk(ctx, from, askId, ask);
 }
@@ -378,6 +410,82 @@ function applyDefaults(
     }
   }
   return { kind: "record", fields };
+}
+
+// ─── finalizers (the `finally` terminal) ──────────────────────────────────────────────────────────
+
+/** The panic a finalizer's forbidden escalation raises (backstop for the compiler's io-only `finally` rule). */
+const FINALLY_ESCALATION_PANIC =
+  "a finally block may not perform an escalation that proxies through the parent (finally is io-only)";
+
+/**
+ * Reach the instance's terminal. A trusted instance with armed finalizers DEFERS its ack: it enters the
+ * `finalizing` phase and drains the stack in reverse before acking `disposition` (the original result for a
+ * normal completion, a discarded result for a cancel). A `failed` instance (a panic escaped) or one with no
+ * finalizers acks immediately — a panicked instance's state is not trusted, so its finalizers are skipped.
+ */
+function beginTerminal(ctx: StepContext, disposition: FinalizerDisposition): void {
+  const instance = ctx.instance;
+  if (instance.phase.kind === "failed" || instance.finalizers.length === 0) {
+    emitTerminal(ctx, disposition);
+    return;
+  }
+  instance.phase = { kind: "finalizing", disposition };
+  // The user tree is gone; the root now drives finalizers as ordinary children, so restore it to `running`
+  // (a cancel-induced terminal left it `cancelling`) and drop the cancel exit that would ack its parent.
+  const root = agentRootOf(ctx);
+  root.status = "running";
+  delete instance.cancelExits[root.id];
+  runNextFinalizer(ctx);
+}
+
+/** Emit the instance's terminal ack for `disposition` and retire it (its finalizers, if any, already drained). */
+function emitTerminal(ctx: StepContext, disposition: FinalizerDisposition): void {
+  switch (disposition.kind) {
+    case "completed":
+      completeInstance(ctx, disposition.value); // the deferred delegateAck with the original result
+      return;
+    case "cancelled":
+      terminateInstance(ctx); // the deferred terminateAck (the completed result, if any, is discarded)
+      return;
+  }
+}
+
+/**
+ * Run the next armed finalizer (reverse arming order) as an ordinary child of the agent root, or — the stack
+ * drained — emit the deferred terminal ack. Each finalizer chains to the scope it was armed in (so it reads
+ * the enclosing bindings) and is stamped `finalizer` so a user cancel never cascades into its subtree.
+ */
+function runNextFinalizer(ctx: StepContext): void {
+  const instance = ctx.instance;
+  if (instance.phase.kind !== "finalizing") return;
+  const armed = instance.finalizers.pop();
+  if (armed === undefined) {
+    const { disposition } = instance.phase;
+    instance.phase = { kind: "running" };
+    emitTerminal(ctx, disposition);
+    return;
+  }
+  const root = agentRootOf(ctx);
+  const callId = allocateCallId(instance);
+  root.pending = { callId, output: null };
+  spawnThread(ctx, {
+    parent: root.id,
+    parentCallId: callId,
+    parentScopeId: armed.scopeId,
+    blockId: armed.block,
+    parameters: {},
+    origin: "finalizer",
+  });
+}
+
+/** The instance's root `AgentThread` — the finalizer drain's parent and the instance's terminal boundary. */
+function agentRootOf(ctx: StepContext): AgentThread {
+  const root = ctx.instance.threads[ctx.instance.rootThreadId];
+  if (root === undefined || root.kind !== "agent") {
+    throw new Error("the instance root is not an agent thread (engine bug)");
+  }
+  return root;
 }
 
 // ─── sequence ───────────────────────────────────────────────────────────────────────────────────

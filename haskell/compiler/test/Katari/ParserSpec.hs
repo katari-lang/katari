@@ -290,6 +290,16 @@ spec = do
         (StatementUse useStatement : _) -> useStatement.binder `shouldSatisfy` (/= Nothing)
         _ -> expectationFailure "expected a use statement"
 
+  describe "finally" $ do
+    it "parses a finally statement carrying a block" $ do
+      body <- parseClean "agent main() -> integer {\n  finally { let cleanup = 1 }\n  7\n}" >>= soleAgentBody
+      case body.statements of
+        (StatementFinally finallyStatement : _) -> length finallyStatement.body.statements `shouldBe` 1
+        _ -> expectationFailure "expected a leading finally statement"
+
+    it "rejects `finally` used as an identifier (it is a reserved keyword)" $
+      shouldFail "agent main() -> integer { let finally = 1 }"
+
   describe "comments and layout" $ do
     it "ignores line and block comments" $ do
       _ <- parseClean "// header\nagent main() -> integer {\n  let a = 1 // trailing\n  /* block */ a\n}"

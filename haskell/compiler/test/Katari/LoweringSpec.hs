@@ -155,6 +155,22 @@ spec = describe "lowerModule (via compile)" $ do
       danglingReferences irModule `shouldBe` []
       nonAgentEntries irModule `shouldBe` []
 
+  describe "finally (arming a finalizer)" $ do
+    it "emits an OperationDefer arming the finally body as its own sequence block" $ do
+      let irModule = loweredTestModule "agent cleanup() -> integer { 0 }\nagent main() -> integer { finally { cleanup() }\n7 }"
+          operations = entryBodyOperations irModule "main"
+      case [operation.block | OperationDefer operation <- operations] of
+        (deferBlock : _) -> do
+          blockKind irModule deferBlock `shouldBe` Just "sequence"
+          -- The armed block's operations are the lowered finally body: a delegate to `cleanup`.
+          [target | OperationDelegate delegateOperation <- blockOperations irModule deferBlock, CalleeName target <- [delegateOperation.target]]
+            `shouldContain` [testName "cleanup"]
+        [] -> expectationFailure "expected an OperationDefer in the agent body"
+
+    it "places the defer inside the loop body block when a finally is armed in a for-body" $ do
+      let irModule = loweredTestModule "agent main(xs: array[integer]) -> array[integer] { for (x in xs) { finally { let c = 1 }\nnext x } }"
+      length [() | OperationDefer _ <- forBodyOperations irModule] `shouldBe` 1
+
   describe "the env stdlib (primitive.env)" $ do
     it "types `env.get_secret` as a `string of private` (assignable to a private return)" $
       compileErrorCodes "agent f() -> string of private { env.get_secret(key = \"K\") }" `shouldBe` []
@@ -529,6 +545,23 @@ entryBodyOperations irModule name = fromMaybe [] $ do
     BlockSequence sequenceBlock -> Just sequenceBlock.operations
     _ -> Nothing
 
+-- | The operations of a 'BlockSequence' by id (empty for a missing or non-sequence block).
+blockOperations :: IRModule -> BlockId -> List Operation
+blockOperations irModule blockId = fromMaybe [] $ do
+  information <- Map.lookup blockId irModule.blocks
+  case information.block of
+    BlockSequence sequenceBlock -> Just sequenceBlock.operations
+    _ -> Nothing
+
+-- | The operations of every for-loop's body block in the module.
+forBodyOperations :: IRModule -> List Operation
+forBodyOperations irModule =
+  concat
+    [ blockOperations irModule for.body
+      | information <- Map.elems irModule.blocks,
+        BlockFor for <- [information.block]
+    ]
+
 -- | Every variable released by any drop in the operation list.
 droppedVariables :: List Operation -> List VariableId
 droppedVariables operations = concat [dropOperation.variables | OperationDrop dropOperation <- operations]
@@ -584,6 +617,8 @@ operationMentions = \case
   OperationContinue operation ->
     maybeToList operation.value <> concatMap (\(state, value) -> [state, value]) operation.modifiers
   OperationDrop _ -> []
+  -- A defer names only the block to arm; it mentions no variable of the enclosing sequence.
+  OperationDefer _ -> []
   where
     calleeVariable = \case
       CalleeName _ -> []
@@ -645,6 +680,8 @@ operationReference :: Operation -> Maybe BlockId
 operationReference = \case
   OperationCall operation -> Just operation.target
   OperationMakeClosure operation -> Just operation.agent
+  -- A defer arms its block, so that block is reachable through this operation.
+  OperationDefer operation -> Just operation.block
   _ -> Nothing
 
 thenReferences :: Maybe ThenClause -> List BlockId

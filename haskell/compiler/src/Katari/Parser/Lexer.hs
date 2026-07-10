@@ -378,6 +378,7 @@ reservedWords =
       "break",
       "var",
       "let",
+      "finally",
       "then",
       "in",
       "with",

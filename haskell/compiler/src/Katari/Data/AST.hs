@@ -365,6 +365,9 @@ data Statement (phase :: Phase) where
   StatementForNext :: ForNextStatement phase -> Statement phase
   -- | @break v@ inside a @for@ body
   StatementForBreak :: ForBreakStatement phase -> Statement phase
+  -- | @finally { ... }@ — arm the block as a finalizer of the current agent instance (see
+  -- 'FinallyStatement'). A statement, not an expression: it yields no value, only the arming effect.
+  StatementFinally :: FinallyStatement phase -> Statement phase
   -- | Reserved sentinel for statement-level recovery. The parser does not emit it yet (it recovers
   -- only at declaration boundaries), but downstream walkers transport it so the slot exists already.
   StatementError :: SourceSpan -> Statement phase
@@ -380,6 +383,7 @@ instance HasSourceSpan (Statement phase) where
     StatementBreak statement -> statement.sourceSpan
     StatementForNext statement -> statement.sourceSpan
     StatementForBreak statement -> statement.sourceSpan
+    StatementFinally statement -> statement.sourceSpan
     StatementError sourceSpan -> sourceSpan
 
 data LetStatement (phase :: Phase) = LetStatement
@@ -444,6 +448,20 @@ data ForBreakStatement (phase :: Phase) = ForBreakStatement
   }
 
 instance HasSourceSpan (ForBreakStatement phase) where
+  sourceSpanOf statement = statement.sourceSpan
+
+-- | @finally { body }@ — arm @body@ as a finalizer of the current agent instance. Armed finalizers
+-- run in reverse arming order right before the instance acknowledges its terminal (a normal
+-- completion or a cancellation), and never on a panic. The body reads the enclosing scope through
+-- the ordinary parent chain, so it takes no parameters; its net effect must be within @io@ (a
+-- finalizer runs while the parent may already await the instance's cancellation, so it must not
+-- escalate a request through that parent).
+data FinallyStatement (phase :: Phase) = FinallyStatement
+  { body :: Block phase,
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (FinallyStatement phase) where
   sourceSpanOf statement = statement.sourceSpan
 
 -- | One @name = expression@ entry in a @with (...)@ list of @next@
@@ -1584,6 +1602,10 @@ deriving stock instance (ShowPhase phase) => Show (ForNextStatement phase)
 deriving stock instance (EqPhase phase) => Eq (ForBreakStatement phase)
 
 deriving stock instance (ShowPhase phase) => Show (ForBreakStatement phase)
+
+deriving stock instance (EqPhase phase) => Eq (FinallyStatement phase)
+
+deriving stock instance (ShowPhase phase) => Show (FinallyStatement phase)
 
 deriving stock instance (EqPhase phase) => Eq (Modifier phase)
 

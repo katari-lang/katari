@@ -23,7 +23,7 @@ import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
-import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType)
+import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType, renderSemanticEffect)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (diagnosticAt)
@@ -32,6 +32,7 @@ import Katari.Error
     CannotInferGenericErrorInfo (..),
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
+    FinallyEffectErrorInfo (..),
     GenericNotAppliedErrorInfo (..),
     MalformedUseErrorInfo (..),
     MalformedUseReason (..),
@@ -69,7 +70,7 @@ import Katari.Typechecker.Context
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
 import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), collectConstraints, metavarKinded, solveConstraints)
-import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -184,6 +185,7 @@ walkStatements statements continuation = case statements of
           StatementForBreak forBreakStmt -> passThrough (StatementForBreak <$> checkForBreakStatement forBreakStmt)
           StatementBreak breakStmt -> passThrough (StatementBreak <$> checkBreakStatement breakStmt)
           StatementNext nextStmt -> passThrough (StatementNext <$> checkNextStatement nextStmt)
+          StatementFinally finallyStmt -> passThrough (StatementFinally <$> checkFinallyStatement finallyStmt)
           StatementError s -> passThrough (pure (StatementError s))
 
 -- | A @let@ binding: compute the value's type (against an annotation if present), bind, walk the
@@ -1305,6 +1307,35 @@ checkNextStatement nextStmt = do
         modifiers = typedModifiers,
         sourceSpan = nextStmt.sourceSpan
       }
+
+-- | Type a @finally@ finalizer body and enforce the finalizer effect discipline. The body is typed as
+-- an ordinary statement block whose value is discarded, with its inferred effect isolated so it can be
+-- checked on its own. A finalizer runs at instance termination — when the parent may already be
+-- awaiting the instance's cancellation — so its net effect must be within @io@: no request (which would
+-- escalate through that parent and could deadlock against its own cancellation wait), and no control
+-- escape (which has no target there). A request handled locally inside the body is discharged before
+-- this point, so it never appears in the residual checked here. The finalizer's io genuinely happens at
+-- termination, so it joins the enclosing effect row exactly as any statement's effect would (a valid
+-- body is within io, so only its io can contribute).
+checkFinallyStatement :: FinallyStatement Identified -> Checker (FinallyStatement Typed)
+checkFinallyStatement finallyStmt = do
+  (bodyEffect, (typedBody, _)) <- withEffectInference (synthBlock finallyStmt.body)
+  unless (isWithinIoEffect bodyEffect) $ do
+    rendered <- renderSemanticEffect <$> runNormalizer finallyStmt.sourceSpan (denormalizeEffect bodyEffect)
+    reportType finallyStmt.sourceSpan (TypeErrorFinallyEffect FinallyEffectErrorInfo {effect = rendered})
+  when bodyEffect.io (emitEffect finallyStmt.sourceSpan ioEffect)
+  pure FinallyStatement {body = typedBody, sourceSpan = finallyStmt.sourceSpan}
+
+-- | Whether an effect is within @io@: no concrete request, no unresolved effect tail, and no concrete
+-- escape — it performs at most external io. This is @effect ⊆ io@ as a structural predicate; it is
+-- 'isPureEffect' with the one allowance that io itself is permitted.
+isWithinIoEffect :: NormalizedEffect -> Bool
+isWithinIoEffect effect =
+  withinIoRequests effect.requests && not (hasConcreteEscape effect)
+  where
+    withinIoRequests = \case
+      RequestEffectAny -> False
+      RequestEffectRow row -> Map.null row.request && Map.null row.tails
 
 ------------------------------------------------------------------------------------------------
 -- Patterns

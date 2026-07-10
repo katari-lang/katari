@@ -627,6 +627,7 @@ blockElement =
       BlockElementStatement <$> returnStatement,
       BlockElementStatement <$> nextStatement,
       BlockElementStatement <$> breakStatement,
+      BlockElementStatement <$> finallyStatement,
       BlockElementExpression <$> expression
     ]
 
@@ -694,6 +695,13 @@ breakStatement = do
     LoopContextFor -> pure (StatementForBreak ForBreakStatement {value = valueExpression, sourceSpan = sourceSpan})
     LoopContextHandler -> pure (StatementBreak BreakStatement {value = valueExpression, sourceSpan = sourceSpan})
     LoopContextNone -> fail "`break` is only allowed inside a `for` loop or a request handler"
+
+-- | @finally { ... }@ — arm the braced block as a finalizer of the current agent instance.
+finallyStatement :: Parser (Statement Parsed)
+finallyStatement = do
+  finallySpan <- keyword "finally"
+  body <- block
+  pure (StatementFinally FinallyStatement {body = body, sourceSpan = mergeSpans finallySpan (sourceSpanOf body)})
 
 -- | @with { name = expression, ... }@ — the modifier list of a @next@.
 modifierClause :: Parser (List (Modifier Parsed))

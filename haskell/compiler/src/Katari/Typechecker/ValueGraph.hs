@@ -113,6 +113,7 @@ referencesInStatement = \case
   StatementBreak statement -> referencesInExpression statement.value
   StatementForNext statement -> referencesInExpression statement.value <> foldMap referencesInModifier statement.modifiers
   StatementForBreak statement -> referencesInExpression statement.value
+  StatementFinally statement -> referencesInBlock statement.body
   StatementError _ -> Set.empty
 
 referencesInModifier :: Modifier Identified -> Set QualifiedName

@@ -53,9 +53,15 @@ insertDropOperations :: IRModule -> IRModule
 insertDropOperations irModule = irModule {blocks = Map.map rewriteBlock irModule.blocks}
   where
     moduleWideMentions = moduleMentions irModule
+    -- Named construction rather than a record update: 'DeferOperation' also carries a @block@ field, so
+    -- an unqualified @information {block = ...}@ update would be ambiguous under DuplicateRecordFields.
+    rewriteBlock :: BlockInformation -> BlockInformation
     rewriteBlock information = case information.block of
       BlockSequence sequenceBlock ->
-        information {block = BlockSequence (insertSequenceDrops moduleWideMentions sequenceBlock)}
+        BlockInformation
+          { block = BlockSequence (insertSequenceDrops moduleWideMentions sequenceBlock),
+            parameters = information.parameters
+          }
       _ -> information
 
 -- | Rewrite one sequence: compute each locally-written variable's last mention index and insert one
@@ -158,6 +164,10 @@ operationVariables = \case
   OperationContinue operation ->
     maybeToList operation.value <> concatMap (\(state, value) -> [state, value]) operation.modifiers
   OperationDrop operation -> operation.variables
+  -- A defer names only the block to arm; that block reads the enclosing scope through the ordinary
+  -- parent chain, so the defer op mentions no variables of this sequence. The armed block's own reads
+  -- are counted where the block is walked as its own 'IRModule.blocks' entry.
+  OperationDefer _ -> []
 
 -- | The variables an operation writes into the EXECUTING thread's local scope — the drop candidates.
 -- A 'ContinueOperation''s modifiers write into the TARGET block's scope instead, so they are not
@@ -178,6 +188,8 @@ operationWrites = \case
   OperationExit _ -> []
   OperationContinue _ -> []
   OperationDrop _ -> []
+  -- A defer transfers no value into the executing thread's scope, so it writes nothing.
+  OperationDefer _ -> []
 
 calleeVariables :: CalleeReference -> List VariableId
 calleeVariables = \case

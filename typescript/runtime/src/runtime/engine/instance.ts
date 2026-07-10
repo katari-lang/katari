@@ -51,6 +51,8 @@ export function createInstance(
     rootThreadId: toThreadId(0),
     threads: {},
     cancelExits: {},
+    finalizers: [],
+    phase: { kind: "running" },
     nextThreadId: 0,
     nextCallId: 0,
     nextAskId: 0,
@@ -68,6 +70,8 @@ export function createInstance(
     scopeId,
     blockId: args.agentBlockId,
     status: "running",
+    // The instance root is user code (the finalizer drain runs as its children, stamped `finalizer`).
+    origin: "user",
     forwardRoutes: {},
     kind: "agent",
     pending: null,

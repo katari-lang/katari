@@ -524,6 +524,7 @@ statementFacts moduleName = \case
     expressionFacts moduleName statement.value
       <> foldMap (modifierFacts moduleName) statement.modifiers
   StatementForBreak statement -> expressionFacts moduleName statement.value
+  StatementFinally statement -> blockFacts moduleName statement.body
   StatementError _ -> mempty
 
 modifierFacts :: ModuleName -> Modifier Typed -> ModuleFacts

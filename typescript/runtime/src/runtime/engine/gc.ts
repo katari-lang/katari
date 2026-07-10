@@ -41,6 +41,14 @@ export function unreachableOwnedScopes(store: ProjectStore, instance: CoreInstan
   for (const exit of Object.values(instance.cancelExits)) {
     for (const value of cancelExitValues(exit)) seedValue(value);
   }
+  // The armed-but-not-yet-run finalizers' scopes (each spawned finalizer chains to one) outlive the threads
+  // that armed them, so they are roots in their own right — otherwise a multi-turn finalizer would let GC
+  // reclaim a later finalizer's enclosing scope. So is the value a `finalizing` completion defers (its
+  // deferred delegateAck may return a closure / blob whose captured scopes must survive the drain).
+  for (const armed of instance.finalizers) worklist.push(armed.scopeId);
+  if (instance.phase.kind === "finalizing" && instance.phase.disposition.kind === "completed") {
+    seedValue(instance.phase.disposition.value);
+  }
 
   // Mark: walk each scope's lexical-ancestor chain and the closures its bindings capture, transitively.
   while (worklist.length > 0) {

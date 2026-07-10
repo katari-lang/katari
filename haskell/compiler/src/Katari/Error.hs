@@ -130,6 +130,13 @@ renderTypeError typeError =
         <> " = _` does not name a parameter of the callee; its parameters are ["
         <> Text.intercalate ", " info.parameters
         <> "]"
+    TypeErrorFinallyEffect info ->
+      "A `finally` finalizer's net effect must be within `io`, but this body's effect is "
+        <> info.effect
+        <> ". A finalizer runs at instance termination, when the parent may already be awaiting this"
+        <> " instance's cancellation; a request would escalate through that parent (deadlocking against"
+        <> " its own cancellation wait), and a control escape has no target there. Perform only `io`"
+        <> " (routed to sibling reactors), or handle any request locally inside the `finally` body."
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -179,6 +186,11 @@ data TypeError where
   -- missing-argument subtype failure (K3001): the hole is extra, not absent, so the residual function
   -- could never receive it.
   TypeErrorUnknownHoleLabel :: UnknownHoleLabelErrorInfo -> TypeError
+  -- | A @finally@ finalizer body's net effect is not within @io@ — it performs a request that would
+  -- escalate through the parent, or carries a control escape with no target at instance termination.
+  -- Distinct from an ordinary subtype failure (K3001): the restriction is peculiar to a finalizer,
+  -- which runs while the parent may already be awaiting the instance's cancellation.
+  TypeErrorFinallyEffect :: FinallyEffectErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -200,6 +212,7 @@ typeErrorCode = \case
   TypeErrorUnknownReactor _ -> "K3018"
   TypeErrorMalformedUse _ -> "K3019"
   TypeErrorUnknownHoleLabel _ -> "K3020"
+  TypeErrorFinallyEffect _ -> "K3021"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -222,6 +235,7 @@ typeErrorSeverity = \case
   TypeErrorUnknownReactor _ -> SeverityError
   TypeErrorMalformedUse _ -> SeverityError
   TypeErrorUnknownHoleLabel _ -> SeverityError
+  TypeErrorFinallyEffect _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -353,6 +367,13 @@ newtype MalformedUseErrorInfo = MalformedUseErrorInfo
 data UnknownHoleLabelErrorInfo = UnknownHoleLabelErrorInfo
   { label :: Text,
     parameters :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @effect@ is the finalizer body's offending residual effect, rendered in surface syntax (e.g. the
+-- request it escalates), so the message can name why the body is not within @io@.
+newtype FinallyEffectErrorInfo = FinallyEffectErrorInfo
+  { effect :: Text
   }
   deriving (Eq, Ord, Show)
 
