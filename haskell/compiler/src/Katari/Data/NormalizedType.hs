@@ -36,7 +36,11 @@ data NormalizedBaseType where
 data LayeredType = LayeredType
   { nullLayer :: Bool,
     numberLayer :: NumberSlot,
-    stringLayer :: Bool,
+    -- | The string values this type admits (a finite set of literal singletons, or every string).
+    -- @"x"@ and the full @string@ are distinguishable; their join is @string@ absorbing the literal.
+    -- Unlike 'booleanLayer' the domain is infinite, so a literal set never contributes to match
+    -- exhaustiveness the way the two booleans do.
+    stringLayer :: StringSlot,
     -- | The boolean values this type admits. @boolean@ is @{False, True}@; a boolean literal is a
     -- singleton, so @true@ / @false@ are distinguishable (their join is @boolean@). This is the only
     -- finitely-enumerable primitive, which is why a @true@ / @false@ pattern can contribute to match
@@ -57,6 +61,41 @@ data NumberSlot where
   NumberSlotInteger :: NumberSlot
   NumberSlotNumber :: NumberSlot
   deriving (Eq, Ord, Show)
+
+-- | The string layer's own lattice: a finite set of string literal singletons (empty = the layer is
+-- absent), topped by the full @string@ type. A two-constructor sum rather than a set with a sentinel
+-- because the domain is infinite — "every string" is not a set of literals.
+data StringSlot where
+  StringSlotLiterals :: Set Text -> StringSlot
+  StringSlotString :: StringSlot
+  deriving (Eq, Ord, Show)
+
+-- | The absent string layer (no string value is admitted).
+stringSlotAbsent :: StringSlot
+stringSlotAbsent = StringSlotLiterals Set.empty
+
+-- | Whether the slot admits any string value at all (the layer is inhabited).
+stringSlotInhabited :: StringSlot -> Bool
+stringSlotInhabited slot = case slot of
+  StringSlotString -> True
+  StringSlotLiterals values -> not (Set.null values)
+
+-- | The string layer's ordering: literal sets by inclusion, every literal set under the full
+-- @string@, and @string@ under nothing but itself (a finite set never covers the infinite domain).
+stringSlotWithin :: StringSlot -> StringSlot -> Bool
+stringSlotWithin left right = case (left, right) of
+  (_, StringSlotString) -> True
+  (StringSlotString, StringSlotLiterals _) -> False
+  (StringSlotLiterals leftValues, StringSlotLiterals rightValues) -> leftValues `Set.isSubsetOf` rightValues
+
+-- | Precise difference for match narrowing (@scrutinee \\ cover@): a full-string cover removes
+-- everything, a literal cover removes exactly its literals from a literal scrutinee, and a
+-- full-string scrutinee keeps its infinitely many residual values under a finite cover.
+stringSlotDifference :: StringSlot -> StringSlot -> StringSlot
+stringSlotDifference scrutinee cover = case (scrutinee, cover) of
+  (_, StringSlotString) -> stringSlotAbsent
+  (StringSlotString, StringSlotLiterals _) -> StringSlotString
+  (StringSlotLiterals values, StringSlotLiterals covered) -> StringSlotLiterals (Set.difference values covered)
 
 data NormalizedFunction = NormalizedFunction
   { argumentType :: NormalizedType,
@@ -221,7 +260,7 @@ neverLayer =
   LayeredType
     { nullLayer = False,
       numberLayer = NumberSlotAbsent,
-      stringLayer = False,
+      stringLayer = stringSlotAbsent,
       booleanLayer = Set.empty,
       fileLayer = False,
       functionLayer = Nothing,

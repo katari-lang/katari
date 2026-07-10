@@ -85,6 +85,9 @@ toJSONSchema dataDefinitions = convert Set.empty
       SemanticTypeInteger -> SchemaInteger
       SemanticTypeNumber -> SchemaNumber
       SemanticTypeString -> SchemaString
+      -- A string literal singleton admits exactly one value, which is what @const@ says. The runtime's
+      -- conformance walk already checks @const@ schemas, so a literal-instantiated generic validates.
+      SemanticTypeStringLiteral value -> SchemaConst (toJSON value)
       SemanticTypeBoolean -> SchemaBoolean
       -- A @file@ is a blob handle supplied by orchestration, never produced inline by the AI; the
       -- schema documents the @$ref@ reference object so a runtime-passed handle validates.

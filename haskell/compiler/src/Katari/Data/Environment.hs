@@ -26,6 +26,9 @@ data GenericParameterInformation = GenericParameterInformation
   { genericId :: GenericId,
     kind :: GenericKind,
     variance :: Variance,
+    -- | @literal name@ — call-site inference proposes a string literal argument's singleton type for
+    -- this parameter instead of @string@. An unmarked parameter never binds a singleton implicitly.
+    bindsLiteral :: Bool,
     -- | The declared @extends@ upper bound, normalized; 'Nothing' for an unbounded parameter
     upperBound :: Maybe NormalizedKindedType
   }
@@ -96,7 +99,13 @@ data RequestInformation = RequestInformation
   { name :: QualifiedName,
     genericParameters :: GenericParameters,
     parameterType :: NormalizedType,
-    returnType :: NormalizedType
+    returnType :: NormalizedType,
+    -- | A marker effect (@effect name[generics]@): an entry with NO operations. Markers live in the
+    -- request environment on purpose — every effect-row mechanism (arity, bounds, variance, tails,
+    -- overrides, subsumption) dispatches on the row's @QualifiedName -> arguments@ map, so a second
+    -- row-entry kind would fork all of them; the flag is consulted only where a marker genuinely
+    -- differs (a handler may not name one, and lowering drops it from the requests schema).
+    marker :: Bool
   }
   deriving (Eq, Show)
 

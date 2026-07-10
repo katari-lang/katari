@@ -111,6 +111,58 @@ spec = do
     it "rejects a newline before an agent's body brace (no Allman braces)" $
       shouldFail "agent main() -> integer\n{ 1 }"
 
+    it "parses a marker effect declaration" $ do
+      module' <- parseClean "effect scoped[resource]"
+      case module'.declarations of
+        [DeclarationMarkerEffect marker] -> do
+          marker.name `shouldBe` "scoped"
+          length marker.genericParameters `shouldBe` 1
+        _ -> expectationFailure "expected one marker effect"
+
+    it "parses a marker effect without generics and keeps its doc annotation" $ do
+      module' <- parseClean "@\"a pure capability\"\neffect sandboxed"
+      case module'.declarations of
+        [DeclarationMarkerEffect marker] -> do
+          marker.annotation `shouldBe` Just "a pure capability"
+          marker.genericParameters `shouldBe` []
+        _ -> expectationFailure "expected one marker effect"
+
+    it "parses a string literal in type position as a singleton type" $ do
+      module' <- parseClean "type fast = \"fast\""
+      case module'.declarations of
+        [DeclarationTypeSynonym synonym] -> case synonym.definition of
+          TypeStringLiteral node -> node.value `shouldBe` "fast"
+          _ -> expectationFailure "expected a string literal type"
+        _ -> expectationFailure "expected one type synonym"
+
+    it "unescapes a string literal type exactly like an expression literal" $ do
+      module' <- parseClean "type odd = \"a\\n\\\"b\\\\\""
+      case module'.declarations of
+        [DeclarationTypeSynonym synonym] -> case synonym.definition of
+          TypeStringLiteral node -> node.value `shouldBe` "a\n\"b\\"
+          _ -> expectationFailure "expected a string literal type"
+        _ -> expectationFailure "expected one type synonym"
+
+    it "parses a `literal` generic parameter as a literal-binding type parameter" $ do
+      module' <- parseClean "agent connect[literal url_type](url: url_type) -> url_type { url }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.genericParameters of
+          [parameter] -> do
+            parameter.name `shouldBe` "url_type"
+            parameter.bindsLiteral `shouldBe` True
+          _ -> expectationFailure "expected one generic parameter"
+        _ -> expectationFailure "expected one agent"
+
+    it "keeps a bare `[literal]` a plain parameter named literal (positional word, not reserved)" $ do
+      module' <- parseClean "agent f[literal]() -> integer { 1 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.genericParameters of
+          [parameter] -> do
+            parameter.name `shouldBe` "literal"
+            parameter.bindsLiteral `shouldBe` False
+          _ -> expectationFailure "expected one generic parameter"
+        _ -> expectationFailure "expected one agent"
+
     it "parses a type synonym with generics" $ do
       module' <- parseClean "type pair[T] = [T, T]"
       case module'.declarations of

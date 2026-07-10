@@ -61,6 +61,14 @@ spec = do
       toJSONSchema noData (SemanticTypeUnion [SemanticTypeInteger, SemanticTypeNull])
         `shouldBe` SchemaAnyOf [SchemaInteger, SchemaNull]
 
+    it "maps a string literal singleton to a const schema" $
+      toJSONSchema noData (SemanticTypeStringLiteral "https://x")
+        `shouldBe` SchemaConst (toJSON ("https://x" :: Text))
+
+    it "maps a union of string literals to an anyOf of const schemas" $
+      toJSONSchema noData (SemanticTypeUnion [SemanticTypeStringLiteral "fast", SemanticTypeStringLiteral "slow"])
+        `shouldBe` SchemaAnyOf [SchemaConst (toJSON ("fast" :: Text)), SchemaConst (toJSON ("slow" :: Text))]
+
     it "reflects the base type through an attribute (private is transparent)" $
       toJSONSchema noData (SemanticTypeAttribute SemanticTypeString SemanticAttributePrivate)
         `shouldBe` SchemaString

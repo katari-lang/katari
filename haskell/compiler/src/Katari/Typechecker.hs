@@ -168,6 +168,7 @@ buildTypedModule typedAgents identifiedModule =
               Just typed -> DeclarationAgent typed
               Nothing -> panic ("buildTypedModule: no typed agent for " <> renderQualifiedName qualifiedName)
       DeclarationRequest declaration -> DeclarationRequest (retagRequestDeclaration declaration)
+      DeclarationMarkerEffect declaration -> DeclarationMarkerEffect (retagMarkerEffectDeclaration declaration)
       DeclarationImport declaration -> DeclarationImport declaration
       DeclarationExternalAgent declaration -> DeclarationExternalAgent (retagExternalAgentDeclaration declaration)
       DeclarationPrimitiveAgent declaration -> DeclarationPrimitiveAgent (retagPrimitiveAgentDeclaration declaration)

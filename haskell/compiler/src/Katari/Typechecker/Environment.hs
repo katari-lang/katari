@@ -82,14 +82,29 @@ data CollectedData = CollectedData
     sourceSpan :: SourceSpan
   }
 
+-- | What a request-namespace declaration declares beyond its name and generics: an ordinary
+-- request's typed parameters and result type, or nothing at all for a marker effect (@effect
+-- name[generics]@ — no operations, so there is no syntax to elaborate).
+data CollectedRequestOperations
+  = CollectedRequestOperations (List (ParameterSignature Identified)) (SyntacticTypeExpression Identified)
+  | CollectedRequestMarker
+
+-- | Both ordinary requests and marker effects collect here: they share the effect-row namespace and
+-- every row mechanism keys on the qualified name, so one collected shape (with 'operations' telling
+-- them apart) keeps the pipeline single-pathed.
 data CollectedRequest = CollectedRequest
   { qualifiedName :: QualifiedName,
     genericParameters :: GenericParameters,
     genericBounds :: Map GenericId (SyntacticTypeExpression Identified),
-    parameters :: List (ParameterSignature Identified),
-    returnType :: SyntacticTypeExpression Identified,
+    operations :: CollectedRequestOperations,
     sourceSpan :: SourceSpan
   }
+
+-- | Whether a collected request-namespace declaration is a marker effect.
+collectedMarker :: CollectedRequest -> Bool
+collectedMarker item = case item.operations of
+  CollectedRequestOperations _ _ -> False
+  CollectedRequestMarker -> True
 
 data CollectedSynonym = CollectedSynonym
   { qualifiedName :: QualifiedName,
@@ -108,7 +123,7 @@ collectGenericParameter parameter = case parameter.typeReference.resolution of
   Just (TypeResolutionGeneric genericId) ->
     Just
       ( parameter.name,
-        GenericParameterInformation {genericId = genericId, kind = parameter.kind, variance = Bivariant, upperBound = Nothing},
+        GenericParameterInformation {genericId = genericId, kind = parameter.kind, variance = Bivariant, bindsLiteral = parameter.bindsLiteral, upperBound = Nothing},
         parameter.upperBound
       )
   _ -> Nothing
@@ -132,7 +147,8 @@ collectGenericParameters parameters =
 collectDeclarations :: Map ModuleName (Module Identified) -> (List CollectedData, List CollectedRequest, List CollectedSynonym)
 collectDeclarations modules =
   ( [collectData declaration | DeclarationData declaration <- declarations],
-    [collectRequest declaration | DeclarationRequest declaration <- declarations],
+    [collectRequest declaration | DeclarationRequest declaration <- declarations]
+      <> [collectMarkerEffect declaration | DeclarationMarkerEffect declaration <- declarations],
     [collectSynonym declaration | DeclarationTypeSynonym declaration <- declarations]
   )
   where
@@ -152,8 +168,16 @@ collectDeclarations modules =
             { qualifiedName = referencedTypeName declaration.typeReference,
               genericParameters = genericParameters,
               genericBounds = genericBounds,
-              parameters = declaration.parameters,
-              returnType = declaration.returnType,
+              operations = CollectedRequestOperations declaration.parameters declaration.returnType,
+              sourceSpan = declaration.sourceSpan
+            }
+    collectMarkerEffect declaration =
+      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+       in CollectedRequest
+            { qualifiedName = referencedTypeName declaration.typeReference,
+              genericParameters = genericParameters,
+              genericBounds = genericBounds,
+              operations = CollectedRequestMarker,
               sourceSpan = declaration.sourceSpan
             }
     collectSynonym declaration =
@@ -190,6 +214,15 @@ constructorObject parameters = SemanticTypeObject . Map.fromList <$> traverse fi
       fieldType <- elaborateAsType signature.parameterType
       pure (signature.name, FieldInformation {semanticType = fieldType, optional = False})
 
+-- | The (parameter object, return type) shape of one request-namespace declaration. A marker effect
+-- has no operations, so its shape is fixed — the empty parameter object and a @never@ return — and
+-- mentions no generic, which is what makes every marker generic phantom by construction.
+elaborateRequestOperations :: CollectedRequestOperations -> Elaborate (SemanticType, SemanticType)
+elaborateRequestOperations operations = case operations of
+  CollectedRequestOperations parameters returnType ->
+    (,) <$> constructorObject parameters <*> elaborateAsType returnType
+  CollectedRequestMarker -> pure (SemanticTypeObject mempty, SemanticTypeNever)
+
 -- | The elaborator's signature registry over every collected declaration.
 elaborateContextFor :: List CollectedData -> List CollectedRequest -> List CollectedSynonym -> ElaborateContext
 elaborateContextFor collectedData collectedRequests collectedSynonyms =
@@ -208,10 +241,7 @@ elaborateAll context (collectedData, collectedRequests, collectedSynonyms) =
     requestShapes <-
       traverse
         ( \item ->
-            (,) item
-              <$> withOwnGenerics
-                item.genericParameters
-                ((,) <$> constructorObject item.parameters <*> elaborateAsType item.returnType)
+            (,) item <$> withOwnGenerics item.genericParameters (elaborateRequestOperations item.operations)
         )
         collectedRequests
     synonymShapes <-
@@ -235,6 +265,22 @@ elaborateAll context (collectedData, collectedRequests, collectedSynonyms) =
 --
 -- A variance variable is just a 'GenericId' (globally unique once paired with its module). Inference
 -- starts every parameter at 'Bivariant' and joins in each occurrence's polarity to a fixed point.
+--
+-- The polarity roots ('varianceShapesOf'): a data constructor is one covariant root; a request's
+-- parameter object is covariant and its return type contravariant (dual to a function type, because
+-- the performer SUPPLIES the parameters — the handler receives them — and CONSUMES the return).
+-- Occurrences compose through nested positions ('composeVariance'): a function argument flips the
+-- polarity, a nested application composes with the applied parameter's current estimate, and an
+-- unclear position contributes 'Invariant' (soundness first). So a request parameter is inferred
+--
+--   * 'Covariant'     — it appears only in parameter (handler-receives) positions, which is what
+--                       makes @throw[narrow] ⊆ throw[wide]@ lawful (the handler receives a narrower
+--                       value than it is prepared for);
+--   * 'Contravariant' — only in the result;
+--   * 'Invariant'     — in both polarities (the join of co- and contra-);
+--   * 'Bivariant'     — in neither (a phantom, e.g. every marker-effect generic by construction).
+--     A phantom admits any relation in principle; the effect-row comparison pins it to covariant
+--     ('Katari.Typechecker.Normalizer.requestRowVariance') so a phantom tag is not erased.
 ------------------------------------------------------------------------------------------------
 
 -- | What the variance walk needs: the name -> id map of every declaration's parameters (so an
@@ -384,6 +430,7 @@ stampBound bounds parameter =
     { genericId = parameter.genericId,
       kind = parameter.kind,
       variance = parameter.variance,
+      bindsLiteral = parameter.bindsLiteral,
       upperBound = Map.lookup parameter.genericId bounds
     }
 
@@ -412,7 +459,7 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
     environmentOver dataParameters requestParameters =
       SubtypingContext
         { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = placeholderConstructor}) | (item, parameters) <- dataParameters],
-          requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = bottomType, returnType = bottomType}) | (item, parameters) <- requestParameters],
+          requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = bottomType, returnType = bottomType, marker = collectedMarker item}) | (item, parameters) <- requestParameters],
           genericsInScope = mempty,
           world = bottomAttribute
         }
@@ -465,7 +512,7 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
       let scopedEnvironment = inScope parameters
           (parameterType, parameterDiagnostics) = runNormalize scopedEnvironment item.sourceSpan (normalizeType parameterObject)
           (returnType, returnDiagnostics) = runNormalize scopedEnvironment item.sourceSpan (normalizeType returnSemantic)
-       in (RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = parameterType, returnType = returnType}, parameterDiagnostics <> returnDiagnostics)
+       in (RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = parameterType, returnType = returnType, marker = collectedMarker item}, parameterDiagnostics <> returnDiagnostics)
 
     normalizeSynonym item parameters maybeSemantic =
       let semantic = fromMaybe (SemanticGenericArgumentType SemanticTypeNever) maybeSemantic

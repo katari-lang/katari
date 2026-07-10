@@ -69,7 +69,7 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), collectConstraints, metavarKinded, solveConstraints)
+import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), asTypeMetavar, collectConstraints, metavarKinded, solveConstraints)
 import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
@@ -668,14 +668,17 @@ synthCallExpressionWith extraFields expression = do
   -- rejected as an unapplied generic.
   (typedCallee, scheme) <- synthApplicationCallee expression.callee
   (typedArgs, suppliedFields, argumentAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments extraFields
+  -- The labels written as string literals, read off the argument EXPRESSIONS (never the synthesized
+  -- types, which stay @string@): the only doorway through which a call proposes a literal singleton.
+  let literalArguments = literalCallArguments expression.arguments
   (effectiveReturn, instantiation) <- case callArgumentHoles expression.arguments of
     [] -> do
       -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
       -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
       -- parameter match (against a required parameter it still fails the optional<:required check).
       let argumentObject = namedObjectTypeWithRest bottomType suppliedFields
-      applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
-    holes -> synthPartialApplication expression.sourceSpan scheme holes suppliedFields argumentAttribute
+      applyCallee expression.sourceSpan scheme literalArguments argumentObject argumentAttribute
+    holes -> synthPartialApplication expression.sourceSpan scheme literalArguments holes suppliedFields argumentAttribute
   typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
     ExpressionCall
       CallExpression
@@ -696,12 +699,16 @@ synthCallExpressionWith extraFields expression = do
 -- Returns the effective return type together with the resolved instantiation (declared parameter name
 -- -> inferred argument; empty for a non-generic callee), which the call node records so lowering can
 -- stamp the runtime schemas onto the delegate.
-applyCallee :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
-applyCallee sourceSpan scheme argumentObject argumentAttribute = do
-  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme InferWholeParameter argumentObject
+applyCallee :: SourceSpan -> Scheme -> Map Text Text -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
+applyCallee sourceSpan scheme literalArguments argumentObject argumentAttribute = do
+  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme InferWholeParameter literalArguments argumentObject
   case resolved of
-    Just (functionAttribute, function) ->
-      (,instantiation) <$> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+    Just (functionAttribute, function) -> do
+      -- Where the RESOLVED parameter expects a string literal singleton (a written annotation, an
+      -- explicit @f["x"]@ instantiation, or a just-solved literal binding), a syntactically-literal
+      -- argument is checked at its singleton type rather than @string@ ('checkedLiteralArguments').
+      let checkedArgument = checkedLiteralArguments literalArguments function.argumentType argumentObject
+      (,instantiation) <$> applyAgent sourceSpan functionAttribute function checkedArgument argumentAttribute
     -- Already reported by 'resolveCalleeFunction'; degrade to bottom.
     Nothing -> pure (bottomType, instantiation)
 
@@ -745,7 +752,7 @@ inhabitedKinds layer =
     concat
       [ [NullKind | layer.nullLayer],
         [NumberKind | layer.numberLayer /= NumberSlotAbsent],
-        [StringKind | layer.stringLayer],
+        [StringKind | stringSlotInhabited layer.stringLayer],
         [BooleanKind | not (Set.null layer.booleanLayer)],
         [FileKind | layer.fileLayer],
         [FunctionKind | isJust layer.functionLayer],
@@ -943,7 +950,7 @@ instantiateToMetavars sourceSpan parameters = do
       <$> traverse
         ( \(parameterName, info, metavar) -> do
             boundInMetavarTerms <- traverse (runNormalizer sourceSpan . substituteGenericArgument substitution) info.upperBound
-            pure (metavar, Metavar {name = parameterName, kind = info.kind, bound = boundInMetavarTerms})
+            pure (metavar, Metavar {name = parameterName, kind = info.kind, bindsLiteral = info.bindsLiteral, bound = boundInMetavarTerms})
         )
         allocated
   pure (substitution, registry)
@@ -967,9 +974,10 @@ resolveCalleeFunction ::
   SourceSpan ->
   Scheme ->
   InferenceParameterView ->
+  Map Text Text ->
   NormalizedType ->
   Checker (Maybe (NormalizedAttribute, NormalizedFunction), Map Text SemanticGenericArgument)
-resolveCalleeFunction sourceSpan scheme view argumentObject =
+resolveCalleeFunction sourceSpan scheme view literalArguments argumentObject =
   if null scheme.genericParameters.parameterNames
     then do
       maybeFunction <- extractFunction sourceSpan scheme.valueType
@@ -991,7 +999,12 @@ resolveCalleeFunction sourceSpan scheme view argumentObject =
           let inferenceParameter = case view of
                 InferWholeParameter -> openFunction.argumentType
                 InferSuppliedLabels labels -> restrictObjectFields labels openFunction.argumentType
-          solveResult <- inferGenericArguments sourceSpan registry argumentObject inferenceParameter
+              -- A parameter declared @literal@ binds at a literal argument's most specific type: where
+              -- the open parameter's field is exactly that parameter's bare metavariable and the
+              -- argument was written as a string literal, the proposal sees the literal's singleton
+              -- instead of @string@. Unmarked parameters see the argument exactly as before.
+              proposalArgument = proposedLiteralArguments registry literalArguments inferenceParameter argumentObject
+          solveResult <- inferGenericArguments sourceSpan registry proposalArgument inferenceParameter
           solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
           -- The instantiation by declared parameter: the scheme opened each parameter to a
           -- metavariable (`substitution`), and the solver bound the metavariables
@@ -1051,6 +1064,79 @@ restrictObjectFields labels parameterType = case parameterType.baseType of
   _ -> parameterType
 
 ------------------------------------------------------------------------------------------------
+-- String-literal argument refinement
+--
+-- A string literal expression synthesizes @string@ (never a singleton), so a call site that WANTS
+-- the literal's singleton type — a @literal@-marked generic, or a parameter whose type is a written
+-- literal singleton — refines the argument object here, per field and only where the parameter side
+-- asks for it. Refinement replaces a field's @string@ with the literal's singleton, a SUBTYPE of what
+-- was there, so it can only make checks pass that the parameter side explicitly opted into; nothing
+-- else about the call changes.
+------------------------------------------------------------------------------------------------
+
+-- | The call arguments written as string literals, syntactically (the checker looks at the argument
+-- expression node, never at the synthesized type): label -> the literal's text.
+literalCallArguments :: List (CallArgument Identified) -> Map Text Text
+literalCallArguments arguments =
+  Map.fromList
+    [ (argument.name, text)
+      | argument <- arguments,
+        ArgumentExpression (ExpressionLiteral literal) <- [argument.value],
+        LiteralValueString text <- [literal.value]
+    ]
+
+-- | Refine the literal-written fields of an argument object wherever the matching parameter field
+-- satisfies @parameterWantsLiteral@. Everything that is not a literal-written field of a plain
+-- object-to-object match is left untouched.
+refineLiteralArgumentFields ::
+  (NormalizedType -> Bool) ->
+  Map Text Text ->
+  NormalizedType ->
+  NormalizedType ->
+  NormalizedType
+refineLiteralArgumentFields parameterWantsLiteral literalArguments parameterType argumentObject
+  | Map.null literalArguments = argumentObject
+  | NormalizedBaseTypeLayered argumentLayer <- argumentObject.baseType,
+    Just arguments <- argumentLayer.objectLayer,
+    NormalizedBaseTypeLayered parameterLayer <- parameterType.baseType,
+    Just parameters <- parameterLayer.objectLayer =
+      let refineField label field
+            | Just literal <- Map.lookup label literalArguments,
+              Just parameterField <- Map.lookup label parameters.fields,
+              parameterWantsLiteral parameterField.normalizedType =
+                NormalizedFieldInformation {normalizedType = stringLiteralSingleton literal, optional = field.optional}
+            | otherwise = field
+          refinedObject = NormalizedObject {fields = Map.mapWithKey refineField arguments.fields, rest = arguments.rest}
+       in NormalizedType
+            { baseType = NormalizedBaseTypeLayered argumentLayer {objectLayer = Just refinedObject},
+              generics = argumentObject.generics,
+              attribute = argumentObject.attribute
+            }
+  | otherwise = argumentObject
+
+-- | The propose-step refinement: a field binds a literal singleton exactly when the OPEN parameter's
+-- field is the bare metavariable of a @literal@-marked generic. An unmarked generic therefore never
+-- binds a singleton implicitly, however the argument is written.
+proposedLiteralArguments :: Registry -> Map Text Text -> NormalizedType -> NormalizedType -> NormalizedType
+proposedLiteralArguments registry = refineLiteralArgumentFields wantsLiteral
+  where
+    literalMetavars = Map.keysSet (Map.filter (.bindsLiteral) registry)
+    wantsLiteral fieldType = isJust (asTypeMetavar literalMetavars fieldType)
+
+-- | The dispose-step refinement: a field is checked at its singleton exactly when the RESOLVED
+-- parameter's field mentions a string literal singleton — a written literal annotation, an explicit
+-- @f["x"]@ instantiation, or a literal binding the propose step just solved. A plain-@string@
+-- parameter keeps seeing @string@, so error messages for existing programs are unchanged.
+checkedLiteralArguments :: Map Text Text -> NormalizedType -> NormalizedType -> NormalizedType
+checkedLiteralArguments = refineLiteralArgumentFields wantsLiteral
+  where
+    wantsLiteral fieldType = case fieldType.baseType of
+      NormalizedBaseTypeLayered layer -> case layer.stringLayer of
+        StringSlotLiterals values -> not (Set.null values)
+        StringSlotString -> False
+      NormalizedBaseTypeUnknown -> False
+
+------------------------------------------------------------------------------------------------
 -- Partial application (@f(x = _, y = e)@)
 ------------------------------------------------------------------------------------------------
 
@@ -1064,21 +1150,22 @@ restrictObjectFields labels parameterType = case parameterType.baseType of
 synthPartialApplication ::
   SourceSpan ->
   Scheme ->
+  Map Text Text ->
   List (Text, SourceSpan) ->
   List (Text, NormalizedType) ->
   NormalizedAttribute ->
   Checker (NormalizedType, Map Text SemanticGenericArgument)
-synthPartialApplication sourceSpan scheme holes suppliedFields suppliedAttribute = do
+synthPartialApplication sourceSpan scheme literalArguments holes suppliedFields suppliedAttribute = do
   -- The supplied arguments alone drive generic inference; the object is closed, exactly as a full
   -- call's, so the inference sees the same shapes it would on the eventual call.
   let suppliedObject = namedObjectTypeWithRest bottomType suppliedFields
       suppliedLabels = Set.fromList (fst <$> suppliedFields)
-  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme (InferSuppliedLabels suppliedLabels) suppliedObject
+  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme (InferSuppliedLabels suppliedLabels) literalArguments suppliedObject
   case resolved of
     -- Already reported by 'resolveCalleeFunction'; degrade to bottom.
     Nothing -> pure (bottomType, instantiation)
     Just (functionAttribute, function) -> do
-      residual <- partialResidualType sourceSpan holes suppliedFields suppliedAttribute functionAttribute function
+      residual <- partialResidualType sourceSpan literalArguments holes suppliedFields suppliedAttribute functionAttribute function
       pure (residual, instantiation)
 
 -- | The residual function type of a partial application over the resolved callee function. Holes
@@ -1088,13 +1175,14 @@ synthPartialApplication sourceSpan scheme holes suppliedFields suppliedAttribute
 -- parameter that is neither supplied nor holed reports as it would on the eventual call.
 partialResidualType ::
   SourceSpan ->
+  Map Text Text ->
   List (Text, SourceSpan) ->
   List (Text, NormalizedType) ->
   NormalizedAttribute ->
   NormalizedAttribute ->
   NormalizedFunction ->
   Checker NormalizedType
-partialResidualType sourceSpan holes suppliedFields suppliedAttribute functionAttribute function = do
+partialResidualType sourceSpan literalArguments holes suppliedFields suppliedAttribute functionAttribute function = do
   maybeParameterObject <- partialParameterObject sourceSpan function.argumentType
   case maybeParameterObject of
     Nothing -> do
@@ -1115,7 +1203,10 @@ partialResidualType sourceSpan holes suppliedFields suppliedAttribute functionAt
       -- their declared types and contribute no captured value.
       when (all isJust resolvedHoles) $ do
         let probeFields = suppliedFields <> [(label, field.normalizedType) | (label, field) <- Map.toList holeFields]
-            probeObject = namedObjectTypeWithRest bottomType probeFields
+            -- The probe runs the same dispose-time literal refinement a full call would, so a supplied
+            -- literal against a literal-singleton parameter is accepted here too (holes are untouched:
+            -- they stand in at exactly their declared types and were never written as literals).
+            probeObject = checkedLiteralArguments literalArguments function.argumentType (namedObjectTypeWithRest bottomType probeFields)
         void (checkArgumentShape sourceSpan functionAttribute function probeObject suppliedAttribute)
       -- The residual parameter is the callee's parameter object restricted to the hole labels, with
       -- each field's original 'NormalizedFieldInformation' — so an optional (defaulted) parameter
@@ -1676,7 +1767,7 @@ subtractCover scrutinee cover = case scrutinee.baseType of
                 -- cover leaves @false@.
                 nullLayer = scrutineeLayer.nullLayer && not coverLayer.nullLayer,
                 numberLayer = if scrutineeLayer.numberLayer <= coverLayer.numberLayer then NumberSlotAbsent else scrutineeLayer.numberLayer,
-                stringLayer = scrutineeLayer.stringLayer && not coverLayer.stringLayer,
+                stringLayer = stringSlotDifference scrutineeLayer.stringLayer coverLayer.stringLayer,
                 booleanLayer = Set.difference scrutineeLayer.booleanLayer coverLayer.booleanLayer,
                 fileLayer = scrutineeLayer.fileLayer && not coverLayer.fileLayer,
                 functionLayer = residualFunction,
@@ -1961,8 +2052,8 @@ checkHandlerScheme expression = do
   resultId <- freshGenericId
   effectId <- freshGenericId
   let resultVariable = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton resultId, attribute = bottomAttribute}
-      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, upperBound = Nothing}
-      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, upperBound = Nothing}
+      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
+      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
       handlerGenerics =
         GenericParameters
           { parameterNames = [handlerResultParameterName, handlerEffectParameterName],
@@ -2124,6 +2215,12 @@ walkRequestHandler handler =
         Nothing -> do
           reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a request"}))
           pure Nothing
+        -- A marker effect resolves in the same (type) namespace but declares no operations, so there is
+        -- nothing a handler could catch: markers are introduced and discharged by signatures alone.
+        Just (_, requestInfo)
+          | requestInfo.marker -> do
+              reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a handleable request (a marker effect declares no operations)"}))
+              pure Nothing
         Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
 
 -- | Whether a handler clause is the ambient @panic@ catch: the bare (unqualified) name @panic@. Panic is
@@ -2141,7 +2238,8 @@ panicRequestInformation =
     { name = panicRequestName,
       genericParameters = emptyGenericParameters,
       parameterType = namedObjectType [("msg", stringType)],
-      returnType = bottomType
+      returnType = bottomType,
+      marker = False
     }
 
 -- | Walk a request handler whose handled request has been resolved (see 'walkRequestHandler'). Returns
@@ -2898,7 +2996,13 @@ booleanSingleton :: Bool -> NormalizedType
 booleanSingleton value = layeredOf neverLayer {booleanLayer = Set.singleton value}
 
 stringType :: NormalizedType
-stringType = layeredOf neverLayer {stringLayer = True}
+stringType = layeredOf neverLayer {stringLayer = StringSlotString}
+
+-- | A string literal singleton (@"x"@). Never synthesized for a string literal /expression/ (that
+-- stays @string@); it arises from annotations and from literal-binding generic parameters, where a
+-- call site refines a syntactic literal argument ('literalCallArguments').
+stringLiteralSingleton :: Text -> NormalizedType
+stringLiteralSingleton value = layeredOf neverLayer {stringLayer = StringSlotLiterals (Set.singleton value)}
 
 integerType :: NormalizedType
 integerType = layeredOf neverLayer {numberLayer = NumberSlotInteger}

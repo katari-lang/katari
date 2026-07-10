@@ -40,6 +40,12 @@ spec = do
     it "renders array and generic placeholders" $
       renderSemanticType (SemanticTypeArray (SemanticTypeGeneric (GenericId (ModuleName "test") 0)))
         `shouldBe` "array[T0]"
+    it "renders a string literal singleton quoted, exactly as written" $
+      renderSemanticType (SemanticTypeStringLiteral "https://x")
+        `shouldBe` "\"https://x\""
+    it "renders a string literal singleton with source escapes (round-trips through the lexer)" $
+      renderSemanticType (SemanticTypeStringLiteral "a\n\"b\\")
+        `shouldBe` "\"a\\n\\\"b\\\\\""
 
   describe "renderTypeError" $ do
     it "includes the code and the rendered types" $

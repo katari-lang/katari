@@ -55,6 +55,9 @@ import Katari.Typechecker.Normalizer
 data Metavar = Metavar
   { name :: Text,
     kind :: GenericKind,
+    -- | Whether the declared parameter was marked @literal@ — the call site then proposes a string
+    -- literal argument's singleton type for this variable ('Katari.Typechecker.Check.proposedLiteralArguments').
+    bindsLiteral :: Bool,
     bound :: Maybe NormalizedKindedType
   }
   deriving (Eq, Show)

@@ -180,6 +180,10 @@ parsedDeclarationSurface = \case
         Just (information DeclarationKindRequest declaration.annotation Nothing)
       )
     ]
+  -- A marker effect surfaces only in the type namespace (there is no value to perform); it presents
+  -- as a request there because that is how it is referenced — inside effect rows.
+  DeclarationMarkerEffect declaration ->
+    [(declaration.name, Nothing, Just (information DeclarationKindRequest declaration.annotation Nothing))]
   DeclarationData declaration ->
     [ ( declaration.name,
         Just (information DeclarationKindConstructor declaration.annotation Nothing),
@@ -347,6 +351,9 @@ declarationFacts moduleName = \case
       <> foldMap (genericParameterFacts moduleName) declaration.genericParameters
       <> foldMap (parameterSignatureFacts moduleName) declaration.parameters
       <> typeExpressionFacts moduleName declaration.returnType
+  DeclarationMarkerEffect declaration ->
+    typeReferenceFacts moduleName declaration.typeReference
+      <> foldMap (genericParameterFacts moduleName) declaration.genericParameters
   DeclarationExternalAgent declaration ->
     variableReferenceFacts moduleName declaration.variableReference
       <> foldMap (genericParameterFacts moduleName) declaration.genericParameters
@@ -467,6 +474,7 @@ fieldPatternFacts moduleName field = patternFacts moduleName field.bindPattern
 typeExpressionFacts :: ModuleName -> SyntacticTypeExpression Typed -> ModuleFacts
 typeExpressionFacts moduleName = \case
   TypePrimitive _ -> mempty
+  TypeStringLiteral _ -> mempty
   TypeNever _ -> mempty
   TypeUnknown _ -> mempty
   TypeAll _ -> mempty

@@ -79,7 +79,10 @@ data LowerContext = LowerContext
 data RequestDefinition = RequestDefinition
   { parameterType :: SemanticType,
     returnType :: SemanticType,
-    parameterGenericIds :: Map Text GenericId
+    parameterGenericIds :: Map Text GenericId,
+    -- | A marker effect: type-level only, so it contributes no requests-schema entry — the runtime
+    -- must never present an unperformable capability tag as a catchable request.
+    marker :: Bool
   }
 
 -- | The scope-local environment, threaded by 'local'. 'localVariables' maps each resolved local to the
@@ -305,7 +308,8 @@ buildRequestDefinitions environment = Map.map convert
       RequestDefinition
         { parameterType = runDenormalize environment (denormalize information.parameterType),
           returnType = runDenormalize environment (denormalize information.returnType),
-          parameterGenericIds = Map.map (.genericId) information.genericParameters.parameterInformation
+          parameterGenericIds = Map.map (.genericId) information.genericParameters.parameterInformation,
+          marker = information.marker
         }
 
 -- | The open schema, used for the value-addressable wrappers lowering synthesises (a @use@
@@ -348,7 +352,7 @@ callableSchema context qualifiedName = case Map.lookup qualifiedName context.val
 
 -- | Turn an effect into its requests schema: each concrete request becomes a descriptor (its parameter /
 -- return type specialised by the request's arguments), each effect-generic a reference. @all@ cannot be
--- enumerated, so it contributes no concrete requests.
+-- enumerated, so it contributes no concrete requests; a marker effect is type-level only and vanishes.
 effectRequestSchemas :: LowerContext -> SemanticEffect -> List RequestSchema
 effectRequestSchemas context = go
   where
@@ -357,11 +361,22 @@ effectRequestSchemas context = go
       SemanticEffectAny -> []
       -- io is not a request, so it contributes no request schema (it is a type-level IO marker only).
       SemanticEffectIo -> []
-      SemanticEffectRequest qualifiedName arguments -> [RequestConcrete (requestDescriptor context qualifiedName arguments)]
+      SemanticEffectRequest qualifiedName arguments -> concreteRequest qualifiedName arguments
       SemanticEffectGeneric genericId -> [RequestGeneric genericId]
       SemanticEffectUnion effects -> concatMap go effects
       SemanticEffectOverwrite baseEffect overrides ->
-        go baseEffect <> concatMap (\(qualifiedName, arguments) -> [RequestConcrete (requestDescriptor context qualifiedName arguments)]) overrides
+        go baseEffect <> concatMap (uncurry concreteRequest) overrides
+    -- A marker effect names no operations, so a row that carries one exposes nothing to the runtime.
+    concreteRequest qualifiedName arguments
+      | isMarkerRequest context qualifiedName = []
+      | otherwise = [RequestConcrete (requestDescriptor context qualifiedName arguments)]
+
+-- | Whether a request name refers to a marker effect declaration (a name absent from the definitions
+-- is an ordinary request, matching 'requestDescriptor''s open fallback).
+isMarkerRequest :: LowerContext -> QualifiedName -> Bool
+isMarkerRequest context qualifiedName = case Map.lookup qualifiedName context.requestDefinitions of
+  Just definition -> definition.marker
+  Nothing -> False
 
 requestDescriptor :: LowerContext -> QualifiedName -> Map Text SemanticGenericArgument -> RequestDescriptor
 requestDescriptor context qualifiedName arguments = case Map.lookup qualifiedName context.requestDefinitions of
@@ -471,6 +486,9 @@ lowerDeclaration = \case
       BlockPrimitive Primitive {name = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input}
   AST.DeclarationImport _ -> pure ()
   AST.DeclarationTypeSynonym _ -> pure ()
+  -- A marker effect is type-level only: nothing to perform, nothing to handle, so it lowers to
+  -- nothing at all (and 'effectRequestSchemas' drops it from every requests schema).
+  AST.DeclarationMarkerEffect _ -> pure ()
   AST.DeclarationError _ -> pure ()
 
 -- | A declaration's user-facing description: its @\@"..."@ annotation, or empty when undocumented.

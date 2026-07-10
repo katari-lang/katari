@@ -25,6 +25,11 @@ data SemanticType where
   SemanticTypeInteger :: SemanticType
   SemanticTypeNumber :: SemanticType
   SemanticTypeString :: SemanticType
+  -- | A string literal singleton type (@"x"@): exactly one string value, a subtype of
+  -- 'SemanticTypeString'. Introduced only by written type annotations and literal-binding generic
+  -- parameters — a string literal /expression/ still synthesizes @string@, so existing inference is
+  -- unchanged.
+  SemanticTypeStringLiteral :: Text -> SemanticType
   SemanticTypeBoolean :: SemanticType
   SemanticTypeFile :: SemanticType
   SemanticTypeAgent :: SemanticType -> SemanticType -> SemanticEffect -> SemanticType
@@ -93,6 +98,7 @@ renderSemanticType = render False
       SemanticTypeInteger -> "integer"
       SemanticTypeNumber -> "number"
       SemanticTypeString -> "string"
+      SemanticTypeStringLiteral value -> renderStringLiteralType value
       SemanticTypeBoolean -> "boolean"
       SemanticTypeFile -> "file"
       SemanticTypeArray itemType -> "array[" <> render False itemType <> "]"
@@ -130,6 +136,19 @@ renderSemanticType = render False
         remaining -> SemanticTypeUnion remaining
       other -> other
     parenthesiseIf parenthesise body = if parenthesise then "(" <> body <> ")" else body
+
+-- | Render a string literal singleton type exactly as it is written in source: double-quoted, with
+-- the same escape sequences the lexer accepts, so the rendering round-trips through the parser.
+renderStringLiteralType :: Text -> Text
+renderStringLiteralType value = "\"" <> Text.concatMap escape value <> "\""
+  where
+    escape character = case character of
+      '\n' -> "\\n"
+      '\t' -> "\\t"
+      '\r' -> "\\r"
+      '"' -> "\\\""
+      '\\' -> "\\\\"
+      other -> Text.singleton other
 
 -- | Render an effect in the surface @with@ syntax: @pure@, @all@, @req[T]@, @a | b@,
 -- @{...base, req[T]}@.
@@ -195,6 +214,7 @@ substituteGenerics substitution = substituteType
       SemanticTypeInteger -> SemanticTypeInteger
       SemanticTypeNumber -> SemanticTypeNumber
       SemanticTypeString -> SemanticTypeString
+      SemanticTypeStringLiteral value -> SemanticTypeStringLiteral value
       SemanticTypeBoolean -> SemanticTypeBoolean
       SemanticTypeFile -> SemanticTypeFile
       SemanticTypeAgent parameterType returnType effect ->

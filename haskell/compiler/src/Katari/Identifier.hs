@@ -51,6 +51,9 @@ declarationBindings moduleName = \case
   DeclarationExternalAgent declaration -> [ownVariable declaration.name declaration.variableReference]
   DeclarationPrimitiveAgent declaration -> [ownVariable declaration.name declaration.variableReference]
   DeclarationRequest declaration -> [ownVariable declaration.name declaration.variableReference, ownType declaration.name declaration.typeReference]
+  -- A marker effect has no operations, so it binds nothing in the value namespace: it is
+  -- unperformable by construction (there is no name to call), only referable in effect rows.
+  DeclarationMarkerEffect declaration -> [ownType declaration.name declaration.typeReference]
   DeclarationData declaration -> [ownVariable declaration.name declaration.variableReference, ownType declaration.name declaration.typeReference]
   DeclarationTypeSynonym declaration -> [ownType declaration.name declaration.typeReference]
   DeclarationImport _ -> []
@@ -218,6 +221,7 @@ resolveDeclaration = \case
     ownResolution <- ownVariableResolution declaration.name
     DeclarationAgent <$> resolveAgentDeclaration ownResolution declaration
   DeclarationRequest declaration -> DeclarationRequest <$> resolveRequestDeclaration declaration
+  DeclarationMarkerEffect declaration -> DeclarationMarkerEffect <$> resolveMarkerEffectDeclaration declaration
   DeclarationExternalAgent declaration -> DeclarationExternalAgent <$> resolveExternalAgentDeclaration declaration
   DeclarationPrimitiveAgent declaration -> DeclarationPrimitiveAgent <$> resolvePrimitiveAgentDeclaration declaration
   DeclarationData declaration -> DeclarationData <$> resolveDataDeclaration declaration
@@ -267,6 +271,19 @@ resolveRequestDeclaration declaration =
           genericParameters = genericParameters,
           parameters = parameters,
           returnType = returnType,
+          sourceSpan = declaration.sourceSpan
+        }
+
+resolveMarkerEffectDeclaration :: MarkerEffectDeclaration Parsed -> Identifier (MarkerEffectDeclaration Identified)
+resolveMarkerEffectDeclaration declaration =
+  withGenericParameters declaration.sourceSpan declaration.genericParameters $ \genericParameters -> do
+    typeReference <- ownTypeReference declaration.typeReference declaration.name
+    pure
+      MarkerEffectDeclaration
+        { annotation = declaration.annotation,
+          name = declaration.name,
+          typeReference = typeReference,
+          genericParameters = genericParameters,
           sourceSpan = declaration.sourceSpan
         }
 

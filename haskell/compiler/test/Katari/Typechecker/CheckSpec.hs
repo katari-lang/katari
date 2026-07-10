@@ -1020,6 +1020,133 @@ spec = do
         )
         `shouldContain` ["K3021"]
 
+  -- A string literal in type position is that string's singleton type: `"x" <: "x"` and
+  -- `"x" <: string`, but never the other way around. Literal types enter through written annotations
+  -- (here) and literal-binding generics (below); a string literal EXPRESSION still synthesizes
+  -- `string`, so nothing changes for programs that never write a literal type.
+  describe "string literal singleton types" $ do
+    it "accepts a literal-typed value where the same literal is expected" $
+      compiledCodes "agent pass(mode: \"fast\") -> \"fast\" { mode }" `shouldBe` []
+
+    it "accepts a literal-typed value where string is expected (\"x\" <: string)" $
+      compiledCodes "agent widen(mode: \"fast\") -> string { mode }" `shouldBe` []
+
+    it "rejects a literal-typed value where a different literal is expected (K3001)" $
+      compiledCodes "agent cross(mode: \"fast\") -> \"slow\" { mode }" `shouldContain` ["K3001"]
+
+    it "rejects a plain string where a literal is expected (string </: \"x\", K3001)" $
+      compiledCodes "agent narrow(mode: string) -> \"fast\" { mode }" `shouldContain` ["K3001"]
+
+    it "accepts a literal member flowing into a union of literals" $
+      compiledCodes "agent pick(mode: \"fast\") -> \"fast\" | \"slow\" { mode }" `shouldBe` []
+
+    it "rejects a literal outside the expected union (K3001)" $
+      compiledCodes "agent pick(mode: \"other\") -> \"fast\" | \"slow\" { mode }" `shouldContain` ["K3001"]
+
+    it "checks a literal call argument at its singleton against a literal-annotated parameter" $
+      compiledCodes "agent takes(mode: \"fast\") -> \"fast\" { mode }\nagent run() -> \"fast\" { takes(mode = \"fast\") }" `shouldBe` []
+
+    it "rejects a mismatched literal call argument against a literal-annotated parameter (K3001)" $
+      compiledCodes "agent takes(mode: \"fast\") -> \"fast\" { mode }\nagent run() -> \"fast\" { takes(mode = \"slow\") }" `shouldContain` ["K3001"]
+
+    it "a string literal expression still synthesizes `string` (a literal-typed let annotation is not met, K3001)" $
+      compiledCodes "agent run() -> string { let mode : \"fast\" = \"fast\"\nmode }" `shouldContain` ["K3001"]
+
+  -- The TypeScript `const` type-parameter analog: a `literal`-marked generic binds at a string
+  -- literal argument's singleton type; everything else infers exactly as before, and an unmarked
+  -- generic can never receive a singleton implicitly.
+  describe "literal-binding generic parameters" $ do
+    let connectDecl = "agent connect[literal url_type extends string](url: url_type) -> url_type { url }\n"
+        plainDecl = "agent plain[T](value: T) -> T { value }\n"
+
+    it "binds the singleton from a literal argument" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://x\" { connect(url = \"https://x\") }") `shouldBe` []
+
+    it "the singleton binding is exact — a different literal annotation is rejected (K3001)" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://y\" { connect(url = \"https://x\") }") `shouldContain` ["K3001"]
+
+    it "binds plain string from a variable argument" $
+      compiledCodes (connectDecl <> "agent run(address: string) -> string { connect(url = address) }") `shouldBe` []
+
+    it "a variable argument never produces a singleton (K3001 against a literal annotation)" $
+      compiledCodes (connectDecl <> "agent run(address: string) -> \"https://x\" { connect(url = address) }") `shouldContain` ["K3001"]
+
+    it "an unmarked generic binds string from a literal argument, exactly as before" $
+      compiledCodes (plainDecl <> "agent run() -> string { plain(value = \"x\") }") `shouldBe` []
+
+    it "an unmarked generic never binds a singleton implicitly (K3001)" $
+      compiledCodes (plainDecl <> "agent run() -> \"x\" { plain(value = \"x\") }") `shouldContain` ["K3001"]
+
+    it "explicit literal instantiation works through type-position literals" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://x\" { connect[\"https://x\"](url = \"https://x\") }") `shouldBe` []
+
+    it "explicit literal instantiation rejects a mismatched literal argument (K3001)" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://x\" { connect[\"https://x\"](url = \"https://y\") }") `shouldContain` ["K3001"]
+
+    it "a literal request generic stamps the singleton into the performed row" $
+      compiledCodes
+        ( "request fetch[literal url_type extends string](url: url_type) -> string\n"
+            <> "agent run() -> string with fetch[\"https://x\"] { fetch(url = \"https://x\") }"
+        )
+        `shouldBe` []
+
+    it "the performed singleton row fits under a plain-string row (covariant request parameter)" $
+      compiledCodes
+        ( "request fetch[literal url_type extends string](url: url_type) -> string\n"
+            <> "agent run() -> string with fetch[string] { fetch(url = \"https://x\") }"
+        )
+        `shouldBe` []
+
+    it "the performed singleton row does not fit under a different literal's row (K3001)" $
+      compiledCodes
+        ( "request fetch[literal url_type extends string](url: url_type) -> string\n"
+            <> "agent run() -> string with fetch[\"https://y\"] { fetch(url = \"https://x\") }"
+        )
+        `shouldContain` ["K3001"]
+
+  -- A marker effect (`effect name[generics]`) is a pure type-level capability: it rides effect rows,
+  -- gates calls, is introduced and discharged by signatures alone, cannot be performed (it binds no
+  -- value name) and cannot be handled.
+  describe "marker effect declarations" $ do
+    let scopedDecl = "effect scoped[resource]\n"
+        -- The provide SHAPE, with a neutral name: a higher-order signature that mints the capability
+        -- for its callback's row and discharges it from its own result row. A primitive, because only
+        -- a signature (not a checked body) can discharge a marker — and a primitive adds no io.
+        provideDecl =
+          "primitive agent with_resource[R, effect E](run: agent (token: string) -> R with E | scoped[\"db\"]) -> R with E\n"
+        workerDecl = "agent worker(token: string) -> integer with scoped[\"db\"] { 0 }\n"
+
+    it "declares a marker and carries it in an effect row" $
+      compiledCodes (scopedDecl <> workerDecl) `shouldBe` []
+
+    it "introduces and discharges the marker through the higher-order signature (the result row is pure)" $
+      compiledCodes (scopedDecl <> provideDecl <> workerDecl <> "agent main() -> integer with pure { with_resource(run = worker) }") `shouldBe` []
+
+    it "gates a direct call: the marker row does not fit a pure caller (K3001)" $
+      compiledCodes (scopedDecl <> workerDecl <> "agent main() -> integer with pure { worker(token = \"t\") }") `shouldContain` ["K3001"]
+
+    it "scopes by argument: a callback tagged with a different resource is rejected (K3001)" $
+      compiledCodes
+        ( scopedDecl
+            <> provideDecl
+            <> "agent other_worker(token: string) -> integer with scoped[\"other\"] { 0 }\n"
+            <> "agent main() -> integer with pure { with_resource(run = other_worker) }"
+        )
+        `shouldContain` ["K3001"]
+
+    it "marker generics are phantom, hence row-compared covariantly (a literal tag fits a string tag)" $
+      compiledCodes (scopedDecl <> workerDecl <> "agent caller() -> integer with scoped[string] { worker(token = \"t\") }") `shouldBe` []
+
+    it "rejects a handler naming a marker (K3017 — nothing to catch)" $
+      compiledCodes
+        ( scopedDecl
+            <> "agent run() -> integer { use handler { request scoped() -> null { break 0 } }\n1 }"
+        )
+        `shouldContain` ["K3017"]
+
+    it "a marker is unperformable by construction (no value name to call, K2001)" $
+      compiledCodes (scopedDecl <> "agent run() -> null { scoped() }") `shouldContain` ["K2001"]
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------
@@ -1298,7 +1425,7 @@ identityScheme genericId =
             parameterInformation =
               Map.singleton
                 "a"
-                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, upperBound = Nothing}
+                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
           },
       valueType = pureAgentType (paramObject [("x", genericVariable genericId)]) (genericVariable genericId)
     }
@@ -1333,7 +1460,8 @@ typeEnvironmentWithFakeRequest =
             { name = fakeRequestName,
               genericParameters = emptyGenerics,
               parameterType = recordNormalized [],
-              returnType = nullType
+              returnType = nullType,
+              marker = False
             },
       synonymEnvironment = mempty,
       elaborateContext = emptyContext mempty (Map.singleton fakeRequestName emptyGenerics) mempty
@@ -1636,7 +1764,7 @@ extractSequenceElement normalizedType = case normalizedType.baseType of
 carriesIntegerAndString :: NormalizedType -> Bool
 carriesIntegerAndString normalizedType = case normalizedType.baseType of
   NormalizedBaseTypeLayered layer ->
-    layer.numberLayer == NumberSlotInteger && layer.stringLayer
+    layer.numberLayer == NumberSlotInteger && layer.stringLayer == StringSlotString
   _ -> False
 
 -- | Wrap a normalized type in @of private@: keep its base and generics, raise its outer attribute

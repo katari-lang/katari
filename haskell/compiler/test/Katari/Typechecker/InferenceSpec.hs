@@ -387,7 +387,7 @@ typeVar metavar = case metavarKinded GenericKindType metavar of
 
 -- | A registry of type metavariables from @(id, name, bound)@ triples.
 registry :: [(GenericId, Text, Maybe NormalizedKindedType)] -> Registry
-registry entries = Map.fromList [(metavar, Metavar {name = name, kind = GenericKindType, bound = bound}) | (metavar, name, bound) <- entries]
+registry entries = Map.fromList [(metavar, Metavar {name = name, kind = GenericKindType, bindsLiteral = False, bound = bound}) | (metavar, name, bound) <- entries]
 
 typeLowersOf :: GenericId -> Constraints -> [NormalizedType]
 typeLowersOf metavar constraints = Map.findWithDefault [] metavar constraints.typeBounds

@@ -201,6 +201,7 @@ elaborate = \case
       PrimitiveTypeKindString -> SemanticTypeString
       PrimitiveTypeKindBoolean -> SemanticTypeBoolean
       PrimitiveTypeKindFile -> SemanticTypeFile
+  TypeStringLiteral node -> pureType (SemanticTypeStringLiteral node.value)
   TypeNever _ -> pureType SemanticTypeNever
   TypeUnknown _ -> pureType SemanticTypeUnknown
   TypeAll _ -> pureEffect SemanticEffectAny

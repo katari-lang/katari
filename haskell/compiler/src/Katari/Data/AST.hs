@@ -64,6 +64,7 @@ instance HasSourceSpan (Module phase) where
 data Declaration (phase :: Phase) where
   DeclarationAgent :: AgentDeclaration phase -> Declaration phase
   DeclarationRequest :: RequestDeclaration phase -> Declaration phase
+  DeclarationMarkerEffect :: MarkerEffectDeclaration phase -> Declaration phase
   DeclarationImport :: ImportDeclaration -> Declaration phase
   DeclarationExternalAgent :: ExternalAgentDeclaration phase -> Declaration phase
   DeclarationPrimitiveAgent :: PrimitiveAgentDeclaration phase -> Declaration phase
@@ -75,6 +76,7 @@ instance HasSourceSpan (Declaration phase) where
   sourceSpanOf = \case
     DeclarationAgent declaration -> declaration.sourceSpan
     DeclarationRequest declaration -> declaration.sourceSpan
+    DeclarationMarkerEffect declaration -> declaration.sourceSpan
     DeclarationImport declaration -> declaration.sourceSpan
     DeclarationExternalAgent declaration -> declaration.sourceSpan
     DeclarationPrimitiveAgent declaration -> declaration.sourceSpan
@@ -109,6 +111,11 @@ data GenericParameter (phase :: Phase) = GenericParameter
     -- | Generic ID
     typeReference :: Reference phase TypeReference,
     kind :: GenericKind,
+    -- | @literal name@ — the parameter binds at the argument's most specific literal type: a call
+    -- whose argument expression is a string literal proposes the literal's singleton type instead of
+    -- @string@. Only meaningful for type-kind parameters; an unmarked generic never binds a singleton
+    -- implicitly.
+    bindsLiteral :: Bool,
     -- | No upper bound  ~> unknown of private (top type)
     upperBound :: Maybe (SyntacticTypeExpression phase),
     sourceSpan :: SourceSpan
@@ -214,6 +221,23 @@ data RequestDeclaration (phase :: Phase) = RequestDeclaration
   }
 
 instance HasSourceSpan (RequestDeclaration phase) where
+  sourceSpanOf declaration = declaration.sourceSpan
+
+-- | @effect name[generics]@ — a marker effect: a pure type-level capability with NO operations. It
+-- occupies only the type namespace (there is no value to perform, so it is unperformable by
+-- construction), appears in effect rows exactly like a request reference, is rejected as a handler
+-- clause, and vanishes at lowering. Signatures use it to introduce and discharge scope-capability
+-- rows (@with E | name[T]@ on a parameter, absent from the result row).
+data MarkerEffectDeclaration (phase :: Phase) = MarkerEffectDeclaration
+  { annotation :: Maybe Text,
+    name :: Text,
+    -- | As effect (the only namespace a marker populates)
+    typeReference :: Reference phase TypeReference,
+    genericParameters :: List (GenericParameter phase),
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (MarkerEffectDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
 -- | @import { ... } from "module"@ / @import "module" as alias@.
@@ -680,6 +704,8 @@ instance HasSourceSpan (RecordPattern phase) where
 data SyntacticTypeExpression (phase :: Phase) where
   -- | @null@ / @integer@ / @number@ / @string@ / @boolean@ / @file@
   TypePrimitive :: PrimitiveTypeNode -> SyntacticTypeExpression phase
+  -- | @"x"@ — a string literal singleton type (exactly this string; a subtype of @string@)
+  TypeStringLiteral :: StringLiteralTypeNode -> SyntacticTypeExpression phase
   -- | @never@ — the type bottom
   TypeNever :: SourceSpan -> SyntacticTypeExpression phase
   -- | @unknown@ — the type top
@@ -719,6 +745,7 @@ data SyntacticTypeExpression (phase :: Phase) where
 instance HasSourceSpan (SyntacticTypeExpression phase) where
   sourceSpanOf = \case
     TypePrimitive node -> node.sourceSpan
+    TypeStringLiteral node -> node.sourceSpan
     TypeNever sourceSpan -> sourceSpan
     TypeUnknown sourceSpan -> sourceSpan
     TypeAll sourceSpan -> sourceSpan
@@ -752,6 +779,17 @@ data PrimitiveTypeNode = PrimitiveTypeNode
   deriving stock (Eq, Show)
 
 instance HasSourceSpan PrimitiveTypeNode where
+  sourceSpanOf node = node.sourceSpan
+
+-- | @"x"@ in type position. Escaping follows expression string literals exactly (the parser reuses
+-- the lexer's string body), so a value literal and its singleton type are always spelled the same.
+data StringLiteralTypeNode = StringLiteralTypeNode
+  { value :: Text,
+    sourceSpan :: SourceSpan
+  }
+  deriving stock (Eq, Show)
+
+instance HasSourceSpan StringLiteralTypeNode where
   sourceSpanOf node = node.sourceSpan
 
 -- | @[module.]name@ — a kind-agnostic name reference. @moduleQualifier@ is the
@@ -1251,6 +1289,7 @@ retagSyntacticTypeExpression ::
   SyntacticTypeExpression phase2
 retagSyntacticTypeExpression = \case
   TypePrimitive node -> TypePrimitive node
+  TypeStringLiteral node -> TypeStringLiteral node
   TypeNever sourceSpan -> TypeNever sourceSpan
   TypeUnknown sourceSpan -> TypeUnknown sourceSpan
   TypeAll sourceSpan -> TypeAll sourceSpan
@@ -1341,6 +1380,7 @@ retagGenericParameter parameter =
       labelReference = retagReference parameter.labelReference,
       typeReference = retagReference parameter.typeReference,
       kind = parameter.kind,
+      bindsLiteral = parameter.bindsLiteral,
       upperBound = retagSyntacticTypeExpression <$> parameter.upperBound,
       sourceSpan = parameter.sourceSpan
     }
@@ -1401,6 +1441,21 @@ retagRequestDeclaration declaration =
       genericParameters = retagGenericParameter <$> declaration.genericParameters,
       parameters = retagParameterSignature <$> declaration.parameters,
       returnType = retagSyntacticTypeExpression declaration.returnType,
+      sourceSpan = declaration.sourceSpan
+    }
+
+retagMarkerEffectDeclaration ::
+  ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
+  ) =>
+  MarkerEffectDeclaration phase1 ->
+  MarkerEffectDeclaration phase2
+retagMarkerEffectDeclaration declaration =
+  MarkerEffectDeclaration
+    { annotation = declaration.annotation,
+      name = declaration.name,
+      typeReference = retagReference declaration.typeReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
       sourceSpan = declaration.sourceSpan
     }
 
@@ -1550,6 +1605,10 @@ deriving stock instance (ShowPhase phase) => Show (AgentDeclaration phase)
 deriving stock instance (EqPhase phase) => Eq (RequestDeclaration phase)
 
 deriving stock instance (ShowPhase phase) => Show (RequestDeclaration phase)
+
+deriving stock instance (EqPhase phase) => Eq (MarkerEffectDeclaration phase)
+
+deriving stock instance (ShowPhase phase) => Show (MarkerEffectDeclaration phase)
 
 deriving stock instance (EqPhase phase) => Eq (ExternalAgentDeclaration phase)
 
