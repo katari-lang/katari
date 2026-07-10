@@ -122,6 +122,22 @@ export class ResourcePool {
     }
   }
 
+  /** Re-own to `to` each listed blob still owned by `from` — the produced blobs a completing external call
+   *  did NOT ascend by value (a direct mcp call's literal `json` tree carries a produced blob as a `$ref`
+   *  string, not a real ref, so the value-driven release never freed it from the ephemeral call instance).
+   *  Adopting them onto the long-lived run keeps them readable past the call's drop; the run's teardown
+   *  reclaims them. A blob already released to in-transit (owner = null, a value-carried one the caller will
+   *  reown) does not match `from`, so it is left alone. */
+  reassignOwnedBlobs(from: InstanceId, to: InstanceId, blobIds: Iterable<BlobId>): void {
+    for (const blobId of blobIds) {
+      const blob = this.store.blobs[blobId];
+      if (blob?.owner === from) {
+        blob.owner = to;
+        this.dirtyBlobs.add(blobId);
+      }
+    }
+  }
+
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
    *  the value's recipient can re-own them rather than have them dropped with `owner`. Only `owner`'s own
    *  resources move; ancestors / others' are left as they are. */

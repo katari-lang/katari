@@ -17,7 +17,7 @@ agent main(url: string) -> string {
     }
   }
   let tools = mcp.tools(url = url, auth = mcp.headers(values = record.empty()))
-  let names = for (let tool in mcp.tools_of(toolbox = tools)) {
+  let names = for (let tool in record.values(target = tools)) {
     next reflection.get_metadata(value = tool).name
   }
   let added = match (record.get(target = tools, key = "add")) {

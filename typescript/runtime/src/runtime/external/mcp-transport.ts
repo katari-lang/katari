@@ -428,8 +428,12 @@ export class SdkMcpTransport implements McpTransport {
             "this runtime has no OAuth credential store configured, so mcp.oauth(...) cannot resolve a credential",
           );
         }
-        const credential = await loadStoredCredential(auth.name, store);
-        return { authProvider: new StoredMcpOAuthProvider(auth.name, store, credential) };
+        // Pre-flight: fail a missing credential as the typed auth_error BEFORE building any SDK
+        // machinery. The provider then reads the credential THROUGH the store on each use, so a
+        // credential a re-login replaced is picked up by a warm (transport-cached) provider rather than
+        // being served — and refreshed off — stale.
+        await loadStoredCredential(auth.name, store);
+        return { authProvider: new StoredMcpOAuthProvider(auth.name, store) };
       }
     }
   }

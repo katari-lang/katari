@@ -146,21 +146,24 @@ export interface CallRow<Payload> {
   innerCalls: InnerCallRow[];
 }
 
-/** The optional capability a call payload may carry: shaping its own `delegateAck` value. A call whose
- *  result is assembled FROM the call rather than by the transport attaches `shapeResult` where its payload
- *  variant is decided (`openPayload`) — the mcp listing mints its toolbox there, from the transport's tool
- *  listing plus the call's original privacy-marked descriptor, which the wire cannot carry. A plain-data
- *  payload simply omits it and the decoded transport value passes through unchanged. */
-export interface ResultShapingPayload {
-  shapeResult?: (value: Value) => Value;
+/** The ONE ack-shaping seam a call payload may carry: decoding its own `delegateAck` value straight from
+ *  the transport's RAW wire Json. A plain-data payload omits it and the base wire decoder (`jsonToValue`)
+ *  runs; a payload whose result is assembled FROM the call attaches it where its variant is decided
+ *  (`openPayload`) — the mcp listing mints its toolbox from the raw listing plus the call's original
+ *  privacy-marked descriptor (which the wire cannot carry), the mcp direct call lifts the raw reply
+ *  literally into a `json` tree. Shaping at the WIRE boundary (raw Json in, Value out) keeps hostile /
+ *  quirky server Json away from the generic decoder, which is total only for wire-shaped documents — the
+ *  reason a bespoke `complete` interception is no longer needed. */
+export interface AckDecodingPayload {
+  decodeAck?: (raw: Json) => Value;
 }
 
-/** Read a payload's optional ack shaper structurally. The class's payload parameter is constrained only to
- *  `object` because constraining it to the all-optional `ResultShapingPayload` would trip TypeScript's
+/** Read a payload's optional ack decoder structurally. The class's payload parameter is constrained only to
+ *  `object` because constraining it to the all-optional `AckDecodingPayload` would trip TypeScript's
  *  weak-type check for the plain-data payloads (ffi / http / webhook) that share no field with it. */
-function resultShaperOf(payload: object): ((value: Value) => Value) | undefined {
-  const shaping: ResultShapingPayload = payload;
-  return shaping.shapeResult;
+function ackDecoderOf(payload: object): ((raw: Json) => Value) | undefined {
+  const decoding: AckDecodingPayload = payload;
+  return decoding.decodeAck;
 }
 
 export abstract class ExternalCallReactor<Payload extends object> extends Reactor {
@@ -180,6 +183,13 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
   private pendingDeliveries: InnerDelivery[] = [];
   private readonly dirty = new Set<DelegationId>();
   private droppedInstances: InstanceId[] = [];
+  /** The blobs each in-flight call produced mid-call (via `registerProducedBlob`), owned by the call's
+   *  instance. At a successful completion the base adopts onto the run any of these the result did NOT
+   *  ascend by value — a direct mcp call's literal `$ref` in a `json` tree carries the blob only as a
+   *  string, not a real ref, so the value-driven release never freed it and this call's drop would
+   *  otherwise reclaim it in the same commit that delivered the result. In-memory only: recovery is
+   *  at-most-once, so an interrupted call fails and its produced blobs reclaim at its drop. */
+  private readonly producedBlobs = new Map<DelegationId, Set<BlobId>>();
 
   // ─── concrete-reactor hooks (the only transport-specific surface) ────────────────────────────────
 
@@ -233,6 +243,9 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     const instance = this.callInstance(delegation);
     if (instance === undefined) return false;
     this.pool.registerBlob(blobId, { owner: instance, ...entry });
+    const produced = this.producedBlobs.get(delegation);
+    if (produced === undefined) this.producedBlobs.set(delegation, new Set([blobId]));
+    else produced.add(blobId);
     return true;
   }
 
@@ -543,21 +556,26 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     call.pendingOutcome = undefined;
     switch (outcome.kind) {
       case "result": {
-        // A payload that shapes its own ack (see `ResultShapingPayload`) does so here, at the same seam
-        // the transport's Json lifts back into an engine value.
-        const decoded = jsonToValue(outcome.value);
-        const shape = resultShaperOf(call.payload);
+        // The payload decodes its own ack straight from the transport's raw wire Json (the ONE ack-shaping
+        // seam, `AckDecodingPayload`): the default is the base wire decoder, an mcp listing mints its
+        // toolbox, an mcp direct call lifts a literal `json` tree — all at this boundary, where the value's
+        // resources then ascend (`send`'s release, the caller's reown).
+        const decode = ackDecoderOf(call.payload) ?? jsonToValue;
         this.send(
           {
             kind: "delegateAck",
             delegation,
-            value: shape === undefined ? decoded : shape(decoded),
+            value: decode(outcome.value),
             from: this.name,
             to: caller,
             run,
           },
           instance,
         );
+        // A produced blob the result did NOT ascend by value (a direct mcp call's literal `$ref` in the
+        // json tree) would otherwise be reclaimed by this drop; adopt it onto the run so it survives to the
+        // caller — uniform with the value-carried case, which `send` already released to in-transit.
+        this.adoptDetachedProducedBlobs(delegation, instance, run);
         this.drop(delegation);
         return;
       }
@@ -733,6 +751,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     this.pendingDeliveries = [];
     this.dirty.clear();
     this.droppedInstances = [];
+    this.producedBlobs.clear();
   }
 
   private innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
@@ -761,6 +780,21 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     if (set.size === 0) this.innerCallsByParent.delete(parent);
   }
 
+  /** Adopt onto the run every blob this call produced that its result did not ascend by value. `send`'s
+   *  delegateAck release has already moved the value-carried resources to in-transit (owner = null) for the
+   *  caller to reown; a produced blob still owned by the ephemeral `call` instance is one the result carried
+   *  only as a literal handle (a direct mcp call's `$ref` string in a json tree), not a real ref — so it
+   *  moves onto the long-lived `run`, readable until the run's teardown reclaims it. Uniform across call
+   *  shapes: a callTool / ffi result carries all its produced blobs as refs, so this is a no-op there. */
+  private adoptDetachedProducedBlobs(
+    delegation: DelegationId,
+    call: InstanceId,
+    run: InstanceId,
+  ): void {
+    const produced = this.producedBlobs.get(delegation);
+    if (produced !== undefined) this.pool.reassignOwnedBlobs(call, run, produced);
+  }
+
   private put(delegation: DelegationId, call: Call<Payload>): void {
     this.calls.set(delegation, call);
     this.dirty.add(delegation);
@@ -768,6 +802,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
 
   private drop(delegation: DelegationId): void {
     this.onDropCall(delegation);
+    this.producedBlobs.delete(delegation);
     const instance = this.handledInstanceOf(delegation);
     if (instance !== undefined) {
       this.droppedInstances.push(instance);

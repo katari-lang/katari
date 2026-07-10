@@ -67,6 +67,11 @@ export function parseListToolsArguments(argv: string[]): ListToolsArguments {
   if (url === undefined || url === "") {
     throw new Error("--url <server> is required");
   }
+  // Auth is a sum, not a bag: a server authenticates with explicit headers OR an OAuth credential,
+  // never both — accepting both would silently drop one, so reject the combination outright.
+  if (oauth && Object.keys(headers).length > 0) {
+    throw new Error("--header and --oauth cannot be combined (auth is one or the other)");
+  }
   if (scope !== undefined && !oauth) {
     throw new Error("--scope only applies together with --oauth");
   }

@@ -56,6 +56,16 @@ describe("parseListToolsArguments", () => {
     );
     expect(() => parseListToolsArguments(["--url"])).toThrowError(/requires a value/);
   });
+
+  test("rejects --header combined with --oauth (auth is a sum, not both)", () => {
+    // Either order must fail: accepting both would silently drop one form of auth.
+    expect(() =>
+      parseListToolsArguments(["--url", "u", "--header", "authorization=Bearer k", "--oauth"]),
+    ).toThrowError(/--header and --oauth cannot be combined/);
+    expect(() =>
+      parseListToolsArguments(["--url", "u", "--oauth", "--header", "authorization=Bearer k"]),
+    ).toThrowError(/--header and --oauth cannot be combined/);
+  });
 });
 
 describe("performListTools against a loopback MCP server", () => {

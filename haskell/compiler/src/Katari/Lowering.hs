@@ -48,7 +48,7 @@ import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (.
 import Katari.Diagnostics (Diagnostics)
 import Katari.Lowering.Drop (insertDropOperations)
 import Katari.Panic (panic)
-import Katari.Primitive (panicRequestName, preludeModuleName, recordMergeName)
+import Katari.Primitive (panicRequestName, preludeModuleName, recordMergeLeftLabel, recordMergeName, recordMergeRightLabel)
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
@@ -791,7 +791,7 @@ lowerPartialApplication callExpression = do
   argumentVariable <- freshVariableId
   (resultVariable, operations) <- withFreshOperations $ do
     mergeArgument <- freshVariableId
-    emit (OperationMakeRecord MakeRecordOperation {entries = [("left", argumentVariable), ("right", suppliedRecord)], output = mergeArgument})
+    emit (OperationMakeRecord MakeRecordOperation {entries = [(recordMergeLeftLabel, argumentVariable), (recordMergeRightLabel, suppliedRecord)], output = mergeArgument})
     mergedArgument <- freshVariableId
     emit (OperationDelegate DelegateOperation {target = CalleeName recordMergeName, argument = mergeArgument, output = Just mergedArgument, generics = mempty})
     output <- freshVariableId

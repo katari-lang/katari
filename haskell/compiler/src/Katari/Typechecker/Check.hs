@@ -9,7 +9,7 @@
 -- the normalized type — used by tests that only need the type-level result.
 module Katari.Typechecker.Check where
 
-import Control.Monad (filterM, foldM, unless, when, zipWithM)
+import Control.Monad (filterM, foldM, unless, void, when, zipWithM)
 import Control.Monad.RWS.Class (asks, tell)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -859,8 +859,20 @@ liftByAttribute attribute normalizedType =
 -- non-pure (monadic) agent cannot be lifted across worlds, so its types are used as-is, the agent must
 -- already be callable in the current world (@functionAttribute <: public@), and its effect is re-emitted
 -- into the enclosing scope. Returns the (possibly lifted) result type.
-applyAgent :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
-applyAgent sourceSpan functionAttribute function argumentType argumentAttribute = do
+-- | The world-crossing argument-shape check shared by a full application ('applyAgent') and a partial
+-- one ('partialResidualType'), so neither site grows a second argument pipeline that can drift on how a
+-- pure callee lifts across attribute worlds. Given the resolved callee @function@ (its handle
+-- @functionAttribute@), the argument-shape type the site presents (@argumentType@ — the whole argument
+-- object for a full call; the supplied fields plus each hole at its declared type for a partial one) and
+-- that argument's observable @argumentAttribute@, it computes the pure-call lift and runs the ONE
+-- subtype check policing the argument shape. A /pure/ callee's parameter is lifted by the callee's handle
+-- joined with the argument's /excess/ over the /unlifted/ parameter (bottom when the argument already
+-- fits it, so a private argument absorbed by a private-expecting parameter does not lift), so an
+-- attribute-bearing argument — a @private@ value — is accepted; a non-pure callee's parameter is used
+-- as-is. Returns the (possibly lifted) result type; the callee's effect and world check are the caller's
+-- concern (a full call emits / enforces them, a partial one bakes the effect into the residual instead).
+checkArgumentShape :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+checkArgumentShape sourceSpan functionAttribute function argumentType argumentAttribute = do
   let pureCall = isPureEffect function.effect
   -- The argument's excess over the parameter: nothing when the argument already fits the unlifted
   -- parameter (the parameter absorbs the argument's attribute), otherwise the argument's full observable
@@ -877,7 +889,16 @@ applyAgent sourceSpan functionAttribute function argumentType argumentAttribute 
           then (liftByAttribute liftAttribute function.argumentType, liftByAttribute liftAttribute function.returnType)
           else (function.argumentType, function.returnType)
   runNormalizer sourceSpan (subtype argumentType effectiveParameter)
-  unless pureCall $ do
+  pure effectiveReturn
+
+-- | Apply an agent value to an argument at a full call site: check the argument shape through the shared
+-- 'checkArgumentShape' core, then police the callee's effect. A pure callee performs nothing extra; a
+-- non-pure (monadic) callee must already be callable in the current world (@functionAttribute <: public@)
+-- and re-emits its effect into the enclosing scope. Returns the (possibly lifted) result type.
+applyAgent :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+applyAgent sourceSpan functionAttribute function argumentType argumentAttribute = do
+  effectiveReturn <- checkArgumentShape sourceSpan functionAttribute function argumentType argumentAttribute
+  unless (isPureEffect function.effect) $ do
     runNormalizer sourceSpan (subtype functionAttribute bottomAttribute)
     emitEffect sourceSpan function.effect
   pure effectiveReturn
@@ -1084,11 +1105,16 @@ partialResidualType sourceSpan holes suppliedFields suppliedAttribute functionAt
       let holeFields = Map.fromList (catMaybes resolvedHoles)
       -- The probe stands in for the eventual full call, so it only makes sense when every hole
       -- resolved: after a K3020 the dropped hole would read as a missing required parameter and
-      -- cascade a spurious K3001 on top.
+      -- cascade a spurious K3001 on top. It runs through the SAME 'checkArgumentShape' core a full
+      -- call uses, so a pure callee lifts across attribute worlds identically here — an
+      -- attribute-bearing supplied argument (a @private@ value baked into the residual) is accepted
+      -- exactly as it would be by the eventual call, rather than rejected against the unlifted
+      -- parameter. The probe carries only the /supplied/ observable attribute: the holes stand in at
+      -- their declared types and contribute no captured value.
       when (all isJust resolvedHoles) $ do
         let probeFields = suppliedFields <> [(label, field.normalizedType) | (label, field) <- Map.toList holeFields]
             probeObject = namedObjectTypeWithRest bottomType probeFields
-        runNormalizer sourceSpan (subtype probeObject function.argumentType)
+        void (checkArgumentShape sourceSpan functionAttribute function probeObject suppliedAttribute)
       -- The residual parameter is the callee's parameter object restricted to the hole labels, with
       -- each field's original 'NormalizedFieldInformation' — so an optional (defaulted) parameter
       -- stays omittable on the residual. The rest is open, like every agent parameter object.

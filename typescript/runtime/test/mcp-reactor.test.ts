@@ -26,7 +26,7 @@ import type {
   McpTransport,
 } from "../src/runtime/external/mcp-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
-import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -470,7 +470,10 @@ const CALL_IR: IRModule = {
   names: {},
 };
 
-function makeCallActor(mcp: McpTransport): ProjectActor {
+function makeCallActor(
+  mcp: McpTransport,
+  blobs: InMemoryBlobStore = new InMemoryBlobStore(),
+): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(CALL_IR.entries)) {
     registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), CALL_IR);
@@ -479,7 +482,7 @@ function makeCallActor(mcp: McpTransport): ProjectActor {
     projectId: PROJECT,
     ir: registry,
     prims: new PrimRegistry(),
-    blobs: new InMemoryBlobStore(),
+    blobs,
     external: new StubFfiTransport(),
     http: new StubHttpTransport(),
     mcp,
@@ -561,15 +564,68 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     );
   });
 
+  test("a REAL produced blob survives the direct call, ascending onto the run (still readable after)", async () => {
+    const transport = new ControlledMcpTransport();
+    const blobs = new InMemoryBlobStore();
+    const blob = "blob-mcp-direct" as BlobId;
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    await blobs.put(PROJECT, blob, bytes);
+    const actor = makeCallActor(transport, blobs);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    // The transport produced a blob from a tool result's image content mid-call: register its ownership
+    // (bytes already staged above), exactly as the SDK transport's blob bridge does — a REAL produced blob,
+    // not just a `$ref` string.
+    const registered = await actor.registerProducedMcpBlob(call.delegation, blob, {
+      hash: "hash",
+      size: bytes.byteLength,
+      semanticKind: "file",
+    });
+    expect(registered).toBe(true);
+
+    // The reply lifts LITERALLY into the json tree — the blob rides only as a `$ref` STRING leaf, not a
+    // real ref, so the value-driven resource ascent cannot carry it.
+    transport.feed({
+      delegation: call.delegation,
+      outcome: {
+        kind: "result",
+        value: { text: "rendered", files: [{ $ref: blob, semanticKind: "file" }] },
+      },
+    });
+    await expect(result).resolves.toEqual(
+      treeObject({
+        text: treeString("rendered"),
+        files: treeArray([
+          treeObject({ $ref: treeString(blob), semanticKind: treeString("file") }),
+        ]),
+      }),
+    );
+
+    // The handle is still readable after the call settles: the produced blob ascended onto the (permanent)
+    // run instance rather than being reclaimed with the ephemeral call. The OLD code — which left a
+    // produced blob the literal `$ref` tree did not carry out owned by the call instance — deleted these
+    // bytes in the same commit that delivered the result, so this read would have failed.
+    await expect(blobs.get(PROJECT, blob)).resolves.toEqual(bytes);
+  });
+
   test("a transport error surfaces as the typed throw[mcp.server_error]", async () => {
     const transport = new ControlledMcpTransport();
     const actor = makeCallActor(transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
     const call = await waitUntil(() => transport.dispatched[0]);
+    // The real transport reports every anticipated failure as this typed throw (never a bare `error`,
+    // which the reactor now treats as an engine-invariant panic uniformly).
     transport.feed({
       delegation: call.delegation,
-      outcome: { kind: "error", message: "connection refused" },
+      outcome: {
+        kind: "throw",
+        error: {
+          $constructor: "prelude.mcp.server_error",
+          value: { message: "connection refused" },
+        },
+      },
     });
     await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*connection refused/);
   });

@@ -5,7 +5,7 @@ every core feature in a small, deterministic form.
 
 | Module                                   | Entry              | Shows                                                                                                                              |
 | ---------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| [`basics.ktr`](src/basics.ktr)           | `basics.main`      | data + `match`, `for` (map + accumulator), `parallel for`, stateful inline handlers, partial application (`scale(factor = 2.0, value = _)`), prelude (string / array / math / json) |
+| [`basics.ktr`](src/basics.ktr)           | `basics.main`      | data + `match`, `for` (map + accumulator), `parallel for`, stateful inline handlers, partial application (`scale(factor = 2.0, value = _)`, incl. an omitted `?=`-defaulted parameter filled through the residual), prelude (string / array / math / json) |
 | [`tools.ktr`](src/tools.ktr)             | `tools.main`       | agents as AI tools: `reflection.get_metadata` schema derivation, the typed JSON boundary (`json.parse_as[T]`), dynamic dispatch (`reflection.call_agent`) |
 | [`errors.ktr`](src/errors.ktr)           | `errors.main`      | the typed error model: `prelude.throw[T]` raised + caught (incl. `env.missing_secret` config fallback), and the ambient `panic` clause catching a runtime failure |
 | [`interactive.ktr`](src/interactive.ktr) | `interactive.main` | escalation: unanswered `request`s bubble out as open questions; parallel delegations — watch the **delegation tree** on the run page |

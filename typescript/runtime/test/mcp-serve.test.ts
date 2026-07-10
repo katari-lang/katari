@@ -6,7 +6,7 @@
 //     `callableMetadata` reflection as `reflection.get_metadata`, and converts each `tools/call`
 //     into a delegation of the named agent — covering value / throw / schema-violation outcomes,
 //     settlement with the subscriber, cancellation deactivating the token, and the restart contract
-//     (token + tools reload from the `mcp_instances` serve columns);
+//     (token + tools reload from the `mcp_serve_instances` extension row);
 //   - through the hand-rolled JSON-RPC layer (`serveMcpMessage`) with the REAL SDK client over
 //     `StreamableHTTPClientTransport` against a live loopback server, pinning wire compatibility of
 //     the stateless POST-only contract (initialize / tools/list / tools/call, 405 on GET, 404 on a
@@ -421,7 +421,7 @@ describe("the mcp reactor (serve, restart survival)", () => {
     });
 
     // Restart: a fresh actor over the same durable rows. The endpoint must still serve — the token and
-    // the tools record reload from the `mcp_instances` serve columns; nothing is re-dispatched.
+    // the tools record reload from the `mcp_serve_instances` extension; nothing is re-dispatched.
     const second = actorFor(persistence);
     await second.activate();
     const described = await second.listMcpServeTools(token);

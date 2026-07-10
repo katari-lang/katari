@@ -19,6 +19,7 @@ import {
   instances,
   isTerminalRunState,
   mcpInstances,
+  mcpServeInstances,
   outbox,
   runEscalationsAudit,
   runEvents,
@@ -282,25 +283,50 @@ export class DbPersistence implements Persistence {
           })),
       },
       mcp: {
-        // A serve endpoint's extras (token + the sealed tools record) reload alongside the status, so
-        // the reactor re-registers the endpoint; a transport call's row carries only its status.
-        instances: () =>
-          callInstancesOf("mcp", mcpInstances, (call, extension) => ({
-            ...call,
-            status: extension.status,
-            serve:
-              extension.serveToken === null ||
-              extension.snapshotId === null ||
-              extension.serveTools === null
-                ? null
-                : {
-                    snapshotId: extension.snapshotId as SnapshotId,
-                    token: extension.serveToken,
-                    tools: unsealFromStorage(extension.serveTools),
-                  },
-            relays: brandedRelays(extension.relays),
-            innerCalls: brandedInnerCalls(extension.innerCalls),
-          })),
+        // The mcp call joins its status-only `mcp_instances` row and LEFT-joins its `mcp_serve_instances`
+        // subtype: a matched serve extension reloads the live endpoint (re-registering its token, with its
+        // sealed tools record + inner-delegation bridges); an absent one is a transport call recovered
+        // at-most-once. `callInstancesOf` joins one extension table, so the two-table read is spelled here.
+        instances: async () => {
+          const rows = await this.db
+            .select({
+              delegation: instances.delegationId,
+              instance: instances.id,
+              caller: instances.callerReactor,
+              run: instances.runId,
+              status: mcpInstances.status,
+              serve: mcpServeInstances,
+            })
+            .from(instances)
+            .innerJoin(mcpInstances, eq(instances.id, mcpInstances.instanceId))
+            .leftJoin(mcpServeInstances, eq(instances.id, mcpServeInstances.instanceId))
+            .where(and(eq(instances.projectId, projectId), eq(instances.kind, "mcp")));
+          return rows.flatMap((row) => {
+            // A live call's delegation / caller / run are written together at delegate-receive, so a null
+            // in any is a dropped or corrupt row (the same guard `callInstancesOf` applies).
+            if (row.delegation === null || row.caller === null || row.run === null) return [];
+            const serve = row.serve;
+            return [
+              {
+                delegation: row.delegation as DelegationId,
+                instance: row.instance as InstanceId,
+                caller: row.caller,
+                run: row.run as InstanceId,
+                status: row.status,
+                serve:
+                  serve === null
+                    ? null
+                    : {
+                        snapshotId: serve.snapshotId as SnapshotId,
+                        token: serve.serveToken,
+                        tools: unsealFromStorage(serve.serveTools),
+                        relays: brandedRelays(serve.relays),
+                        innerCalls: brandedInnerCalls(serve.innerCalls),
+                      },
+              },
+            ];
+          });
+        },
       },
       webhook: {
         // Unlike ffi / http the webhook extension carries the payload (token + callback) a reload
@@ -548,33 +574,43 @@ export class DbPersistence implements Persistence {
       },
       mcp: {
         putMcpInstance: async (row) => {
-          const relays = row.relays.map((relay) => ({
+          // The status-only `mcp_instances` row first (the serve subtype FKs it). Immutable after open,
+          // only `status` updates on re-upsert.
+          await drizzleTx
+            .insert(mcpInstances)
+            .values({ instanceId: row.instanceId, status: row.status })
+            .onConflictDoUpdate({
+              target: mcpInstances.instanceId,
+              set: { status: row.status },
+            });
+          if (row.serve === null) return;
+          const serve = row.serve;
+          const relays = serve.relays.map((relay) => ({
             escalation: relay.escalation as string,
             child: relay.child as string,
             childEscalation: relay.childEscalation as string,
           }));
-          const innerCalls = row.innerCalls.map((inner) => ({
+          const innerCalls = serve.innerCalls.map((inner) => ({
             delegation: inner.delegation as string,
             call: inner.call,
           }));
-          // The served tools record may capture private values (a closure over a secret), so it seals
-          // like the webhook callback. The serve extras are immutable after open, so only the status
-          // and the inner-delegation bridges update on re-upsert.
-          const serveTools = row.serve === null ? null : sealForStorage(row.serve.tools);
+          // The served tools record may capture private values (a closure over a secret), so it seals like
+          // the webhook callback. The token / tools / snapshot are immutable after open, so only the
+          // inner-delegation bridges update on re-upsert.
+          const serveTools = sealForStorage(serve.tools);
           await drizzleTx
-            .insert(mcpInstances)
+            .insert(mcpServeInstances)
             .values({
               instanceId: row.instanceId,
-              status: row.status,
-              snapshotId: row.serve?.snapshotId ?? null,
-              serveToken: row.serve?.token ?? null,
+              snapshotId: serve.snapshotId,
+              serveToken: serve.token,
               serveTools,
               relays,
               innerCalls,
             })
             .onConflictDoUpdate({
-              target: mcpInstances.instanceId,
-              set: { status: row.status, relays, innerCalls },
+              target: mcpServeInstances.instanceId,
+              set: { relays, innerCalls },
             });
         },
       },

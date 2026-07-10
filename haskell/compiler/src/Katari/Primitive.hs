@@ -36,6 +36,17 @@ panicRequestName = QualifiedName {moduleName = preludeModuleName, name = "panic"
 recordMergeName :: QualifiedName
 recordMergeName = QualifiedName {moduleName = ModuleName "prelude.record", name = "merge"}
 
+-- | The argument labels lowering emits for the synthesized @prelude.record.merge@ call: the residual's
+-- incoming argument record goes to @left@ and the captured supplied record to @right@, so on a shared
+-- key the captured (supplied) value wins — a later caller cannot override a baked-in argument. These
+-- must match the parameter names of the @prelude.record.merge@ signature (enforced by
+-- "Katari.StdlibSpec", the same way the operator desugar's labels are pinned).
+recordMergeLeftLabel :: Text
+recordMergeLeftLabel = "left"
+
+recordMergeRightLabel :: Text
+recordMergeRightLabel = "right"
+
 -- | The prelude function a binary operator desugars to: @a \<op\> b@ becomes
 -- @prelude.\<name\>(left = a, right = b)@. Every name here must be exported by the @prelude@
 -- module (enforced by "Katari.StdlibSpec").

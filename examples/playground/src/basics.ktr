@@ -53,6 +53,19 @@ agent doubles(values: array[number]) -> array[number] {
   for (let value in values) { next double(value = value) }
 }
 
+@"Decorate `body`, with a fixed `prefix` and an optional `suffix` that defaults to `\"!\"`."
+agent decorate(prefix: string, body: string, suffix: string ?= "!") -> string {
+  f"${prefix}${body}${suffix}"
+}
+
+@"Partial application meets defaults: this bakes in `prefix`, holes `body`, and OMITS the optional
+`suffix` entirely (not holed, not supplied). So each residual call carries only `body`, and the
+callee's runtime default fills `suffix` THROUGH the residual — a defaulted parameter stays defaulted."
+agent decorated() -> string {
+  let mark = decorate(prefix = ">> ", body = _)
+  mark(body = "hello")
+}
+
 @"Run the whole tour and render one summary line."
 agent main() -> string {
   // A stateful inline handler provides `tick` to the rest of the block.
@@ -67,6 +80,7 @@ agent main() -> string {
     f"ticks=${json.to_text(value = count_three())}",
     f"sum(squares(4))=${string.to_string(value = total)}",
     f"doubles=${json.to_text(value = doubles(values = [1.5, 21.0]))}",
+    f"decorated=${decorated()}",
     f"shout=${string.to_upper(value = "hello, katari")}",
   ]
   string.join(parts = parts, separator = " | ")

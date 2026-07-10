@@ -24,7 +24,7 @@ module Katari.Cli.Command.Mcp
   )
 where
 
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Data.Aeson (FromJSON (..), Value, withObject, (.:))
 import Data.Aeson qualified as Aeson
 import Data.Text (Text)
@@ -33,7 +33,7 @@ import Data.Text.Encoding qualified as TextEncoding
 import Data.Text.IO qualified as TextIO
 import GHC.List (List)
 import Katari.Cli.Api (setEnv)
-import Katari.Cli.Common (RuntimeContext (..), dieIn, resolveNodeHelperInvocation, withRuntimeContext, writeOrExit)
+import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, resolveNodeHelperInvocation, withRuntimeContext, writeOrExit)
 import Katari.Cli.McpCodegen (McpListing, PullContext (..), renderBindingModule)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (OutputContext (..), newOutputContext, progress)
@@ -62,8 +62,7 @@ data PullOptions = PullOptions
     out :: FilePath,
     headers :: List Text,
     oauth :: Bool,
-    scope :: Maybe Text,
-    credentialName :: Maybe Text
+    scope :: Maybe Text
   }
   deriving stock (Show)
 
@@ -102,7 +101,6 @@ optionsParser =
         <*> many (strOption (long "header" <> metavar "KEY=VALUE" <> help "A header to send on every request (repeatable; e.g. an authorization bearer key)"))
         <*> switch (long "oauth" <> help "Authorize interactively (the same flow as login), keeping the credential in memory — nothing is stored")
         <*> optional (strOption (long "scope" <> metavar "SCOPE" <> help "OAuth scope(s) to request (only with --oauth)"))
-        <*> optional (strOption (long "name" <> metavar "NAME" <> help "The stored OAuth credential name the generated module's doc suggests for `auth` (from `katari mcp login --name ...`)"))
 
 run :: Options -> IO ()
 run options = case options.action of
@@ -140,8 +138,10 @@ runKatariMcpLogin loginOptions = do
         ["login", "--url", Text.unpack loginOptions.url]
           <> maybe [] (\scope -> ["--scope", Text.unpack scope]) loginOptions.scope
   raw <- Text.strip <$> runKatariMcpHelper arguments "no credential was stored"
+  -- The helper exited 0, so JSON that will not decode is a bad payload, not a mis-invocation: an
+  -- operation failure (exit 1), not a usage error (exit 2).
   case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 raw) of
-    Left decodeError -> dieIn "mcp" ("katari-mcp returned unparseable JSON: " <> Text.pack decodeError)
+    Left decodeError -> dieProgram "mcp" ("katari-mcp returned unparseable JSON: " <> Text.pack decodeError)
     Right (_ :: CredentialBlob) -> pure raw
 
 -- | The shape check for login's stdout: the three fields the runtime's credential store decodes
@@ -167,8 +167,11 @@ instance FromJSON CredentialBlob where
 runPull :: GlobalOptions -> PullOptions -> IO ()
 runPull global pullOptions = do
   output <- newOutputContext global
-  -- The helper rejects a bare --scope too, but failing here keeps the message in `katari mcp`
-  -- vocabulary and avoids spawning node just to be told off.
+  -- The helper rejects both of these too, but failing here keeps the message in `katari mcp`
+  -- vocabulary and avoids spawning node just to be told off. Auth is a sum, not a bag: a server is
+  -- reached with explicit headers OR an OAuth credential, never both, so refuse the combination.
+  when (pullOptions.oauth && not (null pullOptions.headers)) $
+    dieIn "mcp" "--header cannot be combined with --oauth (auth is one or the other)"
   unless (pullOptions.oauth || null pullOptions.scope) $
     dieIn "mcp" "--scope only applies together with --oauth"
   let arguments =
@@ -177,14 +180,15 @@ runPull global pullOptions = do
           <> ["--oauth" | pullOptions.oauth]
           <> maybe [] (\scope -> ["--scope", Text.unpack scope]) pullOptions.scope
   raw <- runKatariMcpHelper arguments "no module was written"
+  -- The helper exited 0, so a listing that will not decode is a bad payload, not a mis-invocation:
+  -- that is an operation failure (exit 1), not a usage error (exit 2).
   listing <- case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 (Text.strip raw)) of
-    Left decodeError -> dieIn "mcp" ("katari-mcp returned an unparseable tool listing: " <> Text.pack decodeError)
+    Left decodeError -> dieProgram "mcp" ("katari-mcp returned an unparseable tool listing: " <> Text.pack decodeError)
     Right (decoded :: McpListing) -> pure decoded
   let context =
         PullContext
           { url = pullOptions.url,
-            outPath = Text.pack pullOptions.out,
-            credentialName = pullOptions.credentialName
+            outPath = Text.pack pullOptions.out
           }
       rendered = renderBindingModule context listing
   writeOrExit "mcp" ("could not write " <> Text.pack pullOptions.out) $ do
@@ -224,8 +228,11 @@ runKatariMcpHelper arguments failureNote = do
         hClose handle
         exitCode <- waitForProcess processHandle
         pure (exitCode, output)
+  -- The helper already printed its own error to the inherited stderr; add only the outcome, and
+  -- preserve its exit-code split instead of collapsing every failure to "usage": it exits 2 only on
+  -- a usage / setup problem (map to dieIn, exit 2), and any other non-zero exit is the flow or
+  -- listing failing on its own terms (map to dieProgram, exit 1) — see Common.hs's convention.
   case exitCode of
-    ExitFailure code ->
-      -- The helper already printed its own error to the inherited stderr; add only the outcome.
-      dieIn "mcp" ("katari-mcp exited " <> Text.pack (show code) <> "; " <> failureNote)
     ExitSuccess -> pure output
+    ExitFailure 2 -> dieIn "mcp" ("katari-mcp exited 2; " <> failureNote)
+    ExitFailure code -> dieProgram "mcp" ("katari-mcp exited " <> Text.pack (show code) <> "; " <> failureNote)

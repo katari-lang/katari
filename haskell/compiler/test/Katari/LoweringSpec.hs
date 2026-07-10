@@ -15,6 +15,7 @@ import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..))
 import Katari.Diagnostics (hasErrors)
 import Katari.Error (compilerErrorCode)
+import Katari.Primitive (recordMergeLeftLabel, recordMergeRightLabel)
 import Test.Hspec
 
 spec :: Spec
@@ -300,6 +301,20 @@ spec = describe "lowerModule (via compile)" $ do
           delegated = [target | OperationDelegate delegateOperation <- bodyOperations, CalleeName target <- [delegateOperation.target]]
       delegated `shouldBe` [QualifiedName {moduleName = ModuleName "prelude.record", name = "merge"}, testName "scale"]
 
+    it "maps the merge record's `left` to the residual's incoming record and `right` to the captured supplied one" $ do
+      -- The captured (supplied) record wins a shared key, so it must be `merge`'s RIGHT and the
+      -- residual's own incoming record its LEFT. Swapping them would let a later caller override a
+      -- baked-in supplied argument — a silent soundness hole this pins shut.
+      let irModule = loweredTestModule partialSource
+          incoming = namedBlockParameter irModule "partial.body" "parameter"
+          captured = firstRecordOutput (entryBodyOperations irModule "make_double")
+          mergeEntries = case [recordOperation.entries | OperationMakeRecord recordOperation <- namedBlockOperations irModule "partial.body"] of
+            (entries : _) -> entries
+            [] -> []
+      map fst mergeEntries `shouldBe` [recordMergeLeftLabel, recordMergeRightLabel]
+      lookup recordMergeLeftLabel mergeEntries `shouldBe` incoming
+      lookup recordMergeRightLabel mergeEntries `shouldBe` captured
+
     it "stamps the call site's inferred generics on the inner delegate" $ do
       let source =
             "agent pick[T](value: T, fallback: T) -> T { value }\n"
@@ -448,6 +463,26 @@ namedBlockOperations irModule label =
         Just information <- [Map.lookup blockId irModule.blocks],
         BlockSequence sequenceBlock <- [information.block]
     ]
+
+-- | The variable a named block binds under the given parameter key (e.g. a @partial.body@ block's
+-- @parameter@ — its incoming argument record). 'Nothing' when no such block, or it lacks that key.
+namedBlockParameter :: IRModule -> Text -> Text -> Maybe VariableId
+namedBlockParameter irModule label parameterKey =
+  case [ information.parameters
+         | (blockId, name) <- Map.toList irModule.names,
+           name == label,
+           Just information <- [Map.lookup blockId irModule.blocks]
+       ] of
+    (parameters : _) -> Map.lookup parameterKey parameters
+    [] -> Nothing
+
+-- | The output variable of the first @make record@ in an operation list ('Nothing' when there is none)
+-- — e.g. the captured supplied record a partial application builds in its enclosing scope.
+firstRecordOutput :: List Operation -> Maybe VariableId
+firstRecordOutput operations =
+  case [recordOperation.output | OperationMakeRecord recordOperation <- operations] of
+    (output : _) -> Just output
+    [] -> Nothing
 
 -- | The field each `use.continuation.body` block projects FIRST (the use binder's `value` read).
 continuationFirstFields :: IRModule -> List Text

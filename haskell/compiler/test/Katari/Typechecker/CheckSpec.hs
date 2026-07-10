@@ -940,6 +940,24 @@ spec = do
     it "checks a supplied argument against its parameter as a full call would (K3001)" $
       compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = \"x\", value = _) }") `shouldContain` ["K3001"]
 
+    it "accepts a private supplied argument as a full call would, baking it into a private residual" $
+      -- A pure callee lifts across attribute worlds identically at a partial site now that both share
+      -- 'Katari.Typechecker.Check.checkArgumentShape': the private `secret` is accepted (a full
+      -- `scale(factor = secret, value = 2.0)` would accept it too), and the residual's handle carries
+      -- that private attribute, so the residual typed as a `private` agent compiles cleanly.
+      compiledCodes (scaleDecl <> "agent partial(secret: number of private) -> (agent (value: number) -> number) of private { scale(factor = secret, value = _) }") `shouldBe` []
+
+    it "carries the baked-in private attribute on the residual — a public residual annotation is rejected (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial(secret: number of private) -> agent (value: number) -> number { scale(factor = secret, value = _) }") `shouldContain` ["K3001"]
+
+    it "the residual's eventual result matches a full call's: both observe the private argument (`number of private`)" $
+      compiledCodes
+        ( scaleDecl
+            <> "agent via_full(secret: number of private) -> number of private { scale(factor = secret, value = 21.0) }\n"
+            <> "agent via_residual(secret: number of private) -> number of private { let double = scale(factor = secret, value = _)\ndouble(value = 21.0) }"
+        )
+        `shouldBe` []
+
     it "infers a generic from the supplied arguments" $
       compiledCodes (pickDecl <> "agent partial() -> agent (value: integer) -> integer { pick(value = _, fallback = 3) }") `shouldBe` []
 

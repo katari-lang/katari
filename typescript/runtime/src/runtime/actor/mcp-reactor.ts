@@ -27,16 +27,20 @@
 //     `reflection.call_error` without ever failing the run). The call settles when the SUBSCRIBER
 //     settles; a `terminate` from above cancels it and releases the token either way.
 //
-// The transport-backed shapes own their in-flight calls durably (`mcp_instances` — just the status; no
-// argument is persisted) and recovery never re-runs, so a reloaded transport call's payload is the
-// explicit `recovered` variant — nothing dispatch-shaped survives a restart by type. A `serve` call, by
-// contrast, persists its payload (token + tools record on the same ext row) and survives a restart
-// COMPLETELY, exactly like a webhook endpoint: there is no external process to reconcile with, the
-// subscriber's inner delegation is durable core work, and the reload re-registers the token. Connections
-// are the TRANSPORT's business (a lazy, descriptor-keyed cache), not a program-visible resource: a
-// restart empties the cache and the next tool call reconnects — tools survive restarts. Every
-// anticipated transport failure is a typed `throw[mcp.server_error]`; a serve call's failures are the
-// program's own (its subscriber panics like any callee).
+// A payload is a two-level sum — `serve | transport{listTools|callTool|directCall|recovered}` — so every
+// serve-vs-transport lifecycle method dispatches that axis once, structurally. The transport-backed shapes
+// own their in-flight calls durably as a status-only `mcp_instances` row (no argument is persisted) and
+// recovery never re-runs, so a reloaded transport call's payload is the explicit `recovered` variant —
+// nothing dispatch-shaped survives a restart by type. A `serve` call, by contrast, persists its endpoint
+// payload in a separate `mcp_serve_instances` extension (token + tools record + its inner-delegation
+// bridges) and survives a restart COMPLETELY, exactly like a webhook endpoint: there is no external process
+// to reconcile with, the subscriber's inner delegation is durable core work, and the reload re-registers
+// the token. Connections are the TRANSPORT's business (a lazy, descriptor-keyed cache), not a
+// program-visible resource: a restart empties the cache and the next tool call reconnects — tools survive
+// restarts. Every anticipated transport failure is a typed `throw[mcp.server_error]` (including a direct
+// call's argument-lowering failure, completed as that throw at its own site); a bare `error` completion is
+// an engine-invariant panic; a serve call's failures are the program's own (its subscriber panics like any
+// callee).
 
 import { randomBytes } from "node:crypto";
 import type { Json } from "@katari-lang/types";
@@ -45,14 +49,13 @@ import { jsonValueFromJson, jsonValueToJson, type StringReader } from "../engine
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { McpToolListing, McpTransport } from "../external/mcp-transport.js";
-import type { DelegationId, InstanceId, SnapshotId } from "../ids.js";
-import { valueToJson } from "../value/codec.js";
+import type { DelegationId, SnapshotId } from "../ids.js";
+import { jsonToValue, valueToJson } from "../value/codec.js";
 import { jsonToSchema } from "../value/schema-json.js";
 import type { Value } from "../value/types.js";
 import {
   type CallRow,
   ExternalCallReactor,
-  type ExternalCompletion,
   type ExternalTarget,
   type InnerDelivery,
   innerOutcomeAsCompletion,
@@ -69,21 +72,19 @@ const MCP_TOOLS_KEY = "prelude.mcp.tools";
 const MCP_SERVE_KEY = "prelude.mcp.serve";
 const MCP_CALL_KEY = "prelude.mcp.call";
 
-/** What an mcp call holds, decided once from the delegate target (see the module comment): a `listTools`
- *  listing (its descriptor from the call's original marker-bearing argument, and the toolbox minting as
- *  its own `shapeResult`), a `callTool` dispatch (the tool's name, the descriptor from the minted tool's
- *  context, the caller's argument verbatim), a `serve` endpoint (token + the served tools record —
- *  persisted, so the endpoint survives a restart; the subscriber is consumed by the one-time dispatch
- *  and never stored), or `recovered` — a reloaded transport call, which by construction can never be
+/** A transport-backed mcp call — the built-in client's OUTBOUND side, told apart from a `serve` endpoint at
+ *  the TOP level of `McpPayload` (see below) so every serve-vs-transport method dispatches that axis once,
+ *  structurally. The four sub-shapes: a `listTools` listing (its descriptor from the call's original
+ *  marker-bearing argument), a `callTool` dispatch (the tool's name, the descriptor from the minted tool's
+ *  context, the caller's argument verbatim), a `directCall` (`{url, auth, tool, arguments}` all in the
+ *  call's own argument), or `recovered` — a reloaded transport call, which by construction can never be
  *  re-dispatched (at-most-once; nothing dispatch-shaped is persisted for the transport shapes). */
-type McpPayload =
+type TransportCall =
   | {
       kind: "listTools";
       /** The `{url, auth}` descriptor with privacy markers intact — the transport gets a revealed
        *  copy, the minted tools get this one. */
       descriptor: Value;
-      /** Mints the toolbox from the transport's listing (the base applies it to the settled result). */
-      shapeResult: (value: Value) => Value;
     }
   | {
       kind: "callTool";
@@ -104,18 +105,33 @@ type McpPayload =
       /** The `arguments` json tree, lowered to the literal Json document at dispatch. */
       argumentsTree: Value | null;
     }
+  | { kind: "recovered" };
+
+/** What an mcp call holds, a two-level sum whose TOP level is the serve-vs-transport axis every lifecycle
+ *  method (dispatch / recover / abort / onDropCall / persistCallRow / loadCallRows) dispatches once: a
+ *  `serve` endpoint (token + the served tools record — persisted, so the endpoint survives a restart; the
+ *  subscriber is consumed by the one-time dispatch and never stored), or a `transport` call (its
+ *  `TransportCall` sub-shape plus its optional ack decoder). */
+type McpPayload =
   | {
       kind: "serve";
-      token: string;
       /** The snapshot the call was dispatched against — persisted as the ext row's version pin
        *  (retention: a live endpoint keeps its snapshot undeletable, so the served agents stay
        *  resolvable). */
       snapshot: SnapshotId;
+      token: string;
       /** The served tools record (key = the published tool name, value = the agent it dispatches). */
       tools: Value;
       subscriber: Value | null;
     }
-  | { kind: "recovered" };
+  | {
+      kind: "transport";
+      call: TransportCall;
+      /** The ONE ack-shaping seam (`AckDecodingPayload`, applied by the base at the wire-decode boundary):
+       *  a `listTools` mints its toolbox from the raw listing, a `directCall` lifts the raw reply literally
+       *  into a `json` tree; `callTool` / `recovered` omit it, so the base wire decoder runs. */
+      decodeAck?: (raw: Json) => Value;
+    };
 
 /** The live endpoint's served tools, resolved on a reactor turn (values still engine `Value`s — the
  *  actor resolves each entry's metadata, the service lowers at the user-facing boundary). */
@@ -255,18 +271,28 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       const descriptor = descriptorOf(argument);
       const snapshot = target.snapshot;
       return {
-        kind: "listTools",
-        descriptor,
-        shapeResult: (value) => mintToolbox(value, descriptor, snapshot),
+        kind: "transport",
+        call: { kind: "listTools", descriptor },
+        // Mint the toolbox from the raw listing (decoded by the base wire decoder first) plus the call's
+        // original privacy-marked descriptor, which the wire cannot carry.
+        decodeAck: (raw) => mintToolbox(jsonToValue(raw), descriptor, snapshot),
       };
     }
     if (target.key === MCP_CALL_KEY) {
       const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
       return {
-        kind: "directCall",
-        descriptor: descriptorOf(argument),
-        tool: fields.tool ?? null,
-        argumentsTree: fields.arguments ?? null,
+        kind: "transport",
+        call: {
+          kind: "directCall",
+          descriptor: descriptorOf(argument),
+          tool: fields.tool ?? null,
+          argumentsTree: fields.arguments ?? null,
+        },
+        // Lift the transport's raw reply LITERALLY into the `json` tree the caller receives (total for any
+        // server reply — a reserved `$`-key stays a plain tree key, exactly the `$ref`-inside-the-tree form
+        // `json.decode` expects). Keeping hostile / quirky server Json off the wire decoder is why this
+        // shapes here rather than through the generic decoder.
+        decodeAck: (raw) => jsonValueFromJson(raw),
       };
     }
     if (target.key === MCP_SERVE_KEY) {
@@ -280,44 +306,47 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         subscriber: fields.subscriber ?? null,
       };
     }
-    return { kind: "callTool", tool: target.key, descriptor: target.context ?? null, argument };
+    return {
+      kind: "transport",
+      call: { kind: "callTool", tool: target.key, descriptor: target.context ?? null, argument },
+    };
   }
 
   protected dispatch(delegation: DelegationId, payload: McpPayload): void {
+    if (payload.kind === "serve") {
+      // Post-commit: activate the endpoint and hand the one-time subscriber dispatch back to the serial
+      // loop (a dispatch is a side-effect slot — the inner delegation must open inside a turn).
+      this.tokens.set(payload.token, delegation);
+      const subscriber = payload.subscriber;
+      payload.subscriber = null;
+      this.schedule(() => this.startSubscriber(delegation, subscriber));
+      return;
+    }
     // Lowering to plain Json for the SDK reveals a secret header value (an MCP server is an allowed
     // sink, like an http auth header), unlike the user-facing API.
-    switch (payload.kind) {
+    const call = payload.call;
+    switch (call.kind) {
       case "listTools":
         this.transport.dispatch({
           kind: "listTools",
           delegation,
-          descriptor: valueToJson(payload.descriptor, "reveal"),
+          descriptor: valueToJson(call.descriptor, "reveal"),
         });
         return;
       case "callTool":
         this.transport.dispatch({
           kind: "callTool",
           delegation,
-          tool: payload.tool,
-          descriptor:
-            payload.descriptor === null ? null : valueToJson(payload.descriptor, "reveal"),
-          argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
+          tool: call.tool,
+          descriptor: call.descriptor === null ? null : valueToJson(call.descriptor, "reveal"),
+          argument: call.argument === null ? null : valueToJson(call.argument, "reveal"),
         });
         return;
       case "directCall":
         // Lowering the arguments tree may read a blob-backed string leaf, so the dispatch finishes
         // asynchronously; the transport call is fire-and-forget anyway.
-        void this.dispatchDirectCall(delegation, payload);
+        void this.dispatchDirectCall(delegation, call);
         return;
-      case "serve": {
-        // Post-commit: activate the endpoint and hand the one-time subscriber dispatch back to the
-        // serial loop (a dispatch is a side-effect slot — the inner delegation must open inside a turn).
-        this.tokens.set(payload.token, delegation);
-        const subscriber = payload.subscriber;
-        payload.subscriber = null;
-        this.schedule(() => this.startSubscriber(delegation, subscriber));
-        return;
-      }
       case "recovered":
         // A reloaded transport call only ever goes through `recover` (at-most-once), so a recovered
         // payload reaching the dispatch seam is a runtime bug — fail loudly rather than fabricate a call.
@@ -327,27 +356,32 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
 
   /** Finish a `directCall`'s dispatch: read the tool name, lower the arguments tree to its literal
    *  Json document (the `json.stringify` walk, so a blob-backed string leaf materialises), and hand
-   *  the transport the SAME `callTool` operation a minted tool's call produces. A lowering failure is
-   *  fed back as an error completion on a fresh turn — this reactor's `escalateError` then types it
-   *  as the catchable `mcp.server_error`, like every other non-serve failure. */
+   *  the transport the SAME `callTool` operation a minted tool's call produces. The argument-lowering
+   *  failure is program-anticipatable (a malformed tree), so it completes as the typed
+   *  `throw[mcp.server_error]` DIRECTLY here — the same channel every other transport failure uses.
+   *  That is why this reactor no longer overrides `escalateError`: a bare `error` completion stays an
+   *  engine-invariant panic uniformly. */
   private async dispatchDirectCall(
     delegation: DelegationId,
-    payload: Extract<McpPayload, { kind: "directCall" }>,
+    call: Extract<TransportCall, { kind: "directCall" }>,
   ): Promise<void> {
     let tool: string;
     let argumentDocument: Json | null;
     try {
-      if (payload.tool === null) throw new Error("mcp.call: the tool name is missing");
-      tool = await this.readString(payload.tool);
+      if (call.tool === null) throw new Error("mcp.call: the tool name is missing");
+      tool = await this.readString(call.tool);
       argumentDocument =
-        payload.argumentsTree === null
+        call.argumentsTree === null
           ? null
-          : await jsonValueToJson(payload.argumentsTree, this.readString);
+          : await jsonValueToJson(call.argumentsTree, this.readString);
     } catch (cause) {
       this.schedule(() =>
         this.complete({
           delegation,
-          outcome: { kind: "error", message: `mcp.call: ${messageOf(cause)}` },
+          outcome: {
+            kind: "throw",
+            error: valueToJson(errorData(SERVER_ERROR, `mcp.call: ${messageOf(cause)}`), "reveal"),
+          },
         }),
       );
       return;
@@ -360,32 +394,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       kind: "callTool",
       delegation,
       tool,
-      descriptor: valueToJson(payload.descriptor, "reveal"),
+      descriptor: valueToJson(call.descriptor, "reveal"),
       argument: argumentDocument,
     });
-  }
-
-  /** A `directCall`'s successful reply is re-shaped BEFORE the base's generic decode: the transport's
-   *  raw Json lifts LITERALLY into the `json` tree (total for any server reply — a reply containing a
-   *  reserved `$`-key stays a plain tree key, exactly the `$ref`-inside-the-tree form `json.decode`
-   *  expects), and the tree is lowered to its wire form so the base's `jsonToValue` reconstructs that
-   *  tree bit-for-bit. Shaping here (not via `shapeResult`) keeps hostile / quirky server Json away
-   *  from the wire decoder, which is only total for wire-shaped documents. */
-  override complete(completion: ExternalCompletion): void {
-    const payload = this.payloadOf(completion.delegation);
-    if (
-      payload !== undefined &&
-      payload.kind === "directCall" &&
-      completion.outcome.kind === "result"
-    ) {
-      const tree = jsonValueFromJson(completion.outcome.value);
-      super.complete({
-        delegation: completion.delegation,
-        outcome: { kind: "result", value: valueToJson(tree, "reveal") },
-      });
-      return;
-    }
-    super.complete(completion);
   }
 
   /** The one-time subscriber dispatch (a reactor turn): delegate the subscriber value with the minted
@@ -473,23 +484,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.transport.recover(delegation);
   }
 
-  /** An mcp transport infrastructure error is still program-anticipatable (the server is an external
-   *  party): escalate `throw[mcp.server_error]` (not a panic), so a caller's handler controls retry —
-   *  and a retried call reconnects through the transport's descriptor cache. A `serve` call's error is
-   *  the program's own (its subscriber failed), so it stays the base's panic. */
-  protected override escalateError(
-    delegation: DelegationId,
-    message: string,
-    caller: ReactorName,
-    run: InstanceId,
-  ): void {
-    if (this.payloadOf(delegation)?.kind === "serve") {
-      super.escalateError(delegation, message, caller, run);
-      return;
-    }
-    this.raiseThrow(delegation, errorData(SERVER_ERROR, message), caller, run);
-  }
-
   protected abort(delegation: DelegationId): void {
     // A serve call's cancel has no transport half: deactivate the endpoint and confirm on a fresh turn
     // (the children — the subscriber, in-flight served calls — drain through the base's cancel cascade).
@@ -509,17 +503,23 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   }
 
   protected async persistCallRow(tx: PersistenceTx, row: CallRow<McpPayload>): Promise<void> {
-    // A transport call persists only its status (at-most-once; the inner-delegation bridges are empty
-    // by construction); a serve call persists its endpoint payload too, so a restart re-registers it.
+    // A transport call persists only its status (at-most-once; it opens no inner delegations, so its
+    // bridges are empty by construction — the status-only `mcp_instances` row); a serve call persists its
+    // whole endpoint extension (`mcp_serve_instances`: token + tools + its inner-delegation bridges), so a
+    // restart re-registers it.
     await tx.mcp.putMcpInstance({
       instanceId: row.instance,
       status: row.status,
       serve:
         row.payload.kind === "serve"
-          ? { snapshotId: row.payload.snapshot, token: row.payload.token, tools: row.payload.tools }
+          ? {
+              snapshotId: row.payload.snapshot,
+              token: row.payload.token,
+              tools: row.payload.tools,
+              relays: row.relays,
+              innerCalls: row.innerCalls,
+            }
           : null,
-      relays: row.relays,
-      innerCalls: row.innerCalls,
     });
   }
 
@@ -530,12 +530,13 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       caller: row.caller,
       run: row.run,
       status: row.status,
-      // A row with serve extras reloads as the live endpoint (the subscriber was dispatched exactly
-      // once at the original open; never re-dispatched). A transport row reloads as `recovered`:
-      // nothing dispatch-shaped is persisted for it, so the payload says so by type.
+      // A row with a serve extension reloads as the live endpoint (the subscriber was dispatched exactly
+      // once at the original open; never re-dispatched), carrying its inner-delegation bridges. A
+      // transport row (no serve extension) reloads as `recovered`: nothing dispatch-shaped is persisted
+      // for it, so the payload says so by type and its bridges are empty.
       payload:
         row.serve === null
-          ? { kind: "recovered" }
+          ? { kind: "transport", call: { kind: "recovered" } }
           : {
               kind: "serve",
               token: row.serve.token,
@@ -543,8 +544,8 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
               tools: row.serve.tools,
               subscriber: null,
             },
-      relays: row.relays,
-      innerCalls: row.innerCalls,
+      relays: row.serve?.relays ?? [],
+      innerCalls: row.serve?.innerCalls ?? [],
     }));
   }
 

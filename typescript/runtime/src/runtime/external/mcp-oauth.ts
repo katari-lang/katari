@@ -33,12 +33,23 @@ export interface McpOAuthCredential {
   resourceUrl: string;
 }
 
+/** A credential as read out of the store, paired with an opaque `generation` marker of THAT stored
+ *  version. The provider captures the generation at load and echoes it back to `save`, which writes only
+ *  while it still matches — a compare-and-set, so a token refresh never clobbers a credential a re-login
+ *  replaced under it. */
+export interface LoadedMcpOAuthCredential {
+  credential: McpOAuthCredential;
+  generation: string;
+}
+
 /** The credential store port the transport reaches OAuth credentials through, keyed by credential
  *  NAME (never token material). `save` is the refresh write-back: a rotated token set must outlive
- *  the process, or every restart would burn the refresh token's single use. */
+ *  the process, or every restart would burn the refresh token's single use — but it is CONDITIONAL on the
+ *  generation the caller loaded, so a stale write (a warm provider refreshing off a credential a re-login
+ *  has since replaced) is refused rather than clobbering the newer record. */
 export interface McpCredentialStore {
-  load(name: string): Promise<McpOAuthCredential | null>;
-  save(name: string, credential: McpOAuthCredential): Promise<void>;
+  load(name: string): Promise<LoadedMcpOAuthCredential | null>;
+  save(name: string, credential: McpOAuthCredential, expectedGeneration: string): Promise<void>;
 }
 
 /** The failure that must surface as the typed `prelude.mcp.auth_error` throw (not `server_error`):
@@ -82,19 +93,20 @@ export function decodeMcpOAuthCredential(name: string, raw: string): McpOAuthCre
 }
 
 /** The runtime-side provider: tokens in, refreshed tokens out, nothing interactive. One instance per
- *  cached client (the SDK provider contract is per-server "session"). The credential is loaded once
- *  up front (see `loadStoredCredential`) so a missing credential fails as `auth_error` BEFORE any
- *  network I/O; refresh write-back goes through the same store the login command wrote. */
+ *  cached client (the SDK provider contract is per-server "session"). It reads the credential THROUGH the
+ *  store on every `tokens()` / `clientInformation()` (an mcp call is network I/O anyway, so one store read
+ *  is cheap) — so a warm provider the transport cached across a re-login never serves a stale credential —
+ *  and it remembers the generation it read so a refresh write-back refuses to overwrite a credential
+ *  replaced under it. */
 export class StoredMcpOAuthProvider implements OAuthClientProvider {
-  private credential: McpOAuthCredential;
+  /** The credential + its generation as last read through the store, captured so `saveTokens` /
+   *  `saveClientInformation` can compare-and-set against it. */
+  private loaded: LoadedMcpOAuthCredential | null = null;
 
   constructor(
     private readonly name: string,
     private readonly store: McpCredentialStore,
-    initial: McpOAuthCredential,
-  ) {
-    this.credential = initial;
-  }
+  ) {}
 
   /** No redirect target exists server-side; `undefined` marks the flow non-interactive to the SDK. */
   get redirectUrl(): undefined {
@@ -112,22 +124,36 @@ export class StoredMcpOAuthProvider implements OAuthClientProvider {
     };
   }
 
-  clientInformation(): OAuthClientInformationMixed {
-    return this.credential.clientInformation;
+  /** Read the credential fresh from the store, remembering its generation. A vanished credential (deleted
+   *  since, or never stored) is the typed auth failure — the runtime cannot log in on its own. */
+  private async reload(): Promise<LoadedMcpOAuthCredential> {
+    const record = await this.store.load(this.name);
+    if (record === null) {
+      throw new McpAuthError(
+        `the OAuth credential "${this.name}" is no longer stored; ` +
+          `re-run \`katari mcp login --name ${this.name}\``,
+      );
+    }
+    this.loaded = record;
+    return record;
+  }
+
+  async clientInformation(): Promise<OAuthClientInformationMixed> {
+    return (await this.reload()).credential.clientInformation;
   }
 
   async saveClientInformation(clientInformation: OAuthClientInformationMixed): Promise<void> {
-    this.credential = { ...this.credential, clientInformation };
-    await this.store.save(this.name, this.credential);
+    const base = this.loaded ?? (await this.reload());
+    await this.store.save(this.name, { ...base.credential, clientInformation }, base.generation);
   }
 
-  tokens(): OAuthTokens {
-    return this.credential.tokens;
+  async tokens(): Promise<OAuthTokens> {
+    return (await this.reload()).credential.tokens;
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    this.credential = { ...this.credential, tokens };
-    await this.store.save(this.name, this.credential);
+    const base = this.loaded ?? (await this.reload());
+    await this.store.save(this.name, { ...base.credential, tokens }, base.generation);
   }
 
   /** Reaching the interactive step means refresh failed (or the server revoked the grant): the
@@ -158,13 +184,13 @@ export class StoredMcpOAuthProvider implements OAuthClientProvider {
 export async function loadStoredCredential(
   name: string,
   store: McpCredentialStore,
-): Promise<McpOAuthCredential> {
-  const credential = await store.load(name);
-  if (credential === null) {
+): Promise<LoadedMcpOAuthCredential> {
+  const record = await store.load(name);
+  if (record === null) {
     throw new McpAuthError(
       `no OAuth credential named "${name}" is stored for this project; ` +
         `establish one with \`katari mcp login --url <server> --name ${name}\``,
     );
   }
-  return credential;
+  return record;
 }

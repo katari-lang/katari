@@ -199,6 +199,10 @@ test("basics.main: data/match, for, parallel for, handlers, prelude", async () =
   const { stdout, stderr } = await katari(["run", "basics.main", "--project", "playground"]);
   expect(stdout).toContain("ticks=[0,1,2]");
   expect(stdout).toContain("sum(squares(4))=30");
+  // Partial application, value-checked end to end: doubles is a residual of scale, and decorated
+  // omits a ?=-defaulted parameter so the callee's runtime default must fill it through the residual.
+  expect(stdout).toContain("doubles=[3,42]");
+  expect(stdout).toContain("decorated=>> hello!");
   // The wait loop tails the run's execution trace to stderr: the launch delegate and the final ack
   // must have printed as summary lines while stdout stayed result-only.
   expect(stderr).toContain("delegate api→core basics.main");

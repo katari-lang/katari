@@ -34,20 +34,39 @@ const CREDENTIAL: McpOAuthCredential = {
   resourceUrl: "https://mcp.example.test/mcp",
 };
 
-/** An in-memory credential store: what the facade's env-backed store does, minus the database. */
+/** An in-memory credential store: what the facade's env-backed store does, minus the database. Each stored
+ *  credential carries a monotonic generation (the facade uses a content hash); `save` is a compare-and-set
+ *  against it, and `replace` simulates an out-of-band `katari mcp login` overwriting the credential. */
 function memoryStore(seed: Record<string, McpOAuthCredential> = {}): McpCredentialStore & {
   saved: Array<{ name: string; credential: McpOAuthCredential }>;
+  replace: (name: string, credential: McpOAuthCredential) => void;
 } {
-  const entries = new Map(Object.entries(seed));
+  const entries = new Map<string, { credential: McpOAuthCredential; generation: number }>();
+  let sequence = 0;
+  for (const [name, credential] of Object.entries(seed)) {
+    sequence += 1;
+    entries.set(name, { credential, generation: sequence });
+  }
   const saved: Array<{ name: string; credential: McpOAuthCredential }> = [];
   return {
     saved,
     async load(name) {
-      return entries.get(name) ?? null;
+      const entry = entries.get(name);
+      return entry === undefined
+        ? null
+        : { credential: entry.credential, generation: String(entry.generation) };
     },
-    async save(name, credential) {
-      entries.set(name, credential);
+    async save(name, credential, expectedGeneration) {
+      const entry = entries.get(name);
+      // A stale generation (the credential was replaced since it was read — a re-login) refuses the write.
+      if (entry !== undefined && String(entry.generation) !== expectedGeneration) return;
+      sequence += 1;
+      entries.set(name, { credential, generation: sequence });
       saved.push({ name, credential });
+    },
+    replace(name, credential) {
+      sequence += 1;
+      entries.set(name, { credential, generation: sequence });
     },
   };
 }
@@ -145,19 +164,49 @@ describe("decodeMcpOAuthCredential", () => {
 describe("StoredMcpOAuthProvider", () => {
   test("serves the stored tokens and writes refreshed ones back through the store", async () => {
     const store = memoryStore({ github: CREDENTIAL });
-    const provider = new StoredMcpOAuthProvider("github", store, CREDENTIAL);
-    expect(provider.tokens().access_token).toBe("token-123");
+    const provider = new StoredMcpOAuthProvider("github", store);
+    expect((await provider.tokens()).access_token).toBe("token-123");
 
     await provider.saveTokens({ access_token: "token-456", token_type: "Bearer" });
     // The rotated set is durable (a refresh token is often single-use) and immediately served.
     expect(store.saved).toHaveLength(1);
     expect(store.saved[0]?.credential.tokens.access_token).toBe("token-456");
     expect(store.saved[0]?.credential.clientInformation.client_id).toBe("client-123");
-    expect(provider.tokens().access_token).toBe("token-456");
+    expect((await provider.tokens()).access_token).toBe("token-456");
+  });
+
+  test("reads through on each use, so a warm provider serves a re-login's replaced credential", async () => {
+    const store = memoryStore({ github: CREDENTIAL });
+    const provider = new StoredMcpOAuthProvider("github", store);
+    expect((await provider.tokens()).access_token).toBe("token-123");
+    // A human re-runs `katari mcp login`, replacing the stored credential out of band.
+    store.replace("github", {
+      ...CREDENTIAL,
+      tokens: { access_token: "relogin-999", token_type: "Bearer", refresh_token: "relogin-r" },
+    });
+    // The warm provider does NOT keep serving the stale token — it reads through on the next use.
+    expect((await provider.tokens()).access_token).toBe("relogin-999");
+  });
+
+  test("a refresh write-back refuses to clobber a credential a re-login replaced under it", async () => {
+    const store = memoryStore({ github: CREDENTIAL });
+    const provider = new StoredMcpOAuthProvider("github", store);
+    // The provider reads the credential (the read that drives an about-to-happen refresh)…
+    expect((await provider.tokens()).access_token).toBe("token-123");
+    // …then a re-login replaces it before that refresh's write-back lands.
+    store.replace("github", {
+      ...CREDENTIAL,
+      tokens: { access_token: "relogin-999", token_type: "Bearer", refresh_token: "relogin-r" },
+    });
+    // The stale write-back is refused (compare-and-set on the generation it read), so nothing is saved…
+    await provider.saveTokens({ access_token: "stale-refresh", token_type: "Bearer" });
+    expect(store.saved).toHaveLength(0);
+    // …and the newer credential stands.
+    expect((await provider.tokens()).access_token).toBe("relogin-999");
   });
 
   test("the interactive steps refuse as the typed auth failure (the runtime cannot log in)", () => {
-    const provider = new StoredMcpOAuthProvider("github", memoryStore(), CREDENTIAL);
+    const provider = new StoredMcpOAuthProvider("github", memoryStore());
     expect(() => provider.redirectToAuthorization()).toThrowError(McpAuthError);
     expect(() => provider.redirectToAuthorization()).toThrowError(/katari mcp login/);
     expect(() => provider.codeVerifier()).toThrowError(McpAuthError);

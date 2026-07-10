@@ -60,7 +60,8 @@ type auth = headers | oauth
 // One server tool, as an ordinary agent value. (Type synonyms take no docs.)
 type tool = agent never -> unknown with io | prelude.throw[server_error | auth_error]
 
-// A server's tools, keyed by tool name — call one by key, or hand `tools_of` to an AI loop wholesale.
+// A server's tools, keyed by tool name — call one by key, or hand `record.values(target = ...)` (the
+// flat array of tools) to an AI loop wholesale.
 type toolbox = record[tool]
 
 @"The MCP server's tools, one runtime-minted agent per tool. Each carries the server-declared
@@ -93,12 +94,3 @@ external agent serve[R, effect E](
   tools: toolbox,
   subscriber: agent (url: string) -> R with E,
 ) -> R with E from "mcp"
-
-@"A toolbox's tools as a flat array — the shape an AI tool loop takes."
-agent tools_of(toolbox: toolbox) -> array[tool] {
-  // Iterating the entries directly (rather than keys + a re-lookup) keeps every read total: an
-  // entry's value is always present, so there is no impossible-null case to handle.
-  for (let [_, tool] in record.entries(target = toolbox)) {
-    next tool
-  }
-}

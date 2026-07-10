@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { config } from "./config/index.js";
@@ -35,6 +36,17 @@ export function createApp() {
   // Boundaries.
   app.onError(errorHandler);
   app.notFound(notFound);
+
+  // A shared body-size cap on the public capability surfaces (`/inbound`, `/mcp`): they accept
+  // unauthenticated POST bodies (the token is the only capability), so an unbounded read is a trivial
+  // memory-exhaustion vector. One rule for both surfaces — 1 MiB is ample for a webhook payload or an MCP
+  // JSON-RPC message; a larger delivery is rejected with 413 before its body is buffered.
+  const capabilityBodyLimit = bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (c) => c.json({ error: "the request body is too large" }, 413),
+  });
+  app.use("/inbound/*", capabilityBodyLimit);
+  app.use("/mcp/*", capabilityBodyLimit);
 
   // The public inbound-webhook endpoints (`webhook.inbound`'s minted URLs). Outside `/api`, so
   // `bearerAuth` passes them through — the unguessable token is the capability (see `webhook.routes.ts`).

@@ -224,13 +224,14 @@ export class StoringPersistence implements Persistence {
           })),
       },
       mcp: {
+        // A serve call's inner-delegation bridges (relays / innerCalls) ride inside its `serve` extension
+        // now (the twin of the `mcp_serve_instances` subtype table); a transport call has no serve
+        // extension and opens none.
         instances: async () =>
           this.instancesOf("mcp", this.mcpInstanceRows, (call, extension) => ({
             ...call,
             status: extension.status,
             serve: extension.serve,
-            relays: extension.relays,
-            innerCalls: extension.innerCalls,
           })),
       },
       outbox: {

@@ -1,6 +1,6 @@
 // The public MCP serve endpoint: `POST /mcp/:token` — the URLs `mcp.serve` mints. It lives OUTSIDE the
 // bearer-authenticated `/api` surface (an external MCP client cannot present the runtime's key); the
-// unguessable token is the capability, and the durable `mcp_instances` serve row scopes it to exactly
+// unguessable token is the capability, and the durable `mcp_serve_instances` row scopes it to exactly
 // one endpoint of one project.
 //
 // The endpoint is STATELESS streamable-HTTP: POST-only JSON responses, no session id, no SSE stream —

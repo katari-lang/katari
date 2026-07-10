@@ -16,7 +16,7 @@ import { config } from "../config/index.js";
 import { db } from "../db/client.js";
 import {
   instances,
-  mcpInstances,
+  mcpServeInstances,
   runs,
   TERMINAL_RUN_STATES,
   webhookInstances,
@@ -135,12 +135,23 @@ registerHostPrims(prims, { env: envReader });
  *  admin API) like any secret — exactly where `katari mcp login` puts a credential, and where a token
  *  refresh writes the rotated set back. */
 function mcpCredentialStoreFor(projectId: ProjectId): McpCredentialStore {
+  // The generation marker is a content hash of the stored blob, so any change to the credential (a
+  // re-login) shifts it — no extra column needed on `env_entries`.
+  const generationOf = (raw: string): string => createHash("sha256").update(raw).digest("hex");
   return {
     async load(name) {
       const raw = await envReader.readSecret(projectId, mcpOAuthEnvKey(name));
-      return raw === null ? null : decodeMcpOAuthCredential(name, raw);
+      if (raw === null) return null;
+      return { credential: decodeMcpOAuthCredential(name, raw), generation: generationOf(raw) };
     },
-    async save(name, credential) {
+    async save(name, credential, expectedGeneration) {
+      // Compare-and-set on the stored content: refuse the write when the credential changed since it was
+      // read (a concurrent re-login), so a token refresh never clobbers the newer record. Residual race:
+      // the re-read and the write are not one atomic statement, so a re-login landing in that
+      // sub-millisecond window is still overwritten — harmless, because the refreshed tokens derive from
+      // the just-superseded credential, and the next use reloads the newer credential and re-refreshes.
+      const currentRaw = await envReader.readSecret(projectId, mcpOAuthEnvKey(name));
+      if (currentRaw === null || generationOf(currentRaw) !== expectedGeneration) return;
       await envService.set(projectId, mcpOAuthEnvKey(name), {
         value: JSON.stringify(credential),
         isSecret: true,
@@ -319,16 +330,16 @@ export const facade = {
   },
 
   /** Serve one inbound MCP request (`POST /mcp/<token>`). The token alone locates its endpoint — the
-   *  durable `mcp_instances` serve row resolves it to a project (waking a cold actor, whose reload
+   *  durable `mcp_serve_instances` row resolves it to a project (waking a cold actor, whose reload
    *  re-registers the token) — and the JSON-RPC handling is stateless, so nothing session-shaped exists
    *  to lose across a restart. Values lower inside the endpoint adapter at THIS user-facing boundary
    *  (private content redacts — an MCP caller is outside the trust boundary, like a webhook caller). */
   async deliverMcp(input: { token: string; body: string }): Promise<McpServeHttpReply> {
     const [row] = await db
       .select({ projectId: instances.projectId })
-      .from(mcpInstances)
-      .innerJoin(instances, eq(mcpInstances.instanceId, instances.id))
-      .where(eq(mcpInstances.serveToken, input.token))
+      .from(mcpServeInstances)
+      .innerJoin(instances, eq(mcpServeInstances.instanceId, instances.id))
+      .where(eq(mcpServeInstances.serveToken, input.token))
       .limit(1);
     const endpoint =
       row === undefined
