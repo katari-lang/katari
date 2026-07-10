@@ -1,7 +1,7 @@
 // The sequence operation executor: runs a `SequenceThread`'s operations one at a time from its cursor.
 // Value-producing ops (literals, records, tuples, field reads, pattern binds, closures, agent refs,
-// generic application) run synchronously and advance the cursor; the four control-transfer ops suspend
-// the thread:
+// generic application) and the binding-releasing `drop` run synchronously and advance the cursor; the
+// four control-transfer ops suspend the thread:
 //   - `call` enters a structural node in this instance (an internal child thread);
 //   - `delegate` summons a child instance (an outbound external `delegate`, proxied by a DelegateThread);
 //   - `exit` / `continue` raise a control ask (return / break / next) up the thread tree.
@@ -28,7 +28,7 @@ import { CALL_AGENT_NAME, completeThread, constructValue, raiseThrow } from "./c
 import type { StepContext } from "./context.js";
 import { CALL_ERROR, type DispatchResult, dispatchCallable } from "./dynamic-dispatch.js";
 import { matchPattern } from "./pattern.js";
-import { readVariable, writeVariable } from "./scope.js";
+import { dropVariable, readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
 import { allocateAskId, allocateCallId, allocateThreadId } from "./store.js";
 import { errorData } from "./throw-signal.js";
@@ -106,6 +106,15 @@ function executeOperation(ctx: StepContext, thread: SequenceThread, operation: O
     case "bindPattern":
       // An irrefutable `let` destructure — exhaustiveness is the checker's guarantee, so binds always.
       matchPattern(ctx, scope, operation.pattern, requireVariable(ctx, scope, operation.source));
+      return true;
+    case "drop":
+      // Every listed binding was written by this same sequence, and the compiler's liveness pass proved
+      // it unreadable past this point — deleting it can never break a later read, it only shrinks the
+      // scope row persisted at each turn boundary. A miscompiled drop would surface as the
+      // unbound-variable throw in `requireVariable` (which names the variable id) at the next read.
+      for (const variable of operation.variables) {
+        dropVariable(ctx.store, scope, variable);
+      }
       return true;
     case "applyGenerics": {
       const substitution: GenericSubstitution = {};

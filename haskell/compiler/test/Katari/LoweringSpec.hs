@@ -2,7 +2,9 @@ module Katari.LoweringSpec (spec) where
 
 import Data.Foldable (toList)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
@@ -185,6 +187,91 @@ spec = describe "lowerModule (via compile)" $ do
     it "rejects a secret in the url (only header values may be secret)" $
       compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = s, method = \"GET\", headers = {}, body = \"\").status\n}\n" `shouldNotBe` []
 
+  -- The post-lowering liveness pass (Katari.Lowering.Drop): a temporary written and last mentioned
+  -- within one sequence is released by a `drop` right after that mention; anything a nested block (a
+  -- match arm, a local agent's body) still reads must stay bound for the scope-level GC instead.
+  describe "drop insertion (the post-lowering liveness pass)" $ do
+    let letSource =
+          "agent helper(x: integer) -> integer { x }\n"
+            <> "agent caller(y: integer) -> integer { let x = helper(x = y)\nhelper(x = x) }"
+
+    it "drops the `let x = f(a)` temporaries — the argument record and the delegate output — once spent" $ do
+      let operations = entryBodyOperations (loweredTestModule letSource) "caller"
+      case [operation | OperationDelegate operation <- operations] of
+        (firstDelegate : _) -> do
+          droppedVariables operations `shouldContain` [firstDelegate.argument]
+          case firstDelegate.output of
+            Just output -> droppedVariables operations `shouldContain` [output]
+            Nothing -> expectationFailure "the let-bound delegate has no output"
+        [] -> expectationFailure "expected a delegate in the caller body"
+
+    it "the delegate output dies at the bindPattern: a drop listing it directly follows the bind" $ do
+      let operations = entryBodyOperations (loweredTestModule letSource) "caller"
+      case [ (bindOperation.source, followup)
+             | (OperationBindPattern bindOperation, followup) <- adjacentPairs operations
+           ] of
+        ((source, OperationDrop dropOperation) : _) -> dropOperation.variables `shouldContain` [source]
+        other -> expectationFailure ("expected a drop right after the bindPattern, got " <> show other)
+
+    it "keeps the let-bound variable until its last use, then releases it too" $ do
+      let operations = entryBodyOperations (loweredTestModule letSource) "caller"
+          letBound =
+            [ variable
+              | OperationBindPattern bindOperation <- operations,
+                PatternVariable variable <- [bindOperation.pattern]
+            ]
+      -- The bound variable is dead after the second call's argument record, so it IS dropped —
+      -- the mention-after-drop oracle below guarantees never before a remaining use.
+      case letBound of
+        [variable] -> droppedVariables operations `shouldContain` [variable]
+        other -> expectationFailure ("expected exactly one let-bound variable, got " <> show other)
+
+    it "keeps a variable a nested match arm still reads (the arm runs as its own thread)" $ do
+      let operations =
+            entryBodyOperations
+              (loweredTestModule "agent f(b: boolean) -> integer { let x = 1\nif (b) { x } else { 2 } }")
+              "f"
+      case [variable | OperationBindPattern bindOperation <- operations, PatternVariable variable <- [bindOperation.pattern]] of
+        [variable] -> droppedVariables operations `shouldNotContain` [variable]
+        other -> expectationFailure ("expected exactly one let-bound variable, got " <> show other)
+
+    it "keeps a variable a local agent's body captures (read through the closure's scope chain)" $ do
+      let operations =
+            entryBodyOperations
+              (loweredTestModule "agent f() -> integer { let x = 1\nagent g() -> integer { x }\ng() }")
+              "f"
+      case [variable | OperationBindPattern bindOperation <- operations, PatternVariable variable <- [bindOperation.pattern]] of
+        [variable] -> droppedVariables operations `shouldNotContain` [variable]
+        other -> expectationFailure ("expected exactly one let-bound variable, got " <> show other)
+
+    it "drops an unread output immediately after its write" $ do
+      let operations =
+            entryBodyOperations
+              (loweredTestModule "agent helper(x: integer) -> integer { x }\nagent caller() -> integer { helper(x = 1)\n2 }")
+              "caller"
+      case [ (delegateOperation.output, followup)
+             | (OperationDelegate delegateOperation, followup) <- adjacentPairs operations
+           ] of
+        ((Just output, OperationDrop dropOperation) : _) -> dropOperation.variables `shouldContain` [output]
+        other -> expectationFailure ("expected a drop right after the unread delegate, got " <> show other)
+
+    it "keeps every lowered module sound: no mention after a drop, no dropped result, no empty drop (stdlib included)" $ do
+      let source =
+            "data Pair(left: integer, right: integer)\n"
+              <> "request tick() -> integer\n"
+              <> "agent classify(b: boolean) -> integer { match (b) { case true -> 1\ncase false -> 0 } }\n"
+              <> "agent doubles(xs: array[integer]) -> array[integer] { for (x in xs) { next x } }\n"
+              <> "agent withHandler() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } }\n0 }\n"
+              <> "agent caller() -> integer { classify(b = true) }"
+          result = compile CompileInput {sources = Map.singleton testModuleName source}
+      hasErrors result.diagnostics `shouldBe` False
+      [ violation
+        | irModule <- Map.elems result.loweredModules,
+          sequenceBlock <- allSequences irModule,
+          violation <- sequenceDropViolations sequenceBlock
+        ]
+        `shouldBe` []
+
   describe "the io effect (external calls are impure)" $ do
     let ext = "external agent fetch(headers: record[string of private], body: string) -> { status: integer, body: string }\n"
     it "declassifies an external call's result (impure → no pure-call lift, so a secret header gives a public result)" $
@@ -330,6 +417,89 @@ loadedAgentNames irModule =
       BlockSequence sequence' <- [information.block],
       OperationLoadAgent operation <- sequence'.operations
   ]
+
+-- | The operations of the body sequence of the named entry agent.
+entryBodyOperations :: IRModule -> Text -> List Operation
+entryBodyOperations irModule name = fromMaybe [] $ do
+  entry <- entryBlock irModule name
+  agent <- case entry of
+    BlockAgent agent -> Just agent
+    _ -> Nothing
+  information <- Map.lookup agent.body irModule.blocks
+  case information.block of
+    BlockSequence sequenceBlock -> Just sequenceBlock.operations
+    _ -> Nothing
+
+-- | Every variable released by any drop in the operation list.
+droppedVariables :: List Operation -> List VariableId
+droppedVariables operations = concat [dropOperation.variables | OperationDrop dropOperation <- operations]
+
+-- | Consecutive operation pairs, for "the drop directly follows operation X" assertions.
+adjacentPairs :: List Operation -> List (Operation, Operation)
+adjacentPairs operations = zip operations (drop 1 operations)
+
+-- | Every sequence block in the module.
+allSequences :: IRModule -> List Sequence
+allSequences irModule =
+  [sequenceBlock | information <- Map.elems irModule.blocks, BlockSequence sequenceBlock <- [information.block]]
+
+-- | The drop-soundness oracle over one sequence, restated independently of the pass: an operation may
+-- never mention a variable an earlier drop released, a drop may never release the sequence's own
+-- result, and a drop is never empty. Returns a description per violation (so a pass shows as @[]@).
+sequenceDropViolations :: Sequence -> List String
+sequenceDropViolations sequenceBlock = walk mempty sequenceBlock.operations
+  where
+    walk :: Set VariableId -> List Operation -> List String
+    walk released remaining = case remaining of
+      [] ->
+        [ "the sequence result " <> show variable <> " was dropped"
+          | variable <- maybeToList sequenceBlock.result,
+            Set.member variable released
+        ]
+      (operation : rest) ->
+        [ "operation mentions dropped " <> show variable
+          | variable <- operationMentions operation,
+            Set.member variable released
+        ]
+          <> ["empty drop operation" | OperationDrop dropOperation <- [operation], null dropOperation.variables]
+          <> walk (releaseOf operation <> released) rest
+    releaseOf operation = case operation of
+      OperationDrop dropOperation -> Set.fromList dropOperation.variables
+      _ -> mempty
+
+-- | Every variable an operation reads or writes (a drop's own list is a release, not a mention) — the
+-- spec's independent mention walker, kept total over the constructors so it cannot drift silently.
+operationMentions :: Operation -> List VariableId
+operationMentions = \case
+  OperationCall operation -> maybeToList operation.output
+  OperationDelegate operation -> calleeVariable operation.target <> (operation.argument : maybeToList operation.output)
+  OperationLoadLiteral operation -> [operation.output]
+  OperationLoadAgent operation -> [operation.output]
+  OperationMakeClosure operation -> [operation.output]
+  OperationMakeRecord operation -> map snd operation.entries <> [operation.output]
+  OperationMakeTuple operation -> operation.elements <> [operation.output]
+  OperationGetField operation -> [operation.source, operation.output]
+  OperationBindPattern operation -> operation.source : patternVariables operation.pattern
+  OperationApplyGenerics operation -> [operation.source, operation.output]
+  OperationExit operation -> [operation.value]
+  OperationContinue operation ->
+    maybeToList operation.value <> concatMap (\(state, value) -> [state, value]) operation.modifiers
+  OperationDrop _ -> []
+  where
+    calleeVariable = \case
+      CalleeName _ -> []
+      CalleeValue variable -> [variable]
+
+-- | The variables a pattern binds (every 'PatternVariable' position).
+patternVariables :: Pattern -> List VariableId
+patternVariables = \case
+  PatternAny -> []
+  PatternVariable variable -> [variable]
+  PatternLiteral _ -> []
+  PatternConstructor _ fields -> concatMap (patternVariables . snd) fields
+  PatternTuple elements -> concatMap patternVariables elements
+  PatternRecord fields -> concatMap (patternVariables . snd) fields
+  PatternTypeGuard _ inner -> patternVariables inner
 
 -- | The field names of an object schema (empty for any other schema shape).
 objectFieldNames :: JSONSchema -> List Text

@@ -82,6 +82,7 @@ library:
     - Katari.Parser.Pattern
     - Katari.Parser.Expression
     - Katari.Lowering
+    - Katari.Lowering.Drop
     - Katari.Compile
     - Katari.Query
     - Katari.Query.Completion

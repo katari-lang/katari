@@ -50,9 +50,11 @@ newtype Metadata = Metadata
   }
   deriving stock (Eq, Show)
 
--- | The metadata the compiler stamps on every emitted 'IRModule'.
+-- | The metadata the compiler stamps on every emitted 'IRModule'. Version 2 added 'OperationDrop':
+-- the wire shape gained an operation a pre-drop runtime cannot execute, and this constant is exactly
+-- that contract — a runtime rejects IR whose version it does not understand.
 currentMetadata :: Metadata
-currentMetadata = Metadata {schemaVersion = 1}
+currentMetadata = Metadata {schemaVersion = 2}
 
 -- | One module's lowered output. The runtime loads it and resolves callables by 'QualifiedName'
 -- through 'entries'
@@ -271,6 +273,11 @@ data Operation where
   OperationExit :: ExitOperation -> Operation
   -- | A non-local continue (next / for-next). 'target' is the enclosing handle / for it resumes.
   OperationContinue :: ContinueOperation -> Operation
+  -- | Release bindings this same sequence wrote and provably never reads again. Inserted by the
+  -- post-lowering liveness pass ("Katari.Lowering.Drop"), never by lowering itself; the runtime
+  -- deletes each binding from the thread's local scope, shrinking the scope row it persists every
+  -- turn. Scope-level GC remains the backstop for everything the pass cannot prove dead.
+  OperationDrop :: DropOperation -> Operation
   deriving stock (Eq, Show)
 
 data CallOperation = CallOperation
@@ -359,6 +366,12 @@ data ContinueOperation = ContinueOperation
     value :: Maybe VariableId,
     -- | @with (name = e, ...)@ state updates: (state var in the target's scope, new-value var here).
     modifiers :: List (VariableId, VariableId)
+  }
+  deriving stock (Eq, Show)
+
+-- | See 'OperationDrop'. The list is non-empty and sorted by id, so the emitted IR is deterministic.
+newtype DropOperation = DropOperation
+  { variables :: List VariableId
   }
   deriving stock (Eq, Show)
 
@@ -557,6 +570,7 @@ instance ToJSON Operation where
     OperationExit op -> taggedObject "exit" ["target" .= op.target, "value" .= op.value]
     OperationContinue op ->
       taggedObject "continue" ["target" .= op.target, "value" .= op.value, "modifiers" .= op.modifiers]
+    OperationDrop op -> taggedObject "drop" ["variables" .= op.variables]
 
 instance ToJSON CalleeReference where
   toJSON reference = case reference of

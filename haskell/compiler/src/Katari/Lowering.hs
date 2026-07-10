@@ -46,6 +46,7 @@ import Katari.Data.NormalizedType (bottomAttribute)
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), substituteGenerics)
 import Katari.Diagnostics (Diagnostics)
+import Katari.Lowering.Drop (insertDropOperations)
 import Katari.Panic (panic)
 import Katari.Primitive (panicRequestName, preludeModuleName)
 import Katari.Schema qualified as Schema
@@ -388,15 +389,18 @@ genericArgumentSchema context = \case
 -- | Lower one typed module to IR. The 'TypeEnvironment' / 'ValueEnvironment' are shared across the
 -- program (a referenced callable's schema may live in another module); the emitted IR is otherwise
 -- self-contained, with module-local 'BlockId' / 'VariableId' spaces. No lowering diagnostics fire on a
--- clean program (a malformed shape 'panic's), so the diagnostics are always empty.
+-- clean program (a malformed shape 'panic's), so the diagnostics are always empty. Once every block is
+-- built, the drop-insertion pass ("Katari.Lowering.Drop") releases provably-dead temporaries early —
+-- it needs the whole module's mentions, so it runs over the finished 'IRModule'.
 lowerModule :: TypeEnvironment -> ValueEnvironment -> ModuleName -> AST.Module AST.Typed -> (IRModule, Diagnostics)
 lowerModule typeEnvironment valueEnvironment _moduleName module' =
-  ( IRModule
-      { metadata = currentMetadata,
-        blocks = finalState.blockTable,
-        entries = finalState.entryTable,
-        names = finalState.nameTable
-      },
+  ( insertDropOperations
+      IRModule
+        { metadata = currentMetadata,
+          blocks = finalState.blockTable,
+          entries = finalState.entryTable,
+          names = finalState.nameTable
+        },
     diagnostics
   )
   where

@@ -12,9 +12,11 @@
 //
 // This is sound because anything that could still reference one of the instance's scopes keeps the instance
 // suspended: a child reading a scope through a closure argument keeps its caller awaiting the delegateAck, so
-// the caller still holds that closure in one of its own scopes (the value is bound to a variable, never
-// dropped — bindings are single-assignment) until the child returns. So a scope unreachable from the
-// instance at a quiesced turn boundary is unreachable for good.
+// the caller still holds that closure in one of its own scopes until the child returns. Bindings are
+// single-assignment, and the one way a binding disappears early — a compiler-inserted `drop` op — removes only
+// a binding the compiler proved unreadable, so reachability computed here can only shrink turn over turn,
+// never grow back. A scope unreachable from the instance at a quiesced turn boundary is therefore unreachable
+// for good.
 
 import type { ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";

@@ -32,7 +32,8 @@ export type GenericId = number;
 // ─── Module ──────────────────────────────────────────────────────────────────────────────────
 
 export type Metadata = {
-  /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles. */
+  /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles.
+   *  Version 2 added the `drop` operation, which a version-1 runtime cannot execute. */
   schemaVersion: number;
 };
 
@@ -228,7 +229,8 @@ export type Operation =
   | BindPatternOperation
   | ApplyGenericsOperation
   | ExitOperation
-  | ContinueOperation;
+  | ContinueOperation
+  | DropOperation;
 
 /** Enter a local structural node (`match` / `for` / `handle` / `par`) in the current scope. */
 export type CallOperation = { kind: "call"; target: BlockId; output: VariableId | null };
@@ -301,6 +303,14 @@ export type ContinueOperation = {
   /** `with (name = e, ...)` state updates: (state var in the target's scope, new-value var here). */
   modifiers: Array<[VariableId, VariableId]>;
 };
+
+/**
+ * Release bindings this same sequence wrote and provably never reads again (inserted by the compiler's
+ * conservative post-lowering liveness pass, `Katari.Lowering.Drop`). The runtime deletes each binding
+ * from the thread's LOCAL scope, shrinking the scope row persisted every turn; scope-level GC remains
+ * the backstop for anything the pass could not prove dead. The list is non-empty and sorted by id.
+ */
+export type DropOperation = { kind: "drop"; variables: VariableId[] };
 
 /** A callable-invocation target: a name (via `entries`) or a runtime value (an agent / closure). */
 export type CalleeReference =

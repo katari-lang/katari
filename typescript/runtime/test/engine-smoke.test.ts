@@ -124,6 +124,94 @@ describe("in-memory core", () => {
     await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 3 });
   });
 
+  test("executes compiler-inserted drops and still computes the same result", async () => {
+    // The arithmetic program above with the liveness pass's drops interleaved: the operand literals die
+    // at the makeRecord, the argument record at the delegate. Later operations must still read the
+    // bindings that stay live (the delegate reads 4 after [2, 3] dropped; the exit reads 5 after [4]).
+    const ir: IRModule = {
+      metadata: { schemaVersion: 2 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 2, value: { kind: "integer", value: 1 } },
+              { kind: "loadLiteral", output: 3, value: { kind: "integer", value: 2 } },
+              {
+                kind: "makeRecord",
+                entries: [
+                  ["left", 2],
+                  ["right", 3],
+                ],
+                output: 4,
+              },
+              { kind: "drop", variables: [2, 3] },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("prelude.add") },
+                argument: 4,
+                output: 5,
+              },
+              { kind: "drop", variables: [4] },
+              { kind: "exit", target: 0, value: 5 },
+            ],
+          },
+          parameters: { parameter: 1 },
+        },
+        ...primitiveWrapper(6, 7, 8, "prelude.add"),
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("prelude.add")]: 6,
+      },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 3 });
+  });
+
+  test("a drop deletes the binding from the local scope only, never up the chain", async () => {
+    // A hand-built probe of the runtime semantics (compiler output never reuses a VariableId): the
+    // agent body binds variable 20 to 1, then enters a child sequence that shadows 20 with 2 and drops
+    // it. The child's result read of 20 must fall back through the scope chain to the parent's 1 —
+    // proving the drop really deleted the child's own binding, and deleted nothing above it.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 2 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 1 } },
+              { kind: "call", target: 2, output: 21 },
+              { kind: "exit", target: 0, value: 21 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        2: {
+          block: {
+            kind: "sequence",
+            result: 20,
+            operations: [
+              { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 2 } },
+              { kind: "drop", variables: [20] },
+            ],
+          },
+          parameters: {},
+        },
+      },
+      entries: { [createAgentName("main")]: 0 },
+      names: {},
+    };
+
+    await expect(run(ir, "main", null)).resolves.toEqual({ kind: "integer", value: 1 });
+  });
+
   test("maps a sequential for loop over an array argument", async () => {
     // agent triple(xs) { for (x in xs) { x * 3 } }
     const ir: IRModule = {
