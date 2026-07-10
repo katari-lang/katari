@@ -33,6 +33,7 @@ import {
 } from "../value/validation.js";
 import type { PrimContext, PrimImplementation } from "./context.js";
 import {
+  blobStoreStringReader,
   encodeValue,
   jsonValueFromJson,
   jsonValueToJson,
@@ -55,16 +56,9 @@ const MAX_RANGE_LENGTH = 10_000_000;
 
 const NULL_VALUE: Value = { kind: "null" };
 
-/** A `StringReader` over the context's blob store (inline strings read directly). */
+/** A `StringReader` over the context's blob store (the shared implementation in `json-value.ts`). */
 function stringReaderOf(context: PrimContext): StringReader {
-  return async (value: Value): Promise<string> => {
-    if (value.kind === "string") return value.value;
-    if (value.kind === "ref" && value.semanticKind === "string") {
-      const bytes = await context.blobs.get(context.projectId, value.blobId);
-      return new TextDecoder().decode(bytes);
-    }
-    throw new Error(`expected a string, got ${value.kind}`);
-  };
+  return blobStoreStringReader(context.projectId, context.blobs);
 }
 
 /** Read a possibly blob-backed string argument field. */

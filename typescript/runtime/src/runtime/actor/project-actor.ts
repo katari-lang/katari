@@ -10,6 +10,7 @@ import type { JSONSchema, QualifiedName } from "@katari-lang/types";
 import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
 import { callableMetadata } from "../engine/interop-prims.js";
+import { blobStoreStringReader } from "../engine/json-value.js";
 import { createProjectStore } from "../engine/store.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
@@ -149,6 +150,9 @@ export class ProjectActor {
       this.mcpTransport,
       publicBaseUrl,
       (work) => this.substrate.submit(this.mcp, work),
+      // A direct call's json-tree arguments may hold blob-backed string leaves; the reactor lowers
+      // them through the same reader the json prims use.
+      blobStoreStringReader(this.projectId, dependencies.blobs),
       pool,
     );
     // The webhook reactor serves `webhook.inbound` calls: it mints tokens and re-enters the serial loop for

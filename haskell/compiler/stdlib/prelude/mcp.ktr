@@ -69,6 +69,16 @@ listed with (@url@ + @auth@ — a header value may be a secret), so calling it n
 setup. A missing or dead `oauth` credential throws `auth_error` (re-run `katari mcp login`)."
 external agent tools(url: string, auth: auth) -> toolbox with prelude.throw[server_error | auth_error] from "mcp"
 
+@"Call one tool on an MCP server directly — the static counterpart of `tools`, with no listing and
+no minted agent value. The schema-blind seam the binding modules `katari mcp pull` generates are
+built on: @tool@ is the server-declared tool name, @arguments@ its arguments object as a literal
+`json` tree (a typed wrapper builds it with `json.encode` per parameter). The result is the server's
+reply as a `json` tree — the tool's `structuredContent` when it declares one, otherwise its text as
+a `json_string`; a binary content block's produced file rides inside the tree as its `$ref` handle
+object, so `json.decode` with a `file`-typed shape reconstructs the handle. Nothing validates the
+arguments before the server does (unlike a minted tool) — a rejected call throws `server_error`."
+external agent call(url: string, auth: auth, tool: string, arguments: json.json) -> json.json with prelude.throw[server_error | auth_error] from "mcp"
+
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is
 the published tool name, each agent's declared signature the tool's advertised schema. The URL is

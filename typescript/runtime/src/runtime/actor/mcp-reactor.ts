@@ -1,7 +1,8 @@
 // McpReactor: the `mcp` reactor — the built-in MCP client AND inbound MCP server as a call reactor (see
-// `ExternalCallReactor` for the shared callee-call lifecycle). Three call shapes reach it, told apart ONCE
-// at the `openPayload` boundary (the compiled `prelude.mcp.tools` / `prelude.mcp.serve` externals arrive
-// as their qualified names on the wire; every other key is a minted tool's server-declared name):
+// `ExternalCallReactor` for the shared callee-call lifecycle). Four call shapes reach it, told apart ONCE
+// at the `openPayload` boundary (the compiled `prelude.mcp.tools` / `prelude.mcp.serve` /
+// `prelude.mcp.call` externals arrive as their qualified names on the wire; every other key is a minted
+// tool's server-declared name):
 //   - `listTools` (the `prelude.mcp.tools` external): list the server's tools and MINT one agent value
 //     per tool — a `$tool` carrying the server-declared signature and, as its context, the server
 //     DESCRIPTOR (`{url, auth}`; the auth sum — explicit headers or a named OAuth credential — rides
@@ -11,6 +12,13 @@
 //     values must not; an oauth credential NAME is not secret).
 //   - `callTool` (a minted tool's call, an `external` target carrying that descriptor as `context`): the
 //     caller's argument passes to the transport verbatim, the descriptor rides out-of-band.
+//   - `directCall` (the `prelude.mcp.call` external): the STATIC counterpart of a minted tool's call —
+//     a compiled external carries no context, so everything (`{url, auth, tool, arguments}`) rides in
+//     the call's own argument. `arguments` is a `json` TREE; it lowers to the literal Json document at
+//     dispatch (the same `jsonValueToJson` walk behind `json.stringify`, so a blob-backed string leaf
+//     materialises), and the transport's reply lifts back LITERALLY into a `json` tree (`structuredContent`
+//     as its tree, plain text as a `json_string`, a produced blob's `$ref` handle as a literal object
+//     inside the tree — which `json.decode` with a `file`-typed shape then lifts into a handle).
 //   - `serve` (the `prelude.mcp.serve` external): the INBOUND direction, mirroring the webhook reactor —
 //     no transport at all. It mints an unguessable token (the public URL's capability), dispatches the
 //     SUBSCRIBER once as an inner delegation carrying that URL, and converts every MCP `tools/call` to
@@ -31,7 +39,9 @@
 // program's own (its subscriber panics like any callee).
 
 import { randomBytes } from "node:crypto";
+import type { Json } from "@katari-lang/types";
 import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
+import { jsonValueFromJson, jsonValueToJson, type StringReader } from "../engine/json-value.js";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { McpToolListing, McpTransport } from "../external/mcp-transport.js";
@@ -42,11 +52,13 @@ import type { Value } from "../value/types.js";
 import {
   type CallRow,
   ExternalCallReactor,
+  type ExternalCompletion,
   type ExternalTarget,
   type InnerDelivery,
   innerOutcomeAsCompletion,
   type LoadedCall,
 } from "./external-call-reactor.js";
+import { messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
@@ -55,6 +67,7 @@ import type { ResourcePool } from "./resource-pool.js";
  *  cannot collide). Past `openPayload` the call shapes are distinct payload variants, not key sniffs. */
 const MCP_TOOLS_KEY = "prelude.mcp.tools";
 const MCP_SERVE_KEY = "prelude.mcp.serve";
+const MCP_CALL_KEY = "prelude.mcp.call";
 
 /** What an mcp call holds, decided once from the delegate target (see the module comment): a `listTools`
  *  listing (its descriptor from the call's original marker-bearing argument, and the toolbox minting as
@@ -79,6 +92,17 @@ type McpPayload =
        *  one), which the transport rejects as the typed descriptor error. */
       descriptor: Value | null;
       argument: Value | null;
+    }
+  | {
+      kind: "directCall";
+      /** The `{url, auth}` descriptor assembled from the call's own argument (privacy markers intact —
+       *  the transport gets a revealed copy at dispatch, like the other transport shapes). */
+      descriptor: Value;
+      /** The `tool` name value (a string leaf, possibly blob-backed) — read at dispatch, where the
+       *  string reader is allowed to touch the store. */
+      tool: Value | null;
+      /** The `arguments` json tree, lowered to the literal Json document at dispatch. */
+      argumentsTree: Value | null;
     }
   | {
       kind: "serve";
@@ -139,6 +163,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     /** Schedule a fresh reactor turn (the substrate's serial mailbox) — how a serve call's post-commit
      *  work (the subscriber dispatch, a synthesised completion) re-enters the transactional loop. */
     private readonly schedule: (work: () => void) => void,
+    /** Reads a string leaf's content (inline, or a semantic-string blob through the store) — what a
+     *  `directCall`'s json-tree lowering needs at dispatch. */
+    private readonly readString: StringReader,
     pool: ResourcePool,
   ) {
     super(pool);
@@ -233,6 +260,15 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         shapeResult: (value) => mintToolbox(value, descriptor, snapshot),
       };
     }
+    if (target.key === MCP_CALL_KEY) {
+      const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
+      return {
+        kind: "directCall",
+        descriptor: descriptorOf(argument),
+        tool: fields.tool ?? null,
+        argumentsTree: fields.arguments ?? null,
+      };
+    }
     if (target.key === MCP_SERVE_KEY) {
       const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
       return {
@@ -268,6 +304,11 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
           argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
         });
         return;
+      case "directCall":
+        // Lowering the arguments tree may read a blob-backed string leaf, so the dispatch finishes
+        // asynchronously; the transport call is fire-and-forget anyway.
+        void this.dispatchDirectCall(delegation, payload);
+        return;
       case "serve": {
         // Post-commit: activate the endpoint and hand the one-time subscriber dispatch back to the
         // serial loop (a dispatch is a side-effect slot — the inner delegation must open inside a turn).
@@ -282,6 +323,69 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         // payload reaching the dispatch seam is a runtime bug — fail loudly rather than fabricate a call.
         throw new Error(`mcp: refusing to dispatch recovered call ${delegation} (at-most-once)`);
     }
+  }
+
+  /** Finish a `directCall`'s dispatch: read the tool name, lower the arguments tree to its literal
+   *  Json document (the `json.stringify` walk, so a blob-backed string leaf materialises), and hand
+   *  the transport the SAME `callTool` operation a minted tool's call produces. A lowering failure is
+   *  fed back as an error completion on a fresh turn — this reactor's `escalateError` then types it
+   *  as the catchable `mcp.server_error`, like every other non-serve failure. */
+  private async dispatchDirectCall(
+    delegation: DelegationId,
+    payload: Extract<McpPayload, { kind: "directCall" }>,
+  ): Promise<void> {
+    let tool: string;
+    let argumentDocument: Json | null;
+    try {
+      if (payload.tool === null) throw new Error("mcp.call: the tool name is missing");
+      tool = await this.readString(payload.tool);
+      argumentDocument =
+        payload.argumentsTree === null
+          ? null
+          : await jsonValueToJson(payload.argumentsTree, this.readString);
+    } catch (cause) {
+      this.schedule(() =>
+        this.complete({
+          delegation,
+          outcome: { kind: "error", message: `mcp.call: ${messageOf(cause)}` },
+        }),
+      );
+      return;
+    }
+    // The call may have resolved (a cancel) while the tree was lowering; a dead call must not reach
+    // the server. A cancel landing after this check races like any transport dispatch would — the
+    // late completion is guarded at the base.
+    if (this.payloadOf(delegation) === undefined) return;
+    this.transport.dispatch({
+      kind: "callTool",
+      delegation,
+      tool,
+      descriptor: valueToJson(payload.descriptor, "reveal"),
+      argument: argumentDocument,
+    });
+  }
+
+  /** A `directCall`'s successful reply is re-shaped BEFORE the base's generic decode: the transport's
+   *  raw Json lifts LITERALLY into the `json` tree (total for any server reply — a reply containing a
+   *  reserved `$`-key stays a plain tree key, exactly the `$ref`-inside-the-tree form `json.decode`
+   *  expects), and the tree is lowered to its wire form so the base's `jsonToValue` reconstructs that
+   *  tree bit-for-bit. Shaping here (not via `shapeResult`) keeps hostile / quirky server Json away
+   *  from the wire decoder, which is only total for wire-shaped documents. */
+  override complete(completion: ExternalCompletion): void {
+    const payload = this.payloadOf(completion.delegation);
+    if (
+      payload !== undefined &&
+      payload.kind === "directCall" &&
+      completion.outcome.kind === "result"
+    ) {
+      const tree = jsonValueFromJson(completion.outcome.value);
+      super.complete({
+        delegation: completion.delegation,
+        outcome: { kind: "result", value: valueToJson(tree, "reveal") },
+      });
+      return;
+    }
+    super.complete(completion);
   }
 
   /** The one-time subscriber dispatch (a reactor turn): delegate the subscriber value with the minted

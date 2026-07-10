@@ -20,7 +20,8 @@
 // primitive layer's monotonic taint rule marks the whole result private whenever any input part is.
 
 import { createAgentName, type Json } from "@katari-lang/types";
-import { type BlobId, toScopeId, toSnapshotId } from "../ids.js";
+import { type BlobId, type ProjectId, toScopeId, toSnapshotId } from "../ids.js";
+import type { BlobStore } from "../value/blob-store.js";
 import {
   AGENT_KEY,
   CLOSURE_KEY,
@@ -63,6 +64,21 @@ export const JSON_OBJECT = "prelude.json.json_object";
 
 /** Reads a string value's content: inline directly, a semantic-string blob through the store. */
 export type StringReader = (value: Value) => Promise<string>;
+
+/** The one shared `StringReader` implementation over a blob store: an inline string reads directly,
+ *  a semantic-string blob decodes from its stored bytes. Both the prim layer and the reactors that
+ *  lower `json` trees (the mcp reactor's direct call) build their readers here, so the two paths can
+ *  never diverge on what "read a string" means. */
+export function blobStoreStringReader(projectId: ProjectId, blobs: BlobStore): StringReader {
+  return async (value: Value): Promise<string> => {
+    if (value.kind === "string") return value.value;
+    if (value.kind === "ref" && value.semanticKind === "string") {
+      const bytes = await blobs.get(projectId, value.blobId);
+      return new TextDecoder().decode(bytes);
+    }
+    throw new Error(`expected a string, got ${value.kind}`);
+  };
+}
 
 // ─── `json` tree constructors ─────────────────────────────────────────────────────────────────────
 

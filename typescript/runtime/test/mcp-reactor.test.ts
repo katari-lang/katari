@@ -1,10 +1,12 @@
 // End-to-end tests for the built-in `mcp` reactor, driven through the whole ProjectActor (no real MCP
-// server — a controlled transport). Two call shapes are covered: `prelude.mcp.tools` (the listing —
+// server — a controlled transport). Three call shapes are covered: `prelude.mcp.tools` (the listing —
 // the reactor MINTS one agent value per listed tool, carrying the server descriptor with its privacy
-// markers intact) and a minted tool's call (an external delegate straight to the reactor: the caller's
-// args verbatim, the tool's descriptor riding its own wire field). Failures are typed
-// `throw[mcp.server_error]`; recovery is at-most-once (an interrupted call fails typed — a katari
-// retry reconnects through the transport's descriptor cache).
+// markers intact), a minted tool's call (an external delegate straight to the reactor: the caller's
+// args verbatim, the tool's descriptor riding its own wire field), and `prelude.mcp.call` (the static
+// direct call: `{url, auth, tool, arguments}` all in the argument, the `arguments` json TREE lowered
+// to the literal document for the transport and the reply lifted literally back into a tree). Failures
+// are typed `throw[mcp.server_error]`; recovery is at-most-once (an interrupted call fails typed — a
+// katari retry reconnects through the transport's descriptor cache).
 
 import {
   createAgentName,
@@ -329,5 +331,246 @@ describe("mcp reactor", () => {
     await waitUntil(() => (persistence.peekRun(run)?.state === "error" ? true : undefined));
     expect(persistence.peekRun(run)?.errorMessage).toContain("interrupted by a runtime restart");
     expect(second.dispatched).toHaveLength(0);
+  });
+});
+
+// agent main() {
+//   let arguments = json.json_object(entries = { x = json.json_integer(value = 19),
+//                                                note = json.json_string(value = "hi") })
+//   return mcp.call(url = "https://mcp.example.test/mcp",
+//                   auth = mcp.headers(values = {}), tool = "add", arguments = arguments)
+// }
+const CALL_IR: IRModule = {
+  metadata: { schemaVersion: 1 },
+  blocks: {
+    0: {
+      block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    1: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "loadLiteral",
+            output: 11,
+            value: { kind: "string", value: "https://mcp.example.test/mcp" },
+          },
+          { kind: "makeRecord", entries: [], output: 12 },
+          { kind: "makeRecord", entries: [["values", 12]], output: 13 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 13,
+            output: 14,
+          },
+          { kind: "loadLiteral", output: 15, value: { kind: "integer", value: 19 } },
+          { kind: "makeRecord", entries: [["value", 15]], output: 16 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.json.json_integer") },
+            argument: 16,
+            output: 17,
+          },
+          { kind: "loadLiteral", output: 18, value: { kind: "string", value: "hi" } },
+          { kind: "makeRecord", entries: [["value", 18]], output: 19 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.json.json_string") },
+            argument: 19,
+            output: 20,
+          },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["x", 17],
+              ["note", 20],
+            ],
+            output: 21,
+          },
+          { kind: "makeRecord", entries: [["entries", 21]], output: 22 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.json.json_object") },
+            argument: 22,
+            output: 23,
+          },
+          { kind: "loadLiteral", output: 24, value: { kind: "string", value: "add" } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 11],
+              ["auth", 14],
+              ["tool", 24],
+              ["arguments", 23],
+            ],
+            output: 25,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.call") },
+            argument: 25,
+            output: 26,
+          },
+          { kind: "exit", target: 0, value: 26 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    },
+    2: {
+      block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    3: {
+      block: { kind: "external", key: "prelude.mcp.call", input: 30, reactor: "mcp" },
+      parameters: { parameter: 30 },
+    },
+    4: {
+      block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    5: {
+      block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
+      parameters: { parameter: 50 },
+    },
+    6: {
+      block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    7: {
+      block: { kind: "construct", name: createAgentName("prelude.json.json_integer"), input: 70 },
+      parameters: { parameter: 70 },
+    },
+    8: {
+      block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    9: {
+      block: { kind: "construct", name: createAgentName("prelude.json.json_string"), input: 90 },
+      parameters: { parameter: 90 },
+    },
+    20: {
+      block: { kind: "agent", body: 21, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    21: {
+      block: { kind: "construct", name: createAgentName("prelude.json.json_object"), input: 210 },
+      parameters: { parameter: 210 },
+    },
+  },
+  entries: {
+    [createAgentName("main")]: 0,
+    [createAgentName("prelude.mcp.call")]: 2,
+    [createAgentName("prelude.mcp.headers")]: 4,
+    [createAgentName("prelude.json.json_integer")]: 6,
+    [createAgentName("prelude.json.json_string")]: 8,
+    [createAgentName("prelude.json.json_object")]: 20,
+  },
+  names: {},
+};
+
+function makeCallActor(mcp: McpTransport): ProjectActor {
+  const registry = new SnapshotRegistry();
+  for (const name of Object.keys(CALL_IR.entries)) {
+    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), CALL_IR);
+  }
+  return new ProjectActor({
+    projectId: PROJECT,
+    ir: registry,
+    prims: new PrimRegistry(),
+    blobs: new InMemoryBlobStore(),
+    external: new StubFfiTransport(),
+    http: new StubHttpTransport(),
+    mcp,
+    persistence: new InMemoryPersistence(),
+  });
+}
+
+/** The `json` tree Value a scalar / object test asserts against — mirrors `engine/json-value.ts`. */
+function jsonTree(ctor: string, fields: Record<string, Value>): Value {
+  return { kind: "record", ctor: createAgentName(ctor), fields };
+}
+const treeString = (value: string): Value =>
+  jsonTree("prelude.json.json_string", { value: { kind: "string", value } });
+const treeInteger = (value: number): Value =>
+  jsonTree("prelude.json.json_integer", { value: { kind: "integer", value } });
+const treeObject = (entries: Record<string, Value>): Value =>
+  jsonTree("prelude.json.json_object", { entries: { kind: "record", fields: entries } });
+const treeArray = (elements: Value[]): Value =>
+  jsonTree("prelude.json.json_array", { items: { kind: "array", elements } });
+
+describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
+  test("lowers the arguments TREE to the literal document and ships the same callTool operation", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeCallActor(transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    if (call.kind !== "callTool") throw new Error("expected a callTool dispatch");
+    expect(call.tool).toBe("add");
+    // The wire-form asymmetry contract: the transport receives the LITERAL document the tree denotes
+    // — no `$constructor` tagging anywhere (that would be the value wire form, which a server does
+    // not speak).
+    expect(call.argument).toEqual({ x: 19, note: "hi" });
+    expect(call.descriptor).toEqual({
+      url: "https://mcp.example.test/mcp",
+      auth: { $constructor: "prelude.mcp.headers", value: { values: {} } },
+    });
+
+    // A structured reply lifts LITERALLY into the `json` tree the caller receives.
+    transport.feed({
+      delegation: call.delegation,
+      outcome: { kind: "result", value: { sum: 42 } },
+    });
+    await expect(result).resolves.toEqual(treeObject({ sum: treeInteger(42) }));
+  });
+
+  test("a plain-text reply becomes a json_string tree", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeCallActor(transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "just text" } });
+    await expect(result).resolves.toEqual(treeString("just text"));
+  });
+
+  test("a blob-bearing reply keeps the `$ref` handle as a LITERAL object inside the tree", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeCallActor(transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({
+      delegation: call.delegation,
+      outcome: {
+        kind: "result",
+        value: { text: "rendered", files: [{ $ref: "blob-mcp-image", semanticKind: "file" }] },
+      },
+    });
+    // The handle is NOT lifted into a `file` value here (that is `json.decode`'s job, against a
+    // `file`-typed shape); it must survive as the literal `$ref` object inside the tree.
+    await expect(result).resolves.toEqual(
+      treeObject({
+        text: treeString("rendered"),
+        files: treeArray([
+          treeObject({ $ref: treeString("blob-mcp-image"), semanticKind: treeString("file") }),
+        ]),
+      }),
+    );
+  });
+
+  test("a transport error surfaces as the typed throw[mcp.server_error]", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeCallActor(transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({
+      delegation: call.delegation,
+      outcome: { kind: "error", message: "connection refused" },
+    });
+    await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*connection refused/);
   });
 });
