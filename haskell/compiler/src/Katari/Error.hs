@@ -122,6 +122,14 @@ renderTypeError typeError =
         "`continuation` is the argument `use` itself passes to its provider — a `use` application cannot also write one"
       MalformedUseProviderShape ->
         "a `use` provider must be a handler or an application — a handler literal, a (qualified) name, or a call; bind any other expression first (`let p = ...` then `use p`, or apply it: `use expression(...)`)"
+      MalformedUseHoleArgument ->
+        "a `use` provider is applied exactly once, so its application cannot leave a `_` hole; bind the partial application first (`let p = f(x = _, ...)` then `use p`)"
+    TypeErrorUnknownHoleLabel info ->
+      "`"
+        <> info.label
+        <> " = _` does not name a parameter of the callee; its parameters are ["
+        <> Text.intercalate ", " info.parameters
+        <> "]"
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -167,6 +175,10 @@ data TypeError where
   -- specific violation. Distinct from a malformed /type/ (K3011): the type expression is fine, the
   -- @use@ construct itself is misused.
   TypeErrorMalformedUse :: MalformedUseErrorInfo -> TypeError
+  -- | A partial application's @label = _@ hole names no parameter of the callee. Distinct from a
+  -- missing-argument subtype failure (K3001): the hole is extra, not absent, so the residual function
+  -- could never receive it.
+  TypeErrorUnknownHoleLabel :: UnknownHoleLabelErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -187,6 +199,7 @@ typeErrorCode = \case
   TypeErrorWrongReferenceKind _ -> "K3017"
   TypeErrorUnknownReactor _ -> "K3018"
   TypeErrorMalformedUse _ -> "K3019"
+  TypeErrorUnknownHoleLabel _ -> "K3020"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -208,6 +221,7 @@ typeErrorSeverity = \case
   TypeErrorWrongReferenceKind _ -> SeverityError
   TypeErrorUnknownReactor _ -> SeverityError
   TypeErrorMalformedUse _ -> SeverityError
+  TypeErrorUnknownHoleLabel _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -324,10 +338,21 @@ data MalformedUseReason
   | -- | The provider expression has no application reading (it is not a handler literal, a name, an
     -- instantiation, or a call), so admitting it would make @use@'s meaning depend on provider syntax.
     MalformedUseProviderShape
+  | -- | The provider application leaves a @_@ hole. @use@ applies its provider exactly once (the
+    -- continuation is that application's argument), so a partial application has no @use@ reading.
+    MalformedUseHoleArgument
   deriving (Eq, Ord, Show)
 
 newtype MalformedUseErrorInfo = MalformedUseErrorInfo
   { reason :: MalformedUseReason
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @label@ is the hole's label as written; @parameters@ are the callee's declared parameter labels
+-- (so the message can point at what the user probably meant).
+data UnknownHoleLabelErrorInfo = UnknownHoleLabelErrorInfo
+  { label :: Text,
+    parameters :: List Text
   }
   deriving (Eq, Ord, Show)
 

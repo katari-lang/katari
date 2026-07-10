@@ -85,6 +85,13 @@ spec = do
       codesFor (phantomDecl <> "agent run() -> integer { phantom(value = 1) }") `shouldContain` ["K3016"]
     it "a bare (uncalled) generic reference is still rejected (K3015)" $
       codesFor (identityDecl <> "agent run() -> integer { let f = identity\n1 }") `shouldContain` ["K3015"]
+    -- A partial application infers only from its SUPPLIED arguments: a `_` hole constrains nothing,
+    -- so a parameter mentioned solely in holed positions is un-inferrable (explicit `identity[T]` is
+    -- the escape hatch), rather than silently solving to `never` off the closed argument object.
+    it "reports a parameter determined only by `_` holes in a partial application (K3016)" $
+      codesFor (identityDecl <> "agent run() -> integer { let f = identity(value = _)\n1 }") `shouldContain` ["K3016"]
+    it "accepts the explicit escape hatch `identity[integer](value = _)`" $
+      codesFor (identityDecl <> "agent run() -> integer { let f = identity[integer](value = _)\nf(value = 1) }") `shouldBe` []
 
   describe "handler inference (a handler is a generic value over R / E, applied at use)" $ do
     it "a bare handler (no application) is an unapplied generic value (K3015)" $

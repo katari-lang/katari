@@ -550,6 +550,12 @@ thenClauseFacts moduleName clause =
 -- Expressions
 ---------------------------------------------------------------------------------------------------
 
+-- | A hole contributes no facts (it is a marker, not an expression); an expression payload recurses.
+callArgumentFacts :: ModuleName -> CallArgument Typed -> ModuleFacts
+callArgumentFacts moduleName argument = case argument.value of
+  ArgumentHole _ -> mempty
+  ArgumentExpression expression -> expressionFacts moduleName expression
+
 expressionFacts :: ModuleName -> Expression Typed -> ModuleFacts
 expressionFacts moduleName expression = case expression of
   ExpressionLiteral literal -> typedSpanFacts literal.sourceSpan literal.typeOf
@@ -564,7 +570,7 @@ expressionFacts moduleName expression = case expression of
       <> typedSpanFacts record.sourceSpan record.typeOf
   ExpressionCall call ->
     expressionFacts moduleName call.callee
-      <> foldMap (\argument -> expressionFacts moduleName argument.value) call.arguments
+      <> foldMap (callArgumentFacts moduleName) call.arguments
       <> typedSpanFacts call.sourceSpan call.typeOf
   ExpressionBinaryOperator operator ->
     expressionFacts moduleName operator.left

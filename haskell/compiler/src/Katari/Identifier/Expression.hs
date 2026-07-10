@@ -93,7 +93,10 @@ resolveRecordEntry entry = do
 
 resolveCallArgument :: CallArgument Parsed -> Identifier (CallArgument Identified)
 resolveCallArgument argument = do
-  value <- resolveExpression argument.value
+  -- A hole carries no names, so it passes through untouched; only an expression payload resolves.
+  value <- case argument.value of
+    ArgumentHole sourceSpan -> pure (ArgumentHole sourceSpan)
+    ArgumentExpression expression -> ArgumentExpression <$> resolveExpression expression
   pure CallArgument {name = argument.name, labelReference = retagReference argument.labelReference, value = value, sourceSpan = argument.sourceSpan}
 
 resolveTemplateElement :: TemplateElement Parsed -> Identifier (TemplateElement Identified)
@@ -208,7 +211,7 @@ primitiveCall sourceSpan member arguments =
           }
     -- Synthetic labels carry no navigable source (label resolution is @()@), so the reference is built directly.
     buildArgument (label, value) =
-      CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = value, sourceSpan = sourceSpan}
+      CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = ArgumentExpression value, sourceSpan = sourceSpan}
 
 ---------------------------------------------------------------------------------------------------
 -- match / for / handler

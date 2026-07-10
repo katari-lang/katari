@@ -142,7 +142,9 @@ referencesInExpression = \case
   ExpressionQualifiedReference expression -> referenceOf expression.variableReference
 
 referencesInCallArgument :: CallArgument Identified -> Set QualifiedName
-referencesInCallArgument argument = referencesInExpression argument.value
+referencesInCallArgument argument = case argument.value of
+  ArgumentHole _ -> Set.empty
+  ArgumentExpression expression -> referencesInExpression expression
 
 referencesInCaseArm :: CaseArm Identified -> Set QualifiedName
 referencesInCaseArm arm = referencesInBlock arm.body

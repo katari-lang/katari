@@ -48,7 +48,7 @@ import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (.
 import Katari.Diagnostics (Diagnostics)
 import Katari.Lowering.Drop (insertDropOperations)
 import Katari.Panic (panic)
-import Katari.Primitive (panicRequestName, preludeModuleName)
+import Katari.Primitive (panicRequestName, preludeModuleName, recordMergeName)
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
@@ -723,9 +723,12 @@ buildElementBlock element = do
 -- | A call delegates to the callee with the single argument record built from its labelled arguments.
 -- The call's inferred generic instantiation (recorded by the checker; an explicit @callee[T]@ rides on
 -- the callee value via 'lowerTypeApplication' instead) is stamped onto the delegate as runtime schemas,
--- exactly like an 'OperationApplyGenerics' would carry them.
+-- exactly like an 'OperationApplyGenerics' would carry them. A call with @_@ holes is a partial
+-- application: it produces a closure instead of delegating ('lowerPartialApplication').
 lowerCall :: AST.CallExpression AST.Typed -> Lower VariableId
-lowerCall callExpression = delegateCall callExpression []
+lowerCall callExpression = case AST.callArgumentHoles callExpression.arguments of
+  [] -> delegateCall callExpression []
+  _holes -> lowerPartialApplication callExpression
 
 -- | Delegate a call expression's callee with the argument record built from its labelled arguments
 -- joined with any synthetic extra entries — the @use@ statement adds its continuation closure this
@@ -750,10 +753,74 @@ calleeReference callee = case topLevelCalleeName callee of
 
 buildArgumentRecord :: List (AST.CallArgument AST.Typed) -> List (Text, VariableId) -> Lower VariableId
 buildArgumentRecord arguments extraEntries = do
-  entries <- mapM (\argument -> do value <- lowerExpression argument.value; pure (argument.name, value)) arguments
+  entries <- mapM loweredEntry arguments
   output <- freshVariableId
   emit (OperationMakeRecord MakeRecordOperation {entries = entries <> extraEntries, output = output})
   pure output
+  where
+    loweredEntry argument = case argument.value of
+      AST.ArgumentExpression expression -> do
+        value <- lowerExpression expression
+        pure (argument.name, value)
+      -- A holed call lowers through 'lowerPartialApplication' and a @use@ provider rejects holes at
+      -- check time; the pipeline gates on a clean check, so a hole here is a compiler bug.
+      AST.ArgumentHole _ -> panic "lowering: a `_` hole reached a full call's argument record"
+
+-- | A partial application @f(x = _, y = e)@ produces a CLOSURE over the enclosing scope, not a
+-- delegate. Now, in the enclosing scope: the callee is resolved once (a named callee stays a name; a
+-- value callee lowers to a captured variable), the supplied argument expressions are evaluated in
+-- written order — the same callee-then-arguments order a full call uses — and the supplied fields are
+-- built into ONE captured record. Later, when the residual is called: its body merges its own
+-- incoming argument record (the hole-labelled parameters) with that captured record via
+-- @prelude.record.merge@ (captured values win a shared key) and delegates to the callee. Merging —
+-- rather than rebuilding the record field by field — preserves the ABSENCE of an omitted optional
+-- hole, so the callee's runtime defaults still fill it. The call site's generic instantiation is
+-- stamped on the inner delegate exactly as on a full call's; an explicit @f[T]@ instead rides the
+-- captured callee value ('lowerTypeApplication').
+lowerPartialApplication :: AST.CallExpression AST.Typed -> Lower VariableId
+lowerPartialApplication callExpression = do
+  target <- calleeReference callExpression.callee
+  suppliedEntries <- concat <$> mapM suppliedEntry callExpression.arguments
+  suppliedRecord <- freshVariableId
+  emit (OperationMakeRecord MakeRecordOperation {entries = suppliedEntries, output = suppliedRecord})
+  context <- asks (.context)
+  let generics =
+        mapMaybe
+          (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
+          (Map.toList callExpression.instantiation)
+  argumentVariable <- freshVariableId
+  (resultVariable, operations) <- withFreshOperations $ do
+    mergeArgument <- freshVariableId
+    emit (OperationMakeRecord MakeRecordOperation {entries = [("left", argumentVariable), ("right", suppliedRecord)], output = mergeArgument})
+    mergedArgument <- freshVariableId
+    emit (OperationDelegate DelegateOperation {target = CalleeName recordMergeName, argument = mergeArgument, output = Just mergedArgument, generics = mempty})
+    output <- freshVariableId
+    emit (OperationDelegate DelegateOperation {target = target, argument = mergedArgument, output = Just output, generics = generics})
+    pure output
+  bodyBlock <- freshBlockId
+  recordBlock
+    bodyBlock
+    (BlockSequence Sequence {operations = operations, result = Just resultVariable})
+    (Map.singleton "parameter" argumentVariable)
+    (Just "partial.body")
+  agentBlock <- freshBlockId
+  -- The residual's schema comes from the checker's stamped type — the callee's parameter object
+  -- restricted to the hole labels — so @get_metadata@ and the delegate boundary see exactly the
+  -- parameters that are still open (an optional hole stays optional).
+  recordBlock
+    agentBlock
+    (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context mempty callExpression.typeOf, description = "", defaults = mempty})
+    mempty
+    (Just "partial")
+  closureVariable <- freshVariableId
+  emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = agentBlock})
+  pure closureVariable
+  where
+    suppliedEntry argument = case argument.value of
+      AST.ArgumentExpression expression -> do
+        value <- lowerExpression expression
+        pure [(argument.name, value)]
+      AST.ArgumentHole _ -> pure []
 
 -- | @callee[args]@: attach the generic substitution to the callee value (for @get_metadata@ schema
 -- specialisation). A purely-attribute instantiation has no runtime schema, so it is a pass-through.

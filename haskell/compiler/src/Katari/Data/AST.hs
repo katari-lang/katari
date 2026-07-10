@@ -965,16 +965,37 @@ data CallExpression (phase :: Phase) = CallExpression
 instance HasSourceSpan (CallExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | @label = value@ in a call argument list
+-- | @label = value@ / @label = _@ in a call argument list
 data CallArgument (phase :: Phase) = CallArgument
   { name :: Text,
     labelReference :: Reference phase LabelReference,
-    value :: Expression phase,
+    value :: CallArgumentValue phase,
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (CallArgument phase) where
   sourceSpanOf argument = argument.sourceSpan
+
+-- | A call argument's payload: an ordinary expression, or a lone @_@ hole marking the parameter a
+-- partial application leaves open (@f(x = _, y = e)@ evaluates @e@ now and yields the residual
+-- @agent (x: X) -> R@). A hole is deliberately NOT an 'Expression' — it exists only in argument
+-- position, so every expression walker stays hole-free by construction.
+data CallArgumentValue (phase :: Phase) where
+  ArgumentHole :: SourceSpan -> CallArgumentValue phase
+  ArgumentExpression :: Expression phase -> CallArgumentValue phase
+
+instance HasSourceSpan (CallArgumentValue phase) where
+  sourceSpanOf = \case
+    ArgumentHole sourceSpan -> sourceSpan
+    ArgumentExpression expression -> sourceSpanOf expression
+
+-- | The @label = _@ holes of a call's arguments, in written order. Empty for an ordinary call; any
+-- entry makes the call a partial application. Shared by the checker (which types the residual
+-- function) and lowering (which emits a closure instead of a delegate), so the two dispatch on the
+-- same notion of "has holes".
+callArgumentHoles :: List (CallArgument phase) -> List (Text, SourceSpan)
+callArgumentHoles arguments =
+  [(argument.name, holeSpan) | argument <- arguments, ArgumentHole holeSpan <- [argument.value]]
 
 data BinaryOperator
   = BinaryOperatorAdd
@@ -1691,6 +1712,10 @@ deriving stock instance (ShowPhase phase) => Show (CallExpression phase)
 deriving stock instance (EqPhase phase) => Eq (CallArgument phase)
 
 deriving stock instance (ShowPhase phase) => Show (CallArgument phase)
+
+deriving stock instance (EqPhase phase) => Eq (CallArgumentValue phase)
+
+deriving stock instance (ShowPhase phase) => Show (CallArgumentValue phase)
 
 deriving stock instance (EqPhase phase) => Eq (BinaryOperatorExpression phase)
 

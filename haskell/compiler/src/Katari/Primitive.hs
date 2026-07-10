@@ -29,6 +29,13 @@ preludeModuleName = ModuleName "prelude"
 panicRequestName :: QualifiedName
 panicRequestName = QualifiedName {moduleName = preludeModuleName, name = "panic"}
 
+-- | The wired-in @prelude.record.merge@ primitive. Lowering synthesizes a call to it inside a
+-- partial application's residual body: merging the residual's incoming argument record with the
+-- captured supplied fields preserves the ABSENCE of an omitted optional parameter (a field-by-field
+-- rebuild would turn absent into @null@ and defeat the callee's runtime defaults).
+recordMergeName :: QualifiedName
+recordMergeName = QualifiedName {moduleName = ModuleName "prelude.record", name = "merge"}
+
 -- | The prelude function a binary operator desugars to: @a \<op\> b@ becomes
 -- @prelude.\<name\>(left = a, right = b)@. Every name here must be exported by the @prelude@
 -- module (enforced by "Katari.StdlibSpec").

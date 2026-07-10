@@ -41,6 +41,18 @@ agent squares(count: integer) -> array[integer] {
   }
 }
 
+@"Scale a value by a factor — the two-parameter agent `main` partially applies below."
+agent scale(factor: number, value: number) -> number {
+  factor * value
+}
+
+@"Partial application: `scale(factor = 2.0, value = _)` fixes the factor NOW and yields a residual
+`agent (value: number) -> number`; each later call supplies only the holes."
+agent doubles(values: array[number]) -> array[number] {
+  let double = scale(factor = 2.0, value = _)
+  for (let value in values) { next double(value = value) }
+}
+
 @"Run the whole tour and render one summary line."
 agent main() -> string {
   // A stateful inline handler provides `tick` to the rest of the block.
@@ -54,6 +66,7 @@ agent main() -> string {
     f"areas=${json.to_text(value = areas)}",
     f"ticks=${json.to_text(value = count_three())}",
     f"sum(squares(4))=${string.to_string(value = total)}",
+    f"doubles=${json.to_text(value = doubles(values = [1.5, 21.0]))}",
     f"shout=${string.to_upper(value = "hello, katari")}",
   ]
   string.join(parts = parts, separator = " | ")

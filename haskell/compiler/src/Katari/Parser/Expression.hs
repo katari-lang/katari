@@ -136,7 +136,7 @@ callArgument :: Parser (CallArgument Parsed)
 callArgument = do
   name <- identifier
   assignEquals
-  value <- expression
+  value <- callArgumentValue
   pure
     CallArgument
       { name = name.value,
@@ -144,6 +144,19 @@ callArgument = do
         value = value,
         sourceSpan = mergeSpans name.sourceSpan (sourceSpanOf value)
       }
+
+-- | The payload of a call argument: a lone @_@ hole (partial application) or an ordinary
+-- expression. The hole is recognized ONLY here — @_@ anywhere else in expression position still
+-- parses as a variable named @_@ (and fails identification), so no other position changes meaning.
+callArgumentValue :: Parser (CallArgumentValue Parsed)
+callArgumentValue = argumentHole <|> (ArgumentExpression <$> expression)
+
+-- | A lone @_@, with the same not-followed-by discipline as the pattern wildcard so an identifier
+-- that merely starts with an underscore (@_x@) stays an ordinary expression.
+argumentHole :: Parser (CallArgumentValue Parsed)
+argumentHole = do
+  holeSpan <- snd <$> lexeme (try (char '_' <* notFollowedBy identifierContinue))
+  pure (ArgumentHole holeSpan)
 
 genericApplicationPostfix :: Parser (ExpressionP -> ExpressionP)
 genericApplicationPostfix = do

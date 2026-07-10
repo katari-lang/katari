@@ -5,6 +5,7 @@ import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
+import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.AST
 import Katari.Data.Environment (GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), ValueEnvironment, monoScheme)
 import Katari.Data.GenericKind (GenericKind (..))
@@ -15,7 +16,7 @@ import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (Diagnostics)
-import Katari.Error (CompilerError (..), typeErrorCode)
+import Katari.Error (CompilerError (..), compilerErrorCode, typeErrorCode)
 import Katari.Typechecker.Check
 import Katari.Typechecker.Context
   ( Checker,
@@ -907,6 +908,60 @@ spec = do
       let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "grpc"))
        in hasErrorCode "K3018" diagnostics `shouldBe` True
 
+  -- The residual-type assertions run end to end (through 'Katari.Compile'): the enclosing agent's
+  -- return annotation states the expected residual type, so a clean compile IS the type assertion.
+  describe "partial application (`_` holes)" $ do
+    let scaleDecl = "agent scale(factor: number, value: number) -> number { factor * value }\n"
+        tickDecl = "request tick() -> integer\nagent effectful(label: string, count: integer) -> string with tick { label }\n"
+        pickDecl = "agent pick[T](value: T, fallback: T) -> T { value }\n"
+        defaultedDecl = "agent defaulted(x: integer, y: integer ?= 3) -> integer { x + y }\n"
+
+    it "types the residual as an agent over exactly the holed parameter" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = 2.0, value = _) }") `shouldBe` []
+
+    it "rejects a residual annotation whose holed parameter has a different type (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: string) -> number { scale(factor = 2.0, value = _) }") `shouldContain` ["K3001"]
+
+    it "moves the callee's effect onto the residual: the partial application itself is pure" $
+      compiledCodes (tickDecl <> "agent partial() -> agent (count: integer) -> string with tick with pure { effectful(label = \"x\", count = _) }") `shouldBe` []
+
+    it "rejects a residual annotation that drops the callee's effect (K3001)" $
+      compiledCodes (tickDecl <> "agent partial() -> agent (count: integer) -> string { effectful(label = \"x\", count = _) }") `shouldContain` ["K3001"]
+
+    it "keeps a holed defaulted parameter optional on the residual" $
+      compiledCodes (defaultedDecl <> "agent partial() -> agent (x: integer, y ?: integer) -> integer { defaulted(x = _, y = _) }") `shouldBe` []
+
+    it "rejects a hole label that names no callee parameter (K3020)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = 2.0, wrong = _) }") `shouldContain` ["K3020"]
+
+    it "rejects a required parameter that is neither supplied nor holed (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(value = _) }") `shouldContain` ["K3001"]
+
+    it "checks a supplied argument against its parameter as a full call would (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = \"x\", value = _) }") `shouldContain` ["K3001"]
+
+    it "infers a generic from the supplied arguments" $
+      compiledCodes (pickDecl <> "agent partial() -> agent (value: integer) -> integer { pick(value = _, fallback = 3) }") `shouldBe` []
+
+    it "reports a generic determined only by holed parameters (K3016)" $
+      compiledCodes (pickDecl <> "agent partial() -> agent (value: integer, fallback: integer) -> integer { pick(value = _, fallback = _) }") `shouldContain` ["K3016"]
+
+    it "composes with explicit instantiation: `pick[integer](value = _, fallback = _)`" $
+      compiledCodes (pickDecl <> "agent partial() -> agent (value: integer, fallback: integer) -> integer { pick[integer](value = _, fallback = _) }") `shouldBe` []
+
+    it "partially applies an agent value (a `let`-bound callee)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { let f = scale\nf(factor = 2.0, value = _) }") `shouldBe` []
+
+    it "the residual is callable like any agent value" $
+      compiledCodes (scaleDecl <> "agent run() -> number { let double = scale(factor = 2.0, value = _)\ndouble(value = 21.0) }") `shouldBe` []
+
+    it "rejects a hole in a `use` provider application (K3019)" $
+      compiledCodes
+        ( "agent provider(continuation: agent (value: null) -> integer, extra: integer) -> integer { continuation(value = null) }\n"
+            <> "agent run() -> integer { let x : integer = use provider(extra = _)\nx }"
+        )
+        `shouldContain` ["K3019"]
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------
@@ -942,6 +997,14 @@ hasErrorCode code diagnostics =
     typeErrorCode' = \case
       CompilerErrorType typeError -> Just (typeErrorCode typeError)
       _ -> Nothing
+
+-- | The error codes of a whole single-module @test@ program compiled through the full pipeline
+-- (stdlib spliced in). Used where the assertion needs surface syntax the direct-AST fixtures cannot
+-- spell (partial-application holes); @== []@ asserts a clean compile.
+compiledCodes :: Text -> List Text
+compiledCodes source =
+  let result = compile CompileInput {sources = Map.singleton (ModuleName "test") source}
+   in [compilerErrorCode located.value | located <- toList result.diagnostics]
 
 ------------------------------------------------------------------------------------------------
 -- Type fixtures
@@ -1100,7 +1163,7 @@ callExpression callee arguments =
           [ CallArgument
               { name = name,
                 labelReference = Reference {sourceSpan = testSpan, resolution = ()},
-                value = value,
+                value = ArgumentExpression value,
                 sourceSpan = testSpan
               }
             | (name, value) <- arguments

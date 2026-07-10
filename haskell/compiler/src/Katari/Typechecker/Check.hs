@@ -38,6 +38,7 @@ import Katari.Error
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     TypeError (..),
+    UnknownHoleLabelErrorInfo (..),
     UnknownReactorErrorInfo (..),
     WrongReferenceKindErrorInfo (..),
   )
@@ -291,7 +292,21 @@ handleUseStatement useStmt = do
         reportType
           callExpression.sourceSpan
           (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseWrittenContinuation})
-      pure callExpression
+      -- A provider is applied exactly ONCE (the continuation is that application's argument), so a
+      -- `_` hole — a partial application — has no `use` reading. Reject it, then strip the holes so
+      -- the provider is still typed as a full application (recovery).
+      case callArgumentHoles callExpression.arguments of
+        [] -> pure callExpression
+        ((_, holeSpan) : _) -> do
+          reportType holeSpan (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseHoleArgument})
+          pure
+            CallExpression
+              { callee = callExpression.callee,
+                arguments = [argument | argument <- callExpression.arguments, ArgumentExpression _ <- [argument.value]],
+                instantiation = callExpression.instantiation,
+                sourceSpan = callExpression.sourceSpan,
+                typeOf = callExpression.typeOf
+              }
     ExpressionHandler _ -> pure (zeroArgumentApplication useStmt.provider)
     ExpressionVariable _ -> pure (zeroArgumentApplication useStmt.provider)
     ExpressionQualifiedReference _ -> pure (zeroArgumentApplication useStmt.provider)
@@ -640,14 +655,25 @@ synthCallExpression = synthCallExpressionWith []
 -- | As 'synthCallExpression', with extra synthetic (label, type) fields joined into the argument
 -- object — the @use@ pipeline adds its @continuation@ this way, so a provider is applied to ONE
 -- closed object carrying both the written arguments and the continuation.
+--
+-- A call whose arguments contain @label = _@ holes is a PARTIAL application: the supplied arguments
+-- are still typed (and evaluated) here, but the call is not performed — the expression's type is the
+-- residual function over exactly the holed parameters ('synthPartialApplication').
 synthCallExpressionWith :: List (Text, NormalizedType) -> CallExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthCallExpressionWith extraFields expression = do
   -- Take the callee's full 'Scheme' (not a bare-instantiated type): a generic callee keeps its
   -- quantified parameters here so they can be inferred from the arguments below, rather than being
   -- rejected as an unapplied generic.
   (typedCallee, scheme) <- synthApplicationCallee expression.callee
-  (typedArgs, argumentObject, argumentAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments extraFields
-  (effectiveReturn, instantiation) <- applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
+  (typedArgs, suppliedFields, argumentAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments extraFields
+  (effectiveReturn, instantiation) <- case callArgumentHoles expression.arguments of
+    [] -> do
+      -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
+      -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
+      -- parameter match (against a required parameter it still fails the optional<:required check).
+      let argumentObject = namedObjectTypeWithRest bottomType suppliedFields
+      applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
+    holes -> synthPartialApplication expression.sourceSpan scheme holes suppliedFields argumentAttribute
   typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
     ExpressionCall
       CallExpression
@@ -669,21 +695,13 @@ synthCallExpressionWith extraFields expression = do
 -- -> inferred argument; empty for a non-generic callee), which the call node records so lowering can
 -- stamp the runtime schemas onto the delegate.
 applyCallee :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
-applyCallee sourceSpan scheme argumentObject argumentAttribute =
-  if null scheme.genericParameters.parameterNames
-    then (,mempty) <$> applyMonomorphicCallee sourceSpan scheme.valueType argumentObject argumentAttribute
-    else applyGenericValue sourceSpan scheme argumentObject argumentAttribute
-
--- | Apply a non-generic callee: it must already be a callable agent (no inference). A non-callable
--- callee is reported and degrades to bottom.
-applyMonomorphicCallee :: SourceSpan -> NormalizedType -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
-applyMonomorphicCallee sourceSpan calleeType argumentObject argumentAttribute = do
-  maybeFunction <- extractFunction sourceSpan calleeType
-  case maybeFunction of
-    Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
-    Nothing -> do
-      reportExpectedShape sourceSpan "a callable agent" calleeType
-      pure bottomType
+applyCallee sourceSpan scheme argumentObject argumentAttribute = do
+  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme InferWholeParameter argumentObject
+  case resolved of
+    Just (functionAttribute, function) ->
+      (,instantiation) <$> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+    -- Already reported by 'resolveCalleeFunction'; degrade to bottom.
+    Nothing -> pure (bottomType, instantiation)
 
 -- | Raise a type's generics to their declared upper bounds before its shape is inspected, so a value
 -- typed as a bounded generic (@F extends agent(...)@, @S extends array[T]@) is usable at its bound.
@@ -777,37 +795,37 @@ extractFunction sourceSpan normalizedType = do
     Just (attribute, layer) | Just function <- layer.functionLayer -> Just (attribute, function)
     _ -> Nothing
 
--- | Type a call's written arguments into the single argument object, joined with any extra synthetic
--- (label, type) fields — the @use@ pipeline adds its @continuation@ this way, so the provider is
--- applied to ONE object carrying both the written arguments and the continuation.
+-- | Type a call's written (expression-valued) arguments into the supplied (label, type) field list,
+-- joined with any extra synthetic fields — the @use@ pipeline adds its @continuation@ this way, so
+-- the provider is applied to ONE object carrying both the written arguments and the continuation.
+-- A @_@ hole passes through to the typed argument list untouched and contributes no field; the
+-- caller decides whether the call is a full application (no holes) or a partial one.
 synthCallArgumentsWith ::
   SourceSpan ->
   List (CallArgument Identified) ->
   List (Text, NormalizedType) ->
-  Checker (List (CallArgument Typed), NormalizedType, NormalizedAttribute)
+  Checker (List (CallArgument Typed), List (Text, NormalizedType), NormalizedAttribute)
 synthCallArgumentsWith sourceSpan arguments extraFields = do
   entries <- traverse synthEntry arguments
-  let typedArguments = [typedArg | (typedArg, _, _) <- entries]
-      fields = [(name, normalizedType) | (_, name, normalizedType) <- entries] <> extraFields
-      -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
-      -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
-      -- parameter match (against a required parameter it still fails the optional<:required check).
-      object = namedObjectTypeWithRest bottomType fields
+  let typedArguments = [typedArg | (typedArg, _) <- entries]
+      fields = [field | (_, Just field) <- entries] <> extraFields
   liftAmount <-
     runNormalizer sourceSpan $
       foldr joinAttribute bottomAttribute <$> traverse (foldAttribute . snd) fields
-  pure (typedArguments, object, liftAmount)
+  pure (typedArguments, fields, liftAmount)
   where
-    synthEntry argument = do
-      (typedValue, normalizedType) <- synthExpression argument.value
-      let typedArg =
-            CallArgument
-              { name = argument.name,
-                labelReference = retagReference argument.labelReference,
-                value = typedValue,
-                sourceSpan = argument.sourceSpan
-              }
-      pure (typedArg, argument.name, normalizedType)
+    synthEntry argument = case argument.value of
+      ArgumentExpression expression -> do
+        (typedValue, normalizedType) <- synthExpression expression
+        pure (retagArgument argument (ArgumentExpression typedValue), Just (argument.name, normalizedType))
+      ArgumentHole holeSpan -> pure (retagArgument argument (ArgumentHole holeSpan), Nothing)
+    retagArgument argument value =
+      CallArgument
+        { name = argument.name,
+          labelReference = retagReference argument.labelReference,
+          value = value,
+          sourceSpan = argument.sourceSpan
+        }
 
 -- | Pure = no requests /and/ no escapes. Because a @return@ / @next@ / @break@ now contributes an escape
 -- effect, a control-flow branch that escapes is automatically impure here — the single rule that
@@ -911,39 +929,62 @@ instantiateToMetavars sourceSpan parameters = do
       metavar <- freshGenericId
       pure (parameterName, info, metavar)
 
--- | Apply a generic callee by inferring its type arguments from the argument object. Falls back to
--- 'bottomType' (after a diagnostic) when the scheme is not a callable agent or a type argument cannot
--- be inferred. Also yields the resolved instantiation (declared name -> inferred argument) — the same
--- record an explicit @callee[T]@ leaves on its 'TypeApplicationExpression' — so an inferred
--- instantiation reaches the IR (and thereby the runtime's schema validation) all the same.
-applyGenericValue :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
-applyGenericValue sourceSpan scheme argumentObject argumentAttribute = do
-  (substitution, registry) <- instantiateToMetavars sourceSpan scheme.genericParameters
-  openType <- runNormalizer sourceSpan (substituteType substitution scheme.valueType)
-  case openFunctionLayer openType of
-    Nothing -> do
-      reportExpectedShape sourceSpan "a callable agent" scheme.valueType
-      pure (bottomType, mempty)
-    Just openFunction -> do
-      -- Infer the type arguments from the argument against the open parameter, then substitute the
-      -- solution into the open scheme and dispose by applying it through the trusted 'applyAgent'.
-      solveResult <- inferGenericArguments sourceSpan registry argumentObject openFunction.argumentType
-      solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
-      -- The instantiation by declared parameter: the scheme opened each parameter to a metavariable
-      -- (`substitution`), and the solver bound the metavariables (`solveResult.substitution`) — their
-      -- composition is exactly what an explicit application would have written.
-      solvedByParameter <-
-        traverse
-          (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution)
-          substitution
-      instantiation <- instantiationOf sourceSpan scheme.genericParameters solvedByParameter
-      maybeFunction <- extractFunction sourceSpan solvedType
+-- | Resolve a callee scheme to the concrete function an application sees, paired with the resolved
+-- instantiation (declared parameter name -> argument; empty for a non-generic callee): a monomorphic
+-- callee is inspected directly; a generic one has its type arguments inferred from @argumentObject@
+-- (propose / solve / dispose), the solution substituted back — the same record an explicit
+-- @callee[T]@ leaves on its 'TypeApplicationExpression', so an inferred instantiation reaches the IR
+-- (and thereby the runtime's schema validation) all the same. Shared by a full application
+-- ('applyCallee') and a partial one ('synthPartialApplication'), so the two cannot drift on generic
+-- inference — a partial application infers from its SUPPLIED arguments only (holes constrain
+-- nothing; a parameter determined only by a holed argument is reported by the existing K3016, with
+-- explicit @f[T](x = _)@ as the escape hatch). A non-callable callee is reported and yields
+-- 'Nothing'.
+resolveCalleeFunction ::
+  SourceSpan ->
+  Scheme ->
+  InferenceParameterView ->
+  NormalizedType ->
+  Checker (Maybe (NormalizedAttribute, NormalizedFunction), Map Text SemanticGenericArgument)
+resolveCalleeFunction sourceSpan scheme view argumentObject =
+  if null scheme.genericParameters.parameterNames
+    then do
+      maybeFunction <- extractFunction sourceSpan scheme.valueType
       case maybeFunction of
-        Just (functionAttribute, function) ->
-          (,instantiation) <$> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+        Just resolved -> pure (Just resolved, mempty)
         Nothing -> do
-          reportExpectedShape sourceSpan "a callable agent" solvedType
-          pure (bottomType, mempty)
+          reportExpectedShape sourceSpan "a callable agent" scheme.valueType
+          pure (Nothing, mempty)
+    else do
+      (substitution, registry) <- instantiateToMetavars sourceSpan scheme.genericParameters
+      openType <- runNormalizer sourceSpan (substituteType substitution scheme.valueType)
+      case openFunctionLayer openType of
+        Nothing -> do
+          reportExpectedShape sourceSpan "a callable agent" scheme.valueType
+          pure (Nothing, mempty)
+        Just openFunction -> do
+          -- Infer the type arguments from the argument against the open parameter, then substitute
+          -- the solution into the open scheme; the caller disposes by using the concrete function.
+          let inferenceParameter = case view of
+                InferWholeParameter -> openFunction.argumentType
+                InferSuppliedLabels labels -> restrictObjectFields labels openFunction.argumentType
+          solveResult <- inferGenericArguments sourceSpan registry argumentObject inferenceParameter
+          solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
+          -- The instantiation by declared parameter: the scheme opened each parameter to a
+          -- metavariable (`substitution`), and the solver bound the metavariables
+          -- (`solveResult.substitution`) — their composition is exactly what an explicit application
+          -- would have written.
+          solvedByParameter <-
+            traverse
+              (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution)
+              substitution
+          instantiation <- instantiationOf sourceSpan scheme.genericParameters solvedByParameter
+          maybeFunction <- extractFunction sourceSpan solvedType
+          case maybeFunction of
+            Just resolved -> pure (Just resolved, instantiation)
+            Nothing -> do
+              reportExpectedShape sourceSpan "a callable agent" solvedType
+              pure (Nothing, mempty)
 
 -- | The propose / solve / dispose core of generic-argument inference, shared by a generic call
 -- ('applyGenericValue') and a request handler ('inferRequestHandlerSubstitution'). Given the
@@ -960,6 +1001,125 @@ inferGenericArguments sourceSpan registry argumentObject openParameterType = do
   reportUninferredGenerics sourceSpan registry solveResult.uninferred
   checkInferredBounds sourceSpan registry solveResult
   pure solveResult
+
+-- | How a call site's generic inference sees the callee's open parameter object. A full application
+-- matches the whole parameter (a missing required field then surfaces at the application's subtype
+-- check). A partial application matches only its SUPPLIED labels: the closed argument object's
+-- @never@ rest would otherwise align against every holed parameter and silently "infer" its generic
+-- to @never@ — restricting the view keeps such a generic genuinely unconstrained, so the existing
+-- K3016 reports it and @f[T](x = _)@ remains the escape hatch.
+data InferenceParameterView
+  = InferWholeParameter
+  | InferSuppliedLabels (Set.Set Text)
+
+-- | Restrict a parameter object type's named fields to @labels@; every other part of the type (other
+-- layers, the object's rest, the attribute) is kept. A non-object parameter is returned unchanged.
+restrictObjectFields :: Set.Set Text -> NormalizedType -> NormalizedType
+restrictObjectFields labels parameterType = case parameterType.baseType of
+  NormalizedBaseTypeLayered layer
+    | Just object <- layer.objectLayer ->
+        NormalizedType
+          { baseType =
+              NormalizedBaseTypeLayered
+                layer {objectLayer = Just NormalizedObject {fields = Map.restrictKeys object.fields labels, rest = object.rest}},
+            generics = parameterType.generics,
+            attribute = parameterType.attribute
+          }
+  _ -> parameterType
+
+------------------------------------------------------------------------------------------------
+-- Partial application (@f(x = _, y = e)@)
+------------------------------------------------------------------------------------------------
+
+-- | Type a partial application: resolve the callee's function exactly as a full call would (generic
+-- arguments inferred from the SUPPLIED fields), check the supplied arguments and the
+-- required-parameter completeness, and yield the RESIDUAL function type — the callee's parameter
+-- object restricted to the hole labels (each keeping its declared type and optionality), returning
+-- the callee's return type WITH the callee's effect. The partial application itself performs nothing
+-- (no effect is emitted, no world check runs); the residual carries the whole call, and the ordinary
+-- application rules police it when it is eventually called.
+synthPartialApplication ::
+  SourceSpan ->
+  Scheme ->
+  List (Text, SourceSpan) ->
+  List (Text, NormalizedType) ->
+  NormalizedAttribute ->
+  Checker (NormalizedType, Map Text SemanticGenericArgument)
+synthPartialApplication sourceSpan scheme holes suppliedFields suppliedAttribute = do
+  -- The supplied arguments alone drive generic inference; the object is closed, exactly as a full
+  -- call's, so the inference sees the same shapes it would on the eventual call.
+  let suppliedObject = namedObjectTypeWithRest bottomType suppliedFields
+      suppliedLabels = Set.fromList (fst <$> suppliedFields)
+  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme (InferSuppliedLabels suppliedLabels) suppliedObject
+  case resolved of
+    -- Already reported by 'resolveCalleeFunction'; degrade to bottom.
+    Nothing -> pure (bottomType, instantiation)
+    Just (functionAttribute, function) -> do
+      residual <- partialResidualType sourceSpan holes suppliedFields suppliedAttribute functionAttribute function
+      pure (residual, instantiation)
+
+-- | The residual function type of a partial application over the resolved callee function. Holes
+-- must name declared parameters (K3020 otherwise); the supplied fields plus each hole at exactly its
+-- declared type form ONE closed probe object subsumed under the callee's parameter object — the same
+-- closed-object machinery (and errors) a full call uses, so a wrong supplied type or a required
+-- parameter that is neither supplied nor holed reports as it would on the eventual call.
+partialResidualType ::
+  SourceSpan ->
+  List (Text, SourceSpan) ->
+  List (Text, NormalizedType) ->
+  NormalizedAttribute ->
+  NormalizedAttribute ->
+  NormalizedFunction ->
+  Checker NormalizedType
+partialResidualType sourceSpan holes suppliedFields suppliedAttribute functionAttribute function = do
+  maybeParameterObject <- partialParameterObject sourceSpan function.argumentType
+  case maybeParameterObject of
+    Nothing -> do
+      reportExpectedShape sourceSpan "a callee with named parameters (required by a `_` hole)" function.argumentType
+      pure bottomType
+    Just parameterObject -> do
+      -- An unknown hole label is reported and dropped from the residual, so downstream checking
+      -- continues with the parameters that do exist.
+      resolvedHoles <- traverse (lookupHoleField parameterObject) holes
+      let holeFields = Map.fromList (catMaybes resolvedHoles)
+      -- The probe stands in for the eventual full call, so it only makes sense when every hole
+      -- resolved: after a K3020 the dropped hole would read as a missing required parameter and
+      -- cascade a spurious K3001 on top.
+      when (all isJust resolvedHoles) $ do
+        let probeFields = suppliedFields <> [(label, field.normalizedType) | (label, field) <- Map.toList holeFields]
+            probeObject = namedObjectTypeWithRest bottomType probeFields
+        runNormalizer sourceSpan (subtype probeObject function.argumentType)
+      -- The residual parameter is the callee's parameter object restricted to the hole labels, with
+      -- each field's original 'NormalizedFieldInformation' — so an optional (defaulted) parameter
+      -- stays omittable on the residual. The rest is open, like every agent parameter object.
+      let residualParameter = layeredOf neverLayer {objectLayer = Just NormalizedObject {fields = holeFields, rest = unknownType}}
+      -- The residual's handle carries the callee's handle attribute joined with the captured
+      -- (supplied) arguments' observable attribute: a closure that bakes a private value in is
+      -- itself private at the handle, so a later call cannot launder it. This is deliberately
+      -- coarser than 'applyAgent''s excess computation — the partial site defers the call, so it
+      -- takes the conservative join rather than probing parameter absorption.
+      pure (assembleAgent (joinAttribute functionAttribute suppliedAttribute) residualParameter function.returnType function.effect)
+
+-- | The named parameter object of a callee's argument type, read through the standard "raise to
+-- bounds, sole layer" discipline every shape inspector uses. 'Nothing' when the parameter is not
+-- solely an object — such a callee has no labelled parameters for a hole to name.
+partialParameterObject :: SourceSpan -> NormalizedType -> Checker (Maybe NormalizedObject)
+partialParameterObject sourceSpan parameterType = do
+  raised <- soleLayer sourceSpan (Set.singleton ObjectKind) parameterType
+  pure $ case raised of
+    Just (_, layer) -> layer.objectLayer
+    Nothing -> Nothing
+
+-- | Look one hole's label up in the callee's parameter object; an unknown label is K3020 (the
+-- residual could never receive it) and yields 'Nothing' so the caller drops it.
+lookupHoleField :: NormalizedObject -> (Text, SourceSpan) -> Checker (Maybe (Text, NormalizedFieldInformation))
+lookupHoleField parameterObject (label, holeSpan) = case Map.lookup label parameterObject.fields of
+  Just field -> pure (Just (label, field))
+  Nothing -> do
+    reportType
+      holeSpan
+      (TypeErrorUnknownHoleLabel UnknownHoleLabelErrorInfo {label = label, parameters = Map.keys parameterObject.fields})
+    pure Nothing
 
 -- | The function layer of a type whose base is exactly a function (a scheme body opened to
 -- metavariables), without any bound raising — the open callee is a plain agent type, not a bounded

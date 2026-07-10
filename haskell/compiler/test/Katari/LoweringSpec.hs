@@ -272,6 +272,49 @@ spec = describe "lowerModule (via compile)" $ do
         ]
         `shouldBe` []
 
+  describe "partial application (`_` holes) lowers to a closure" $ do
+    let scaleDecl = "agent scale(factor: number, value: number) -> number { factor * value }\n"
+        partialSource = scaleDecl <> "agent make_double() -> agent (value: number) -> number { scale(factor = 2.0, value = _) }"
+
+    it "the call site makes a closure of a synthesized `partial` agent instead of delegating" $ do
+      let operations = entryBodyOperations (loweredTestModule partialSource) "make_double"
+      [() | OperationMakeClosure _ <- operations] `shouldBe` [()]
+      [target | OperationDelegate delegateOperation <- operations, CalleeName target <- [delegateOperation.target]] `shouldBe` []
+
+    it "the residual's schema input lists exactly the hole labels" $ do
+      case namedAgentBlocks (loweredTestModule partialSource) "partial" of
+        [agent] -> objectFieldNames agent.schema.input `shouldBe` ["value"]
+        other -> expectationFailure ("expected exactly one synthesized partial agent, got " <> show (length other))
+
+    it "evaluates the supplied arguments in the enclosing scope, in written order, into one captured record" $ do
+      let source =
+            "agent blend(a: integer, b: integer, c: integer) -> integer { a + b + c }\n"
+              <> "agent make_partial() -> agent (b: integer) -> integer { blend(c = 1, b = _, a = 2) }"
+          operations = entryBodyOperations (loweredTestModule source) "make_partial"
+      case [recordOperation.entries | OperationMakeRecord recordOperation <- operations] of
+        [entries] -> map fst entries `shouldBe` ["c", "a"]
+        other -> expectationFailure ("expected exactly one captured supplied record, got " <> show other)
+
+    it "the residual body merges the incoming record with the captured one, then delegates to the callee by name" $ do
+      let bodyOperations = namedBlockOperations (loweredTestModule partialSource) "partial.body"
+          delegated = [target | OperationDelegate delegateOperation <- bodyOperations, CalleeName target <- [delegateOperation.target]]
+      delegated `shouldBe` [QualifiedName {moduleName = ModuleName "prelude.record", name = "merge"}, testName "scale"]
+
+    it "stamps the call site's inferred generics on the inner delegate" $ do
+      let source =
+            "agent pick[T](value: T, fallback: T) -> T { value }\n"
+              <> "agent make_partial() -> agent (fallback: integer) -> integer { pick(value = 1, fallback = _) }"
+      case delegateGenericsTo (loweredTestModule source) (testName "pick") of
+        Just [("T", GenericArgumentType schema)] -> schema `shouldBe` SchemaInteger
+        other -> expectationFailure ("expected an inferred [T -> integer] on the inner delegate, got " <> show other)
+
+    it "a value callee is captured in the enclosing scope and delegated through `CalleeValue`" $ do
+      let source = scaleDecl <> "agent make_double() -> agent (value: number) -> number { let f = scale\nf(factor = 2.0, value = _) }"
+          irModule = loweredTestModule source
+          bodyOperations = namedBlockOperations irModule "partial.body"
+      loadedAgentNames irModule `shouldContain` [testName "scale"]
+      [() | OperationDelegate delegateOperation <- bodyOperations, CalleeValue _ <- [delegateOperation.target]] `shouldBe` [()]
+
   describe "the io effect (external calls are impure)" $ do
     let ext = "external agent fetch(headers: record[string of private], body: string) -> { status: integer, body: string }\n"
     it "declassifies an external call's result (impure → no pure-call lift, so a secret header gives a public result)" $
@@ -384,6 +427,27 @@ delegateArgumentEntriesTo irModule name =
             (label, _) <- recordOperation.entries
         ]
     [] -> Nothing
+
+-- | Every 'BlockAgent' carrying the given debug name (e.g. the synthesized @partial@ agents).
+namedAgentBlocks :: IRModule -> Text -> List Agent
+namedAgentBlocks irModule label =
+  [ agent
+    | (blockId, name) <- Map.toList irModule.names,
+      name == label,
+      Just information <- [Map.lookup blockId irModule.blocks],
+      BlockAgent agent <- [information.block]
+  ]
+
+-- | The operations of every 'BlockSequence' carrying the given debug name, concatenated.
+namedBlockOperations :: IRModule -> Text -> List Operation
+namedBlockOperations irModule label =
+  concat
+    [ sequenceBlock.operations
+      | (blockId, name) <- Map.toList irModule.names,
+        name == label,
+        Just information <- [Map.lookup blockId irModule.blocks],
+        BlockSequence sequenceBlock <- [information.block]
+    ]
 
 -- | The field each `use.continuation.body` block projects FIRST (the use binder's `value` read).
 continuationFirstFields :: IRModule -> List Text

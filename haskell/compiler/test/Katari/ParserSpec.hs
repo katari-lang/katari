@@ -158,6 +158,36 @@ spec = do
         Just (ExpressionCall node) -> length node.arguments `shouldBe` 2
         _ -> expectationFailure "expected a call"
 
+    it "parses a `_` argument value as a hole (partial application)" $ do
+      body <- parseClean "agent main() -> integer { sum_two(a = _, b = 3) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall node) -> case node.arguments of
+          [holeArgument, suppliedArgument] -> do
+            case holeArgument.value of
+              ArgumentHole _ -> pure ()
+              ArgumentExpression _ -> expectationFailure "expected the first argument to be a hole"
+            case suppliedArgument.value of
+              ArgumentExpression _ -> pure ()
+              ArgumentHole _ -> expectationFailure "expected the second argument to be an expression"
+          _ -> expectationFailure "expected two arguments"
+        _ -> expectationFailure "expected a call"
+
+    it "keeps an underscore-prefixed identifier argument an ordinary expression" $ do
+      body <- parseClean "agent main() -> integer { sum_two(a = _x, b = 3) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall node) -> case node.arguments of
+          (firstArgument : _) -> case firstArgument.value of
+            ArgumentExpression (ExpressionVariable variable) -> variable.name `shouldBe` "_x"
+            _ -> expectationFailure "expected a variable expression argument"
+          _ -> expectationFailure "expected arguments"
+        _ -> expectationFailure "expected a call"
+
+    it "still parses a bare `_` outside an argument value as a variable expression" $ do
+      body <- parseClean "agent main() -> integer { _ }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionVariable variable) -> variable.name `shouldBe` "_"
+        _ -> expectationFailure "expected a variable expression"
+
     it "parses a record literal and field access" $ do
       _ <- parseClean "agent main() -> integer { let r = { name = \"a\", age = 30 }\n r.age }"
       pure ()
