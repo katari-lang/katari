@@ -8,6 +8,7 @@ import { bearerAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { requestContext } from "./middleware/request-context.js";
+import { mcpServeRoutes } from "./modules/mcp/mcp.routes.js";
 import { inboundRoutes } from "./modules/webhook/webhook.routes.js";
 import { apiRoutes } from "./routes.js";
 import type { AppEnv } from "./types/app-env.js";
@@ -38,6 +39,10 @@ export function createApp() {
   // The public inbound-webhook endpoints (`webhook.inbound`'s minted URLs). Outside `/api`, so
   // `bearerAuth` passes them through — the unguessable token is the capability (see `webhook.routes.ts`).
   app.route("/inbound", inboundRoutes);
+
+  // The public MCP serve endpoints (`mcp.serve`'s minted URLs) — the same capability-URL contract, the
+  // token scoping one stateless MCP server to one live call (see `mcp.routes.ts`).
+  app.route("/mcp", mcpServeRoutes);
 
   const api = app.route("/api/v1", apiRoutes);
 

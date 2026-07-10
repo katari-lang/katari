@@ -6,9 +6,10 @@
 // (in-process api commands, FFI completions) onto the serial bus. Everything is serial; concurrency is the
 // ack model (a parent that fanned out several delegates resumes each branch as its delegateAck lands).
 
-import type { QualifiedName } from "@katari-lang/types";
+import type { JSONSchema, QualifiedName } from "@katari-lang/types";
 import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
+import { callableMetadata } from "../engine/interop-prims.js";
 import { createProjectStore } from "../engine/store.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
@@ -31,7 +32,7 @@ import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
 import { FfiReactor } from "./ffi-reactor.js";
 import { HttpReactor } from "./http-reactor.js";
-import { McpReactor } from "./mcp-reactor.js";
+import { McpReactor, type McpServeCallOutcome, type McpServeToolsOutcome } from "./mcp-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { ResourcePool } from "./resource-pool.js";
@@ -41,6 +42,21 @@ import { type WebhookDeliveryOutcome, WebhookReactor } from "./webhook-reactor.j
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
 // so existing importers (tests, callers) keep their entry point.
 export { type OpenEscalation, RunCancelledError } from "./api-reactor.js";
+
+/** One tool an `mcp.serve` endpoint advertises: the served record's key as the published name, and the
+ *  agent's reflected signature (its declared schemas, still `JSONSchema` — the MCP service lowers them
+ *  to the wire shape at its own boundary). */
+export interface McpServedToolMetadata {
+  name: string;
+  description: string;
+  input: JSONSchema;
+  output: JSONSchema;
+}
+
+/** What `listMcpServeTools` resolves to: the advertised tools, or `unknown` for a dead token. */
+export type McpServeToolsDescription =
+  | { kind: "unknown" }
+  | { kind: "tools"; tools: McpServedToolMetadata[] };
 
 export interface ProjectActorDependencies {
   projectId: ProjectId;
@@ -54,9 +70,11 @@ export interface ProjectActorDependencies {
   /** The transport the `mcp` reactor performs built-in `prelude.mcp.*` calls through (the SDK client).
    *  Defaults to the loud stub (fine for tests; the facade injects the SDK-backed one). */
   mcp?: McpTransport;
-  /** The public base URL the `webhook` reactor mints inbound endpoints under (`<base>/inbound/<token>`).
-   *  Defaults to the local dev address (fine for tests; the facade injects the configured one). */
-  webhookBaseUrl?: string;
+  /** The public base URL the dynamically generated endpoints are minted under — `webhook.inbound`'s
+   *  `<base>/inbound/<token>` and `mcp.serve`'s `<base>/mcp/<token>`. One knob for both: they are the
+   *  same public address (KATARI_PUBLIC_URL). Defaults to the local dev address (fine for tests; the
+   *  facade injects the configured one). */
+  publicBaseUrl?: string;
   persistence: Persistence;
 }
 
@@ -67,6 +85,9 @@ export class ProjectActor {
    *  issued by each run's own permanent run instance, not by this root. */
   private readonly apiRootId: InstanceId;
   private readonly persistence: Persistence;
+  /** The IR source, kept for reflection at the actor's own boundaries (a served MCP tool's advertised
+   *  metadata resolves through the same `callableMetadata` as `reflection.get_metadata`). */
+  private readonly ir: IrSource;
 
   /** The engine reactor: instances, the delegation routing graph, the IR turns. */
   private readonly core: CoreReactor;
@@ -94,6 +115,7 @@ export class ProjectActor {
     this.projectId = dependencies.projectId;
     this.apiRootId = apiRootIdOf(this.projectId);
     this.persistence = dependencies.persistence;
+    this.ir = dependencies.ir;
     this.externalTransport = dependencies.external;
     this.httpTransport = dependencies.http;
     this.mcpTransport = dependencies.mcp ?? new StubMcpTransport();
@@ -116,14 +138,23 @@ export class ProjectActor {
     // The http reactor performs built-in `http.fetch` calls through the injected transport (an in-runtime
     // fetch); an http call reaches it as a `delegate` from core's external proxy, exactly like ffi.
     this.http = new HttpReactor(dependencies.http, pool);
+    // The one public base both dynamically generated endpoint kinds mint their capability URLs under.
+    const publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
     // The mcp reactor performs built-in `prelude.mcp.*` calls through the injected transport (the SDK
-    // client); an mcp call reaches it as a `delegate` from core's external proxy, exactly like http.
-    this.mcp = new McpReactor(this.mcpTransport, pool);
+    // client); an mcp call reaches it as a `delegate` from core's external proxy, exactly like http. Its
+    // `serve` shape additionally mints inbound endpoints (`<base>/mcp/<token>`) and re-enters the serial
+    // loop for its post-commit work through the scheduler closure — which reads `this.substrate`,
+    // assigned just below, only when work actually runs.
+    this.mcp = new McpReactor(
+      this.mcpTransport,
+      publicBaseUrl,
+      (work) => this.substrate.submit(this.mcp, work),
+      pool,
+    );
     // The webhook reactor serves `webhook.inbound` calls: it mints tokens and re-enters the serial loop for
-    // its post-commit work (the subscriber dispatch, synthesised completions) through the scheduler closure —
-    // which reads `this.substrate`, assigned just below, only when work actually runs.
+    // its post-commit work (the subscriber dispatch, synthesised completions) the same way.
     this.webhook = new WebhookReactor(
-      dependencies.webhookBaseUrl ?? "http://localhost:3000",
+      publicBaseUrl,
       (work) => this.substrate.submit(this.webhook, work),
       pool,
     );
@@ -270,6 +301,49 @@ export class ProjectActor {
   deliverWebhook(token: string, argument: Value): Promise<WebhookDeliveryOutcome> {
     return new Promise((resolve) => {
       this.substrate.submit(this.webhook, () => this.webhook.deliver(token, argument, resolve));
+    });
+  }
+
+  /** Whether a live `mcp.serve` endpoint holds `token` — the MCP `initialize` liveness probe (cheap: the
+   *  reactor read runs on a serial turn, no metadata is resolved). */
+  async probeMcpServe(token: string): Promise<boolean> {
+    const outcome = await this.mcpServeToolEntries(token);
+    return outcome.kind === "tools";
+  }
+
+  /** The tools a live `mcp.serve` endpoint advertises, for MCP `tools/list`: each served record entry's
+   *  metadata resolved through the same `callableMetadata` as `reflection.get_metadata` — the record key
+   *  is the published name (overriding the callee's own), the schemas are the agent's declared signature. */
+  async listMcpServeTools(token: string): Promise<McpServeToolsDescription> {
+    const outcome = await this.mcpServeToolEntries(token);
+    if (outcome.kind === "unknown") return { kind: "unknown" };
+    const tools: McpServedToolMetadata[] = [];
+    for (const entry of outcome.entries) {
+      const metadata = await callableMetadata(entry.value, this.ir);
+      tools.push({
+        name: entry.name,
+        description: metadata.description,
+        input: metadata.input,
+        output: metadata.output,
+      });
+    }
+    return { kind: "tools", tools };
+  }
+
+  /** Deliver one MCP `tools/call` to the endpoint serving `token`: the mcp reactor converts it into a
+   *  delegation of the served record's agent on a serial turn, and the returned promise resolves with
+   *  the agent's outcome (or the dead-endpoint / unknown-tool variants) once it settles. */
+  deliverMcpServeCall(token: string, tool: string, argument: Value): Promise<McpServeCallOutcome> {
+    return new Promise((resolve) => {
+      this.substrate.submit(this.mcp, () => this.mcp.serveCall(token, tool, argument, resolve));
+    });
+  }
+
+  /** The reactor-side read behind the two listing entry points: the served record's entries, resolved
+   *  on a serial turn (a pure read — the turn only guarantees a consistent view of the warm calls). */
+  private mcpServeToolEntries(token: string): Promise<McpServeToolsOutcome> {
+    return new Promise((resolve) => {
+      this.substrate.submit(this.mcp, () => resolve(this.mcp.serveTools(token)));
     });
   }
 

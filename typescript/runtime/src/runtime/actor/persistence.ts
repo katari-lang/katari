@@ -153,21 +153,54 @@ export interface PersistedFfiInstance extends PersistedCallEnvelope {
   innerCalls: PersistedInnerCall[];
 }
 
-/** The status-only instance extension write (`http_instances` / `mcp_instances`) — just the call-specific
- *  `status` (the envelope cannot carry `awaitingAnswer`), behind the kind's instance envelope. The
- *  delegation the call handles and the caller reactor its reply routes to are both on the envelope, and no
- *  argument is stored (recovery never re-sends — at-most-once). One shape serves every reactor whose calls
- *  persist nothing beyond their status, so the next such reactor adds no new row types. */
+/** The status-only instance extension write (`http_instances`) — just the call-specific `status` (the
+ *  envelope cannot carry `awaitingAnswer`), behind the kind's instance envelope. The delegation the call
+ *  handles and the caller reactor its reply routes to are both on the envelope, and no argument is stored
+ *  (recovery never re-sends — at-most-once). One shape serves every reactor whose calls persist nothing
+ *  beyond their status, so the next such reactor adds no new row types. */
 export interface PersistedStatusOnlyInstanceRow {
   instanceId: InstanceId;
   status: "running" | "cancelling" | "awaitingAnswer";
 }
 
-/** One in-flight status-only call (http / mcp) a reactivation reads (envelope ⋈ the status extension), the
+/** One in-flight status-only call (http) a reactivation reads (envelope ⋈ the status extension), the
  *  precise `status` coming from the extension so an `awaitingAnswer` call is not mistaken for a `running`
- *  one. Both reactors recover at-most-once: gone work fails typed, never re-runs. */
+ *  one. The reactor recovers at-most-once: gone work fails typed, never re-runs. */
 export interface PersistedStatusOnlyInstance extends PersistedCallEnvelope {
   status: "running" | "cancelling" | "awaitingAnswer";
+}
+
+/** The serve extras an mcp `serve` call persists (the `mcp_instances` serve columns): the capability
+ *  `token` (the public URL) and the served `tools` record must survive a restart so the endpoint
+ *  re-registers; `snapshotId` pins the version the served agents dispatch against, like
+ *  `webhook_instances.snapshot_id`. The subscriber is not stored (dispatched exactly once — its inner
+ *  delegation is durable core work). */
+export interface PersistedMcpServeExtension {
+  snapshotId: SnapshotId;
+  token: string;
+  tools: Value;
+}
+
+/** The `mcp` instance extension write (`mcp_instances`) — the status every mcp call persists, plus the
+ *  serve extras when (and only when) the call is a `serve` endpoint: the transport-backed shapes
+ *  (listTools / callTool) store no argument (recovery never re-sends — at-most-once) and open no inner
+ *  delegations, so their `serve` is `null` and their bridges are empty by construction. */
+export interface PersistedMcpInstanceRow {
+  instanceId: InstanceId;
+  status: "running" | "cancelling" | "awaitingAnswer";
+  serve: PersistedMcpServeExtension | null;
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
+}
+
+/** One in-flight mcp call a reactivation reads (envelope ⋈ `mcp_instances`): a row with serve extras
+ *  reloads as the live endpoint (re-registering its token — the endpoint survives a restart, exactly
+ *  like a webhook's); a transport row recovers at-most-once (gone work fails typed, never re-runs). */
+export interface PersistedMcpInstance extends PersistedCallEnvelope {
+  status: "running" | "cancelling" | "awaitingAnswer";
+  serve: PersistedMcpServeExtension | null;
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
 }
 
 /** The `webhook` instance extension write (`webhook_instances`) — the call-specific state behind a
@@ -256,7 +289,7 @@ export interface WebhookTx {
 
 /** The `mcp` reactor's *own-data* write surface — its `mcp_instances` extension (the envelope is base). */
 export interface McpTx {
-  putMcpInstance(row: PersistedStatusOnlyInstanceRow): Promise<void>;
+  putMcpInstance(row: PersistedMcpInstanceRow): Promise<void>;
 }
 
 /** The `ResourcePool`'s write surface: the independent scope / blob-ownership resource. `owner` may be `null`
@@ -362,10 +395,10 @@ export interface WebhookLoader {
   instances(): Promise<PersistedWebhookInstance[]>;
 }
 
-/** The `mcp` reactor's own-data read surface: its in-flight calls (envelope ⋈ `mcp_instances`), to fail
- *  at-most-once on recovery. */
+/** The `mcp` reactor's own-data read surface: its in-flight calls (envelope ⋈ `mcp_instances`) — a
+ *  transport call to fail at-most-once on recovery, a serve endpoint to re-register its token. */
 export interface McpLoader {
-  instances(): Promise<PersistedStatusOnlyInstance[]>;
+  instances(): Promise<PersistedMcpInstance[]>;
 }
 
 /** The substrate's read surface: the undrained outbox, replayed into the mailbox so an in-flight event is not

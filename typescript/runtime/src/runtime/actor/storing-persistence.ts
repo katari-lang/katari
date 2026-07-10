@@ -31,6 +31,7 @@ import type {
   PersistedCallEnvelope,
   PersistedDelegation,
   PersistedFfiInstanceRow,
+  PersistedMcpInstanceRow,
   PersistedOpenEscalation,
   PersistedRun,
   PersistedRunEscalationAudit,
@@ -86,7 +87,7 @@ export class StoringPersistence implements Persistence {
   private readonly ffiInstanceRows = new Map<InstanceId, PersistedFfiInstanceRow>();
   private readonly httpInstanceRows = new Map<InstanceId, PersistedStatusOnlyInstanceRow>();
   private readonly webhookInstanceRows = new Map<InstanceId, PersistedWebhookInstanceRow>();
-  private readonly mcpInstanceRows = new Map<InstanceId, PersistedStatusOnlyInstanceRow>();
+  private readonly mcpInstanceRows = new Map<InstanceId, PersistedMcpInstanceRow>();
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
   /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
@@ -227,6 +228,9 @@ export class StoringPersistence implements Persistence {
           this.instancesOf("mcp", this.mcpInstanceRows, (call, extension) => ({
             ...call,
             status: extension.status,
+            serve: extension.serve,
+            relays: extension.relays,
+            innerCalls: extension.innerCalls,
           })),
       },
       outbox: {

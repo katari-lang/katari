@@ -25,13 +25,13 @@ import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { DelegationId, SnapshotId } from "../ids.js";
-import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
   type CallRow,
   ExternalCallReactor,
   type ExternalTarget,
   type InnerDelivery,
+  innerOutcomeAsCompletion,
   type LoadedCall,
 } from "./external-call-reactor.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
@@ -203,7 +203,10 @@ export class WebhookReactor extends ExternalCallReactor<WebhookPayload> {
   protected override deliverInnerOutcome(delivery: InnerDelivery): void {
     if (delivery.call === SUBSCRIBER_CALL) {
       this.schedule(() =>
-        this.complete({ delegation: delivery.delegation, outcome: completionOf(delivery.outcome) }),
+        this.complete({
+          delegation: delivery.delegation,
+          outcome: innerOutcomeAsCompletion(delivery.outcome),
+        }),
       );
       return;
     }
@@ -284,26 +287,5 @@ export class WebhookReactor extends ExternalCallReactor<WebhookPayload> {
     // Waiters are in-process HTTP requests; a reset (poisoned commit) makes their deliveries unresolvable.
     for (const waiter of this.waiters.values()) waiter({ kind: "gone" });
     this.waiters.clear();
-  }
-}
-
-/** Lower a subscriber's settled outcome to the transport-completion shape the base consumes. `reveal`
- *  keeps content across the internal Json round-trip (this boundary faces the engine, not a user). */
-function completionOf(
-  outcome: InnerDelivery["outcome"],
-):
-  | { kind: "result"; value: ReturnType<typeof valueToJson> }
-  | { kind: "throw"; error: ReturnType<typeof valueToJson> }
-  | { kind: "error"; message: string }
-  | { kind: "cancelled" } {
-  switch (outcome.kind) {
-    case "result":
-      return { kind: "result", value: valueToJson(outcome.value, "reveal") };
-    case "throw":
-      return { kind: "throw", error: valueToJson(outcome.value, "reveal") };
-    case "error":
-      return { kind: "error", message: outcome.message };
-    case "cancelled":
-      return { kind: "cancelled" };
   }
 }

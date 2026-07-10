@@ -48,7 +48,7 @@ import {
   newEscalationId,
   newInstanceId,
 } from "../ids.js";
-import { jsonToValue } from "../value/codec.js";
+import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import { messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
@@ -782,6 +782,25 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     this.calls.delete(delegation);
     this.dropHandled(delegation);
     this.dirty.delete(delegation);
+  }
+}
+
+/** Lower a settled inner delegation's outcome to the transport-completion shape `complete` consumes —
+ *  for a reactor whose WHOLE call settles with one designated inner delegation (webhook / mcp-serve: the
+ *  subscriber's outcome is the call's outcome, fed back as a synthesised completion). `reveal` keeps
+ *  content across the internal Json round-trip (this boundary faces the engine, not a user). */
+export function innerOutcomeAsCompletion(
+  outcome: InnerDelivery["outcome"],
+): ExternalCompletion["outcome"] {
+  switch (outcome.kind) {
+    case "result":
+      return { kind: "result", value: valueToJson(outcome.value, "reveal") };
+    case "throw":
+      return { kind: "throw", error: valueToJson(outcome.value, "reveal") };
+    case "error":
+      return { kind: "error", message: outcome.message };
+    case "cancelled":
+      return { kind: "cancelled" };
   }
 }
 

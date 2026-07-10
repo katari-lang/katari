@@ -14,11 +14,24 @@ import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/typ
 import { and, eq, notInArray } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
-import { instances, runs, TERMINAL_RUN_STATES, webhookInstances } from "../db/tables/execution.js";
+import {
+  instances,
+  mcpInstances,
+  runs,
+  TERMINAL_RUN_STATES,
+  webhookInstances,
+} from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
 import { envReader, envService } from "../modules/env/env.service.js";
+import {
+  isCallError,
+  type McpServeHttpReply,
+  mcpServeEndpointOf,
+  serveMcpMessage,
+  unknownMcpServeEndpoint,
+} from "../modules/mcp/mcp-serve.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { messageOf } from "./actor/failure.js";
@@ -170,8 +183,9 @@ const registry = new ProjectRegistry({
       },
       credentials: mcpCredentialStoreFor(projectId),
     }),
-  // The public base `webhook.inbound` mints its URLs under (KATARI_PUBLIC_URL, or the local port).
-  webhookBaseUrl: config.publicUrl,
+  // The public base the dynamically generated endpoints (`webhook.inbound`, `mcp.serve`) mint their
+  // capability URLs under (KATARI_PUBLIC_URL, or the local port) — one address, one knob.
+  publicBaseUrl: config.publicUrl,
 });
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
@@ -304,6 +318,25 @@ export const facade = {
     }
   },
 
+  /** Serve one inbound MCP request (`POST /mcp/<token>`). The token alone locates its endpoint — the
+   *  durable `mcp_instances` serve row resolves it to a project (waking a cold actor, whose reload
+   *  re-registers the token) — and the JSON-RPC handling is stateless, so nothing session-shaped exists
+   *  to lose across a restart. Values lower inside the endpoint adapter at THIS user-facing boundary
+   *  (private content redacts — an MCP caller is outside the trust boundary, like a webhook caller). */
+  async deliverMcp(input: { token: string; body: string }): Promise<McpServeHttpReply> {
+    const [row] = await db
+      .select({ projectId: instances.projectId })
+      .from(mcpInstances)
+      .innerJoin(instances, eq(mcpInstances.instanceId, instances.id))
+      .where(eq(mcpInstances.serveToken, input.token))
+      .limit(1);
+    const endpoint =
+      row === undefined
+        ? unknownMcpServeEndpoint()
+        : mcpServeEndpointOf(registry.actorFor(row.projectId as ProjectId), input.token);
+    return serveMcpMessage(endpoint, input.body);
+  },
+
   /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob
    *  as owned by that handler's ffi call instance — so the call's return ascends it to the core caller. Returns
    *  the blob handle the sidecar lifts into a `File` value; throws a `ConflictError` (so the upload fails) when
@@ -322,11 +355,6 @@ export const facade = {
     );
   },
 };
-
-/** Whether a thrown payload is the dynamic-dispatch schema violation (`reflection.call_error`). */
-function isCallError(value: Value): boolean {
-  return value.kind === "record" && String(value.ctor) === "prelude.reflection.call_error";
-}
 
 /** Resume every project that still has an in-flight run — the boot half of recovery. Reactivation is
  *  otherwise lazy (a project reloads when next touched), so after a restart a long-running run would stay

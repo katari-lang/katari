@@ -38,8 +38,9 @@ export interface ProjectRegistryDependencies {
    *  id lets the host bind a blob producer for image tool results). Defaults to the stub (mcp fails
    *  loudly until the SDK-backed transport is injected). */
   mcpFactory?: (projectId: ProjectId) => McpTransport;
-  /** The public base URL webhook endpoints are minted under. Defaults to the local dev address. */
-  webhookBaseUrl?: string;
+  /** The public base URL the dynamically generated endpoints (webhook inbound, mcp serve) are minted
+   *  under. Defaults to the local dev address. */
+  publicBaseUrl?: string;
 }
 
 export class ProjectRegistry {
@@ -52,7 +53,7 @@ export class ProjectRegistry {
   private readonly externalFactory: () => FfiTransport;
   private readonly httpFactory: () => HttpTransport;
   private readonly mcpFactory: (projectId: ProjectId) => McpTransport;
-  private readonly webhookBaseUrl: string;
+  private readonly publicBaseUrl: string;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
     this.ir = dependencies.ir ?? new SnapshotRegistry();
@@ -62,7 +63,7 @@ export class ProjectRegistry {
     this.externalFactory = dependencies.externalFactory ?? (() => new StubFfiTransport());
     this.httpFactory = dependencies.httpFactory ?? (() => new StubHttpTransport());
     this.mcpFactory = dependencies.mcpFactory ?? (() => new StubMcpTransport());
-    this.webhookBaseUrl = dependencies.webhookBaseUrl ?? "http://localhost:3000";
+    this.publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
   }
 
   /** Register one module's IR within a snapshot — only on the default in-memory source (tests); the
@@ -87,7 +88,7 @@ export class ProjectRegistry {
       external: this.externalFactory(),
       http: this.httpFactory(),
       mcp: this.mcpFactory(projectId),
-      webhookBaseUrl: this.webhookBaseUrl,
+      publicBaseUrl: this.publicBaseUrl,
       persistence: this.persistence,
     });
     this.actors.set(projectId, actor);

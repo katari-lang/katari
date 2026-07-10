@@ -282,10 +282,24 @@ export class DbPersistence implements Persistence {
           })),
       },
       mcp: {
+        // A serve endpoint's extras (token + the sealed tools record) reload alongside the status, so
+        // the reactor re-registers the endpoint; a transport call's row carries only its status.
         instances: () =>
           callInstancesOf("mcp", mcpInstances, (call, extension) => ({
             ...call,
             status: extension.status,
+            serve:
+              extension.serveToken === null ||
+              extension.snapshotId === null ||
+              extension.serveTools === null
+                ? null
+                : {
+                    snapshotId: extension.snapshotId as SnapshotId,
+                    token: extension.serveToken,
+                    tools: unsealFromStorage(extension.serveTools),
+                  },
+            relays: brandedRelays(extension.relays),
+            innerCalls: brandedInnerCalls(extension.innerCalls),
           })),
       },
       webhook: {
@@ -534,13 +548,34 @@ export class DbPersistence implements Persistence {
       },
       mcp: {
         putMcpInstance: async (row) => {
+          const relays = row.relays.map((relay) => ({
+            escalation: relay.escalation as string,
+            child: relay.child as string,
+            childEscalation: relay.childEscalation as string,
+          }));
+          const innerCalls = row.innerCalls.map((inner) => ({
+            delegation: inner.delegation as string,
+            call: inner.call,
+          }));
+          // The served tools record may capture private values (a closure over a secret), so it seals
+          // like the webhook callback. The serve extras are immutable after open, so only the status
+          // and the inner-delegation bridges update on re-upsert.
+          const serveTools = row.serve === null ? null : sealForStorage(row.serve.tools);
           await drizzleTx
             .insert(mcpInstances)
             .values({
               instanceId: row.instanceId,
               status: row.status,
+              snapshotId: row.serve?.snapshotId ?? null,
+              serveToken: row.serve?.token ?? null,
+              serveTools,
+              relays,
+              innerCalls,
             })
-            .onConflictDoUpdate({ target: mcpInstances.instanceId, set: { status: row.status } });
+            .onConflictDoUpdate({
+              target: mcpInstances.instanceId,
+              set: { status: row.status, relays, innerCalls },
+            });
         },
       },
       pool: {

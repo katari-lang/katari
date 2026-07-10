@@ -1,7 +1,10 @@
-// The `prelude.mcp` sub-module: plug any MCP server's tools into a program as ordinary agent
-// values. `tools` routes to the runtime's `mcp` reactor (an in-runtime MCP client, like
-// `http.fetch`'s in-runtime fetch — no FFI sidecar, nothing for the user to install). The whole
-// integration is one line — pick how the server authenticates with the `auth` sum:
+// The `prelude.mcp` sub-module: MCP in both directions, as ordinary agent values. Outbound, `tools`
+// plugs any MCP server's tools into a program; inbound, `serve` publishes a program's own agents AS
+// an MCP server for the extent of a subscriber. Both route to the runtime's `mcp` reactor (an
+// in-runtime MCP client / server, like `http.fetch`'s in-runtime fetch — no FFI sidecar, nothing
+// for the user to install).
+//
+// Outbound, the whole integration is one line — pick how the server authenticates with the `auth` sum:
 //
 //   let tools = mcp.tools(url = "https://...", auth = mcp.headers(values = record.empty()))
 //   let tools = mcp.tools(url = "https://...", auth = mcp.oauth(name = "github"))
@@ -23,6 +26,15 @@
 // header value may be a secret (`string of private`); it stays private inside the tool value
 // (sealed at rest, redacted at user-facing boundaries) and is revealed only to the server itself.
 // An `oauth` credential's NAME is not a secret — the tokens it names never enter the program.
+//
+// Inbound, `serve` mirrors `webhook.inbound`: the runtime mints a fresh, unguessable capability URL
+// and serves the given record's agents as MCP tools there for exactly as long as @subscriber@ runs.
+// The URL IS the key — possession grants access, nothing else does (the endpoint lives outside the
+// bearer-authenticated API surface, and the token is generated fresh per call); when the subscriber
+// returns, or the run is cancelled, the URL deactivates. `toolbox` doubles as the parameter type
+// because `tool` is the TOP type of self-contained callables — any agent whose effects are handled
+// (or are at most `io` and this module's throws) coerces to it, so a user's own typed agents fit
+// without ceremony.
 
 @"The MCP server rejected a listing or a tool call, or the transport failed (the server-reported or
 transport message). Catch it to control retry — a retried call reconnects."
@@ -56,6 +68,21 @@ signature (for `reflection.get_metadata` and call-site validation) and the serve
 listed with (@url@ + @auth@ — a header value may be a secret), so calling it needs no further
 setup. A missing or dead `oauth` credential throws `auth_error` (re-run `katari mcp login`)."
 external agent tools(url: string, auth: auth) -> toolbox with prelude.throw[server_error | auth_error] from "mcp"
+
+@"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
+unguessable capability URL and serves the record's agents as MCP tools there — each record key is
+the published tool name, each agent's declared signature the tool's advertised schema. The URL is
+the key: possession grants access, nobody without it can call in. @subscriber@ receives the URL,
+hands it to whoever should connect (an AI session, a teammate's MCP client), and stays alive while
+calls should be served; when it returns the URL deactivates and its result becomes `serve`'s
+result. Cancelling the run cancels @subscriber@ and deactivates the URL the same way. The
+subscriber's effects flow to the caller's handlers unchanged; the served agents are self-contained
+(`tool` — the top type of callables whose effects are handled), so any agent fits once its own
+effects are handled."
+external agent serve[R, effect E](
+  tools: toolbox,
+  subscriber: agent (url: string) -> R with E,
+) -> R with E from "mcp"
 
 @"A toolbox's tools as a flat array — the shape an AI tool loop takes."
 agent tools_of(toolbox: toolbox) -> array[tool] {

@@ -29,6 +29,13 @@
       "when": 1783659669833,
       "tag": "0003_deferrable_delegation_instance_fks",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1783660894920,
+      "tag": "0004_mcp_serve_instances",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,39 @@
+// Publishing agents over MCP, end to end — self-contained: `mcp.serve` mints a fresh capability URL
+// and serves the given record's agents as MCP tools for the extent of a SUBSCRIBER (the record key is
+// the published tool name, the agent's declared signature the advertised schema). Here the subscriber
+// "registers" the URL by connecting back to it itself with the built-in MCP client, so the whole loop
+// — mint → list → call → respond → deactivate — runs with no external service. A real subscriber hands
+// the URL to whoever should call in (an AI session, a teammate's MCP client) and stays alive until
+// serving should stop; possession of the URL is the only credential, and cancelling the run (or the
+// subscriber returning) deactivates it.
+
+@"The published tool: doubles the delivered value. A `tools/call` whose arguments violate this
+signature is rejected at the boundary as invalid params — this never runs on a malformed call."
+agent double(value: integer) -> integer {
+  value * 2
+}
+
+@"The subscriber: receives the minted capability URL, lists the endpoint it is itself being served
+from with the built-in MCP client (anonymous headers — the URL is the key), and calls the published
+`double` through the same dynamic dispatch an AI loop uses. Returning ends the serving and makes
+this summary the run's result."
+agent self_subscriber(url: string) -> string {
+  use handler {
+    request prelude.throw(error: mcp.server_error | mcp.auth_error | reflection.call_error) -> never {
+      break f"mcp failed: ${json.to_text(value = error)}"
+    }
+  }
+  let tools = mcp.tools(url = url, auth = mcp.headers(values = record.empty()))
+  let doubled = match (record.get(target = tools, key = "double")) {
+    case null -> "(no double tool)"
+    case tool -> json.to_text(value = reflection.call_agent(target = tool, args = { value = 21 }))
+  }
+  f"double(21) = ${doubled}"
+}
+
+@"Serve `double` at a fresh capability URL for the extent of `self_subscriber`: expect
+`double(21) = 42`. `double` needs no ceremony to become a tool — a fully handled agent coerces to
+the toolbox entry type."
+agent main() -> string {
+  mcp.serve(tools = { double = double }, subscriber = self_subscriber)
+}

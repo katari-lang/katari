@@ -175,18 +175,48 @@ export const httpInstances = pgTable("http_instances", {
   status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
 });
 
-// The `mcp` instance extension: an in-flight mcp call (a `prelude.mcp.tools` listing or a minted
-// tool's call). Like `http_instances` it stores no argument (recovery never re-sends; gone work fails
-// as a typed `mcp.server_error`, and a katari-level retry reconnects through the transport's
-// descriptor cache); it carries only the call-specific `status` the envelope cannot.
-export const mcpInstances = pgTable("mcp_instances", {
-  instanceId: uuid("instance_id")
-    .primaryKey()
-    .references(() => instances.id, { onDelete: "cascade" }),
-  /** running (request in flight) | cancelling (aborting) | awaitingAnswer (errored, the throw escalated,
-   *  awaiting a caught answer or the run's terminate). */
-  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-});
+// The `mcp` instance extension: an in-flight mcp call — a `prelude.mcp.tools` listing, a minted tool's
+// call, or a `prelude.mcp.serve` endpoint. The transport-backed shapes store no argument (recovery never
+// re-sends; gone work fails as a typed `mcp.server_error`, and a katari-level retry reconnects through
+// the transport's descriptor cache) and carry only the call-specific `status` the envelope cannot. A
+// `serve` call additionally persists its endpoint payload, exactly like `webhook_instances`: the
+// `serve_token` must survive a restart (the URL is the capability an MCP caller holds) and the served
+// `serve_tools` record must too (future tool calls dispatch its agents) — the subscriber does not
+// (dispatched exactly once; its inner delegation is durable core work).
+export const mcpInstances = pgTable(
+  "mcp_instances",
+  {
+    instanceId: uuid("instance_id")
+      .primaryKey()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    /** running (request in flight / endpoint serving) | cancelling (aborting) | awaitingAnswer (errored,
+     *  the throw escalated, awaiting a caught answer or the run's terminate). */
+    status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+    /** The snapshot a `serve` call's tools / subscriber dispatch against — pins the version (no cascade),
+     *  like `webhook_instances.snapshot_id`. `null` for the transport-backed call shapes. */
+    snapshotId: uuid("snapshot_id").references(() => snapshots.id),
+    /** The unguessable URL token (`POST /mcp/<token>`) — a `serve` endpoint's capability. Globally
+     *  unique, so the public route resolves a token to its project without any other key; `null` for
+     *  the transport-backed call shapes. */
+    serveToken: text("serve_token"),
+    /** The served tools record each MCP `tools/call` dispatches (key = tool name, value = an agent /
+     *  closure / tool reference). Sealed like every stored value; `null` for the transport shapes. */
+    serveTools: jsonb("serve_tools").$type<Value>(),
+    /** The escalations this call is proxying upward for its inner delegations (see
+     *  `ffi_instances.relays`) — only a `serve` call opens inner delegations, so empty otherwise. */
+    relays: jsonb("relays")
+      .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
+      .notNull()
+      .default([]),
+    /** The call's open inner delegations (the subscriber, in-flight served tool calls) and the local
+     *  token each settles under — so a call landing after a warm reset still finds its consumer. */
+    innerCalls: jsonb("inner_calls")
+      .$type<Array<{ delegation: string; call: string }>>()
+      .notNull()
+      .default([]),
+  },
+  (table) => [uniqueIndex("mcp_instances_serve_token_idx").on(table.serveToken)],
+);
 
 // The `webhook` instance extension: an in-flight `webhook.inbound` call — a dynamically generated public
 // endpoint serving for the extent of its subscriber. Cascades with its envelope; pins its snapshot (the

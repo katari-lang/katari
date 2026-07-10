@@ -472,8 +472,10 @@ function conformedOrThrow(value: Value, schema: JSONSchema, label: string): Valu
 /** A callable value's public metadata, ready for `agent_metadata`. A `tool` (a reactor-backed agent)
  *  presents the runtime-decided signature it was minted with: the provider-declared name / description
  *  / input schema, its output schema when the provider declared one (`{}` — unknown — otherwise), and
- *  no requests (a reactor call performs io, not katari requests). */
-async function callableMetadata(
+ *  no requests (a reactor call performs io, not katari requests). Exported because `mcp.serve`
+ *  advertises a served agent's tool listing from exactly this metadata — one reflection source, so the
+ *  MCP listing and `reflection.get_metadata` can never drift. */
+export async function callableMetadata(
   value: Value,
   ir: IrSource,
 ): Promise<{
