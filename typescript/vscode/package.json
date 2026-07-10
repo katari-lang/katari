@@ -21,6 +21,38 @@
     "Programming Languages"
   ],
   "contributes": {
+    "commands": [
+      {
+        "command": "katari.check",
+        "category": "Katari",
+        "title": "Check project"
+      },
+      {
+        "command": "katari.build",
+        "category": "Katari",
+        "title": "Build project"
+      },
+      {
+        "command": "katari.apply",
+        "category": "Katari",
+        "title": "Apply (deploy) project"
+      },
+      {
+        "command": "katari.mcpLogin",
+        "category": "Katari",
+        "title": "MCP login (OAuth)"
+      },
+      {
+        "command": "katari.mcpPull",
+        "category": "Katari",
+        "title": "Generate MCP tool bindings"
+      },
+      {
+        "command": "katari.restartLanguageServer",
+        "category": "Katari",
+        "title": "Restart language server"
+      }
+    ],
     "languages": [
       {
         "id": "katari",
@@ -56,6 +88,11 @@
           },
           "default": [],
           "description": "Extra command-line arguments passed to katari-lsp (useful for verbose logging flags during LSP development)."
+        },
+        "katari.cli.path": {
+          "type": "string",
+          "default": "katari",
+          "description": "Path to the katari CLI executable used by the 'Katari: ...' commands (check, build, apply, mcp). Leave unset to use a katari on PATH (the extension bundles no CLI); set an absolute path or a PATH name to override it with your own build."
         }
       }
     }

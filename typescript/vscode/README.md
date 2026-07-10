@@ -9,6 +9,29 @@ grammar) + language client (LSP).
 - Hover types, go-to-definition, find-references, completion, and
   diagnostics — all served by the
   [`katari-lsp`](../../haskell/lsp) server.
+- Command-palette commands that drive the [`katari` CLI](../../haskell/cli).
+
+## Commands
+
+All "Katari: …" entries in the command palette. The CLI-backed commands run
+in one shared **Katari** integrated terminal (so interactive flows — OAuth
+logins, apply prompts — work), against the nearest project: the extension
+walks up from the active editor's file (falling back to the workspace
+folders) to the closest `katari.toml` and passes it as `-C <dir>`.
+
+| Command                                 | Runs                                        |
+| --------------------------------------- | ------------------------------------------- |
+| **Katari: Check project**               | `katari check`                              |
+| **Katari: Build project**               | `katari build`                              |
+| **Katari: Apply (deploy) project**      | `katari apply`                              |
+| **Katari: MCP login (OAuth)**           | `katari mcp login --url … --name …` — prompts for the server URL and credential name |
+| **Katari: Generate MCP tool bindings**  | `katari mcp pull --url … --out …` — prompts for the server URL and a `.ktr` output path (defaulting into `src/`), then opens the generated file |
+| **Katari: Restart language server**     | Stops `katari-lsp` and starts it again from the current settings (picks up a changed `katari.server.path`) |
+
+The CLI is resolved like the server, minus the bundled tier: an explicit
+`katari.cli.path` setting wins, else `katari` on `PATH` (no CLI is bundled
+in the VSIX — `stack install katari` in a from-source checkout, or a
+release binary).
 
 ## The bundled language server
 
