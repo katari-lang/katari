@@ -4,6 +4,7 @@ import Data.Foldable (toList)
 import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.AST
@@ -15,7 +16,7 @@ import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..))
-import Katari.Diagnostics (Diagnostics)
+import Katari.Diagnostics (Diagnostics, renderDiagnostics)
 import Katari.Error (CompilerError (..), compilerErrorCode, typeErrorCode)
 import Katari.Typechecker.Check
 import Katari.Typechecker.Context
@@ -1147,6 +1148,88 @@ spec = do
     it "a marker is unperformable by construction (no value name to call, K2001)" $
       compiledCodes (scopedDecl <> "agent run() -> null { scoped() }") `shouldContain` ["K2001"]
 
+  -- A scoped provider written with the UNION continuation row `-> R with E | scoped[url]` (the
+  -- semantically correct spelling `mcp.provide` / `katari mcp pull`'s `with_tools` declare). Inference
+  -- solves the provider's own residual `E` from a call site by CANCELLING the shared `scoped[url]`
+  -- entry against the actual's, rather than subtracting it into a lacks set (which the dispose step
+  -- then rejected against a rigid `E`). The nested case additionally exercises the name-keyed arg-union:
+  -- two literal scopes merge to `scoped["a" | "b"]`, and each provide subtracts its own url from the
+  -- merged arg, so both discharge to pure.
+  describe "scoped provider inference (union continuation rows)" $ do
+    let scopedDecl = "effect scoped[resource]\n"
+        stepA = "agent step_a(token: string) -> integer with scoped[\"a\"] { 0 }\n"
+        stepB = "agent step_b(token: string) -> integer with scoped[\"b\"] { 0 }\n"
+        -- The provider is a primitive (only a signature can discharge a marker; a primitive adds no io),
+        -- one over a fixed literal scope and one generic over a literal-binding url.
+        withA = "primitive agent with_a[R, effect E](continuation: agent (value: integer) -> R with E | scoped[\"a\"]) -> R with E\n"
+        provideUrl = "primitive agent provide[literal URL, R, effect E](url: URL, continuation: agent (value: integer) -> R with E | scoped[URL]) -> R with E\n"
+
+    it "infers a wrapper's residual E through the union row (a rigid E passes through)" $
+      -- The regression: solving `with_a`'s E from `k`'s `E | scoped["a"]` used to subtract scoped into a
+      -- lacks set, yielding `E \\ scoped` which the dispose rejected against the rigid declared `E`.
+      -- Cancelling the shared `scoped["a"]` solves `E := E`, so this compiles.
+      compiledCodes
+        ( scopedDecl
+            <> withA
+            <> "agent wrap[R, effect E](k: agent (value: integer) -> R with E | scoped[\"a\"]) -> R with E { with_a(continuation = k) }"
+        )
+        `shouldBe` []
+
+    it "the same wrapper compiles with explicit generics (the inference-free path was never broken)" $
+      compiledCodes
+        ( scopedDecl
+            <> withA
+            <> "agent wrap[R, effect E](k: agent (value: integer) -> R with E | scoped[\"a\"]) -> R with E { with_a[R, E](continuation = k) }"
+        )
+        `shouldBe` []
+
+    it "a single use-provide over a literal url discharges its scope to pure" $
+      compiledCodes
+        ( scopedDecl
+            <> stepA
+            <> provideUrl
+            <> "agent single() -> integer with pure {\n  let v : integer = use provide(url = \"a\")\n  step_a(token = \"x\")\n}"
+        )
+        `shouldBe` []
+
+    it "two nested use-provides compose: a tool from EACH scope (and one from the outer scope) inside the inner block, both discharged to pure" $
+      compiledCodes
+        ( scopedDecl
+            <> stepA
+            <> stepB
+            <> provideUrl
+            <> "agent nested() -> integer with pure {\n"
+            <> "  let va : integer = use provide(url = \"a\")\n"
+            <> "  let vb : integer = use provide(url = \"b\")\n"
+            <> "  let x = step_a(token = \"x\")\n"
+            <> "  let y = step_b(token = \"y\")\n"
+            <> "  let z = step_a(token = \"z\")\n"
+            <> "  x + y + z\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "negative: scoped[\"a\"] alone never satisfies scoped[\"b\"] (K3001)" $
+      compiledCodes
+        ( scopedDecl
+            <> stepB
+            <> "agent wrong() -> integer with scoped[\"a\"] { step_b(token = \"x\") }"
+        )
+        `shouldContain` ["K3001"]
+
+    it "a tail-lacks (override) mismatch names the subtracted marker instead of rendering two identical rows" $ do
+      -- An overwrite-spelled provider param `{...E, scoped["x"]}` (tail lacks scoped) against a union
+      -- continuation `E | scoped["x"]` (tail lacks nothing): both rows denormalize to `scoped["x"] | E`,
+      -- so the message must name the difference (`scoped`) or it reads as two identical rows.
+      let message =
+            compiledMessages
+              ( scopedDecl
+                  <> "external agent prov[R, effect E](k: agent (value: null) -> R with {...E, scoped[\"x\"]}) -> R with E\n"
+                  <> "agent wrong[R, effect E](k: agent (value: null) -> R with E | scoped[\"x\"]) -> R with io | E { prov[R, E](k = k) }"
+              )
+      message `shouldSatisfy` Text.isInfixOf "additionally excludes"
+      message `shouldSatisfy` Text.isInfixOf "scoped"
+
 ------------------------------------------------------------------------------------------------
 -- Runners
 ------------------------------------------------------------------------------------------------
@@ -1190,6 +1273,12 @@ compiledCodes :: Text -> List Text
 compiledCodes source =
   let result = compile CompileInput {sources = Map.singleton (ModuleName "test") source}
    in [compilerErrorCode located.value | located <- toList result.diagnostics]
+
+-- | The rendered diagnostic text of a single-module compile — for asserting on a message's WORDING
+-- (not just its code), e.g. that an override mismatch names the entry it disagrees on.
+compiledMessages :: Text -> Text
+compiledMessages source =
+  renderDiagnostics (compile CompileInput {sources = Map.singleton (ModuleName "test") source}).diagnostics
 
 ------------------------------------------------------------------------------------------------
 -- Type fixtures

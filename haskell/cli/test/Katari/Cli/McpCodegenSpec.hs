@@ -106,7 +106,7 @@ golden =
       "  continuation: agent (value: {",
       "    get_issue: agent(filter?: json.json, labels?: array[string], owner: string, repo: string) -> get_issue_output with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error],",
       "    ping: agent(arguments: json.json) -> json.json with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error],",
-      "  }) -> R with {...E, mcp.scope[\"https://mcp.example.test/mcp\"]},",
+      "  }) -> R with E | mcp.scope[\"https://mcp.example.test/mcp\"],",
       ") -> R with io | E {",
       "  let tools : mcp.toolbox[\"https://mcp.example.test/mcp\"] = use mcp.provide(url = \"https://mcp.example.test/mcp\", auth = auth)",
       "",

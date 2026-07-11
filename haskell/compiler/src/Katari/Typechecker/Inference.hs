@@ -26,21 +26,25 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
-import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..))
+import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..))
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId)
 import Katari.Data.NormalizedType
+import Katari.Data.QualifiedName (QualifiedName)
 import Katari.Data.Variance (Variance (..))
 import Katari.Typechecker.Normalizer
   ( Normalizer,
     alignObjectFields,
     alignSequenceItems,
+    captureErrors,
     dataInfoFor,
     relateAtVariance,
-    restrictEffect,
+    requestInfoFor,
+    requestRowVariance,
     substituteEffect,
     substituteGenericArgument,
     substituteType,
+    subtypeArgumentsWith,
     union,
   )
 
@@ -92,8 +96,23 @@ metavarKinded kind metavar = case kind of
 -- only ever bounds a variable from below.
 data Constraints = Constraints
   { typeBounds :: Map GenericId (List NormalizedType),
-    effectBounds :: Map GenericId (List NormalizedEffect),
+    effectBounds :: Map GenericId (List EffectLowerBound),
     attributeBounds :: Map GenericId (List NormalizedAttribute)
+  }
+  deriving (Eq, Show)
+
+-- | One lower bound proposed for an effect metavariable, kept in a form whose variance-directed
+-- concrete-request subtraction is DEFERRED to solve time. @effect@ is the raw continuation effect;
+-- @subtractConcrete@ is the concrete requests the provider supplies (the @scope[URL] | ...@ part of its
+-- continuation row), whose args may still mention type metavariables (a literal-bound @scope[URL]@);
+-- @lacks@ is the parameter tail's own overwrite @lacks@. Deferring matters because a provider's
+-- @scope[URL]@ is keyed on an as-yet-unsolved @URL@: only once the type metavariables are solved (from
+-- the sibling @url@ argument) can @scope["a" | "b"]@ minus the now-known @scope["b"]@ reduce to
+-- @scope["a"]@. See 'resolveEffectLowerBound'.
+data EffectLowerBound = EffectLowerBound
+  { effect :: NormalizedEffect,
+    subtractConcrete :: Map QualifiedName (Map Text NormalizedKindedType),
+    lacks :: Set QualifiedName
   }
   deriving (Eq, Show)
 
@@ -111,8 +130,13 @@ instance Monoid Constraints where
 lowerType :: GenericId -> NormalizedType -> Constraints
 lowerType metavar normalizedType = mempty {typeBounds = Map.singleton metavar [normalizedType]}
 
+-- | A bare (no concrete-request subtraction) effect lower bound — the whole actual flows into the
+-- variable, as a bare effect metavariable on the parameter side takes it.
 lowerEffect :: GenericId -> NormalizedEffect -> Constraints
-lowerEffect metavar effect = mempty {effectBounds = Map.singleton metavar [effect]}
+lowerEffect metavar effect = lowerEffectBound metavar EffectLowerBound {effect = effect, subtractConcrete = mempty, lacks = mempty}
+
+lowerEffectBound :: GenericId -> EffectLowerBound -> Constraints
+lowerEffectBound metavar bound = mempty {effectBounds = Map.singleton metavar [bound]}
 
 lowerAttribute :: GenericId -> NormalizedAttribute -> Constraints
 lowerAttribute metavar attribute = mempty {attributeBounds = Map.singleton metavar [attribute]}
@@ -165,21 +189,122 @@ asAttributeMetavar flexible attribute
 
 -- | Collect the constraints under which @actual <: parameter@ could hold for an effect (the covariant
 -- effect of a function). A bare effect metavariable on the parameter side takes the actual as a lower
--- bound. A parameter effect row carrying a flexible /tail/ alongside concrete requests (the @{...E,
--- req}@ a handler's continuation has) gives that tail the actual /restricted to lack/ the row's
--- requests — so a handler's residual @E@ is inferred as the continuation's effect minus the handled
--- requests.
+-- bound. A parameter effect row carrying a flexible /tail/ alongside concrete requests — the @E |
+-- scope[url]@ a scoped provider's continuation has, or the @{...E, req}@ a handler's continuation has —
+-- gives that tail the actual with the row's concrete requests SUBTRACTED, so a provider's residual @E@
+-- is inferred as the continuation's effect minus what the provider itself supplies concretely.
+--
+-- The subtraction is variance-directed per concrete entry, not a blanket name-drop ('subtractConcreteRequests'):
+--
+--   * an actual request the parameter's concrete entry fully subsumes (same name, the actual's args fit
+--     the parameter's) is DISCHARGED — dropped from the residual. This is the cancellation rule: for the
+--     agreeing @E | scope["u"] <: E2 | scope["u"]@ case it drops @scope["u"]@ and solves @E2 := E@
+--     directly, rather than the old spelling's @E2 := E \\ scope@ (which the dispose then spuriously
+--     rejected against a rigid @E@).
+--   * a partially-covered entry — a wider covariant arg, e.g. a merged @scope["a" | "b"]@ against the
+--     parameter's @scope["b"]@ — keeps its UNCOVERED remainder (@scope["a"]@) in the residual, so an
+--     outer provider still sees the scope it must discharge. This is the name-keyed arg-union of nested
+--     provides, handled at arg granularity.
+--   * an actual request the parameter does not name is kept as-is.
+--
+-- The parameter tail's own overwrite @lacks@ (the @{...E, req}@ spelling) are still applied by NAME to
+-- the actual's tails — that is what removes a request hiding inside the actual's own tail, which no
+-- concrete-part subtraction could see. The actual's escape channels and io ride through untouched, so a
+-- continuation's escapes flow into the solved @E@ and are discharged later at their target boundary.
+--
+-- SOUNDNESS: this is the error-free PROPOSE step; the trusted 'subtype' re-checks the solution at
+-- dispose. Cancelling a covered entry (instead of blanket-subtracting it into the tail's @lacks@) can
+-- only make the proposed residual LARGER — never smaller — than the old name-keyed subtraction, and a
+-- larger covariant lower bound is the sound direction: if it is too large the dispose's result / bound
+-- check rejects it, whereas the old over-subtraction made the residual too SMALL and the dispose then
+-- rejected a valid @E | scope[url]@ continuation as "overrides incompatible". The subtraction itself is
+-- carried on the 'EffectLowerBound' and run at SOLVE time ('resolveEffectLowerBound'), so a provider's
+-- @scope[URL]@ is subtracted only after @URL@ is solved from the sibling @url@ argument.
 collectEffectConstraints :: Set GenericId -> NormalizedEffect -> NormalizedEffect -> Constraints
 collectEffectConstraints flexible actual parameter
   | Just metavar <- asEffectMetavar flexible parameter = lowerEffect metavar actual
   | otherwise = case parameter.requests of
-      RequestEffectRow parameterRow ->
-        let concreteKeys = Map.keysSet parameterRow.request
-            flexibleTails = [(metavar, lacks) | (metavar, lacks) <- Map.toList parameterRow.tails, metavar `Set.member` flexible]
-         in -- 'restrictEffect' keeps the actual's escape channels, so a continuation's escapes flow into
-            -- the solved @E@ and are discharged later at their target boundary.
-            mconcat [lowerEffect metavar (restrictEffect (Set.union concreteKeys lacks) actual) | (metavar, lacks) <- flexibleTails]
       RequestEffectAny -> mempty
+      RequestEffectRow parameterRow ->
+        let flexibleTails = [(metavar, lacks) | (metavar, lacks) <- Map.toList parameterRow.tails, metavar `Set.member` flexible]
+         in mconcat
+              [ lowerEffectBound metavar EffectLowerBound {effect = actual, subtractConcrete = parameterRow.request, lacks = lacks}
+                | (metavar, lacks) <- flexibleTails
+              ]
+
+-- | Discharge one deferred effect lower bound with the (already solved) type substitution applied: the
+-- provider's concrete requests are subtracted from the continuation's effect only now, so a literal
+-- @scope[URL]@'s @URL@ is concrete. An @all@ actual has no representable restriction and passes through
+-- (a sound over-approximation — the dispose step re-checks).
+resolveEffectLowerBound :: Map GenericId NormalizedKindedType -> EffectLowerBound -> Normalizer NormalizedEffect
+resolveEffectLowerBound typeSubstitution bound = do
+  effect <- substituteEffect typeSubstitution bound.effect
+  subtractConcrete <- traverse (traverse (substituteGenericArgument typeSubstitution)) bound.subtractConcrete
+  case effect.requests of
+    RequestEffectAny -> pure effect
+    RequestEffectRow row -> do
+      residualRequest <- subtractConcreteRequests subtractConcrete row.request
+      pure effect {requests = RequestEffectRow row {request = residualRequest, tails = Map.map (Set.union bound.lacks) row.tails}}
+
+-- | Subtract a parameter row's concrete requests from the actual's concrete requests, variance-directed
+-- per entry (see 'collectEffectConstraints'): a matched request the actual's args fully fit the
+-- parameter's is dropped (discharged); a partially-covered one keeps the uncovered remainder of its
+-- covariant args; an actual request the parameter does not name is kept as-is.
+subtractConcreteRequests ::
+  Map QualifiedName (Map Text NormalizedKindedType) ->
+  Map QualifiedName (Map Text NormalizedKindedType) ->
+  Normalizer (Map QualifiedName (Map Text NormalizedKindedType))
+subtractConcreteRequests parameterRequests =
+  Map.foldrWithKey step (pure Map.empty)
+  where
+    step name actualArguments accumulate = do
+      accumulated <- accumulate
+      case Map.lookup name parameterRequests of
+        Nothing -> pure (Map.insert name actualArguments accumulated)
+        Just parameterArguments -> do
+          maybeResidual <- subtractRequestEntry name actualArguments parameterArguments
+          pure $ case maybeResidual of
+            Nothing -> accumulated
+            Just residualArguments -> Map.insert name residualArguments accumulated
+
+-- | Subtract one matched request's parameter args from its actual args, using the request's declared
+-- variances (via 'requestRowVariance', which pins a phantom marker's arg to covariant). Returns
+-- 'Nothing' when the parameter's entry fully subsumes the actual's (the entry is discharged), else the
+-- uncovered remainder. Coverage is decided with the trusted 'subtype' the dispose step uses, so
+-- "discharged" here means exactly "the dispose would accept the actual's entry against the parameter's".
+subtractRequestEntry :: QualifiedName -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Maybe (Map Text NormalizedKindedType))
+subtractRequestEntry name actualArguments parameterArguments = do
+  requestInfo <- requestInfoFor name
+  let variances = requestRowVariance . (.variance) <$> requestInfo.genericParameters.parameterInformation
+  (_, coverageErrors) <- captureErrors (subtypeArgumentsWith variances actualArguments parameterArguments)
+  pure $
+    if null coverageErrors
+      then Nothing
+      else Just (Map.mapWithKey (reduceArgument variances) actualArguments)
+  where
+    -- Only a covariant position can keep an uncovered remainder; an invariant / contravariant one is
+    -- left as the actual wrote it (the dispose step is the authority on whether it is acceptable).
+    reduceArgument variances argumentName actualArgument = case (Map.lookup argumentName variances, Map.lookup argumentName parameterArguments) of
+      (Just Covariant, Just parameterArgument) -> subtractKinded actualArgument parameterArgument
+      _ -> actualArgument
+
+-- | The covariant "difference" of one kinded arg, used to keep a request entry's UNCOVERED remainder.
+-- Only the type kind's string layer is reduced (the phantom scope-URL case, where the arg is a
+-- string-literal singleton or a union); every other layer / kind is kept, a sound over-approximation
+-- the dispose step re-checks.
+subtractKinded :: NormalizedKindedType -> NormalizedKindedType -> NormalizedKindedType
+subtractKinded actual parameter = case (actual, parameter) of
+  (NormalizedKindedTypeType actualType, NormalizedKindedTypeType parameterType) -> NormalizedKindedTypeType (subtractType actualType parameterType)
+  _ -> actual
+
+-- | Reduce a covariant type arg by removing the literals the parameter's arg already covers. Keeps all
+-- non-string structure (over-approximation); for the scope-URL case the arg is purely string literals,
+-- so @scope["a" | "b"]@ against @scope["b"]@ reduces to @scope["a"]@ exactly.
+subtractType :: NormalizedType -> NormalizedType -> NormalizedType
+subtractType actual parameter = case (actual.baseType, parameter.baseType) of
+  (NormalizedBaseTypeLayered actualLayer, NormalizedBaseTypeLayered parameterLayer) ->
+    actual {baseType = NormalizedBaseTypeLayered actualLayer {stringLayer = stringSlotDifference actualLayer.stringLayer parameterLayer.stringLayer}}
+  _ -> actual
 
 -- | As 'collectEffectConstraints', for the attribute of a node (only the bare-metavariable shapes are
 -- recognised; richer attributes contribute nothing and are left to the dispose check).
@@ -328,8 +453,10 @@ solveConstraints registry constraints = do
       case Map.findWithDefault [] metavar constraints.effectBounds of
         [] -> pure solved
         lowers -> do
-          substituted <- traverse (substituteEffect typeSubstitution) lowers
-          joined <- foldM union bottomEffect substituted
+          -- The type substitution is applied here, so a deferred concrete-request subtraction (a
+          -- provider's @scope[URL]@) runs against a now-solved @URL@.
+          resolved <- traverse (resolveEffectLowerBound typeSubstitution) lowers
+          joined <- foldM union bottomEffect resolved
           pure (Map.insert metavar (NormalizedKindedTypeEffect joined) solved)
     solveAttribute solved metavar =
       case Map.findWithDefault [] metavar constraints.attributeBounds of

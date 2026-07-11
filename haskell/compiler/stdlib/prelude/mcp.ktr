@@ -102,7 +102,7 @@ degrades `URL` to `string` (the widest scope — see the module header)."
 external agent provide[literal URL, R, effect E](
   url: URL,
   auth: auth,
-  continuation: agent (value: toolbox[URL]) -> R with {...E, scope[URL]},
+  continuation: agent (value: toolbox[URL]) -> R with E | scope[URL],
 ) -> R with E from "mcp"
 
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no

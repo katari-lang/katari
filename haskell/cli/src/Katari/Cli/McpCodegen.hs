@@ -373,9 +373,11 @@ synonymLines tool = case tool.output of
 -- the wrappers call through the static @mcp.call@ path rather than the minted toolbox. @provide@
 -- discharges @scope[url]@ from the rest of the block, so only @io@ (the implicit effect of every
 -- external call, which a rigid @E@ cannot absorb) remains on @with_tools@'s own row. The caller
--- continuation's row uses the OVERWRITE spelling @{...E, scope[url]}@ — the provider-canonical
--- form @provide@ itself declares; the union spelling @E | scope[url]@ would not match the
--- tail-minus-scope row the @use@ discharge gives the rest of the block.
+-- continuation's row uses the UNION spelling @E | scope[url]@ — the provider-canonical form @provide@
+-- itself declares. It composes across nested providers (a merged @scope[a | b]@ still covers each
+-- inner @provide@'s @scope[url]@), which the overwrite spelling's pinned entry cannot; and inference
+-- solves @provide@'s own @E@ from it by cancelling the shared @scope[url]@ entry, so the generated
+-- @use mcp.provide(...)@ needs no explicit @[url, R, E]@ instantiation.
 withToolsLines :: PullContext -> List ResolvedTool -> List Text
 withToolsLines context resolvedTools =
   let scopeRow = scopeEffect context.url
@@ -387,7 +389,7 @@ withToolsLines context resolvedTools =
         indent 1 "continuation: agent (value: {"
       ]
         <> [indent 2 (returnTypeField scopeRow tool) | tool <- resolvedTools]
-        <> [ indent 1 ("}) -> R with {...E, " <> scopeRow <> "},"),
+        <> [ indent 1 ("}) -> R with E | " <> scopeRow <> ","),
              ") -> R with io | E {",
              indent 1 ("let tools : mcp.toolbox[" <> urlLiteral <> "] = use mcp.provide(url = " <> urlLiteral <> ", auth = auth)")
            ]

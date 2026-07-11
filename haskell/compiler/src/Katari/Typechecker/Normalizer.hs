@@ -29,6 +29,7 @@ import Data.Map.Merge.Strict qualified as Merge
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Common (intersectWithKeyM, unionWithKeyM)
 import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), reKeyByGenericId)
@@ -559,9 +560,23 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
                 Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
                 Just rightLacks ->
                   unless (rightLacks `Set.isSubsetOf` leftLacks) $
-                    tellEffectMismatch "Effect generic overrides are incompatible" effectiveLeft right
+                    -- The two rows denormalize to identical-looking text — a tail's @lacks@ set is
+                    -- invisible in the surface syntax — so the message names the requests the expected
+                    -- effect additionally removes from the shared generic, which is the difference the
+                    -- rows actually disagree on.
+                    tellEffectMismatch (overrideMismatchReason (Set.difference rightLacks leftLacks)) effectiveLeft right
           )
           (Map.toList effectiveLeftRow.tails)
+
+-- | The reason for a tail-lacks (effect-generic override) mismatch, naming the requests the expected
+-- effect additionally removes from the shared generic. Both the expected and actual rows render to the
+-- same surface text (a tail's @lacks@ set has no surface spelling), so without these names the error
+-- would show two identical rows; the difference set is exactly what the check rejected on.
+overrideMismatchReason :: Set QualifiedName -> Text
+overrideMismatchReason additionallyExcluded =
+  "Effect generic overrides are incompatible: the expected effect additionally excludes "
+    <> Text.intercalate ", " (renderQualifiedName <$> Set.toList additionallyExcluded)
+    <> " from the shared effect generic, which the actual effect still admits"
 
 -- | Combine the argument maps of one request name according to the request's declared variances.
 combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Map Text NormalizedKindedType)
