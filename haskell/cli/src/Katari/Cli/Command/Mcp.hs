@@ -5,10 +5,11 @@
 -- refreshes) the tokens itself, so no token material ever appears in Katari source.
 --
 -- @pull@ generates a typed binding module from a live server: it lists the server's tools through
--- the same node helper and writes one self-contained @.ktr@ module — a @with_tools@ scoped
--- provider handing its continuation one typed wrapper per tool (see "Katari.Cli.McpCodegen" for
--- the codegen contract). Regeneration overwrites the file, so the module is an artifact, never
--- hand-edited.
+-- the same node helper and writes one self-contained @.ktr@ module — a @connect@ scoped provider
+-- plus one top-level typed agent per tool, the connection's credentials supplied ambiently through a
+-- generated @credentials@ request (see "Katari.Cli.McpCodegen" for the codegen contract). A caller
+-- writes @use github.connect(auth = ...)@ once and then calls the tools directly. Regeneration
+-- overwrites the file, so the module is an artifact, never hand-edited.
 --
 -- The interactive OAuth flow itself (authorization-code + PKCE, dynamic client registration, the
 -- loopback redirect listener) lives in the @katari-mcp@ node helper — spawned like @katari-bundle@
@@ -41,7 +42,7 @@ import Katari.Cli.Output (newOutputContext, progress)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory)
+import System.FilePath (takeBaseName, takeDirectory)
 import System.IO (hClose)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
 
@@ -195,7 +196,14 @@ runPull global pullOptions = do
   writeOrExit "mcp" ("could not write " <> Text.pack pullOptions.out) $ do
     createDirectoryIfMissing True (takeDirectory pullOptions.out)
     TextIO.writeFile pullOptions.out rendered
-  progress output ("Wrote " <> Text.pack pullOptions.out <> " — import it and open the typed tools with `let tools : {...} = use with_tools(auth = ...)`")
+  progress output ("Wrote " <> Text.pack pullOptions.out <> " — import it, open the connection with `use " <> moduleQualifierOf pullOptions.out <> "connect(auth = ...)`, then call the tools directly")
+
+-- | The module qualifier a caller writes, from the out path's base name (a Katari module is named
+-- after its file): @"github."@ for @src/github.ktr@, or empty for a degenerate path with no base name.
+moduleQualifierOf :: FilePath -> Text
+moduleQualifierOf path = case Text.pack (takeBaseName path) of
+  "" -> ""
+  base -> base <> "."
 
 ---------------------------------------------------------------------------------------------------
 -- the shared helper spawn

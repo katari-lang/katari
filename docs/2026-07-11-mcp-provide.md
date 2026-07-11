@@ -8,7 +8,7 @@
 ```katari
 // tool は `use` ブロックの区間だけ生きる。ブロックを抜けたら scope が閉じる。
 // mint された tool は動的シグネチャの agent 値なので、呼び出しは reflection 経由
-// (型付きの dot アクセスが欲しければ codegen の `with_tools` — §5)。
+// (型付きの直接呼び出しが欲しければ codegen の `connect` + トップレベル tool — §5)。
 let tools : mcp.toolbox["https://mcp.example.com/mcp"] =
   use mcp.provide(url = "https://mcp.example.com/mcp", auth = mcp.oauth(name = "github"))
 let issue = match (record.get(target = tools, key = "get_issue")) {
@@ -20,8 +20,8 @@ json.to_text(value = issue)
 
 このドキュメントは、tool を provide の外へ逃がせないようにするスコープ設計(phantom marker +
 covariance)、literal / dynamic の分岐、covariance が残す唯一の穴とそれを塞ぐランタイム backstop
-規則、永続化 / リカバリの形、codegen(`katari mcp pull`)の `with_tools` 化、そして `serve` の
-型の微調整を記録する。表面は `prelude/mcp.ktr` の 1 モジュールにまとまっている。
+規則、永続化 / リカバリの形、codegen(`katari mcp pull`)の `connect` provider + トップレベル tool 化、
+そして `serve` の型の微調整を記録する。表面は `prelude/mcp.ktr` の 1 モジュールにまとまっている。
 
 ## 1. スコープ設計: tool は provide の外へ逃げられない
 
@@ -121,44 +121,68 @@ URL ごとの literal スコープは型システム上は airtight である。
 - mint された tool 値は(永続化された安定な)**スコープ id** を運ぶので、保存された tool は再起動後も
   再登録されたスコープに解決する。
 
-## 5. codegen: `katari mcp pull` の `connect` → `with_tools`
+## 5. codegen: `katari mcp pull` の `connect` provider + トップレベル tool
 
-生成モジュールの旧 `connect` agent は、provide をラップする provider に置き換わった:
+生成モジュールは、provide をラップする `connect` provider + 接続の credentials を配る `credentials`
+request + **トップレベル**の型付き tool agent 群に置き換わった(旧 `with_tools` は継続にクロージャの
+record を渡す形だった — トップレベル agent は何もクローズできないので削除し、`tavily` / `e2b` と同型の
+provider idiom に揃えた)。
 
 ```katari
-agent with_tools[R, effect E](
+@"接続の credentials — `connect` がスコープの区間だけ供給する。"
+request credentials() -> mcp.auth
+
+agent connect[R, effect E](
   auth: mcp.auth,
-  continuation: agent (value: { /* …型付きラッパー… */ }) -> R with E | mcp.scope["<url>"],
-) -> R with io | E
+  continuation: agent (value: null) -> R with {...(E | mcp.scope["<url>"]), credentials},
+) -> R with io | E {
+  let _ : mcp.toolbox["<url>"] = use mcp.provide(url = "<url>", auth = auth)
+  use handler { request credentials() { next auth } }
+  continuation(value = null)
+}
+
+@"<tool description>"
+agent get_issue(owner: string, repo: string) -> get_issue_output
+  with io | mcp.scope["<url>"] | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {
+  // <arguments fold>
+  mcp.call["<url>", get_issue_output](url = "<url>", auth = credentials(), tool = "get-issue", arguments = ...)
+}
 ```
 
-- `with_tools` は `mcp.provide(url = "<pulled literal>", auth = auth, ...)` を呼び、スコープの
-  **中で**型付きラッパー record を組み立て、それを呼び出し側の継続に渡す。Katari に無名 agent 式は
-  無いので、body は `use` 形になる: `let tools : mcp.toolbox["<url>"] = use mcp.provide(url = "<url>", auth = auth)`
-  に続けてローカルの型付きラッパー agent 群、最後に `continuation(value = { … })`。
-- 各ラッパーは末尾式 `mcp.call["<literal>", T](url = "<literal>", auth = auth, tool = "...", arguments = ...)`
-  を呼ぶ(`T` はマップされた出力型 or `json.json`; デコードは runtime に移り、末尾の `json.decode` 行は
-  消えた)。その行に `mcp.scope["<literal>"]` が乗る。`mcp.call` の行は常に `json.decode_error` を持つ
-  ので、ラッパーの effect 行は出力型に関わらず `json.decode_error` を含む(§3 の pull ドキュメント参照)。
-- したがって型付きラッパーの行と、呼び出し側の継続の行に `scope["<literal>"]` が入る
-  (継続は `-> R with {...E, mcp.scope["<literal>"]}`)。`with_tools` 自身の結果はスコープを
-  discharge する — ただし結果行は `io | E` であって素の `E` ではない(external agent は暗黙に `io` を
-  perform するので、`provide` を呼ぶ通常 agent の `with_tools` は `io` を自分の行に宣言する)。
+- `connect` は `mcp.provide` でスコープを開き、`use handler` で `credentials` を供給し、継続に `null` を
+  渡す。Katari に無名 agent 式は無いので body は `use` 形。`use mcp.provide` の binder は `_`(型注釈
+  `mcp.toolbox["<url>"]` の供給に構文上必須だが、tool は static な `mcp.call` 経路を通るので mint された
+  toolbox は捨てる)。**順序が肝**: provide が外側でスコープを継続に敷き、handler がその内側で
+  `credentials` を discharge する。
+- 各トップレベル tool は `credentials()` で接続の `auth` を読み(何もクローズしない)、末尾式
+  `mcp.call["<literal>", T](url = "<literal>", auth = credentials(), tool = "...", arguments = ...)` を呼ぶ
+  (`T` はマップされた出力型 or `json.json`; デコードは runtime。末尾の `json.decode` 行は無い)。その行に
+  `io | mcp.scope["<literal>"] | credentials | prelude.throw[...]` が乗る(`mcp.call` の行は常に
+  `json.decode_error` を持つので出力型に関わらず含む — §3 の pull ドキュメント参照)。
+- `connect` の継続の行は**混在綴り** `{...(E | mcp.scope["<url>"]), credentials}`。phantom marker の
+  `scope` は §1 の正準どおり **union 側**(2 つの `connect` を nest したとき URL ごとの scope が arg-union で
+  `scope["a" | "b"]` にマージするのを許す — pin されると 2 つ目で `K3001: String layers are incompatible`)。
+  handle される `credentials` は **overwrite 側**: handler が discharge するには共有 `E` から pin して外す
+  必要があり、純 union `| credentials` だと `E` に残って discharge が **K3001** で失敗する(実測)。2 つの
+  サーバーの `credentials` は**モジュールで名前空間化**されるので衝突せず、overwrite で問題ない。
+- `connect` 自身の結果行は `io | E`(素の `E` ではない — external の `mcp.provide` を呼ぶ通常 agent なので
+  `io` を宣言する)。生成される `use mcp.provide(...)` は `[url, R, E]` を明示せず **推論**で解ける
+  (§1「推論」の相殺規則)。
 
-留意: 継続の行は **union 綴り `E | mcp.scope["<url>"]`**(§1 の正準表記)。生成される
-`use mcp.provide(...)` は `[url, R, E]` を明示せず **推論**で解ける(§1「推論」の相殺規則)ので、
-バグ回避のための明示インスタンス化は不要。`let tools : ... = use ...` の binder(`tools`)は
-`use` の型注釈供給のために構文上必須で、値自体は未使用(ラッパーは static な `mcp.call` 経路を通る)。
+呼び出し側は **bare `use`**(binder 無し)で開き、tool を直接呼ぶ。binder-less `use` は継続の値型を `null`
+に定めるので `connect` の `continuation: agent (value: null)` に合致し、`let _` の廃棄バインドが要らず
+**K3013(注釈欠落)も噛まない**。
+
+> 留意(将来最適化): `connect` は現状スコープを開くために `mcp.provide` の listing 往復を走らせるが、
+> 静的バインディングは mint された toolbox を捨てる。listing 不要の `mcp.open` primitive があれば
+> この一度きりのオーバーヘッドを消せる(未実装 — 記録のみ)。
 
 ```katari
 import github   // `--out src/github.ktr` の生成モジュール
 
 agent main() -> string {
-  let tools : {
-    get_issue: agent (owner: string, repo: string, number: integer) -> get_issue_output with ...,
-    // ...
-  } = use github.with_tools(auth = mcp.oauth(name = "github"))
-  let issue = tools.get_issue(owner = "katari-lang", repo = "katari", number = 1)
+  use github.connect(auth = mcp.oauth(name = "github"))
+  let issue = github.get_issue(owner = "katari-lang", repo = "katari", number = 1)
   issue.title
 }
 ```
