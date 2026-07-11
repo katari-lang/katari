@@ -7,14 +7,18 @@
 // descriptor + scope riding the tool's context — a closed scope is rejected typed, the covariance
 // backstop), and `prelude.mcp.call` (the static direct call: `{url, auth, tool, arguments}` all in the
 // argument, gated on a LIVE provide scope of the same descriptor, the `arguments` json TREE lowered to
-// the literal document for the transport and the reply lifted literally back into a tree). Failures are
-// typed `throw[mcp.server_error]`; recovery of an in-flight tool call is at-most-once (an interrupted
-// call fails typed — a katari retry reconnects through the transport's descriptor cache), while the
-// provide endpoint itself survives a restart.
+// the literal document for the transport, and the reply DECODED against the call's `T` generic — a typed
+// `T` reconstructs the value wire form, `json.json` keeps the raw tree). Failures are typed
+// `throw[mcp.server_error]` (a reply that does not conform to `T` is `throw[json.decode_error]`);
+// recovery of an in-flight tool call is at-most-once (an interrupted call fails typed — a katari retry
+// reconnects through the transport's descriptor cache), while the provide endpoint itself survives a
+// restart.
 
 import {
   createAgentName,
+  type GenericArgumentSchema,
   type IRModule,
+  type JSONSchema,
   type QualifiedName,
   type SchemaInfo,
 } from "@katari-lang/types";
@@ -504,6 +508,59 @@ describe("mcp reactor", () => {
   });
 });
 
+// One shape of the `json` union's emitted schema (`Katari.Schema`): a `data` value nests its fields under
+// `value`, keyed by a `$constructor` const. `json.json` itself is the seven-shape anyOf below.
+function jsonShape(constructorName: string, valueProperties: Record<string, JSONSchema>): JSONSchema {
+  return {
+    type: "object",
+    properties: {
+      $constructor: { const: constructorName },
+      value: {
+        type: "object",
+        properties: valueProperties,
+        required: Object.keys(valueProperties),
+        additionalProperties: true,
+      },
+    },
+    required: ["$constructor", "value"],
+    additionalProperties: false,
+  };
+}
+
+// The `json.json` output schema the codegen stamps on `mcp.call[..., json.json]`: the seven-shape anyOf
+// of the `json` union, mirroring what the compiler emits for `json.json`. A reply lifted as a LITERAL
+// `json` tree conforms to it, so the direct call keeps the raw tree (with its inert `$ref` objects) — the
+// no-`outputSchema` behaviour. A NON-tree value (a bare record, a scalar) does NOT conform, so a typed
+// `T` instead reconstructs the value wire form. (A nested `json` position expands to `{}` here — enough
+// for the decode's "is this a json tree?" question; the real schema breaks its own recursion the same way.)
+const JSON_TREE_SCHEMA: JSONSchema = {
+  anyOf: [
+    jsonShape("prelude.json.json_null", {}),
+    jsonShape("prelude.json.json_boolean", { value: { type: "boolean" } }),
+    jsonShape("prelude.json.json_integer", { value: { type: "integer" } }),
+    jsonShape("prelude.json.json_number", { value: { type: "number" } }),
+    jsonShape("prelude.json.json_string", { value: { type: "string" } }),
+    jsonShape("prelude.json.json_array", { items: { type: "array", items: {} } }),
+    jsonShape("prelude.json.json_object", { entries: { type: "object", additionalProperties: {} } }),
+  ],
+};
+
+// A `file` value's `$ref` handle schema (`Katari.Schema.fileReferenceSchema`): a typed `T` that carries a
+// file reconstructs a REAL handle from the reply's `$ref` object, so its lifetime rides the value walk.
+const FILE_REF_SCHEMA: JSONSchema = {
+  type: "object",
+  properties: { $ref: { type: "string" }, semanticKind: { type: "string" } },
+  required: ["$ref"],
+  additionalProperties: true,
+};
+
+/** The delegate generics a `mcp.call[url, T]` stamps: only `T` matters to the reactor's reply decode (the
+ *  literal `URL` gates the scope, not the shape). The engine forwards the external agent's own ambient to
+ *  the reactor, so `generics.T` reaches the direct call the same way a compiled `mcp.call[url, T]` does. */
+function directCallGenerics(outputSchema: JSONSchema): Array<[string, GenericArgumentSchema]> {
+  return [["T", { kind: "type", schema: outputSchema }]];
+}
+
 // agent main() {
 //   mcp.provide(url = "https://mcp.example.test/mcp", auth = mcp.headers(values = {}),
 //               continuation = call_runner)
@@ -511,7 +568,8 @@ describe("mcp reactor", () => {
 // agent call_runner(value) {   // the direct call must run INSIDE a provide of the same descriptor
 //   let arguments = json.json_object(entries = { x = json.json_integer(value = 19),
 //                                                note = json.json_string(value = "hi") })
-//   return mcp.call(url = "https://mcp.example.test/mcp",
+//   // T = json.json: the reply comes back as a raw `json` tree (the codegen's no-outputSchema choice).
+//   return mcp.call["https://mcp.example.test/mcp", json.json](url = "https://mcp.example.test/mcp",
 //                   auth = mcp.headers(values = {}), tool = "add", arguments = arguments)
 // }
 const CALL_IR: IRModule = {
@@ -678,6 +736,10 @@ const CALL_IR: IRModule = {
             target: { kind: "name", name: createAgentName("prelude.mcp.call") },
             argument: 115,
             output: 116,
+            // `mcp.call[url, json.json]` — the codegen's no-`outputSchema` instantiation. The engine
+            // forwards this to the mcp reactor as the external agent's ambient, so the reply is decoded
+            // against `json.json` (kept as the raw tree).
+            generics: directCallGenerics(JSON_TREE_SCHEMA),
           },
           { kind: "exit", target: 24, value: 116 },
         ],
@@ -698,8 +760,9 @@ const CALL_IR: IRModule = {
   names: {},
 };
 
-// agent main() { mcp.call(url = ..., auth = mcp.headers(values = {}), tool = "add") } — NO provide
-// anywhere, so the reactor must reject the direct call before any transport dispatch.
+// agent main() { mcp.call["...", json.json](url = ..., auth = mcp.headers(values = {}), tool = "add") }
+// — NO provide anywhere, so the reactor must reject the direct call before any transport dispatch (the
+// scope gate fires ahead of any reply decode, so this IR carries no `T` generic).
 const UNSCOPED_CALL_IR: IRModule = {
   metadata: { schemaVersion: 1 },
   blocks: {
@@ -784,6 +847,26 @@ const treeObject = (entries: Record<string, Value>): Value =>
 const treeArray = (elements: Value[]): Value =>
   jsonTree("prelude.json.json_array", { items: { kind: "array", elements } });
 
+/** `CALL_IR` with the direct call's `T` re-stamped: the typed-decode variants reuse the whole provide +
+ *  call_runner scaffold and only change what the reply is decoded against. */
+function callIrWithT(outputSchema: JSONSchema): IRModule {
+  const clone: IRModule = structuredClone(CALL_IR);
+  const body = clone.blocks[25]?.block;
+  if (body?.kind !== "sequence") {
+    throw new Error("CALL_IR block 25 must be the call_runner sequence");
+  }
+  for (const operation of body.operations) {
+    if (
+      operation.kind === "delegate" &&
+      operation.target.kind === "name" &&
+      String(operation.target.name) === "prelude.mcp.call"
+    ) {
+      operation.generics = directCallGenerics(outputSchema);
+    }
+  }
+  return clone;
+}
+
 /** Drive `CALL_IR`'s wrapping provide to active: the first dispatch is the provide's `listTools`; feed
  *  it an EMPTY listing so the continuation (`call_runner`) dispatches, and return the `callTool` its
  *  `mcp.call` then ships as `dispatched[1]`. */
@@ -815,7 +898,8 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
       auth: { $constructor: "prelude.mcp.headers", value: { values: {} } },
     });
 
-    // A structured reply lifts LITERALLY into the `json` tree the caller receives.
+    // `T = json.json` (CALL_IR's instantiation): the structured reply lifts LITERALLY into the `json`
+    // tree the caller receives, since that tree conforms to the seven-shape `json` union.
     transport.feed({
       delegation: call.delegation,
       outcome: { kind: "result", value: { sum: 42 } },
@@ -823,7 +907,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     await expect(result).resolves.toEqual(treeObject({ sum: treeInteger(42) }));
   });
 
-  test("a plain-text reply becomes a json_string tree", async () => {
+  test("T = json.json: a plain-text reply becomes a json_string tree", async () => {
     const transport = new ControlledMcpTransport();
     const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -833,7 +917,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     await expect(result).resolves.toEqual(treeString("just text"));
   });
 
-  test("a blob-bearing reply keeps the `$ref` handle as a LITERAL object inside the tree", async () => {
+  test("T = json.json: a blob-bearing reply keeps the `$ref` handle as a LITERAL object inside the tree", async () => {
     const transport = new ControlledMcpTransport();
     const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -846,8 +930,8 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
         value: { text: "rendered", files: [{ $ref: "blob-mcp-image", semanticKind: "file" }] },
       },
     });
-    // The handle is NOT lifted into a `file` value here (that is `json.decode`'s job, against a
-    // `file`-typed shape); it must survive as the literal `$ref` object inside the tree.
+    // `T = json.json`: the handle is NOT lifted into a `file` value here (a typed `T` would do that);
+    // it survives as the literal `$ref` object inside the tree, which a later `json.decode` reconstructs.
     await expect(result).resolves.toEqual(
       treeObject({
         text: treeString("rendered"),
@@ -858,7 +942,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     );
   });
 
-  test("a REAL produced blob survives the direct call, ascending onto the run (still readable after)", async () => {
+  test("T = json.json: a produced blob left inert in the tree run-adopts (the narrowed backstop)", async () => {
     const transport = new ControlledMcpTransport();
     const blobs = new InMemoryBlobStore();
     const blob = "blob-mcp-direct" as BlobId;
@@ -878,8 +962,9 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     });
     expect(registered).toBe(true);
 
-    // The reply lifts LITERALLY into the json tree — the blob rides only as a `$ref` STRING leaf, not a
-    // real ref, so the value-driven resource ascent cannot carry it.
+    // `T = json.json` keeps the raw tree, so the blob rides only as a `$ref` STRING leaf, not a real ref —
+    // the value-driven resource ascent cannot carry it. This is the ONE case the run-adoption backstop
+    // still exists for.
     transport.feed({
       delegation: call.delegation,
       outcome: {
@@ -896,11 +981,110 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
       }),
     );
 
-    // The handle is still readable after the call settles: the produced blob ascended onto the (permanent)
-    // run instance rather than being reclaimed with the ephemeral call. The OLD code — which left a
-    // produced blob the literal `$ref` tree did not carry out owned by the call instance — deleted these
-    // bytes in the same commit that delivered the result, so this read would have failed.
+    // Still readable after the call settles: the produced blob was ADOPTED onto the (permanent) run
+    // instance rather than reclaimed with the ephemeral call — the narrowed backstop for a `$ref` the
+    // literal tree carries only as a string.
     await expect(blobs.get(PROJECT, blob)).resolves.toEqual(bytes);
+  });
+
+  test("a typed T decodes the reply to a real value (a record shape)", async () => {
+    const transport = new ControlledMcpTransport();
+    // T = { sum: integer } — a fully mapped outputSchema.
+    const outputSchema: JSONSchema = {
+      type: "object",
+      properties: { sum: { type: "integer" } },
+      required: ["sum"],
+    };
+    const actor = makeActor(callIrWithT(outputSchema), transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await callToolAfterProvide(transport);
+    // The server's `structuredContent`, a plain document conforming to the outputSchema.
+    transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: { sum: 42 } } });
+    // Decoded against `T`: a REAL record value (not the `json` tree), validated to conform.
+    await expect(result).resolves.toEqual({
+      kind: "record",
+      fields: { sum: { kind: "integer", value: 42 } },
+    });
+  });
+
+  test("a typed T carrying a file reconstructs a REAL handle that ascends by value (not run-adopted)", async () => {
+    const transport = new ControlledMcpTransport();
+    const blobs = new InMemoryBlobStore();
+    const blob = "blob-mcp-typed" as BlobId;
+    const bytes = new Uint8Array([9, 8, 7, 6]);
+    await blobs.put(PROJECT, blob, bytes);
+    // T = { text: string, files: array[file] } — the reply's `$ref` reconstructs a REAL file handle.
+    const outputSchema: JSONSchema = {
+      type: "object",
+      properties: { text: { type: "string" }, files: { type: "array", items: FILE_REF_SCHEMA } },
+      required: ["text", "files"],
+    };
+    const actor = makeActor(callIrWithT(outputSchema), transport, new InMemoryPersistence(), blobs);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await callToolAfterProvide(transport);
+    const registered = await actor.registerProducedMcpBlob(call.delegation, blob, {
+      hash: "hash",
+      size: bytes.byteLength,
+      semanticKind: "file",
+    });
+    expect(registered).toBe(true);
+
+    transport.feed({
+      delegation: call.delegation,
+      outcome: {
+        kind: "result",
+        value: { text: "rendered", files: [{ $ref: blob, semanticKind: "file" }] },
+      },
+    });
+    // The `$ref` reconstructs a REAL `ref` value — not the inert tree object of the `json.json` case — so
+    // the file rides the ordinary release / reown walk. Its lifetime is now value-reachability: the
+    // run-adoption backstop is a no-op here (the blob was released to in-transit by value, not left owned
+    // by the ephemeral call), which is exactly "value-owned rather than run-adopted".
+    await expect(result).resolves.toEqual({
+      kind: "record",
+      fields: {
+        text: { kind: "string", value: "rendered" },
+        files: {
+          kind: "array",
+          elements: [{ kind: "ref", semanticKind: "file", blobId: blob }],
+        },
+      },
+    });
+    // The real handle survived to the caller via the value walk (still readable after settle).
+    await expect(blobs.get(PROJECT, blob)).resolves.toEqual(bytes);
+  });
+
+  test("a reply that does not conform to a typed T throws json.decode_error", async () => {
+    const transport = new ControlledMcpTransport();
+    const outputSchema: JSONSchema = {
+      type: "object",
+      properties: { sum: { type: "integer" } },
+      required: ["sum"],
+    };
+    const actor = makeActor(callIrWithT(outputSchema), transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await callToolAfterProvide(transport);
+    // `sum` is a string, not an integer — the reply cannot take `T`'s shape.
+    transport.feed({
+      delegation: call.delegation,
+      outcome: { kind: "result", value: { sum: "not a number" } },
+    });
+    // The row declares `json.decode_error`; the runtime raises it (never a panic) so a handler catches it.
+    await expect(result).rejects.toThrow(/prelude\.json\.decode_error.*does not conform to T/);
+  });
+
+  test("a plain-text reply decodes into a string-shaped T", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(callIrWithT({ type: "string" }), transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await callToolAfterProvide(transport);
+    transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "just text" } });
+    // Decoded against `T = string`: the plain string VALUE (not a `json_string` tree node).
+    await expect(result).resolves.toEqual({ kind: "string", value: "just text" });
   });
 
   test("a transport error surfaces as the typed throw[mcp.server_error]", async () => {

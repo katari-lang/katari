@@ -608,6 +608,12 @@ function createExternal(ctx: StepContext, thread: ExternalThread): void {
         snapshot: ctx.ir.snapshot,
       },
       argument,
+      // The external agent's own instantiation (this instance's ambient) rides to the reactor, so a
+      // reactor that decodes its reply against a result generic — the mcp direct call against its `T` —
+      // reads the schema the call site stamped. A reactor that ignores it (ffi / http) is unaffected.
+      ...(ctx.instance.ambientGenerics !== undefined
+        ? { generics: ctx.instance.ambientGenerics }
+        : {}),
     },
     // `to` is the call reactor this routes to (`ffi` / `http`), from the block's marker via the proxy thread;
     // the target does not repeat it.

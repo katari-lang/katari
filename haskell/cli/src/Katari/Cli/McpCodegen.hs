@@ -4,14 +4,16 @@
 -- wrapper agent per server tool, each calling through the schema-blind @mcp.call@ external under the
 -- provide scope.
 --
--- The type mapping is ALL-OR-NOTHING per parameter and per tool output, forced by the wire-form
--- asymmetry of the @json@ boundary: @json.encode@ \/ @json.decode@ speak the value WIRE form, so a
--- @json.json@ nested INSIDE a typed value would embed as its @$constructor@ tree — not as the raw
+-- The type mapping is ALL-OR-NOTHING per parameter and per tool output. On the PARAMETER side this is
+-- forced by the wire-form asymmetry of the @json@ boundary: @json.encode@ speaks the value WIRE form, so
+-- a @json.json@ nested INSIDE a typed parameter would embed as its @$constructor@ tree — not the raw
 -- fragment an MCP server expects. A parameter whose schema maps completely is embedded with
--- @json.encode@; a parameter with any unmapped part falls back to @json.json@ as a whole and is
--- inserted into the arguments tree AS-IS (it already is a tree). Symmetrically, a tool's reply is
--- decoded with @json.decode[...]@ only when its ENTIRE @outputSchema@ maps; any other tool returns
--- the raw @json.json@ reply.
+-- @json.encode@; a parameter with any unmapped part falls back to @json.json@ as a whole and is inserted
+-- into the arguments tree AS-IS (it already is a tree). The OUTPUT side has no such asymmetry:
+-- @mcp.call[url, T]@ decodes the reply against @T@ in the RUNTIME. A tool whose @outputSchema@ maps
+-- completely instantiates @T@ to that type (decoded, @json.decode_error@ on a mismatch); any other tool
+-- instantiates @T@ to @json.json@ (the raw reply as a tree — today's behaviour), so the wrapper is one
+-- @mcp.call[...]@ call either way, with no trailing @json.decode@.
 --
 -- The body uses ONE uniform construction shape: the arguments object is folded field by field over
 -- @record.set@ (@arguments_0@ .. @arguments_n@), an optional parameter folding through a @match@
@@ -346,11 +348,13 @@ headerLines context =
     "//   - an anyOf whose members all map -> a union;",
     "//   - everything else (enum / const, allOf / oneOf, tuples, open or",
     "//     unmodelled schemas) falls back to `json.json`.",
-    "// All-or-nothing is the wire-form asymmetry: `json.encode` / `json.decode` speak the value WIRE",
-    "// form, so a `json.json` nested inside a typed value would embed as its `$constructor` tree, not",
-    "// as the raw fragment the server expects. A fallback parameter is therefore inserted into the",
-    "// arguments tree as-is (it already is a tree), and a reply is decoded with `json.decode[...]`",
-    "// only when the entire outputSchema maps — any other tool returns the raw `json.json` reply."
+    "// All-or-nothing on the PARAMETER side is the wire-form asymmetry: `json.encode` speaks the value",
+    "// WIRE form, so a `json.json` nested inside a typed parameter would embed as its `$constructor` tree,",
+    "// not the raw fragment the server expects — a fallback parameter is therefore inserted into the",
+    "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call[url,",
+    "// T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema instantiates `T`",
+    "// to its type (decoded, `json.decode_error` on a mismatch) and any other tool instantiates `T` to",
+    "// `json.json` (the raw reply as a tree)."
   ]
 
 -- | The per-tool output synonym, only where the output mapped. (Type synonyms take no @\@"..."@
@@ -442,8 +446,8 @@ toolAgentLines context scopeRow tool =
   [ "",
     docPrefix <> "agent " <> tool.identifier <> "(" <> parameterList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow scopeRow tool.output <> " {"
   ]
-    <> bodyLines
-    <> [ indent 1 (resultExpression tool.output),
+    <> argumentLines
+    <> [ indent 1 (call argumentsExpression),
          "}"
        ]
   where
@@ -453,16 +457,34 @@ toolAgentLines context scopeRow tool =
       | Text.null tool.description = ""
       | otherwise = "@\"" <> escapeDocText tool.description <> "\" "
     urlLiteral = "\"" <> escapeDocText context.url <> "\""
-    -- The url is the pulled literal (there is no `url` parameter) — this is exactly what binds
-    -- `mcp.call`'s `[literal URL]` generic to the singleton and so satisfies the `scope[url]` gate.
-    call argumentsText = "let raw = mcp.call(url = " <> urlLiteral <> ", auth = auth, tool = \"" <> escapeDocText tool.originalName <> "\", arguments = " <> argumentsText <> ")"
-    bodyLines = case tool.input of
-      -- The pass-through plan: the caller's tree IS the arguments object, as-is.
-      InputPassthrough -> [indent 1 (call "arguments")]
+    -- The url is the pulled literal (there is no `url` parameter) — this binds `mcp.call`'s `[literal
+    -- URL]` generic to the singleton (satisfying the `scope[url]` gate); `T` is the second, explicit
+    -- generic (the mapped output type, or `json.json`), against which the runtime decodes the reply. Both
+    -- generics MUST be written — a `literal` generic is inferred but still counts toward the explicit
+    -- `[...]` arity — so the url literal appears in the instantiation and again as the `url` argument. The
+    -- call is the wrapper's tail expression: no trailing `json.decode`, since `mcp.call` decodes itself.
+    call argumentsText =
+      "mcp.call["
+        <> urlLiteral
+        <> ", "
+        <> outputTypeText tool.output
+        <> "](url = "
+        <> urlLiteral
+        <> ", auth = auth, tool = \""
+        <> escapeDocText tool.originalName
+        <> "\", arguments = "
+        <> argumentsText
+        <> ")"
+    -- The arguments object the call sends: the caller's pass-through tree as-is, or the folded object.
+    argumentsExpression = case tool.input of
+      InputPassthrough -> "arguments"
+      InputFields parameters -> "json.json_object(entries = arguments_" <> Text.pack (show (length parameters)) <> ")"
+    argumentLines = case tool.input of
+      -- The pass-through plan: the caller's tree IS the arguments object, nothing to fold.
+      InputPassthrough -> []
       InputFields parameters ->
         [indent 1 "let arguments_0 = record.empty()"]
           <> concat (zipWith parameterFoldLines [0 ..] parameters)
-          <> [indent 1 (call ("json.json_object(entries = arguments_" <> Text.pack (show (length parameters)) <> ")"))]
 
 -- | One parameter's fold step: @arguments_i@ -> @arguments_(i+1)@. A required parameter folds
 -- unconditionally; an optional one matches @null@ (absent — the key is omitted) against @present@.
@@ -484,11 +506,6 @@ parameterFoldLines slot parameter =
             indent 1 "}"
           ]
         else [indent 1 ("let " <> target <> " = " <> insert parameter.identifier)]
-
-resultExpression :: ResolvedOutput -> Text
-resultExpression output = case output of
-  OutputTyped synonymName _ -> "json.decode[" <> synonymName <> "](value = raw)"
-  OutputRaw -> "raw"
 
 -- | The wrapper declaration's parameter list: @name: T@, or @name: T | null ?= null@ when optional
 -- (defaulting to @null@ marks absence — the fold omits the key, so absent and JSON null never
@@ -524,12 +541,15 @@ outputTypeText output = case output of
   OutputRaw -> "json.json"
 
 -- | The wrapper's effect row: @io@ (an external call), the provide @scope@ the call is gated by
--- (inserted between @io@ and the throws), the two typed mcp throws, and @json.decode_error@ only
--- when the wrapper decodes. The scope is what ties the call to the enclosing @provide@.
+-- (inserted between @io@ and the throws), and the three typed throws `mcp.call` itself declares —
+-- @server_error@ / @auth_error@ and @json.decode_error@ (the runtime raises the last when a reply does
+-- not conform to the decode target). It is UNIFORM across both output plans: even the @json.json@ plan
+-- calls the same @mcp.call[...]@, whose row carries @decode_error@, so the wrapper must carry it too
+-- (it is never actually raised for @json.json@, which keeps the raw tree). The scope is what ties the
+-- call to the enclosing @provide@.
 effectRow :: Text -> ResolvedOutput -> Text
-effectRow scopeRow output = case output of
-  OutputTyped _ _ -> "io | " <> scopeRow <> " | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
-  OutputRaw -> "io | " <> scopeRow <> " | prelude.throw[mcp.server_error | mcp.auth_error]"
+effectRow scopeRow _ =
+  "io | " <> scopeRow <> " | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
 
 -- | Escape text into a Katari string \/ doc-annotation literal: backslash and double quote escape,
 -- newlines become the @\\n@ escape so every generated literal stays on one line, and the other

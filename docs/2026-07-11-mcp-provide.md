@@ -136,8 +136,10 @@ agent with_tools[R, effect E](
   **中で**型付きラッパー record を組み立て、それを呼び出し側の継続に渡す。Katari に無名 agent 式は
   無いので、body は `use` 形になる: `let tools : mcp.toolbox["<url>"] = use mcp.provide(url = "<url>", auth = auth)`
   に続けてローカルの型付きラッパー agent 群、最後に `continuation(value = { … })`。
-- 各ラッパーは従来どおり `mcp.call(url = "<literal>", auth = auth, tool = "...", arguments = ...)` +
-  decode を呼ぶが、その行に `mcp.scope["<literal>"]` が乗るようになった。
+- 各ラッパーは末尾式 `mcp.call["<literal>", T](url = "<literal>", auth = auth, tool = "...", arguments = ...)`
+  を呼ぶ(`T` はマップされた出力型 or `json.json`; デコードは runtime に移り、末尾の `json.decode` 行は
+  消えた)。その行に `mcp.scope["<literal>"]` が乗る。`mcp.call` の行は常に `json.decode_error` を持つ
+  ので、ラッパーの effect 行は出力型に関わらず `json.decode_error` を含む(§3 の pull ドキュメント参照)。
 - したがって型付きラッパーの行と、呼び出し側の継続の行に `scope["<literal>"]` が入る
   (継続は `-> R with {...E, mcp.scope["<literal>"]}`)。`with_tools` 自身の結果はスコープを
   discharge する — ただし結果行は `io | E` であって素の `E` ではない(external agent は暗黙に `io` を

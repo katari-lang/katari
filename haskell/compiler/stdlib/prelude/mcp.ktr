@@ -106,17 +106,23 @@ external agent provide[literal URL, R, effect E](
 ) -> R with E from "mcp"
 
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
-minted agent value. The schema-blind seam the binding modules `katari mcp pull` generates are built on:
-@tool@ is the server-declared tool name, @arguments@ its arguments object as a literal `json` tree (a
-typed wrapper builds it with `json.encode` per parameter). The result is the server's reply as a `json`
-tree — the tool's `structuredContent` when it declares one, otherwise its text as a `json_string`; a
-binary content block's produced file rides inside the tree as its `$ref` handle object, so `json.decode`
-with a `file`-typed shape reconstructs the handle. Nothing validates the arguments before the server does
-(unlike a minted tool) — a rejected call throws `server_error`. Scope-gated the same way as a minted tool
-(`scope[URL]` on its row, a literal @url@ binding it per-URL): a generated binding calls this only inside
-a `provide` scope over the same descriptor, and the runtime rejects a call with no live scope for that
-descriptor as a typed `server_error`."
-external agent call[literal URL](url: URL, auth: auth, tool: string, arguments: json.json) -> json.json with scope[URL] | prelude.throw[server_error | auth_error] from "mcp"
+minted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the
+server-declared tool name, @arguments@ its arguments object as a literal `json` tree (a typed wrapper
+builds it with `json.encode` per parameter). The result is DECODED against @T@ inside the runtime, exactly
+as `json.decode[T]` decodes the server's reply: a tool's `structuredContent` is read as @T@'s wire form
+(so a `$ref` handle object reconstructs a REAL `file` value, and records / arrays / scalars land as
+values), a plain-text reply decodes only into a string-shaped @T@, and a schema mismatch throws
+`decode_error`. Instantiate @T@ with `json.json` to keep the reply as a raw `json` tree instead (the
+codegen's choice when no `outputSchema` maps): a `$ref` then stays an inert object inside the tree, which
+`json.decode` with a `file`-typed shape can still reconstruct later. @T@ appears only in the result, so it
+is never inferable — instantiate it explicitly; the literal @url@ generic is inferred from the argument,
+so a caller writes both arguments to `[...]`, `mcp.call[url_literal, T](url = url_literal, ...)`. Nothing
+validates @arguments@ before the server does (unlike a minted tool) — a rejected call throws
+`server_error`. Scope-gated the same way as a minted tool (`scope[URL]` on its row, a literal @url@
+binding it per-URL): a generated binding calls this only inside a `provide` scope over the same
+descriptor, and the runtime rejects a call with no live scope for that descriptor as a typed
+`server_error`."
+external agent call[literal URL, T](url: URL, auth: auth, tool: string, arguments: json.json) -> T with scope[URL] | prelude.throw[server_error | auth_error | json.decode_error] from "mcp"
 
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is

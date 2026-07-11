@@ -91,11 +91,13 @@ golden =
       "//   - an anyOf whose members all map -> a union;",
       "//   - everything else (enum / const, allOf / oneOf, tuples, open or",
       "//     unmodelled schemas) falls back to `json.json`.",
-      "// All-or-nothing is the wire-form asymmetry: `json.encode` / `json.decode` speak the value WIRE",
-      "// form, so a `json.json` nested inside a typed value would embed as its `$constructor` tree, not",
-      "// as the raw fragment the server expects. A fallback parameter is therefore inserted into the",
-      "// arguments tree as-is (it already is a tree), and a reply is decoded with `json.decode[...]`",
-      "// only when the entire outputSchema maps — any other tool returns the raw `json.json` reply.",
+      "// All-or-nothing on the PARAMETER side is the wire-form asymmetry: `json.encode` speaks the value",
+      "// WIRE form, so a `json.json` nested inside a typed parameter would embed as its `$constructor` tree,",
+      "// not the raw fragment the server expects — a fallback parameter is therefore inserted into the",
+      "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call[url,",
+      "// T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema instantiates `T`",
+      "// to its type (decoded, `json.decode_error` on a mismatch) and any other tool instantiates `T` to",
+      "// `json.json` (the raw reply as a tree).",
       "",
       "// The declared output of `get-issue`.",
       "type get_issue_output = {assignee?: string | null, number: integer, title: string}",
@@ -105,7 +107,7 @@ golden =
       "  auth: mcp.auth,",
       "  continuation: agent (value: {",
       "    get_issue: agent(filter?: json.json, labels?: array[string], owner: string, repo: string) -> get_issue_output with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error],",
-      "    ping: agent(arguments: json.json) -> json.json with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error],",
+      "    ping: agent(arguments: json.json) -> json.json with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error],",
       "  }) -> R with E | mcp.scope[\"https://mcp.example.test/mcp\"],",
       ") -> R with io | E {",
       "  let tools : mcp.toolbox[\"https://mcp.example.test/mcp\"] = use mcp.provide(url = \"https://mcp.example.test/mcp\", auth = auth)",
@@ -122,13 +124,11 @@ golden =
       "    }",
       "    let arguments_3 = record.set(target = arguments_2, key = \"owner\", value = json.encode(value = owner))",
       "    let arguments_4 = record.set(target = arguments_3, key = \"repo\", value = json.encode(value = repo))",
-      "    let raw = mcp.call(url = \"https://mcp.example.test/mcp\", auth = auth, tool = \"get-issue\", arguments = json.json_object(entries = arguments_4))",
-      "    json.decode[get_issue_output](value = raw)",
+      "    mcp.call[\"https://mcp.example.test/mcp\", get_issue_output](url = \"https://mcp.example.test/mcp\", auth = auth, tool = \"get-issue\", arguments = json.json_object(entries = arguments_4))",
       "  }",
       "",
-      "  agent ping(arguments: json.json) -> json.json with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error] {",
-      "    let raw = mcp.call(url = \"https://mcp.example.test/mcp\", auth = auth, tool = \"ping\", arguments = arguments)",
-      "    raw",
+      "  agent ping(arguments: json.json) -> json.json with io | mcp.scope[\"https://mcp.example.test/mcp\"] | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
+      "    mcp.call[\"https://mcp.example.test/mcp\", json.json](url = \"https://mcp.example.test/mcp\", auth = auth, tool = \"ping\", arguments = arguments)",
       "  }",
       "",
       "  continuation(value = {",
@@ -196,11 +196,14 @@ spec = describe "katari mcp pull codegen" $ do
 
     it "decodes only a fully-mapped outputSchema; any fallback inside keeps the raw reply" $ do
       rendered <- render outputShapesFixture
-      -- (b) `typed` maps everywhere (nested array/object/record) — decoded.
+      -- (b) `typed` maps everywhere (nested array/object/record) — its `T` is the mapped type, so the
+      -- runtime decodes the reply against it (no trailing `json.decode` anywhere anymore).
       rendered `shouldSatisfy` Text.isInfixOf "type typed_output = {hits: array[{id: integer}], scores?: record[number]}"
-      rendered `shouldSatisfy` Text.isInfixOf "json.decode[typed_output](value = raw)"
-      -- (b) `partly-typed` has ONE untyped field — the whole output stays the raw `json.json`.
+      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[\"https://mcp.example.test/mcp\", typed_output](url ="
+      rendered `shouldSatisfy` (not . Text.isInfixOf "json.decode[")
+      -- (b) `partly-typed` has ONE untyped field — the whole output stays `json.json` (the `T` argument).
       rendered `shouldSatisfy` (not . Text.isInfixOf "partly_typed_output")
+      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[\"https://mcp.example.test/mcp\", json.json](url = \"https://mcp.example.test/mcp\", auth = auth, tool = \"partly-typed\""
       -- (b) a field named by a reserved word cannot label an object type — also raw.
       rendered `shouldSatisfy` (not . Text.isInfixOf "reserved_field_output")
       shouldCompile rendered
