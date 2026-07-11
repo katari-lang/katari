@@ -210,6 +210,23 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "accepts a pure call passing a private argument to a parameter that expects private" $
     allErrorCodes [("test", "agent sink(value: string of private) -> integer { 0 }\nagent f(key: string of private) -> integer { sink(value = key) }")] `shouldBe` []
 
+  -- The `prelude.http.fetch` information-flow rule, tested at the type layer where it lives (attribute
+  -- subtyping: public <: private, so a public value fits a private-capable sink but a private value does
+  -- NOT fit a public one). `fetchLike` mirrors fetch's exact parameter attributes: `url` / `method` are
+  -- public `string`, while `headers` values AND `body` are `string of private` (the deliberate submission
+  -- surfaces). A public-world caller may submit a secret header AND a secret body to the destination
+  -- server, because each private-capable parameter absorbs its private argument (nothing is observed, so
+  -- the result stays public and the `io` call needs no private world).
+  it "accepts a public-world caller submitting a private header AND a private body to fetch's private-capable sinks" $
+    allErrorCodes [("test", fetchLike <> "agent submit() -> integer with io { fetch_like(url = \"https://api.test\", method = \"POST\", headers = { authorization = secret() }, body = secret()) }")] `shouldBe` []
+
+  -- The honest negative that keeps the rule from decaying into "every parameter is a private sink": the
+  -- `url` stays a PUBLIC sink, so a private value reaching it is a type error (K3001). A URL leaks into
+  -- logs, caches, proxies, and `Referer` headers — not the destination server — so a secret must never
+  -- ride it, even though the very same secret is accepted in the body one argument over.
+  it "rejects a private value reaching fetch's public `url` sink (K3001)" $
+    typeErrorCodes [("test", fetchLike <> "agent leak() -> integer with io { fetch_like(url = secret(), method = \"POST\", headers = { authorization = secret() }, body = \"\") }")] `shouldContain` ["K3001"]
+
   -- A shape inspector (field read / iteration / destructure) requires the value to be /solely/ the
   -- shape it reads: a @... | null@ (or otherwise mixed) union is rejected (K3014), so the dropped
   -- member can no longer surface as a non-null result. A call already demanded a lone function.
@@ -384,6 +401,18 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   -- an accident, and a future tightening to reject unexpected arguments is a deliberate change.
   it "currently accepts an undeclared named call argument" $
     typeErrorCodes [("test", "data point(x: integer, y: integer)\nagent make() -> point { point(x = 1, y = 2, bogus = 9) }")] `shouldBe` []
+
+------------------------------------------------------------------------------------------------
+-- Fixtures
+------------------------------------------------------------------------------------------------
+
+-- | A local mirror of @prelude.http.fetch@'s information-flow shape (the driver seeds no prelude): the
+-- @url@ / @method@ are public sinks, the @headers@ values and the @body@ are private-capable sinks, and
+-- the call is impure (@io@). Paired with a @secret@ agent that yields a private @string@.
+fetchLike :: Text
+fetchLike =
+  "external agent fetch_like(url: string, method: string, headers: record[string of private], body: string of private) -> integer with io\n"
+    <> "private agent secret() -> string { \"x\" }\n"
 
 ------------------------------------------------------------------------------------------------
 -- Driver

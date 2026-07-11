@@ -14,7 +14,8 @@ import type { Json } from "@katari-lang/types";
 import type { DelegationId } from "../ids.js";
 
 /** One http request to perform. `argument` is the call's argument as plain Json — `{ url, method, headers,
- *  body }`, with any secret header value already revealed at the reactor boundary. */
+ *  body }`, with any secret header value or secret body already revealed at the reactor boundary (the
+ *  submission surfaces toward the destination server; the `url` is public by type). */
 export interface HttpCall {
   delegation: DelegationId;
   argument: Json | null;

@@ -198,10 +198,14 @@ spec = describe "lowerModule (via compile)" $ do
     it "allows a secret header and declassifies the response (the call is impure, so no result lift)" $
       compileErrorCodes "agent f(key: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = { Authorization = key }, body = \"\").status\n}\n" `shouldBe` []
 
-    it "rejects a secret in the body (a secret must not be sent outbound)" $
-      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = s).status\n}\n" `shouldNotBe` []
+    it "accepts a secret in the body (a private submission surface toward the destination server)" $
+      -- The rule change: the `body` is a `string of private` sink, so a secret may be submitted in a form
+      -- body (e.g. an OAuth `refresh_token`), exactly like a secret header value.
+      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = s).status\n}\n" `shouldBe` []
 
-    it "rejects a secret in the url (only header values may be secret)" $
+    it "rejects a secret in the url (the url stays public: it leaks into logs, caches, and referrers)" $
+      -- The honest negative that keeps the rule from decaying: the `url` is a public sink even though the
+      -- body one argument over is private-capable, so a private value reaching it is still a type error.
       compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = s, method = \"GET\", headers = {}, body = \"\").status\n}\n" `shouldNotBe` []
 
   -- The post-lowering liveness pass (Katari.Lowering.Drop): a temporary written and last mentioned

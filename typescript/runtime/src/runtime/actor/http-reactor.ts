@@ -53,8 +53,12 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
   protected dispatch(delegation: DelegationId, payload: HttpPayload): void {
     this.transport.dispatch({
       delegation,
-      // Lower the engine's Value to plain Json for the request; a secret header value is revealed here (http
-      // is an allowed sink — an API key flows to its request), unlike the user-facing API which redacts.
+      // Lower the engine's Value to plain Json for the request. This is THE single transport boundary the
+      // stdlib rule names: a secret submission surface — a header value OR the body — is revealed here (http
+      // is an allowed sink toward the destination server: an API key flows to its auth header, an OAuth
+      // `refresh_token` to its form body), unlike the user-facing API which redacts. The `url` carries no
+      // secret (the type system forbids a private URL), so revealing the whole argument reveals only what
+      // was deliberately submitted.
       argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
     });
   }

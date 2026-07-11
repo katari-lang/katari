@@ -6,6 +6,7 @@
 // response), the unhandled-error path (→ a run-failing `throw[http.fetch_error]`), and the at-most-once
 // recovery contract (an interrupted request is never re-sent — it fails on restart).
 
+import { createServer } from "node:http";
 import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import { InMemoryPersistence, type Persistence } from "../src/runtime/actor/persistence.js";
@@ -14,6 +15,7 @@ import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js"
 import { type EnvReader, registerHostPrims } from "../src/runtime/engine/host-prims.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import {
+  FetchHttpTransport,
   type HttpCall,
   type HttpCompletion,
   type HttpTransport,
@@ -170,6 +172,134 @@ const CANCELLING_FETCH_IR: IRModule = {
   },
   names: {},
 };
+
+/** The public body text the public-body loopback test submits (a plain, non-secret string). */
+const PUBLIC_BODY_TEXT = "public-body-text";
+
+// agent main() {
+//   let key = prelude.env.get_secret({ key: "API_KEY" })     // a private string
+//   return prelude.http.fetch({
+//     url, method: "POST",
+//     headers: { authorization: key },   // secret in a header (a private submission surface)
+//     body: key,                         // AND the same secret in the body (the new private surface)
+//   })
+// }
+// Both surfaces carry the secret so one test proves the whole rule: the reveal at the reactor boundary
+// puts BOTH on the wire, and the response the server returns is untainted.
+function postSecretBodyIr(url: string): IRModule {
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadLiteral", output: 20, value: { kind: "string", value: "API_KEY" } },
+            { kind: "makeRecord", entries: [["key", 20]], output: 21 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.env.get_secret") },
+              argument: 21,
+              output: 22,
+            },
+            { kind: "makeRecord", entries: [["authorization", 22]], output: 23 },
+            { kind: "loadLiteral", output: 24, value: { kind: "string", value: url } },
+            { kind: "loadLiteral", output: 25, value: { kind: "string", value: "POST" } },
+            // The body slot reuses register 22 — the same private secret the header carries.
+            {
+              kind: "makeRecord",
+              entries: [
+                ["url", 24],
+                ["method", 25],
+                ["headers", 23],
+                ["body", 22],
+              ],
+              output: 27,
+            },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch") },
+              argument: 27,
+              output: 28,
+            },
+            { kind: "exit", target: 0, value: 28 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      7: {
+        block: { kind: "primitive", name: "prelude.env.get_secret", input: 70 },
+        parameters: { parameter: 70 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: 0,
+      [createAgentName("prelude.env.get_secret")]: 6,
+      [createAgentName("prelude.http.fetch")]: 8,
+    },
+    names: {},
+  };
+}
+
+// agent main() { return prelude.http.fetch({ url, method: "POST", headers: {}, body: PUBLIC_BODY_TEXT }) }
+// A plain public body: it must reach the wire exactly like before (a public value fits the now
+// private-capable `body` sink unchanged — public <: private).
+function postPublicBodyIr(url: string): IRModule {
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [], output: 23 },
+            { kind: "loadLiteral", output: 24, value: { kind: "string", value: url } },
+            { kind: "loadLiteral", output: 25, value: { kind: "string", value: "POST" } },
+            { kind: "loadLiteral", output: 26, value: { kind: "string", value: PUBLIC_BODY_TEXT } },
+            {
+              kind: "makeRecord",
+              entries: [
+                ["url", 24],
+                ["method", 25],
+                ["headers", 23],
+                ["body", 26],
+              ],
+              output: 27,
+            },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch") },
+              argument: 27,
+              output: 28,
+            },
+            { kind: "exit", target: 0, value: 28 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: 0,
+      [createAgentName("prelude.http.fetch")]: 8,
+    },
+    names: {},
+  };
+}
 
 /** A fixed env exposing one secret, so `get_secret("API_KEY")` yields a private `"sk-123"`. */
 const ENV: EnvReader = {
@@ -384,5 +514,102 @@ describe("http reactor", () => {
     // Recovery aborted the cancelling call; it never re-dispatched (no request re-sent).
     expect(secondTransport.aborted).toHaveLength(1);
     expect(secondTransport.dispatched).toHaveLength(0);
+  });
+});
+
+// The reveal boundary end-to-end: drive the whole ProjectActor through the REAL `FetchHttpTransport`
+// against a loopback http server, so what the server actually receives on the wire is the assertion. This
+// proves the stdlib rule change — a `string of private` body reaches the destination server (revealed at
+// the single transport boundary, exactly like a secret header) — and that the server's response is never
+// tainted by the private request.
+describe("http reactor — private body sink (real transport over loopback)", () => {
+  interface Loopback {
+    url: string;
+    /** The last request the server received, filled in on its `end` — read after the run resolves. */
+    received: { body: string; authorization: string | null };
+    close: () => Promise<void>;
+  }
+
+  /** Start a loopback server that records the request body + `authorization` header it receives and replies
+   *  200 "ok". Bound to 127.0.0.1 on an ephemeral port so tests never touch a real network. */
+  async function startLoopback(): Promise<Loopback> {
+    const received: Loopback["received"] = { body: "", authorization: null };
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        received.body = Buffer.concat(chunks).toString("utf8");
+        received.authorization = request.headers.authorization ?? null;
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ok");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback server did not bind a port");
+    }
+    return {
+      url: `http://127.0.0.1:${address.port}/submit`,
+      received,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  test("reveals a private body to the wire and leaves the response untainted", async () => {
+    const loopback = await startLoopback();
+    try {
+      const actor = makeActor(
+        new FetchHttpTransport(),
+        new InMemoryPersistence(),
+        postSecretBodyIr(loopback.url),
+      );
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+      const value = await result;
+
+      // The secret reached the actual wire in BOTH private submission surfaces (header AND body), revealed
+      // at the reactor boundary — the whole point of making the body a private-capable sink.
+      expect(loopback.received.body).toBe("sk-123");
+      expect(loopback.received.authorization).toBe("sk-123");
+
+      // Declassified: the response is public even though the request carried a secret body (the reactor
+      // mints the response with `jsonToValue`, which never marks a value private — no new taint rule).
+      expect(value.private).toBeUndefined();
+      expect(value.kind).toBe("record");
+      if (value.kind === "record") {
+        expect(value.fields.status).toEqual({ kind: "integer", value: 200 });
+        expect(value.fields.body).toEqual({ kind: "string", value: "ok" });
+        expect(value.fields.status?.private).toBeUndefined();
+        expect(value.fields.body?.private).toBeUndefined();
+      }
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("a plain public body still reaches the wire unchanged", async () => {
+    const loopback = await startLoopback();
+    try {
+      const actor = makeActor(
+        new FetchHttpTransport(),
+        new InMemoryPersistence(),
+        postPublicBodyIr(loopback.url),
+      );
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+      const value = await result;
+
+      // A public value fits the now private-capable `body` sink (public <: private) with no change on the
+      // wire — the regression guard that widening the sink did not break the ordinary case.
+      expect(loopback.received.body).toBe(PUBLIC_BODY_TEXT);
+      expect(value.kind).toBe("record");
+      if (value.kind === "record") {
+        expect(value.fields.status).toEqual({ kind: "integer", value: 200 });
+      }
+    } finally {
+      await loopback.close();
+    }
   });
 });

@@ -4,10 +4,14 @@
 //
 // Because it is an external call it performs io: the call is impure (it carries the un-dischargeable `io`
 // effect, which propagates to the run root), so it takes the strict, non-lifting call path. That gives the
-// information-flow rules for free: `url` / `method` / `body` are public `string`, so a secret cannot be sent
-// in a URL or body (a private value there is a type error — a secret must not go outbound); only header
-// *values* are `string of private` (a secret may be sent as an auth header); and the response is public
-// (declassified — it is the server's response, not a function of the secret).
+// information-flow rules for free. The uniform rule: a private value may leave the runtime ONLY toward the
+// request's destination server, through its deliberate submission surfaces — the header *values* AND the
+// `body` are `string of private`, so a secret may be submitted as an auth header or inside a form body
+// (Google's OAuth token endpoint wants the `refresh_token` in a POST body, with no header alternative). Both
+// surfaces are revealed at a single transport boundary, where the request leaves for the one server the
+// program named. `url` and `method` stay public `string`: a private value there is a type error, because a
+// URL leaks into logs, caches, proxies, and `Referer` headers — places that are not the destination server.
+// The response is public (declassified — it is the server's reply, not a function of the secret).
 //
 // Errors: a non-2xx response is returned as its `status` to branch on (`match (response.status) { ... }`).
 // A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) throws
@@ -19,32 +23,34 @@
 restart. Thrown by `fetch`. (A response that did arrive is never an error — branch on its `status`.)"
 data fetch_error(message: string)
 
-@"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
-may be a secret, such as an auth token), and @body@. Returns the response @status@ code, its @headers@
-(names lowercased; repeated headers joined with \", \") and its @body@ text. A request that never
-completes throws `fetch_error` (catchable with `use handler { request throw(error: http.fetch_error) ->
-never { ... } }`)."
+@"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ and @body@.
+Each header value AND the @body@ may be a secret (an auth token, or a form-encoded `refresh_token`): both
+are submitted to @url@'s server, while @url@ and @method@ stay public. Returns the response @status@ code,
+its @headers@ (names lowercased; repeated headers joined with \", \") and its @body@ text. A request that
+never completes throws `fetch_error` (catchable with `use handler { request throw(error: http.fetch_error)
+-> never { ... } }`)."
 external agent fetch(
   url: string,
   method: string,
   headers: record[string of private],
-  body: string,
+  body: string of private,
 ) -> { status: integer, headers: record[string], body: string } with prelude.throw[fetch_error] from "http"
 
 @"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
 arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
 data status_error(status: integer, body: string)
 
-@"POST @body@ to @url@ as application/json with the given @headers@ (each value may be a secret, such
-as an auth token — an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\" for
-Gemini; build one with `record.set(target = record.empty(), key = ..., value = ...)`). A
-@Content-Type: application/json@ default is merged beneath the caller's headers — on a shared name
-the caller's value wins. Returns the response body text; a non-2xx status throws `status_error`, a
-transport failure `fetch_error`. The canonical one-call shape of a JSON API integration — build the
-body as `json` in Katari, post it, parse the reply as `json` in Katari."
+@"POST @body@ to @url@ as application/json with the given @headers@. The @body@ AND each header value may
+be a secret (an auth token — an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\"
+for Gemini, built with `record.set(target = record.empty(), key = ..., value = ...)` — or a
+`refresh_token` carried in the body of an OAuth token exchange): both are submitted only to @url@'s
+server, which stays public. A @Content-Type: application/json@ default is merged beneath the caller's
+headers — on a shared name the caller's value wins. Returns the response body text; a non-2xx status
+throws `status_error`, a transport failure `fetch_error`. The canonical one-call shape of a JSON API
+integration — build the body as `json` in Katari, post it, parse the reply as `json` in Katari."
 agent post_json(
   url: string,
-  body: string,
+  body: string of private,
   headers: record[string of private],
 ) -> string with io | prelude.throw[status_error | fetch_error] {
   // The caller's headers merge as `record.merge`'s right side, so on a shared name (a caller that
