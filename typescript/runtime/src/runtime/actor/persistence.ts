@@ -185,24 +185,42 @@ export interface PersistedMcpServeExtension {
   innerCalls: PersistedInnerCall[];
 }
 
+/** The provide extension an mcp `provide` scope persists (`mcp_provide_instances`, the sibling subtype of
+ *  `mcp_serve_instances`): the runtime `scopeId` minted tool values carry, the server `descriptor` the scope
+ *  connects and evicts under, and the `continuation` — stored ONLY while the provide is still listing (the
+ *  toolbox not yet handed to the block), null once the continuation has been dispatched (then it is durable
+ *  core work). `snapshotId` pins the version the minted tools / continuation dispatch against. Its
+ *  inner-delegation bridges (`relays` / `innerCalls`) live here, like serve's. */
+export interface PersistedMcpProvideExtension {
+  snapshotId: SnapshotId;
+  scopeId: string;
+  descriptor: Value;
+  continuation: Value | null;
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
+}
+
 /** The `mcp` instance extension write — the status every mcp call persists (`mcp_instances`, status-only
- *  like `http_instances`), plus the whole serve extension (`mcp_serve_instances`) when (and only when) the
- *  call is a `serve` endpoint. The transport-backed shapes (listTools / callTool / directCall) store no
- *  argument (recovery never re-sends — at-most-once) and open no inner delegations, so their `serve` is
- *  `null`. */
+ *  like `http_instances`), plus the whole serve extension (`mcp_serve_instances`) when the call is a `serve`
+ *  endpoint, or the provide extension (`mcp_provide_instances`) when it is a `provide` scope. The
+ *  transport-backed shapes (callTool / directCall) store no argument (recovery never re-sends —
+ *  at-most-once) and open no inner delegations, so both extensions are `null`. At most one is non-null. */
 export interface PersistedMcpInstanceRow {
   instanceId: InstanceId;
   status: "running" | "cancelling" | "awaitingAnswer";
   serve: PersistedMcpServeExtension | null;
+  provide: PersistedMcpProvideExtension | null;
 }
 
 /** One in-flight mcp call a reactivation reads (envelope ⋈ `mcp_instances`, left-joined to
- *  `mcp_serve_instances`): a row with a serve extension reloads as the live endpoint (re-registering its
- *  token — the endpoint survives a restart, exactly like a webhook's); a transport row (no serve
- *  extension) recovers at-most-once (gone work fails typed, never re-runs). */
+ *  `mcp_serve_instances` AND `mcp_provide_instances`): a serve extension reloads the live endpoint
+ *  (re-registering its token), a provide extension re-registers the live scope (and re-lists or resumes by
+ *  whether its continuation is still stored); a transport row (both null) recovers at-most-once (gone work
+ *  fails typed, never re-runs). At most one extension is present. */
 export interface PersistedMcpInstance extends PersistedCallEnvelope {
   status: "running" | "cancelling" | "awaitingAnswer";
   serve: PersistedMcpServeExtension | null;
+  provide: PersistedMcpProvideExtension | null;
 }
 
 /** The `webhook` instance extension write (`webhook_instances`) — the call-specific state behind a

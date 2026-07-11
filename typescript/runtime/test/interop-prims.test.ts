@@ -622,8 +622,8 @@ describe("prelude.reflection.get_metadata", () => {
       properties: { city: { type: "string" } },
       required: ["city"],
     };
-    // The shape `prelude.mcp.tools` mints: a $tool value carrying its server descriptor as context
-    // and the server-declared signature (output schema optional — `{}`/unknown when undeclared).
+    // The shape `prelude.mcp.provide` mints: a $tool value carrying its reactor context (opaque to
+    // metadata) and the server-declared signature (output schema optional — `{}`/unknown when undeclared).
     const tool: Value = {
       kind: "tool",
       reactor: "mcp",

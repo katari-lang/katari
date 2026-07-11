@@ -1,22 +1,25 @@
-// The built-in MCP client, end to end: `mcp.tools(url = ...)` lists any MCP server's tools as a
+// The built-in MCP client, end to end: `use mcp.provide(url = ...)` lists any MCP server's tools as a
 // toolbox of AGENTS — one per server tool, minted by the runtime with the server-declared name /
-// description / input schema. `reflection.get_metadata` reads that signature (what an AI loop
-// advertises) and `reflection.call_agent` dispatches one with runtime-built args, validated against
-// the server's schema before the server is contacted — a tool IS an agent. There is no connection to
-// manage: each tool carries its server descriptor and the runtime (re)connects lazily.
+// description / input schema — and hands them to the rest of the block as a scope. The reflection loop
+// (`reflection.get_metadata` reads a tool's signature, `reflection.call_agent` dispatches it with
+// runtime-built args, validated against the server's schema before the server is contacted — a tool IS
+// an agent) runs INSIDE that `provide` scope: a tool call raises `mcp.scope`, discharged when `provide`
+// returns, so a tool cannot escape the block. There is no connection to manage: each tool carries its
+// server descriptor and the runtime (re)connects lazily, closing on scope exit.
 //
 // Deterministic given a server: the e2e suite starts a local MCP server exposing one `add` tool and
-// passes its URL as the argument.
+// passes its URL as the argument (a dynamic url, so the scope is `mcp.scope[string]`).
 
 @"List the MCP server at @url@, report its tool names (from each minted agent's metadata), and call
-its `add` tool through the same dynamic dispatch an AI loop uses."
+its `add` tool through the same dynamic dispatch an AI loop uses — all inside the `provide` scope the
+tools are gated by."
 agent main(url: string) -> string {
   use handler {
     request prelude.throw(error: mcp.server_error | mcp.auth_error | reflection.call_error) -> never {
       break f"mcp failed: ${json.to_text(value = error)}"
     }
   }
-  let tools = mcp.tools(url = url, auth = mcp.headers(values = record.empty()))
+  let tools : mcp.toolbox[string] = use mcp.provide(url = url, auth = mcp.headers(values = record.empty()))
   let names = for (let tool in record.values(target = tools)) {
     next reflection.get_metadata(value = tool).name
   }

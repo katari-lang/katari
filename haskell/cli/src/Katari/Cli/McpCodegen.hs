@@ -1,7 +1,8 @@
 -- | Code generation for @katari mcp pull@: one MCP server listing in, one self-contained Katari
--- binding module out — a @connect@ agent whose result record carries one typed wrapper agent per
--- server tool, each closed over the connection (@url@ + @auth@) and calling through the schema-blind
--- @mcp.call@ external.
+-- binding module out — a @with_tools@ scoped provider (the @use github.with_tools(auth = ...)@ form)
+-- that wraps @mcp.provide@ over the pulled url and hands its continuation a record of one typed
+-- wrapper agent per server tool, each calling through the schema-blind @mcp.call@ external under the
+-- provide scope.
 --
 -- The type mapping is ALL-OR-NOTHING per parameter and per tool output, forced by the wire-form
 -- asymmetry of the @json@ boundary: @json.encode@ \/ @json.decode@ speak the value WIRE form, so a
@@ -41,6 +42,7 @@ import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.JSONSchema (AdditionalProperties (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Parser.Lexer (reservedWords)
+import System.FilePath qualified as FilePath
 
 ---------------------------------------------------------------------------------------------------
 -- The listing (what `katari-mcp list-tools` prints)
@@ -84,7 +86,8 @@ instance FromJSON McpListing where
 ---------------------------------------------------------------------------------------------------
 
 data PullContext = PullContext
-  { -- | The server url — @connect@'s default and part of the regenerate hint.
+  { -- | The server url — baked as the literal everywhere in the binding (the @provide@ url, the
+    -- @scope@ \/ @toolbox@ key, and every @mcp.call@ url), and part of the regenerate hint.
     url :: Text,
     -- | The @--out@ path, for the regenerate hint only.
     outPath :: Text
@@ -251,16 +254,22 @@ renderBindingModule context listing =
         "\n"
         ( headerLines context
             <> concatMap synonymLines resolvedTools
-            <> connectLines context resolvedTools
+            <> withToolsLines context resolvedTools
         )
         <> "\n"
 
 -- | The names a tool identifier must not take: Katari reserved words are handled inside
--- 'assignIdentifier'; these are the module's own working names — @connect@'s parameters (a tool
--- agent would shadow them for every OTHER wrapper's body), @connect@ itself, and the default-import
--- qualifiers the bodies and signatures reference in value position.
+-- 'assignIdentifier'; these are the module's own working names — @with_tools@'s parameters
+-- (@auth@ \/ @continuation@, which a tool agent would shadow for every OTHER wrapper's body),
+-- @with_tools@ itself, the @tools@ use binder (a tool agent of that name would redeclare it in the
+-- same block), and the default-import qualifiers the bodies and signatures reference in value
+-- position. @url@ stays reserved even though there is no longer a @url@ parameter, so a tool
+-- literally named @url@ still bumps and identifier assignment stays stable across this change. The
+-- @mcp.scope@ \/ @mcp.toolbox@ \/ @mcp.provide@ names are module-qualified everywhere the
+-- generated text references them, so a bare local @scope@ \/ @provide@ could not shadow them and
+-- needs no seed.
 toolNameSeed :: Set Text
-toolNameSeed = Set.fromList ["connect", "url", "auth", "mcp", "json", "record", "prelude"]
+toolNameSeed = Set.fromList ["with_tools", "continuation", "tools", "url", "auth", "mcp", "json", "record", "prelude"]
 
 resolveTools :: List ToolListing -> List ResolvedTool
 resolveTools = walk toolNameSeed
@@ -335,7 +344,7 @@ headerLines context =
     "//   - an object with properties -> an object type (a non-required property becomes a `?` field);",
     "//   - an object with only schema-valued additionalProperties -> record[T];",
     "//   - an anyOf whose members all map -> a union;",
-    "//   - everything else (enum / const — no literal types yet — allOf / oneOf, tuples, open or",
+    "//   - everything else (enum / const, allOf / oneOf, tuples, open or",
     "//     unmodelled schemas) falls back to `json.json`.",
     "// All-or-nothing is the wire-form asymmetry: `json.encode` / `json.decode` speak the value WIRE",
     "// form, so a `json.json` nested inside a typed value would embed as its `$constructor` tree, not",
@@ -355,42 +364,81 @@ synonymLines tool = case tool.output of
       "type " <> synonymName <> " = " <> outputType
     ]
 
-connectLines :: PullContext -> List ResolvedTool -> List Text
-connectLines context resolvedTools =
-  [ "",
-    "@\"" <> escapeDocText connectDoc <> "\"",
-    "agent connect(url: string ?= \"" <> escapeDocText context.url <> "\", auth: mcp.auth) -> {"
-  ]
-    <> [indent 1 (returnTypeField tool) | tool <- resolvedTools]
-    <> ["} {"]
-    <> concatMap (map indentToolLine . toolAgentLines) resolvedTools
-    <> ["", indent 1 "{"]
-    <> [indent 2 (tool.identifier <> " = " <> tool.identifier <> ",") | tool <- resolvedTools]
-    <> [indent 1 "}", "}"]
+-- | The @with_tools@ scoped provider. It takes NO @url@ parameter — the pulled url is baked as a
+-- literal everywhere (which is what per-URL scoping needs), so it appears in @provide@'s @url@, in
+-- the @scope@ \/ @toolbox@ keys, and in every @mcp.call@. The body opens the scope with the @use@
+-- form (Katari has no anonymous agent expressions, so a provider is entered by capturing the rest
+-- of the block as its continuation): the @tools@ binder is REQUIRED — a @use@ binder carries the
+-- type annotation that supplies the continuation's value type — but intentionally unused, because
+-- the wrappers call through the static @mcp.call@ path rather than the minted toolbox. @provide@
+-- discharges @scope[url]@ from the rest of the block, so only @io@ (the implicit effect of every
+-- external call, which a rigid @E@ cannot absorb) remains on @with_tools@'s own row. The caller
+-- continuation's row uses the OVERWRITE spelling @{...E, scope[url]}@ — the provider-canonical
+-- form @provide@ itself declares; the union spelling @E | scope[url]@ would not match the
+-- tail-minus-scope row the @use@ discharge gives the rest of the block.
+withToolsLines :: PullContext -> List ResolvedTool -> List Text
+withToolsLines context resolvedTools =
+  let scopeRow = scopeEffect context.url
+      urlLiteral = "\"" <> escapeDocText context.url <> "\""
+   in [ "",
+        "@\"" <> escapeDocText (withToolsDoc context) <> "\"",
+        "agent with_tools[R, effect E](",
+        indent 1 "auth: mcp.auth,",
+        indent 1 "continuation: agent (value: {"
+      ]
+        <> [indent 2 (returnTypeField scopeRow tool) | tool <- resolvedTools]
+        <> [ indent 1 ("}) -> R with {...E, " <> scopeRow <> "},"),
+             ") -> R with io | E {",
+             indent 1 ("let tools : mcp.toolbox[" <> urlLiteral <> "] = use mcp.provide(url = " <> urlLiteral <> ", auth = auth)")
+           ]
+        <> concatMap (map indentToolLine . toolAgentLines context scopeRow) resolvedTools
+        <> ["", indent 1 "continuation(value = {"]
+        <> [indent 2 (tool.identifier <> " = " <> tool.identifier <> ",") | tool <- resolvedTools]
+        <> [indent 1 "})", "}"]
 
--- | Indent a tool agent's line one level inside connect's body — except a blank separator line,
--- which stays empty (trailing whitespace would churn diffs and formatters).
+-- | The scope effect a tool call carries, keyed by the pulled url literal: it rides every wrapper's
+-- effect row and the provide continuation's row, and @provide@ discharges it. Module-qualified
+-- (@mcp.scope@) since the binding module imports the prelude by default.
+scopeEffect :: Text -> Text
+scopeEffect url = "mcp.scope[\"" <> escapeDocText url <> "\"]"
+
+-- | Indent a tool agent's line one level inside @with_tools@'s body — except a blank separator
+-- line, which stays empty (trailing whitespace would churn diffs and formatters).
 indentToolLine :: Text -> Text
 indentToolLine line = if Text.null line then line else indent 1 line
 
--- | The @connect@ doc: `auth` takes either header/anonymous access or a named OAuth credential. The
--- oauth form is shown as the generic @mcp.oauth(name = "...")@ placeholder — pull does not know (and
--- no longer takes) a specific credential name; the user fills in the one they established with
--- @katari mcp login@.
-connectDoc :: Text
-connectDoc =
-  "Connect to the pulled MCP server — returns the typed tools closed over the connection (@url@ +\n\
-  \@auth@). `auth` is `mcp.headers(values = ...)` for header or anonymous access, or\n\
-  \`mcp.oauth(name = \"...\")` for a credential established by `katari mcp login`."
+-- | The @with_tools@ doc: it opens the pulled server's tools for the extent of @continuation@ (the
+-- binder-annotated @use@ form — a @use@ binder requires its type annotation), scoped by @provide@.
+-- `auth` takes either header/anonymous access or a named OAuth credential; the oauth form is the
+-- generic @mcp.oauth(name = "...")@ placeholder — pull does not know (and no longer takes) a
+-- specific credential name; the user fills in the one they established with @katari mcp login@.
+-- The pulled url is inlined so the doc names the exact server the binding scopes.
+withToolsDoc :: PullContext -> Text
+withToolsDoc context =
+  "Open the pulled MCP server's tools for the extent of @continuation@ — as `"
+    <> useExample
+    <> "` (a `use` binder carries an explicit type annotation). Establishes a `provide` scope over `"
+    <> context.url
+    <> "`, hands @continuation@ the typed tools closed over the connection, and discharges the scope on return. "
+    <> "`auth` is `mcp.headers(values = ...)` for header or anonymous access, or `mcp.oauth(name = \"...\")` "
+    <> "for a credential established by `katari mcp login`."
+  where
+    -- The example call is rendered the way a caller actually writes it: qualified by the module the
+    -- out path names (a Katari module is named after its file). A degenerate out path (no base name)
+    -- just drops the qualifier rather than rendering a bogus one.
+    qualifier = Text.pack (FilePath.takeBaseName (Text.unpack context.outPath))
+    useExample
+      | Text.null qualifier = "let tools : {...} = use with_tools(auth = ...)"
+      | otherwise = "let tools : {...} = use " <> qualifier <> ".with_tools(auth = ...)"
 
-returnTypeField :: ResolvedTool -> Text
-returnTypeField tool =
-  tool.identifier <> ": agent(" <> parameterTypeList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow tool.output <> ","
+returnTypeField :: Text -> ResolvedTool -> Text
+returnTypeField scopeRow tool =
+  tool.identifier <> ": agent(" <> parameterTypeList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow scopeRow tool.output <> ","
 
-toolAgentLines :: ResolvedTool -> List Text
-toolAgentLines tool =
+toolAgentLines :: PullContext -> Text -> ResolvedTool -> List Text
+toolAgentLines context scopeRow tool =
   [ "",
-    docPrefix <> "agent " <> tool.identifier <> "(" <> parameterList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow tool.output <> " {"
+    docPrefix <> "agent " <> tool.identifier <> "(" <> parameterList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow scopeRow tool.output <> " {"
   ]
     <> bodyLines
     <> [ indent 1 (resultExpression tool.output),
@@ -402,7 +450,10 @@ toolAgentLines tool =
     docPrefix
       | Text.null tool.description = ""
       | otherwise = "@\"" <> escapeDocText tool.description <> "\" "
-    call argumentsText = "let raw = mcp.call(url = url, auth = auth, tool = \"" <> escapeDocText tool.originalName <> "\", arguments = " <> argumentsText <> ")"
+    urlLiteral = "\"" <> escapeDocText context.url <> "\""
+    -- The url is the pulled literal (there is no `url` parameter) — this is exactly what binds
+    -- `mcp.call`'s `[literal URL]` generic to the singleton and so satisfies the `scope[url]` gate.
+    call argumentsText = "let raw = mcp.call(url = " <> urlLiteral <> ", auth = auth, tool = \"" <> escapeDocText tool.originalName <> "\", arguments = " <> argumentsText <> ")"
     bodyLines = case tool.input of
       -- The pass-through plan: the caller's tree IS the arguments object, as-is.
       InputPassthrough -> [indent 1 (call "arguments")]
@@ -451,7 +502,7 @@ parameterList tool = case tool.input of
             then parameter.identifier <> ": " <> baseType <> " | null ?= null"
             else parameter.identifier <> ": " <> baseType
 
--- | The same parameters in TYPE position (connect's return object): a default is not type syntax,
+-- | The same parameters in TYPE position (the continuation's tools record): a default is not type syntax,
 -- so an optional parameter renders as an optional field — @name?: T@ elaborates to @null | T@,
 -- exactly the declaration's @T | null@ with a default (a defaulted parameter is an optional field
 -- of the agent's parameter object).
@@ -470,12 +521,13 @@ outputTypeText output = case output of
   OutputTyped synonymName _ -> synonymName
   OutputRaw -> "json.json"
 
--- | The wrapper's effect row: whatever @mcp.call@ carries (@io@ — an external call — plus the two
--- typed mcp throws), and @json.decode_error@ only when the wrapper decodes.
-effectRow :: ResolvedOutput -> Text
-effectRow output = case output of
-  OutputTyped _ _ -> "io | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
-  OutputRaw -> "io | prelude.throw[mcp.server_error | mcp.auth_error]"
+-- | The wrapper's effect row: @io@ (an external call), the provide @scope@ the call is gated by
+-- (inserted between @io@ and the throws), the two typed mcp throws, and @json.decode_error@ only
+-- when the wrapper decodes. The scope is what ties the call to the enclosing @provide@.
+effectRow :: Text -> ResolvedOutput -> Text
+effectRow scopeRow output = case output of
+  OutputTyped _ _ -> "io | " <> scopeRow <> " | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
+  OutputRaw -> "io | " <> scopeRow <> " | prelude.throw[mcp.server_error | mcp.auth_error]"
 
 -- | Escape text into a Katari string \/ doc-annotation literal: backslash and double quote escape,
 -- newlines become the @\\n@ escape so every generated literal stays on one line, and the other

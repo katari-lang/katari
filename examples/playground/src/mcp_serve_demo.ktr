@@ -15,15 +15,15 @@ agent double(value: integer) -> integer {
 
 @"The subscriber: receives the minted capability URL, lists the endpoint it is itself being served
 from with the built-in MCP client (anonymous headers — the URL is the key), and calls the published
-`double` through the same dynamic dispatch an AI loop uses. Returning ends the serving and makes
-this summary the run's result."
+`double` through the same dynamic dispatch an AI loop uses — inside the `provide` scope the listed
+tools are gated by. Returning ends the serving and makes this summary the run's result."
 agent self_subscriber(url: string) -> string {
   use handler {
     request prelude.throw(error: mcp.server_error | mcp.auth_error | reflection.call_error) -> never {
       break f"mcp failed: ${json.to_text(value = error)}"
     }
   }
-  let tools = mcp.tools(url = url, auth = mcp.headers(values = record.empty()))
+  let tools : mcp.toolbox[string] = use mcp.provide(url = url, auth = mcp.headers(values = record.empty()))
   let doubled = match (record.get(target = tools, key = "double")) {
     case null -> "(no double tool)"
     case tool -> json.to_text(value = reflection.call_agent(target = tool, args = { value = 21 }))

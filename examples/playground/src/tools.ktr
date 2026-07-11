@@ -13,7 +13,7 @@
 //
 // With a real AI, step 2's canned reply becomes an `http.fetch` of the tool-calling API with
 // step 1's body — the rest is unchanged (the standalone discord-bot example does exactly that).
-// Runtime-minted tools (an MCP server's, via `mcp.tools(url = ...)`) flow through this same
+// Runtime-minted tools (an MCP server's, via `use mcp.provide(url = ...)`) flow through this same
 // metadata / dispatch machinery, indistinguishable from the compiled agents below.
 
 @"Raised when the AI reply names a tool that is not in the list (never, in this demo)."

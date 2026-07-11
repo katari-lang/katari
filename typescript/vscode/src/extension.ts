@@ -338,7 +338,7 @@ function quoteForShell(argument: string): string {
 async function promptForMcpServerUrl(): Promise<string | undefined> {
   const value = await vscode.window.showInputBox({
     title: "MCP server URL",
-    prompt: "The MCP server to connect to (the URL programs pass to mcp.tools)",
+    prompt: "The MCP server to connect to (the URL programs pass to mcp.provide)",
     placeHolder: "https://example.com/mcp",
     // OAuth flows send the user to a browser mid-command; losing the input on focus change would
     // force retyping.

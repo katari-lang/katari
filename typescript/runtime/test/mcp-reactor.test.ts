@@ -1,12 +1,16 @@
 // End-to-end tests for the built-in `mcp` reactor, driven through the whole ProjectActor (no real MCP
-// server — a controlled transport). Three call shapes are covered: `prelude.mcp.tools` (the listing —
-// the reactor MINTS one agent value per listed tool, carrying the server descriptor with its privacy
-// markers intact), a minted tool's call (an external delegate straight to the reactor: the caller's
-// args verbatim, the tool's descriptor riding its own wire field), and `prelude.mcp.call` (the static
-// direct call: `{url, auth, tool, arguments}` all in the argument, the `arguments` json TREE lowered
-// to the literal document for the transport and the reply lifted literally back into a tree). Failures
-// are typed `throw[mcp.server_error]`; recovery is at-most-once (an interrupted call fails typed — a
-// katari retry reconnects through the transport's descriptor cache).
+// server — a controlled transport). Three call shapes are covered: `prelude.mcp.provide` (the SCOPED
+// provider — the reactor lists the server under an internal side delegation, MINTS one agent value per
+// listed tool carrying `{ descriptor, scope }` as its context, and dispatches the continuation with the
+// toolbox; the whole call settles with the continuation's outcome, and settling closes the scope), a
+// minted tool's call (an external delegate straight back to the reactor: the caller's args verbatim, the
+// descriptor + scope riding the tool's context — a closed scope is rejected typed, the covariance
+// backstop), and `prelude.mcp.call` (the static direct call: `{url, auth, tool, arguments}` all in the
+// argument, gated on a LIVE provide scope of the same descriptor, the `arguments` json TREE lowered to
+// the literal document for the transport and the reply lifted literally back into a tree). Failures are
+// typed `throw[mcp.server_error]`; recovery of an in-flight tool call is at-most-once (an interrupted
+// call fails typed — a katari retry reconnects through the transport's descriptor cache), while the
+// provide endpoint itself survives a restart.
 
 import {
   createAgentName,
@@ -36,11 +40,15 @@ const SNAPSHOT = "snapshot-mcp" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
 // agent main() {
-//   let toolbox = prelude.mcp.tools({ url: "https://mcp.example.test/mcp",
-//                                     auth: prelude.mcp.headers({ values: { authorization: <private "sk-mcp"> } }) })
-//   return reflection.call_agent({ target: toolbox.add, args: { x: 19, y: 23 } })
+//   mcp.provide(url = "https://mcp.example.test/mcp",
+//               auth = mcp.headers(values = { authorization: "sk-mcp" }),
+//               continuation = continuation)
 // }
-const TOOLS_IR: IRModule = {
+// agent continuation(value) {   // dispatched with { value: toolbox } once the listing lands
+//   let toolbox = value.value
+//   return reflection.call_agent(target = toolbox.add, args = { x: 19, y: 23 })
+// }
+const PROVIDE_IR: IRModule = {
   metadata: { schemaVersion: 1 },
   blocks: {
     0: {
@@ -66,46 +74,23 @@ const TOOLS_IR: IRModule = {
             argument: 14,
             output: 15,
           },
+          { kind: "loadAgent", output: 16, name: createAgentName("continuation") },
           {
             kind: "makeRecord",
             entries: [
               ["url", 11],
               ["auth", 15],
+              ["continuation", 16],
             ],
-            output: 16,
-          },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.mcp.tools") },
-            argument: 16,
             output: 17,
           },
-          { kind: "getField", source: 17, field: "add", output: 18 },
-          { kind: "loadLiteral", output: 19, value: { kind: "integer", value: 19 } },
-          { kind: "loadLiteral", output: 20, value: { kind: "integer", value: 23 } },
-          {
-            kind: "makeRecord",
-            entries: [
-              ["x", 19],
-              ["y", 20],
-            ],
-            output: 21,
-          },
-          {
-            kind: "makeRecord",
-            entries: [
-              ["target", 18],
-              ["args", 21],
-            ],
-            output: 22,
-          },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
-            argument: 22,
-            output: 23,
+            target: { kind: "name", name: createAgentName("prelude.mcp.provide") },
+            argument: 17,
+            output: 18,
           },
-          { kind: "exit", target: 0, value: 23 },
+          { kind: "exit", target: 0, value: 18 },
         ],
       },
       parameters: { parameter: 10 },
@@ -115,7 +100,7 @@ const TOOLS_IR: IRModule = {
       parameters: {},
     },
     3: {
-      block: { kind: "external", key: "prelude.mcp.tools", input: 30, reactor: "mcp" },
+      block: { kind: "external", key: "prelude.mcp.provide", input: 30, reactor: "mcp" },
       parameters: { parameter: 30 },
     },
     4: {
@@ -126,16 +111,166 @@ const TOOLS_IR: IRModule = {
       block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
       parameters: { parameter: 50 },
     },
+    // continuation: receives { value: toolbox } and calls the minted `add` through call_agent.
+    6: {
+      block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    7: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "getField", source: 60, field: "value", output: 61 },
+          { kind: "getField", source: 61, field: "add", output: 62 },
+          { kind: "loadLiteral", output: 63, value: { kind: "integer", value: 19 } },
+          { kind: "loadLiteral", output: 64, value: { kind: "integer", value: 23 } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["x", 63],
+              ["y", 64],
+            ],
+            output: 65,
+          },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["target", 62],
+              ["args", 65],
+            ],
+            output: 66,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
+            argument: 66,
+            output: 67,
+          },
+          { kind: "exit", target: 6, value: 67 },
+        ],
+      },
+      parameters: { parameter: 60 },
+    },
   },
   entries: {
     [createAgentName("main")]: 0,
-    [createAgentName("prelude.mcp.tools")]: 2,
+    [createAgentName("prelude.mcp.provide")]: 2,
     [createAgentName("prelude.mcp.headers")]: 4,
+    [createAgentName("continuation")]: 6,
   },
   names: {},
 };
 
-/** The listing completion the controlled transport feeds for a `tools` call. */
+// The covariance-hole probe: the continuation RETURNS the minted tool, so the provide settles with the
+// tool as its result — the scope is already closed by the time main calls it.
+// agent main() {
+//   let tool = mcp.provide(url = "https://mcp.example.test/mcp",
+//                          auth = mcp.headers(values = {}), continuation = pick_add)
+//   tool(x = 1, y = 2)   // the scope closed when the provide settled — must fail typed
+// }
+// agent pick_add(value) { value.value.add }
+const ESCAPED_TOOL_IR: IRModule = {
+  metadata: { schemaVersion: 1 },
+  blocks: {
+    0: {
+      block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    1: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "loadLiteral",
+            output: 11,
+            value: { kind: "string", value: "https://mcp.example.test/mcp" },
+          },
+          { kind: "makeRecord", entries: [], output: 12 },
+          { kind: "makeRecord", entries: [["values", 12]], output: 13 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 13,
+            output: 14,
+          },
+          { kind: "loadAgent", output: 15, name: createAgentName("pick_add") },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 11],
+              ["auth", 14],
+              ["continuation", 15],
+            ],
+            output: 16,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.provide") },
+            argument: 16,
+            output: 17,
+          },
+          { kind: "loadLiteral", output: 18, value: { kind: "integer", value: 1 } },
+          { kind: "loadLiteral", output: 19, value: { kind: "integer", value: 2 } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["x", 18],
+              ["y", 19],
+            ],
+            output: 20,
+          },
+          { kind: "delegate", target: { kind: "value", variable: 17 }, argument: 20, output: 21 },
+          { kind: "exit", target: 0, value: 21 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    },
+    2: {
+      block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    3: {
+      block: { kind: "external", key: "prelude.mcp.provide", input: 30, reactor: "mcp" },
+      parameters: { parameter: 30 },
+    },
+    4: {
+      block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    5: {
+      block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
+      parameters: { parameter: 50 },
+    },
+    // pick_add: leaks the minted `add` tool out of its scope by returning it.
+    6: {
+      block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    7: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "getField", source: 60, field: "value", output: 61 },
+          { kind: "getField", source: 61, field: "add", output: 62 },
+          { kind: "exit", target: 6, value: 62 },
+        ],
+      },
+      parameters: { parameter: 60 },
+    },
+  },
+  entries: {
+    [createAgentName("main")]: 0,
+    [createAgentName("prelude.mcp.provide")]: 2,
+    [createAgentName("prelude.mcp.headers")]: 4,
+    [createAgentName("pick_add")]: 6,
+  },
+  names: {},
+};
+
+/** The listing completion the controlled transport feeds for a provide's `listTools`. */
 const ADD_LISTING: McpCompletion["outcome"] = {
   kind: "result",
   value: {
@@ -189,6 +324,11 @@ class ControlledMcpTransport implements McpTransport {
     this.feed({ delegation, outcome: { kind: "cancelled" } });
   }
 
+  evict(): void {
+    // The reactor evicts a descriptor's cached client when the last provide scope on it closes; a
+    // hand-driven transport holds nothing to evict.
+  }
+
   close(): void {
     this.sink = null;
   }
@@ -200,18 +340,20 @@ class ControlledMcpTransport implements McpTransport {
 }
 
 function makeActor(
+  ir: IRModule,
   mcp: McpTransport,
   persistence: Persistence = new InMemoryPersistence(),
+  blobs: InMemoryBlobStore = new InMemoryBlobStore(),
 ): ProjectActor {
   const registry = new SnapshotRegistry();
-  for (const name of Object.keys(TOOLS_IR.entries)) {
-    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), TOOLS_IR);
+  for (const name of Object.keys(ir.entries)) {
+    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
   }
   return new ProjectActor({
     projectId: PROJECT,
     ir: registry,
     prims: new PrimRegistry(),
-    blobs: new InMemoryBlobStore(),
+    blobs,
     external: new StubFfiTransport(),
     http: new StubHttpTransport(),
     mcp,
@@ -229,14 +371,15 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
 }
 
 describe("mcp reactor", () => {
-  test("mints the listing into tool agents, then a minted tool's call goes straight back to the reactor", async () => {
+  test("provide lists the server, mints the toolbox for its continuation, and a minted tool's call goes straight back to the reactor", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeActor(transport);
+    const actor = makeActor(PROVIDE_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    // 1. The listing call: a `listTools` dispatch carrying the descriptor read from the argument —
-    //    the auth sum rides inside it as its `$constructor` wire form, headers revealed for the
-    //    transport (an MCP server is an allowed sink).
+    // 1. The provide's listing: a `listTools` dispatch (under an internal side delegation — its
+    //    completion never settles the provide) carrying the descriptor read from the argument — the
+    //    auth sum rides inside it as its `$constructor` wire form, headers revealed for the transport
+    //    (an MCP server is an allowed sink).
     const listing = await waitUntil(() => transport.dispatched[0]);
     expect(listing.kind).toBe("listTools");
     expect(listing.descriptor).toEqual({
@@ -248,8 +391,9 @@ describe("mcp reactor", () => {
     });
     transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
 
-    // 2. The minted tool's call: a `callTool` dispatch by its server-declared name, the caller's args
-    //    verbatim, the descriptor from the minted tool's context.
+    // 2. The minted tool's call, issued by the continuation the listing dispatched: a `callTool` by
+    //    its server-declared name, the caller's args verbatim, the descriptor from the minted tool's
+    //    `{ descriptor, scope }` context.
     const toolCall = await waitUntil(() => transport.dispatched[1]);
     if (toolCall.kind !== "callTool") throw new Error("expected a callTool dispatch");
     expect(toolCall.tool).toBe("add");
@@ -261,13 +405,14 @@ describe("mcp reactor", () => {
         value: { values: { authorization: "sk-mcp" } },
       },
     });
+    // The continuation's outcome IS the provide's outcome — the run resolves with it.
     transport.feed({ delegation: toolCall.delegation, outcome: { kind: "result", value: "42" } });
     await expect(result).resolves.toEqual({ kind: "string", value: "42" });
   });
 
   test("a tool result carrying file handles lifts them into `file` values for the caller", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeActor(transport);
+    const actor = makeActor(PROVIDE_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
     const listing = await waitUntil(() => transport.dispatched[0]);
@@ -300,9 +445,11 @@ describe("mcp reactor", () => {
 
   test("a server-reported failure surfaces as a typed throw[mcp.server_error]", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeActor(transport);
+    const actor = makeActor(PROVIDE_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
+    // The failure is fed at the LISTING stage: a listing failure the continuation never saw settles
+    // the whole provide with the typed throw.
     const listing = await waitUntil(() => transport.dispatched[0]);
     transport.feed({
       delegation: listing.delegation,
@@ -315,26 +462,53 @@ describe("mcp reactor", () => {
     await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*listing exploded/);
   });
 
-  test("an interrupted call recovers as the typed restart throw (at-most-once, never re-run)", async () => {
+  test("an interrupted TOOL CALL recovers as the typed restart throw (at-most-once, never re-run)", async () => {
     const persistence = new StoringPersistence();
     const first = new ControlledMcpTransport();
-    const actor = makeActor(first, persistence);
+    const actor = makeActor(PROVIDE_IR, first, persistence);
     const { run } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
-    await waitUntil(() => first.dispatched[0]);
+    // Drive the provide to ACTIVE: feed the listing so the continuation dispatches, and leave its
+    // minted tool's `callTool` in flight — the meaningful at-most-once case.
+    const listing = await waitUntil(() => first.dispatched[0]);
+    first.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
+    await waitUntil(() => first.dispatched[1]);
 
-    // Restart: a fresh actor over the same rows. The reloaded in-flight call is recovered, not re-run;
-    // the transport refuses with the typed throw, and the run's durable outcome records the error.
+    // Restart: a fresh actor over the same rows. The provide scope re-registers (its continuation was
+    // consumed at dispatch and resumes as durable core work — no re-list), but the in-flight tool call
+    // is recovered, not re-run; the transport refuses with the typed throw, and the run's durable
+    // outcome records the error.
     const second = new ControlledMcpTransport();
-    const reloaded = makeActor(second, persistence);
+    const reloaded = makeActor(PROVIDE_IR, second, persistence);
     await reloaded.activate();
     await waitUntil(() => second.recovered[0]);
     await waitUntil(() => (persistence.peekRun(run)?.state === "error" ? true : undefined));
     expect(persistence.peekRun(run)?.errorMessage).toContain("interrupted by a runtime restart");
+    // Nothing was re-dispatched: no fresh listing (the provide is past it) and no re-run tool call.
     expect(second.dispatched).toHaveLength(0);
+  });
+
+  test("a minted tool called after its provide scope closed is rejected typed (the covariance backstop)", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(ESCAPED_TOOL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The continuation returns the minted `add` itself, so the provide settles with the tool as its
+    // result and the scope closes; main then calls the escaped tool.
+    const listing = await waitUntil(() => transport.dispatched[0]);
+    expect(listing.kind).toBe("listTools");
+    transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
+    await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*has closed/);
+    // The rejection happened at the reactor's scope check — the listing stays the transport's only
+    // dispatch; no `callTool` ever reached it.
+    expect(transport.dispatched).toHaveLength(1);
   });
 });
 
 // agent main() {
+//   mcp.provide(url = "https://mcp.example.test/mcp", auth = mcp.headers(values = {}),
+//               continuation = call_runner)
+// }
+// agent call_runner(value) {   // the direct call must run INSIDE a provide of the same descriptor
 //   let arguments = json.json_object(entries = { x = json.json_integer(value = 19),
 //                                                note = json.json_string(value = "hi") })
 //   return mcp.call(url = "https://mcp.example.test/mcp",
@@ -365,55 +539,23 @@ const CALL_IR: IRModule = {
             argument: 13,
             output: 14,
           },
-          { kind: "loadLiteral", output: 15, value: { kind: "integer", value: 19 } },
-          { kind: "makeRecord", entries: [["value", 15]], output: 16 },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.json.json_integer") },
-            argument: 16,
-            output: 17,
-          },
-          { kind: "loadLiteral", output: 18, value: { kind: "string", value: "hi" } },
-          { kind: "makeRecord", entries: [["value", 18]], output: 19 },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.json.json_string") },
-            argument: 19,
-            output: 20,
-          },
-          {
-            kind: "makeRecord",
-            entries: [
-              ["x", 17],
-              ["note", 20],
-            ],
-            output: 21,
-          },
-          { kind: "makeRecord", entries: [["entries", 21]], output: 22 },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.json.json_object") },
-            argument: 22,
-            output: 23,
-          },
-          { kind: "loadLiteral", output: 24, value: { kind: "string", value: "add" } },
+          { kind: "loadAgent", output: 15, name: createAgentName("call_runner") },
           {
             kind: "makeRecord",
             entries: [
               ["url", 11],
               ["auth", 14],
-              ["tool", 24],
-              ["arguments", 23],
+              ["continuation", 15],
             ],
-            output: 25,
+            output: 16,
           },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.mcp.call") },
-            argument: 25,
-            output: 26,
+            target: { kind: "name", name: createAgentName("prelude.mcp.provide") },
+            argument: 16,
+            output: 17,
           },
-          { kind: "exit", target: 0, value: 26 },
+          { kind: "exit", target: 0, value: 17 },
         ],
       },
       parameters: { parameter: 10 },
@@ -458,6 +600,90 @@ const CALL_IR: IRModule = {
       block: { kind: "construct", name: createAgentName("prelude.json.json_object"), input: 210 },
       parameters: { parameter: 210 },
     },
+    22: {
+      block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    23: {
+      block: { kind: "external", key: "prelude.mcp.provide", input: 230, reactor: "mcp" },
+      parameters: { parameter: 230 },
+    },
+    // call_runner: builds the json tree and performs the direct call inside the provide scope.
+    24: {
+      block: { kind: "agent", body: 25, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    25: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "loadLiteral",
+            output: 101,
+            value: { kind: "string", value: "https://mcp.example.test/mcp" },
+          },
+          { kind: "makeRecord", entries: [], output: 102 },
+          { kind: "makeRecord", entries: [["values", 102]], output: 103 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 103,
+            output: 104,
+          },
+          { kind: "loadLiteral", output: 105, value: { kind: "integer", value: 19 } },
+          { kind: "makeRecord", entries: [["value", 105]], output: 106 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.json.json_integer") },
+            argument: 106,
+            output: 107,
+          },
+          { kind: "loadLiteral", output: 108, value: { kind: "string", value: "hi" } },
+          { kind: "makeRecord", entries: [["value", 108]], output: 109 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.json.json_string") },
+            argument: 109,
+            output: 110,
+          },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["x", 107],
+              ["note", 110],
+            ],
+            output: 111,
+          },
+          { kind: "makeRecord", entries: [["entries", 111]], output: 112 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.json.json_object") },
+            argument: 112,
+            output: 113,
+          },
+          { kind: "loadLiteral", output: 114, value: { kind: "string", value: "add" } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 101],
+              ["auth", 104],
+              ["tool", 114],
+              ["arguments", 113],
+            ],
+            output: 115,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.call") },
+            argument: 115,
+            output: 116,
+          },
+          { kind: "exit", target: 24, value: 116 },
+        ],
+      },
+      parameters: { parameter: 100 },
+    },
   },
   entries: {
     [createAgentName("main")]: 0,
@@ -466,29 +692,84 @@ const CALL_IR: IRModule = {
     [createAgentName("prelude.json.json_integer")]: 6,
     [createAgentName("prelude.json.json_string")]: 8,
     [createAgentName("prelude.json.json_object")]: 20,
+    [createAgentName("prelude.mcp.provide")]: 22,
+    [createAgentName("call_runner")]: 24,
   },
   names: {},
 };
 
-function makeCallActor(
-  mcp: McpTransport,
-  blobs: InMemoryBlobStore = new InMemoryBlobStore(),
-): ProjectActor {
-  const registry = new SnapshotRegistry();
-  for (const name of Object.keys(CALL_IR.entries)) {
-    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), CALL_IR);
-  }
-  return new ProjectActor({
-    projectId: PROJECT,
-    ir: registry,
-    prims: new PrimRegistry(),
-    blobs,
-    external: new StubFfiTransport(),
-    http: new StubHttpTransport(),
-    mcp,
-    persistence: new InMemoryPersistence(),
-  });
-}
+// agent main() { mcp.call(url = ..., auth = mcp.headers(values = {}), tool = "add") } — NO provide
+// anywhere, so the reactor must reject the direct call before any transport dispatch.
+const UNSCOPED_CALL_IR: IRModule = {
+  metadata: { schemaVersion: 1 },
+  blocks: {
+    0: {
+      block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    1: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "loadLiteral",
+            output: 11,
+            value: { kind: "string", value: "https://mcp.example.test/mcp" },
+          },
+          { kind: "makeRecord", entries: [], output: 12 },
+          { kind: "makeRecord", entries: [["values", 12]], output: 13 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 13,
+            output: 14,
+          },
+          { kind: "loadLiteral", output: 15, value: { kind: "string", value: "add" } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 11],
+              ["auth", 14],
+              ["tool", 15],
+            ],
+            output: 16,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.call") },
+            argument: 16,
+            output: 17,
+          },
+          { kind: "exit", target: 0, value: 17 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    },
+    2: {
+      block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    3: {
+      block: { kind: "external", key: "prelude.mcp.call", input: 30, reactor: "mcp" },
+      parameters: { parameter: 30 },
+    },
+    4: {
+      block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    5: {
+      block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
+      parameters: { parameter: 50 },
+    },
+  },
+  entries: {
+    [createAgentName("main")]: 0,
+    [createAgentName("prelude.mcp.call")]: 2,
+    [createAgentName("prelude.mcp.headers")]: 4,
+  },
+  names: {},
+};
 
 /** The `json` tree Value a scalar / object test asserts against — mirrors `engine/json-value.ts`. */
 function jsonTree(ctor: string, fields: Record<string, Value>): Value {
@@ -503,13 +784,26 @@ const treeObject = (entries: Record<string, Value>): Value =>
 const treeArray = (elements: Value[]): Value =>
   jsonTree("prelude.json.json_array", { items: { kind: "array", elements } });
 
+/** Drive `CALL_IR`'s wrapping provide to active: the first dispatch is the provide's `listTools`; feed
+ *  it an EMPTY listing so the continuation (`call_runner`) dispatches, and return the `callTool` its
+ *  `mcp.call` then ships as `dispatched[1]`. */
+async function callToolAfterProvide(transport: ControlledMcpTransport): Promise<McpCall> {
+  const listing = await waitUntil(() => transport.dispatched[0]);
+  if (listing.kind !== "listTools") throw new Error("expected the provide's listTools dispatch");
+  transport.feed({
+    delegation: listing.delegation,
+    outcome: { kind: "result", value: { tools: [] } },
+  });
+  return waitUntil(() => transport.dispatched[1]);
+}
+
 describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
   test("lowers the arguments TREE to the literal document and ships the same callTool operation", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeCallActor(transport);
+    const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const call = await waitUntil(() => transport.dispatched[0]);
+    const call = await callToolAfterProvide(transport);
     if (call.kind !== "callTool") throw new Error("expected a callTool dispatch");
     expect(call.tool).toBe("add");
     // The wire-form asymmetry contract: the transport receives the LITERAL document the tree denotes
@@ -531,20 +825,20 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
 
   test("a plain-text reply becomes a json_string tree", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeCallActor(transport);
+    const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const call = await waitUntil(() => transport.dispatched[0]);
+    const call = await callToolAfterProvide(transport);
     transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "just text" } });
     await expect(result).resolves.toEqual(treeString("just text"));
   });
 
   test("a blob-bearing reply keeps the `$ref` handle as a LITERAL object inside the tree", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeCallActor(transport);
+    const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const call = await waitUntil(() => transport.dispatched[0]);
+    const call = await callToolAfterProvide(transport);
     transport.feed({
       delegation: call.delegation,
       outcome: {
@@ -570,13 +864,13 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     const blob = "blob-mcp-direct" as BlobId;
     const bytes = new Uint8Array([1, 2, 3, 4]);
     await blobs.put(PROJECT, blob, bytes);
-    const actor = makeCallActor(transport, blobs);
+    const actor = makeActor(CALL_IR, transport, new InMemoryPersistence(), blobs);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const call = await waitUntil(() => transport.dispatched[0]);
+    const call = await callToolAfterProvide(transport);
     // The transport produced a blob from a tool result's image content mid-call: register its ownership
     // (bytes already staged above), exactly as the SDK transport's blob bridge does — a REAL produced blob,
-    // not just a `$ref` string.
+    // not just a `$ref` string. It targets the `callTool` delegation, the call the blob belongs to.
     const registered = await actor.registerProducedMcpBlob(call.delegation, blob, {
       hash: "hash",
       size: bytes.byteLength,
@@ -611,10 +905,10 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
 
   test("a transport error surfaces as the typed throw[mcp.server_error]", async () => {
     const transport = new ControlledMcpTransport();
-    const actor = makeCallActor(transport);
+    const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
 
-    const call = await waitUntil(() => transport.dispatched[0]);
+    const call = await callToolAfterProvide(transport);
     // The real transport reports every anticipated failure as this typed throw (never a bare `error`,
     // which the reactor now treats as an engine-invariant panic uniformly).
     transport.feed({
@@ -628,5 +922,15 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
       },
     });
     await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*connection refused/);
+  });
+
+  test("a direct call with NO live provide scope is rejected typed, before any transport dispatch", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(UNSCOPED_CALL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The reactor rejects at its scope gate — nothing to feed, and the transport never hears of it.
+    await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*no live mcp\.provide scope/);
+    expect(transport.dispatched).toHaveLength(0);
   });
 });

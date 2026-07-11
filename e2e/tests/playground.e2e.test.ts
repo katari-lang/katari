@@ -223,8 +223,9 @@ test("webhook.main: a minted inbound URL serves validated deliveries, then deact
 
 test("mcp_demo.main: the built-in MCP client mints the server's tools as agents", async () => {
   // A real MCP server on a loopback port (stateless streamable HTTP: a fresh server + transport per
-  // request), exposing one `add` tool. The playground program lists it with `mcp.tools(url = ...)`,
-  // reads each minted agent's metadata, and dispatches `add` through `reflection.call_agent`.
+  // request), exposing one `add` tool. The playground program opens it with `use mcp.provide(url = ...)`,
+  // reads each minted agent's metadata, and dispatches `add` through `reflection.call_agent` — all
+  // inside the provide scope the tools are gated by.
   const readBody = (request: IncomingMessage): Promise<unknown> =>
     new Promise((resolve, reject) => {
       let raw = "";

@@ -1,9 +1,9 @@
 // The built-in MCP path end to end INSIDE the actor (no CLI, no Postgres): a real MCP server on a
-// loopback port, the real `SdkMcpTransport`, and a hand-built program that does what `mcp.tools(...)`
-// lowers to — list + mint the toolbox, then dispatch a minted tool through `reflection.call_agent`.
-// Pins the whole chain: SDK client (lazy, descriptor-keyed connect) ↔ reactor-side `$tool` minting ↔
-// emit-site dynamic dispatch (schema validation, context riding the external target) ↔ the reactor
-// round-trip.
+// loopback port, the real `SdkMcpTransport`, and a hand-built program that does what `mcp.provide(...)`
+// lowers to — open a scoped provider (list once + mint the toolbox), then have the CONTINUATION dispatch
+// a minted tool through `reflection.call_agent` inside the scope. Pins the whole chain: SDK client (lazy,
+// descriptor-keyed connect) ↔ reactor-side `$tool` minting under a provide scope ↔ emit-site dynamic
+// dispatch (schema validation, context riding the external target) ↔ the reactor round-trip.
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -27,11 +27,14 @@ const SNAPSHOT = "snapshot-mcp-integration" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
 // agent main(url) {
-//   let toolbox = prelude.mcp.tools({ url, auth: prelude.mcp.headers({ values: {} }) })
-//   return reflection.call_agent({ target: toolbox.add, args: { x: 19, y: 23 } })
+//   mcp.provide(url = url, auth = mcp.headers(values = {}), continuation = continuation)
+// }
+// agent continuation(value) {   // dispatched with { value: toolbox } once the listing lands
+//   return reflection.call_agent(target = value.value.add, args = { x: 19, y: 23 })
 // }
 // No connect / close: a tool carries its server DESCRIPTOR, and the transport's descriptor-keyed
-// cache (re)connects lazily — connections are not a program-visible resource.
+// cache (re)connects lazily — connections are not a program-visible resource (the provide scope
+// evicts the cached client when it settles).
 const MCP_IR: IRModule = {
   metadata: { schemaVersion: 1 },
   blocks: {
@@ -53,46 +56,23 @@ const MCP_IR: IRModule = {
             argument: 13,
             output: 14,
           },
+          { kind: "loadAgent", output: 15, name: createAgentName("continuation") },
           {
             kind: "makeRecord",
             entries: [
               ["url", 11],
               ["auth", 14],
+              ["continuation", 15],
             ],
-            output: 15,
-          },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.mcp.tools") },
-            argument: 15,
             output: 16,
           },
-          { kind: "getField", source: 16, field: "add", output: 17 },
-          { kind: "loadLiteral", output: 18, value: { kind: "integer", value: 19 } },
-          { kind: "loadLiteral", output: 19, value: { kind: "integer", value: 23 } },
-          {
-            kind: "makeRecord",
-            entries: [
-              ["x", 18],
-              ["y", 19],
-            ],
-            output: 20,
-          },
-          {
-            kind: "makeRecord",
-            entries: [
-              ["target", 17],
-              ["args", 20],
-            ],
-            output: 21,
-          },
           {
             kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
-            argument: 21,
-            output: 22,
+            target: { kind: "name", name: createAgentName("prelude.mcp.provide") },
+            argument: 16,
+            output: 17,
           },
-          { kind: "exit", target: 0, value: 22 },
+          { kind: "exit", target: 0, value: 17 },
         ],
       },
       parameters: { parameter: 10 },
@@ -102,7 +82,7 @@ const MCP_IR: IRModule = {
       parameters: {},
     },
     3: {
-      block: { kind: "external", key: "prelude.mcp.tools", input: 30, reactor: "mcp" },
+      block: { kind: "external", key: "prelude.mcp.provide", input: 30, reactor: "mcp" },
       parameters: { parameter: 30 },
     },
     4: {
@@ -113,11 +93,53 @@ const MCP_IR: IRModule = {
       block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
       parameters: { parameter: 50 },
     },
+    // continuation: receives { value: toolbox } and calls the minted `add` through call_agent.
+    6: {
+      block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    7: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "getField", source: 60, field: "value", output: 61 },
+          { kind: "getField", source: 61, field: "add", output: 62 },
+          { kind: "loadLiteral", output: 63, value: { kind: "integer", value: 19 } },
+          { kind: "loadLiteral", output: 64, value: { kind: "integer", value: 23 } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["x", 63],
+              ["y", 64],
+            ],
+            output: 65,
+          },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["target", 62],
+              ["args", 65],
+            ],
+            output: 66,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
+            argument: 66,
+            output: 67,
+          },
+          { kind: "exit", target: 6, value: 67 },
+        ],
+      },
+      parameters: { parameter: 60 },
+    },
   },
   entries: {
     [createAgentName("main")]: 0,
-    [createAgentName("prelude.mcp.tools")]: 2,
+    [createAgentName("prelude.mcp.provide")]: 2,
     [createAgentName("prelude.mcp.headers")]: 4,
+    [createAgentName("continuation")]: 6,
   },
   names: {},
 };
@@ -177,7 +199,7 @@ afterAll(async () => {
 });
 
 describe("the built-in mcp path through the actor", () => {
-  test("list → mint the toolbox → dispatch a minted tool via call_agent (lazy connect)", async () => {
+  test("provide: list → mint the scoped toolbox → the continuation dispatches a minted tool via call_agent (lazy connect)", async () => {
     const registry = new SnapshotRegistry();
     for (const name of Object.keys(MCP_IR.entries)) {
       registry.set(SNAPSHOT, moduleOfName(createAgentName(name)), MCP_IR);

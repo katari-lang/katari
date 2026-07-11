@@ -100,12 +100,13 @@ export type AgentValue = {
 
 /**
  * A reactor-backed agent: the value-level mirror of an `external agent` declaration, minted only by
- * the runtime (an MCP server's tool — `prelude.mcp.tools` mints one per server tool). Where a named
+ * the runtime (an MCP server's tool — `prelude.mcp.provide` mints one per server tool). Where a named
  * agent references compiled code and a closure references a block + captured scope, a tool references
  * a REACTOR (`reactor` + the reactor-scoped `name`) + an opaque `context` the reactor needs to
- * execute (an MCP tool carries its server descriptor — url + headers). `get_metadata` reads the
- * attached runtime-decided signature; a call validates its argument against `inputSchema` where the
- * dispatch is emitted (mismatch = `reflection.call_error`), then delegates DIRECTLY to the reactor —
+ * execute (an MCP tool carries its server descriptor plus its provide scope's identity).
+ * `get_metadata` reads the attached runtime-decided signature; a call validates its argument against
+ * `inputSchema` where the dispatch is emitted (mismatch = `reflection.call_error`), then delegates
+ * DIRECTLY to the reactor —
  * the argument passes through verbatim, the context rides the delegate target out-of-band (exactly
  * like a closure's captured scope).
  */

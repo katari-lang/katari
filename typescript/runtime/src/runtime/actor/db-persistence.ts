@@ -19,6 +19,7 @@ import {
   instances,
   isTerminalRunState,
   mcpInstances,
+  mcpProvideInstances,
   mcpServeInstances,
   outbox,
   runEscalationsAudit,
@@ -283,10 +284,12 @@ export class DbPersistence implements Persistence {
           })),
       },
       mcp: {
-        // The mcp call joins its status-only `mcp_instances` row and LEFT-joins its `mcp_serve_instances`
-        // subtype: a matched serve extension reloads the live endpoint (re-registering its token, with its
-        // sealed tools record + inner-delegation bridges); an absent one is a transport call recovered
-        // at-most-once. `callInstancesOf` joins one extension table, so the two-table read is spelled here.
+        // The mcp call joins its status-only `mcp_instances` row and LEFT-joins BOTH its `mcp_serve_instances`
+        // and `mcp_provide_instances` subtypes: a matched serve extension reloads the live endpoint
+        // (re-registering its token); a matched provide extension re-registers the live scope (with its
+        // descriptor / scope id / still-listing continuation); both absent is a transport call recovered
+        // at-most-once. At most one subtype matches. `callInstancesOf` joins one extension table, so the
+        // three-table read is spelled here.
         instances: async () => {
           const rows = await this.db
             .select({
@@ -296,16 +299,19 @@ export class DbPersistence implements Persistence {
               run: instances.runId,
               status: mcpInstances.status,
               serve: mcpServeInstances,
+              provide: mcpProvideInstances,
             })
             .from(instances)
             .innerJoin(mcpInstances, eq(instances.id, mcpInstances.instanceId))
             .leftJoin(mcpServeInstances, eq(instances.id, mcpServeInstances.instanceId))
+            .leftJoin(mcpProvideInstances, eq(instances.id, mcpProvideInstances.instanceId))
             .where(and(eq(instances.projectId, projectId), eq(instances.kind, "mcp")));
           return rows.flatMap((row) => {
             // A live call's delegation / caller / run are written together at delegate-receive, so a null
             // in any is a dropped or corrupt row (the same guard `callInstancesOf` applies).
             if (row.delegation === null || row.caller === null || row.run === null) return [];
             const serve = row.serve;
+            const provide = row.provide;
             return [
               {
                 delegation: row.delegation as DelegationId,
@@ -322,6 +328,20 @@ export class DbPersistence implements Persistence {
                         tools: unsealFromStorage(serve.serveTools),
                         relays: brandedRelays(serve.relays),
                         innerCalls: brandedInnerCalls(serve.innerCalls),
+                      },
+                provide:
+                  provide === null
+                    ? null
+                    : {
+                        snapshotId: provide.snapshotId as SnapshotId,
+                        scopeId: provide.scopeId,
+                        descriptor: unsealFromStorage(provide.descriptor),
+                        continuation:
+                          provide.continuation === null
+                            ? null
+                            : unsealFromStorage(provide.continuation),
+                        relays: brandedRelays(provide.relays),
+                        innerCalls: brandedInnerCalls(provide.innerCalls),
                       },
               },
             ];
@@ -574,8 +594,8 @@ export class DbPersistence implements Persistence {
       },
       mcp: {
         putMcpInstance: async (row) => {
-          // The status-only `mcp_instances` row first (the serve subtype FKs it). Immutable after open,
-          // only `status` updates on re-upsert.
+          // The status-only `mcp_instances` row first (the serve / provide subtypes FK it). Immutable after
+          // open, only `status` updates on re-upsert.
           await drizzleTx
             .insert(mcpInstances)
             .values({ instanceId: row.instanceId, status: row.status })
@@ -583,35 +603,70 @@ export class DbPersistence implements Persistence {
               target: mcpInstances.instanceId,
               set: { status: row.status },
             });
-          if (row.serve === null) return;
-          const serve = row.serve;
-          const relays = serve.relays.map((relay) => ({
-            escalation: relay.escalation as string,
-            child: relay.child as string,
-            childEscalation: relay.childEscalation as string,
-          }));
-          const innerCalls = serve.innerCalls.map((inner) => ({
-            delegation: inner.delegation as string,
-            call: inner.call,
-          }));
-          // The served tools record may capture private values (a closure over a secret), so it seals like
-          // the webhook callback. The token / tools / snapshot are immutable after open, so only the
-          // inner-delegation bridges update on re-upsert.
-          const serveTools = sealForStorage(serve.tools);
-          await drizzleTx
-            .insert(mcpServeInstances)
-            .values({
-              instanceId: row.instanceId,
-              snapshotId: serve.snapshotId,
-              serveToken: serve.token,
-              serveTools,
-              relays,
-              innerCalls,
-            })
-            .onConflictDoUpdate({
-              target: mcpServeInstances.instanceId,
-              set: { relays, innerCalls },
-            });
+          if (row.serve !== null) {
+            const serve = row.serve;
+            const relays = serve.relays.map((relay) => ({
+              escalation: relay.escalation as string,
+              child: relay.child as string,
+              childEscalation: relay.childEscalation as string,
+            }));
+            const innerCalls = serve.innerCalls.map((inner) => ({
+              delegation: inner.delegation as string,
+              call: inner.call,
+            }));
+            // The served tools record may capture private values (a closure over a secret), so it seals like
+            // the webhook callback. The token / tools / snapshot are immutable after open, so only the
+            // inner-delegation bridges update on re-upsert.
+            const serveTools = sealForStorage(serve.tools);
+            await drizzleTx
+              .insert(mcpServeInstances)
+              .values({
+                instanceId: row.instanceId,
+                snapshotId: serve.snapshotId,
+                serveToken: serve.token,
+                serveTools,
+                relays,
+                innerCalls,
+              })
+              .onConflictDoUpdate({
+                target: mcpServeInstances.instanceId,
+                set: { relays, innerCalls },
+              });
+          }
+          if (row.provide !== null) {
+            const provide = row.provide;
+            const relays = provide.relays.map((relay) => ({
+              escalation: relay.escalation as string,
+              child: relay.child as string,
+              childEscalation: relay.childEscalation as string,
+            }));
+            const innerCalls = provide.innerCalls.map((inner) => ({
+              delegation: inner.delegation as string,
+              call: inner.call,
+            }));
+            // The descriptor's auth may be a secret, and a continuation closes over the block's scope (private
+            // values reachable), so both seal like the webhook callback. The scope id / descriptor / snapshot
+            // are immutable after open; the continuation flips to null when it is dispatched and the
+            // inner-delegation bridges grow, so those update on re-upsert.
+            const descriptor = sealForStorage(provide.descriptor);
+            const continuation =
+              provide.continuation === null ? null : sealForStorage(provide.continuation);
+            await drizzleTx
+              .insert(mcpProvideInstances)
+              .values({
+                instanceId: row.instanceId,
+                snapshotId: provide.snapshotId,
+                scopeId: provide.scopeId,
+                descriptor,
+                continuation,
+                relays,
+                innerCalls,
+              })
+              .onConflictDoUpdate({
+                target: mcpProvideInstances.instanceId,
+                set: { continuation, relays, innerCalls },
+              });
+          }
         },
       },
       pool: {

@@ -280,8 +280,10 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
   };
 
   /** The server descriptor the tool carries as its reactor context (a `headers`-variant auth sum
-   *  with a private header value, the way `prelude.mcp.tools` mints it — the reveal at the
-   *  transport boundary is asserted below). */
+   *  with a private header value — the reveal at the transport boundary is asserted below). A BARE
+   *  descriptor, not the `{ descriptor, scope }` record `prelude.mcp.provide` mints: the reactor
+   *  falls back to treating the whole context as the descriptor and skips the scope check, which is
+   *  exactly the hand-built-tool path this suite pins. */
   function descriptor(): Value {
     return {
       kind: "record",
@@ -326,6 +328,10 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
     recover(): void {}
     abort(delegation: DelegationId): void {
       this.sink?.({ delegation, outcome: { kind: "cancelled" } });
+    }
+    evict(): void {
+      // The reactor evicts a descriptor's cached client when the last provide scope on it closes; a
+      // hand-driven transport holds nothing to evict.
     }
     close(): void {}
     feed(completion: McpCompletion): void {

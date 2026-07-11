@@ -84,8 +84,20 @@ export interface McpTransport {
   recover(delegation: DelegationId): void;
   /** Abort an in-flight call; its `cancelled` (or a racing real) completion confirms the teardown. */
   abort(delegation: DelegationId): void;
+  /** Close and evict a descriptor's cached client (the `mcp` reactor calls this when the last `provide`
+   *  scope on a descriptor returns — the scope owns the connection's lifetime). A no-op for a descriptor
+   *  with no cached client (never connected, or already evicted by a failure). */
+  evict(descriptor: Json): void;
   /** Tear the transport down (actor disposal): close every cached client, deliver nothing after. */
   close(): void;
+}
+
+/** A stable cache key for a lowered `{ url, auth }` descriptor Json — the `mcp` reactor's own key for
+ *  matching a `directCall` against a live `provide` scope of the same descriptor, and for the scope
+ *  eviction refcount. Shares the transport's exact keying (url + auth identity, never token material) so
+ *  the reactor and the transport agree on what "the same descriptor" is. */
+export function descriptorKeyOf(descriptor: Json): string {
+  return descriptorKey(readDescriptor(descriptor));
 }
 
 /** The seam default: no mcp client configured, so dispatching one is an error (fails loudly, like the
@@ -99,6 +111,7 @@ export class StubMcpTransport implements McpTransport {
     throw new Error(`mcp transport not configured (recovering call ${delegation})`);
   }
   abort(): void {}
+  evict(): void {}
   close(): void {}
 }
 
@@ -280,6 +293,22 @@ export class SdkMcpTransport implements McpTransport {
       return;
     }
     this.emit({ delegation, outcome: { kind: "cancelled" } });
+  }
+
+  evict(descriptor: Json): void {
+    // The provide scope owning this connection returned; close the cached client so the next scope on the
+    // same descriptor reconnects fresh. A malformed descriptor cannot key anything cached, so it evicts
+    // nothing (the scope is closing regardless).
+    let key: string;
+    try {
+      key = descriptorKey(readDescriptor(descriptor));
+    } catch {
+      return;
+    }
+    const pending = this.clients.get(key);
+    if (pending === undefined) return;
+    this.clients.delete(key);
+    void pending.then((client) => client.close()).catch(() => {});
   }
 
   close(): void {

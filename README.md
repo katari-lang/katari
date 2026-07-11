@@ -62,9 +62,11 @@ more — see [`examples/playground`](examples/playground) and its
 - **Agents as AI tools.** Schema derivation (`reflection.get_metadata`) and dynamic dispatch
   (`reflection.call_agent`), plus a typed JSON boundary (`json.parse_as[T]`), let an AI loop pick
   and call agents as tools with arguments validated against their schemas.
-- **MCP integration.** Consume any MCP server's tools as agents with `mcp.tools`; publish your own
-  agents as an MCP server with `mcp.serve`; generate typed `.ktr` bindings from a live server with
-  `katari mcp pull`; and authorize outbound servers with OAuth via `katari mcp login`.
+- **MCP integration.** Consume any MCP server's tools as agents with `use mcp.provide` — a scoped
+  provider whose tools live exactly as long as the block that opened them, enforced by the type
+  system; publish your own agents as an MCP server with `mcp.serve`; generate typed `.ktr` bindings
+  from a live server with `katari mcp pull`; and authorize outbound servers with OAuth via
+  `katari mcp login`.
 - **Typed errors.** `prelude.throw[T]` raises a typed, catchable error the signature tracks;
   `panic` is the runtime's separate failure channel, also catchable.
 - **First-class files.** File blobs flow through agents and the FFI in both directions, with an MCP

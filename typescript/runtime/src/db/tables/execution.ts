@@ -176,13 +176,15 @@ export const httpInstances = pgTable("http_instances", {
 });
 
 // The `mcp` instance extension: an in-flight mcp call. Like `http` it pins no snapshot and stores no
-// request for the TRANSPORT-backed shapes (a `prelude.mcp.tools` listing, a minted tool's call, a direct
-// `prelude.mcp.call`) — recovery never re-sends (gone work fails as a typed `mcp.server_error`, and a
-// katari-level retry reconnects through the transport's descriptor cache) — so it carries only the
-// call-specific `status` the envelope cannot (the envelope collapses `awaitingAnswer` to `running`). A
-// `serve` endpoint's durable state is NOT here: it lives in the `mcp_serve_instances` SUBTYPE table, so an
-// mcp call is a transport|serve union discriminated by that table's presence, NOT by nullable columns on
-// this one (class-table inheritance — the "no nullable subtype columns" doctrine this schema preaches).
+// request for the TRANSPORT-backed shapes (a minted tool's call, a direct `prelude.mcp.call`; a
+// `prelude.mcp.provide` listing rides an internal side delegation, never a call of its own) — recovery
+// never re-sends (gone work fails as a typed `mcp.server_error`, and a katari-level retry reconnects
+// through the transport's descriptor cache) — so it carries only the call-specific `status` the envelope
+// cannot (the envelope collapses `awaitingAnswer` to `running`). A `serve` / `provide` endpoint's durable
+// state is NOT here: it lives in the `mcp_serve_instances` / `mcp_provide_instances` SUBTYPE tables, so an
+// mcp call is a transport|serve|provide union discriminated by those tables' presence, NOT by nullable
+// columns on this one (class-table inheritance — the "no nullable subtype columns" doctrine this schema
+// preaches).
 export const mcpInstances = pgTable("mcp_instances", {
   instanceId: uuid("instance_id")
     .primaryKey()
@@ -230,6 +232,52 @@ export const mcpServeInstances = pgTable(
       .default([]),
   },
   (table) => [uniqueIndex("mcp_serve_instances_serve_token_idx").on(table.serveToken)],
+);
+
+// The `mcp` PROVIDE extension: a `prelude.mcp.provide` scope's durable state — the sibling subtype of
+// `mcp_serve_instances` (an mcp call is a transport|serve|provide union, discriminated by WHICH subtype
+// table holds a row, never by nullable columns on `mcp_instances`). A `provide` lists a server, hands its
+// continuation a `toolbox[URL]`, and lives for the extent of that continuation, gating tool calls by a
+// runtime `scope_id`. Persists its payload, like serve: the `scope_id` must survive a restart (minted tool
+// values carry it, so a stored tool re-resolves to the re-registered scope) and the `descriptor` too (the
+// url + auth the scope connects and evicts under). The `continuation` is stored ONLY while the provide is
+// still listing (not yet dispatched into the block) — null once active, so a restart mid-listing re-lists
+// and a restart mid-block resumes the durable continuation delegation. Its inner-delegation bridges
+// (`relays` / `inner_calls`) live here because only a serve/provide call opens inner delegations.
+export const mcpProvideInstances = pgTable(
+  "mcp_provide_instances",
+  {
+    instanceId: uuid("instance_id")
+      .primaryKey()
+      .references(() => mcpInstances.instanceId, { onDelete: "cascade" }),
+    /** The snapshot the minted tools / continuation dispatch against — pins the version (no cascade), like
+     *  `mcp_serve_instances.snapshot_id`. */
+    snapshotId: uuid("snapshot_id")
+      .notNull()
+      .references(() => snapshots.id),
+    /** The runtime scope identity minted at provide open — the token minted tool values carry in their
+     *  context, checked live at each tool call. Globally unique, so a restart re-registers exactly it. */
+    scopeId: text("scope_id").notNull(),
+    /** The server descriptor (`{ url, auth }`) the scope connects under: the transport cache key to evict on
+     *  scope close, and the descriptor `directCall` matches a live scope against. Sealed (auth may be secret). */
+    descriptor: jsonb("descriptor").$type<Value>().notNull(),
+    /** The continuation dispatched once the listing lands, stored ONLY until then (null once active — the
+     *  dispatched continuation is durable core work). A reload with a non-null continuation is a
+     *  listing-phase interruption: re-list; a null one is an active scope: re-register and resume. Sealed. */
+    continuation: jsonb("continuation").$type<Value | null>(),
+    /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`). */
+    relays: jsonb("relays")
+      .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
+      .notNull()
+      .default([]),
+    /** The call's open inner delegations (the continuation, resolved through the bridge on reload) and the
+     *  local token each settles under. */
+    innerCalls: jsonb("inner_calls")
+      .$type<Array<{ delegation: string; call: string }>>()
+      .notNull()
+      .default([]),
+  },
+  (table) => [uniqueIndex("mcp_provide_instances_scope_id_idx").on(table.scopeId)],
 );
 
 // The `webhook` instance extension: an in-flight `webhook.inbound` call — a dynamically generated public

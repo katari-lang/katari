@@ -1,43 +1,62 @@
-// The `prelude.mcp` sub-module: MCP in both directions, as ordinary agent values. Outbound, `tools`
-// plugs any MCP server's tools into a program; inbound, `serve` publishes a program's own agents AS
-// an MCP server for the extent of a subscriber. Both route to the runtime's `mcp` reactor (an
-// in-runtime MCP client / server, like `http.fetch`'s in-runtime fetch — no FFI sidecar, nothing
-// for the user to install).
+// The `prelude.mcp` sub-module: MCP in both directions, as ordinary agent values. Outbound, `provide`
+// plugs any MCP server's tools into a program for the extent of a scope; inbound, `serve` publishes a
+// program's own agents AS an MCP server for the extent of a subscriber. Both route to the runtime's
+// `mcp` reactor (an in-runtime MCP client / server, like `http.fetch`'s in-runtime fetch — no FFI
+// sidecar, nothing for the user to install).
 //
-// Outbound, the whole integration is one line — pick how the server authenticates with the `auth` sum:
+// Outbound, the whole integration is one line — the tools live for the extent of the `use` block, and
+// you pick how the server authenticates with the `auth` sum:
 //
-//   let tools = mcp.tools(url = "https://...", auth = mcp.headers(values = record.empty()))
-//   let tools = mcp.tools(url = "https://...", auth = mcp.oauth(name = "github"))
+//   let tools : mcp.toolbox["https://..."] = use mcp.provide(url = "https://...", auth = mcp.headers(values = record.empty()))
+//   let tools : mcp.toolbox["https://..."] = use mcp.provide(url = "https://...", auth = mcp.oauth(name = "github"))
 //
 // `headers` covers anonymous access (an empty record), bearer keys and any custom scheme uniformly:
-// the given headers ride on every request. `oauth` names an OAuth credential established
-// out-of-band by `katari mcp login --url <server> --name <name>` and stored server-side; the
-// runtime injects (and refreshes) its tokens itself, so no token material appears in the program.
+// the given headers ride on every request. `oauth` names an OAuth credential established out-of-band by
+// `katari mcp login --url <server> --name <name>` and stored server-side; the runtime injects (and
+// refreshes) its tokens itself, so no token material appears in the program.
 //
-// A tool IS an agent: the runtime mints one agent value per server tool, carrying the
-// server-declared name / description / input schema (and output schema when the server declares
-// one) — `reflection.get_metadata` reads them (that is what an AI loop advertises), and a call is
-// validated against that schema before anything runs (a bad argument throws
-// `reflection.call_error` without the server ever being contacted).
+// THE SCOPE STORY. A tool is a live capability, not a value that may outlive its connection: it exists
+// only WHILE its `provide` is running. `provide` is a scoped provider (the ST-monad `runST` shape) — it
+// lists the server, hands the continuation a `toolbox[URL]`, and DISCHARGES the `scope[URL]` marker from
+// its own result row. A tool carries `scope[URL]` in its effect row (`tool[URL]` below), so a call to it
+// is only well-typed inside a row that still carries that scope — which only `provide`'s continuation
+// does. The tools therefore cannot escape their `provide`: return one and the `scope[URL]` it drags along
+// has nowhere to be discharged, a type error. `scope[URL]` is a phantom marker (it names no operation, is
+// never performed and never handled, and vanishes at lowering); its URL parameter is phantom too, so it
+// is COVARIANT in a row — `scope["x"]` fits a `scope[string]` context but never `scope["y"]`.
 //
-// There is no connection to manage: each minted tool carries its server DESCRIPTOR (the url +
-// auth it was listed with), and the runtime (re)connects lazily per descriptor — reusing a live
-// connection across calls, reconnecting transparently after a failure or a runtime restart. A
-// header value may be a secret (`string of private`); it stays private inside the tool value
-// (sealed at rest, redacted at user-facing boundaries) and is revealed only to the server itself.
-// An `oauth` credential's NAME is not a secret — the tokens it names never enter the program.
+// THE COVARIANCE CONSEQUENCE. A literal `url` gives per-URL scoping: `provide(url = "https://a")` mints
+// `scope["https://a"]`, and a tool tagged `scope["https://a"]` fits only a context carrying that exact
+// scope. A dynamic (non-literal) `url` degrades to `scope[string]` — the widest scope — and by covariance
+// a `scope[string]` context can run a tool of ANY concrete URL. That hole (a `string`-scoped continuation
+// that smuggles in a foreign-URL tool) is the one thing the type system cannot rule out, so the runtime
+// backstops it: every scope is a runtime identity, and a tool call carrying a scope its `provide` has
+// already closed is rejected with a typed `server_error` naming the closed scope. The type system prevents
+// everything else; this catches only the dynamic-URL covariance case.
 //
-// Inbound, `serve` mirrors `webhook.inbound`: the runtime mints a fresh, unguessable capability URL
-// and serves the given record's agents as MCP tools there for exactly as long as @subscriber@ runs.
-// The URL IS the key — possession grants access, nothing else does (the endpoint lives outside the
+// A tool IS an agent: the runtime mints one agent value per server tool, carrying the server-declared
+// name / description / input schema (and output schema when the server declares one) —
+// `reflection.get_metadata` reads them (that is what an AI loop advertises), and a call is validated
+// against that schema before anything runs (a bad argument throws `reflection.call_error` without the
+// server ever being contacted). Each minted tool carries its server DESCRIPTOR (the url + auth it was
+// listed with) and its scope identity; the runtime (re)connects lazily per descriptor — reusing a live
+// connection across calls, reconnecting transparently after a failure or a runtime restart, and closing it
+// when the last `provide` on that descriptor returns. A header value may be a secret (`string of private`);
+// it stays private inside the tool value (sealed at rest, redacted at user-facing boundaries) and is
+// revealed only to the server itself. An `oauth` credential's NAME is not a secret — the tokens it names
+// never enter the program.
+//
+// Inbound, `serve` mirrors `webhook.inbound`: the runtime mints a fresh, unguessable capability URL and
+// serves the given record's agents as MCP tools there for exactly as long as @subscriber@ runs. The URL
+// IS the key — possession grants access, nothing else does (the endpoint lives outside the
 // bearer-authenticated API surface, and the token is generated fresh per call); when the subscriber
-// returns, or the run is cancelled, the URL deactivates. `toolbox` doubles as the parameter type
-// because `tool` is the TOP type of self-contained callables — any agent whose effects are handled
-// (or are at most `io` and this module's throws) coerces to it, so a user's own typed agents fit
+// returns, or the run is cancelled, the URL deactivates. A served agent is self-contained (its effects
+// are handled, or are at most `io` and this module's throws), so a user's own typed agents fit as tools
 // without ceremony.
 
 @"The MCP server rejected a listing or a tool call, or the transport failed (the server-reported or
-transport message). Catch it to control retry — a retried call reconnects."
+transport message). Also raised as the scope backstop: a tool called after its `provide` returned reports
+its closed scope this way. Catch it to control retry — a retried call reconnects."
 data server_error(message: string)
 
 @"An `oauth` credential is missing, or expired beyond what a token refresh can fix. Retrying does
@@ -54,31 +73,50 @@ data headers(values: record[string of private])
 not a secret."
 data oauth(name: string)
 
-// How `tools` authenticates with the server: explicit headers, or a named OAuth credential.
+// How `provide` authenticates with the server: explicit headers, or a named OAuth credential.
 type auth = headers | oauth
 
-// One server tool, as an ordinary agent value. (Type synonyms take no docs.)
-type tool = agent never -> unknown with io | prelude.throw[server_error | auth_error]
+@"A pure scope capability, keyed by its server URL: carried in a tool's effect row, never performable,
+never handleable. `provide` mints it for its continuation's row and discharges it from its own, so a
+tool tagged `scope[URL]` cannot outlive the `provide` that introduced it. Its URL is phantom (covariant):
+`scope[\"x\"]` fits a `scope[string]` row, never a `scope[\"y\"]` one."
+effect scope[URL]
+
+// One server tool, as an ordinary agent value, gated by its provide scope. (Type synonyms take no docs.)
+type tool[URL] = agent never -> unknown with io | scope[URL] | prelude.throw[server_error | auth_error]
 
 // A server's tools, keyed by tool name — call one by key, or hand `record.values(target = ...)` (the
-// flat array of tools) to an AI loop wholesale.
-type toolbox = record[tool]
+// flat array of tools) to an AI loop wholesale. `URL` is the scope the tools are gated by.
+type toolbox[URL] = record[tool[URL]]
 
-@"The MCP server's tools, one runtime-minted agent per tool. Each carries the server-declared
-signature (for `reflection.get_metadata` and call-site validation) and the server descriptor it was
-listed with (@url@ + @auth@ — a header value may be a secret), so calling it needs no further
-setup. A missing or dead `oauth` credential throws `auth_error` (re-run `katari mcp login`)."
-external agent tools(url: string, auth: auth) -> toolbox with prelude.throw[server_error | auth_error] from "mcp"
+@"Plug an MCP server's tools into a program for the extent of @continuation@, as a scoped provider —
+the `use mcp.provide(url = ..., auth = ...)` form. The runtime lists the server (a missing or dead
+`oauth` credential throws `auth_error`; a rejected listing throws `server_error`), hands @continuation@
+a `toolbox[URL]` of one runtime-minted agent per tool (each carrying the server signature — for
+`reflection.get_metadata` and call-site validation — and the descriptor it was listed with), and settles
+with the continuation's result. `scope[URL]` rides the continuation's row (that is what a tool call
+raises) and is DISCHARGED from `provide`'s own row, so a tool cannot escape the block: the scope closes
+when @continuation@ returns (or the run is cancelled), and a stray later call is rejected as a typed
+`server_error`. A literal @url@ binds `URL` to that string's singleton (per-URL scoping); a dynamic @url@
+degrades `URL` to `string` (the widest scope — see the module header)."
+external agent provide[literal URL, R, effect E](
+  url: URL,
+  auth: auth,
+  continuation: agent (value: toolbox[URL]) -> R with {...E, scope[URL]},
+) -> R with E from "mcp"
 
-@"Call one tool on an MCP server directly — the static counterpart of `tools`, with no listing and
-no minted agent value. The schema-blind seam the binding modules `katari mcp pull` generates are
-built on: @tool@ is the server-declared tool name, @arguments@ its arguments object as a literal
-`json` tree (a typed wrapper builds it with `json.encode` per parameter). The result is the server's
-reply as a `json` tree — the tool's `structuredContent` when it declares one, otherwise its text as
-a `json_string`; a binary content block's produced file rides inside the tree as its `$ref` handle
-object, so `json.decode` with a `file`-typed shape reconstructs the handle. Nothing validates the
-arguments before the server does (unlike a minted tool) — a rejected call throws `server_error`."
-external agent call(url: string, auth: auth, tool: string, arguments: json.json) -> json.json with prelude.throw[server_error | auth_error] from "mcp"
+@"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
+minted agent value. The schema-blind seam the binding modules `katari mcp pull` generates are built on:
+@tool@ is the server-declared tool name, @arguments@ its arguments object as a literal `json` tree (a
+typed wrapper builds it with `json.encode` per parameter). The result is the server's reply as a `json`
+tree — the tool's `structuredContent` when it declares one, otherwise its text as a `json_string`; a
+binary content block's produced file rides inside the tree as its `$ref` handle object, so `json.decode`
+with a `file`-typed shape reconstructs the handle. Nothing validates the arguments before the server does
+(unlike a minted tool) — a rejected call throws `server_error`. Scope-gated the same way as a minted tool
+(`scope[URL]` on its row, a literal @url@ binding it per-URL): a generated binding calls this only inside
+a `provide` scope over the same descriptor, and the runtime rejects a call with no live scope for that
+descriptor as a typed `server_error`."
+external agent call[literal URL](url: URL, auth: auth, tool: string, arguments: json.json) -> json.json with scope[URL] | prelude.throw[server_error | auth_error] from "mcp"
 
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is
@@ -88,9 +126,9 @@ hands it to whoever should connect (an AI session, a teammate's MCP client), and
 calls should be served; when it returns the URL deactivates and its result becomes `serve`'s
 result. Cancelling the run cancels @subscriber@ and deactivates the URL the same way. The
 subscriber's effects flow to the caller's handlers unchanged; the served agents are self-contained
-(`tool` — the top type of callables whose effects are handled), so any agent fits once its own
-effects are handled."
+(their effects are handled, or are at most `io` and this module's throws), so any agent fits once its
+own effects are handled."
 external agent serve[R, effect E](
-  tools: toolbox,
+  tools: toolbox[string],
   subscriber: agent (url: string) -> R with E,
 ) -> R with E from "mcp"
