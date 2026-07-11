@@ -37,7 +37,7 @@ import Katari.Cli.Api (setEnv)
 import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, resolveNodeHelperInvocation, withRuntimeContext, writeOrExit)
 import Katari.Cli.McpCodegen (McpListing, PullContext (..), renderBindingModule)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
-import Katari.Cli.Output (OutputContext (..), newOutputContext, progress)
+import Katari.Cli.Output (newOutputContext, progress)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
 import System.Exit (ExitCode (..))
@@ -155,11 +155,11 @@ data CredentialBlob = CredentialBlob
   }
 
 instance FromJSON CredentialBlob where
-  parseJSON = withObject "CredentialBlob" $ \object' ->
-    CredentialBlob
-      <$> object' .: "tokens"
-      <*> object' .: "clientInformation"
-      <*> object' .: "resourceUrl"
+  parseJSON = withObject "CredentialBlob" $ \object' -> do
+    tokens <- object' .: "tokens"
+    clientInformation <- object' .: "clientInformation"
+    resourceUrl <- object' .: "resourceUrl"
+    pure CredentialBlob {tokens, clientInformation, resourceUrl}
 
 ---------------------------------------------------------------------------------------------------
 -- pull
