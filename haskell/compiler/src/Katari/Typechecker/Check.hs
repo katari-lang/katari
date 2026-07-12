@@ -21,6 +21,7 @@ import Katari.Data.AST
 import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), emptyGenericParameters, instantiationByName, monoScheme, reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
+import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType, renderSemanticEffect)
@@ -38,6 +39,7 @@ import Katari.Error
     MalformedUseReason (..),
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
+    ReservedReactorErrorInfo (..),
     TypeError (..),
     UnknownHoleLabelErrorInfo (..),
     UnknownReactorErrorInfo (..),
@@ -45,6 +47,7 @@ import Katari.Error
   )
 import Katari.Panic (panic)
 import Katari.Primitive (panicRequestName)
+import Katari.Stdlib (isReservedModuleName)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
@@ -2647,18 +2650,31 @@ signatureValueScheme ::
 externalReactorNames :: List Text
 externalReactorNames = ["ffi", "http", "webhook", "mcp", "time"]
 
--- | Reject an @external@'s @from "name"@ clause when it names a reactor that does not exist (a typo, or an
--- unimplemented reactor) — K3018, at compile time rather than a silent runtime fallback to the FFI reactor.
--- An absent clause ('Nothing') defaults to the FFI reactor and is always valid.
-checkExternalReactor :: SourceSpan -> Maybe Text -> Checker ()
-checkExternalReactor sourceSpan = \case
+-- | The reactors reserved to the embedded stdlib modules. Each dispatches on the compiled stdlib
+-- externals' fully-qualified keys (@prelude.http.fetch@, @prelude.time.sleep@, ...), so an external a
+-- user module declared would reach it with a key it cannot serve. The one user-facing channel is @ffi@.
+stdlibOnlyReactorNames :: List Text
+stdlibOnlyReactorNames = ["http", "webhook", "mcp", "time"]
+
+-- | Validate an @external@'s @from "name"@ clause, in the module named @declaringModule@: a name outside
+-- 'externalReactorNames' (a typo, an unimplemented reactor) is K3018, and a built-in reactor named by a
+-- user module is K3022 — both at compile time, rather than a runtime dispatch panic (or a silent
+-- fallback to the FFI reactor). An absent clause ('Nothing') defaults to the FFI reactor and is always
+-- valid; the embedded stdlib modules (the reserved names) may name any reactor, since the built-in
+-- reactors exist precisely to serve their compiled externals.
+checkExternalReactor :: SourceSpan -> ModuleName -> Maybe Text -> Checker ()
+checkExternalReactor sourceSpan declaringModule = \case
   Nothing -> pure ()
   Just reactor
-    | reactor `elem` externalReactorNames -> pure ()
-    | otherwise ->
+    | reactor `notElem` externalReactorNames ->
         reportType
           sourceSpan
           (TypeErrorUnknownReactor UnknownReactorErrorInfo {reactor = reactor, known = externalReactorNames})
+    | reactor `elem` stdlibOnlyReactorNames && not (isReservedModuleName declaringModule) ->
+        reportType
+          sourceSpan
+          (TypeErrorReservedReactor ReservedReactorErrorInfo {reactor = reactor})
+    | otherwise -> pure ()
 
 signatureValueScheme genericDeclarations parameters returnType effectExpression performsIo = do
   genericParameters <- boundedGenericParameters genericDeclarations

@@ -117,6 +117,14 @@ renderTypeError typeError =
         <> info.reactor
         <> "` in a `from` clause; the external reactors are "
         <> Text.intercalate ", " info.known
+    TypeErrorReservedReactor info ->
+      "The `"
+        <> info.reactor
+        <> "` reactor serves only the compiled stdlib externals, so a user module cannot declare an"
+        <> " external `from \""
+        <> info.reactor
+        <> "\"` — a call would reach the reactor with a key it cannot serve. Implement the external over"
+        <> " the FFI instead (omit the `from` clause, or write `from \"ffi\"`)"
     TypeErrorMalformedUse info -> case info.reason of
       MalformedUseWrittenContinuation ->
         "`continuation` is the argument `use` itself passes to its provider — a `use` application cannot also write one"
@@ -178,6 +186,12 @@ data TypeError where
   -- (a typo, or an unimplemented reactor). Rejected at compile time rather than silently defaulting to
   -- the FFI reactor at runtime.
   TypeErrorUnknownReactor :: UnknownReactorErrorInfo -> TypeError
+  -- | A USER module's @external ... from "name"@ clause names a built-in reactor (http / webhook / mcp /
+  -- time). Those reactors serve only the compiled stdlib externals (they dispatch on the stdlib keys), so
+  -- a user-declared external would reach them with a key they cannot serve — a runtime panic at best, a
+  -- silent mis-serve at worst. Only the embedded stdlib modules may name them; the user channel is @ffi@
+  -- (or no clause). Distinct from an unknown name (K3018): the reactor exists, this module may not name it.
+  TypeErrorReservedReactor :: ReservedReactorErrorInfo -> TypeError
   -- | A @use@ statement is written in a shape @use@ does not admit — see 'MalformedUseReason' for the
   -- specific violation. Distinct from a malformed /type/ (K3011): the type expression is fine, the
   -- @use@ construct itself is misused.
@@ -213,6 +227,7 @@ typeErrorCode = \case
   TypeErrorMalformedUse _ -> "K3019"
   TypeErrorUnknownHoleLabel _ -> "K3020"
   TypeErrorFinallyEffect _ -> "K3021"
+  TypeErrorReservedReactor _ -> "K3022"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -236,6 +251,7 @@ typeErrorSeverity = \case
   TypeErrorMalformedUse _ -> SeverityError
   TypeErrorUnknownHoleLabel _ -> SeverityError
   TypeErrorFinallyEffect _ -> SeverityError
+  TypeErrorReservedReactor _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -340,6 +356,12 @@ data WrongReferenceKindErrorInfo = WrongReferenceKindErrorInfo
 data UnknownReactorErrorInfo = UnknownReactorErrorInfo
   { reactor :: Text,
     known :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @reactor@ is the built-in reactor name a user module's @from@ clause tried to claim.
+newtype ReservedReactorErrorInfo = ReservedReactorErrorInfo
+  { reactor :: Text
   }
   deriving (Eq, Ord, Show)
 

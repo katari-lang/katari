@@ -897,17 +897,27 @@ spec = do
           (_, diagnostics) = runChecker environment (synthExpressionType (qualifiedVariableExpression topLevelName))
        in hasErrorCode "K3015" diagnostics `shouldBe` True
 
-  describe "checkExternalReactor (a `from` clause names a real reactor)" $ do
+  describe "checkExternalReactor (a `from` clause names a reactor this module may use)" $ do
+    let userModule = ModuleName "test"
     it "accepts an absent clause (defaults to ffi)" $
-      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan Nothing)
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule Nothing)
        in toList diagnostics `shouldBe` []
-    it "accepts the known reactors ffi and http" $
-      let (_, ffiDiagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "ffi"))
-          (_, httpDiagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "http"))
-       in (toList ffiDiagnostics, toList httpDiagnostics) `shouldBe` ([], [])
+    it "accepts ffi from a user module (the one user-facing channel)" $
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just "ffi"))
+       in toList diagnostics `shouldBe` []
     it "rejects an unknown reactor name (K3018)" $
-      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "grpc"))
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just "grpc"))
        in hasErrorCode "K3018" diagnostics `shouldBe` True
+    it "rejects a user module's claim on every built-in reactor (K3022)" $
+      let rejected reactor =
+            let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just reactor))
+             in hasErrorCode "K3022" diagnostics
+       in all rejected ["http", "webhook", "mcp", "time"] `shouldBe` True
+    it "accepts a built-in reactor from an embedded stdlib module (its compiled externals ARE the reactor's keys)" $
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (ModuleName "prelude.time") (Just "time"))
+       in toList diagnostics `shouldBe` []
+    it "rejects a user source declaring `from \"time\"` end to end (K3022, not a runtime dispatch panic)" $
+      compiledCodes "external agent my_now() -> number from \"time\"" `shouldContain` ["K3022"]
 
   -- The residual-type assertions run end to end (through 'Katari.Compile'): the enclosing agent's
   -- return annotation states the expected residual type, so a clean compile IS the type assertion.
