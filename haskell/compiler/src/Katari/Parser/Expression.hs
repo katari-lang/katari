@@ -202,6 +202,7 @@ primaryExpression =
         ifExpression,
         matchExpression,
         forExpression,
+        foreverExpression,
         parallelExpression,
         handlerExpression,
         tupleExpression,
@@ -362,6 +363,19 @@ forExpression :: Parser ExpressionP
 forExpression = do
   forSpan <- keyword "for"
   forBody False forSpan
+
+-- | @forever { body }@ — repeat the block indefinitely (the expression types as @never@). `forever` is
+-- deliberately NOT a reserved word (see 'reservedWords': the stdlib's `retry.forever` agent keeps its
+-- name); it is recognised positionally, like the type-only words — only at an expression head with a `{`
+-- directly after it. The `try` backtracks a call (`forever(...)`) or a bare reference into the ordinary
+-- identifier expression. The body introduces no loop context of its own: `forever` has no jump target
+-- (no built-in exit — escaping is composed with a surrounding handler's `break`), so `next` / `break`
+-- inside the body keep meaning exactly what they mean outside it, as in a `match` arm.
+foreverExpression :: Parser ExpressionP
+foreverExpression = do
+  foreverSpan <- try (keyword "forever" <* lookAhead (string "{"))
+  body <- block
+  pure (ExpressionForever ForeverExpression {body = body, sourceSpan = mergeSpans foreverSpan (sourceSpanOf body), typeOf = ()})
 
 -- | @parallel [e, ...]@, @parallel for (...) {...}@, or @parallel handler ...@.
 parallelExpression :: Parser ExpressionP

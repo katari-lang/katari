@@ -604,6 +604,9 @@ expressionFacts moduleName expression = case expression of
       <> blockFacts moduleName for.body
       <> foldMap (thenClauseFacts moduleName) for.thenClause
       <> typedSpanFacts for.sourceSpan for.typeOf
+  ExpressionForever forever' ->
+    blockFacts moduleName forever'.body
+      <> typedSpanFacts forever'.sourceSpan forever'.typeOf
   ExpressionBlock block ->
     blockFacts moduleName block.block
       <> typedSpanFacts block.sourceSpan block.typeOf
@@ -731,6 +734,7 @@ typeOfExpression = \case
   ExpressionIf expression -> expression.typeOf
   ExpressionMatch expression -> expression.typeOf
   ExpressionFor expression -> expression.typeOf
+  ExpressionForever expression -> expression.typeOf
   ExpressionBlock expression -> expression.typeOf
   ExpressionFieldAccess expression -> expression.typeOf
   ExpressionTypeApplication expression -> expression.typeOf

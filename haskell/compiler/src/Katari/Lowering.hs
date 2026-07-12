@@ -685,6 +685,7 @@ lowerExpression = \case
   AST.ExpressionIf expression -> lowerIf expression
   AST.ExpressionMatch expression -> lowerMatch expression
   AST.ExpressionFor expression -> lowerFor expression
+  AST.ExpressionForever expression -> lowerForever expression
   AST.ExpressionBlock expression -> lowerBlockExpression expression.block
   AST.ExpressionHandler expression -> lowerHandlerExpression expression
   -- Operators are desugared into primitive calls by the identifier, so they never reach lowering.
@@ -980,6 +981,19 @@ lowerFor forExpression = do
     Nothing
   output <- freshVariableId
   emit (OperationCall CallOperation {target = forBlock, output = Just output})
+  pure output
+
+-- | @forever { body }@. The body lowers as a parameterless sequence block reading the enclosing scope
+-- lexically — the runtime spawns a fresh iteration thread per pass, so per-iteration bindings live in
+-- that thread's own scope and are reclaimed when it completes. The loop is entered by an ordinary call
+-- whose output can never bind: the runtime's forever thread never completes, the @-> never@ call shape.
+lowerForever :: AST.ForeverExpression AST.Typed -> Lower VariableId
+lowerForever expression = do
+  body <- buildScopedBlock [] expression.body
+  blockId <- freshBlockId
+  recordBlock blockId (BlockForever Forever {body = body}) mempty Nothing
+  output <- freshVariableId
+  emit (OperationCall CallOperation {target = blockId, output = Just output})
   pure output
 
 -- | Lower a list of @var@ state bindings (of a @for@ or a @handle@). Returns the initial-value variables

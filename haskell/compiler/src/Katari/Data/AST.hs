@@ -920,6 +920,8 @@ data Expression (phase :: Phase) where
   ExpressionMatch :: MatchExpression phase -> Expression phase
   -- | @[par] for (...) { body } then (pattern) { ... }@
   ExpressionFor :: ForExpression phase -> Expression phase
+  -- | @forever { body }@ — repeat the block indefinitely; the expression types as @never@
+  ExpressionForever :: ForeverExpression phase -> Expression phase
   -- | Standalone @{ ... }@ in expression position
   ExpressionBlock :: BlockExpression phase -> Expression phase
   -- | @object.field@
@@ -946,6 +948,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionIf expression -> expression.sourceSpan
     ExpressionMatch expression -> expression.sourceSpan
     ExpressionFor expression -> expression.sourceSpan
+    ExpressionForever expression -> expression.sourceSpan
     ExpressionBlock expression -> expression.sourceSpan
     ExpressionFieldAccess expression -> expression.sourceSpan
     ExpressionTypeApplication expression -> expression.sourceSpan
@@ -1140,6 +1143,21 @@ data ForExpression (phase :: Phase) = ForExpression
   }
 
 instance HasSourceSpan (ForExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
+-- | @forever { body }@ — the unbounded sibling of the sequential @for@: repeat @body@ indefinitely, one
+-- iteration at a time, discarding each iteration's value (nothing is collected — the point of the form is
+-- that a long-lived loop accumulates no state). The expression never yields a value, so it types as
+-- @never@. There is deliberately no built-in exit and no jump target of its own: escaping is composed with
+-- the existing catch-and-break mechanism (a surrounding handler whose request handler @break@s), exactly
+-- like throw handling.
+data ForeverExpression (phase :: Phase) = ForeverExpression
+  { body :: Block phase,
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (ForeverExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | @pattern in source@
@@ -1821,6 +1839,10 @@ deriving stock instance (ShowPhase phase) => Show (CaseArm phase)
 deriving stock instance (EqPhase phase) => Eq (ForExpression phase)
 
 deriving stock instance (ShowPhase phase) => Show (ForExpression phase)
+
+deriving stock instance (EqPhase phase) => Eq (ForeverExpression phase)
+
+deriving stock instance (ShowPhase phase) => Show (ForeverExpression phase)
 
 deriving stock instance (EqPhase phase) => Eq (ForInBinding phase)
 

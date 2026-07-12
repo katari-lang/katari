@@ -290,6 +290,22 @@ spec = do
         Just (ExpressionFor node) -> node.parallel `shouldBe` True
         _ -> expectationFailure "expected a for"
 
+    it "parses a forever loop" $ do
+      body <- parseClean "agent main() -> never { forever { tick() } }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionForever node) -> length node.body.statements `shouldBe` 0
+        _ -> expectationFailure "expected a forever loop"
+
+    it "keeps `forever` an ordinary identifier away from a loop head (a call, and a declared agent name)" $ do
+      -- The word is recognised positionally (only directly before `{`), so the stdlib's `retry.forever`
+      -- agent — declared and called by that name — must keep parsing as an identifier.
+      body <- parseClean "agent main() -> integer { forever(x = 1) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall _) -> pure ()
+        _ -> expectationFailure "expected a call to an agent named forever"
+      _ <- parseClean "agent forever(x: integer) -> integer { x }"
+      pure ()
+
     it "parses a parallel tuple" $ do
       body <- parseClean "agent main() -> integer { parallel [a, b, c] }" >>= soleAgentBody
       case body.returnExpression of

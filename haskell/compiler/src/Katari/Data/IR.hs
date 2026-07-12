@@ -105,6 +105,9 @@ data Block where
   BlockExternal :: External -> Block
   BlockMatch :: Match -> Block
   BlockFor :: For -> Block
+  -- | @forever { body }@: run 'body' again each time it completes, discarding its value — the unbounded
+  -- sibling of the sequential 'For' with nothing collected, so a long-lived loop's state stays flat.
+  BlockForever :: Forever -> Block
   BlockHandle :: Handle -> Block
   -- | A parallel sequence literal (@parallel [e1, ...]@): its elements run concurrently.
   BlockParallel :: ParallelBlock -> Block
@@ -197,6 +200,15 @@ data For = For
     initialStates :: List VariableId,
     body :: BlockId,
     thenClause :: Maybe ThenClause
+  }
+  deriving stock (Eq, Show)
+
+-- | @forever { body }@: each time 'body' completes, run it again — one iteration at a time, its value
+-- discarded (nothing is collected, unlike 'For', so iteration count does not grow the loop's state). The
+-- block never completes on its own; it ends only by cancellation or an ask (a request whose handler
+-- @break@s, a jump to an enclosing target) unwinding past it.
+newtype Forever = Forever
+  { body :: BlockId
   }
   deriving stock (Eq, Show)
 
@@ -542,6 +554,7 @@ instance ToJSON Block where
           "body" .= for.body,
           "thenClause" .= for.thenClause
         ]
+    BlockForever forever' -> taggedObject "forever" ["body" .= forever'.body]
     BlockHandle handle ->
       taggedObject
         "handle"

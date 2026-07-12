@@ -135,6 +135,7 @@ referencesInExpression = \case
       <> foldMap referencesInVariableBinding expression.varBindings
       <> referencesInBlock expression.body
       <> foldMap referencesInThenClause expression.thenClause
+  ExpressionForever expression -> referencesInBlock expression.body
   ExpressionBlock expression -> referencesInBlock expression.block
   ExpressionFieldAccess expression -> referencesInExpression expression.object
   ExpressionTypeApplication expression -> referencesInExpression expression.callee

@@ -919,6 +919,28 @@ spec = do
     it "rejects a user source declaring `from \"time\"` end to end (K3022, not a runtime dispatch panic)" $
       compiledCodes "external agent my_now() -> number from \"time\"" `shouldContain` ["K3022"]
 
+  describe "forever loops (end to end)" $ do
+    it "types as never, so it conforms to any declared return" $
+      compiledCodes "agent main() -> integer { forever { let _x = 1 } }" `shouldBe` []
+
+    it "propagates the body's effects to the enclosing row (performed every iteration)" $
+      compiledCodes "request tick() -> null\nagent daemon() -> never with tick { forever { tick() } }" `shouldBe` []
+
+    it "rejects a body effect the declared row does not carry (the loop performs it every iteration)" $
+      compiledCodes "request tick() -> null\nagent daemon() -> never with pure { forever { tick() } }" `shouldSatisfy` (not . null)
+
+    it "escapes by the composed catch-and-break: a surrounding handler's break exits with the value" $
+      compiledCodes
+        ( "request done(value: integer) -> never\n"
+            <> "agent main() -> integer {\n"
+            <> "  use handler {\n"
+            <> "    request done(value: integer) -> never { break value }\n"
+            <> "  }\n"
+            <> "  forever { done(value = 1) }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
   -- The residual-type assertions run end to end (through 'Katari.Compile'): the enclosing agent's
   -- return annotation states the expected residual type, so a clean compile IS the type assertion.
   describe "partial application (`_` holes)" $ do

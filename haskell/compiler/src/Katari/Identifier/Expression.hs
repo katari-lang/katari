@@ -71,6 +71,9 @@ resolveExpression = \case
     cases <- traverse resolveCaseArm node.cases
     pure (ExpressionMatch MatchExpression {subject = subject, cases = cases, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionFor node -> resolveFor node
+  ExpressionForever node -> do
+    body <- resolveBlock node.body
+    pure (ExpressionForever ForeverExpression {body = body, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionBlock node -> do
     block <- resolveBlock node.block
     pure (ExpressionBlock BlockExpression {block = block, sourceSpan = node.sourceSpan, typeOf = ()})

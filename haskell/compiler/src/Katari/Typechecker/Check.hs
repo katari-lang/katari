@@ -98,6 +98,7 @@ synthExpression = \case
   ExpressionIf expression -> synthIfExpression expression
   ExpressionMatch expression -> synthMatchExpression expression
   ExpressionFor expression -> synthForExpression expression
+  ExpressionForever expression -> synthForeverExpression expression
   ExpressionHandler expression -> synthHandlerExpression expression
   ExpressionBlock expression -> synthBlockExpression expression
   ExpressionFieldAccess expression -> synthFieldAccessExpression expression
@@ -1925,6 +1926,25 @@ synthForExpression expression = do
           varBindings = typedVarBindings,
           body = typedBody,
           thenClause = typedThen,
+          sourceSpan = expression.sourceSpan,
+          typeOf = semantic
+        }
+
+-- | @forever { body }@ types as @never@ (the bottom type): the loop repeats its body indefinitely and
+-- never yields a value, so the expression conforms anywhere — exactly like a @-> never@ call, including
+-- what follows it. The body is an ordinary block synthesized for its effects, which are performed on
+-- every iteration and flow to the enclosing row unchanged; its tail value is discarded per iteration (a
+-- @for@ maps its body values into an array — @forever@ deliberately collects nothing, which is what keeps
+-- a long-lived loop's durable state flat). No boundary is introduced: @forever@ owns no @next@ / @break@
+-- target (there is no built-in exit — a surrounding handler's @break@ is the composed escape), so jumps
+-- and requests inside the body mean exactly what they mean outside it, as in a @match@ arm.
+synthForeverExpression :: ForeverExpression Identified -> Checker (Expression Typed, NormalizedType)
+synthForeverExpression expression = do
+  (typedBody, _discardedTail) <- synthBlock expression.body
+  typedExpression expression.sourceSpan bottomType $ \semantic ->
+    ExpressionForever
+      ForeverExpression
+        { body = typedBody,
           sourceSpan = expression.sourceSpan,
           typeOf = semantic
         }
