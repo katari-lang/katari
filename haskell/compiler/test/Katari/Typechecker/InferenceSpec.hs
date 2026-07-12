@@ -168,6 +168,14 @@ spec = do
       codesFor (reraiseDecl <> throwerDecl <> "agent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse reraise\nthrows() }") `shouldBe` []
     it "the inferred Error is exact: a handler for the wrong payload does not discharge it (K3001)" $
       codesFor (reraiseDecl <> throwerDecl <> "data other()\nagent run() -> integer { use handler { request prelude.throw(error: other) -> never { break 0 } }\nuse reraise\nthrows() }") `shouldContain` ["K3001"]
+    -- The pinning pair for the goFunction addition: a generic named in BOTH a value position (already
+    -- solvable before request-row payloads were related) and the continuation's throw row. The row's
+    -- proposal must AGREE with the value position's solution — programs the old inference solved stay
+    -- solved unchanged — and a disagreeing pair must surface, not silently prefer either occurrence.
+    it "a generic in a value position AND the throw row solves consistently (the row proposal changes nothing already solvable)" $
+      codesFor (guardDecl <> throwerDecl <> "agent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse guard(fallback = oops(n = 0))\nthrows() }") `shouldBe` []
+    it "a value-position payload disagreeing with the row's is not silently narrowed away" $
+      codesFor (guardDecl <> throwerDecl <> "data other()\nagent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse guard(fallback = other())\nthrows() }") `shouldSatisfy` (not . null)
 
   describe "request handler generic inference (param-derived)" $ do
     it "infers the request's generic from a handler parameter annotation" $
@@ -370,6 +378,12 @@ reraiseDecl = "agent reraise[R, Error, effect E](continuation: agent(value: null
 
 throwerDecl :: Text
 throwerDecl = "data oops(n: integer)\nagent throws() -> integer with prelude.throw[oops] { prelude.throw(error = oops(n = 1)) }\n"
+
+-- | Like 'reraiseDecl', but @Error@ ALSO appears in a value position (@fallback@) — the pinning shape for
+-- the request-row addition: the value occurrence alone solved @Error@ before rows were related, so the row
+-- proposal must agree with (never disturb) that solution.
+guardDecl :: Text
+guardDecl = "agent guard[R, Error, effect E](fallback: Error, continuation: agent(value: null) -> R with {...E, prelude.throw[Error]}) -> R with E | prelude.throw[Error] { continuation(value = null) }\n"
 
 ------------------------------------------------------------------------------------------------
 -- White-box helpers
