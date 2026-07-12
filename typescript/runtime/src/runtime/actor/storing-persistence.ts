@@ -480,6 +480,20 @@ export class StoringPersistence implements Persistence {
     return this.outbox.size;
   }
 
+  /** Test helper: how many persisted thread rows are live across every instance — one half of a
+   *  flat-growth assertion (a `forever` loop must not accumulate a row per iteration). */
+  threadCount(): number {
+    let count = 0;
+    for (const rows of this.threads.values()) count += rows.length;
+    return count;
+  }
+
+  /** Test helper: how many persisted scopes are live — the other half of the flat-growth assertion
+   *  (each completed iteration's scope must be reclaimed, not parked). */
+  scopeCount(): number {
+    return this.scopes.size;
+  }
+
   /** Test helper: the journaled trace of one run, in production order. */
   journalFor(run: InstanceId): ExternalEvent[] {
     return this.journal.filter((event) => event.run === run);

@@ -102,6 +102,8 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
         postCancelCollect: {},
         thenPending: null,
       };
+    case "forever":
+      return { ...base, kind: "forever", pending: null };
     case "handle":
       return {
         ...base,

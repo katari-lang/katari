@@ -85,6 +85,7 @@ export type Block =
   | ExternalBlock
   | MatchBlock
   | ForBlock
+  | ForeverBlock
   | HandleBlock
   | ParallelBlock;
 
@@ -181,6 +182,17 @@ export type ForBlock = {
   initialStates: VariableId[];
   body: BlockId;
   thenClause: ThenClause | null;
+};
+
+/**
+ * `forever { body }`: each time `body` completes, run it again — one iteration at a time, its value
+ * discarded (nothing is collected, unlike `for`, so iteration count never grows the loop's state). The
+ * block never completes on its own; it ends only by cancellation or an ask (a request whose handler
+ * breaks, a jump to an enclosing target) unwinding past it.
+ */
+export type ForeverBlock = {
+  kind: "forever";
+  body: BlockId;
 };
 
 /**

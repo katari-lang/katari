@@ -57,6 +57,13 @@
       "when": 1783845357251,
       "tag": "0007_time_instances",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783868393878,
+      "tag": "0008_forever_thread_kind",
+      "breakpoints": true
     }
   ]
 }

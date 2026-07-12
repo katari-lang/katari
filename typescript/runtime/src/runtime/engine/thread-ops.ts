@@ -37,6 +37,7 @@ import type {
   CancelExit,
   ExternalThread,
   FinalizerDisposition,
+  ForeverThread,
   ForThread,
   HandleThread,
   MatchThread,
@@ -84,6 +85,9 @@ export async function dispatchCreate(ctx: StepContext, thread: Thread): Promise<
       return;
     case "for":
       createFor(ctx, thread);
+      return;
+    case "forever":
+      createForever(ctx, thread);
       return;
     case "handle":
       createHandle(ctx, thread);
@@ -134,6 +138,10 @@ export function dispatchCallAck(
     case "for":
       handleForCallAck(ctx, thread, callId, value);
       return;
+    case "forever":
+      // An iteration completed: its value is discarded and the next iteration starts at once.
+      startForeverIteration(ctx, thread);
+      return;
     case "handle":
       handleHandleCallAck(ctx, thread, callId, value);
       return;
@@ -168,11 +176,14 @@ export function dispatchAsk(
       return;
     case "sequence":
     case "match":
+    case "forever":
     case "parallel":
     case "delegate":
     case "external":
-      // None of these is a control target or a request handler: bubble every ask up unchanged. (A delegate /
-      // external proxy has no in-instance children to ask it, so this is reached only defensively.)
+      // None of these is a control target or a request handler: bubble every ask up unchanged (`forever`
+      // deliberately owns no target — its composed exit IS an ask unwinding past it to a surrounding
+      // handler). (A delegate / external proxy has no in-instance children to ask it, so those two are
+      // reached only defensively.)
       proxyAsk(ctx, thread, ask, from, askId);
       return;
     case "primitive":
@@ -314,6 +325,7 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
     case "sequence":
     case "match":
     case "for":
+    case "forever":
     case "parallel":
     case "handle":
       beginCancel(ctx, thread, { kind: "ackParent" });
@@ -839,6 +851,33 @@ function finishFor(ctx: StepContext, thread: ForThread, thenClause: { body: numb
     parentScopeId: thread.scopeId,
     blockId: thenClause.body,
     parameters,
+  });
+}
+
+// ─── forever (unbounded loop) ────────────────────────────────────────────────────────────────────
+
+function createForever(ctx: StepContext, thread: ForeverThread): void {
+  startForeverIteration(ctx, thread);
+}
+
+/** Spawn one body iteration as a fresh child thread in a fresh scope, so per-iteration bindings die with
+ *  the iteration (the intra-instance GC reclaims the completed child's scope at the turn boundary). The
+ *  body block takes no parameters — it reads the enclosing scope lexically. However many iterations have
+ *  run, the loop holds exactly one pending call and nothing collected: the flat-durable-footprint
+ *  invariant this construct exists for. A body with no suspension point spins within the turn — an
+ *  infinite pure loop is expressible in any language; a useful daemon body always suspends (an external
+ *  call, a sleep, a request). */
+function startForeverIteration(ctx: StepContext, thread: ForeverThread): void {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "forever") throw new Error(`thread ${thread.id} is not a forever block`);
+  const callId = allocateCallId(ctx.instance);
+  thread.pending = callId;
+  spawnThread(ctx, {
+    parent: thread.id,
+    parentCallId: callId,
+    parentScopeId: thread.scopeId,
+    blockId: block.body,
+    parameters: {},
   });
 }
 

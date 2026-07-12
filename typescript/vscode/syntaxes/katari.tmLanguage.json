@@ -82,6 +82,11 @@
           "match": "\\b(if|else|match|case|return|next|break|for|then|handler|use|parallel|in|with)\\b"
         },
         {
+          "comment": "`forever` is a positional word (only a loop head directly before `{`), so the lookahead keeps `retry.forever(...)` an ordinary identifier.",
+          "name": "keyword.control.katari",
+          "match": "\\bforever\\b(?=\\s*\\{)"
+        },
+        {
           "name": "keyword.declaration.katari",
           "match": "\\b(agent|request|data|external|primitive|let|var|import|as|from|type|of|extends)\\b"
         }

@@ -103,6 +103,7 @@ export type Thread =
   | RequestThread
   | MatchThread
   | ForThread
+  | ForeverThread
   | HandleThread
   | ParallelThread
   | DelegateThread
@@ -219,6 +220,21 @@ export type ForThread = ThreadBase & {
   postCancelCollect: Record<number, { value: Value; modifiers: Record<number, Value> }>;
   /** Once the source is exhausted, the then-clause's call (if any): its value is the loop's value. */
   thenPending: CallId | null;
+};
+
+/**
+ * Drives a `forever` loop: one body iteration at a time, each spawned as a fresh child thread whose
+ * completion value is DISCARDED and immediately followed by the next iteration. Nothing is collected and
+ * no cursor exists, so the thread's state is one pending call id no matter how many iterations have run —
+ * which, with the per-iteration child scopes reclaimed by the intra-instance GC, is what makes a
+ * long-lived loop's durable footprint flat. The loop owns no asks (no `next` / `break` target, no
+ * handlers): every ask from the body proxies up unchanged, and the loop ends only by cancellation or by
+ * an ask unwinding past it (a surrounding handler's `break` — the composed exit).
+ */
+export type ForeverThread = ThreadBase & {
+  kind: "forever";
+  /** The in-flight iteration's child call (exactly one at any time once created). */
+  pending: CallId | null;
 };
 
 /**
