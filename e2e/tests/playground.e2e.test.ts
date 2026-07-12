@@ -300,6 +300,16 @@ test("time.main: durable now + sleep resolve through the built-in time reactor",
   expect(stdout).toContain("slept for");
 }, 20_000);
 
+test("retry_demo: exponential backoff re-runs the block until it succeeds, then exhaustion re-raises typed", async () => {
+  // `retry.exponential` re-invokes its continuation (the rest of the block) with millisecond-scale durable
+  // sleeps. `main` fails twice then succeeds; `exhausting` never succeeds, so the budget is spent and the
+  // final attempt's throw re-raises UNCHANGED and still typed (caught as `not_ready`).
+  const success = await katari(["run", "retry_demo.main", "--project", "playground"]);
+  expect(success.stdout).toContain("result: ready on attempt 3");
+  const exhausted = await katari(["run", "retry_demo.exhausting", "--project", "playground"]);
+  expect(exhausted.stdout).toContain("exhausted at attempt 2");
+}, 20_000);
+
 test("ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
   const { stdout } = await katari([
     "run",

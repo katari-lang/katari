@@ -1,0 +1,81 @@
+// Failure recovery, composed. `retry.exponential` re-runs a failing block with backoff until it succeeds
+// or the budget is spent; `retry.forever` keeps a daemon alive across transient failures. Both are ordinary
+// `use` providers that RE-INVOKE their continuation (the rest of the block) — the runtime re-enters it
+// fresh each attempt, against the caller's live ambient state.
+
+@"A typed error raised while the resource is still warming up."
+data not_ready(attempt: integer)
+
+@"The ambient warm-up counter: each call returns the next attempt number. A handler in `main` provides it,
+OUTSIDE the retry provider, so it survives the re-invocations and counts across them."
+request warmup() -> integer
+
+@"Fails the first two attempts (raising `not_ready`), then succeeds. Each retry re-runs this fresh, but the
+ambient `warmup` counter persists across the re-invocations, so the third run sees attempt 3 and returns."
+agent flaky() -> string with warmup | prelude.throw[not_ready] {
+  let attempt = warmup()
+  if (attempt < 3) {
+    prelude.throw(error = not_ready(attempt = attempt))
+  } else {
+    f"ready on attempt ${string.to_string(value = attempt)}"
+  }
+}
+
+@"Entry: retry `flaky` with millisecond exponential backoff. Attempts 1 and 2 throw `not_ready`; the
+provider durably sleeps (5ms, then 10ms) and re-runs the block; attempt 3 succeeds. The `warmup` handler
+sits OUTSIDE the provider, so its counter accumulates across the re-invocations — proof the continuation is
+re-entered against live ambient state. The outer `throw` handler is the exhaustion fallback (never reached
+here, since attempt 3 lands inside the budget of 5)."
+agent main() -> string {
+  use handler {
+    request prelude.throw(error: not_ready) -> never {
+      break f"gave up while warming up (attempt ${string.to_string(value = error.attempt)})"
+    }
+  }
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use retry.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 5.0)
+  f"result: ${flaky()}"
+}
+
+@"Always fails: every attempt throws `not_ready`."
+agent always_fails() -> string with warmup | prelude.throw[not_ready] {
+  prelude.throw(error = not_ready(attempt = warmup()))
+}
+
+@"Exhaustion, with the error type preserved. `always_fails` never succeeds, so a 2-attempt
+`retry.exponential` spends its budget and the final attempt's throw re-raises UNCHANGED — still typed
+`not_ready`, which the outer handler catches and reads `error.attempt` off. Proof that exhaustion re-raise
+keeps the error typed end to end (attempt 2 is the final, uncaught one)."
+agent exhausting() -> string {
+  use handler {
+    request prelude.throw(error: not_ready) -> never {
+      break f"exhausted at attempt ${string.to_string(value = error.attempt)}"
+    }
+  }
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use retry.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 2.0)
+  f"result: ${always_fails()}"
+}
+
+@"A typed error a flaky delivery raises to stand in for a transient downstream failure."
+data delivery_failed(scheduled: number)
+
+@"Deliver one tick, but fail transiently by raising `delivery_failed`. A `deliver_to` failure kills
+`time.watch` by design; wrapped in `retry.forever` the watch is re-armed after a backoff instead."
+agent flaky_deliver(time: number) -> null with prelude.throw[delivery_failed] {
+  prelude.throw(error = delivery_failed(scheduled = time))
+}
+
+@"THE composition the release is about: a resilient daemon. `time.watch` fires a delivery per occurrence and
+dies if the delivery fails; `retry.forever` catches that failure (or a restart-induced panic), backs off,
+and re-runs `watch`, which re-arms from its persisted next occurrence. This never returns — it is the shape
+a cron/daemon takes when it must survive transient failures. (Typecheck-only: an unbounded daemon has no
+result to assert, so it is not part of the e2e run.)"
+agent daemon() -> never with io {
+  use retry.forever(initial_delay_milliseconds = 100.0, factor = 2.0, max_delay_milliseconds = 5000.0)
+  time.watch(schedule = time.interval(milliseconds = 1000), deliver_to = flaky_deliver)
+}
