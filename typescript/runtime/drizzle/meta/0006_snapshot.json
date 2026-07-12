@@ -1,6 +1,6 @@
 {
-  "id": "1c95c366-1736-476a-93d7-f9d996b906ac",
-  "prevId": "df184384-8022-4b29-a020-e518130df7a9",
+  "id": "df184384-8022-4b29-a020-e518130df7a9",
+  "prevId": "e829439e-957f-43d3-a90b-d2e715c85a1a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -900,7 +900,7 @@
         },
         "instances_kind_check": {
           "name": "instances_kind_check",
-          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time')"
+          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp')"
         }
       },
       "isRLSEnabled": false
@@ -1512,84 +1512,6 @@
           "value": "\"runs\".\"state\" in ('running', 'cancelling', 'done', 'error', 'cancelled')"
         }
       },
-      "isRLSEnabled": false
-    },
-    "public.time_instances": {
-      "name": "time_instances",
-      "schema": "",
-      "columns": {
-        "instance_id": {
-          "name": "instance_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "snapshot_id": {
-          "name": "snapshot_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "operation": {
-          "name": "operation",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "relays": {
-          "name": "relays",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "inner_calls": {
-          "name": "inner_calls",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "time_instances_instance_id_instances_id_fk": {
-          "name": "time_instances_instance_id_instances_id_fk",
-          "tableFrom": "time_instances",
-          "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "time_instances_snapshot_id_snapshots_id_fk": {
-          "name": "time_instances_snapshot_id_snapshots_id_fk",
-          "tableFrom": "time_instances",
-          "tableTo": "snapshots",
-          "columnsFrom": [
-            "snapshot_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.webhook_instances": {
