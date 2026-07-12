@@ -23,6 +23,7 @@ import type {
   ScopeId,
   SnapshotId,
 } from "../ids.js";
+import type { TimeOperation } from "../time-schedule.js";
 import type { Value } from "../value/types.js";
 import type {
   DeserializedEngine,
@@ -249,6 +250,30 @@ export interface PersistedWebhookInstance extends PersistedCallEnvelope {
   innerCalls: PersistedInnerCall[];
 }
 
+/** The `time` instance extension write (`time_instances`) — the call-specific state behind a `time`-kind
+ *  instance envelope. Like `webhook` it persists its payload: the whole per-variant `operation` (the durable
+ *  `sleep` deadline, the `watch` schedule + next-occurrence cursor + `deliver_to`) must survive a restart so
+ *  the timer re-arms and the watch keeps firing. `snapshotId` pins the version a watch's `deliver_to`
+ *  dispatches against. `now` / `sleep` open no inner delegations, so their bridges are empty. */
+export interface PersistedTimeInstanceRow {
+  instanceId: InstanceId;
+  snapshotId: SnapshotId;
+  operation: TimeOperation;
+  status: "running" | "cancelling" | "awaitingAnswer";
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
+}
+
+/** One in-flight time call a reactivation reads (envelope ⋈ `time_instances`): the time reactor rebuilds its
+ *  warm call — and re-arms its timer — keyed by `delegation` (from the envelope). */
+export interface PersistedTimeInstance extends PersistedCallEnvelope {
+  snapshot: SnapshotId;
+  operation: TimeOperation;
+  status: "running" | "cancelling" | "awaitingAnswer";
+  relays: PersistedEscalationRelay[];
+  innerCalls: PersistedInnerCall[];
+}
+
 /** The base-class write surface: the generic state every reactor's base owns — the instance envelope, the
  *  caller-owned delegations, the raiser-owned escalations, and the cascade drop. A concrete reactor never
  *  touches this directly; it goes through `Reactor.persistBase`, so the protocol is uniform (and a reactor
@@ -312,6 +337,11 @@ export interface McpTx {
   putMcpInstance(row: PersistedMcpInstanceRow): Promise<void>;
 }
 
+/** The `time` reactor's *own-data* write surface — its `time_instances` extension (the envelope is base). */
+export interface TimeTx {
+  putTimeInstance(row: PersistedTimeInstanceRow): Promise<void>;
+}
+
 /** The `ResourcePool`'s write surface: the independent scope / blob-ownership resource. `owner` may be `null`
  *  (a value in transit between owners mid-ascent). */
 export interface PoolTx {
@@ -352,6 +382,7 @@ export interface PersistenceTx {
   http: HttpTx;
   webhook: WebhookTx;
   mcp: McpTx;
+  time: TimeTx;
   pool: PoolTx;
   outbox: OutboxTx;
   journal: JournalTx;
@@ -421,6 +452,13 @@ export interface McpLoader {
   instances(): Promise<PersistedMcpInstance[]>;
 }
 
+/** The `time` reactor's own-data read surface: its in-flight calls (envelope ⋈ `time_instances`), to re-arm
+ *  their durable timers on restart (a `sleep` / `watch` deadline that already passed fires at once; a watch
+ *  with a live tick delivery resumes it as durable core work). */
+export interface TimeLoader {
+  instances(): Promise<PersistedTimeInstance[]>;
+}
+
 /** The substrate's read surface: the undrained outbox, replayed into the mailbox so an in-flight event is not
  *  lost across a restart. */
 export interface OutboxLoader {
@@ -440,6 +478,7 @@ export interface Loader {
   http: HttpLoader;
   webhook: WebhookLoader;
   mcp: McpLoader;
+  time: TimeLoader;
   outbox: OutboxLoader;
 }
 
@@ -499,6 +538,9 @@ export const NO_OP_TX: PersistenceTx = {
   mcp: {
     async putMcpInstance() {},
   },
+  time: {
+    async putTimeInstance() {},
+  },
   pool: {
     async putScope() {},
     async deleteScope() {},
@@ -549,6 +591,11 @@ const EMPTY_LOADER: Loader = {
     },
   },
   mcp: {
+    async instances() {
+      return [];
+    },
+  },
+  time: {
     async instances() {
       return [];
     },

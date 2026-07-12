@@ -14,6 +14,7 @@ import { blobStoreStringReader } from "../engine/json-value.js";
 import { createProjectStore } from "../engine/store.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
+import { type Clock, SystemClock } from "../external/clock.js";
 import type { HttpTransport } from "../external/http-transport.js";
 import { type McpTransport, StubMcpTransport } from "../external/mcp-transport.js";
 import type { FfiTransport } from "../external/runner.js";
@@ -38,6 +39,7 @@ import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { ResourcePool } from "./resource-pool.js";
 import { Substrate } from "./substrate.js";
+import { TimeReactor } from "./time-reactor.js";
 import { type WebhookDeliveryOutcome, WebhookReactor } from "./webhook-reactor.js";
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
@@ -76,6 +78,10 @@ export interface ProjectActorDependencies {
    *  same public address (KATARI_PUBLIC_URL). Defaults to the local dev address (fine for tests; the
    *  facade injects the configured one). */
   publicBaseUrl?: string;
+  /** The wall-clock + timers the `time` reactor reads through (durable `sleep` / `watch`, the `time.now`
+   *  reading). Defaults to the real `SystemClock` (fine in production; tests inject a controllable clock so
+   *  durable time is deterministic and needs no real waits). */
+  clock?: Clock;
   persistence: Persistence;
 }
 
@@ -103,6 +109,8 @@ export class ProjectActor {
   private readonly webhook: WebhookReactor;
   /** The mcp reactor: built-in `prelude.mcp.*` calls — a `delegate` to it, the SDK client, its records. */
   private readonly mcp: McpReactor;
+  /** The time reactor: built-in `prelude.time.*` calls — durable `sleep` / `watch` and the `now` reading. */
+  private readonly time: TimeReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -162,6 +170,13 @@ export class ProjectActor {
       (work) => this.substrate.submit(this.webhook, work),
       pool,
     );
+    // The time reactor serves `prelude.time.*` calls: it reads the injected clock and arms its durable timers,
+    // re-entering the serial loop for a fired timer's post-commit work (a resolve, a watch tick) the same way.
+    this.time = new TimeReactor(
+      dependencies.clock ?? new SystemClock(),
+      (work) => this.substrate.submit(this.time, work),
+      pool,
+    );
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
@@ -176,6 +191,7 @@ export class ProjectActor {
       http: this.http,
       webhook: this.webhook,
       mcp: this.mcp,
+      time: this.time,
     };
     this.substrate = new Substrate(
       this.projectId,
@@ -386,6 +402,7 @@ export class ProjectActor {
     this.http.reset();
     this.webhook.reset();
     this.mcp.reset();
+    this.time.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
@@ -396,11 +413,14 @@ export class ProjectActor {
       // panic (never re-run), a cancelling call re-aborts.
       // The webhook load re-registers each endpoint's token — no external process to reconcile with, so
       // (unlike ffi / http) a webhook call survives a restart completely.
+      // The time load re-arms each call's durable timer (a passed deadline fires at once) — like webhook,
+      // there is no external process to reconcile, so a time call survives a restart completely.
       await Promise.all([
         this.ffi.load(loader),
         this.http.load(loader),
         this.webhook.load(loader),
         this.mcp.load(loader),
+        this.time.load(loader),
       ]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {

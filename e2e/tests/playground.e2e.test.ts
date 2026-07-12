@@ -293,6 +293,13 @@ test("errors.main: typed throw caught, panic caught, missing-secret fallback", a
   expect(stdout).toContain("no secret under playground.no_such_key");
 });
 
+test("time.main: durable now + sleep resolve through the built-in time reactor", async () => {
+  // A ~1s durable sleep bracketed by two `time.now` readings — the result text is deterministic in its
+  // prefix (the elapsed span is at least the sleep, but not asserted exactly).
+  const { stdout } = await katari(["run", "time.main", "--project", "playground"]);
+  expect(stdout).toContain("slept for");
+}, 20_000);
+
 test("ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
   const { stdout } = await katari([
     "run",

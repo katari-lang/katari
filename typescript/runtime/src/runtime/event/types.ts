@@ -82,9 +82,10 @@ export type DelegateTarget =
  *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. `ffi` runs FFI
  *  (sidecar) handlers, `http` the built-in http client — an external call is a `delegate` to one of them,
  *  exactly like a core sub-call, `webhook` the dynamically generated inbound endpoints
- *  (`webhook.inbound` — the outside world calling the program), and `mcp` the built-in MCP client
- *  (`prelude.mcp.*` — connect / list / call against an MCP server). */
-export type ReactorName = "core" | "api" | "ffi" | "http" | "webhook" | "mcp";
+ *  (`webhook.inbound` — the outside world calling the program), `mcp` the built-in MCP client
+ *  (`prelude.mcp.*` — connect / list / call against an MCP server), and `time` durable wall-clock time
+ *  (`prelude.time.*` — a clock reading and the durable timers `sleep` / `watch` wait on). */
+export type ReactorName = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =

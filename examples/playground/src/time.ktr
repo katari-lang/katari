@@ -1,0 +1,45 @@
+// Durable wall-clock time, end to end. `time.now` reads the clock (a value recorded durably, so a
+// recovered run agrees with itself about what time it was); `time.sleep` waits a persisted deadline that
+// re-arms across a restart; `time.watch` fires an agent once per schedule occurrence. All three are built-in
+// reactor calls — no FFI sidecar, nothing to install.
+
+@"Sleep a second, timing it with the durable clock either side. The elapsed span is at least the sleep
+(the deadline is persisted, so even a restart mid-sleep wakes no earlier)."
+agent main() -> string {
+  let before = time.now()
+  time.sleep(milliseconds = 1000)
+  let after = time.now()
+  f"slept for ${string.to_string(value = after - before)}ms"
+}
+
+@"A private signal used only to stop the watch below once it has seen enough occurrences."
+data enough()
+
+@"One reported occurrence — the ambient capability the watched agent performs per tick."
+request note(scheduled: number) -> null
+
+@"The watched agent: report each occurrence's scheduled instant and return. Its `note` effect flows to
+whoever runs it (here, the handlers in `every_second`)."
+agent report(time: number) -> null with note {
+  note(scheduled = time)
+}
+
+@"Watch a one-second interval and stop after three occurrences. `time.watch` never returns on its own, so
+a stateful handler counts the deliveries and, on the third, throws `enough` — which propagates out of the
+watched agent, tears the watch down, and is caught here to end with a summary. This is how resilience and
+termination are composed AROUND `watch` rather than baked into it."
+agent every_second() -> string with io {
+  use handler {
+    request prelude.throw(error: enough) -> never { break "watched three occurrences" }
+  }
+  use handler (var seen = 0) {
+    request note(scheduled: number) -> null {
+      if (seen + 1 >= 3) {
+        prelude.throw(error = enough())
+      } else {
+        next null with { seen = seen + 1 }
+      }
+    }
+  }
+  time.watch(schedule = time.interval(milliseconds = 1000), deliver_to = report)
+}

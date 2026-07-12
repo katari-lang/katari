@@ -36,6 +36,7 @@ import type {
   PersistedRun,
   PersistedRunEscalationAudit,
   PersistedStatusOnlyInstanceRow,
+  PersistedTimeInstanceRow,
   PersistedWebhookInstanceRow,
   Persistence,
   PersistenceTx,
@@ -88,6 +89,7 @@ export class StoringPersistence implements Persistence {
   private readonly httpInstanceRows = new Map<InstanceId, PersistedStatusOnlyInstanceRow>();
   private readonly webhookInstanceRows = new Map<InstanceId, PersistedWebhookInstanceRow>();
   private readonly mcpInstanceRows = new Map<InstanceId, PersistedMcpInstanceRow>();
+  private readonly timeInstanceRows = new Map<InstanceId, PersistedTimeInstanceRow>();
   private readonly threads = new Map<InstanceId, PersistedThread[]>();
   /** Scopes by id with their owner — cascaded on the owner's drop, mirroring the `scopes` table's FK. */
   private readonly scopes = new Map<number, PersistedScope>();
@@ -233,6 +235,17 @@ export class StoringPersistence implements Persistence {
             status: extension.status,
             serve: extension.serve,
             provide: extension.provide,
+          })),
+      },
+      time: {
+        instances: async () =>
+          this.instancesOf("time", this.timeInstanceRows, (call, extension) => ({
+            ...call,
+            snapshot: extension.snapshotId,
+            operation: extension.operation,
+            status: extension.status,
+            relays: extension.relays,
+            innerCalls: extension.innerCalls,
           })),
       },
       outbox: {
@@ -381,6 +394,11 @@ export class StoringPersistence implements Persistence {
           this.mcpInstanceRows.set(row.instanceId, row);
         },
       },
+      time: {
+        putTimeInstance: async (row) => {
+          this.timeInstanceRows.set(row.instanceId, row);
+        },
+      },
       pool: {
         putScope: async (scope) => {
           this.scopes.set(scope.scopeId, scope);
@@ -419,6 +437,7 @@ export class StoringPersistence implements Persistence {
     this.httpInstanceRows.delete(instanceId);
     this.webhookInstanceRows.delete(instanceId);
     this.mcpInstanceRows.delete(instanceId);
+    this.timeInstanceRows.delete(instanceId);
     this.threads.delete(instanceId);
     for (const [id, scope] of this.scopes) {
       if (scope.ownerInstanceId === instanceId) this.scopes.delete(id);

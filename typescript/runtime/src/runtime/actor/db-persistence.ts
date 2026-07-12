@@ -25,6 +25,7 @@ import {
   runEscalationsAudit,
   runEvents,
   runs,
+  timeInstances,
   webhookInstances,
 } from "../../db/tables/execution.js";
 import type { InstanceKind } from "../engine/types.js";
@@ -362,6 +363,19 @@ export class DbPersistence implements Persistence {
             innerCalls: brandedInnerCalls(extension.innerCalls),
           })),
       },
+      time: {
+        // Like webhook, the time extension carries the payload a reload re-arms; the sealed `operation`
+        // (whose `watch` variant holds the deliver_to value) unseals here.
+        instances: () =>
+          callInstancesOf("time", timeInstances, (call, extension) => ({
+            ...call,
+            snapshot: extension.snapshotId as SnapshotId,
+            operation: unsealFromStorage(extension.operation),
+            status: extension.status,
+            relays: brandedRelays(extension.relays),
+            innerCalls: brandedInnerCalls(extension.innerCalls),
+          })),
+      },
     };
   }
 
@@ -589,6 +603,37 @@ export class DbPersistence implements Persistence {
             .onConflictDoUpdate({
               target: webhookInstances.instanceId,
               set: { status: row.status, relays, innerCalls },
+            });
+        },
+      },
+      time: {
+        putTimeInstance: async (row) => {
+          const relays = row.relays.map((relay) => ({
+            escalation: relay.escalation as string,
+            child: relay.child as string,
+            childEscalation: relay.childEscalation as string,
+          }));
+          const innerCalls = row.innerCalls.map((inner) => ({
+            delegation: inner.delegation as string,
+            call: inner.call,
+          }));
+          // The operation evolves (a watch's cursor advances per tick) and its `watch` variant embeds the
+          // deliver_to value, which may close over a secret — so the whole operation seals and re-writes on
+          // update, unlike webhook's immutable callback.
+          const operation = sealForStorage(row.operation);
+          await drizzleTx
+            .insert(timeInstances)
+            .values({
+              instanceId: row.instanceId,
+              snapshotId: row.snapshotId,
+              operation,
+              status: row.status,
+              relays,
+              innerCalls,
+            })
+            .onConflictDoUpdate({
+              target: timeInstances.instanceId,
+              set: { operation, status: row.status, relays, innerCalls },
             });
         },
       },

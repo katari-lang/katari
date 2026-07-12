@@ -2645,7 +2645,7 @@ signatureValueScheme ::
 -- on these. Kept in one place so adding a reactor is a single edit here; the runtime's routing must stay
 -- in step with this set.
 externalReactorNames :: List Text
-externalReactorNames = ["ffi", "http", "webhook", "mcp"]
+externalReactorNames = ["ffi", "http", "webhook", "mcp", "time"]
 
 -- | Reject an @external@'s @from "name"@ clause when it names a reactor that does not exist (a typo, or an
 -- unimplemented reactor) — K3018, at compile time rather than a silent runtime fallback to the FFI reactor.

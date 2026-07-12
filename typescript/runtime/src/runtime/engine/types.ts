@@ -360,7 +360,7 @@ export type InstanceStatus = "running" | "cancelling";
  *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. Api-targeted events
  *  route to the `ApiReactor` by the substrate's `event.to`, not by any caller-id comparison here; that is
  *  why there is no `ApiInstance` in the engine model below. */
-export type InstanceKind = "core" | "api" | "ffi" | "http" | "webhook" | "mcp";
+export type InstanceKind = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time";
 
 /**
  * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right

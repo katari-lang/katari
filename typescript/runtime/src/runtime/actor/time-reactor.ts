@@ -1,0 +1,409 @@
+// TimeReactor: the `time` reactor — durable wall-clock time as a call reactor (see `ExternalCallReactor` for
+// the shared callee-call lifecycle). Each compiled `prelude.time.*` external reaches it as a `delegate` (an
+// external leaf marked `reactor: "time"`) and becomes a `TimeOperation` decided ONCE at `openPayload`, keyed
+// by the delegate's fully-qualified external key — after which every lifecycle method dispatches that sum:
+//   - `now` (`prelude.time.now`): resolve with the current instant. It routes through the reactor rather than
+//     a prim precisely so the observed instant is recorded on the `delegateAck` (journaled in the durable
+//     outbox) — a prim's `Date.now()` would be recomputed on a turn replay / restart and disagree with
+//     itself. `now` opens no timer; it resolves on the next turn.
+//   - `sleep` / `sleep_until` (`prelude.time.sleep` / `.sleep_until`): resolve with `null` at an ABSOLUTE
+//     deadline. A relative `sleep(ms)` collapses to `now + ms` at open (both operations become one `sleep`
+//     variant), so recovery re-arms the exact same instant — and a deadline that passed while the runtime was
+//     down arms delay 0 and fires at once.
+//   - `watch` (`prelude.time.watch`): fire `deliver_to` once per schedule occurrence, forever, via an inner
+//     delegation carrying the occurrence's scheduled epoch ms — the discord-watch shape. Deliveries are
+//     SERIALIZED (the next occurrence arms only when the current delivery settles), so the persisted
+//     `nextTick` cursor is the single source of truth: a restart re-arms it, firing one catch-up if it
+//     already passed (never backfilling every missed occurrence) and then continuing on schedule. A
+//     `deliver_to` failure (throw / panic) settles the WHOLE call as that failure — the watch dies, with no
+//     built-in retry (resilience is composed at the call site).
+//
+// Timers are the injected `Clock`'s one-shot timers (kept in `timers`, one per live call); a fired timer
+// re-enters the serial loop through `schedule` (like webhook's post-commit work), so its `complete` /
+// inner-delegation commits with a turn. The recovery story matches webhook: there is no external process to
+// reconcile, so a time call survives a restart completely — its operation reloads from `time_instances` and
+// its timer re-arms; only an in-flight tick delivery's core work resumes on its own.
+
+import { CronExpressionParser } from "cron-parser";
+import { dispatchCallable } from "../engine/dynamic-dispatch.js";
+import type { ReactorName } from "../event/types.js";
+import type { Clock, TimerHandle } from "../external/clock.js";
+import type { DelegationId } from "../ids.js";
+import type { Schedule, TimeOperation, TimePayload } from "../time-schedule.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
+import {
+  type CallRow,
+  ExternalCallReactor,
+  type ExternalTarget,
+  type InnerDelivery,
+  innerOutcomeAsCompletion,
+  type LoadedCall,
+} from "./external-call-reactor.js";
+import { messageOf } from "./failure.js";
+import type { Loader, PersistenceTx } from "./persistence.js";
+import type { ResourcePool } from "./resource-pool.js";
+
+/** The compiled external keys (fully-qualified names) the `prelude.time.*` calls arrive under — compared
+ *  exactly here, at the payload boundary, then never again (past `openPayload` the call is a `TimeOperation`
+ *  variant, not a key sniff). */
+const NOW_KEY = "prelude.time.now";
+const SLEEP_KEY = "prelude.time.sleep";
+const SLEEP_UNTIL_KEY = "prelude.time.sleep_until";
+const WATCH_KEY = "prelude.time.watch";
+
+/** The data constructors of the `schedule` sum a `watch` argument carries. */
+const INTERVAL_CTOR = "prelude.time.interval";
+const CRON_CTOR = "prelude.time.cron";
+
+/** The single in-flight tick delivery's inner-call token. A watch serializes ticks (one at a time), so one
+ *  reserved token suffices. */
+const TICK_CALL = "tick";
+
+export class TimeReactor extends ExternalCallReactor<TimePayload> {
+  readonly name: ReactorName = "time";
+
+  /** The live timer per call (a `sleep` deadline, or a `watch`'s armed next occurrence). One at a time per
+   *  call — arming clears the previous — so the map holds at most one handle per delegation. */
+  private readonly timers = new Map<DelegationId, TimerHandle>();
+
+  constructor(
+    /** The wall-clock + one-shot timers this reactor reads through (`SystemClock` in production, a controllable
+     *  clock in tests) — the sole source of "what time is it" and "wake me at". */
+    private readonly clock: Clock,
+    /** Schedule a fresh reactor turn (the substrate's serial mailbox) — how a fired timer re-enters the
+     *  transactional loop, like webhook's post-commit work. */
+    private readonly schedule: (work: () => void) => void,
+    pool: ResourcePool,
+  ) {
+    super(pool);
+  }
+
+  // ─── the ExternalCallReactor hooks ───────────────────────────────────────────────────────────────
+
+  protected openPayload(
+    target: ExternalTarget,
+    argument: Value | null,
+    _generics: GenericSubstitution | undefined,
+  ): TimePayload {
+    const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
+    return { snapshot: target.snapshot, operation: this.openOperation(target.key, fields) };
+  }
+
+  /** Decide the operation once, from the external key and argument. `sleep` / `sleep_until` collapse to one
+   *  absolute deadline; a `watch` computes (and validates) its first occurrence here, degrading an unusable
+   *  schedule to `invalid` rather than a nullable field. */
+  private openOperation(key: string, fields: Record<string, Value>): TimeOperation {
+    switch (key) {
+      case NOW_KEY:
+        return { kind: "now" };
+      case SLEEP_KEY:
+        return { kind: "sleep", deadline: this.clock.now() + numberOf(fields.milliseconds) };
+      case SLEEP_UNTIL_KEY:
+        return { kind: "sleep", deadline: numberOf(fields.time) };
+      case WATCH_KEY:
+        return this.openWatch(fields);
+      default:
+        // Unreachable: the typechecker restricts `from "time"` to the four externals above. Fail loudly (a
+        // panic at dispatch) rather than silently mis-serve, so an engine/compiler drift surfaces at once.
+        return { kind: "invalid", message: `time: unknown external key "${key}"` };
+    }
+  }
+
+  /** Parse a `watch`'s schedule and deliver_to, and compute its first occurrence. A schedule that cannot be
+   *  read (a bad cron expression / timezone, a non-positive interval) becomes `invalid`. */
+  private openWatch(fields: Record<string, Value>): TimeOperation {
+    const schedule = parseSchedule(fields.schedule);
+    const deliverTo = fields.deliver_to ?? { kind: "null" };
+    const start = this.clock.now();
+    try {
+      // The first occurrence uses `start` as both the phase anchor (interval) and the not-before bound.
+      return {
+        kind: "watch",
+        schedule,
+        deliverTo,
+        nextTick: nextOccurrence(schedule, start, start),
+      };
+    } catch (error) {
+      return { kind: "invalid", message: messageOf(error) };
+    }
+  }
+
+  /** Post-commit: begin the operation. `now` resolves on the next turn; `sleep` / `watch` arm a timer; an
+   *  `invalid` operation fails the run as a panic. */
+  protected dispatch(delegation: DelegationId, payload: TimePayload): void {
+    const operation = payload.operation;
+    switch (operation.kind) {
+      case "now":
+        this.schedule(() => this.completeNow(delegation));
+        return;
+      case "sleep":
+        this.arm(delegation, operation.deadline);
+        return;
+      case "watch":
+        this.arm(delegation, operation.nextTick);
+        return;
+      case "invalid":
+        this.schedule(() =>
+          this.complete({ delegation, outcome: errorOutcome(operation.message) }),
+        );
+        return;
+    }
+  }
+
+  /** Reactivation: re-arm the reloaded call's timer. Nothing external to reconcile — a time call survives a
+   *  restart completely (like webhook). A `now` re-resolves (no result was committed, else the call is gone);
+   *  a `sleep` / `watch` re-arms from its persisted deadline (a passed one fires immediately — the single
+   *  catch-up). A `watch` whose tick delivery is still in flight (durable core work resuming) is NOT re-armed
+   *  here — that delivery's completion arms the next occurrence. */
+  protected recover(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined) return;
+    const operation = payload.operation;
+    switch (operation.kind) {
+      case "now":
+        this.schedule(() => this.completeNow(delegation));
+        return;
+      case "sleep":
+        this.arm(delegation, operation.deadline);
+        return;
+      case "watch": {
+        const instance = this.callInstance(delegation);
+        if (instance !== undefined && this.hasIssuedDelegations(instance)) return;
+        this.arm(delegation, operation.nextTick);
+        return;
+      }
+      case "invalid":
+        this.schedule(() =>
+          this.complete({ delegation, outcome: errorOutcome(operation.message) }),
+        );
+        return;
+    }
+  }
+
+  /** A cancel's transport half: disarm the timer and confirm on a fresh turn (a watch's in-flight tick drains
+   *  through the base's cancel cascade). */
+  protected abort(delegation: DelegationId): void {
+    this.clearTimerFor(delegation);
+    this.schedule(() => this.complete({ delegation, outcome: { kind: "cancelled" } }));
+  }
+
+  /** A settled tick delivery. A success re-arms the next occurrence (the cursor already advanced when the tick
+   *  fired); a failure kills the whole watch (fed back as the call's outcome, exactly as a subscriber's
+   *  failure settles `webhook.inbound`); a cancelled tick is part of teardown, so nothing to do. */
+  protected override deliverInnerOutcome(delivery: InnerDelivery): void {
+    switch (delivery.outcome.kind) {
+      case "result":
+        this.armWatch(delivery.delegation);
+        return;
+      case "throw":
+      case "error":
+        this.schedule(() =>
+          this.complete({
+            delegation: delivery.delegation,
+            outcome: innerOutcomeAsCompletion(delivery.outcome),
+          }),
+        );
+        return;
+      case "cancelled":
+        return;
+    }
+  }
+
+  /** The call resolved — disarm any timer (covers every resolution path at once). */
+  protected override onDropCall(delegation: DelegationId): void {
+    this.clearTimerFor(delegation);
+  }
+
+  protected async persistCallRow(tx: PersistenceTx, row: CallRow<TimePayload>): Promise<void> {
+    await tx.time.putTimeInstance({
+      instanceId: row.instance,
+      snapshotId: row.payload.snapshot,
+      operation: row.payload.operation,
+      status: row.status,
+      relays: row.relays,
+      innerCalls: row.innerCalls,
+    });
+  }
+
+  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<TimePayload>>> {
+    return (await loader.time.instances()).map((row) => ({
+      delegation: row.delegation,
+      instance: row.instance,
+      caller: row.caller,
+      run: row.run,
+      status: row.status,
+      payload: { snapshot: row.snapshot, operation: row.operation },
+      relays: row.relays,
+      innerCalls: row.innerCalls,
+    }));
+  }
+
+  override reset(): void {
+    super.reset();
+    for (const handle of this.timers.values()) this.clock.clearTimer(handle);
+    this.timers.clear();
+  }
+
+  // ─── timers ──────────────────────────────────────────────────────────────────────────────────────
+
+  /** A fired timer (in a fresh turn): resolve a `sleep` with `null`, fire a `watch` tick, or resolve a `now`
+   *  (defensive — `now` normally resolves via `completeNow`). A call gone before its timer fired is a no-op. */
+  private onTimer(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined) return;
+    const operation = payload.operation;
+    switch (operation.kind) {
+      case "sleep":
+        this.complete({ delegation, outcome: { kind: "result", value: null } });
+        return;
+      case "watch":
+        this.fireWatchTick(delegation, operation);
+        return;
+      case "now":
+        this.complete({ delegation, outcome: { kind: "result", value: this.clock.now() } });
+        return;
+      case "invalid":
+        this.complete({ delegation, outcome: errorOutcome(operation.message) });
+        return;
+    }
+  }
+
+  /** Fire one watch occurrence (in a turn): advance the cursor to the next occurrence (persisted with this
+   *  turn via `openInnerDelegation`'s dirty mark), then deliver the just-fired occurrence's scheduled epoch ms
+   *  to `deliver_to`. The next timer is NOT armed here — it arms when this delivery settles (serialized). */
+  private fireWatchTick(
+    delegation: DelegationId,
+    operation: Extract<TimeOperation, { kind: "watch" }>,
+  ): void {
+    const scheduledTick = operation.nextTick;
+    let next: number;
+    try {
+      next = nextOccurrence(operation.schedule, scheduledTick, this.clock.now());
+    } catch (error) {
+      // A schedule that validated at open but fails to advance now is a defect — fail the watch as a panic.
+      this.complete({ delegation, outcome: errorOutcome(messageOf(error)) });
+      return;
+    }
+    operation.nextTick = next;
+    const argument: Value = {
+      kind: "record",
+      fields: { time: { kind: "number", value: scheduledTick } },
+    };
+    const dispatched = dispatchCallable(operation.deliverTo, argument);
+    if ("error" in dispatched) {
+      this.complete({
+        delegation,
+        outcome: errorOutcome(`time.watch: deliver_to is ${dispatched.error}`),
+      });
+      return;
+    }
+    // A null open means the call is winding down (cancelling / already settling) — the teardown path settles
+    // it, so there is nothing to do here.
+    this.openInnerDelegation(
+      delegation,
+      dispatched.target,
+      dispatched.to,
+      dispatched.argument,
+      TICK_CALL,
+      dispatched.generics,
+    );
+  }
+
+  /** Resolve a `now` call with the current instant (recorded on its `delegateAck`, durable thereafter). */
+  private completeNow(delegation: DelegationId): void {
+    this.complete({ delegation, outcome: { kind: "result", value: this.clock.now() } });
+  }
+
+  /** Re-arm a watch's next occurrence after a delivery settled (post-commit side effect — the cursor already
+   *  advanced when the tick fired, so this only schedules the timer). */
+  private armWatch(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined || payload.operation.kind !== "watch") return;
+    this.arm(delegation, payload.operation.nextTick);
+  }
+
+  /** Arm the single timer for `delegation` to fire at `deadlineEpochMs` (a passed deadline arms delay 0 → the
+   *  next tick fires at once). Replaces any existing timer for the call. */
+  private arm(delegation: DelegationId, deadlineEpochMs: number): void {
+    this.clearTimerFor(delegation);
+    const delay = Math.max(0, deadlineEpochMs - this.clock.now());
+    const handle = this.clock.setTimer(delay, () => {
+      this.timers.delete(delegation);
+      this.schedule(() => this.onTimer(delegation));
+    });
+    this.timers.set(delegation, handle);
+  }
+
+  private clearTimerFor(delegation: DelegationId): void {
+    const handle = this.timers.get(delegation);
+    if (handle === undefined) return;
+    this.clock.clearTimer(handle);
+    this.timers.delete(delegation);
+  }
+}
+
+/** Read a number/integer value field as a JS number; a missing / wrong-kind field (unreachable — typechecked)
+ *  degrades to `NaN`, which a `sleep` treats as an already-passed deadline (resolves at once). */
+function numberOf(value: Value | undefined): number {
+  if (value !== undefined && (value.kind === "number" || value.kind === "integer"))
+    return value.value;
+  return Number.NaN;
+}
+
+/** Read a `schedule` sum value into the runtime `Schedule`, dispatching on its data constructor. A value that
+ *  is neither `interval` nor `cron` (unreachable — typechecked) degrades to an unusable interval, which
+ *  `nextOccurrence` rejects into an `invalid` operation. */
+function parseSchedule(value: Value | undefined): Schedule {
+  if (value !== undefined && value.kind === "record") {
+    if (value.ctor === INTERVAL_CTOR) {
+      return { kind: "interval", milliseconds: numberOf(value.fields.milliseconds) };
+    }
+    if (value.ctor === CRON_CTOR) {
+      return {
+        kind: "cron",
+        expression: stringOf(value.fields.expression),
+        timezone: stringOf(value.fields.timezone),
+      };
+    }
+  }
+  return { kind: "interval", milliseconds: Number.NaN };
+}
+
+function stringOf(value: Value | undefined): string {
+  return value !== undefined && value.kind === "string" ? value.value : "";
+}
+
+/** The next occurrence strictly after `notBefore` (epoch ms), skipping every missed one — so a slow delivery
+ *  or a restart fires a single catch-up, never a backfill. `interval` counts from `previousTick` (preserving
+ *  the start phase) up past `notBefore`; `cron` reads the expression's next occurrence after `notBefore` in
+ *  its timezone (cron carries its own phase). Throws for a schedule that cannot yield an occurrence (a
+ *  non-positive interval, a malformed cron expression / timezone) — the caller turns that into `invalid`. */
+function nextOccurrence(schedule: Schedule, previousTick: number, notBefore: number): number {
+  switch (schedule.kind) {
+    case "interval": {
+      if (!(Number.isFinite(schedule.milliseconds) && schedule.milliseconds > 0)) {
+        throw new Error(
+          `time.watch: interval milliseconds must be a positive number (got ${schedule.milliseconds})`,
+        );
+      }
+      let tick = previousTick + schedule.milliseconds;
+      while (tick <= notBefore) tick += schedule.milliseconds;
+      return tick;
+    }
+    case "cron": {
+      // cron-parser's `next()` is exclusive of `currentDate`, so an occurrence exactly at `notBefore` yields
+      // the FOLLOWING one — no same-instant re-fire.
+      const iterator = CronExpressionParser.parse(schedule.expression, {
+        currentDate: new Date(notBefore),
+        tz: schedule.timezone,
+      });
+      return iterator.next().getTime();
+    }
+  }
+}
+
+/** A no-result error outcome — the reactor escalates it as a panic (the default `escalateError`), so a
+ *  malformed schedule / broken invariant fails the run rather than sitting as an open question. */
+function errorOutcome(message: string): { kind: "error"; message: string } {
+  return { kind: "error", message };
+}

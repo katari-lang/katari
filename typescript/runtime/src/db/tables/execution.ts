@@ -33,6 +33,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../../runtime/event/types.js";
+import type { TimeOperation } from "../../runtime/time-schedule.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
@@ -104,7 +105,7 @@ export const instances = pgTable(
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
     check(
       "instances_kind_check",
-      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp')`,
+      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time')`,
     ),
   ],
 );
@@ -319,6 +320,41 @@ export const webhookInstances = pgTable(
   },
   (table) => [uniqueIndex("webhook_instances_token_idx").on(table.token)],
 );
+
+// The `time` instance extension: an in-flight `prelude.time.*` call — a `now` reading, a durable `sleep`, or a
+// `watch`. Cascades with its envelope; pins its snapshot (the version a `watch`'s `deliver_to` dispatches
+// against; for `now` / `sleep` it is the calling version, pinned uniformly). Unlike the capability-URL
+// endpoints (`webhook` / `mcp serve`) a time call has no external token to look up, so its whole per-variant
+// payload rides in one jsonb `operation` column (a tagged union like `core_instances.target`) rather than
+// split columns or subtype tables — the deadline / schedule / next-occurrence cursor / `deliver_to` all live
+// there. That column is SEALED (the `deliver_to` value may close over a secret). `now` / `sleep` open no inner
+// delegations, so their `relays` / `inner_calls` stay empty; only a `watch`'s per-tick delivery uses them.
+export const timeInstances = pgTable("time_instances", {
+  instanceId: uuid("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  /** The snapshot the call pins — a `watch` dispatches its `deliver_to` against it (no cascade). */
+  snapshotId: uuid("snapshot_id")
+    .notNull()
+    .references(() => snapshots.id),
+  /** The call's whole per-variant work as a sealed tagged union (`now` / `sleep{deadline}` /
+   *  `watch{schedule, deliverTo, cursor}`) — the deliver_to value may capture private state, so it seals. */
+  operation: jsonb("operation").$type<TimeOperation>().notNull(),
+  /** running (waiting / serving) | cancelling (tearing down) | awaitingAnswer (a watch's deliver_to failed,
+   *  its throw / panic escalated, awaiting an answer or the run's terminate). */
+  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
+  /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`);
+   *  only a `watch`'s tick delivery opens inner delegations, so empty for `now` / `sleep`. */
+  relays: jsonb("relays")
+    .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
+    .notNull()
+    .default([]),
+  /** The call's open inner delegations (a `watch`'s in-flight tick) and the local token each settles under. */
+  innerCalls: jsonb("inner_calls")
+    .$type<Array<{ delegation: string; call: string }>>()
+    .notNull()
+    .default([]),
+});
 
 /** The parent→child edge and recovery outbox: the issuer's durable record of a child it summoned, and
  *  the correlation id its `delegateAck` carries. Cascades with the caller (it is meaningless without it). */
