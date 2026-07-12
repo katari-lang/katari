@@ -6,18 +6,26 @@
 @"A typed error raised while the resource is still warming up."
 data not_ready(attempt: integer)
 
+@"The resource is warm enough to serve, as of attempt @attempt@."
+data ready(attempt: integer)
+
+@"THE one comparison boundary: classify a warm-up attempt number into the readiness sum once. Everything
+downstream dispatches on the sum — no other code compares the counter."
+agent readiness(attempt: integer) -> not_ready | ready {
+  if (attempt < 3) { not_ready(attempt = attempt) } else { ready(attempt = attempt) }
+}
+
 @"The ambient warm-up counter: each call returns the next attempt number. A handler in `main` provides it,
 OUTSIDE the retry provider, so it survives the re-invocations and counts across them."
 request warmup() -> integer
 
 @"Fails the first two attempts (raising `not_ready`), then succeeds. Each retry re-runs this fresh, but the
-ambient `warmup` counter persists across the re-invocations, so the third run sees attempt 3 and returns."
+ambient `warmup` counter persists across the re-invocations, so the third run sees attempt 3 and returns.
+The classification value IS the throw payload — the sum is minted once and thrown whole."
 agent flaky() -> string with warmup | prelude.throw[not_ready] {
-  let attempt = warmup()
-  if (attempt < 3) {
-    prelude.throw(error = not_ready(attempt = attempt))
-  } else {
-    f"ready on attempt ${string.to_string(value = attempt)}"
+  match (readiness(attempt = warmup())) {
+    case not_ready(attempt => attempt) -> { prelude.throw(error = not_ready(attempt = attempt)) }
+    case ready(attempt => attempt) -> { f"ready on attempt ${string.to_string(value = attempt)}" }
   }
 }
 
