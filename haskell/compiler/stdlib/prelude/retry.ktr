@@ -67,8 +67,11 @@ agent attempt[R, Error, effect E](
 (1-based; a `throw` OR a `panic`) with n < @max_attempts@, durably sleep @initial_delay_milliseconds@ *
 @factor@^(n-1) then re-run; on the @max_attempts@-th attempt the failure propagates UNCHANGED (that attempt
 runs uncaught — a throw is re-thrown to the caller with its type, a panic re-panics). At least one attempt
-always runs (a @max_attempts@ below 1 still runs once). Written `use retry.exponential(initial_delay_milliseconds
-= ..., factor = ..., max_attempts = ...)`."
+always runs (a @max_attempts@ below 1 still runs once). The counted attempts are materialized as an
+`array.range` up front, so the budget is bounded by the range primitive's ten-million-element cap — an
+absurd @max_attempts@ panics loudly at entry rather than silently truncating; an unbounded retry is
+`forever`, not a large budget. Written `use retry.exponential(initial_delay_milliseconds = ..., factor =
+..., max_attempts = ...)`."
 agent exponential[R, Error, effect E](
   initial_delay_milliseconds: number,
   factor: number,
@@ -92,31 +95,44 @@ agent exponential[R, Error, effect E](
   }
 }
 
+@"The exit of the `forever` / `attended` loop: performed with a successful attempt's @value@ and answered
+by the provider's OWN handler, which `break`s the loop with it. It exists because the `forever { ... }`
+construct has no built-in exit — escaping IS a request a surrounding handler breaks on — and it never
+reaches application code: the provider's handler is the innermost one, so it always catches first."
+request done[R](value: R) -> never
+
+@"The current backoff delay, answered by `forever`'s OWN state handler: each ask returns the delay to sleep
+now and grows it by the provider's factor (capped) for the next. The state lives in the handler — the same
+ambient-counter pattern applications use — so the loop body stays stateless. Never reaches application
+code (the provider's handler is innermost)."
+request backoff() -> number
+
 @"Retry the rest of the block FOREVER, with exponential backoff capped at @max_delay_milliseconds@. Every
 failure (a `throw` OR a `panic`) is caught and retried, so this never re-raises and never returns on its
 own — it is for daemons that must stay up across transient failures and restarts (e.g. keeping a
-`time.watch` alive). The recursion IS the loop; its depth is the number of failures, not the number of
-successes, so a healthy daemon accumulates nothing. Written `use retry.forever(initial_delay_milliseconds =
-..., factor = ..., max_delay_milliseconds = ...)`."
+`time.watch` alive). The loop is the `forever` construct — one iterating thread whose finished iterations
+are reclaimed — so the daemon's durable state stays FLAT no matter how many failures it has retried: each
+failure's frames are freed when its attempt settles, and only the loop thread plus its one state handler
+persist. The continuation's row carries `done[R]` / `backoff` in its overwrite because the provider's own
+handler discharges them (a discharged request always sits in the overwrite row — the `attempt` shape);
+`use` never performs them from user code. Written `use retry.forever(initial_delay_milliseconds = ...,
+factor = ..., max_delay_milliseconds = ...)`."
 agent forever[R, Error, effect E](
   initial_delay_milliseconds: number,
   factor: number,
   max_delay_milliseconds: number,
-  continuation: agent (value: null) -> R with {...E, prelude.throw[Error]},
+  continuation: agent (value: null) -> R with {...E, prelude.throw[Error], done[R], backoff},
 ) -> R with E | io {
-  match (attempt(run = continuation)) {
-    case succeeded(value => value) -> value
-    case failed(failure => _failure) -> {
-      time.sleep(milliseconds = initial_delay_milliseconds)
-      // `initial_delay_milliseconds` carries the CURRENT delay, so each retry grows it by @factor@ up to
-      // the cap. Recursing (rather than looping) keeps every retry a fresh durable delegation that recovers
-      // cleanly across a restart.
-      forever(
-        initial_delay_milliseconds = math.min(left = initial_delay_milliseconds * factor, right = max_delay_milliseconds),
-        factor = factor,
-        max_delay_milliseconds = max_delay_milliseconds,
-        continuation = continuation,
-      )
+  // The one handler is both the loop's exit (`done` breaks with the success value) and its evolving
+  // backoff state (`backoff` returns the current delay and grows it toward the cap).
+  use handler (var delay = initial_delay_milliseconds) {
+    request done(value: R) -> never { break value }
+    request backoff() { next delay with { delay = math.min(left = delay * factor, right = max_delay_milliseconds) } }
+  }
+  forever {
+    match (attempt(run = continuation)) {
+      case succeeded(value => value) -> { done(value = value) }
+      case failed(failure => _failure) -> { time.sleep(milliseconds = backoff()) }
     }
   }
 }
@@ -132,15 +148,20 @@ request attention[Error](failure: failure[Error]) -> null
 config, ...) re-run the block. Unhandled, `attention` escalates to a durable open question the run parks on;
 an application can intercept it with its own handler. This is the re-auth story — a revoked token throws,
 `attended` turns it into a notification, the user re-authorizes and answers, and the block re-executes.
-Written `use retry.attended()`."
+Like `forever`, the loop is the `forever` construct, so durable state stays FLAT across any number of
+failure/answer cycles (each cycle's frames are reclaimed when its attempt settles); the continuation's row
+carries `done[R]` in its overwrite because the provider's own handler discharges it. Written
+`use retry.attended()`."
 agent attended[R, Error, effect E](
-  continuation: agent (value: null) -> R with {...E, prelude.throw[Error]},
+  continuation: agent (value: null) -> R with {...E, prelude.throw[Error], done[R]},
 ) -> R with E | attention[Error] {
-  match (attempt(run = continuation)) {
-    case succeeded(value => value) -> value
-    case failed(failure => detail) -> {
-      attention(failure = detail)
-      attended(continuation = continuation)
+  use handler {
+    request done(value: R) -> never { break value }
+  }
+  forever {
+    match (attempt(run = continuation)) {
+      case succeeded(value => value) -> { done(value = value) }
+      case failed(failure => detail) -> { attention(failure = detail) }
     }
   }
 }
