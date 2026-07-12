@@ -344,8 +344,26 @@ collectConstraints flexible = goType
       argumentConstraints <- goType parameterFunction.argumentType actualFunction.argumentType
       returnConstraints <- goType actualFunction.returnType parameterFunction.returnType
       let effectConstraints = collectEffectConstraints flexible actualFunction.effect parameterFunction.effect
-      pure (argumentConstraints <> returnConstraints <> effectConstraints)
+      -- Constraints also flow through a request row's PAYLOAD generics (the @Error@ in @throw[Error]@) — the
+      -- effect-row analogue of 'goData' for data-type arguments. 'collectEffectConstraints' bounds the flexible
+      -- tails (which requests the continuation adds to @E@); this relates a request shared by the actual and
+      -- parameter rows at the request's row variance, so a generic named only inside a continuation's effect
+      -- (a retry provider catching @throw[Error]@) is inferable rather than reported un-inferrable (K3016).
+      payloadConstraints <- goRequestPayloads actualFunction.effect parameterFunction.effect
+      pure (argumentConstraints <> returnConstraints <> effectConstraints <> payloadConstraints)
     goFunction _ _ = pure mempty
+    goRequestPayloads actualEffect parameterEffect =
+      case (actualEffect.requests, parameterEffect.requests) of
+        (RequestEffectRow actualRow, RequestEffectRow parameterRow) ->
+          mconcat <$> traverse perRequest (Map.toList (Map.intersectionWith (,) actualRow.request parameterRow.request))
+        _ -> pure mempty
+      where
+        perRequest (requestName, (actualArguments, parameterArguments)) = do
+          info <- requestInfoFor requestName
+          let variances = requestRowVariance . (.variance) <$> info.genericParameters.parameterInformation
+          mconcat <$> traverse (perArgument variances) (Map.toList (Map.intersectionWith (,) actualArguments parameterArguments))
+        perArgument variances (argumentName, (actualArgument, parameterArgument)) =
+          relateAtVariance goKinded (Map.findWithDefault Bivariant argumentName variances) actualArgument parameterArgument
     goSequence (Just actualSequence) (Just parameterSequence) = do
       itemConstraints <- traverse (uncurry goType) (alignSequenceItems actualSequence parameterSequence)
       restConstraints <- goType actualSequence.rest parameterSequence.rest

@@ -160,6 +160,15 @@ spec = do
     it "a computed provider is still usable by applying it (a zero-argument call)" $
       codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p()\n\"result\" }") `shouldBe` []
 
+  describe "request-row payload inference (a generic named only inside a continuation's effect)" $ do
+    -- A retry-style provider names `Error` ONLY in its continuation's throw row (`{...E, throw[Error]}`);
+    -- inference must relate that row's payload to the continuation argument so `Error` is solved rather than
+    -- reported un-inferrable, and the re-raised throw stays typed end to end.
+    it "infers Error from the continuation's throw row, keeping the re-raised throw typed" $
+      codesFor (reraiseDecl <> throwerDecl <> "agent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse reraise\nthrows() }") `shouldBe` []
+    it "the inferred Error is exact: a handler for the wrong payload does not discharge it (K3001)" $
+      codesFor (reraiseDecl <> throwerDecl <> "data other()\nagent run() -> integer { use handler { request prelude.throw(error: other) -> never { break 0 } }\nuse reraise\nthrows() }") `shouldContain` ["K3001"]
+
   describe "request handler generic inference (param-derived)" $ do
     it "infers the request's generic from a handler parameter annotation" $
       codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo(x : integer) { next x } }\n0 }" `shouldBe` []
@@ -352,6 +361,15 @@ noopDecl = "agent noop(value: integer) -> integer { value }\n"
 -- | A non-generic provider (concrete R), so it can be carried in a record without an instantiation.
 monoProviderDecl :: Text
 monoProviderDecl = "external agent bar(continuation: agent(value: integer) -> string) -> string\n"
+
+-- | A retry-shaped provider whose only mention of @Error@ is inside the continuation's throw row (the
+-- OVERWRITE form a discharge needs). Exercises request-row payload inference: @Error@ must be solved from
+-- the continuation argument, not reported un-inferrable.
+reraiseDecl :: Text
+reraiseDecl = "agent reraise[R, Error, effect E](continuation: agent(value: null) -> R with {...E, prelude.throw[Error]}) -> R with E | prelude.throw[Error] { continuation(value = null) }\n"
+
+throwerDecl :: Text
+throwerDecl = "data oops(n: integer)\nagent throws() -> integer with prelude.throw[oops] { prelude.throw(error = oops(n = 1)) }\n"
 
 ------------------------------------------------------------------------------------------------
 -- White-box helpers
