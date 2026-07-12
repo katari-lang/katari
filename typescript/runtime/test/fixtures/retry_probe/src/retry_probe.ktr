@@ -1,0 +1,35 @@
+// The retry-provider test fixture: three entries driving `retry.forever` and `retry.attended` end to end
+// over their real compiled IR (the runtime suite loads this module's build output — see
+// `test/retry-providers.test.ts`, which also documents how to regenerate `ir.json`). The `probe` external
+// is an in-process FFI the tests script to fail N times and then succeed.
+
+@"The typed error the probe raises while it is still failing."
+data probe_failed(attempt: integer)
+
+@"The scripted external under retry: the test's in-process FFI handler decides, per call, whether to throw
+`probe_failed` (typed), panic (a plain JS error), or return a value."
+external agent probe(kind: string) -> string with prelude.throw[probe_failed]
+
+@"Entry (a): a `retry.forever` daemon block. Failures back off through durable sleeps (the test drives a
+ManualClock); when the probe finally succeeds, the success value escapes the loop and returns."
+agent forever_main() -> string with io {
+  use retry.forever(initial_delay_milliseconds = 5.0, factor = 2.0, max_delay_milliseconds = 20.0)
+  probe(kind = "forever")
+}
+
+@"Entry (b): `retry.attended` with NO application handler — each failure performs `retry.attention`, which
+escalates to a durable open question; answering it re-runs the block."
+agent attended_main() -> string with retry.attention[probe_failed] | io {
+  use retry.attended()
+  probe(kind = "attended")
+}
+
+@"Entry (c): `retry.attended` intercepted — an application handler above the provider answers `attention`
+with `next null`, so each failure re-runs immediately and nothing escalates."
+agent intercepted_main() -> string {
+  use handler {
+    request retry.attention(failure: retry.failure[probe_failed]) { next null }
+  }
+  use retry.attended()
+  probe(kind = "intercepted")
+}
