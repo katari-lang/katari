@@ -23,10 +23,12 @@ export type Schedule =
  *  resolved to `now + ms` at open, so recovery re-arms the same instant). A `watch` ALWAYS carries a valid
  *  next occurrence: its `nextTick` (epoch ms) is the single evolving durable cursor, advanced past every
  *  missed occurrence as ticks are delivered — which is exactly what makes recovery fire one catch-up rather
- *  than backfilling. `invalid` hoists every "this call cannot run" case out of the other variants (a
- *  malformed cron expression / timezone, a non-positive interval, an unreachable unknown external key): it is
- *  turned into a panic at dispatch. `deliverTo` may close over a secret, so a persisted `watch` operation
- *  seals like any stored value. */
+ *  than backfilling. `invalid` hoists every "well-formed values, but the call cannot run" case out of the
+ *  other variants (a malformed cron expression / timezone, a non-positive interval, a non-finite sleep
+ *  deadline — all reachable runtime inputs): it is turned into a panic at dispatch. Structural drift (an
+ *  unknown external key, a wrong-kind field — what the typechecker rules out) instead throws at the payload
+ *  boundary as a defect. `deliverTo` may close over a secret, so a persisted `watch` operation seals like
+ *  any stored value. */
 export type TimeOperation =
   | { kind: "now" }
   | { kind: "sleep"; deadline: number }

@@ -3,21 +3,24 @@
 // sidecar) via the `from "time"` clause. They are called as `time.now`, `time.sleep`, `time.sleep_until`
 // and `time.watch`.
 //
-// WHY THESE ARE EXTERNAL CALLS, NOT PRIMS. A prim runs as pure computation inside a turn, and a turn is
-// re-run from its durable inputs on a commit failure or a restart (the substrate folds turns into a batch
-// that replays as a whole). A prim reading the wall clock — `Date.now()` — would therefore yield a
-// DIFFERENT value on replay, so a recovered run would disagree with itself about what time it was. Routing
-// `now` through the reactor records the observed instant on the call's `delegateAck`, which is journaled in
-// the durable outbox: replay reads the recorded value, not a fresh clock. So `now` is durable and
-// replay-stable exactly because it is a reactor call. The same reactor owns the timers `sleep` / `watch`
-// wait on, so their deadlines persist and re-arm across a restart.
+// WHY THESE ARE EXTERNAL CALLS, NOT PRIMS. A prim runs as pure computation inside a turn, and the
+// runtime's replay contract is that a turn is a deterministic function of its durable inputs (uncommitted
+// turns re-run from those inputs after a commit failure or restart). A prim reading the wall clock —
+// `Date.now()` — breaks exactly that contract: a replayed turn would observe a different instant than its
+// first execution did. Routing `now` through the reactor moves the clock read OUTSIDE the turn: the
+// instant arrives as a `delegateAck` the caller's turn merely consumes, and the commit that lands that
+// consumption makes the value durable atomically with everything that observed it — after which no replay
+// recomputes it. (A restart BEFORE that commit re-resolves the still-open call from the current clock,
+// which is sound: nothing durable observed the earlier instant.) The same reactor owns the timers `sleep`
+// / `watch` wait on, so their deadlines persist and re-arm across a restart.
 //
 // Because these are external calls they perform io (the un-dischargeable `io` effect, which propagates to
 // the run root) — the strict, non-lifting call path, the same as `http.fetch`.
 
 @"The current wall-clock time, as epoch milliseconds (whole milliseconds since 1970-01-01T00:00:00Z).
-The value is recorded when the call resolves and is durable: a recovered run reads the recorded instant,
-not a fresh clock, so time never jumps backwards under replay."
+The instant becomes durable together with the work that first observes it, so once any downstream step has
+seen the value it never changes under replay or recovery. (A restart in the narrow window before that
+commit re-reads the clock and resolves a fresh instant — sound, because nothing durable saw the first.)"
 external agent now() -> number from "time"
 
 @"Sleep for @milliseconds@ before resolving with `null`. The wake deadline (now + @milliseconds@) is

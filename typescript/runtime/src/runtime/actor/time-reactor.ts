@@ -2,10 +2,13 @@
 // the shared callee-call lifecycle). Each compiled `prelude.time.*` external reaches it as a `delegate` (an
 // external leaf marked `reactor: "time"`) and becomes a `TimeOperation` decided ONCE at `openPayload`, keyed
 // by the delegate's fully-qualified external key — after which every lifecycle method dispatches that sum:
-//   - `now` (`prelude.time.now`): resolve with the current instant. It routes through the reactor rather than
-//     a prim precisely so the observed instant is recorded on the `delegateAck` (journaled in the durable
-//     outbox) — a prim's `Date.now()` would be recomputed on a turn replay / restart and disagree with
-//     itself. `now` opens no timer; it resolves on the next turn.
+//   - `now` (`prelude.time.now`): resolve with the current instant. It routes through the reactor rather
+//     than a prim so the nondeterministic clock read happens OUTSIDE any engine turn: the instant rides a
+//     `delegateAck` the caller's turn merely consumes, and the commit landing that consumption makes value
+//     and observer durable together — a prim's `Date.now()` would instead re-run inside a replayed turn
+//     and disagree with itself. A restart BEFORE that commit re-resolves the open call from the current
+//     clock (see `recover`), which is sound: nothing durable observed the earlier instant. `now` opens no
+//     timer; it resolves on the next turn.
 //   - `sleep` / `sleep_until` (`prelude.time.sleep` / `.sleep_until`): resolve with `null` at an ABSOLUTE
 //     deadline. A relative `sleep(ms)` collapses to `now + ms` at open (both operations become one `sleep`
 //     variant), so recovery re-arms the exact same instant — and a deadline that passed while the runtime was
@@ -90,8 +93,10 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
   }
 
   /** Decide the operation once, from the external key and argument. `sleep` / `sleep_until` collapse to one
-   *  absolute deadline; a `watch` computes (and validates) its first occurrence here, degrading an unusable
-   *  schedule to `invalid` rather than a nullable field. */
+   *  absolute deadline; a `watch` computes (and validates) its first occurrence here, hoisting an unusable
+   *  schedule to `invalid` rather than a nullable field. An unknown key throws: the typechecker restricts
+   *  `from "time"` to the compiled stdlib externals (a user module's claim on the reactor is K3022), so a
+   *  key outside the four above is engine/compiler drift — a defect, not an input to degrade around. */
   private openOperation(key: string, fields: Record<string, Value>): TimeOperation {
     switch (key) {
       case NOW_KEY:
@@ -103,17 +108,20 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
       case WATCH_KEY:
         return this.openWatch(fields);
       default:
-        // Unreachable: the typechecker restricts `from "time"` to the four externals above. Fail loudly (a
-        // panic at dispatch) rather than silently mis-serve, so an engine/compiler drift surfaces at once.
-        return { kind: "invalid", message: `time: unknown external key "${key}"` };
+        throw new Error(`time: unknown external key "${key}" (compiler/runtime drift — a bug)`);
     }
   }
 
-  /** Parse a `watch`'s schedule and deliver_to, and compute its first occurrence. A schedule that cannot be
-   *  read (a bad cron expression / timezone, a non-positive interval) becomes `invalid`. */
+  /** Parse a `watch`'s schedule and deliver_to, and compute its first occurrence. A schedule that cannot
+   *  YIELD an occurrence (a bad cron expression / timezone, a non-positive interval — reachable runtime
+   *  inputs) becomes `invalid`, a panic at dispatch; a structurally absent `deliver_to` throws instead
+   *  (the typechecker requires it, so its absence is drift, like an unknown key). */
   private openWatch(fields: Record<string, Value>): TimeOperation {
     const schedule = parseSchedule(fields.schedule);
-    const deliverTo = fields.deliver_to ?? { kind: "null" };
+    const deliverTo = fields.deliver_to;
+    if (deliverTo === undefined) {
+      throw new Error("time.watch: no deliver_to argument (compiler/runtime drift — a bug)");
+    }
     const start = this.clock.now();
     try {
       // The first occurrence uses `start` as both the phase anchor (interval) and the not-before bound.
@@ -246,8 +254,10 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
 
   // ─── timers ──────────────────────────────────────────────────────────────────────────────────────
 
-  /** A fired timer (in a fresh turn): resolve a `sleep` with `null`, fire a `watch` tick, or resolve a `now`
-   *  (defensive — `now` normally resolves via `completeNow`). A call gone before its timer fired is a no-op. */
+  /** A fired timer (in a fresh turn): resolve a `sleep` with `null` or fire a `watch` tick. Only those two
+   *  variants ever arm a timer (`now` and `invalid` resolve on a scheduled turn at dispatch), so a timer
+   *  firing for either is a reactor bug — thrown, not served. A call gone before its timer fired is a
+   *  no-op (the timer was disarmed with the call; this covers a race with a same-turn resolution). */
   private onTimer(delegation: DelegationId): void {
     const payload = this.payloadOf(delegation);
     if (payload === undefined) return;
@@ -260,11 +270,10 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
         this.fireWatchTick(delegation, operation);
         return;
       case "now":
-        this.complete({ delegation, outcome: { kind: "result", value: this.clock.now() } });
-        return;
       case "invalid":
-        this.complete({ delegation, outcome: errorOutcome(operation.message) });
-        return;
+        throw new Error(
+          `time: a timer fired for a "${operation.kind}" operation, which never arms one (a bug)`,
+        );
     }
   }
 
@@ -309,7 +318,8 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
     );
   }
 
-  /** Resolve a `now` call with the current instant (recorded on its `delegateAck`, durable thereafter). */
+  /** Resolve a `now` call with the current instant. The value rides the `delegateAck` and becomes durable
+   *  with the commit that lands the caller's consumption of it (see the header's `now` paragraph). */
   private completeNow(delegation: DelegationId): void {
     this.complete({ delegation, outcome: { kind: "result", value: this.clock.now() } });
   }
@@ -351,17 +361,20 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
   }
 }
 
-/** Read a number/integer value field as a JS number; a missing / wrong-kind field (unreachable — typechecked)
- *  degrades to `NaN`, which a `sleep` treats as an already-passed deadline (resolves at once). */
+/** Read a number/integer value field as a JS number. A missing / wrong-kind field throws: the stdlib
+ *  signatures type these fields, so a malformed one is compiler/runtime drift — surfaced as a defect, not
+ *  degraded to a NaN that would hang a manual clock and misfire a system one. */
 function numberOf(value: Value | undefined): number {
   if (value !== undefined && (value.kind === "number" || value.kind === "integer"))
     return value.value;
-  return Number.NaN;
+  throw new Error(
+    `time: expected a number argument, got ${value === undefined ? "nothing" : value.kind} (compiler/runtime drift — a bug)`,
+  );
 }
 
-/** Read a `schedule` sum value into the runtime `Schedule`, dispatching on its data constructor. A value that
- *  is neither `interval` nor `cron` (unreachable — typechecked) degrades to an unusable interval, which
- *  `nextOccurrence` rejects into an `invalid` operation. */
+/** Read a `schedule` sum value into the runtime `Schedule`, dispatching on its data constructor. A value
+ *  that is neither `interval` nor `cron` throws — the `schedule` synonym admits exactly those two
+ *  constructors, so anything else is compiler/runtime drift, like an unknown external key. */
 function parseSchedule(value: Value | undefined): Schedule {
   if (value !== undefined && value.kind === "record") {
     if (value.ctor === INTERVAL_CTOR) {
@@ -375,11 +388,18 @@ function parseSchedule(value: Value | undefined): Schedule {
       };
     }
   }
-  return { kind: "interval", milliseconds: Number.NaN };
+  throw new Error(
+    "time.watch: the schedule is neither an interval nor a cron value (compiler/runtime drift — a bug)",
+  );
 }
 
+/** Read a string field, throwing on a missing / wrong-kind one for the same drift-is-a-defect reason as
+ *  `numberOf` (a silently-empty cron expression would fail later with a misleading parse error). */
 function stringOf(value: Value | undefined): string {
-  return value !== undefined && value.kind === "string" ? value.value : "";
+  if (value !== undefined && value.kind === "string") return value.value;
+  throw new Error(
+    `time: expected a string argument, got ${value === undefined ? "nothing" : value.kind} (compiler/runtime drift — a bug)`,
+  );
 }
 
 /** A `sleep`'s absolute deadline, validated ONCE at open: a non-finite deadline (a NaN / infinite argument —
