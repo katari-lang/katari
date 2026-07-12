@@ -15,7 +15,7 @@ import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor, RunCancelledError } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
-import { ManualClock } from "../src/runtime/external/clock.js";
+import { ManualClock, MAX_TIMER_DELAY_MS } from "../src/runtime/external/clock.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import { type FfiHandler, InProcessFfiTransport } from "../src/runtime/external/runner.js";
 import type { InstanceId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
@@ -309,6 +309,37 @@ describe("the time reactor — now and sleep", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(settled).toBe(false);
     clock.advanceBy(40);
+    expect(await result).toEqual({ kind: "null" });
+  });
+});
+
+describe("the time reactor — deadlines past the setTimeout ceiling", () => {
+  // Node coerces a setTimeout delay past 2^31-1 ms to 1 ms, so a raw arm would fire a ~25-day-plus sleep
+  // immediately (a runaway loop for a sparse watch). The reactor must hop in bounded chunks instead; the
+  // `Clock` contract itself rejects an over-ceiling delay, so this test throws loudly if the chunking is
+  // ever removed.
+  test("a sleep farther out than one timer may carry hops in chunks and fires only at its deadline", async () => {
+    const fortyDays = 40 * 24 * 60 * 60 * 1000; // comfortably past the ~24.8-day ceiling
+    const clock = new ManualClock(BASE);
+    const actor = actorFor({ clock });
+    const { result } = actor.startRun(
+      createAgentName("sleep_main"),
+      SNAPSHOT,
+      { kind: "record", fields: { milliseconds: { kind: "number", value: fortyDays } } },
+    );
+    await eventually(() => (clock.pendingCount() > 0 ? true : undefined));
+    let settled = false;
+    void result.then(() => {
+      settled = true;
+    });
+    // Cross the first chunk boundary: the wake is short of the deadline, so the reactor re-arms the
+    // remainder rather than firing.
+    clock.advanceBy(MAX_TIMER_DELAY_MS);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    expect(clock.pendingCount()).toBe(1);
+    // Cross the true deadline: the re-armed remainder fires and the sleep resolves.
+    clock.advanceTo(BASE + fortyDays);
     expect(await result).toEqual({ kind: "null" });
   });
 });

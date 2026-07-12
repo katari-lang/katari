@@ -27,7 +27,7 @@
 import { CronExpressionParser } from "cron-parser";
 import { dispatchCallable } from "../engine/dynamic-dispatch.js";
 import type { ReactorName } from "../event/types.js";
-import type { Clock, TimerHandle } from "../external/clock.js";
+import { type Clock, MAX_TIMER_DELAY_MS, type TimerHandle } from "../external/clock.js";
 import type { DelegationId } from "../ids.js";
 import type { Schedule, TimeOperation, TimePayload } from "../time-schedule.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
@@ -97,9 +97,9 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
       case NOW_KEY:
         return { kind: "now" };
       case SLEEP_KEY:
-        return { kind: "sleep", deadline: this.clock.now() + numberOf(fields.milliseconds) };
+        return sleepOperation(this.clock.now() + numberOf(fields.milliseconds));
       case SLEEP_UNTIL_KEY:
-        return { kind: "sleep", deadline: numberOf(fields.time) };
+        return sleepOperation(numberOf(fields.time));
       case WATCH_KEY:
         return this.openWatch(fields);
       default:
@@ -323,12 +323,21 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
   }
 
   /** Arm the single timer for `delegation` to fire at `deadlineEpochMs` (a passed deadline arms delay 0 → the
-   *  next tick fires at once). Replaces any existing timer for the call. */
+   *  next tick fires at once). Replaces any existing timer for the call. A deadline farther out than one
+   *  timer may carry (`MAX_TIMER_DELAY_MS`, ~24.8 days — Node coerces a longer `setTimeout` delay to 1 ms)
+   *  is reached by chunked hops: a wake short of the deadline just re-arms the remainder, and only a wake AT
+   *  (or past) the deadline fires the operation. A hop is a pure in-memory re-arm off the already-persisted
+   *  deadline, so it needs no turn; chunking lives here — the one place deadlines become timers — rather
+   *  than inside `SystemClock`, so the `ManualClock` tests walk the same path production does. */
   private arm(delegation: DelegationId, deadlineEpochMs: number): void {
     this.clearTimerFor(delegation);
-    const delay = Math.max(0, deadlineEpochMs - this.clock.now());
+    const delay = Math.min(Math.max(0, deadlineEpochMs - this.clock.now()), MAX_TIMER_DELAY_MS);
     const handle = this.clock.setTimer(delay, () => {
       this.timers.delete(delegation);
+      if (this.clock.now() < deadlineEpochMs) {
+        this.arm(delegation, deadlineEpochMs);
+        return;
+      }
       this.schedule(() => this.onTimer(delegation));
     });
     this.timers.set(delegation, handle);
@@ -371,6 +380,20 @@ function parseSchedule(value: Value | undefined): Schedule {
 
 function stringOf(value: Value | undefined): string {
   return value !== undefined && value.kind === "string" ? value.value : "";
+}
+
+/** A `sleep`'s absolute deadline, validated ONCE at open: a non-finite deadline (a NaN / infinite argument —
+ *  a correct program never sleeps toward one) becomes `invalid`, a panic at dispatch, because no timer can
+ *  honestly be armed for it — `NaN <= x` is false, so a manual clock would hang while a system `setTimeout`
+ *  would fire at once, silently divergent. */
+function sleepOperation(deadlineEpochMs: number): TimeOperation {
+  if (!Number.isFinite(deadlineEpochMs)) {
+    return {
+      kind: "invalid",
+      message: `time.sleep: the deadline must be a finite epoch-ms number (got ${deadlineEpochMs})`,
+    };
+  }
+  return { kind: "sleep", deadline: deadlineEpochMs };
 }
 
 /** The next occurrence strictly after `notBefore` (epoch ms), skipping every missed one — so a slow delivery

@@ -11,10 +11,29 @@ export interface TimerHandle {
   readonly id: number;
 }
 
+/** The longest delay one timer may carry: Node's `setTimeout` ceiling (2^31 - 1 ms, ~24.8 days). Node
+ *  silently coerces a longer delay to 1 ms — a sleep armed raw past the ceiling fires at once — so the
+ *  `Clock` contract rejects it loudly in EVERY implementation. Enforcing it in `ManualClock` too is the
+ *  point: a caller that stops chunking (see `TimeReactor.arm`) fails the deterministic tests, instead of
+ *  misfiring only in production where the DI seam would have hidden it. */
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+/** The shared `setTimer` contract check (see `MAX_TIMER_DELAY_MS`): a past-ceiling delay is a caller bug
+ *  (it must chunk), surfaced as a throw rather than Node's silent coerce-to-1ms. */
+function assertDelayWithinTimerCeiling(delayMs: number): void {
+  if (delayMs > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `Clock.setTimer: delay ${delayMs}ms exceeds the ${MAX_TIMER_DELAY_MS}ms timer ceiling — the caller must chunk long deadlines`,
+    );
+  }
+}
+
 export interface Clock {
   /** The current wall-clock time as epoch milliseconds. */
   now(): number;
-  /** Run `callback` once after at least `delayMs` (clamped to `>= 0`). Returns a handle to cancel it. */
+  /** Run `callback` once after at least `delayMs` (clamped to `>= 0`). Returns a handle to cancel it.
+   *  `delayMs` must not exceed `MAX_TIMER_DELAY_MS`; every implementation throws past it (a longer wait
+   *  is the caller's to chunk). */
   setTimer(delayMs: number, callback: () => void): TimerHandle;
   /** Cancel a timer that has not yet fired. Idempotent — a fired or already-cleared handle is a no-op. */
   clearTimer(handle: TimerHandle): void;
@@ -30,6 +49,7 @@ export class SystemClock implements Clock {
   }
 
   setTimer(delayMs: number, callback: () => void): TimerHandle {
+    assertDelayWithinTimerCeiling(delayMs);
     this.sequence += 1;
     const id = this.sequence;
     const timeout = setTimeout(
@@ -67,6 +87,7 @@ export class ManualClock implements Clock {
   }
 
   setTimer(delayMs: number, callback: () => void): TimerHandle {
+    assertDelayWithinTimerCeiling(delayMs);
     this.sequence += 1;
     const id = this.sequence;
     this.pending.set(id, { fireAt: this.current + Math.max(0, delayMs), callback });
