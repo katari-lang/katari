@@ -265,6 +265,29 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     return this.calls.get(delegation)?.payload;
   }
 
+  /** The lifecycle status of a live call, or `undefined` once resolved — for a concrete reactor whose
+   *  transport signals something outside the four base outcomes (the mcp park) to decide whether the call
+   *  can still be acted on, without owning a parallel status map. */
+  protected callStatusOf(delegation: DelegationId): CallStatus | undefined {
+    return this.calls.get(delegation)?.status;
+  }
+
+  /** Whether `escalation` is one this call is RELAYING upward for an inner delegation's child ask (a
+   *  `relays` bridge entry), as opposed to an ask the call raised for itself. A concrete reactor that
+   *  raises its own asks under a call's delegation (the mcp authorize park) needs the distinction on
+   *  reload: both faces are open rows with the same delegation and request name, but a relayed one must
+   *  descend through the bridge when answered, never resume the call itself. */
+  protected hasEscalationRelay(delegation: DelegationId, escalation: EscalationId): boolean {
+    return this.calls.get(delegation)?.relays.has(escalation) ?? false;
+  }
+
+  /** Stage a live call's row for re-persist this turn — for a concrete reactor whose OWN durable state on
+   *  the row changed outside the base's mutations (the mcp park writes / clears its parked-dispatch
+   *  extension). A no-op for a resolved call (its drop supersedes any upsert). */
+  protected markCallDirty(delegation: DelegationId): void {
+    if (this.calls.has(delegation)) this.dirty.add(delegation);
+  }
+
   /** The instance + caller (reply-to) + run (trace context) of a live call, read from the base
    *  received-delegation edge. Present for any delegation this reactor still holds a `calls` entry for — the
    *  edge and the entry are added (delegate) and dropped (resolve) together, so a missing edge here is a

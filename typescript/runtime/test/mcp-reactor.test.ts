@@ -343,6 +343,40 @@ class ControlledMcpTransport implements McpTransport {
   }
 }
 
+/** `PROVIDE_IR` with the continuation TYPED: output `{ done: boolean }` (closed), returning
+ *  `{ done: true }` AFTER the mid-body tool call — the reviewer's regression shape. The tool's
+ *  intermediate result is bound and unused; only the value the continuation RETURNS must meet its own
+ *  output schema, so the mid-body ack must not be conformed against it (a `dispatched` proxy is not the
+ *  `wrapper` hop whose ack IS the instance's result). */
+function typedContinuationIr(base: IRModule): IRModule {
+  const clone: IRModule = structuredClone(base);
+  const continuationAgent = clone.blocks[6]?.block;
+  if (continuationAgent?.kind !== "agent") {
+    throw new Error("block 6 must be the continuation agent");
+  }
+  continuationAgent.schema = {
+    input: {},
+    output: {
+      type: "object",
+      properties: { done: { type: "boolean" } },
+      required: ["done"],
+      additionalProperties: false,
+    },
+    requests: [],
+    genericBindings: {},
+  };
+  const body = clone.blocks[7]?.block;
+  if (body?.kind !== "sequence") throw new Error("block 7 must be the continuation sequence");
+  const exit = body.operations.pop();
+  if (exit?.kind !== "exit") throw new Error("the continuation must end with an exit");
+  body.operations.push(
+    { kind: "loadLiteral", output: 68, value: { kind: "boolean", value: true } },
+    { kind: "makeRecord", entries: [["done", 68]], output: 69 },
+    { kind: "exit", target: 6, value: 69 },
+  );
+  return clone;
+}
+
 function makeActor(
   ir: IRModule,
   mcp: McpTransport,
@@ -505,6 +539,24 @@ describe("mcp reactor", () => {
     // The rejection happened at the reactor's scope check — the listing stays the transport's only
     // dispatch; no `callTool` ever reached it.
     expect(transport.dispatched).toHaveLength(1);
+  });
+
+  test("a TYPED caller's mid-body tool call is not conformed against the caller's own output schema", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(typedContinuationIr(PROVIDE_IR), transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const listing = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
+    const toolCall = await waitUntil(() => transport.dispatched[1]);
+    // The tool's intermediate result ("42", a string) plainly violates the continuation's own
+    // `{ done: boolean }` output schema — and must not be checked against it mid-body: the caller's
+    // schema binds the value the caller RETURNS, which the engine still conforms below.
+    transport.feed({ delegation: toolCall.delegation, outcome: { kind: "result", value: "42" } });
+    await expect(result).resolves.toEqual({
+      kind: "record",
+      fields: { done: { kind: "boolean", value: true } },
+    });
   });
 });
 

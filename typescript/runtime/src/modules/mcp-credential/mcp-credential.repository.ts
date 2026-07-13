@@ -1,0 +1,110 @@
+// Persistence for the `mcp_credentials` table — the single source of truth for OAuth token material
+// (docs/2026-07-13-oauth-escalation.md §2). The repository speaks in SEALED values (the AES-GCM envelope);
+// sealing and decoding stay with the callers, so this layer stays a pure row store.
+//
+// The `generation` column carries two distinct write intents:
+//   - `upsert` (the authorization flow's completion) writes unconditionally and bumps the generation —
+//     a new authorization always wins over whatever was stored;
+//   - `saveWithGeneration` (a provider's token-refresh write-back) is a compare-and-set — it lands only
+//     while the row still holds the generation the caller read, so a rotation computed from a credential
+//     a re-authorization has since replaced is refused instead of clobbering the newer grant.
+//
+// One rule keeps the compare-and-set sound across the row's whole LIFETIME, not just its current
+// incarnation: every write stamps a generation strictly greater than any generation previously minted
+// for this (project, name). A fresh insert seeds at the epoch-millisecond clock and an in-place write
+// takes `max(current + 1, epoch ms)` — so after a `forget` + re-authorization the new row's generation
+// still exceeds everything handed out before the delete, and a refresh write-back holding a pre-delete
+// generation can never match the new account's row (the ABA that a fixed seed like 1 would reintroduce).
+
+import { and, eq, sql } from "drizzle-orm";
+import type { Executor } from "../../db/client.js";
+import { mcpCredentials } from "../../db/tables/mcp-credentials.js";
+
+/** The next-generation expression for an in-place write: strictly above the current value AND at or
+ *  above the wall clock, so it also stays above anything a deleted predecessor row ever handed out. */
+function bumpedGeneration() {
+  return sql`greatest(${mcpCredentials.generation} + 1, ${Date.now()})`;
+}
+
+export const mcpCredentialRepository = {
+  /** One credential's sealed value + the generation it currently holds, or null when none is stored. */
+  async load(
+    executor: Executor,
+    projectId: string,
+    name: string,
+  ): Promise<{ value: string; generation: number } | null> {
+    const [row] = await executor
+      .select({ value: mcpCredentials.value, generation: mcpCredentials.generation })
+      .from(mcpCredentials)
+      .where(and(eq(mcpCredentials.projectId, projectId), eq(mcpCredentials.name, name)))
+      .limit(1);
+    return row ?? null;
+  },
+
+  /** The refresh write-back: update the row only while it still holds `expectedGeneration`, bumping the
+   *  generation so any other reader of the old version loses in turn. One atomic statement — the compare
+   *  and the write cannot interleave with a concurrent authorization. Returns whether the write landed;
+   *  an absent row also refuses (false), so a stale rotation never resurrects a deleted credential. */
+  async saveWithGeneration(
+    executor: Executor,
+    projectId: string,
+    name: string,
+    value: string,
+    expectedGeneration: number,
+  ): Promise<boolean> {
+    const updated = await executor
+      .update(mcpCredentials)
+      .set({ value, generation: bumpedGeneration() })
+      .where(
+        and(
+          eq(mcpCredentials.projectId, projectId),
+          eq(mcpCredentials.name, name),
+          eq(mcpCredentials.generation, expectedGeneration),
+        ),
+      )
+      .returning({ name: mcpCredentials.name });
+    return updated.length > 0;
+  },
+
+  /** The authorization flow's deposit: insert or replace unconditionally, bumping the generation so any
+   *  in-flight refresh that read the previous version is refused by its own compare-and-set. A fresh row
+   *  seeds at the epoch-millisecond clock (not a constant), so it also outranks every generation a
+   *  deleted predecessor row handed out — see the lifetime rule in the header. */
+  async upsert(executor: Executor, projectId: string, name: string, value: string): Promise<void> {
+    await executor
+      .insert(mcpCredentials)
+      .values({ projectId, name, value, generation: Date.now() })
+      .onConflictDoUpdate({
+        target: [mcpCredentials.projectId, mcpCredentials.name],
+        // `updatedAt` must be set explicitly: the column's `$onUpdate` callback fires only for `.update()`
+        // statements, not for an `onConflictDoUpdate` set-clause.
+        set: {
+          value,
+          generation: bumpedGeneration(),
+          updatedAt: new Date(),
+        },
+      });
+  },
+
+  /** The stored credentials as metadata (name / updatedAt). The sealed value is withheld: a credential is
+   *  write-only over the API — deposited by the flow, only ever read by the runtime's own transport. */
+  async list(
+    executor: Executor,
+    projectId: string,
+  ): Promise<Array<{ name: string; updatedAt: Date }>> {
+    return executor
+      .select({ name: mcpCredentials.name, updatedAt: mcpCredentials.updatedAt })
+      .from(mcpCredentials)
+      .where(eq(mcpCredentials.projectId, projectId))
+      .orderBy(mcpCredentials.name);
+  },
+
+  /** Forget a credential (the operator's forced re-authorization). Returns whether a row existed. */
+  async delete(executor: Executor, projectId: string, name: string): Promise<boolean> {
+    const deleted = await executor
+      .delete(mcpCredentials)
+      .where(and(eq(mcpCredentials.projectId, projectId), eq(mcpCredentials.name, name)))
+      .returning({ name: mcpCredentials.name });
+    return deleted.length > 0;
+  },
+};

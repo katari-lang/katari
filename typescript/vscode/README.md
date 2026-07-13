@@ -14,8 +14,8 @@ grammar) + language client (LSP).
 ## Commands
 
 All "Katari: …" entries in the command palette. The CLI-backed commands run
-in one shared **Katari** integrated terminal (so interactive flows — OAuth
-logins, apply prompts — work), against the nearest project: the extension
+in one shared **Katari** integrated terminal (so interactive flows — like
+`apply` prompts — work), against the nearest project: the extension
 walks up from the active editor's file (falling back to the workspace
 folders) to the closest `katari.toml` and passes it as `-C <dir>`.
 
@@ -24,9 +24,13 @@ folders) to the closest `katari.toml` and passes it as `-C <dir>`.
 | **Katari: Check project**               | `katari check`                              |
 | **Katari: Build project**               | `katari build`                              |
 | **Katari: Apply (deploy) project**      | `katari apply`                              |
-| **Katari: MCP login (OAuth)**           | `katari mcp login --url … --name …` — prompts for the server URL and credential name |
 | **Katari: Generate MCP tool bindings**  | `katari mcp pull --url … --out …` — prompts for the server URL and a `.ktr` output path (defaulting into `src/`), then opens the generated file |
 | **Katari: Restart language server**     | Stops `katari-lsp` and starts it again from the current settings (picks up a changed `katari.server.path`) |
+
+An MCP server that uses OAuth is authorized by answering the OAuth
+authorization escalation the runtime raises when a program first needs the
+credential — from the admin console or `katari answer`. There is no login
+command or stored env key to manage.
 
 The CLI is resolved like the server, minus the bundled tier: an explicit
 `katari.cli.path` setting wins, else `katari` on `PATH` (no CLI is bundled

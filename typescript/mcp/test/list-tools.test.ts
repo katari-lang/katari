@@ -2,8 +2,9 @@
 // against a REAL loopback MCP server (the SDK's stateless streamable-HTTP shape, mirroring the
 // runtime's mcp-integration test) — pinning that the emitted JSON carries exactly what `katari mcp
 // pull` consumes (name / description / inputSchema / outputSchema when declared) and that `--header`
-// pairs ride on the actual HTTP requests. The `--oauth` path shares `performLogin`, whose seams are
-// covered by login.test.ts; a full IdP round needs a browser and is exercised by hand.
+// pairs ride on the actual HTTP requests. The `--oauth` path runs `performLogin`, whose callback
+// seam is covered by authorization-callback.test.ts; a full IdP round needs a browser and is
+// exercised by hand.
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";

@@ -16,6 +16,7 @@ import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
+import type { McpCredentialStore } from "../src/runtime/external/mcp-oauth.js";
 import { SdkMcpTransport } from "../src/runtime/external/mcp-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
@@ -25,6 +26,17 @@ import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 const PROJECT = "project-mcp-integration" as ProjectId;
 const SNAPSHOT = "snapshot-mcp-integration" as SnapshotId;
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
+
+/** The transport's now-required credential store; this test's descriptor is `headers`, so it is never
+ *  consulted (an oauth read here would be a test bug — fail loudly like the transport stubs do). */
+const UNUSED_CREDENTIALS: McpCredentialStore = {
+  load() {
+    throw new Error("mcp-integration: no oauth credential should be read on the headers path");
+  },
+  save() {
+    throw new Error("mcp-integration: no oauth credential should be written on the headers path");
+  },
+};
 
 // agent main(url) {
 //   mcp.provide(url = url, auth = mcp.headers(values = {}), continuation = continuation)
@@ -211,7 +223,7 @@ describe("the built-in mcp path through the actor", () => {
       blobs: new InMemoryBlobStore(),
       external: new StubFfiTransport(),
       http: new StubHttpTransport(),
-      mcp: new SdkMcpTransport({}),
+      mcp: new SdkMcpTransport({ credentials: UNUSED_CREDENTIALS }),
       persistence: new InMemoryPersistence(),
     });
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, {

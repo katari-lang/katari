@@ -45,11 +45,6 @@
         "title": "Apply (deploy) project"
       },
       {
-        "command": "katari.mcpLogin",
-        "category": "Katari",
-        "title": "MCP login (OAuth)"
-      },
-      {
         "command": "katari.mcpPull",
         "category": "Katari",
         "title": "Generate MCP tool bindings"
@@ -99,7 +94,7 @@
         "katari.cli.path": {
           "type": "string",
           "default": "katari",
-          "description": "Path to the katari CLI executable used by the 'Katari: ...' commands (check, build, apply, mcp). Leave unset to use a katari on PATH (the extension bundles no CLI); set an absolute path or a PATH name to override it with your own build."
+          "description": "Path to the katari CLI executable used by the 'Katari: ...' commands (check, build, apply, mcp pull). Leave unset to use a katari on PATH (the extension bundles no CLI); set an absolute path or a PATH name to override it with your own build."
         }
       }
     }

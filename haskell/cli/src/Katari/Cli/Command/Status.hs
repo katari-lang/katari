@@ -16,7 +16,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Cli.Api (EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations)
+import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
@@ -94,15 +94,19 @@ run options = do
       unless (null waiting) $ do
         printText ""
         printText "Waiting on:"
-        forM_ waiting $ \escalation ->
-          printText
-            ( "  "
-                <> escalation.request
-                <> maybe "" (\question -> " " <> compactJson question) escalation.argument
-                <> "  — answer with: katari answer "
-                <> Text.take 8 escalation.id
-            )
+        forM_ waiting (printText . renderWaiting)
       renderTrace context target options.traceSelection
+
+-- | One "Waiting on" line, rendered per presentation kind: an oauth escalation names the server and
+-- credential it needs (not the synthesized request), a form escalation shows its request and question.
+renderWaiting :: EscalationView -> Text
+renderWaiting escalation = case escalation.presentation of
+  PresentationOauth {url, name} ->
+    "  OAuth authorization required for " <> url <> " (credential \"" <> name <> "\")  — run: katari answer " <> shortId
+  PresentationForm _ ->
+    "  " <> escalation.request <> maybe "" (\question -> " " <> compactJson question) escalation.argument <> "  — answer with: katari answer " <> shortId
+  where
+    shortId = Text.take 8 escalation.id
 
 -- | The run's execution trace (its journaled external events), the "what actually happened" half of
 -- the status screen — rendered per 'TraceSelection' (the full trace is one `GET .../events` away).

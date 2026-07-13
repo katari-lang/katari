@@ -1,3 +1,8 @@
+-- The escalation presentation sum's oauth constructor is intentionally a record (its two fields read
+-- cleanly as @url@ / @name@ at the pattern-match sites). Under @NoFieldSelectors@ no partial selector
+-- is generated, so the -Wpartial-fields warning it would otherwise provoke is spurious here.
+{-# OPTIONS_GHC -Wno-partial-fields #-}
+
 -- | HTTP client for the Katari runtime.
 --
 -- The runtime mounts its API under @\/api\/v1@ (see @typescript\/runtime\/src\/app.ts@) and wraps
@@ -57,8 +62,15 @@ module Katari.Cli.Api
 
     -- * Escalations
     EscalationView (..),
+    EscalationPresentation (..),
     listEscalations,
     answerEscalation,
+    startOauthEscalationFlow,
+
+    -- * MCP credentials
+    McpCredentialRow (..),
+    listMcpCredentials,
+    deleteMcpCredential,
 
     -- * Env entries
     EnvEntry (..),
@@ -78,6 +90,7 @@ module Katari.Cli.Api
 where
 
 import Control.Exception (Exception, throwIO, try)
+import Control.Monad (unless)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as ByteString
@@ -579,16 +592,36 @@ cancelRun client projectId runId reason = do
 -- Escalations
 -- ===========================================================================
 
+-- | How a client should render (and resolve) an open escalation. The runtime folds the request-name
+-- sniff into this sum at its service boundary, so no surface has to re-derive the kind. The @form@
+-- variant carries the schema an answer must satisfy ('Nothing' when the runtime could not derive one —
+-- the prompt falls back to raw JSON input); the @oauth@ variant names the MCP server a run paused on
+-- and the credential it needs, which the CLI drives to completion instead of asking for a value.
+data EscalationPresentation
+  = PresentationForm (Maybe Value)
+  | PresentationOauth {url :: Text, name :: Text}
+  deriving stock (Show, Eq)
+
+-- | Decode the presentation by dispatching on its @kind@ tag exactly once. An unknown kind is a decode
+-- failure rather than a silent fallback, so wire drift surfaces loudly instead of mis-rendering.
+instance FromJSON EscalationPresentation where
+  parseJSON = withObject "EscalationPresentation" $ \object' -> do
+    kind <- object' .: "kind"
+    case kind :: Text of
+      "form" -> PresentationForm <$> object' .:? "answerSchema"
+      "oauth" -> PresentationOauth <$> object' .: "url" <*> object' .: "name"
+      other -> fail ("unknown escalation presentation kind: " <> Text.unpack other)
+
 -- | One open escalation: which request is being asked, its question (already secret-redacted by the
--- runtime), the run waiting on it, and the schema an answer must satisfy ('Nothing' when the runtime
--- could not derive one — the prompt falls back to raw JSON input).
+-- runtime), the run waiting on it, and how to present / resolve it (the 'EscalationPresentation' sum,
+-- which carries the answer schema for a form escalation or the server details for an oauth one).
 data EscalationView = EscalationView
   { id :: Text,
     request :: Text,
     argument :: Maybe Value,
     runId :: Text,
     createdAt :: Text,
-    answerSchema :: Maybe Value
+    presentation :: EscalationPresentation
   }
   deriving stock (Show)
 
@@ -600,7 +633,7 @@ instance FromJSON EscalationView where
       <*> object' .:? "argument"
       <*> object' .: "runId"
       <*> object' .: "createdAt"
-      <*> object' .:? "answerSchema"
+      <*> object' .: "presentation"
 
 listEscalations :: RuntimeClient -> Text -> IO (Value, List EscalationView)
 listEscalations client projectId = getWithRaw client ("/projects/" <> projectId <> "/escalations")
@@ -614,6 +647,65 @@ answerEscalation client projectId escalationId value = do
       ("/projects/" <> projectId <> "/escalations/" <> escalationId <> "/answer")
       (Just (Aeson.encode (object ["value" .= value])))
   pure ()
+
+-- | Begin the runtime-hosted OAuth flow for an @oauth@-kind escalation, returning the authorization
+-- URL the user must open. The runtime carries out discovery, dynamic client registration and PKCE; the
+-- CLI only opens the URL and waits for the redirect callback to answer the escalation. Fails with a
+-- 'RuntimeHttpError' 404 when the escalation is not open, or 409 when it is not an oauth-kind one.
+startOauthEscalationFlow :: RuntimeClient -> Text -> Text -> IO Text
+startOauthEscalationFlow client projectId escalationId = do
+  SuccessEnvelope (started :: OauthFlowStarted) <-
+    requestJson
+      client
+      "POST"
+      ("/projects/" <> projectId <> "/escalations/" <> escalationId <> "/oauth-flow")
+      (Just (Aeson.encode (object [])))
+  pure started.authorizationUrl
+
+-- | The flow-start response: the authorization URL to open in a browser.
+newtype OauthFlowStarted = OauthFlowStarted {authorizationUrl :: Text}
+
+instance FromJSON OauthFlowStarted where
+  parseJSON = withObject "OauthFlowStarted" $ \object' -> OauthFlowStarted <$> object' .: "authorizationUrl"
+
+-- ===========================================================================
+-- MCP credentials
+-- ===========================================================================
+
+-- | One stored MCP OAuth credential's management row: the name programs reference as
+-- @mcp.oauth(name = ...)@ and when it was last written (initial authorization or a token refresh). The
+-- token material itself never crosses the wire — only this metadata does.
+data McpCredentialRow = McpCredentialRow
+  { name :: Text,
+    updatedAt :: Text
+  }
+  deriving stock (Show)
+
+instance FromJSON McpCredentialRow where
+  parseJSON = withObject "McpCredentialRow" $ \object' ->
+    McpCredentialRow <$> object' .: "name" <*> object' .: "updatedAt"
+
+-- | The credentials listing wraps the rows under a @credentials@ key; only that array is read.
+newtype McpCredentialsResponse = McpCredentialsResponse
+  { credentials :: List McpCredentialRow
+  }
+
+instance FromJSON McpCredentialsResponse where
+  parseJSON = withObject "McpCredentialsResponse" $ \object' -> McpCredentialsResponse <$> object' .: "credentials"
+
+-- | The project's stored MCP OAuth credentials.
+listMcpCredentials :: RuntimeClient -> Text -> IO (List McpCredentialRow)
+listMcpCredentials client projectId = do
+  SuccessEnvelope (response :: McpCredentialsResponse) <-
+    requestJson client "GET" ("/projects/" <> projectId <> "/mcp-credentials") Nothing
+  pure response.credentials
+
+-- | Delete a stored MCP OAuth credential, forcing re-authorization on its next use. The runtime answers
+-- 204 on success and 404 when no credential of that name exists, so the body carries nothing to decode
+-- and only the status class matters; the caller distinguishes the 404 to word a friendly message.
+deleteMcpCredential :: RuntimeClient -> Text -> Text -> IO ()
+deleteMcpCredential client projectId name =
+  requestDiscardingBody client "DELETE" ("/projects/" <> projectId <> "/mcp-credentials/" <> encodePathSegment name) Nothing
 
 -- ===========================================================================
 -- Env entries
@@ -780,6 +872,24 @@ requestJson client httpMethod path body = do
       Right value -> pure value
       Left message -> throwIO (RuntimeDecodeError (Text.pack message))
     else throwIO (RuntimeHttpError status (extractErrorMessage responseBytes))
+
+-- | Perform a request whose 2xx body carries nothing the caller needs (a 204 No Content, or an
+-- envelope left unread), translating every failure mode into a 'RuntimeError'. Only the status class
+-- is inspected; a non-2xx still becomes a 'RuntimeError' carrying the runtime's error message, exactly
+-- as 'requestJson' would.
+requestDiscardingBody :: RuntimeClient -> Text -> Text -> Maybe LazyByteString.ByteString -> IO ()
+requestDiscardingBody client httpMethod path body = do
+  client.trace (httpMethod <> " " <> path)
+  result <- try $ do
+    request <- buildRequest client httpMethod path body
+    httpLbs request client.manager
+  response <- case result of
+    Left exception -> throwIO (RuntimeNetworkError (formatHttpException exception))
+    Right response -> pure response
+  let status = statusCode (responseStatus response)
+  client.trace ("-> " <> Text.pack (show status))
+  unless (status >= 200 && status < 300) $
+    throwIO (RuntimeHttpError status (extractErrorMessage (responseBody response)))
 
 -- | Assemble the underlying 'Request': base URL + API prefix + path, the JSON body when given, and
 -- the @Content-Type@ / @Authorization@ headers.

@@ -57,7 +57,7 @@ commandParser =
         <> command "ls" (info (CommandLs <$> Ls.optionsParser) (progDesc "List runs (default), agents, snapshots, projects, escalations, files or env"))
         <> command "env" (info (CommandEnv <$> Env.optionsParser) (progDesc "Manage the project's env entries (get / set / unset)"))
         <> command "file" (info (CommandFile <$> File.optionsParser) (progDesc "Upload / download project files"))
-        <> command "mcp" (info (CommandMcp <$> Mcp.optionsParser) (progDesc "Manage MCP server credentials (login)"))
+        <> command "mcp" (info (CommandMcp <$> Mcp.optionsParser) (progDesc "MCP integration (pull bindings; list / forget stored credentials)"))
         <> command "project" (info (CommandProject <$> Project.optionsParser) (progDesc "Manage projects on the runtime (remove, rollback)"))
     )
 

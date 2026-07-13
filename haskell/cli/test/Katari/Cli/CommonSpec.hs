@@ -24,7 +24,7 @@ spec = do
     it "reports a prefix nothing starts with" $
       resolveIdPrefix "zz" identifiers `shouldBe` Left PrefixNotFound
 
-  -- The helper-spawn resolution `katari apply` (katari-bundle) and `katari mcp login` (katari-mcp)
+  -- The helper-spawn resolution `katari apply` (katari-bundle) and `katari mcp pull` (katari-mcp)
   -- share. The helper name below is chosen to never exist on a real PATH, so the fallthrough cases
   -- end deterministically at Nothing.
   describe "resolveNodeHelperInvocation" $ do

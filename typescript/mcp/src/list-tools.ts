@@ -2,9 +2,8 @@
 // that `katari mcp pull` code-generates typed bindings from. The connection mirrors the runtime
 // transport's shape (streamable HTTP first, one fallback to HTTP+SSE, so both generations of servers
 // answer the same `--url`), and auth mirrors the program surface: explicit `--header k=v` pairs ride
-// on every request, `--oauth` runs the SAME interactive flow `login` uses (`performLogin` is the
-// factored-out flow both verbs share) — but the credential stays IN MEMORY: a pull is a dev-time
-// read, so nothing is stored anywhere.
+// on every request, `--oauth` runs the OAuth authorization flow (`performLogin`) — but the credential
+// stays IN MEMORY: a pull is a dev-time read, so nothing is stored anywhere.
 
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

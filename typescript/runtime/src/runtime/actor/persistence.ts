@@ -23,6 +23,7 @@ import type {
   ScopeId,
   SnapshotId,
 } from "../ids.js";
+import type { McpDispatchCall } from "../mcp-dispatch.js";
 import type { TimeOperation } from "../time-schedule.js";
 import type { Value } from "../value/types.js";
 import type {
@@ -205,23 +206,29 @@ export interface PersistedMcpProvideExtension {
  *  like `http_instances`), plus the whole serve extension (`mcp_serve_instances`) when the call is a `serve`
  *  endpoint, or the provide extension (`mcp_provide_instances`) when it is a `provide` scope. The
  *  transport-backed shapes (callTool / directCall) store no argument (recovery never re-sends —
- *  at-most-once) and open no inner delegations, so both extensions are `null`. At most one is non-null. */
+ *  at-most-once) and open no inner delegations, so both endpoint extensions are `null` — EXCEPT while
+ *  parked on an authorize escalation, when the call's re-runnable dispatch persists as the `parked`
+ *  extension (`mcp_parked_instances`): present ⟺ parked, deleted in the same commit that retires the
+ *  answered escalation. At most one extension is non-null. */
 export interface PersistedMcpInstanceRow {
   instanceId: InstanceId;
   status: "running" | "cancelling" | "awaitingAnswer";
   serve: PersistedMcpServeExtension | null;
   provide: PersistedMcpProvideExtension | null;
+  parked: McpDispatchCall | null;
 }
 
 /** One in-flight mcp call a reactivation reads (envelope ⋈ `mcp_instances`, left-joined to
- *  `mcp_serve_instances` AND `mcp_provide_instances`): a serve extension reloads the live endpoint
- *  (re-registering its token), a provide extension re-registers the live scope (and re-lists or resumes by
- *  whether its continuation is still stored); a transport row (both null) recovers at-most-once (gone work
- *  fails typed, never re-runs). At most one extension is present. */
+ *  `mcp_serve_instances`, `mcp_provide_instances` AND `mcp_parked_instances`): a serve extension reloads
+ *  the live endpoint (re-registering its token), a provide extension re-registers the live scope (and
+ *  re-lists or resumes by whether its continuation is still stored), a parked extension reconstructs the
+ *  transport call the answered authorize escalation re-runs; a bare transport row (all null) recovers
+ *  at-most-once (gone work fails typed, never re-runs). At most one extension is present. */
 export interface PersistedMcpInstance extends PersistedCallEnvelope {
   status: "running" | "cancelling" | "awaitingAnswer";
   serve: PersistedMcpServeExtension | null;
   provide: PersistedMcpProvideExtension | null;
+  parked: McpDispatchCall | null;
 }
 
 /** The `webhook` instance extension write (`webhook_instances`) — the call-specific state behind a

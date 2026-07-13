@@ -1,38 +1,30 @@
 #!/usr/bin/env node
-// `katari-mcp` — the CLI front for the MCP helpers the Haskell `katari` binary spawns. Two verbs:
+// `katari-mcp` — the CLI front for the MCP helper the Haskell `katari` binary spawns. One verb:
 //
-//   - `login --url <server> [--scope <scope>]` runs the authorization-code + PKCE flow (dynamic
-//     client registration, loopback redirect) and writes the credential JSON —
-//     `{ tokens, clientInformation, resourceUrl }` — to stdout. `katari mcp login` stores the blob
-//     as a project secret.
 //   - `list-tools --url <server> [--header k=v]... [--oauth [--scope <scope>]]` connects, lists the
 //     server's tools, and writes `{ "tools": [...] }` to stdout. `katari mcp pull` generates a typed
-//     binding module from it; `--oauth` runs the same interactive flow as `login` but keeps the
-//     credential in memory (nothing is stored).
+//     binding module from it. `--oauth` runs the OAuth 2.1 authorization-code + PKCE flow (dynamic
+//     client registration, loopback redirect) and keeps the credential in memory for that one listing
+//     — nothing is stored. Runtime credential storage and the human-facing authorization prompt now
+//     live in the runtime as an OAuth escalation, so this helper is a listing concern only.
 //
 // All human-facing output (the authorization URL, progress) goes to stderr so stdout stays pure JSON.
-// Exit codes: 0 success (JSON on stdout) · 1 flow/listing failure · 2 usage error.
+// Exit codes: 0 success (JSON on stdout) · 1 listing failure · 2 usage error.
 
 import { spawn } from "node:child_process";
-import { parseLoginArguments, performLogin } from "./index.js";
 import { parseListToolsArguments, performListTools } from "./list-tools.js";
 
 function printHelp(): void {
   process.stdout.write(
     [
-      "Usage: katari-mcp login --url <server> [--scope <scope>]",
-      "       katari-mcp list-tools --url <server> [--header k=v]... [--oauth [--scope <scope>]]",
-      "",
-      "login runs the OAuth 2.1 authorization-code + PKCE flow against the MCP server at <server>:",
-      "registers a client dynamically, opens the authorization URL (printed to stderr — a local",
-      "browser is attempted best-effort), receives the redirect on a loopback port, exchanges the",
-      "code, and writes the credential JSON { tokens, clientInformation, resourceUrl } to stdout.",
-      "Storage is the caller's job: `katari mcp login` saves the blob as a project secret.",
+      "Usage: katari-mcp list-tools --url <server> [--header k=v]... [--oauth [--scope <scope>]]",
       "",
       "list-tools connects to the server (headers riding on every request, or --oauth running the",
-      "same interactive flow with the credential kept in memory), lists its tools, and writes",
-      '{ "tools": [{ "name", "description", "inputSchema", "outputSchema"? }] } to stdout.',
-      "`katari mcp pull` generates a typed binding module from that listing.",
+      "OAuth 2.1 authorization-code + PKCE flow with the credential kept in memory), lists its tools,",
+      'and writes { "tools": [{ "name", "description", "inputSchema", "outputSchema"? }] } to stdout.',
+      "`katari mcp pull` generates a typed binding module from that listing. With --oauth the",
+      "authorization URL is printed to stderr (a local browser is attempted best-effort) and the",
+      "redirect is received on a loopback port; the credential is used for the one listing, not stored.",
       "",
       "Exit codes: 0 success · 1 failure · 2 usage error",
       "",
@@ -64,23 +56,6 @@ const callbacks = {
   openBrowser,
 };
 
-async function runLogin(rest: string[]): Promise<never> {
-  let parsed: ReturnType<typeof parseLoginArguments>;
-  try {
-    parsed = parseLoginArguments(rest);
-  } catch (error) {
-    bail(error instanceof Error ? error.message : String(error), 2);
-  }
-  try {
-    const credential = await performLogin(parsed, callbacks);
-    process.stdout.write(`${JSON.stringify(credential)}\n`);
-    // The loopback listener is closed, but a lingering keep-alive socket must not hold the process.
-    process.exit(0);
-  } catch (error) {
-    bail(error instanceof Error ? error.message : String(error), 1);
-  }
-}
-
 async function runListTools(rest: string[]): Promise<never> {
   let parsed: ReturnType<typeof parseListToolsArguments>;
   try {
@@ -106,14 +81,11 @@ async function main(): Promise<void> {
   }
   const [subcommand, ...rest] = argv;
   switch (subcommand) {
-    case "login":
-      await runLogin(rest);
-      break;
     case "list-tools":
       await runListTools(rest);
       break;
     default:
-      bail(`unknown subcommand: ${subcommand ?? ""} (login and list-tools exist)`, 2);
+      bail(`unknown subcommand: ${subcommand ?? ""} (list-tools is the only verb)`, 2);
   }
 }
 

@@ -22,9 +22,10 @@ import {
   webhookInstances,
 } from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
+import { decryptSecret, encryptSecret } from "../lib/crypto.js";
 import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
-import { envReader, envService } from "../modules/env/env.service.js";
+import { envReader } from "../modules/env/env.service.js";
 import {
   isCallError,
   type McpServeHttpReply,
@@ -32,6 +33,7 @@ import {
   serveMcpMessage,
   unknownMcpServeEndpoint,
 } from "../modules/mcp/mcp-serve.js";
+import { mcpCredentialRepository } from "../modules/mcp-credential/mcp-credential.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { messageOf } from "./actor/failure.js";
@@ -39,11 +41,7 @@ import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry } from "./engine/types.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
-import {
-  decodeMcpOAuthCredential,
-  type McpCredentialStore,
-  mcpOAuthEnvKey,
-} from "./external/mcp-oauth.js";
+import { decodeMcpOAuthCredential, type McpCredentialStore } from "./external/mcp-oauth.js";
 import { SdkMcpTransport } from "./external/mcp-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
@@ -130,32 +128,35 @@ const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 const prims = new PrimRegistry();
 registerHostPrims(prims, { env: envReader });
 
-/** The per-project OAuth credential store the mcp transport authenticates through: the `env_entries`
- *  table under the reserved `mcp.oauth.<name>` keys, secret (AES-GCM at rest, write-only over the
- *  admin API) like any secret — exactly where `katari mcp login` puts a credential, and where a token
- *  refresh writes the rotated set back. */
+/** The per-project OAuth credential store the mcp transport authenticates through: the `mcp_credentials`
+ *  table (the AES-GCM sealed triple + its integer generation — see `db/tables/mcp-credentials.ts`).
+ *  `load` unseals and decodes a stored credential; `save` is the token-refresh write-back, an atomic
+ *  compare-and-set on the generation the caller loaded — refused when a completed authorization flow
+ *  (whose upsert always wins) replaced the credential in between. */
 function mcpCredentialStoreFor(projectId: ProjectId): McpCredentialStore {
-  // The generation marker is a content hash of the stored blob, so any change to the credential (a
-  // re-login) shifts it — no extra column needed on `env_entries`.
-  const generationOf = (raw: string): string => createHash("sha256").update(raw).digest("hex");
   return {
     async load(name) {
-      const raw = await envReader.readSecret(projectId, mcpOAuthEnvKey(name));
-      if (raw === null) return null;
-      return { credential: decodeMcpOAuthCredential(name, raw), generation: generationOf(raw) };
+      const row = await mcpCredentialRepository.load(db, projectId, name);
+      if (row === null) return null;
+      // An unsealable value (key rotation, storage corruption) is funnelled through the decoder's own
+      // failure path, so it classifies exactly like an undecodable blob: unreadable credential material,
+      // fixed by re-authorizing — never a distinct error species for the caller to handle.
+      let raw: string;
+      try {
+        raw = decryptSecret(row.value);
+      } catch {
+        raw = "";
+      }
+      return { credential: decodeMcpOAuthCredential(name, raw), generation: row.generation };
     },
-    async save(name, credential, expectedGeneration) {
-      // Compare-and-set on the stored content: refuse the write when the credential changed since it was
-      // read (a concurrent re-login), so a token refresh never clobbers the newer record. Residual race:
-      // the re-read and the write are not one atomic statement, so a re-login landing in that
-      // sub-millisecond window is still overwritten — harmless, because the refreshed tokens derive from
-      // the just-superseded credential, and the next use reloads the newer credential and re-refreshes.
-      const currentRaw = await envReader.readSecret(projectId, mcpOAuthEnvKey(name));
-      if (currentRaw === null || generationOf(currentRaw) !== expectedGeneration) return;
-      await envService.set(projectId, mcpOAuthEnvKey(name), {
-        value: JSON.stringify(credential),
-        isSecret: true,
-      });
+    save(name, credential, expectedGeneration) {
+      return mcpCredentialRepository.saveWithGeneration(
+        db,
+        projectId,
+        name,
+        encryptSecret(JSON.stringify(credential)),
+        expectedGeneration,
+      );
     },
   };
 }

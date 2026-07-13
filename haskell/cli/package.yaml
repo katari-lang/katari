@@ -106,6 +106,8 @@ tests:
       - filepath
       - temporary
       - text
+      - aeson
+      - bytestring
     build-tools:
       - hspec-discover
 

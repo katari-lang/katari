@@ -266,7 +266,7 @@ compileSourcesOrExit sources = do
   when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
   pure result.loweredModules
 
--- | Where a spawned node helper (@katari-bundle@ during apply, @katari-mcp@ during mcp login) comes
+-- | Where a spawned node helper (@katari-bundle@ during apply, @katari-mcp@ during @mcp pull@) comes
 -- from, as @Just (command, prefixArgs)@ in npm-convention order (a local install beats a global
 -- one), or @Nothing@ when none of the three resolves (the caller turns that into a clear error):
 --

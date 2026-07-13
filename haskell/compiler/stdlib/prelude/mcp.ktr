@@ -11,9 +11,12 @@
 //   let tools : mcp.toolbox["https://..."] = use mcp.provide(url = "https://...", auth = mcp.oauth(name = "github"))
 //
 // `headers` covers anonymous access (an empty record), bearer keys and any custom scheme uniformly:
-// the given headers ride on every request. `oauth` names an OAuth credential established out-of-band by
-// `katari mcp login --url <server> --name <name>` and stored server-side; the runtime injects (and
-// refreshes) its tokens itself, so no token material appears in the program.
+// the given headers ride on every request. `oauth` names an OAuth credential stored server-side; the
+// runtime injects (and refreshes) its tokens itself, so no token material appears in the program. When
+// the named credential is missing — or dies beyond what a refresh can fix, even mid-run — the program
+// does not fail: the run PAUSES on a user-facing `prelude.mcp.authorize` escalation, the admin console
+// and CLI render it as an OAuth authorization request, and completing the browser flow resumes the run
+// right where it stopped.
 //
 // THE SCOPE STORY. A tool is a live capability, not a value that may outlive its connection: it exists
 // only WHILE its `provide` is running. `provide` is a scoped provider (the ST-monad `runST` shape) — it
@@ -59,8 +62,9 @@ transport message). Also raised as the scope backstop: a tool called after its `
 its closed scope this way. Catch it to control retry — a retried call reconnects."
 data server_error(message: string)
 
-@"An `oauth` credential is missing, or expired beyond what a token refresh can fix. Retrying does
-not help: a human must (re-)establish the credential with `katari mcp login`. Distinct from
+@"The server rejected the `headers` key material. Retrying with the same material does not help: a
+human must fix the key the program supplies. Never raised on the `oauth` path — an unusable `oauth`
+credential pauses the run on an authorization escalation instead of failing it. Distinct from
 `server_error` so a program can catch the two differently."
 data auth_error(message: string)
 
@@ -68,9 +72,10 @@ data auth_error(message: string)
 such as a bearer key). Anonymous access is `headers(values = record.empty())`."
 data headers(values: record[string of private])
 
-@"A named OAuth credential, established out-of-band by `katari mcp login --url <server> --name
-<name>` and stored server-side. The runtime injects and refreshes its tokens itself; the name is
-not a secret."
+@"A named OAuth credential, stored server-side. The runtime injects and refreshes its tokens itself;
+the name is not a secret. While the name has no usable credential, any use pauses the run on a
+`prelude.mcp.authorize` escalation — answering it (the runtime-hosted browser flow) establishes the
+credential and resumes the run."
 data oauth(name: string)
 
 // How `provide` authenticates with the server: explicit headers, or a named OAuth credential.
@@ -91,7 +96,8 @@ type toolbox[URL] = record[tool[URL]]
 
 @"Plug an MCP server's tools into a program for the extent of @continuation@, as a scoped provider —
 the `use mcp.provide(url = ..., auth = ...)` form. The runtime lists the server (a missing or dead
-`oauth` credential throws `auth_error`; a rejected listing throws `server_error`), hands @continuation@
+`oauth` credential pauses on an authorization escalation and retries once answered; rejected `headers`
+material throws `auth_error`; a rejected listing throws `server_error`), hands @continuation@
 a `toolbox[URL]` of one runtime-minted agent per tool (each carrying the server signature — for
 `reflection.get_metadata` and call-site validation — and the descriptor it was listed with), and settles
 with the continuation's result. `scope[URL]` rides the continuation's row (that is what a tool call

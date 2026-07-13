@@ -18,19 +18,27 @@
 //
 // Every anticipated failure — the server rejecting a connect, a tool reporting `isError`, a transport
 // drop — completes as a TYPED throw of `prelude.mcp.server_error`, matching the effect the
-// `prelude.mcp` externals declare; a Katari handler catches it like any stdlib throw. A dead OAuth
-// credential (missing, unreadable, or rejected beyond refresh) is the distinct
-// `prelude.mcp.auth_error` — retrying cannot fix it, a human re-running `katari mcp login` can.
+// `prelude.mcp` externals declare; a Katari handler catches it like any stdlib throw. Authentication
+// failures split on the descriptor's auth variant: on the `headers` path a server 401 is the typed
+// `prelude.mcp.auth_error` (the server rejected the given key material — retrying with the same material
+// will not help), while on the `oauth` path NOTHING auth-shaped is ever a typed throw — a credential that
+// cannot authenticate (missing, unreadable, refresh-dead, or a 401 the server keeps returning) completes
+// as the `authorizationRequired` park signal, which the mcp reactor turns into a `prelude.mcp.authorize`
+// escalation and retries once answered.
 
 import type { Json } from "@katari-lang/types";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport, SseError } from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { DelegationId } from "../ids.js";
 import {
   loadStoredCredential,
-  McpAuthError,
+  McpAuthorizationRequired,
   type McpCredentialStore,
   StoredMcpOAuthProvider,
 } from "./mcp-oauth.js";
@@ -62,15 +70,21 @@ export interface McpToolListing {
 
 /** The outcome of one dispatched mcp call: a `result` (→ delegateAck; a listing completes with
  *  `{ tools: McpToolListing[] }`, which the reactor transforms into the minted toolbox), a `throw` (a
- *  typed `prelude.mcp.server_error` payload — the anticipated failure channel), an `error` (an
- *  engine-level invariant violation → a panic), or a `cancelled` confirmation (after an `abort`). */
+ *  typed `prelude.mcp.server_error` / `auth_error` payload — the anticipated failure channel), an
+ *  `error` (an engine-level invariant violation → a panic), a `cancelled` confirmation (after an
+ *  `abort`), or `authorizationRequired` — the oauth park signal: the operation could not authenticate
+ *  and the reactor must escalate `prelude.mcp.authorize` for `{ url, name }` (stamped here from the
+ *  descriptor, the identity's source of truth) and retry the operation once the escalation is answered.
+ *  The rejected attempt never executed server-side (an HTTP 401 is a rejection), so that retry is safe
+ *  under the at-most-once contract. */
 export interface McpCompletion {
   delegation: DelegationId;
   outcome:
     | { kind: "result"; value: Json }
     | { kind: "throw"; error: Json }
     | { kind: "error"; message: string }
-    | { kind: "cancelled" };
+    | { kind: "cancelled" }
+    | { kind: "authorizationRequired"; url: string; name: string };
 }
 
 export interface McpTransport {
@@ -214,10 +228,66 @@ function serverError(message: string): Json {
   return { $constructor: "prelude.mcp.server_error", value: { message } };
 }
 
-/** The wire form of the typed `prelude.mcp.auth_error` throw — the OAuth credential lifecycle failure
- *  a retry cannot fix (as opposed to `server_error`, whose contract IS "retry reconnects"). */
+/** The wire form of the typed `prelude.mcp.auth_error` throw — the `headers` path's rejected key
+ *  material (as opposed to `server_error`, whose contract IS "retry reconnects"): the server said 401
+ *  to the given headers, so retrying with the same material will not help. The oauth path never throws
+ *  this — it parks and asks instead (`authorizationRequired`). */
 function authError(message: string): Json {
   return { $constructor: "prelude.mcp.auth_error", value: { message } };
+}
+
+/** Classify one failed operation by the descriptor's auth variant — the ONE place the auth sum decides
+ *  what an authentication failure means:
+ *   - `oauth`: every face of "this credential cannot authenticate" completes as `authorizationRequired`,
+ *     carrying the descriptor's `{ url, name }` (the identity's source of truth; the SDK errors carry
+ *     neither): the park signal out of the store-backed provider, the SDK's `UnauthorizedError`, an
+ *     OAuth protocol error escaping the auth flow (a revoked refresh token is `invalid_grant`), and a
+ *     raw HTTP 401 (the post-authentication 401 the SDK's circuit breaker reports).
+ *   - `headers`: a server 401 is the typed `auth_error` — the server rejected the given key material,
+ *     and retrying with the same material will not help.
+ *  Everything else (wire drift, disconnects, a null descriptor that never decoded) stays the typed
+ *  `server_error`, whose contract is "retry reconnects". */
+function classifyFailure(descriptor: Descriptor | null, error: unknown): McpCompletion["outcome"] {
+  if (descriptor !== null) {
+    const auth = descriptor.auth;
+    switch (auth.kind) {
+      case "oauth":
+        if (
+          error instanceof McpAuthorizationRequired ||
+          error instanceof OAuthError ||
+          isServerUnauthorized(error)
+        ) {
+          return { kind: "authorizationRequired", url: descriptor.url, name: auth.name };
+        }
+        break;
+      case "headers":
+        if (isServerUnauthorized(error)) {
+          return {
+            kind: "throw",
+            error: authError(
+              `the server rejected the request's auth headers (${messageOfError(error)}); ` +
+                `retrying with the same key material will not help`,
+            ),
+          };
+        }
+        break;
+    }
+  }
+  return { kind: "throw", error: serverError(messageOfError(error)) };
+}
+
+/** Whether an SDK failure IS the server saying 401. `UnauthorizedError` is the SDK's own auth-flow
+ *  failure (it only arises with an `authProvider`, i.e. the oauth path); the raw HTTP transports report
+ *  a plain 401 as their status-carrying error classes — the only face a `headers` rejection (no
+ *  provider) or a post-authentication 401 (the SDK's circuit breaker) ever wears. */
+function isServerUnauthorized(error: unknown): boolean {
+  if (error instanceof UnauthorizedError) return true;
+  return (error instanceof StreamableHTTPError || error instanceof SseError) && error.code === 401;
+}
+
+/** A failure's human-readable message (SDK errors are `Error`s; anything else is stringified). */
+function messageOfError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** The descriptor's auth sum, decoded from its `$constructor` wire tag: explicit request headers, or
@@ -232,15 +302,17 @@ interface Descriptor {
   auth: DescriptorAuth;
 }
 
-/** What the host wires into an `SdkMcpTransport` (both parts optional so tests and stub deployments
- *  can run without them, degrading loudly at the exact feature that needs the missing part). */
+/** What the host wires into an `SdkMcpTransport`. The credential store is REQUIRED — the facade always
+ *  binds it to the `mcp_credentials` repository, and the park-and-authorize loop is meaningless without
+ *  a store the retry can re-read; the blob producer stays optional (without it every binary block
+ *  degrades to its text placeholder — a graceful loss, not a broken contract). */
 export interface SdkMcpTransportDependencies {
   /** Bridges a tool result's binary content into project blobs (see `McpBlobProducer`); without it
    *  every binary block degrades to its text placeholder. */
   produceBlob?: McpBlobProducer;
-  /** Resolves `oauth`-variant descriptors to stored credentials (see `McpCredentialStore`); without
-   *  it every `oauth` dispatch fails as the typed `auth_error`. */
-  credentials?: McpCredentialStore;
+  /** Resolves `oauth`-variant descriptors to stored credentials (see `McpCredentialStore`) — the store
+   *  the provider reads through and the authorize-retry loop re-reads after an escalation is answered. */
+  credentials: McpCredentialStore;
 }
 
 /** The production transport: the official MCP SDK behind a lazy, descriptor-keyed client cache.
@@ -253,9 +325,9 @@ export class SdkMcpTransport implements McpTransport {
   private readonly clients = new Map<string, Promise<Client>>();
   private readonly controllers = new Map<DelegationId, AbortController>();
   private readonly produceBlob?: McpBlobProducer;
-  private readonly credentials?: McpCredentialStore;
+  private readonly credentials: McpCredentialStore;
 
-  constructor(dependencies: SdkMcpTransportDependencies = {}) {
+  constructor(dependencies: SdkMcpTransportDependencies) {
     this.produceBlob = dependencies.produceBlob;
     this.credentials = dependencies.credentials;
   }
@@ -326,10 +398,10 @@ export class SdkMcpTransport implements McpTransport {
   }
 
   /** Run one operation. Any anticipated failure — a rejected connect, a server-reported tool error, a
-   *  dropped transport — is the typed `server_error` throw; a dead OAuth credential (missing, or the
-   *  SDK's `UnauthorizedError` after refresh failed) is the typed `auth_error` instead. Either way the
-   *  descriptor's cache entry is evicted so the next call starts fresh — after `auth_error`, that next
-   *  call picks up whatever a re-run `katari mcp login` stored. */
+   *  dropped transport — is the typed `server_error` throw; an authentication failure classifies by the
+   *  descriptor's auth variant (see `classifyFailure`). Either way the descriptor's cache entry is
+   *  evicted so the next attempt starts fresh — after `authorizationRequired`, the answered escalation's
+   *  retry reconnects and picks up whatever the authorization flow deposited. */
   private async perform(call: McpCall, signal: AbortSignal): Promise<McpCompletion["outcome"]> {
     let descriptor: Descriptor | null = null;
     try {
@@ -346,13 +418,7 @@ export class SdkMcpTransport implements McpTransport {
       }
       // The connection may be the broken part — evict so the next call re-establishes it.
       if (descriptor !== null) this.clients.delete(descriptorKey(descriptor));
-      if (error instanceof McpAuthError || error instanceof UnauthorizedError) {
-        return { kind: "throw", error: authError(error.message) };
-      }
-      return {
-        kind: "throw",
-        error: serverError(error instanceof Error ? error.message : String(error)),
-      };
+      return classifyFailure(descriptor, error);
     }
   }
 
@@ -415,11 +481,12 @@ export class SdkMcpTransport implements McpTransport {
     };
     const pending = attempt("streamable")
       .catch(async (streamableError) => {
-        // A dead credential fails identically over SSE, so the fallback would only repeat the same
-        // typed failure with a laggier path — rethrow the honest error instead.
+        // An unauthenticated credential fails identically over SSE, so the fallback would only repeat
+        // the same failure with a laggier path — rethrow the honest error instead.
         if (
-          streamableError instanceof McpAuthError ||
-          streamableError instanceof UnauthorizedError
+          streamableError instanceof McpAuthorizationRequired ||
+          streamableError instanceof UnauthorizedError ||
+          streamableError instanceof OAuthError
         ) {
           throw streamableError;
         }
@@ -439,9 +506,9 @@ export class SdkMcpTransport implements McpTransport {
   }
 
   /** The SDK transport options one auth variant needs: explicit headers ride as `requestInit`, an
-   *  OAuth credential becomes a store-backed `authProvider` (loaded HERE, so a missing credential is
-   *  the typed `auth_error` before any network I/O). The option shape is the common subset both the
-   *  streamable and the SSE transports accept. */
+   *  OAuth credential becomes a store-backed `authProvider` (loaded HERE, so a missing credential parks
+   *  before any network I/O). The option shape is the common subset both the streamable and the SSE
+   *  transports accept. */
   private async connectionOptions(
     auth: DescriptorAuth,
   ): Promise<{ requestInit?: RequestInit; authProvider?: StoredMcpOAuthProvider }> {
@@ -450,20 +517,13 @@ export class SdkMcpTransport implements McpTransport {
         return Object.keys(auth.headers).length > 0
           ? { requestInit: { headers: auth.headers } }
           : {};
-      case "oauth": {
-        const store = this.credentials;
-        if (store === undefined) {
-          throw new McpAuthError(
-            "this runtime has no OAuth credential store configured, so mcp.oauth(...) cannot resolve a credential",
-          );
-        }
-        // Pre-flight: fail a missing credential as the typed auth_error BEFORE building any SDK
-        // machinery. The provider then reads the credential THROUGH the store on each use, so a
-        // credential a re-login replaced is picked up by a warm (transport-cached) provider rather than
-        // being served — and refreshed off — stale.
-        await loadStoredCredential(auth.name, store);
-        return { authProvider: new StoredMcpOAuthProvider(auth.name, store) };
-      }
+      case "oauth":
+        // Pre-flight: park a missing credential BEFORE building any SDK machinery. The provider then
+        // reads the credential THROUGH the store on each use, so a credential a fresh authorization
+        // replaced is picked up by a warm (transport-cached) provider rather than being served — and
+        // refreshed off — stale.
+        await loadStoredCredential(auth.name, this.credentials);
+        return { authProvider: new StoredMcpOAuthProvider(auth.name, this.credentials) };
     }
   }
 }

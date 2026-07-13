@@ -13,7 +13,8 @@ import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Katari.Cli.Api
-  ( EscalationView (..),
+  ( EscalationPresentation (..),
+    EscalationView (..),
     RunDetail (..),
     RunListQuery (..),
     RuntimeError (..),
@@ -102,15 +103,16 @@ resolveEscalation subcommand context given = do
               Nothing -> dieIn subcommand "cancelled"
       | otherwise -> dieIn subcommand "no escalation id given (pass one, or run interactively)"
 
+-- | A picker row. The middle two columns render per presentation kind: an oauth escalation names the
+-- OAuth authorization and the server / credential it needs, a form escalation shows its request and a
+-- truncated question preview.
 escalationLabel :: EscalationView -> Text
 escalationLabel escalation =
-  Text.intercalate
-    "  "
-    [ Text.take 8 escalation.id,
-      escalation.request,
-      previewArgument escalation.argument,
-      compactTimestamp escalation.createdAt
-    ]
+  Text.intercalate "  " ([Text.take 8 escalation.id] <> descriptor <> [compactTimestamp escalation.createdAt])
+  where
+    descriptor = case escalation.presentation of
+      PresentationOauth {url, name} -> ["OAuth authorization", url <> " (credential \"" <> name <> "\")"]
+      PresentationForm _ -> [escalation.request, previewArgument escalation.argument]
 
 -- | The question, compact and truncated so one bulky argument does not wreck the picker layout.
 previewArgument :: Maybe Aeson.Value -> Text

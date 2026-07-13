@@ -50,19 +50,46 @@
 // resource: a restart empties the cache and the next tool call reconnects. Every anticipated transport
 // failure is a typed `throw[mcp.server_error]` (including a direct call's argument-lowering failure and a
 // closed-scope rejection); a bare `error` completion is an engine-invariant panic.
+//
+// OAuth authorization is the one failure that is NEITHER: an `authorizationRequired` completion (an
+// `oauth`-descriptor operation that could not authenticate — see the transport's classification) PARKS the
+// operation instead of settling it. The reactor raises a genuine user-facing `prelude.mcp.authorize`
+// escalation from the call's own instance (the request-flavoured sibling of `raiseThrow` / `raisePanic`,
+// but through the base `send` path, so a durable escalation row opens and relays to the api root), and the
+// answering `escalateAck` — its value deliberately ignored — RE-RUNS the parked operation from scratch:
+// the transport reconnects and re-reads the credential store. Still-unusable material parks again with a
+// fresh escalation; first authorization, refresh death, an empty answer, and every race collapse into this
+// ONE loop. Re-running is at-most-once-safe because the parked attempt was REJECTED (an HTTP 401 rejection
+// guarantees the server never executed it) — which is also why the park may persist dispatch-shaped state
+// no in-flight transport call ever does: a parked call's re-runnable dispatch rides the
+// `mcp_parked_instances` extension (written with the escalation row, deleted with its answer, in the same
+// commits), so a reload reconstructs the FULL park — a provide re-lists from its ext row, a transport call
+// re-dispatches its stored call — and a post-reload ack retries identically to a warm one. A reloaded call
+// with NO open authorize escalation stays the at-most-once `recovered` refusal, exactly as before: parked
+// versus in-flight is a true sum, discriminated by the escalation row's presence.
 
 import { randomBytes } from "node:crypto";
 import type { JSONSchema, Json } from "@katari-lang/types";
 import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
 import { jsonValueFromJson, jsonValueToJson, type StringReader } from "../engine/json-value.js";
 import { errorData } from "../engine/throw-signal.js";
-import type { ReactorName } from "../event/types.js";
+import type { ExternalEvent, ReactorName } from "../event/types.js";
+import { MCP_AUTHORIZE_REQUEST } from "../external/mcp-oauth.js";
 import {
   descriptorKeyOf,
+  type McpCompletion,
   type McpToolListing,
   type McpTransport,
 } from "../external/mcp-transport.js";
-import { type DelegationId, newDelegationId, type SnapshotId } from "../ids.js";
+import {
+  type DelegationId,
+  type EscalationId,
+  type InstanceId,
+  newDelegationId,
+  newEscalationId,
+  type SnapshotId,
+} from "../ids.js";
+import type { McpDispatchCall } from "../mcp-dispatch.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import { jsonToSchema } from "../value/schema-json.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
@@ -88,40 +115,15 @@ const MCP_SERVE_KEY = "prelude.mcp.serve";
 const MCP_CALL_KEY = "prelude.mcp.call";
 
 /** A transport-backed mcp call — the built-in client's OUTBOUND tool calls, told apart from a `provide` /
- *  `serve` endpoint at the TOP level of `McpPayload` (see below). A `callTool` dispatch (the tool's name,
- *  the descriptor + scope from the minted tool's context, the caller's argument verbatim), a `directCall`
- *  (`{url, auth, tool, arguments}` all in the call's own argument), or `recovered` — a reloaded transport
- *  call, which by construction can never be re-dispatched (at-most-once; nothing dispatch-shaped is
- *  persisted for the transport shapes). The listing a `provide` performs is NOT here: it rides a side
- *  `listing` delegation, so its completion mints the toolbox instead of settling a call. */
-type TransportCall =
-  | {
-      kind: "callTool";
-      tool: string;
-      /** The minted tool's server descriptor; `null` only for a malformed target (no minted tool lacks
-       *  one), which the transport rejects as the typed descriptor error. */
-      descriptor: Value | null;
-      /** The provide scope this tool was minted under — checked live before dispatch, so a tool outliving
-       *  its `provide` (the covariance hole) is rejected as a typed `server_error`. `null` for a tool with
-       *  no scope in its context (a legacy / hand-built target), which skips the check. */
-      scope: string | null;
-      argument: Value | null;
-    }
-  | {
-      kind: "directCall";
-      /** The `{url, auth}` descriptor assembled from the call's own argument (privacy markers intact —
-       *  the transport gets a revealed copy at dispatch, like the other transport shapes). */
-      descriptor: Value;
-      /** The `tool` name value (a string leaf, possibly blob-backed) — read at dispatch, where the
-       *  string reader is allowed to touch the store. */
-      tool: Value | null;
-      /** The `arguments` json tree, lowered to the literal Json document at dispatch. */
-      argumentsTree: Value | null;
-      /** The result generic `T`'s schema, from the external's own instantiation — what the reply is
-       *  decoded against (see `decodeDirectReply`). Absent decodes to the raw `json` tree. */
-      outputSchema: JSONSchema | undefined;
-    }
-  | { kind: "recovered" };
+ *  `serve` endpoint at the TOP level of `McpPayload` (see below). The dispatch-shaped half (`callTool` /
+ *  `directCall`) is the shared durable `McpDispatchCall` (see `mcp-dispatch.ts` — it persists as the
+ *  `mcp_parked_instances` extension while the call is parked on an authorize escalation, which is what
+ *  lets a reloaded park re-run); `recovered` is a reloaded NON-parked transport call, which by
+ *  construction can never be re-dispatched (at-most-once; an interrupted in-flight call may have executed
+ *  server-side, and nothing dispatch-shaped persists for it). The listing a `provide` performs is NOT
+ *  here: it rides a side `listing` delegation, so its completion mints the toolbox instead of settling a
+ *  call. */
+type TransportCall = McpDispatchCall | { kind: "recovered" };
 
 /** What an mcp call holds, a three-way sum whose TOP level every lifecycle method (dispatch / recover /
  *  abort / onDropCall / persistCallRow / loadCallRows) dispatches once: a `provide` scope (its scope id +
@@ -214,6 +216,14 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
    *  waiter that dies with the process simply never answers (the MCP caller retries); the delivery
    *  itself is durable. */
   private readonly waiters = new Map<string, (outcome: McpServeCallOutcome) => void>();
+  /** The parked operations awaiting an authorize answer: the call (a provide parked at its listing, or a
+   *  transport call) to the `prelude.mcp.authorize` escalation it raised. The map is a derived index over
+   *  durable state — the open escalation row is the source of truth (rebuilt from it on reload), so the
+   *  entry only routes a warm `escalateAck` to its retry. */
+  private readonly parked = new Map<DelegationId, EscalationId>();
+  /** Retries staged by this turn's authorize `escalateAck`s, re-dispatched strictly post-commit
+   *  (durable-first: the retired escalation row commits before the transport re-attempts). */
+  private pendingRetries: DelegationId[] = [];
   private deliverySequence = 0;
 
   constructor(
@@ -363,23 +373,13 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
     if (target.key === MCP_CALL_KEY) {
       const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
-      const outputSchema = directCallOutputSchema(generics);
-      return {
-        kind: "transport",
-        call: {
-          kind: "directCall",
-          descriptor: descriptorOf(argument),
-          tool: fields.tool ?? null,
-          argumentsTree: fields.arguments ?? null,
-          outputSchema,
-        },
-        // Decode the transport reply against the call's `T` (see `decodeDirectReply`): a typed `T` yields a
-        // real value — a `$ref` reconstructs a REAL `file`, whose lifetime the ordinary release / reown
-        // walk then bounds by value-reachability — while `json.json` keeps the raw tree with its inert
-        // refs. This seam only BUILDS the value; a reply that does not conform is re-shaped into the typed
-        // `decode_error` throw in `complete`, so it never throws here.
-        decodeAck: (raw) => decodeDirectReply(raw, outputSchema).value,
-      };
+      return transportPayloadOf({
+        kind: "directCall",
+        descriptor: descriptorOf(argument),
+        tool: fields.tool ?? null,
+        argumentsTree: fields.arguments ?? null,
+        outputSchema: directCallOutputSchema(generics),
+      });
     }
     if (target.key === MCP_SERVE_KEY) {
       const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
@@ -397,16 +397,13 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     const context = target.context ?? null;
     const contextFields = context !== null && context.kind === "record" ? context.fields : {};
     const scopeValue = contextFields.scope;
-    return {
-      kind: "transport",
-      call: {
-        kind: "callTool",
-        tool: target.key,
-        descriptor: contextFields.descriptor ?? context,
-        scope: scopeValue !== undefined && scopeValue.kind === "string" ? scopeValue.value : null,
-        argument,
-      },
-    };
+    return transportPayloadOf({
+      kind: "callTool",
+      tool: target.key,
+      descriptor: contextFields.descriptor ?? context,
+      scope: scopeValue !== undefined && scopeValue.kind === "string" ? scopeValue.value : null,
+      argument,
+    });
   }
 
   protected dispatch(delegation: DelegationId, payload: McpPayload): void {
@@ -441,38 +438,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     // sink, like an http auth header), unlike the user-facing API.
     const call = payload.call;
     switch (call.kind) {
-      case "callTool": {
-        if (call.scope !== null && !this.scopes.has(call.scope)) {
-          // The provide scope that minted this tool has closed — the covariance backstop. Reject with a
-          // typed `server_error` naming the closed scope's server, so a tool called after its `provide`
-          // returned fails catchably (never silently, never a panic).
-          const url = descriptorUrl(call.descriptor);
-          this.schedule(() =>
-            this.complete({
-              delegation,
-              outcome: {
-                kind: "throw",
-                error: valueToJson(
-                  errorData(
-                    SERVER_ERROR,
-                    `mcp: this tool's provide scope for ${url} has closed; a tool cannot be called after its mcp.provide returns`,
-                  ),
-                  "reveal",
-                ),
-              },
-            }),
-          );
-          return;
-        }
-        this.transport.dispatch({
-          kind: "callTool",
-          delegation,
-          tool: call.tool,
-          descriptor: call.descriptor === null ? null : valueToJson(call.descriptor, "reveal"),
-          argument: call.argument === null ? null : valueToJson(call.argument, "reveal"),
-        });
+      case "callTool":
+        this.dispatchToolCall(delegation, call);
         return;
-      }
       case "directCall":
         // Lowering the arguments tree may read a blob-backed string leaf, so the dispatch finishes
         // asynchronously; the transport call is fire-and-forget anyway.
@@ -483,6 +451,44 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         // payload reaching the dispatch seam is a runtime bug — fail loudly rather than fabricate a call.
         throw new Error(`mcp: refusing to dispatch recovered call ${delegation} (at-most-once)`);
     }
+  }
+
+  /** Ship one minted tool's call to the transport (a fresh dispatch, or an authorize retry re-running the
+   *  parked call). The scope gate re-checks on every attempt: a retry whose provide closed while it was
+   *  parked must reject exactly like a fresh call of an escaped tool. */
+  private dispatchToolCall(
+    delegation: DelegationId,
+    call: Extract<TransportCall, { kind: "callTool" }>,
+  ): void {
+    if (call.scope !== null && !this.scopes.has(call.scope)) {
+      // The provide scope that minted this tool has closed — the covariance backstop. Reject with a
+      // typed `server_error` naming the closed scope's server, so a tool called after its `provide`
+      // returned fails catchably (never silently, never a panic).
+      const url = descriptorUrl(call.descriptor);
+      this.schedule(() =>
+        this.complete({
+          delegation,
+          outcome: {
+            kind: "throw",
+            error: valueToJson(
+              errorData(
+                SERVER_ERROR,
+                `mcp: this tool's provide scope for ${url} has closed; a tool cannot be called after its mcp.provide returns`,
+              ),
+              "reveal",
+            ),
+          },
+        }),
+      );
+      return;
+    }
+    this.transport.dispatch({
+      kind: "callTool",
+      delegation,
+      tool: call.tool,
+      descriptor: call.descriptor === null ? null : valueToJson(call.descriptor, "reveal"),
+      argument: call.argument === null ? null : valueToJson(call.argument, "reveal"),
+    });
   }
 
   /** List the server for a provide (a side `listing` delegation): the transport lists under it, and the
@@ -501,17 +507,75 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     });
   }
 
-  /** A transport completion. A listing completion (its delegation is a live `listing`) mints the provide's
-   *  toolbox and dispatches its continuation — it never settles a call; every other completion is an
-   *  ordinary call completion the base handles. This is the ONE place a listing is told from a call. */
-  override complete(completion: ExternalCompletion): void {
+  /** A transport completion. An `authorizationRequired` outcome settles nothing — it parks the operation
+   *  and asks (a listing's park belongs to its provide; every other operation parks its own call). A
+   *  listing completion (its delegation is a live `listing`) mints the provide's toolbox and dispatches
+   *  its continuation — it never settles a call; every other completion is an ordinary call completion
+   *  the base handles. This is the ONE place a listing is told from a call. */
+  override complete(completion: McpCompletion): void {
+    const outcome = completion.outcome;
     const provideDelegation = this.listings.get(completion.delegation);
+    if (outcome.kind === "authorizationRequired") {
+      if (provideDelegation !== undefined) this.listings.delete(completion.delegation);
+      this.park(provideDelegation ?? completion.delegation, outcome.url, outcome.name);
+      return;
+    }
     if (provideDelegation === undefined) {
-      super.complete(this.directCallCompletion(completion));
+      super.complete(this.directCallCompletion({ delegation: completion.delegation, outcome }));
       return;
     }
     this.listings.delete(completion.delegation);
-    this.onListingSettled(provideDelegation, completion.outcome);
+    this.onListingSettled(provideDelegation, outcome);
+  }
+
+  /** Park one operation on the transport's `authorizationRequired` signal: raise a genuine user-facing
+   *  `prelude.mcp.authorize` escalation from the call's own instance — through the base `send` path, so
+   *  the durable escalation row opens (the park state's source of truth) and the ask relays to the api
+   *  root like any escalate — and leave the call unsettled until the answering ack retries it. */
+  private park(delegation: DelegationId, url: string, name: string): void {
+    const status = this.callStatusOf(delegation);
+    if (status === undefined) return; // the call resolved meanwhile — the signal is moot
+    switch (status) {
+      case "cancelling":
+        // The abort raced the authentication failure: the operation is over either way, so the signal
+        // doubles as the transport's abort confirmation (the base treats any completion of a cancelling
+        // call as exactly that).
+        super.complete({ delegation, outcome: { kind: "cancelled" } });
+        return;
+      case "awaitingAnswer":
+        // No transport work can be in flight for an errored call — a stray signal, dropped.
+        return;
+      case "running":
+        break;
+    }
+    const instance = this.handledInstanceOf(delegation);
+    const caller = this.handledCallerOf(delegation);
+    const run = this.handledRunOf(delegation);
+    if (instance === undefined || caller === undefined || run === undefined) {
+      throw new Error(`mcp holds a call for ${delegation} with no received edge (bug)`);
+    }
+    const escalation = newEscalationId();
+    this.parked.set(delegation, escalation);
+    // The park's durable halves commit together: the escalation row (via the base `send` below) and — for
+    // a transport call — the parked-dispatch extension (persistCallRow reads the parked set, so marking
+    // the row dirty writes it this same turn). Atomic, so "open authorize row" ⟺ "re-runnable park".
+    this.markCallDirty(delegation);
+    this.send(
+      {
+        kind: "escalate",
+        delegation,
+        escalation,
+        ask: {
+          kind: "request",
+          request: MCP_AUTHORIZE_REQUEST,
+          argument: authorizeArgument(url, name),
+        },
+        from: this.name,
+        to: caller,
+        run,
+      },
+      instance,
+    );
   }
 
   /** A direct call's transport completion, with a reply that does not conform to its `T` re-shaped into
@@ -742,10 +806,76 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
   }
 
+  /** The answer to an escalation under an mcp call. An authorize answer resumes its parked operation: the
+   *  base has already retired the escalation row, and the answer's VALUE is deliberately ignored — the
+   *  contract is "the credential store now holds what you need", so the retry re-reads the store rather
+   *  than trusting a wire value (which would also leak token material through the plaintext audit). Any
+   *  other ack is the base's business (a relayed child ask, a caught error panic). */
+  protected override onEscalateAck(
+    event: Extract<ExternalEvent, { kind: "escalateAck" }>,
+    context: { raiser: InstanceId | undefined },
+  ): void {
+    if (this.parked.get(event.delegation) === event.escalation) {
+      this.parked.delete(event.delegation);
+      // The unpark commits whole before the transport re-attempts (durable-first): the base retires the
+      // escalation row, and marking the call dirty deletes the parked-dispatch extension in the same
+      // commit. A crash in between thus reloads a plain in-flight call — refused at-most-once by the
+      // reconciliation (the retry may have executed) — and never a double park.
+      this.markCallDirty(event.delegation);
+      this.pendingRetries.push(event.delegation);
+      return;
+    }
+    super.onEscalateAck(event, context);
+  }
+
+  override afterCommit(event: ExternalEvent): void {
+    super.afterCommit(event);
+    const retries = this.pendingRetries;
+    this.pendingRetries = [];
+    for (const delegation of retries) this.retryParked(delegation);
+  }
+
+  /** Re-run one parked operation after its authorize escalation was answered (post-commit, the transport
+   *  side-effect slot). The re-run starts FROM SCRATCH — reconnect, re-read the credential store — and a
+   *  still-failing attempt parks again with a fresh escalation: the one unbounded authorize loop. */
+  private retryParked(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined) return; // the call resolved while the retry was staged (a racing cancel)
+    if (this.callStatusOf(delegation) !== "running") return; // cancelling — the teardown owns it now
+    switch (payload.kind) {
+      case "provide":
+        // Parked at the listing, so the toolbox was never minted and the continuation is still stored:
+        // list again from scratch.
+        this.startListing(delegation, payload);
+        return;
+      case "serve":
+        return; // unreachable: a serve has no transport operation and never parks
+      case "transport": {
+        const call = payload.call;
+        switch (call.kind) {
+          case "callTool":
+            this.dispatchToolCall(delegation, call);
+            return;
+          case "directCall":
+            void this.dispatchDirectCall(delegation, call);
+            return;
+          case "recovered":
+            // Unreachable by construction: a park's escalation row and its parked-dispatch extension are
+            // written and deleted in the same commits, so a call the parked set names always holds its
+            // re-runnable dispatch (a reloaded park carries it; a non-parked reload is never in the set).
+            throw new Error(`mcp: parked call ${delegation} reloaded without its dispatch (bug)`);
+        }
+      }
+    }
+  }
+
   protected recover(delegation: DelegationId): void {
     // A reloaded serve endpoint re-registers its token; a reloaded provide re-registers its scope, and
     // either re-lists (its continuation is still stored — the block never started) or resumes (the
     // continuation was dispatched, so it is durable core work); a transport call reconciles at-most-once.
+    // For BOTH provide and transport shapes, an open raised authorize escalation overrides that default:
+    // the row IS the durable park state, so the call reconstructs as parked — waiting for the ack, never
+    // refused by the reconciliation (its rejected attempt provably never executed server-side).
     const payload = this.payloadOf(delegation);
     if (payload !== undefined && payload.kind === "serve") {
       this.tokens.set(payload.token, delegation);
@@ -753,10 +883,28 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
     if (payload !== undefined && payload.kind === "provide") {
       this.openScope(payload.scope, delegation, payload.descriptor);
+      if (this.reconstructPark(delegation)) return;
       if (payload.continuation !== null) this.startListing(delegation, payload);
       return;
     }
+    if (this.reconstructPark(delegation)) return;
     this.transport.recover(delegation);
+  }
+
+  /** Rebuild a reloaded call's park from its open authorize escalation row, if it has one. An open
+   *  authorize row that is a RELAY bridge entry does not count — and that case is REACHABLE, not
+   *  defensive: a parked tool call's ask escapes its calling core instance (the provide's continuation),
+   *  whose caller is this reactor, so the ACTIVE provide re-raises it upward under its own delegation —
+   *  an open row with the same raiser reactor and request name as a genuine park. That answer must
+   *  descend the provide's `relays` bridge to the parked child; only a row the call raised for ITSELF
+   *  resumes the call (the reload-with-parked-tool-call test fails without this exclusion). */
+  private reconstructPark(delegation: DelegationId): boolean {
+    const parkedEscalation = this.openRaisedEscalationOf(delegation, MCP_AUTHORIZE_REQUEST);
+    if (parkedEscalation === undefined || this.hasEscalationRelay(delegation, parkedEscalation)) {
+      return false;
+    }
+    this.parked.set(delegation, parkedEscalation);
+    return true;
   }
 
   protected abort(delegation: DelegationId): void {
@@ -779,9 +927,11 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.transport.abort(delegation);
   }
 
-  /** A serve / provide call resolved: release its token / close its scope (the drop hook covers every
-   *  resolution path at once) and forget any dangling listing bridge. */
+  /** A call resolved: forget its park entry (a parked call resolves only by teardown — the durable
+   *  escalation row cascades with the raiser instance), release a serve's token / close a provide's scope
+   *  (the drop hook covers every resolution path at once), and forget any dangling listing bridge. */
   protected override onDropCall(delegation: DelegationId): void {
+    this.parked.delete(delegation);
     const payload = this.payloadOf(delegation);
     if (payload === undefined) return;
     if (payload.kind === "serve") {
@@ -798,7 +948,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
 
   protected async persistCallRow(tx: PersistenceTx, row: CallRow<McpPayload>): Promise<void> {
     // A transport call persists only its status (at-most-once; no inner delegations, so its bridges are
-    // empty — the status-only `mcp_instances` row); a serve / provide call persists its whole endpoint
+    // empty — the status-only `mcp_instances` row) — plus, exactly while parked on an authorize
+    // escalation, its re-runnable dispatch (`mcp_parked_instances`: the rejected attempt provably never
+    // executed, so a reloaded park may re-run it). A serve / provide call persists its whole endpoint
     // extension (`mcp_serve_instances` / `mcp_provide_instances`: the payload + its inner-delegation
     // bridges), so a restart re-registers it.
     await tx.mcp.putMcpInstance({
@@ -825,6 +977,12 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
               innerCalls: row.innerCalls,
             }
           : null,
+      parked:
+        row.payload.kind === "transport" &&
+        row.payload.call.kind !== "recovered" &&
+        this.parked.has(row.delegation)
+          ? row.payload.call
+          : null,
     });
   }
 
@@ -832,8 +990,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     return (await loader.mcp.instances()).map((row) => {
       // A row with a serve / provide extension reloads as that live endpoint (the subscriber / continuation
       // was dispatched at the original open — the provide only if its continuation is now null; never
-      // re-dispatched), carrying its inner-delegation bridges. A transport row (neither extension) reloads
-      // as `recovered`: nothing dispatch-shaped is persisted for it, so the payload says so by type.
+      // re-dispatched), carrying its inner-delegation bridges. A transport row with a parked extension
+      // reloads as its full dispatch-shaped call (the park's re-run needs it — the ack decoder is rebuilt
+      // exactly as `openPayload` built it); one with none reloads as `recovered`: nothing dispatch-shaped
+      // persists for an in-flight call, so the payload says so by type.
       const endpoint = row.serve ?? row.provide;
       const payload: McpPayload =
         row.serve !== null
@@ -852,7 +1012,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
                 descriptor: row.provide.descriptor,
                 continuation: row.provide.continuation,
               }
-            : { kind: "transport", call: { kind: "recovered" } };
+            : row.parked !== null
+              ? transportPayloadOf(row.parked)
+              : { kind: "transport", call: { kind: "recovered" } };
       return {
         delegation: row.delegation,
         instance: row.instance,
@@ -872,6 +1034,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.scopes.clear();
     this.liveDescriptors.clear();
     this.listings.clear();
+    // Parks and staged retries are derived from the durable escalation rows; the reload after a poisoned
+    // commit rebuilds them (and an unretired row replays its ack from the outbox, re-staging the retry).
+    this.parked.clear();
+    this.pendingRetries = [];
     // Waiters are in-process HTTP requests; a reset (poisoned commit) makes their calls unresolvable.
     for (const waiter of this.waiters.values()) waiter({ kind: "gone" });
     this.waiters.clear();
@@ -897,6 +1063,25 @@ function decodeError(message: string): Json {
 function directCallOutputSchema(generics: GenericSubstitution | undefined): JSONSchema | undefined {
   const bound = generics?.T;
   return bound !== undefined && bound.kind === "type" ? bound.schema : undefined;
+}
+
+/** The transport payload one dispatch-shaped call rides as — shared by a fresh `openPayload` and a parked
+ *  call's reload, so the ack-decoding seam cannot drift between the two. A `directCall` decodes its raw
+ *  transport reply against its instantiated `T` (see `decodeDirectReply`): a typed `T` yields a real
+ *  value — a `$ref` reconstructs a REAL `file`, whose lifetime the ordinary release / reown walk then
+ *  bounds by value-reachability — while `json.json` keeps the raw tree with its inert refs. The seam only
+ *  BUILDS the value; a reply that does not conform is re-shaped into the typed `decode_error` throw in
+ *  `complete`, so it never throws here. A `callTool` carries no `T` and runs the base wire decoder. */
+function transportPayloadOf(call: McpDispatchCall): Extract<McpPayload, { kind: "transport" }> {
+  if (call.kind === "callTool") {
+    return { kind: "transport", call };
+  }
+  const outputSchema = call.outputSchema;
+  return {
+    kind: "transport",
+    call,
+    decodeAck: (raw) => decodeDirectReply(raw, outputSchema).value,
+  };
 }
 
 /** Decode a direct call's transport reply against its instantiated `T`, conform-tree-first. The reply
@@ -928,6 +1113,20 @@ function decodeDirectReply(
   }
   const result = conformValue(wire, schema);
   return { value: wire, mismatch: result.ok ? null : renderConformFailures(result.failures) };
+}
+
+/** The `{ url, name }` record a `prelude.mcp.authorize` escalation carries — the server url and the
+ *  credential name, stamped from the descriptor at the transport's classification boundary. Identity
+ *  only, never token material: the argument rides the plaintext audit and the admin wire, and the
+ *  answer's value is ignored (the credential travels through the store, not the escalation). */
+function authorizeArgument(url: string, name: string): Value {
+  return {
+    kind: "record",
+    fields: {
+      url: { kind: "string", value: url },
+      name: { kind: "string", value: name },
+    },
+  };
 }
 
 /** The `{url, auth}` descriptor of a `provide` / `directCall`, from its original (marker-bearing) argument. */

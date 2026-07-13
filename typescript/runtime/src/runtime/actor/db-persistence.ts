@@ -19,6 +19,7 @@ import {
   instances,
   isTerminalRunState,
   mcpInstances,
+  mcpParkedInstances,
   mcpProvideInstances,
   mcpServeInstances,
   outbox,
@@ -285,12 +286,13 @@ export class DbPersistence implements Persistence {
           })),
       },
       mcp: {
-        // The mcp call joins its status-only `mcp_instances` row and LEFT-joins BOTH its `mcp_serve_instances`
-        // and `mcp_provide_instances` subtypes: a matched serve extension reloads the live endpoint
-        // (re-registering its token); a matched provide extension re-registers the live scope (with its
-        // descriptor / scope id / still-listing continuation); both absent is a transport call recovered
-        // at-most-once. At most one subtype matches. `callInstancesOf` joins one extension table, so the
-        // three-table read is spelled here.
+        // The mcp call joins its status-only `mcp_instances` row and LEFT-joins its `mcp_serve_instances`,
+        // `mcp_provide_instances` and `mcp_parked_instances` subtypes: a matched serve extension reloads
+        // the live endpoint (re-registering its token); a matched provide extension re-registers the live
+        // scope (with its descriptor / scope id / still-listing continuation); a matched parked extension
+        // reconstructs the transport call an answered authorize escalation re-runs; all absent is a
+        // transport call recovered at-most-once. At most one subtype matches. `callInstancesOf` joins one
+        // extension table, so the four-table read is spelled here.
         instances: async () => {
           const rows = await this.db
             .select({
@@ -301,11 +303,13 @@ export class DbPersistence implements Persistence {
               status: mcpInstances.status,
               serve: mcpServeInstances,
               provide: mcpProvideInstances,
+              parked: mcpParkedInstances,
             })
             .from(instances)
             .innerJoin(mcpInstances, eq(instances.id, mcpInstances.instanceId))
             .leftJoin(mcpServeInstances, eq(instances.id, mcpServeInstances.instanceId))
             .leftJoin(mcpProvideInstances, eq(instances.id, mcpProvideInstances.instanceId))
+            .leftJoin(mcpParkedInstances, eq(instances.id, mcpParkedInstances.instanceId))
             .where(and(eq(instances.projectId, projectId), eq(instances.kind, "mcp")));
           return rows.flatMap((row) => {
             // A live call's delegation / caller / run are written together at delegate-receive, so a null
@@ -344,6 +348,7 @@ export class DbPersistence implements Persistence {
                         relays: brandedRelays(provide.relays),
                         innerCalls: brandedInnerCalls(provide.innerCalls),
                       },
+                parked: row.parked === null ? null : unsealFromStorage(row.parked.call),
               },
             ];
           });
@@ -711,6 +716,22 @@ export class DbPersistence implements Persistence {
                 target: mcpProvideInstances.instanceId,
                 set: { continuation, relays, innerCalls },
               });
+          }
+          // The parked extension mirrors the park itself: upserted while the call is parked (the same
+          // commit that opens the authorize escalation — a re-park after a failed retry rewrites it),
+          // deleted the moment it is not (the same commit that retires the answered escalation), so a
+          // crash never leaves a re-runnable dispatch behind an escalation that no longer exists. The
+          // call's Values may carry private leaves (a secret header in a descriptor), so it seals.
+          if (row.parked !== null) {
+            const call = sealForStorage(row.parked);
+            await drizzleTx
+              .insert(mcpParkedInstances)
+              .values({ instanceId: row.instanceId, call })
+              .onConflictDoUpdate({ target: mcpParkedInstances.instanceId, set: { call } });
+          } else {
+            await drizzleTx
+              .delete(mcpParkedInstances)
+              .where(eq(mcpParkedInstances.instanceId, row.instanceId));
           }
         },
       },

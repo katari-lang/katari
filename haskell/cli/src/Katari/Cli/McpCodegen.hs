@@ -443,7 +443,8 @@ moduleQualifier context =
 -- bare @use@ statement, after which the tools are called directly. `auth` takes either
 -- header/anonymous access or a named OAuth credential; the oauth form is the generic
 -- @mcp.oauth(name = "...")@ placeholder — pull does not know (and no longer takes) a specific
--- credential name; the user fills in the one they established with @katari mcp login@. The pulled url
+-- credential name; the user fills in the one the runtime has stored (a missing one pauses the run on an
+-- OAuth authorization escalation, answered from the admin console or @katari answer@). The pulled url
 -- is inlined so the doc names the exact server the binding scopes.
 connectDoc :: PullContext -> Text
 connectDoc context =
@@ -455,7 +456,7 @@ connectDoc context =
     <> context.url
     <> "`, serves the connection's `credentials` to every tool, and discharges both on return. "
     <> "`auth` is `mcp.headers(values = ...)` for header or anonymous access, or `mcp.oauth(name = \"...\")` "
-    <> "for a credential established by `katari mcp login`."
+    <> "for a server-stored credential (a missing one pauses the run on an OAuth authorization escalation; answer it from the admin console or `katari answer`)."
 
 -- | One tool's whole emission, top-level: a blank separator, its output synonym (when the output
 -- mapped — a plain comment carries the provenance, since a type synonym takes no @\@"..."@), its own

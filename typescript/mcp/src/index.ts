@@ -1,6 +1,7 @@
-// The MCP OAuth login flow, as a library so its seams are testable without a browser. `performLogin`
-// runs the OAuth 2.1 authorization-code + PKCE flow (with dynamic client registration) against one MCP
-// server through the official SDK's `auth(...)` orchestrator, driving it with an in-memory provider:
+// The MCP OAuth authorization flow, as a library so its seams are testable without a browser.
+// `performLogin` runs the OAuth 2.1 authorization-code + PKCE flow (with dynamic client registration)
+// against one MCP server through the official SDK's `auth(...)` orchestrator, driving it with an
+// in-memory provider:
 //
 //   1. a loopback redirect listener starts on an ephemeral port (its URL becomes the client's
 //      registered redirect_uri);
@@ -11,10 +12,11 @@
 //      (the `state` parameter is checked against the one this flow minted);
 //   4. the second `auth(...)` call exchanges the code (PKCE verifier included) for tokens.
 //
-// The result is the CREDENTIAL — tokens + the registered client information + the server url — and
-// nothing else: this helper performs the flow and emits the blob; storing it (as the project secret
-// `mcp.oauth.<name>`) is the Katari CLI's job. That split keeps the helper free of runtime-API
-// knowledge and the Haskell CLI free of OAuth knowledge.
+// The result is the CREDENTIAL — tokens + the registered client information + the server url — held in
+// memory for the one connection that needs it. `list-tools --oauth` (spawned by `katari mcp pull
+// --oauth`) is the sole caller: a pull is a dev-time read, so the credential authorizes that single
+// listing and is never persisted. Runtime credential storage and the human-facing authorization
+// prompt now live in the runtime itself (an OAuth escalation), so this helper stays a listing concern.
 
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -30,44 +32,18 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
-/** What `login` emits on stdout — exactly the blob the runtime's credential store decodes. */
+/** The credential the flow yields: the OAuth tokens, the dynamically registered client information,
+ *  and the server url. `list-tools --oauth` holds one in memory for a single listing. */
 export interface McpLoginCredential {
   tokens: OAuthTokens;
   clientInformation: OAuthClientInformationMixed;
   resourceUrl: string;
 }
 
+/** What `performLogin` needs: the server url, and optionally the OAuth scope(s) to request. */
 export interface LoginArguments {
   url: string;
   scope?: string;
-}
-
-/** Parse `login`'s argv (everything after the subcommand). Throws with a usage message on anything
- *  unexpected — the CLI maps that to exit 2, keeping "mis-invoked" distinct from "the flow failed". */
-export function parseLoginArguments(argv: string[]): LoginArguments {
-  let url: string | undefined;
-  let scope: string | undefined;
-  for (let index = 0; index < argv.length; index += 2) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (value === undefined) {
-      throw new Error(`${flag ?? "argument"} requires a value`);
-    }
-    switch (flag) {
-      case "--url":
-        url = value;
-        break;
-      case "--scope":
-        scope = value;
-        break;
-      default:
-        throw new Error(`unknown argument: ${flag ?? ""}`);
-    }
-  }
-  if (url === undefined || url === "") {
-    throw new Error("--url <server> is required");
-  }
-  return scope === undefined ? { url } : { url, scope };
 }
 
 /** The outcome of one loopback redirect hit: the authorization code, or why it is unusable. */

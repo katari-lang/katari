@@ -64,6 +64,20 @@
       "when": 1783868393878,
       "tag": "0008_forever_thread_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1783948036118,
+      "tag": "0010_mcp_parked_instances",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1783950154538,
+      "tag": "0011_useful_shatterstar",
+      "breakpoints": true
     }
   ]
 }

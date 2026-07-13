@@ -132,7 +132,7 @@ golden =
       "@\"The connection's credentials — provided by `connect` for the scope's duration, read by every tool as `auth`.\"",
       "request credentials() -> mcp.auth",
       "",
-      "@\"Open the pulled MCP server's connection for the extent of @continuation@ — as a bare `use github.connect(auth = ...)`, after which the tools are called directly (`github.get_issue(...)`). Establishes a `provide` scope over `https://mcp.example.test/mcp`, serves the connection's `credentials` to every tool, and discharges both on return. `auth` is `mcp.headers(values = ...)` for header or anonymous access, or `mcp.oauth(name = \\\"...\\\")` for a credential established by `katari mcp login`.\"",
+      "@\"Open the pulled MCP server's connection for the extent of @continuation@ — as a bare `use github.connect(auth = ...)`, after which the tools are called directly (`github.get_issue(...)`). Establishes a `provide` scope over `https://mcp.example.test/mcp`, serves the connection's `credentials` to every tool, and discharges both on return. `auth` is `mcp.headers(values = ...)` for header or anonymous access, or `mcp.oauth(name = \\\"...\\\")` for a server-stored credential (a missing one pauses the run on an OAuth authorization escalation; answer it from the admin console or `katari answer`).\"",
       "agent connect[R, effect E](",
       "  auth: mcp.auth,",
       "  continuation: agent (value: null) -> R with {...(E | mcp.scope[\"https://mcp.example.test/mcp\"]), credentials},",

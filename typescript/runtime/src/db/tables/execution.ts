@@ -33,6 +33,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../../runtime/event/types.js";
+import type { McpDispatchCall } from "../../runtime/mcp-dispatch.js";
 import type { TimeOperation } from "../../runtime/time-schedule.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
@@ -181,11 +182,12 @@ export const httpInstances = pgTable("http_instances", {
 // `prelude.mcp.provide` listing rides an internal side delegation, never a call of its own) — recovery
 // never re-sends (gone work fails as a typed `mcp.server_error`, and a katari-level retry reconnects
 // through the transport's descriptor cache) — so it carries only the call-specific `status` the envelope
-// cannot (the envelope collapses `awaitingAnswer` to `running`). A `serve` / `provide` endpoint's durable
-// state is NOT here: it lives in the `mcp_serve_instances` / `mcp_provide_instances` SUBTYPE tables, so an
-// mcp call is a transport|serve|provide union discriminated by those tables' presence, NOT by nullable
-// columns on this one (class-table inheritance — the "no nullable subtype columns" doctrine this schema
-// preaches).
+// cannot (the envelope collapses `awaitingAnswer` to `running`). The ONE dispatch-shaped exception is a
+// PARKED transport call (awaiting a `prelude.mcp.authorize` answer), whose re-runnable dispatch lives in
+// the `mcp_parked_instances` subtype below. A `serve` / `provide` endpoint's durable state is NOT here
+// either: it lives in the `mcp_serve_instances` / `mcp_provide_instances` SUBTYPE tables, so an mcp call
+// is a transport|serve|provide union discriminated by those tables' presence, NOT by nullable columns on
+// this one (class-table inheritance — the "no nullable subtype columns" doctrine this schema preaches).
 export const mcpInstances = pgTable("mcp_instances", {
   instanceId: uuid("instance_id")
     .primaryKey()
@@ -280,6 +282,25 @@ export const mcpProvideInstances = pgTable(
   },
   (table) => [uniqueIndex("mcp_provide_instances_scope_id_idx").on(table.scopeId)],
 );
+
+// The `mcp` PARKED extension: a transport call's re-runnable dispatch, present exactly while the call is
+// parked on a `prelude.mcp.authorize` escalation. Transport calls otherwise persist NO dispatch data
+// (at-most-once: an interrupted in-flight call may have executed server-side, so recovery refuses it) —
+// but a parked call's attempt was REJECTED with an authorization failure (an HTTP 401 rejection
+// guarantees non-execution), so re-running it once the escalation is answered is safe across restarts.
+// The row is written in the same commit that opens the escalation and deleted in the same commit that
+// retires it (the answer), so "open authorize escalation" ⟺ "parked row present": a crash between the
+// answer's commit and the post-commit re-dispatch reloads a plain in-flight call, and the ordinary
+// at-most-once refusal applies again. Cascades with its `mcp_instances` row like the other subtypes.
+export const mcpParkedInstances = pgTable("mcp_parked_instances", {
+  instanceId: uuid("instance_id")
+    .primaryKey()
+    .references(() => mcpInstances.instanceId, { onDelete: "cascade" }),
+  /** The whole dispatch-shaped call (`callTool | directCall` — see `McpDispatchCall`). Its Values may
+   *  carry private leaves (a secret header in a directCall's descriptor), so it seals like every stored
+   *  value. */
+  call: jsonb("call").$type<McpDispatchCall>().notNull(),
+});
 
 // The `webhook` instance extension: an in-flight `webhook.inbound` call — a dynamically generated public
 // endpoint serving for the extent of its subscriber. Cascades with its envelope; pins its snapshot (the
@@ -409,9 +430,11 @@ export const escalations = pgTable(
      *  event's `run` stamp, so the api reactor rebuilds its answerable list (run + question) from the row
      *  alone and the API lists escalations by run without inferring it from routing. */
     runId: uuid("run_id").notNull(),
-    /** The reactors this escalation runs between: `from` = the raiser's reactor (always `core` today — only
-     *  core instances raise), `to` = the reactor the escalate was addressed to (`api` ⟺ the raiser is a run
-     *  root, i.e. a user-facing escalation). The api root self-selects its answerable set by `to_reactor`. */
+    /** The reactors this escalation runs between: `from` = the raiser's reactor (`core` for an
+     *  instance-raised or relayed ask; `mcp` for a parked call's `prelude.mcp.authorize` and for a
+     *  provide relaying its child's — each reactor reloads its own rows by this column), `to` = the
+     *  reactor the escalate was addressed to (`api` ⟺ the raiser is a run root, i.e. a user-facing
+     *  escalation). The api root self-selects its answerable set by `to_reactor`. */
     fromReactor: text("from_reactor").$type<ReactorName>().notNull(),
     toReactor: text("to_reactor").$type<ReactorName>().notNull(),
     /** The requested capability (the `request` qualified name). */

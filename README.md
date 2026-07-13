@@ -65,8 +65,8 @@ more — see [`examples/playground`](examples/playground) and its
 - **MCP integration.** Consume any MCP server's tools as agents with `use mcp.provide` — a scoped
   provider whose tools live exactly as long as the block that opened them, enforced by the type
   system; publish your own agents as an MCP server with `mcp.serve`; generate typed `.ktr` bindings
-  from a live server with `katari mcp pull`; and authorize outbound servers with OAuth via
-  `katari mcp login`.
+  from a live server with `katari mcp pull`; and authorize outbound servers with OAuth by answering
+  the authorization escalation the run pauses on (from the console or `katari answer`).
 - **Typed errors.** `prelude.throw[T]` raises a typed, catchable error the signature tracks;
   `panic` is the runtime's separate failure channel, also catchable.
 - **First-class files.** File blobs flow through agents and the FFI in both directions, with an MCP
@@ -92,7 +92,7 @@ This is a monorepo of Haskell and TypeScript packages.
 | `typescript/runtime`    | The runtime server: executes IR and persists run state                |
 | `typescript/port`       | FFI library for interacting with the runtime from TypeScript          |
 | `typescript/bundle`     | Bundler for FFI code (invoked by the CLI during `apply`)              |
-| `typescript/mcp`        | The `katari-mcp` helper used by `katari mcp login` / `pull`           |
+| `typescript/mcp`        | The `katari-mcp` helper used by `katari mcp pull`                     |
 | `typescript/cli`        | npm wrapper around the Haskell `katari` binary                        |
 | `typescript/admin-web`  | Web console for managing the runtime                                  |
 | `typescript/vscode`     | VSCode extension                                                      |

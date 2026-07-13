@@ -6,10 +6,10 @@
 // release-page install), else a plain `katari-lsp` on PATH (a from-source developer who ran
 // `stack install katari-lsp`).
 //
-// The palette commands drive the katari CLI (check / build / apply / mcp login / mcp pull) in one
-// shared integrated terminal rather than a background process, because several flows are
-// interactive: `mcp login` prints an authorization URL and waits, and `apply` may prompt. The CLI
-// is resolved separately from the server (see `resolveCliPath`) since the VSIX bundles no CLI.
+// The palette commands drive the katari CLI (check / build / apply / mcp pull) in one shared
+// integrated terminal rather than a background process, because some flows are interactive — `apply`
+// may prompt. The CLI is resolved separately from the server (see `resolveCliPath`) since the VSIX
+// bundles no CLI.
 
 import { chmodSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -188,21 +188,6 @@ const cliCommands: CliCommand[] = [
     buildArguments: async () => ["apply"],
   },
   {
-    id: "katari.mcpLogin",
-    title: "Katari: MCP login (OAuth)",
-    buildArguments: async () => {
-      const url = await promptForMcpServerUrl();
-      if (url === undefined) {
-        return undefined;
-      }
-      const name = await promptForCredentialName();
-      if (name === undefined) {
-        return undefined;
-      }
-      return ["mcp", "login", "--url", url, "--name", name];
-    },
-  },
-  {
     id: "katari.mcpPull",
     title: "Katari: Generate MCP tool bindings",
     buildArguments: async (projectRoot) => {
@@ -340,8 +325,8 @@ async function promptForMcpServerUrl(): Promise<string | undefined> {
     title: "MCP server URL",
     prompt: "The MCP server to connect to (the URL programs pass to mcp.provide)",
     placeHolder: "https://example.com/mcp",
-    // OAuth flows send the user to a browser mid-command; losing the input on focus change would
-    // force retyping.
+    // A save dialog follows this prompt (the bindings output path); losing the input on that focus
+    // change would force retyping.
     ignoreFocusOut: true,
     validateInput: (input) => {
       let parsed: URL;
@@ -353,25 +338,6 @@ async function promptForMcpServerUrl(): Promise<string | undefined> {
       return parsed.protocol === "http:" || parsed.protocol === "https:"
         ? undefined
         : "The URL must use http or https.";
-    },
-  });
-  return value?.trim();
-}
-
-async function promptForCredentialName(): Promise<string | undefined> {
-  const value = await vscode.window.showInputBox({
-    title: "Credential name",
-    prompt: 'Programs reference it as auth = mcp.oauth(name = "..."); stored as mcp.oauth.<name>',
-    placeHolder: "github",
-    ignoreFocusOut: true,
-    validateInput: (input) => {
-      const trimmed = input.trim();
-      if (trimmed.length === 0) {
-        return "The credential name must not be empty.";
-      }
-      // The name becomes part of the env key mcp.oauth.<name>; whitespace would make it
-      // unreferenceable from Katari source.
-      return /\s/.test(trimmed) ? "The credential name must not contain whitespace." : undefined;
     },
   });
   return value?.trim();

@@ -158,6 +158,18 @@ export function useCancelRun(projectId: string) {
   });
 }
 
+export function useStartOauthFlow(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (escalationId: string) => api.startOauthFlow(projectId, escalationId),
+    // The credential lands via the OAuth callback, which answers the escalation server-side. Starting
+    // the flow does not close the escalation, so we keep the inbox polling (invalidate to refetch
+    // promptly) and let the card drop once the callback has answered it.
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "escalations"] }),
+  });
+}
+
 export function useAnswerEscalation(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({

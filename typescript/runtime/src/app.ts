@@ -10,6 +10,7 @@ import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { requestContext } from "./middleware/request-context.js";
 import { mcpServeRoutes } from "./modules/mcp/mcp.routes.js";
+import { oauthCallbackRoutes } from "./modules/oauth/oauth.routes.js";
 import { inboundRoutes } from "./modules/webhook/webhook.routes.js";
 import { apiRoutes } from "./routes.js";
 import type { AppEnv } from "./types/app-env.js";
@@ -55,6 +56,11 @@ export function createApp() {
   // The public MCP serve endpoints (`mcp.serve`'s minted URLs) — the same capability-URL contract, the
   // token scoping one stateless MCP server to one live call (see `mcp.routes.ts`).
   app.route("/mcp", mcpServeRoutes);
+
+  // The public OAuth redirect callback (`GET /oauth/callback`) — the identity provider sends the user's
+  // browser here, which cannot carry a bearer token; the flow's minted `state` parameter is the
+  // capability (see `oauth.routes.ts`).
+  app.route("/oauth", oauthCallbackRoutes);
 
   const api = app.route("/api/v1", apiRoutes);
 

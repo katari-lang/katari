@@ -464,6 +464,20 @@ export abstract class Reactor {
     this.retiredEscalations.add(escalation);
   }
 
+  /** The open escalation this reactor raised for `request` under `delegation`, if one exists. The row set is
+   *  reloaded by `loadBase`, so this is how a concrete reactor recognises durable ask-and-wait state after a
+   *  restart — the mcp reactor rebuilds a parked authorize from exactly this (the open row IS the park state).
+   *  A linear scan is fine: the map holds only this reactor's own open rows, read once per reloaded call. */
+  protected openRaisedEscalationOf(
+    delegation: DelegationId,
+    request: string,
+  ): EscalationId | undefined {
+    for (const [escalation, row] of this.escalations) {
+      if (row.delegation === delegation && row.request === request) return escalation;
+    }
+    return undefined;
+  }
+
   // ─── handled delegations (the callee-side receive index) ────────────────────────────────────────
 
   /** Record a delegation this reactor accepted as callee — a fresh delegate it is about to run, or one

@@ -5,4 +5,5 @@
 
 export * from "./tables/engine.js";
 export * from "./tables/execution.js";
+export * from "./tables/mcp-credentials.js";
 export * from "./tables/projects.js";

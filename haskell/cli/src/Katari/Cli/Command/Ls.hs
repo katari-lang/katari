@@ -23,6 +23,7 @@ import Katari.Cli.Api
   ( AgentView (..),
     AgentsResponse (..),
     EnvEntry (..),
+    EscalationPresentation (..),
     EscalationView (..),
     FileRow (..),
     ProjectRow (..),
@@ -142,7 +143,8 @@ run options = do
           emit options raw $
             table
               ["ID", "RUN", "REQUEST", "QUESTION", "CREATED"]
-              [ [shortId row.id, shortId row.runId, row.request, maybe "" (preview . compactJson) row.argument, compactTimestamp row.createdAt]
+              [ let (requestCell, questionCell) = escalationCells row
+                 in [shortId row.id, shortId row.runId, requestCell, questionCell, compactTimestamp row.createdAt]
                 | row <- escalations
               ]
         TargetFiles -> do
@@ -186,6 +188,15 @@ preview :: Text -> Text
 preview text
   | Text.length text > 40 = Text.take 37 text <> "..."
   | otherwise = text
+
+-- | The REQUEST / QUESTION cells, rendered per presentation kind: an oauth escalation reads as the
+-- OAuth authorization it needs (matching status / the picker) rather than leaking the
+-- runtime-synthesized request name and its raw argument; a form escalation keeps the request name and
+-- a truncated question preview.
+escalationCells :: EscalationView -> (Text, Text)
+escalationCells row = case row.presentation of
+  PresentationOauth {url, name} -> ("OAuth authorization", url <> " (credential \"" <> name <> "\")")
+  PresentationForm _ -> (row.request, maybe "" (preview . compactJson) row.argument)
 
 -- | A schema cell: the decoded brief form, or a shrug when the document does not decode (version skew).
 briefSchema :: Aeson.Value -> Text

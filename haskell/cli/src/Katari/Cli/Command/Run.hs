@@ -35,6 +35,7 @@ import Data.Text.Encoding qualified as TextEncoding
 import Katari.Cli.Api
   ( AgentView (..),
     AgentsResponse (..),
+    EscalationPresentation (..),
     EscalationView (..),
     RunEventView (..),
     RunEventsResponse (..),
@@ -248,16 +249,25 @@ waitForRun context runId = loop initialDelayMicroseconds Set.empty 0
 printEvent :: OutputContext -> RunEventView -> IO ()
 printEvent output event = traceLine output (compactTime event.createdAt <> " " <> event.summary)
 
--- | Bring one open escalation to the user: answer it inline on a terminal. Off a terminal there is no
--- one to answer it in this session and the run cannot progress without an answer, so rather than poll
--- forever the wait fails fast (exit 2) with the command that resolves it elsewhere.
+-- | Bring one open escalation to the user, dispatching on its presentation so the two kinds surface in
+-- their own way (never on the request name).
 surfaceEscalation :: RuntimeContext -> Set Text -> EscalationView -> IO (Set Text)
 surfaceEscalation context notified escalation
   | Set.member escalation.id notified = pure notified
+  | otherwise = case escalation.presentation of
+      PresentationForm rawAnswerSchema -> surfaceForm context notified escalation rawAnswerSchema
+      PresentationOauth {url, name} -> surfaceOauth context notified escalation url name
+
+-- | A form escalation surfaced mid-run: answer it inline on a terminal (the human-in-the-loop core
+-- case closes inside one @katari run@). Off a terminal there is no one to answer it in this session and
+-- the run cannot progress without an answer, so rather than poll forever the wait fails fast (exit 2)
+-- naming the command that resolves it elsewhere.
+surfaceForm :: RuntimeContext -> Set Text -> EscalationView -> Maybe Value -> IO (Set Text)
+surfaceForm context notified escalation rawAnswerSchema
   | context.output.interactive = do
       progress context.output ""
       progress context.output ("The run is asking " <> escalation.request <> maybe "" (\question -> ": " <> compactJson question) escalation.argument)
-      answered <- promptAnswer context escalation
+      answered <- promptAnswer context rawAnswerSchema
       case answered of
         Just answerValue -> do
           answerEscalation context.client context.projectId escalation.id answerValue
@@ -268,8 +278,6 @@ surfaceEscalation context notified escalation
           progress context.output ("Left unanswered — pick it up later: katari answer " <> Text.take 8 escalation.id)
       pure (Set.insert escalation.id notified)
   | otherwise =
-      -- Non-interactive: a human-answerable escalation would block the run indefinitely here. Fail
-      -- fast like every other missing-input case, pointing at how to unblock it.
       dieIn
         "run"
         ( "the run is waiting on "
@@ -279,12 +287,34 @@ surfaceEscalation context notified escalation
             <> "`, or re-run with --detach and answer it later"
         )
 
+-- | An oauth escalation surfaced mid-run: point at @katari answer@ rather than driving the flow here.
+-- The browser round-trip and its poll loop would freeze this run's live trace tail, so authorization
+-- belongs in a separate process; the wait keeps tailing and resumes automatically once it completes.
+-- Off a terminal there is likewise no one to authorize in this session, so it fails fast the same way.
+surfaceOauth :: RuntimeContext -> Set Text -> EscalationView -> Text -> Text -> IO (Set Text)
+surfaceOauth context notified escalation serverUrl credentialName
+  | context.output.interactive = do
+      progress context.output ""
+      progress context.output ("The run needs OAuth authorization for " <> serverUrl <> " (credential \"" <> credentialName <> "\"); authorize it from another session with `katari answer " <> Text.take 8 escalation.id <> "` — the run resumes automatically")
+      pure (Set.insert escalation.id notified)
+  | otherwise =
+      dieIn
+        "run"
+        ( "the run needs OAuth authorization for "
+            <> serverUrl
+            <> " (credential \""
+            <> credentialName
+            <> "\"); authorize it from another session with `katari answer "
+            <> Text.take 8 escalation.id
+            <> "`, or re-run with --detach and authorize it later"
+        )
+
 -- | Interview for the answer using the runtime-derived schema, degrading to raw JSON input when no
 -- schema came through (an undecodable or missing entry).
-promptAnswer :: RuntimeContext -> EscalationView -> IO (Maybe Value)
-promptAnswer context escalation = promptFromSchema context.output ["answer"] answerSchema
+promptAnswer :: RuntimeContext -> Maybe Value -> IO (Maybe Value)
+promptAnswer context rawAnswerSchema = promptFromSchema context.output ["answer"] answerSchema
   where
-    answerSchema = case escalation.answerSchema of
+    answerSchema = case rawAnswerSchema of
       Nothing -> SchemaAny
       Just raw -> case Aeson.fromJSON raw of
         Aeson.Success schema -> schema

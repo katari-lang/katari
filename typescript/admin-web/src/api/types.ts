@@ -46,13 +46,21 @@ export interface Run {
   completedAt: string | null;
 }
 
+/** How a surface should render an open escalation. The runtime folds the request-name sniff into this
+ *  sum once at its service boundary, so each surface only dispatches on `kind`: a schema-driven answer
+ *  form (the answer schema rides here, or `null` when the request is unanswerable), or an MCP OAuth
+ *  authorization the runtime hosts (answered out-of-band by its callback, never by a posted value). */
+export type EscalationPresentation =
+  | { kind: "form"; answerSchema: JsonSchema | null }
+  | { kind: "oauth"; url: string; name: string };
+
 export interface Escalation {
   id: string;
   request: string;
   argument: Json;
   runId: string;
   createdAt: string;
-  answerSchema: JsonSchema | null;
+  presentation: EscalationPresentation;
 }
 
 export interface RunEscalationAudit {

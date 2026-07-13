@@ -163,6 +163,15 @@ export const api = {
         value,
       },
     ),
+  /** Begin the runtime-hosted OAuth flow for an `oauth`-presentation escalation: the runtime mints the
+   *  authorization URL the surface then opens. The escalation itself is answered later by the OAuth
+   *  callback, so this returns only the URL to send the user to. 404 when the escalation is gone,
+   *  409 when its presentation is not `oauth`. */
+  startOauthFlow: (projectId: string, escalationId: string) =>
+    requestJson<{ authorizationUrl: string }>(
+      "POST",
+      `/projects/${projectId}/escalations/${escalationId}/oauth-flow`,
+    ),
 
   listAgents: (projectId: string, snapshotId?: string) =>
     get<AgentList>(
