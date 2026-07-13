@@ -1,9 +1,0 @@
-[package]
-name = "retry_probe"
-description = "Test fixture: the prelude.retry providers driven end to end over compiled IR (see test/retry-providers.test.ts)."
-
-[dependencies]
-packages = []
-
-[runtime]
-url = "http://localhost:3000"

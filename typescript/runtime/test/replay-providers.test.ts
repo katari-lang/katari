@@ -1,19 +1,24 @@
-// The `prelude.retry` providers driven end to end over their REAL compiled IR — the standing net behind
-// the "re-invocation works" claim, which previously rested on a throwaway probe. The fixture
-// (`test/fixtures/retry_probe/`) is a tiny katari project whose `ir.json` is committed alongside it;
+// The `prelude.replay` providers driven end to end over their REAL compiled IR — the standing net behind
+// the "the converter composition works, and re-invocation is sound" claim. The fixture
+// (`test/fixtures/replay_probe/`) is a tiny katari project whose `ir.json` is committed alongside it;
 // regenerate after a compiler / stdlib change with:
 //
-//   cd haskell && stack exec katari -- build -C ../typescript/runtime/test/fixtures/retry_probe \
-//     -o ../typescript/runtime/test/fixtures/retry_probe/ir.json
+//   cd haskell && stack exec katari -- build -C ../typescript/runtime/test/fixtures/replay_probe \
+//     -o ../typescript/runtime/test/fixtures/replay_probe/ir.json
 //
-// (The suite fails loudly on drift — a stale fixture cannot silently pass.) Covered here:
-//   (a) `retry.forever` catches BOTH failure channels (a typed FFI throw, then a JS-error panic), backs
-//       off through real durable `time.sleep` timers on a ManualClock, and the continuation's eventual
-//       success value escapes the loop and returns.
-//   (b) `retry.attended`, unhandled: a failure performs `retry.attention`, which surfaces as an OPEN
-//       run-root escalation; answering it through the same facade the escalation service uses re-runs
-//       the block, and the re-run's success value returns.
-//   (c) `retry.attended`, intercepted: an application handler answers `attention` with `next null`, so
+// (The suite fails loudly on drift — a stale fixture cannot silently pass.) The redesign splits the retry
+// MECHANISM (a `replay` provider that catches only `replay.interrupted`) from the failure POLICY (a user
+// converter that turns the failures it chooses into that signal). Covered here:
+//   (a) `replay.forever` + a converter that folds BOTH channels — a typed FFI throw, then a JS-error panic —
+//       into `replay.interrupted`, backs off through real durable `time.sleep` timers on a ManualClock, and
+//       the continuation's eventual success value escapes the loop and returns.
+//   (b) `replay.exponential` recovers within budget: the converter replays the typed throw, the probe
+//       succeeds inside the attempt budget, and the success value returns.
+//   (c) `replay.exponential` EXHAUSTS: the probe always fails, the budget is spent, and the provider
+//       re-raises the last failure as a TYPED `throw[probe_failed]` the program catches by payload.
+//   (d) `replay.immediate` + a converter that performs `replay.attention`, unhandled: a failure surfaces as
+//       an OPEN run-root escalation; answering it re-runs the block, and the re-run's success value returns.
+//   (e) the same composition intercepted: an application handler answers `attention` with `next null`, so
 //       failures re-run immediately and nothing ever escalates.
 
 import { readFileSync } from "node:fs";
@@ -34,12 +39,12 @@ import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
 
-const PROJECT = "project-retry" as ProjectId;
-const SNAPSHOT = "snapshot-retry" as SnapshotId;
+const PROJECT = "project-replay" as ProjectId;
+const SNAPSHOT = "snapshot-replay" as SnapshotId;
 
 /** The compiled fixture: module name -> IRModule, exactly what `katari build` wrote. */
 const COMPILED: Record<string, IRModule> = JSON.parse(
-  readFileSync(new URL("./fixtures/retry_probe/ir.json", import.meta.url), "utf8"),
+  readFileSync(new URL("./fixtures/replay_probe/ir.json", import.meta.url), "utf8"),
 );
 
 function actorFor(options: { clock: ManualClock; handlers: Record<string, FfiHandler> }): ProjectActor {
@@ -96,13 +101,14 @@ async function advanceThroughBackoffs(clock: ManualClock, settled: () => boolean
   }
 }
 
-describe("prelude.retry over compiled IR", () => {
-  test("forever catches both failure channels, sleeps its backoff, and returns the eventual success", async () => {
+describe("prelude.replay over compiled IR", () => {
+  test("forever + a both-channel converter folds a throw and a panic into interrupted, sleeps its backoff, and returns the eventual success", async () => {
     const clock = new ManualClock(1_700_000_000_000);
-    // One typed throw, then one panic: both channels must fold into `failed` and be retried.
+    // One typed throw, then one panic: the converter turns each channel into `replay.interrupted`, so both
+    // are retried, and the third call's success escapes the loop.
     const probe = scriptedProbe(["throw", "panic"], "forever ready");
-    const actor = actorFor({ clock, handlers: { "retry_probe.probe": probe.handler } });
-    const { result } = actor.startRun(createAgentName("retry_probe.forever_main"), SNAPSHOT, null);
+    const actor = actorFor({ clock, handlers: { "replay_probe.probe_source": probe.handler } });
+    const { result } = actor.startRun(createAgentName("replay_probe.forever_main"), SNAPSHOT, null);
     let value: Value | undefined;
     void result.then((resolved) => {
       value = resolved;
@@ -112,11 +118,49 @@ describe("prelude.retry over compiled IR", () => {
     expect(probe.calls()).toBe(3);
   });
 
-  test("attended, unhandled: a failure parks as an open attention question; answering re-runs to success", async () => {
+  test("exponential recovers within budget: the converter replays the typed throw until the probe succeeds", async () => {
+    const clock = new ManualClock(1_700_000_000_000);
+    const probe = scriptedProbe(["throw", "throw"], "exponential ready");
+    const actor = actorFor({ clock, handlers: { "replay_probe.probe_source": probe.handler } });
+    const { result } = actor.startRun(
+      createAgentName("replay_probe.exponential_recover_main"),
+      SNAPSHOT,
+      null,
+    );
+    let value: Value | undefined;
+    void result.then((resolved) => {
+      value = resolved;
+    });
+    await advanceThroughBackoffs(clock, () => value !== undefined);
+    expect(value).toEqual({ kind: "string", value: "exponential ready" });
+    expect(probe.calls()).toBe(3);
+  });
+
+  test("exponential exhausts to a TYPED throw the program catches by payload", async () => {
+    const clock = new ManualClock(1_700_000_000_000);
+    // Always throws: the 2-attempt budget is spent and the last failure re-raises as `throw[probe_failed]`,
+    // which the fixture's outer handler catches and reads `attempt` off.
+    const probe = scriptedProbe(["throw", "throw", "throw"], "unreached");
+    const actor = actorFor({ clock, handlers: { "replay_probe.probe_source": probe.handler } });
+    const { result } = actor.startRun(
+      createAgentName("replay_probe.exponential_exhaust_main"),
+      SNAPSHOT,
+      null,
+    );
+    let value: Value | undefined;
+    void result.then((resolved) => {
+      value = resolved;
+    });
+    await advanceThroughBackoffs(clock, () => value !== undefined);
+    expect(value).toEqual({ kind: "string", value: "exhausted at attempt 2" });
+    expect(probe.calls()).toBe(2);
+  });
+
+  test("immediate + attention, unhandled: a failure parks as an open attention question; answering re-runs to success", async () => {
     const clock = new ManualClock(1_700_000_000_000);
     const probe = scriptedProbe(["throw"], "attended ready");
-    const actor = actorFor({ clock, handlers: { "retry_probe.probe": probe.handler } });
-    const { result } = actor.startRun(createAgentName("retry_probe.attended_main"), SNAPSHOT, null);
+    const actor = actorFor({ clock, handlers: { "replay_probe.probe_source": probe.handler } });
+    const { result } = actor.startRun(createAgentName("replay_probe.attended_main"), SNAPSHOT, null);
     let value: Value | undefined;
     void result.then((resolved) => {
       value = resolved;
@@ -127,7 +171,7 @@ describe("prelude.retry over compiled IR", () => {
       const escalations = actor.listOpenEscalations();
       return escalations.length > 0 ? escalations[0] : undefined;
     });
-    expect(open.request).toBe("prelude.retry.attention");
+    expect(open.request).toBe("prelude.replay.attention");
     expect(value).toBeUndefined(); // the run is parked, not failed
 
     // Answer through the same facade the escalation service uses: attention answers `null`, re-running
@@ -139,12 +183,12 @@ describe("prelude.retry over compiled IR", () => {
     expect(actor.listOpenEscalations()).toEqual([]);
   });
 
-  test("attended, intercepted: an application handler answers `next null`, so re-runs happen without escalation", async () => {
+  test("immediate + attention, intercepted: an application handler answers `next null`, so re-runs happen without escalation", async () => {
     const clock = new ManualClock(1_700_000_000_000);
     const probe = scriptedProbe(["throw", "throw"], "intercepted ready");
-    const actor = actorFor({ clock, handlers: { "retry_probe.probe": probe.handler } });
+    const actor = actorFor({ clock, handlers: { "replay_probe.probe_source": probe.handler } });
     const { result } = actor.startRun(
-      createAgentName("retry_probe.intercepted_main"),
+      createAgentName("replay_probe.intercepted_main"),
       SNAPSHOT,
       null,
     );

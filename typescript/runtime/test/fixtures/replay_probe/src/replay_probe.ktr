@@ -1,0 +1,104 @@
+// The replay-provider test fixture: entries driving `replay.exponential` / `replay.forever` /
+// `replay.immediate` end to end over their real compiled IR (the runtime suite loads this module's build
+// output — see `test/replay-providers.test.ts`, which also documents how to regenerate `ir.json`). The
+// `probe` external is an in-process FFI the tests script to fail N times (a typed throw or a panic) then
+// succeed. Each entry pairs a `replay` MECHANISM with a user CONVERTER that turns the probe's failures into
+// `replay.interrupted` — the split the redesign is about.
+
+@"The typed error the probe raises while it is still failing."
+data probe_failed(attempt: integer)
+
+@"The scripted external under replay: the test's in-process FFI handler decides, per call, whether to throw
+`probe_failed` (typed), panic (a plain JS error), or return a value. An FFI throw payload arrives as a bare
+structural record (the wire decoder tags nothing), so `probe` below re-raises it as a nominally-tagged
+`probe_failed` — exactly what a throw raised from Katari already is, so the converters below stay canonical."
+external agent probe_source(kind: string) -> string with prelude.throw[probe_failed]
+
+@"Re-tag the FFI throw as a nominal `probe_failed` (a Katari-constructed value), so a converter can pass the
+error straight to `replay.attention` / `replay.interrupted` — as it would for any throw raised in Katari —
+without the escalation boundary rejecting an untagged record. A panic proxies through untouched."
+agent probe(kind: string) -> string with prelude.throw[probe_failed] | io {
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      prelude.throw(error = probe_failed(attempt = error.attempt))
+    }
+  }
+  probe_source(kind = kind)
+}
+
+@"Entry (a): `replay.forever` over a converter that folds BOTH channels — a typed `throw` AND a `panic` —
+into `replay.interrupted` (using the standard `replay.failure` fold). Failures back off through durable
+sleeps (the test drives a ManualClock); when the probe finally succeeds, the value escapes the loop and
+returns. Proves the converter can opt into retrying panics, explicitly, in source."
+agent forever_main() -> string with io {
+  use replay.forever(initial_delay_milliseconds = 5.0, factor = 2.0, max_delay_milliseconds = 20.0)
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      replay.interrupted(failure = replay.thrown(error = error))
+    }
+    request panic(msg: string) {
+      replay.interrupted(failure = replay.panicked(message = msg))
+    }
+  }
+  probe(kind = "forever")
+}
+
+@"Entry (b): `replay.exponential` that RECOVERS. The converter retries the typed `probe_failed`; the probe
+fails a scripted number of times then succeeds within the budget, so the success value returns."
+agent exponential_recover_main() -> string with io | prelude.throw[probe_failed] {
+  use replay.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 5.0)
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      replay.interrupted(failure = error)
+    }
+  }
+  probe(kind = "exponential-recover")
+}
+
+@"Entry (c): `replay.exponential` that EXHAUSTS. The probe always fails, so the 2-attempt budget is spent and
+the provider re-raises the last failure as a TYPED `throw[probe_failed]`; the outer handler catches it by
+payload and returns a string — proof the exhausted failure stays typed and the program can catch it."
+agent exponential_exhaust_main() -> string with io {
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      break f"exhausted at attempt ${string.to_string(value = error.attempt)}"
+    }
+  }
+  use replay.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 2.0)
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      replay.interrupted(failure = error)
+    }
+  }
+  probe(kind = "exponential-exhaust")
+}
+
+@"Entry (d): `replay.immediate` + a converter that performs `replay.attention` (NO application handler) —
+each failure escalates to a durable open question; answering it re-runs the block, and the eventual success
+returns. The attended / re-auth loop, composed."
+agent attended_main() -> string with replay.attention[probe_failed] | io {
+  use replay.immediate()
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      replay.attention(detail = error)
+      replay.interrupted(failure = error)
+    }
+  }
+  probe(kind = "attended")
+}
+
+@"Entry (e): the same composition INTERCEPTED — an application handler above the provider answers
+`replay.attention` with `next null`, so each failure re-runs immediately and nothing escalates."
+agent intercepted_main() -> string {
+  use handler {
+    request replay.attention(detail: probe_failed) { next null }
+  }
+  use replay.immediate()
+  use handler {
+    request prelude.throw(error: probe_failed) -> never {
+      replay.attention(detail = error)
+      replay.interrupted(failure = error)
+    }
+  }
+  probe(kind = "intercepted")
+}
