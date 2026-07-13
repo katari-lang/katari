@@ -1,0 +1,214 @@
+// Failure recovery, composed — with the MECHANISM (a `replay` provider) split from the POLICY (a user
+// "converter" that decides which failures are retriable). A provider re-runs the rest of a block, but it
+// catches only ONE request, `replay.interrupted`; a converter installed between the provider and the body
+// turns exactly the throws / panics it chooses into that signal. Selective retry — "retry warming-up
+// errors, escalate a revoked credential" — is then an ordinary `match` at ONE boundary in the converter.
+
+// ── Demo (a): exponential backoff + a SELECTIVE converter ────────────────────────────────────────────────
+
+@"A transient error: the resource is still warming up on this attempt. RETRIABLE."
+data warming_up(attempt: integer)
+
+@"A fatal error: the credential was rejected. No amount of retrying fixes it — NOT retriable."
+data unauthorized(reason: string)
+
+@"THE one comparison boundary: classify a warm-up attempt number into the readiness sum once. Everything
+downstream dispatches on the sum — no other code compares the counter."
+data not_ready(attempt: integer)
+data ready(attempt: integer)
+agent readiness(attempt: integer) -> not_ready | ready {
+  if (attempt < 3) { not_ready(attempt = attempt) } else { ready(attempt = attempt) }
+}
+
+@"The ambient warm-up counter: each call returns the next attempt number. A handler provides it OUTSIDE the
+replay provider, so it survives the re-runs and counts across them."
+request warmup() -> integer
+
+@"Connect to a flaky resource. With @fatal@ false: warms up (throws `warming_up`) on attempts 1 and 2, then
+connects on attempt 3. With @fatal@ true: the credential is rejected (`unauthorized`) — a failure retrying
+cannot fix. Both are thrown; the converter decides which one replays."
+agent connect(fatal: boolean) -> string with warmup | prelude.throw[warming_up | unauthorized] {
+  if (fatal) {
+    prelude.throw(error = unauthorized(reason = "revoked credential"))
+  } else {
+    match (readiness(attempt = warmup())) {
+      case not_ready(attempt => a) -> { prelude.throw(error = warming_up(attempt = a)) }
+      case ready(attempt => a) -> { f"connected on attempt ${string.to_string(value = a)}" }
+    }
+  }
+}
+
+@"Entry: retry `connect` with millisecond exponential backoff, converting selectively. Attempts 1 and 2
+throw `warming_up`; the converter turns each into `replay.interrupted`, so the provider durably sleeps (5ms,
+then 10ms) and re-runs; attempt 3 connects. The `warmup` handler sits OUTSIDE the provider, so its counter
+accumulates across the re-runs. The outer `throw` handler is the exhaustion / fatal fallback (not reached
+here)."
+agent main() -> string {
+  use handler {
+    request prelude.throw(error: warming_up | unauthorized) -> never {
+      match (error) {
+        case warming_up(attempt => a) -> { break f"gave up while warming up (attempt ${string.to_string(value = a)})" }
+        case unauthorized(reason => r) -> { break f"unauthorized: ${r}" }
+      }
+    }
+  }
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use replay.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 5.0)
+  // THE POLICY. This converter catches both members of the throw union at ONE boundary and dispatches on
+  // the sum: a transient `warming_up` becomes a replay; a fatal `unauthorized` is rethrown (the self-catch
+  // rule proxies the rethrow past this handler to the exhaustion / fatal fallback above).
+  use handler {
+    request prelude.throw(error: warming_up | unauthorized) -> never {
+      match (error) {
+        case warming_up(_) -> { replay.interrupted(failure = error) }
+        case unauthorized(_) -> { prelude.throw(error = error) }
+      }
+    }
+  }
+  f"result: ${connect(fatal = false)}"
+}
+
+@"Exhaustion, with the error type preserved. A 2-attempt budget never reaches the attempt-3 success, so the
+provider spends it and re-raises the LAST `interrupted`'s failure as a TYPED `throw[warming_up]` — which the
+outer handler catches and reads `attempt` off. Proof that exhaustion re-raise keeps the failure typed end to
+end and never re-panics."
+agent exhausting() -> string {
+  use handler {
+    request prelude.throw(error: warming_up | unauthorized) -> never {
+      match (error) {
+        case warming_up(attempt => a) -> { break f"gave up while warming up (attempt ${string.to_string(value = a)})" }
+        case unauthorized(reason => r) -> { break f"unauthorized: ${r}" }
+      }
+    }
+  }
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use replay.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 2.0)
+  use handler {
+    request prelude.throw(error: warming_up | unauthorized) -> never {
+      match (error) {
+        case warming_up(_) -> { replay.interrupted(failure = error) }
+        case unauthorized(_) -> { prelude.throw(error = error) }
+      }
+    }
+  }
+  f"result: ${connect(fatal = false)}"
+}
+
+@"Selective retry, the fatal side. `connect(fatal = true)` throws `unauthorized`, which the converter
+RETHROWS rather than replaying — so it leaves the provider immediately (no backoff, no attempts spent) and
+the outer fallback catches it. The revoked credential does not spin; only `warming_up` would have."
+agent rejected() -> string {
+  use handler {
+    request prelude.throw(error: warming_up | unauthorized) -> never {
+      match (error) {
+        case warming_up(attempt => a) -> { break f"gave up while warming up (attempt ${string.to_string(value = a)})" }
+        case unauthorized(reason => r) -> { break f"unauthorized: ${r}" }
+      }
+    }
+  }
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use replay.exponential(initial_delay_milliseconds = 5.0, factor = 2.0, max_attempts = 5.0)
+  use handler {
+    request prelude.throw(error: warming_up | unauthorized) -> never {
+      match (error) {
+        case warming_up(_) -> { replay.interrupted(failure = error) }
+        case unauthorized(_) -> { prelude.throw(error = error) }
+      }
+    }
+  }
+  f"result: ${connect(fatal = true)}"
+}
+
+// ── Demo (b): the daemon — `replay.forever` over `time.watch` ─────────────────────────────────────────────
+
+@"A typed error a flaky delivery raises to stand in for a transient downstream failure."
+data delivery_failed(scheduled: number)
+
+@"Deliver one tick, but fail transiently by raising `delivery_failed`. A `deliver_to` failure kills
+`time.watch` by design; wrapped in `replay.forever` the watch is re-armed after a backoff instead."
+agent flaky_deliver(time: number) -> null with prelude.throw[delivery_failed] {
+  prelude.throw(error = delivery_failed(scheduled = time))
+}
+
+@"THE flagship composition: a resilient daemon. `time.watch` fires a delivery per occurrence and dies if the
+delivery fails; the converter turns that typed failure into `replay.interrupted`, and `replay.forever`
+catches it, backs off, and re-runs `watch`, which re-arms from its persisted next occurrence. Durable state
+stays FLAT no matter how many failures it has survived (the `forever` loop reclaims each attempt's frames).
+Typecheck-only: an unbounded daemon has no result to assert."
+agent daemon() -> never with io {
+  use replay.forever(initial_delay_milliseconds = 100.0, factor = 2.0, max_delay_milliseconds = 5000.0)
+  use handler {
+    request prelude.throw(error: delivery_failed) -> never {
+      replay.interrupted(failure = error)
+    }
+  }
+  time.watch(schedule = time.interval(milliseconds = 1000), deliver_to = flaky_deliver)
+}
+
+// ── Demo (c): the human in the loop — `replay.immediate` + a converter that performs `replay.attention` ────
+
+@"A revoked-session error: the access token expired and must be re-authorized before the call can succeed."
+data session_expired(scope: string)
+
+@"THE one comparison boundary for the token: classify an attempt number into expired / valid once."
+data expired(attempt: integer)
+data valid(attempt: integer)
+agent token_state(attempt: integer) -> expired | valid {
+  if (attempt < 2) { expired(attempt = attempt) } else { valid(attempt = attempt) }
+}
+
+@"Load the calendar behind a token that is expired on attempt 1 and valid on attempt 2 (once re-authorized).
+The ambient `warmup` counter, held outside the provider, drives the transition across the re-run."
+agent refresh() -> string with warmup | prelude.throw[session_expired] {
+  match (token_state(attempt = warmup())) {
+    case expired(_) -> { prelude.throw(error = session_expired(scope = "calendar")) }
+    case valid(attempt => a) -> { f"calendar loaded on attempt ${string.to_string(value = a)}" }
+  }
+}
+
+@"The attended / re-auth story, DISSOLVED into `immediate` + a converter — no dedicated `attended` provider.
+On the expired token the converter performs `replay.attention`, which (unhandled) escalates to a durable
+open question that parks the run until a human answers via `katari answer`; on the answer it performs
+`replay.interrupted`, and `immediate` re-runs the block against the restored credential. Typecheck-only here
+(running it parks on a human); the intercepted variant below runs to completion, and the runtime tests drive
+the full park → answer → re-run round-trip."
+agent reauth() -> string with replay.attention[session_expired] {
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use replay.immediate()
+  use handler {
+    request prelude.throw(error: session_expired) -> never {
+      replay.attention(detail = error)      // park for a human to re-authorize; resolves null on the answer
+      replay.interrupted(failure = error)   // then re-run the block against the fresh token
+    }
+  }
+  f"session: ${refresh()}"
+}
+
+@"The same composition, but an application intercepts `replay.attention` with its own handler (here it
+re-authorizes in-process by answering `next null`) so nothing escalates and the run completes. This is the
+interceptability the mechanism gives for free: default (escalate-and-park) vs interception (handle in
+process) is the same request, chosen by whether a handler is in scope."
+agent reauth_intercepted() -> string {
+  use handler {
+    request replay.attention(detail: session_expired) { next null }
+  }
+  use handler (var attempts = 0) {
+    request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
+  }
+  use replay.immediate()
+  use handler {
+    request prelude.throw(error: session_expired) -> never {
+      replay.attention(detail = error)
+      replay.interrupted(failure = error)
+    }
+  }
+  f"session: ${refresh()}"
+}

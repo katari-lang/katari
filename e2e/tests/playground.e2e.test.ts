@@ -300,14 +300,20 @@ test("time.main: durable now + sleep resolve through the built-in time reactor",
   expect(stdout).toContain("slept for");
 }, 20_000);
 
-test("retry_demo: exponential backoff re-runs the block until it succeeds, then exhaustion re-raises typed", async () => {
-  // `retry.exponential` re-invokes its continuation (the rest of the block) with millisecond-scale durable
-  // sleeps. `main` fails twice then succeeds; `exhausting` never succeeds, so the budget is spent and the
-  // final attempt's throw re-raises UNCHANGED and still typed (caught as `not_ready`).
-  const success = await katari(["run", "retry_demo.main", "--project", "playground"]);
-  expect(success.stdout).toContain("result: ready on attempt 3");
-  const exhausted = await katari(["run", "retry_demo.exhausting", "--project", "playground"]);
-  expect(exhausted.stdout).toContain("exhausted at attempt 2");
+test("replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
+  // A `replay` provider re-runs the block on `replay.interrupted`; a user converter decides which failures
+  // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);
+  // `exhausting` spends a 2-attempt budget and the exhaustion re-raises the TYPED `warming_up`; `rejected`
+  // shows selective retry — the fatal `unauthorized` is rethrown, not replayed, so it leaves at once; and
+  // `reauth_intercepted` composes `immediate` + an intercepted `replay.attention` to re-run in place.
+  const success = await katari(["run", "replay_demo.main", "--project", "playground"]);
+  expect(success.stdout).toContain("result: connected on attempt 3");
+  const exhausted = await katari(["run", "replay_demo.exhausting", "--project", "playground"]);
+  expect(exhausted.stdout).toContain("gave up while warming up (attempt 2)");
+  const rejected = await katari(["run", "replay_demo.rejected", "--project", "playground"]);
+  expect(rejected.stdout).toContain("unauthorized: revoked credential");
+  const reauth = await katari(["run", "replay_demo.reauth_intercepted", "--project", "playground"]);
+  expect(reauth.stdout).toContain("session: calendar loaded on attempt 2");
 }, 20_000);
 
 test("ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
