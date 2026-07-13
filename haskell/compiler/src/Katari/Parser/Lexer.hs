@@ -354,7 +354,7 @@ qualifiedName = do
 -- ...) are deliberately absent: they are recognised positionally by the type parser and remain
 -- usable as expression identifiers / module names (e.g. @array.get@). @forever@ is likewise absent —
 -- it is recognised positionally by the expression parser (only at an expression head directly before
--- a @{@), so the stdlib's @retry.forever@ agent keeps its name.
+-- a @{@), so the stdlib's @replay.forever@ agent keeps its name.
 reservedWords :: Set Text
 reservedWords =
   Set.fromList

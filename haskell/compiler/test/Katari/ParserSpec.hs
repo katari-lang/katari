@@ -297,7 +297,7 @@ spec = do
         _ -> expectationFailure "expected a forever loop"
 
     it "keeps `forever` an ordinary identifier away from a loop head (a call, and a declared agent name)" $ do
-      -- The word is recognised positionally (only directly before `{`), so the stdlib's `retry.forever`
+      -- The word is recognised positionally (only directly before `{`), so the stdlib's `replay.forever`
       -- agent — declared and called by that name — must keep parsing as an identifier.
       body <- parseClean "agent main() -> integer { forever(x = 1) }" >>= soleAgentBody
       case body.returnExpression of

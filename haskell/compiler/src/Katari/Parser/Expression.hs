@@ -365,7 +365,7 @@ forExpression = do
   forBody False forSpan
 
 -- | @forever { body }@ — repeat the block indefinitely (the expression types as @never@). `forever` is
--- deliberately NOT a reserved word (see 'reservedWords': the stdlib's `retry.forever` agent keeps its
+-- deliberately NOT a reserved word (see 'reservedWords': the stdlib's `replay.forever` agent keeps its
 -- name); it is recognised positionally, like the type-only words — only at an expression head with a `{`
 -- directly after it. The `try` backtracks a call (`forever(...)`) or a bare reference into the ordinary
 -- identifier expression. The body introduces no loop context of its own: `forever` has no jump target

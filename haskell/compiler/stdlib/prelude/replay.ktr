@@ -1,0 +1,189 @@
+// The `prelude.replay` sub-module: the retry MECHANISM, split cleanly from the failure POLICY. A `replay`
+// provider re-runs the rest of a block, but it knows NOTHING about what counts as a retriable failure. It
+// catches exactly one request — `interrupted` — and re-runs after its policy's delay. Deciding WHICH
+// failures become an `interrupted` is user code: an ordinary `use handler` (a "converter") installed
+// between the provider and the body that turns the throws / panics it chooses into `replay.interrupted`.
+//
+//   use replay.exponential(initial_delay_milliseconds = 1000, factor = 2, max_attempts = 5)
+//   use handler {
+//     // POLICY: this converter decides. Only transient errors become a replay; the rest rethrow.
+//     request prelude.throw(error: fetch_error | auth_error) -> never {
+//       match (error) {
+//         case fetch_error(_) -> { replay.interrupted(failure = error) }   // transient -> replay
+//         case auth_error(_)  -> { prelude.throw(error = error) }          // fatal     -> rethrow (proxies up)
+//       }
+//     }
+//   }
+//   <body>   // performs interrupted (via the converter); the provider sleeps and re-runs it
+//
+// WHY THE SPLIT. The predecessor (`prelude.retry`) folded BOTH failure channels into the mechanism: its
+// `attempt` caught every `throw` and every `panic` indiscriminately, so `retry.forever` spun forever on a
+// revoked-credential `auth_error` exactly as on a transient `fetch_error` — there was no way to retry one
+// and escalate the other. Moving the catch OUT of the mechanism and into a user converter makes selective
+// retry an ordinary `match`, makes retrying a `panic` an explicit opt-in in source, and dissolves the old
+// "a caught panic cannot be re-raised from Katari" problem: by the time control reaches a provider every
+// failure is already an `interrupted[F]` whose `F` the converter chose as a value, so exhaustion re-raises
+// a TYPED `throw[F]` and never needs to re-panic.
+
+@"The replay signal — the ONE request a `replay` provider catches. A converter performs it to ask that the
+enclosing block be re-run, carrying the failure it chose to represent as @failure@ (of the converter's own
+type @F@). `-> never`: performing it transfers control to the provider (which applies its delay policy and
+re-runs) and does not return. This is the whole seam between policy and mechanism — a provider reasons only
+about `interrupted`, never about `throw` or `panic`."
+request interrupted[F](failure: F) -> never
+
+@"An OPTIONAL fold of a caught typed `throw`'s payload into an `interrupted` value. `thrown` / `panicked`
+below give a converter a ready `F` when it retries on BOTH channels — a typed `throw` AND a `panic` — so the
+two settle to one type. It is NOT used by the mechanism: a converter that retries only one channel picks its
+own `F` (often the throw's payload directly), and this fold exists purely as a convenience for the both-
+channels case. @E@ is the throw's payload, preserved."
+data thrown[E](error: E)
+
+@"An OPTIONAL fold of a caught `panic`'s @message@ into an `interrupted` value — the panic arm of `failure`."
+data panicked(message: string)
+
+// The both-channels fold a converter may use as its `interrupted` payload. (Type synonyms take no docs.)
+type failure[E] = thrown[E] | panicked
+
+// INTERNAL PROTOCOL (below): `done`, `backoff`, `advance` and the `ran` / `signalled` / `replay_after` /
+// `give_up` sums are the machinery the providers share. A user never performs or handles them — each is
+// discharged by the provider's own handler, the innermost one — so they never reach application code. They
+// are module members only because Katari has no module-private declarations.
+
+@"The loop exit: a provider performs it with a successful run's @value@, and the provider's OWN outer
+handler `break`s the loop with it. It exists because `forever { ... }` has no built-in exit — escaping IS a
+request a surrounding handler breaks on (see `2026-07-13-forever-loop.md`). Never reaches application code."
+request done[R](value: R) -> never
+
+@"One run of the continuation that completed with a value @value@ (it did not signal a replay)."
+data ran[R](value: R)
+
+@"One run of the continuation that performed `interrupted`, carrying the @failure@ it signalled."
+data signalled[F](failure: F)
+
+@"Run the continuation once and reify which happened: `ran` with its value, or `signalled` with the failure
+it performed `interrupted` on. This is the single boundary where `interrupted` is caught and turned into a
+value the loop can `match` — the mechanism-side analog of the old `attempt`, but catching only the replay
+signal (never `throw` / `panic`, which the converter already handled). `interrupted[F]` sits in the
+continuation's OVERWRITE row because this handler DISCHARGES it (the discord-provider shape); @F@ is inferred
+from the continuation and preserved into `signalled`."
+agent run_once[R, F, effect E](
+  continuation: agent (value: null) -> R with {...E, interrupted[F]},
+) -> ran[R] | signalled[F] with E {
+  use handler {
+    request interrupted(failure: F) -> never { break signalled(failure = failure) }
+  }
+  ran(value = continuation(value = null))
+}
+
+// MECHANISM providers — three delay policies over the one `run_once` boundary. Each loops with the
+// `forever { ... }` construct so its durable footprint is FLAT no matter how many times it has replayed:
+// every finished iteration's frames are reclaimed, and the only state that persists is the loop thread and
+// the provider's one outer handler (the growing delay / attempt count live there, the ambient-state
+// pattern). The `ran` arm performs `done` as a concrete entry the outer handler discharges; the `signalled`
+// arm applies the policy's delay (or, for `exponential`, re-raises when the budget is spent).
+
+@"Replay the rest of the block on every `interrupted`, unbounded and with NO artificial delay: it re-runs at
+once. The retry cadence is therefore set entirely by whatever the converter does BEFORE it signals — e.g. a
+converter that performs `replay.attention` and parks for a human before signalling gives the attended /
+re-auth loop, human-paced with no polling. Never re-raises and never returns on its own; a converter that
+rethrows instead of signalling is how a failure leaves this loop. Written `use replay.immediate()`."
+agent immediate[R, F, effect E](
+  continuation: agent (value: null) -> R with {...E, interrupted[F], done[R]},
+) -> R with E {
+  use handler {
+    request done(value: R) -> never { break value }
+  }
+  forever {
+    match (run_once(continuation = continuation)) {
+      case ran(value => value) -> { done(value = value) }
+      case signalled(_) -> { null }
+    }
+  }
+}
+
+@"The current backoff delay, answered by `forever`'s OWN state handler: each ask returns the delay to sleep
+now and grows it toward the cap for the next replay. Never reaches application code."
+request backoff() -> number
+
+@"Replay the rest of the block on every `interrupted`, unbounded, with exponential backoff capped at
+@max_delay_milliseconds@. For daemons that must stay up across transient failures (e.g. keeping a
+`time.watch` alive): it never re-raises and never returns on its own. The backoff delay lives in the
+provider's outer handler and grows by @factor@ per replay up to the cap (`math.min`), so the loop body stays
+stateless and the durable state stays flat across any number of replays. Written
+`use replay.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`."
+agent forever[R, F, effect E](
+  initial_delay_milliseconds: number,
+  factor: number,
+  max_delay_milliseconds: number,
+  continuation: agent (value: null) -> R with {...E, interrupted[F], done[R], backoff},
+) -> R with E | io {
+  use handler (var delay = initial_delay_milliseconds) {
+    request done(value: R) -> never { break value }
+    request backoff() { next delay with { delay = math.min(left = delay * factor, right = max_delay_milliseconds) } }
+  }
+  forever {
+    match (run_once(continuation = continuation)) {
+      case ran(value => value) -> { done(value = value) }
+      case signalled(_) -> { time.sleep(milliseconds = backoff()) }
+    }
+  }
+}
+
+@"A bounded-retry decision, minted at the ONE comparison boundary (`decide`): keep going after sleeping
+@delay_milliseconds@."
+data replay_after(delay_milliseconds: number)
+
+@"The exhausted arm of a bounded-retry decision: no attempts remain, so the provider re-raises the failure."
+data give_up()
+
+@"THE one comparison boundary for `exponential`: classify the running failure count against the budget into
+a `replay_after` / `give_up` sum ONCE, so the `signalled` arm only dispatches on the sum and no code re-tests
+the counter. Below @max_attempts@ failures: `replay_after` the current @delay@; at the budget: `give_up`."
+agent decide(failures: number, max_attempts: number, delay: number) -> replay_after | give_up {
+  if (failures < max_attempts) { replay_after(delay_milliseconds = delay) } else { give_up() }
+}
+
+@"The bounded-retry decision request: each `signalled` asks the provider's outer handler for a verdict. The
+handler holds the failure count and delay and advances them per ask. Never reaches application code."
+request advance() -> replay_after | give_up
+
+@"Replay the rest of the block on `interrupted` with exponential backoff, up to @max_attempts@ times. On
+failure number n (1-based) with n < @max_attempts@: durably sleep @initial_delay_milliseconds@ *
+@factor@^(n-1), then re-run. When the budget is spent (the @max_attempts@-th `interrupted`): re-raise that
+failure as a TYPED `throw[F]` — @F@ is the converter's chosen failure representation, so exhaustion keeps the
+error typed end to end and never needs to re-panic. The failure count and delay live in the provider's outer
+handler; the `signalled` arm only dispatches on the verdict `decide` mints. Written
+`use replay.exponential(initial_delay_milliseconds = ..., factor = ..., max_attempts = ...)`."
+agent exponential[R, F, effect E](
+  initial_delay_milliseconds: number,
+  factor: number,
+  max_attempts: number,
+  continuation: agent (value: null) -> R with {...E, interrupted[F], done[R], advance},
+) -> R with E | io | prelude.throw[F] {
+  use handler (var delay = initial_delay_milliseconds, var failures = 0) {
+    request done(value: R) -> never { break value }
+    request advance() { next decide(failures = failures + 1, max_attempts = max_attempts, delay = delay) with { failures = failures + 1, delay = delay * factor } }
+  }
+  forever {
+    match (run_once(continuation = continuation)) {
+      case ran(value => value) -> { done(value = value) }
+      case signalled(failure => failure) -> {
+        match (advance()) {
+          case replay_after(delay_milliseconds => milliseconds) -> { time.sleep(milliseconds = milliseconds) }
+          case give_up(_) -> { prelude.throw(error = failure) }
+        }
+      }
+    }
+  }
+}
+
+@"A standard escalation a converter may perform to put a human in the loop: it carries the @detail@ of the
+failure and, unhandled, escalates to a durable open question that parks the run until `katari answer`, then
+resolves with `null`. The attended / re-auth loop composes from it — `use replay.immediate()` plus a
+converter that performs `attention(detail = error)` (parks) and then `replay.interrupted(failure = error)`
+(re-runs on the answer). An application may instead install its OWN `attention` handler above the provider
+(e.g. post to a chat and wait there) and `next null` to trigger the replay, or `break` to give up with a
+value — the same request, the interception chosen by whether a handler is in scope. Kept here only as a
+documented convenience; nothing in the mechanism depends on it."
+request attention[F](detail: F) -> null

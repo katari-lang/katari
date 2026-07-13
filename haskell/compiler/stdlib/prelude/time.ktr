@@ -59,7 +59,7 @@ Deliveries are serialized: the next occurrence is not armed until the current de
 
 No built-in retry. A @deliver_to@ that throws or panics is NOT retried — the failure propagates and kills
 the watch, exactly as an uncaught failure in any callee does. Resilience is composed at the call site (a
-retry provider wrapping @deliver_to@), never baked into `watch`."
+`replay` provider plus a converter around @deliver_to@), never baked into `watch`."
 external agent watch[effect E](
   schedule: schedule,
   deliver_to: agent (time: number) -> null with E,
