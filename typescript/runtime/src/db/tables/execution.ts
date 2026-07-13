@@ -1,8 +1,9 @@
-// The execution layer: the instance envelope + its per-kind extensions (`core_instances` / `ffi_instances`),
-// the request/capability edges (delegations, escalations), and the API's per-run management record (runs +
-// escalations audit). The instance is class-table inheritance — a generic envelope (the ownership / cascade /
-// load unit) plus a kind-specific extension keyed by it; an in-flight external (FFI) call is an `ffi`-kind
-// instance (`ffi_instances`), not a separate `ffi_calls` table.
+// The execution layer: the instance envelope + its kind extensions (`core_instances` /
+// `external_call_instances`), the request/capability edges (delegations, escalations), and the API's
+// per-run management record (runs + escalations audit). The instance is class-table inheritance — a
+// generic envelope (the ownership / cascade / load unit) plus a kind-specific extension keyed by it; an
+// in-flight external call is an external-kind instance with an `external_call_instances` row, not a
+// per-kind `*_calls` table.
 //
 // An instance is ephemeral: it self-deletes at its terminal (the project cascade is only a crash
 // backstop), and terminal outcomes live on `runs`, not here. The parent→child edge is the `delegations`
@@ -11,12 +12,14 @@
 // through `delegations.caller_instance_id`. A `core` instance's `target` holds the agent reference
 // `(qname, snapshot) | closure`; its `snapshotId` is the version denormalised out of it for the FK.
 //
-// Snapshot retention: a *running* version is pinned by an extension's `snapshotId` (`core_instances` /
-// `ffi_instances`, ON DELETE NO ACTION) — that, plus `projects.head_snapshot_id`, is what keeps a live
-// snapshot undeletable. A finished run's `runs.snapshotId` is only audit, so it is ON DELETE SET NULL: it
-// must NOT keep every version a run ever touched alive forever, or future snapshot GC could never reclaim
-// anything.
+// Snapshot retention: a *running* core activation pins its version by FK (`core_instances.snapshot_id`,
+// ON DELETE NO ACTION) — that, plus `projects.head_snapshot_id`, is what keeps a live snapshot
+// undeletable. An external call's snapshot id rides inside its extension document as plain data (a future
+// snapshot GC must consult live external calls, not just FKs). A finished run's `runs.snapshotId` is only
+// audit, so it is ON DELETE SET NULL: it must NOT keep every version a run ever touched alive forever, or
+// future snapshot GC could never reclaim anything.
 
+import type { Json } from "@katari-lang/types";
 import { sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
@@ -28,13 +31,10 @@ import {
   primaryKey,
   text,
   timestamp,
-  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import type { EngineState, InstanceKind, InstanceStatus } from "../../runtime/engine/types.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../../runtime/event/types.js";
-import type { McpDispatchCall } from "../../runtime/mcp-dispatch.js";
-import type { TimeOperation } from "../../runtime/time-schedule.js";
 import type { GenericSubstitution, Value } from "../../runtime/value/types.js";
 import { projects, snapshots } from "./projects.js";
 
@@ -45,6 +45,13 @@ import { projects, snapshots } from "./projects.js";
 // terminal outcome on `runs` (below), so `RunState` still carries the terminal values.
 export type DelegationState = "running" | "cancelling";
 export type RunState = "running" | "cancelling" | "done" | "error" | "cancelled";
+
+/** The lifecycle of an in-flight external call, one union for every call reactor: `running` (transport in
+ *  flight / endpoint serving), `cancelling` (aborting, awaiting the transport's stop and the children's
+ *  drain), or `awaitingAnswer` (the transport errored, the failure escalated, awaiting a caught answer or
+ *  the run's terminate). Persisted on `external_call_instances.status` because the envelope collapses
+ *  `awaitingAnswer` to the `running` instance lifecycle (alive, waiting). */
+export type ExternalCallStatus = "running" | "cancelling" | "awaitingAnswer";
 
 /** The terminal run states — a run that reached one of these is finished (its `completedAt` is set). */
 export const TERMINAL_RUN_STATES = [
@@ -59,10 +66,11 @@ export function isTerminalRunState(state: RunState): boolean {
 }
 
 // The instance *envelope*: the generic columns every kind shares (the ownership / cascade / load unit). The
-// kind-specific state lives in a per-kind extension table (`core_instances`, `ffi_instances`) keyed by this
-// id — class-table inheritance, so the envelope carries no nullable subtype columns and a new reactor kind is
-// a new extension table, not an `instances` ALTER. The `api` management root is a bare envelope row (no
-// extension). Each reactor persists this through the base class uniformly (kind = its own reactor name).
+// kind-specific state lives in an extension table keyed by this id (`core_instances` for an engine
+// activation, `external_call_instances` for every call reactor's in-flight call) — class-table
+// inheritance, so the envelope carries no nullable subtype columns. The `api` management root is a bare
+// envelope row (no extension). Each reactor persists this through the base class uniformly (kind = its
+// own reactor name).
 export const instances = pgTable(
   "instances",
   {
@@ -130,252 +138,55 @@ export const coreInstances = pgTable("core_instances", {
   engineState: jsonb("engine_state").$type<EngineState>().notNull(),
 });
 
-// The `ffi` instance extension: an in-flight external call (what was `ffi_calls`). Cascades with its
-// envelope; pins its snapshot (the compiled sidecar bundle hosting the handler). The delegation it handles
-// is its envelope's `delegation_id`. Like `http_instances` it stores no argument: recovery is at-most-once
-// (a handler is never re-run — a call whose process died fails as a panic), so nothing reads it back.
-export const ffiInstances = pgTable("ffi_instances", {
+// The external-call extension: ONE table for every call reactor's in-flight calls (ffi / http / webhook /
+// mcp / time), because the persistence unit is the same shape for all of them — the envelope (above), the
+// precise call `status`, and a kind-specific `extension` document holding whatever the reactor needs to
+// reconstruct the call on reload. The reactor self-selects its rows by joining the envelope's `kind` (the
+// SoT for which reactor owns a call), so no reactor column is repeated here; the extension's TypeScript
+// shape lives in the owning reactor's pure codec (`encode…Extension` / `decode…Extension`), never in SQL.
+// The whole document seals uniformly (private Value nodes anywhere in it become `$sealed` — one rule,
+// not a per-kind column enumeration). Cascades with its envelope.
+export const externalCallInstances = pgTable("external_call_instances", {
   instanceId: uuid("instance_id")
     .primaryKey()
     .references(() => instances.id, { onDelete: "cascade" }),
-  /** The snapshot whose compiled sidecar bundle hosts this handler — pins the version (no cascade). */
-  snapshotId: uuid("snapshot_id")
-    .notNull()
-    .references(() => snapshots.id),
-  /** The handler dispatch key (the external block's `key`). */
-  key: text("key").notNull(),
-  /** running (transport in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
-   *  awaiting a caught-panic answer or the run's terminate). The caller reactor its reply routes to is on the
-   *  generic envelope (`instances.caller_reactor`), not repeated here. */
-  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-  /** The escalations this call is proxying upward for its inner delegations (outer id → the child leg the
-   *  answer descends to) — so an in-flight answer still routes down after a restart. */
-  relays: jsonb("relays")
-    .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
-    .notNull()
-    .default([]),
-  /** The call's open inner delegations and the sidecar `call` token each settles under — so a result landing
-   *  after a warm reset still reaches its consumer in the (still-running) sidecar process. */
-  innerCalls: jsonb("inner_calls")
-    .$type<Array<{ delegation: string; call: string }>>()
-    .notNull()
-    .default([]),
+  /** The call's precise lifecycle — the envelope collapses `awaitingAnswer` to `running`, so it lives here. */
+  status: text("status").$type<ExternalCallStatus>().notNull(),
+  /** The kind-specific reconstruction material, written and read only through the owning reactor's codec.
+   *  What rides here is exactly what must survive a restart: a webhook's token + callback, a time call's
+   *  operation, an mcp call's serve/provide/parked sum, an ffi call's snapshot + key — and the
+   *  inner-delegation bridges (relays / innerCalls) for the kinds that open inner delegations. What must
+   *  NOT survive is exactly what is absent: no argument for the at-most-once kinds (recovery never
+   *  re-runs external work, and an argument may carry secrets). */
+  extension: jsonb("extension").$type<Json>().notNull(),
 });
 
-// The `http` instance extension: an in-flight http call. Cascades with its envelope. Unlike `ffi`, it pins no
-// snapshot and stores no request (recovery never re-sends an http request — see `HttpReactor`), so it carries
-// only the call-specific `status` the envelope cannot (the envelope collapses `awaitingAnswer` to `running`).
-// Its caller reactor (reply-to) and the delegation it handles are both on the generic envelope.
-export const httpInstances = pgTable("http_instances", {
-  instanceId: uuid("instance_id")
-    .primaryKey()
-    .references(() => instances.id, { onDelete: "cascade" }),
-  /** running (request in flight) | cancelling (aborting) | awaitingAnswer (errored, the panic escalated,
-   *  awaiting a caught-panic answer or the run's terminate). On recovery a running call is reconciled with
-   *  the transport (at-most-once: a surviving request is left alone, a gone one fails), a cancelling call
-   *  is aborted, an awaitingAnswer one waits. */
-  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-});
-
-// The `mcp` instance extension: an in-flight mcp call. Like `http` it pins no snapshot and stores no
-// request for the TRANSPORT-backed shapes (a minted tool's call, a direct `prelude.mcp.call`; a
-// `prelude.mcp.provide` listing rides an internal side delegation, never a call of its own) — recovery
-// never re-sends (gone work fails as a typed `mcp.server_error`, and a katari-level retry reconnects
-// through the transport's descriptor cache) — so it carries only the call-specific `status` the envelope
-// cannot (the envelope collapses `awaitingAnswer` to `running`). The ONE dispatch-shaped exception is a
-// PARKED transport call (awaiting a `prelude.mcp.authorize` answer), whose re-runnable dispatch lives in
-// the `mcp_parked_instances` subtype below. A `serve` / `provide` endpoint's durable state is NOT here
-// either: it lives in the `mcp_serve_instances` / `mcp_provide_instances` SUBTYPE tables, so an mcp call
-// is a transport|serve|provide union discriminated by those tables' presence, NOT by nullable columns on
-// this one (class-table inheritance — the "no nullable subtype columns" doctrine this schema preaches).
-export const mcpInstances = pgTable("mcp_instances", {
-  instanceId: uuid("instance_id")
-    .primaryKey()
-    .references(() => instances.id, { onDelete: "cascade" }),
-  /** running (request in flight / endpoint serving) | cancelling (aborting) | awaitingAnswer (errored,
-   *  the throw escalated, awaiting a caught answer or the run's terminate). */
-  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-});
-
-// The `mcp` SERVE extension: a `prelude.mcp.serve` endpoint's durable state — the subtype half of an mcp
-// call, keyed by (and cascading with) its `mcp_instances` row, so serve state is a table, not a nullable
-// column set. Pins its snapshot (the version the served agents dispatch against), like `webhook_instances`.
-// Persists its payload, unlike the transport shapes: the `serve_token` must survive a restart (the URL is
-// the capability an MCP caller holds) and the served `serve_tools` record must too (future tool calls
-// dispatch its agents) — the subscriber does not (dispatched exactly once; its inner delegation is durable
-// core work). Its inner-delegation bridges (`relays` / `inner_calls`) live here because only a serve call
-// opens inner delegations.
-export const mcpServeInstances = pgTable(
-  "mcp_serve_instances",
+// The capability-token routing index: `token` → the (project, instance) serving it, for the public
+// endpoints an external caller reaches with NOTHING but the token (`POST /inbound/<token>`,
+// `POST /mcp/<token>`). The SoT for the token is the call's extension document (warm re-registration
+// reads it from there on reload); this row is a projection maintained in the SAME commit as the call row
+// by the minting reactor, existing only so a cold inbound POST can find its project before any actor is
+// warm. Teardown is the FK cascade — the route dies with its instance, never by an explicit delete.
+export const capabilityRoutes = pgTable(
+  "capability_routes",
   {
+    /** The unguessable URL token — the capability itself, globally unique across kinds. Plaintext, as the
+     *  per-kind unique token indexes it replaces were: the token is a public-facing capability, not a
+     *  secret value. */
+    token: text("token").primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
     instanceId: uuid("instance_id")
-      .primaryKey()
-      .references(() => mcpInstances.instanceId, { onDelete: "cascade" }),
-    /** The snapshot the served tools / subscriber dispatch against — pins the version (no cascade), like
-     *  `webhook_instances.snapshot_id`. */
-    snapshotId: uuid("snapshot_id")
       .notNull()
-      .references(() => snapshots.id),
-    /** The unguessable URL token (`POST /mcp/<token>`) — the endpoint's capability. Globally unique, so the
-     *  public route resolves a token to its project without any other key. */
-    serveToken: text("serve_token").notNull(),
-    /** The served tools record each MCP `tools/call` dispatches (key = tool name, value = an agent /
-     *  closure / tool reference). Sealed like every stored value. */
-    serveTools: jsonb("serve_tools").$type<Value>().notNull(),
-    /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`). */
-    relays: jsonb("relays")
-      .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
-      .notNull()
-      .default([]),
-    /** The call's open inner delegations (the subscriber, in-flight served tool calls) and the local
-     *  token each settles under — so a call landing after a warm reset still finds its consumer. */
-    innerCalls: jsonb("inner_calls")
-      .$type<Array<{ delegation: string; call: string }>>()
-      .notNull()
-      .default([]),
-  },
-  (table) => [uniqueIndex("mcp_serve_instances_serve_token_idx").on(table.serveToken)],
-);
-
-// The `mcp` PROVIDE extension: a `prelude.mcp.provide` scope's durable state — the sibling subtype of
-// `mcp_serve_instances` (an mcp call is a transport|serve|provide union, discriminated by WHICH subtype
-// table holds a row, never by nullable columns on `mcp_instances`). A `provide` lists a server, hands its
-// continuation a `toolbox[URL]`, and lives for the extent of that continuation, gating tool calls by a
-// runtime `scope_id`. Persists its payload, like serve: the `scope_id` must survive a restart (minted tool
-// values carry it, so a stored tool re-resolves to the re-registered scope) and the `descriptor` too (the
-// url + auth the scope connects and evicts under). The `continuation` is stored ONLY while the provide is
-// still listing (not yet dispatched into the block) — null once active, so a restart mid-listing re-lists
-// and a restart mid-block resumes the durable continuation delegation. Its inner-delegation bridges
-// (`relays` / `inner_calls`) live here because only a serve/provide call opens inner delegations.
-export const mcpProvideInstances = pgTable(
-  "mcp_provide_instances",
-  {
-    instanceId: uuid("instance_id")
-      .primaryKey()
-      .references(() => mcpInstances.instanceId, { onDelete: "cascade" }),
-    /** The snapshot the minted tools / continuation dispatch against — pins the version (no cascade), like
-     *  `mcp_serve_instances.snapshot_id`. */
-    snapshotId: uuid("snapshot_id")
-      .notNull()
-      .references(() => snapshots.id),
-    /** The runtime scope identity minted at provide open — the token minted tool values carry in their
-     *  context, checked live at each tool call. Globally unique, so a restart re-registers exactly it. */
-    scopeId: text("scope_id").notNull(),
-    /** The server descriptor (`{ url, auth }`) the scope connects under: the transport cache key to evict on
-     *  scope close, and the descriptor `directCall` matches a live scope against. Sealed (auth may be secret). */
-    descriptor: jsonb("descriptor").$type<Value>().notNull(),
-    /** The continuation dispatched once the listing lands, stored ONLY until then (null once active — the
-     *  dispatched continuation is durable core work). A reload with a non-null continuation is a
-     *  listing-phase interruption: re-list; a null one is an active scope: re-register and resume. Sealed. */
-    continuation: jsonb("continuation").$type<Value | null>(),
-    /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`). */
-    relays: jsonb("relays")
-      .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
-      .notNull()
-      .default([]),
-    /** The call's open inner delegations (the continuation, resolved through the bridge on reload) and the
-     *  local token each settles under. */
-    innerCalls: jsonb("inner_calls")
-      .$type<Array<{ delegation: string; call: string }>>()
-      .notNull()
-      .default([]),
-  },
-  (table) => [uniqueIndex("mcp_provide_instances_scope_id_idx").on(table.scopeId)],
-);
-
-// The `mcp` PARKED extension: a transport call's re-runnable dispatch, present exactly while the call is
-// parked on a `prelude.mcp.authorize` escalation. Transport calls otherwise persist NO dispatch data
-// (at-most-once: an interrupted in-flight call may have executed server-side, so recovery refuses it) —
-// but a parked call's attempt was REJECTED with an authorization failure (an HTTP 401 rejection
-// guarantees non-execution), so re-running it once the escalation is answered is safe across restarts.
-// The row is written in the same commit that opens the escalation and deleted in the same commit that
-// retires it (the answer), so "open authorize escalation" ⟺ "parked row present": a crash between the
-// answer's commit and the post-commit re-dispatch reloads a plain in-flight call, and the ordinary
-// at-most-once refusal applies again. Cascades with its `mcp_instances` row like the other subtypes.
-export const mcpParkedInstances = pgTable("mcp_parked_instances", {
-  instanceId: uuid("instance_id")
-    .primaryKey()
-    .references(() => mcpInstances.instanceId, { onDelete: "cascade" }),
-  /** The whole dispatch-shaped call (`callTool | directCall` — see `McpDispatchCall`). Its Values may
-   *  carry private leaves (a secret header in a directCall's descriptor), so it seals like every stored
-   *  value. */
-  call: jsonb("call").$type<McpDispatchCall>().notNull(),
-});
-
-// The `webhook` instance extension: an in-flight `webhook.inbound` call — a dynamically generated public
-// endpoint serving for the extent of its subscriber. Cascades with its envelope; pins its snapshot (the
-// version the callback / subscriber dispatch against). Unlike `ffi` / `http` it persists its payload: the
-// `token` must survive a restart (the URL is the capability an external caller holds) and the `callback`
-// must too (future deliveries dispatch it) — the subscriber does not (dispatched exactly once; its inner
-// delegation is durable core work that resumes on its own).
-export const webhookInstances = pgTable(
-  "webhook_instances",
-  {
-    instanceId: uuid("instance_id")
-      .primaryKey()
       .references(() => instances.id, { onDelete: "cascade" }),
-    /** The snapshot the call was dispatched against — the callback / subscriber delegations pin it. */
-    snapshotId: uuid("snapshot_id")
-      .notNull()
-      .references(() => snapshots.id),
-    /** The unguessable URL token (`POST /inbound/<token>`) — the endpoint's capability. Globally unique, so
-     *  the public route resolves a token to its project without any other key. */
-    token: text("token").notNull(),
-    /** The callback value each delivery dispatches (an agent / closure / tool reference). Sealed like every
-     *  stored value; a closure's captured scope is durable core state, so the reference stays resolvable. */
-    callback: jsonb("callback").$type<Value>().notNull(),
-    /** running (serving) | cancelling (tearing down) | awaitingAnswer (the subscriber failed, its panic /
-     *  throw escalated, awaiting an answer or the run's terminate). */
-    status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-    /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`). */
-    relays: jsonb("relays")
-      .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
-      .notNull()
-      .default([]),
-    /** The call's open inner delegations (the subscriber, in-flight deliveries) and the local token each
-     *  settles under — so a delivery landing after a warm reset still finds its consumer. */
-    innerCalls: jsonb("inner_calls")
-      .$type<Array<{ delegation: string; call: string }>>()
-      .notNull()
-      .default([]),
   },
-  (table) => [uniqueIndex("webhook_instances_token_idx").on(table.token)],
+  (table) => [
+    // Instances delete constantly (every call resolution); the cascade must find a dying instance's
+    // routes without scanning (parity with `escalations_raiser_instance_id_idx`).
+    index("capability_routes_instance_id_idx").on(table.instanceId),
+  ],
 );
-
-// The `time` instance extension: an in-flight `prelude.time.*` call — a `now` reading, a durable `sleep`, or a
-// `watch`. Cascades with its envelope; pins its snapshot (the version a `watch`'s `deliver_to` dispatches
-// against; for `now` / `sleep` it is the calling version, pinned uniformly). Unlike the capability-URL
-// endpoints (`webhook` / `mcp serve`) a time call has no external token to look up, so its whole per-variant
-// payload rides in one jsonb `operation` column (a tagged union like `core_instances.target`) rather than
-// split columns or subtype tables — the deadline / schedule / next-occurrence cursor / `deliver_to` all live
-// there. That column is SEALED (the `deliver_to` value may close over a secret). `now` / `sleep` open no inner
-// delegations, so their `relays` / `inner_calls` stay empty; only a `watch`'s per-tick delivery uses them.
-export const timeInstances = pgTable("time_instances", {
-  instanceId: uuid("instance_id")
-    .primaryKey()
-    .references(() => instances.id, { onDelete: "cascade" }),
-  /** The snapshot the call pins — a `watch` dispatches its `deliver_to` against it (no cascade). */
-  snapshotId: uuid("snapshot_id")
-    .notNull()
-    .references(() => snapshots.id),
-  /** The call's whole per-variant work as a sealed tagged union (`now` / `sleep{deadline}` /
-   *  `watch{schedule, deliverTo, cursor}`) — the deliver_to value may capture private state, so it seals. */
-  operation: jsonb("operation").$type<TimeOperation>().notNull(),
-  /** running (waiting / serving) | cancelling (tearing down) | awaitingAnswer (a watch's deliver_to failed,
-   *  its throw / panic escalated, awaiting an answer or the run's terminate). */
-  status: text("status").$type<"running" | "cancelling" | "awaitingAnswer">().notNull(),
-  /** The escalations this call is proxying upward for its inner delegations (see `ffi_instances.relays`);
-   *  only a `watch`'s tick delivery opens inner delegations, so empty for `now` / `sleep`. */
-  relays: jsonb("relays")
-    .$type<Array<{ escalation: string; child: string; childEscalation: string }>>()
-    .notNull()
-    .default([]),
-  /** The call's open inner delegations (a `watch`'s in-flight tick) and the local token each settles under. */
-  innerCalls: jsonb("inner_calls")
-    .$type<Array<{ delegation: string; call: string }>>()
-    .notNull()
-    .default([]),
-});
 
 /** The parent→child edge and recovery outbox: the issuer's durable record of a child it summoned, and
  *  the correlation id its `delegateAck` carries. Cascades with the caller (it is meaningless without it). */
@@ -462,7 +273,7 @@ export const escalations = pgTable(
  *  writes (transactional outbox / consumer), so a crash neither loses an in-flight event nor double-delivers
  *  it. The actor drains this into its mailbox; on recovery the undrained rows are replayed. (FFI completions
  *  are NOT here — they are an ephemeral transport side channel; the ffi reactor reconciles its in-flight
- *  calls from its own `ffi_instances` rows on recovery.) */
+ *  calls from its own `external_call_instances` rows on recovery.) */
 export const outbox = pgTable(
   "outbox",
   {

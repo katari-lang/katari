@@ -4,7 +4,7 @@
 // reactor's `complete`) resumes it.
 //
 // `dispatch` is fire-and-forget: the outcome is asynchronous and arrives via the sink. The in-flight call is
-// durable as the reactor's `http_instances` row, so recovery knows it existed. There is no safe re-send (an
+// durable as the reactor's external-call row, so recovery knows it existed. There is no safe re-send (an
 // http request is not idempotent / dedup-able), so `recover` never fetches: a request this transport still
 // holds is left to complete (a warm reset), a gone one reports an `error` straight away (a mid-flight
 // restart is a failure), which the reactor turns into a `panic` the caller can handle locally. This

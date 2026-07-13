@@ -10,8 +10,16 @@
 // `transaction` is a time-slice snapshot of what one turn touched, for recovery. v0.1.0 ships three
 // implementations: an in-memory no-op (`InMemoryPersistence` — the warm store is the truth), an in-memory
 // *storing* twin (`StoringPersistence`, for recovery tests), and a drizzle-backed one (`DbPersistence`).
+// The latter two share one turn-commit implementation over a `RowStore` (see `row-store.ts`), so their
+// semantics cannot drift; only the row CRUD differs.
+//
+// External calls persist through ONE parametric port pair (`ExternalTx` / `ExternalLoader`): every call
+// reactor's durable unit is the same shape — envelope + status + a kind-specific extension document —
+// and the port never learns what is inside the document. Its type lives in the owning reactor's pure
+// codec (`encode…Extension` / `decode…Extension`), so a new call reactor is a codec, not a port change.
 
-import type { DelegationState, RunState } from "../../db/tables/execution.js";
+import type { Json } from "@katari-lang/types";
+import type { DelegationState, ExternalCallStatus, RunState } from "../../db/tables/execution.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type {
   BlobId,
@@ -23,8 +31,6 @@ import type {
   ScopeId,
   SnapshotId,
 } from "../ids.js";
-import type { McpDispatchCall } from "../mcp-dispatch.js";
-import type { TimeOperation } from "../time-schedule.js";
 import type { Value } from "../value/types.js";
 import type {
   DeserializedEngine,
@@ -47,11 +53,11 @@ export interface PersistedDelegation {
   state: DelegationState;
 }
 
-/** A raiser-owned (open) escalation row (the `escalations` table shape). The raiser is a `core` instance today;
- *  the row exists only while open (answering deletes it — the Q&A lives in the audit). `fromReactor` (the
- *  raiser's reactor) / `toReactor` (the reactor the escalate was addressed to) let each reactor self-select on
- *  restart — `toReactor = "api"` ⟺ the raiser is a run root (a user-facing escalation). `delegation` is the
- *  raiser's delegation (the answer's routing); `run` is the run instance it belongs to (its attribution). */
+/** A raiser-owned (open) escalation row (the `escalations` table shape). The row exists only while open
+ *  (answering deletes it — the Q&A lives in the audit). `fromReactor` (the raiser's reactor) / `toReactor`
+ *  (the reactor the escalate was addressed to) let each reactor self-select on restart — `toReactor = "api"`
+ *  ⟺ the raiser is a run root (a user-facing escalation). `delegation` is the raiser's delegation (the
+ *  answer's routing); `run` is the run instance it belongs to (its attribution). */
 export interface PersistedEscalation {
   escalation: EscalationId;
   raiser: InstanceId;
@@ -62,6 +68,10 @@ export interface PersistedEscalation {
   request: string;
   argument: Value | null;
 }
+
+/** A persisted open escalation as a reactivation reads it — the same shape the raiser wrote (see
+ *  `PersistedEscalation`), re-exported under the read-side name the loaders and tests use. */
+export type PersistedOpenEscalation = PersistedEscalation;
 
 /** One produced external event awaiting delivery — a durable outbox row. Routing is carried on the event
  *  itself (`from` / `to`) and recovered from the engine threads, so no issuer is stored. */
@@ -105,40 +115,9 @@ export interface PersistedRunEscalationAudit {
   answer: Value;
 }
 
-/** One escalation an ffi call is proxying upward: the outer id it was re-raised under, and the child leg
- *  (inner delegation + its escalation) the answer descends to. Rides on the call's ext row so an in-flight
- *  answer still routes down after a restart. */
-export interface PersistedEscalationRelay {
-  escalation: EscalationId;
-  child: DelegationId;
-  childEscalation: EscalationId;
-}
-
-/** One inner delegation's transport correlation (delegation ↔ the sidecar's `call` token), riding on the
- *  call's ext row so a settled result still finds its consumer after a warm reset. */
-export interface PersistedInnerCall {
-  delegation: DelegationId;
-  call: string;
-}
-
-/** The `ffi` instance extension write (`ffi_instances`) — the call-specific state behind an `ffi`-kind
- *  instance envelope. The delegation it handles is on the envelope (`delegation_id`), so it is not repeated
- *  here; `projectId` is injected by the transaction. The argument is NOT stored: recovery never re-runs a
- *  handler (at-most-once, like http), so nothing reads it back — and it may carry secrets. */
-export interface PersistedFfiInstanceRow {
-  instanceId: InstanceId;
-  /** The snapshot whose sidecar bundle hosts the handler — pins the running version. */
-  snapshotId: SnapshotId;
-  key: string;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
 /** The envelope half every reloaded in-flight call shares (the join key + routing): `delegation` keys the
  *  reactor's warm call, `instance` is the call's own id (the issuer on its replies), `caller` is the
- *  reactor to reply to, and `run` is the run the call belongs to (its trace context). Each kind's loaded
- *  instance is this plus whatever its extension row carries. */
+ *  reactor to reply to, and `run` is the run the call belongs to (its trace context). */
 export interface PersistedCallEnvelope {
   delegation: DelegationId;
   instance: InstanceId;
@@ -146,145 +125,33 @@ export interface PersistedCallEnvelope {
   run: InstanceId;
 }
 
-/** One in-flight FFI call a reactivation reads (envelope ⋈ `ffi_instances`). */
-export interface PersistedFfiInstance extends PersistedCallEnvelope {
-  snapshot: SnapshotId;
-  key: string;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
-/** The status-only instance extension write (`http_instances`) — just the call-specific `status` (the
- *  envelope cannot carry `awaitingAnswer`), behind the kind's instance envelope. The delegation the call
- *  handles and the caller reactor its reply routes to are both on the envelope, and no argument is stored
- *  (recovery never re-sends — at-most-once). One shape serves every reactor whose calls persist nothing
- *  beyond their status, so the next such reactor adds no new row types. */
-export interface PersistedStatusOnlyInstanceRow {
+/** One external call's own-data write (`external_call_instances`) — the precise `status` (the envelope
+ *  collapses `awaitingAnswer` to `running`) plus the kind-specific `extension` document the owning
+ *  reactor's codec produced. The port does not know what is inside the document; it only seals it whole. */
+export interface PersistedExternalCallRow {
   instanceId: InstanceId;
-  status: "running" | "cancelling" | "awaitingAnswer";
+  status: ExternalCallStatus;
+  extension: Json;
 }
 
-/** One in-flight status-only call (http) a reactivation reads (envelope ⋈ the status extension), the
- *  precise `status` coming from the extension so an `awaitingAnswer` call is not mistaken for a `running`
- *  one. The reactor recovers at-most-once: gone work fails typed, never re-runs. */
-export interface PersistedStatusOnlyInstance extends PersistedCallEnvelope {
-  status: "running" | "cancelling" | "awaitingAnswer";
+/** One in-flight external call a reactivation reads (envelope ⋈ `external_call_instances`). The `extension`
+ *  is the raw (unsealed) document; the owning reactor's codec gives it back its type. */
+export interface PersistedExternalCall extends PersistedCallEnvelope {
+  status: ExternalCallStatus;
+  extension: Json;
 }
 
-/** The serve extension an mcp `serve` call persists (`mcp_serve_instances`, a subtype table keyed by the
- *  instance — class-table inheritance, so `mcp_instances` carries no nullable serve columns): the
- *  capability `token` (the public URL) and the served `tools` record must survive a restart so the
- *  endpoint re-registers; `snapshotId` pins the version the served agents dispatch against, like
- *  `webhook_instances.snapshot_id`. The subscriber is not stored (dispatched exactly once — its inner
- *  delegation is durable core work). Its inner-delegation bridges (`relays` / `innerCalls`) live here too:
- *  only a serve call opens inner delegations, so they are serve-only by construction. */
-export interface PersistedMcpServeExtension {
-  snapshotId: SnapshotId;
+/** One capability-token route (`capability_routes`): the public token → the instance serving it. An index
+ *  for cold inbound routing, not a SoT — the token also lives in the call's extension document, and the
+ *  row dies with its instance (FK cascade), so there is no delete on this port. */
+export interface PersistedCapabilityRoute {
   token: string;
-  tools: Value;
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
-/** The provide extension an mcp `provide` scope persists (`mcp_provide_instances`, the sibling subtype of
- *  `mcp_serve_instances`): the runtime `scopeId` minted tool values carry, the server `descriptor` the scope
- *  connects and evicts under, and the `continuation` — stored ONLY while the provide is still listing (the
- *  toolbox not yet handed to the block), null once the continuation has been dispatched (then it is durable
- *  core work). `snapshotId` pins the version the minted tools / continuation dispatch against. Its
- *  inner-delegation bridges (`relays` / `innerCalls`) live here, like serve's. */
-export interface PersistedMcpProvideExtension {
-  snapshotId: SnapshotId;
-  scopeId: string;
-  descriptor: Value;
-  continuation: Value | null;
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
-/** The `mcp` instance extension write — the status every mcp call persists (`mcp_instances`, status-only
- *  like `http_instances`), plus the whole serve extension (`mcp_serve_instances`) when the call is a `serve`
- *  endpoint, or the provide extension (`mcp_provide_instances`) when it is a `provide` scope. The
- *  transport-backed shapes (callTool / directCall) store no argument (recovery never re-sends —
- *  at-most-once) and open no inner delegations, so both endpoint extensions are `null` — EXCEPT while
- *  parked on an authorize escalation, when the call's re-runnable dispatch persists as the `parked`
- *  extension (`mcp_parked_instances`): present ⟺ parked, deleted in the same commit that retires the
- *  answered escalation. At most one extension is non-null. */
-export interface PersistedMcpInstanceRow {
-  instanceId: InstanceId;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  serve: PersistedMcpServeExtension | null;
-  provide: PersistedMcpProvideExtension | null;
-  parked: McpDispatchCall | null;
-}
-
-/** One in-flight mcp call a reactivation reads (envelope ⋈ `mcp_instances`, left-joined to
- *  `mcp_serve_instances`, `mcp_provide_instances` AND `mcp_parked_instances`): a serve extension reloads
- *  the live endpoint (re-registering its token), a provide extension re-registers the live scope (and
- *  re-lists or resumes by whether its continuation is still stored), a parked extension reconstructs the
- *  transport call the answered authorize escalation re-runs; a bare transport row (all null) recovers
- *  at-most-once (gone work fails typed, never re-runs). At most one extension is present. */
-export interface PersistedMcpInstance extends PersistedCallEnvelope {
-  status: "running" | "cancelling" | "awaitingAnswer";
-  serve: PersistedMcpServeExtension | null;
-  provide: PersistedMcpProvideExtension | null;
-  parked: McpDispatchCall | null;
-}
-
-/** The `webhook` instance extension write (`webhook_instances`) — the call-specific state behind a
- *  `webhook`-kind instance envelope. Unlike `ffi` / `http` the payload IS persisted: the `token` (the
- *  public URL's capability) and the `callback` (dispatched per delivery) must survive a restart; the
- *  subscriber is not stored (dispatched exactly once — its inner delegation is durable core work). */
-export interface PersistedWebhookInstanceRow {
-  instanceId: InstanceId;
-  /** The snapshot the call dispatches its callback / subscriber against. */
-  snapshotId: SnapshotId;
-  token: string;
-  callback: Value;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
-/** One in-flight webhook call a reactivation reads (envelope ⋈ `webhook_instances`): the webhook reactor
- *  rebuilds its warm call — and re-registers the token — keyed by `delegation` (from the envelope). */
-export interface PersistedWebhookInstance extends PersistedCallEnvelope {
-  snapshot: SnapshotId;
-  token: string;
-  callback: Value;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
-/** The `time` instance extension write (`time_instances`) — the call-specific state behind a `time`-kind
- *  instance envelope. Like `webhook` it persists its payload: the whole per-variant `operation` (the durable
- *  `sleep` deadline, the `watch` schedule + next-occurrence cursor + `deliver_to`) must survive a restart so
- *  the timer re-arms and the watch keeps firing. `snapshotId` pins the version a watch's `deliver_to`
- *  dispatches against. `now` / `sleep` open no inner delegations, so their bridges are empty. */
-export interface PersistedTimeInstanceRow {
-  instanceId: InstanceId;
-  snapshotId: SnapshotId;
-  operation: TimeOperation;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
-}
-
-/** One in-flight time call a reactivation reads (envelope ⋈ `time_instances`): the time reactor rebuilds its
- *  warm call — and re-arms its timer — keyed by `delegation` (from the envelope). */
-export interface PersistedTimeInstance extends PersistedCallEnvelope {
-  snapshot: SnapshotId;
-  operation: TimeOperation;
-  status: "running" | "cancelling" | "awaitingAnswer";
-  relays: PersistedEscalationRelay[];
-  innerCalls: PersistedInnerCall[];
+  instance: InstanceId;
 }
 
 /** The base-class write surface: the generic state every reactor's base owns — the instance envelope, the
  *  caller-owned delegations, the raiser-owned escalations, and the cascade drop. A concrete reactor never
- *  touches this directly; it goes through `Reactor.persistBase`, so the protocol is uniform (and a reactor
- *  that issues no delegations, like `ffi` today, can start to without any new wiring). */
+ *  touches this directly; it goes through `Reactor.persistBase`, so the protocol is uniform. */
 export interface BaseTx {
   /** Upsert the generic envelope (id / kind / delegation / status), before any FK that points at the instance. */
   putInstanceEnvelope(envelope: PersistedInstanceEnvelope): Promise<void>;
@@ -299,7 +166,7 @@ export interface BaseTx {
    *  Idempotent. */
   deleteEscalation(escalation: EscalationId): Promise<void>;
   /** Drop a completed / torn-down instance, cascading its extension / threads / owned scopes / issued
-   *  delegations / raised escalations (mirrors the tables' ON DELETE CASCADE). */
+   *  delegations / raised escalations / capability routes (mirrors the tables' ON DELETE CASCADE). */
   dropInstance(instanceId: InstanceId): Promise<void>;
 }
 
@@ -323,30 +190,18 @@ export interface ApiTx {
   putRunEscalationAudit(audit: PersistedRunEscalationAudit): Promise<void>;
 }
 
-/** The `ffi` reactor's *own-data* write surface — its `ffi_instances` extension (the envelope is base). */
-export interface FfiTx {
-  putFfiInstance(row: PersistedFfiInstanceRow): Promise<void>;
+/** Every call reactor's *own-data* write surface — the one `external_call_instances` extension row per
+ *  call (the envelope is base). The kind is not passed: the envelope's `kind` (written by the same
+ *  reactor's base) is the SoT for who owns the row. */
+export interface ExternalTx {
+  putCall(row: PersistedExternalCallRow): Promise<void>;
 }
 
-/** The `http` reactor's *own-data* write surface — its `http_instances` extension (the envelope is base). */
-export interface HttpTx {
-  putHttpInstance(row: PersistedStatusOnlyInstanceRow): Promise<void>;
-}
-
-/** The `webhook` reactor's *own-data* write surface — its `webhook_instances` extension (the envelope is
- *  base). */
-export interface WebhookTx {
-  putWebhookInstance(row: PersistedWebhookInstanceRow): Promise<void>;
-}
-
-/** The `mcp` reactor's *own-data* write surface — its `mcp_instances` extension (the envelope is base). */
-export interface McpTx {
-  putMcpInstance(row: PersistedMcpInstanceRow): Promise<void>;
-}
-
-/** The `time` reactor's *own-data* write surface — its `time_instances` extension (the envelope is base). */
-export interface TimeTx {
-  putTimeInstance(row: PersistedTimeInstanceRow): Promise<void>;
+/** The capability-route write surface — the token-minting reactors (webhook / mcp-serve) maintain their
+ *  routing index here, in the same commit as the call row. Upsert-only: a route is immutable while its
+ *  instance lives and dies with it by cascade. */
+export interface RouteTx {
+  putRoute(route: PersistedCapabilityRoute): Promise<void>;
 }
 
 /** The `ResourcePool`'s write surface: the independent scope / blob-ownership resource. `owner` may be `null`
@@ -378,39 +233,21 @@ export interface JournalTx {
 }
 
 /** The per-turn write surface over one shared transaction: the base-managed generic rows go through `tx.base`
- *  (via `Reactor.persistBase`), each reactor's own extension through `tx.<name>`, the pool through `tx.pool`,
- *  the substrate through `tx.outbox`. So a concrete reactor's `persist` is `persistBase(tx.base, …)` plus its
- *  own data — the flat god-interface is gone, and the generic half is written in exactly one place. */
+ *  (via `Reactor.persistBase`), core / api their own extensions, every call reactor the one `tx.external`,
+ *  the pool through `tx.pool`, the substrate through `tx.outbox` / `tx.journal`. So a concrete reactor's
+ *  `persist` is `persistBase(tx.base, …)` plus its own data — the generic half is written in exactly one
+ *  place, and the external half through exactly one port. */
 export interface PersistenceTx {
   base: BaseTx;
   core: CoreTx;
   api: ApiTx;
-  ffi: FfiTx;
-  http: HttpTx;
-  webhook: WebhookTx;
-  mcp: McpTx;
-  time: TimeTx;
+  external: ExternalTx;
+  routes: RouteTx;
   pool: PoolTx;
   outbox: OutboxTx;
   journal: JournalTx;
 }
 
-/** A persisted open escalation (an `escalations` row still in the `open` state). Each reactor self-selects
- *  the ones it needs from the `Loader` by reactor (`from` = the raiser's reactor; `to` = the addressed
- *  reactor — `to = "api"` is a user-facing escalation). `delegation` routes the answer; `run` attributes it. */
-export interface PersistedOpenEscalation {
-  escalation: EscalationId;
-  raiser: InstanceId;
-  fromReactor: ReactorName;
-  toReactor: ReactorName;
-  delegation: DelegationId;
-  run: InstanceId;
-  request: string;
-  argument: Value | null;
-}
-
-/** The `core` reactor's read surface: its engine graph plus the Layer 1 edges it owns. Every query returns
- *  only live (running / cancelling) delegations / open escalations — terminal rows are history. */
 /** The base-class read surface, symmetric to `BaseTx`: the generic Layer 1 edges a reactor owns, reloaded
  *  through `Reactor.loadBase` (which passes `this.name`). A reactor reloads the delegations it *issued* and
  *  the escalations it *raised* — both `from = self`. Uniform across reactors (a reactor that raises / issues
@@ -435,35 +272,13 @@ export interface ApiLoader {
   answerableEscalations(): Promise<PersistedOpenEscalation[]>;
 }
 
-/** The `ffi` reactor's own-data read surface: its in-flight instances (calls), to recover / re-abort. */
-export interface FfiLoader {
-  instances(): Promise<PersistedFfiInstance[]>;
-}
-
-/** The `http` reactor's own-data read surface: its in-flight calls (envelope ⋈ `http_instances`), to fail
- *  at-most-once on recovery. */
-export interface HttpLoader {
-  instances(): Promise<PersistedStatusOnlyInstance[]>;
-}
-
-/** The `webhook` reactor's own-data read surface: its in-flight calls (envelope ⋈ `webhook_instances`),
- *  to re-register their tokens (the endpoint survives a restart — unlike ffi / http there is no external
- *  process to reconcile with; the subscriber resumes as durable core work). */
-export interface WebhookLoader {
-  instances(): Promise<PersistedWebhookInstance[]>;
-}
-
-/** The `mcp` reactor's own-data read surface: its in-flight calls (envelope ⋈ `mcp_instances`) — a
- *  transport call to fail at-most-once on recovery, a serve endpoint to re-register its token. */
-export interface McpLoader {
-  instances(): Promise<PersistedMcpInstance[]>;
-}
-
-/** The `time` reactor's own-data read surface: its in-flight calls (envelope ⋈ `time_instances`), to re-arm
- *  their durable timers on restart (a `sleep` / `watch` deadline that already passed fires at once; a watch
- *  with a live tick delivery resumes it as durable core work). */
-export interface TimeLoader {
-  instances(): Promise<PersistedTimeInstance[]>;
+/** Every call reactor's own-data read surface: its in-flight calls (envelope ⋈ `external_call_instances`,
+ *  self-selected by the envelope's `kind` = the reactor's name). What a reactor does with a reloaded call
+ *  is its recovery policy, decoded from the extension: fail at-most-once (http, a bare mcp transport call),
+ *  re-register a token / scope (webhook, mcp serve / provide), re-arm a timer (time), reconcile with a
+ *  possibly-surviving process (ffi), reconstruct a park (a parked mcp call). */
+export interface ExternalLoader {
+  instances(reactor: ReactorName): Promise<PersistedExternalCall[]>;
 }
 
 /** The substrate's read surface: the undrained outbox, replayed into the mailbox so an in-flight event is not
@@ -473,19 +288,16 @@ export interface OutboxLoader {
 }
 
 /** The per-owner read surface, symmetric to `PersistenceTx`: the base-managed edges through `loader.base`
- *  (via `Reactor.loadBase`), each reactor's own data through `loader.<name>`, the outbox replay through
+ *  (via `Reactor.loadBase`), core / api / the call reactors through their ports, the outbox replay through
  *  `loader.outbox`. The engine graph rebuilds the core store; routing is rederived from the surviving
  *  `DelegateThread`s and instance `delegationId`s. (Scopes / blobs ride in `core.engine()` into the shared
- *  store, which the pool then reads — it has no separate load.) */
+ *  store, which the pool then reads — it has no separate load. Capability routes are never loaded: warm
+ *  re-registration reads the token from the extension document, its SoT.) */
 export interface Loader {
   base: BaseLoader;
   core: CoreLoader;
   api: ApiLoader;
-  ffi: FfiLoader;
-  http: HttpLoader;
-  webhook: WebhookLoader;
-  mcp: McpLoader;
-  time: TimeLoader;
+  external: ExternalLoader;
   outbox: OutboxLoader;
 }
 
@@ -533,20 +345,11 @@ export const NO_OP_TX: PersistenceTx = {
     async setRunOutcome() {},
     async putRunEscalationAudit() {},
   },
-  ffi: {
-    async putFfiInstance() {},
+  external: {
+    async putCall() {},
   },
-  http: {
-    async putHttpInstance() {},
-  },
-  webhook: {
-    async putWebhookInstance() {},
-  },
-  mcp: {
-    async putMcpInstance() {},
-  },
-  time: {
-    async putTimeInstance() {},
+  routes: {
+    async putRoute() {},
   },
   pool: {
     async putScope() {},
@@ -582,27 +385,7 @@ const EMPTY_LOADER: Loader = {
       return [];
     },
   },
-  ffi: {
-    async instances() {
-      return [];
-    },
-  },
-  http: {
-    async instances() {
-      return [];
-    },
-  },
-  webhook: {
-    async instances() {
-      return [];
-    },
-  },
-  mcp: {
-    async instances() {
-      return [];
-    },
-  },
-  time: {
+  external: {
     async instances() {
       return [];
     },

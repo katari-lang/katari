@@ -1,7 +1,7 @@
 // End-to-end tests for the `time` reactor, driven through the whole ProjectActor with a controllable
 // `ManualClock` (no real waits). A hand-built program calls `prelude.time.{now,sleep,watch}`; the reactor
 // records the instant / arms the durable timer / fires deliver_to per occurrence, and its state persists in
-// `time_instances` so a fresh actor over the same rows re-arms it.
+// its external-call extension so a fresh actor over the same rows re-arms it.
 //
 // Covered: `now` records the clock's instant; `sleep` resolves at its deadline; `sleep` re-arms after a
 // simulated restart; a deadline that passed while the runtime was down resolves immediately on recovery;

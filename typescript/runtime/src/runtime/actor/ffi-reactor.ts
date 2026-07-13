@@ -2,10 +2,10 @@
 // the shared callee-call lifecycle). An external call reaches it as a `delegate` routed from core's
 // `ExternalThread` proxy; it dispatches the handler through its subprocess transport and the base turns the
 // completion into the call's `delegateAck` / `escalate` / `terminateAck`. It owns its in-flight calls as
-// durable `ffi_instances` rows (its callee-side warm state) — symmetric to core owning its instances.
-// Execution is AT-MOST-ONCE, like http: recovery never re-runs a handler (a handler whose process died
-// fails as a panic; retrying is katari-level policy), so the argument is not persisted either — a reloaded
-// call carries none, exactly like an http call.
+// durable `ffi`-kind external-call rows (its callee-side warm state) — symmetric to core owning its
+// instances. Execution is AT-MOST-ONCE, like http: recovery never re-runs a handler (a handler whose
+// process died fails as a panic; retrying is katari-level policy), so the argument is not persisted
+// either — a reloaded call carries none, exactly like an http call.
 //
 // A running handler can call back INTO the runtime (`innerDelegate` — the transport's inbound agent-call
 // channel): this reactor only resolves the request to a delegate target and hands it to the base. A `named`
@@ -27,14 +27,23 @@ import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
+  documentOf,
+  encodeInnerCalls,
+  encodeRelays,
+  innerCallsOf,
+  relaysOf,
+  stringFieldOf,
+} from "./extension-codec.js";
+import {
   type CallRow,
+  type DecodedCallExtension,
+  type EscalationRelayRow,
   ExternalCallReactor,
   type ExternalTarget,
+  type InnerCallRow,
   type InnerDelivery,
-  type LoadedCall,
 } from "./external-call-reactor.js";
 import { messageOf } from "./failure.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** An ffi call's transport data: the snapshot whose sidecar bundle hosts the handler, the dispatch key, and
@@ -44,6 +53,39 @@ interface FfiPayload {
   snapshot: SnapshotId;
   key: string;
   argument: Value | null;
+}
+
+/** The ffi extension document: what an in-flight handler call must reconstruct from — the version pin
+ *  (whose compiled sidecar bundle hosts the handler), the dispatch key, and the inner-delegation bridges.
+ *  The argument is deliberately absent: recovery never re-runs a handler (at-most-once), so nothing ever
+ *  reads it back — and not storing it keeps one less secret-bearing value at rest. */
+export interface FfiExtension {
+  snapshotId: SnapshotId;
+  key: string;
+  relays: EscalationRelayRow[];
+  innerCalls: InnerCallRow[];
+}
+
+/** Encode an ffi call's extension document (pure — the persistence port seals it as a whole). */
+export function encodeFfiExtension(extension: FfiExtension): Json {
+  return {
+    snapshotId: extension.snapshotId,
+    key: extension.key,
+    relays: encodeRelays(extension.relays),
+    innerCalls: encodeInnerCalls(extension.innerCalls),
+  };
+}
+
+/** Decode an ffi call's extension document (pure) — also what the run-tree repository renders an ffi
+ *  node's dispatch key / snapshot from, so the document's schema has exactly one owner. */
+export function decodeFfiExtension(extension: Json): FfiExtension {
+  const document = documentOf(extension);
+  return {
+    snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+    key: stringFieldOf(document, "key"),
+    relays: relaysOf(document),
+    innerCalls: innerCallsOf(document),
+  };
 }
 
 export class FfiReactor extends ExternalCallReactor<FfiPayload> {
@@ -81,31 +123,23 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     this.transport.abort(delegation);
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<FfiPayload>): Promise<void> {
-    // The argument is not persisted: recovery never re-runs the handler (at-most-once), so nothing ever
-    // reads it back — and not storing it keeps one less secret-bearing value at rest.
-    await tx.ffi.putFfiInstance({
-      instanceId: row.instance,
+  protected encodeCallExtension(row: CallRow<FfiPayload>): Json {
+    return encodeFfiExtension({
       snapshotId: row.payload.snapshot,
       key: row.payload.key,
-      status: row.status,
       relays: row.relays,
       innerCalls: row.innerCalls,
     });
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<FfiPayload>>> {
-    return (await loader.ffi.instances()).map((row) => ({
-      delegation: row.delegation,
-      instance: row.instance,
-      caller: row.caller,
-      run: row.run,
-      status: row.status,
+  protected decodeCallExtension(extension: Json): DecodedCallExtension<FfiPayload> {
+    const decoded = decodeFfiExtension(extension);
+    return {
       // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
-      payload: { snapshot: row.snapshot, key: row.key, argument: null },
-      relays: row.relays,
-      innerCalls: row.innerCalls,
-    }));
+      payload: { snapshot: decoded.snapshotId, key: decoded.key, argument: null },
+      relays: decoded.relays,
+      innerCalls: decoded.innerCalls,
+    };
   }
 
   // ─── the inner agent-call channel (a handler calling back into the runtime) ─────────────────────

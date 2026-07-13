@@ -24,27 +24,72 @@
 // Timers are the injected `Clock`'s one-shot timers (kept in `timers`, one per live call); a fired timer
 // re-enters the serial loop through `schedule` (like webhook's post-commit work), so its `complete` /
 // inner-delegation commits with a turn. The recovery story matches webhook: there is no external process to
-// reconcile, so a time call survives a restart completely — its operation reloads from `time_instances` and
-// its timer re-arms; only an in-flight tick delivery's core work resumes on its own.
+// reconcile, so a time call survives a restart completely — its operation reloads from its extension
+// document and its timer re-arms; only an in-flight tick delivery's core work resumes on its own.
 
+import type { Json } from "@katari-lang/types";
 import { CronExpressionParser } from "cron-parser";
 import { dispatchCallable } from "../engine/dynamic-dispatch.js";
 import type { ReactorName } from "../event/types.js";
 import { type Clock, MAX_TIMER_DELAY_MS, type TimerHandle } from "../external/clock.js";
-import type { DelegationId } from "../ids.js";
+import type { DelegationId, SnapshotId } from "../ids.js";
 import type { Schedule, TimeOperation, TimePayload } from "../time-schedule.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import {
+  asJson,
+  documentOf,
+  encodeInnerCalls,
+  encodeRelays,
+  innerCallsOf,
+  relaysOf,
+  stringFieldOf,
+  warmFieldOf,
+} from "./extension-codec.js";
+import {
   type CallRow,
+  type DecodedCallExtension,
+  type EscalationRelayRow,
   ExternalCallReactor,
   type ExternalTarget,
+  type InnerCallRow,
   type InnerDelivery,
   innerOutcomeAsCompletion,
-  type LoadedCall,
 } from "./external-call-reactor.js";
 import { messageOf } from "./failure.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
+
+/** The time extension document: everything a reload re-arms — the whole per-variant `operation` (the
+ *  durable `sleep` deadline, a `watch`'s schedule + next-occurrence cursor + `deliver_to`, which may
+ *  close over a secret — the sealed subtree sits inside this document), the version pin a `watch`'s
+ *  deliveries dispatch against, and the inner-delegation bridges (only a `watch`'s per-tick delivery
+ *  opens inner delegations; `now` / `sleep` keep them empty). */
+export interface TimeExtension {
+  snapshotId: SnapshotId;
+  operation: TimeOperation;
+  relays: EscalationRelayRow[];
+  innerCalls: InnerCallRow[];
+}
+
+/** Encode a time call's extension document (pure — the persistence port seals it as a whole). */
+export function encodeTimeExtension(extension: TimeExtension): Json {
+  return {
+    snapshotId: extension.snapshotId,
+    operation: asJson(extension.operation),
+    relays: encodeRelays(extension.relays),
+    innerCalls: encodeInnerCalls(extension.innerCalls),
+  };
+}
+
+/** Decode a time call's extension document (pure). */
+export function decodeTimeExtension(extension: Json): TimeExtension {
+  const document = documentOf(extension);
+  return {
+    snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+    operation: warmFieldOf<TimeOperation>(document, "operation"),
+    relays: relaysOf(document),
+    innerCalls: innerCallsOf(document),
+  };
+}
 
 /** The compiled external keys (fully-qualified names) the `prelude.time.*` calls arrive under — compared
  *  exactly here, at the payload boundary, then never again (past `openPayload` the call is a `TimeOperation`
@@ -222,28 +267,22 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
     this.clearTimerFor(delegation);
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<TimePayload>): Promise<void> {
-    await tx.time.putTimeInstance({
-      instanceId: row.instance,
+  protected encodeCallExtension(row: CallRow<TimePayload>): Json {
+    return encodeTimeExtension({
       snapshotId: row.payload.snapshot,
       operation: row.payload.operation,
-      status: row.status,
       relays: row.relays,
       innerCalls: row.innerCalls,
     });
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<TimePayload>>> {
-    return (await loader.time.instances()).map((row) => ({
-      delegation: row.delegation,
-      instance: row.instance,
-      caller: row.caller,
-      run: row.run,
-      status: row.status,
-      payload: { snapshot: row.snapshot, operation: row.operation },
-      relays: row.relays,
-      innerCalls: row.innerCalls,
-    }));
+  protected decodeCallExtension(extension: Json): DecodedCallExtension<TimePayload> {
+    const decoded = decodeTimeExtension(extension);
+    return {
+      payload: { snapshot: decoded.snapshotId, operation: decoded.operation },
+      relays: decoded.relays,
+      innerCalls: decoded.innerCalls,
+    };
   }
 
   override reset(): void {

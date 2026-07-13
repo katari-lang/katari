@@ -1,6 +1,5 @@
-// The durable shape of a `time` call's work — a leaf module (it imports only value / id leaves) so both the
-// `time_instances` table (`$type` on its `operation` column) and the `TimeReactor` share one definition with
-// no actor↔db import cycle.
+// The durable shape of a `time` call's work — a leaf module (it imports only value / id leaves), shared by
+// the `TimeReactor` and its extension codec (the `operation` field of `TimeExtension` embeds it).
 //
 // A `time` call is a three-way sum decided ONCE, at the reactor's `openPayload` boundary, from which compiled
 // `prelude.time.*` external the delegate names: `now` (resolve with the current instant), `sleep` (resolve

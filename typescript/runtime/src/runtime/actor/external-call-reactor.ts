@@ -3,10 +3,10 @@
 // core's `ExternalThread` proxy, dispatch it through their transport, and turn the transport's completion
 // into the call's `delegateAck` (result), an `escalate` (a no-result error → a panic), or a `terminateAck`
 // (an abort confirmed). The whole per-delegation callee-instance lifecycle — the call map, the caller it
-// replies to, the running / cancelling / awaitingAnswer state machine, the envelope + ext persistence, and
-// the at-most-once-shaped recovery — lives here once; a concrete reactor supplies only its transport-specific
-// bits (how to dispatch / abort / settle an inner call, and how to read / write its ext row) plus a per-call
-// payload.
+// replies to, the running / cancelling / awaitingAnswer state machine, the envelope + extension persistence,
+// and the at-most-once-shaped recovery — lives here once; a concrete reactor supplies only its
+// transport-specific bits (how to dispatch / abort / settle an inner call) plus a per-call payload and the
+// extension codec that round-trips that payload with the durable extension document.
 //
 // A call is also a *caller*: its handler can ask the runtime to call another agent (an inner delegation —
 // the generic agent-call channel). The base owns that whole protocol too, symmetric to a core instance's
@@ -35,6 +35,7 @@
 // died fails as a panic, and whether to retry is a katari-level decision, not the runtime's.
 
 import type { Json } from "@katari-lang/types";
+import type { ExternalCallStatus } from "../../db/tables/execution.js";
 import { PANIC_REQUEST } from "../engine/common.js";
 import type { BlobEntry } from "../engine/types.js";
 import { isFailureRequest } from "../escalation-filter.js";
@@ -60,8 +61,9 @@ export type ExternalTarget = Extract<DelegateTarget, { kind: "external" }>;
 
 /** The lifecycle state of an in-flight call: `running` (transport in flight), `cancelling` (aborting, awaiting
  *  the transport's stop and the children's drain), or `awaitingAnswer` (transport errored, panic escalated,
- *  awaiting a caught-panic answer or the run's terminate). */
-export type CallStatus = "running" | "cancelling" | "awaitingAnswer";
+ *  awaiting a caught-panic answer or the run's terminate). The same union the durable row stores
+ *  (`external_call_instances.status` — one SoT for the vocabulary). */
+export type CallStatus = ExternalCallStatus;
 
 /** A completion fed back from a transport (the ffi / http completion shape, structurally shared): a `result`
  *  (→ delegateAck), a `throw` (a typed `prelude.throw` the reactor escalates with `error` as its decoded
@@ -77,8 +79,8 @@ export interface ExternalCompletion {
 }
 
 /** One escalation this reactor is proxying upward for a call: the outer id it re-raised the ask under (the
- *  row key), and the child leg its answer descends to. Durable on the call's ext row, so an in-flight
- *  answer still routes down after a restart. */
+ *  row key), and the child leg its answer descends to. Durable in the call's extension document, so an
+ *  in-flight answer still routes down after a restart. */
 export interface EscalationRelayRow {
   escalation: EscalationId;
   child: DelegationId;
@@ -86,9 +88,9 @@ export interface EscalationRelayRow {
 }
 
 /** One inner delegation's transport correlation: the delegation the base opened, and the transport's own
- *  `call` token its settled outcome is delivered under. Durable on the call's ext row, so a result landing
- *  after a warm reset still reaches its consumer (only a transport-process death makes it stale — the call
- *  is then failing anyway, and the stale delivery is dropped). */
+ *  `call` token its settled outcome is delivered under. Durable in the call's extension document, so a
+ *  result landing after a warm reset still reaches its consumer (only a transport-process death makes it
+ *  stale — the call is then failing anyway, and the stale delivery is dropped). */
 export interface InnerCallRow {
   delegation: DelegationId;
   call: string;
@@ -109,9 +111,9 @@ export interface InnerDelivery {
 
 /** One in-flight call's state, keyed by its delegation. Its instance id (the issuer of its replies) and its
  *  caller (the reply-to) are NOT here — they are the received-delegation edge, held once in the base
- *  `handled` index (added / dropped alongside this entry). `relays` is durable (the ext row); the two
- *  hold-state fields are in-memory only — a reload reproduces them (`transportSettled` by re-aborting,
- *  `pendingOutcome` by the recovery outcome the transport reports). */
+ *  `handled` index (added / dropped alongside this entry). `relays` is durable (the extension document);
+ *  the two hold-state fields are in-memory only — a reload reproduces them (`transportSettled` by
+ *  re-aborting, `pendingOutcome` by the recovery outcome the transport reports). */
 interface Call<Payload> {
   status: CallStatus;
   payload: Payload;
@@ -122,25 +124,22 @@ interface Call<Payload> {
   pendingOutcome: ExternalCompletion["outcome"] | undefined;
 }
 
-/** One reloaded call a concrete reactor's `loadCallRows` yields (envelope ⋈ its ext row). */
-export interface LoadedCall<Payload> {
-  delegation: DelegationId;
+/** What a concrete reactor's extension codec encodes for one call — its transport payload plus the two
+ *  inner-delegation bridges (the base maintains them; the codec decides where they ride in the document).
+ *  The caller (reply-to) / run / status are NOT here: they are the envelope's and the row's own columns. */
+export interface CallRow<Payload> {
   instance: InstanceId;
-  caller: ReactorName;
-  run: InstanceId;
+  delegation: DelegationId;
   status: CallStatus;
   payload: Payload;
   relays: EscalationRelayRow[];
   innerCalls: InnerCallRow[];
 }
 
-/** The fields a concrete reactor persists for one call (its ext row), supplied by the base. The caller
- *  (reply-to) is NOT here — it is the instance's ambient on the generic envelope; the ext row is the
- *  transport payload + status plus the two inner-delegation bridges. */
-export interface CallRow<Payload> {
-  instance: InstanceId;
-  delegation: DelegationId;
-  status: CallStatus;
+/** What a concrete reactor's extension codec decodes back out of one reloaded call's document: the warm
+ *  payload and the bridges. The envelope half (delegation / instance / caller / run) and the status come
+ *  from the row itself, so the base re-seeds those uniformly. */
+export interface DecodedCallExtension<Payload> {
   payload: Payload;
   relays: EscalationRelayRow[];
   innerCalls: InnerCallRow[];
@@ -169,7 +168,7 @@ function ackDecoderOf(payload: object): ((raw: Json) => Value) | undefined {
 
 export abstract class ExternalCallReactor<Payload extends object> extends Reactor {
   /** In-flight calls (warm SoT) keyed by their delegation, plus the per-turn dirty set `persist` upserts and
-   *  the instance ids of calls resolved this turn (their envelopes are dropped, cascading the ext row). */
+   *  the instance ids of calls resolved this turn (their envelopes are dropped, cascading the extension row). */
   private readonly calls = new Map<DelegationId, Call<Payload>>();
   /** The reverse of the base received edge: a call's instance back to its delegation — how an inner
    *  delegation's reply (whose base-resolved context names the caller *instance*) finds its parent call. */
@@ -219,11 +218,22 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
    *  transport confirms with a `cancelled` completion (synthesising one when the request is already gone). */
   protected abstract abort(delegation: DelegationId): void;
 
-  /** Persist one call's ext row through its own `tx` port (the base has already staged the envelope). */
-  protected abstract persistCallRow(tx: PersistenceTx, row: CallRow<Payload>): Promise<void>;
+  /** Encode one call's kind-specific reconstruction material as its extension document. Delegates to the
+   *  reactor's pure `encode…Extension` codec; the hook itself may consult reactor state to pick the
+   *  document's variant (the mcp park). The base writes the document through `tx.external` and seals it
+   *  uniformly — the codec never sees the seal. */
+  protected abstract encodeCallExtension(row: CallRow<Payload>): Json;
 
-  /** Read this reactor's in-flight calls (envelope ⋈ ext row) on reactivation. */
-  protected abstract loadCallRows(loader: Loader): Promise<Array<LoadedCall<Payload>>>;
+  /** Decode one reloaded call's extension document back into its warm payload + bridges — the pure
+   *  `decode…Extension` codec's inverse of the above. */
+  protected abstract decodeCallExtension(extension: Json): DecodedCallExtension<Payload>;
+
+  /** The public capability token a call mints, if this kind mints one (webhook / mcp-serve). The base
+   *  maintains the `capability_routes` index row in the same commit as the call row, so cold inbound
+   *  routing can never observe a token without its route. `null` — the default — writes no route. */
+  protected capabilityTokenOf(_payload: Payload): string | null {
+    return null;
+  }
 
   /** Deliver one settled inner delegation to the transport (strictly post-commit). Default no-op: a reactor
    *  whose transport never opens inner delegations (http) never has one staged. */
@@ -282,8 +292,8 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
   }
 
   /** Stage a live call's row for re-persist this turn — for a concrete reactor whose OWN durable state on
-   *  the row changed outside the base's mutations (the mcp park writes / clears its parked-dispatch
-   *  extension). A no-op for a resolved call (its drop supersedes any upsert). */
+   *  the row changed outside the base's mutations (the mcp park flips its extension variant). A no-op for
+   *  a resolved call (its drop supersedes any upsert). */
   protected markCallDirty(delegation: DelegationId): void {
     if (this.calls.has(delegation)) this.dirty.add(delegation);
   }
@@ -715,10 +725,12 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     for (const delivery of deliveries) this.deliverInnerOutcome(delivery);
   }
 
-  /** Write the calls this turn touched as own-kind instances (envelope + ext), dropping resolved ones (their
-   *  envelope drop cascades the ext). The base additionally flushes the caller-owned rows of the calls'
-   *  inner delegations. The envelope status collapses `awaitingAnswer` to the `running` instance lifecycle
-   *  (alive, waiting); the ext row carries the precise status plus the two inner-delegation bridges. */
+  /** Write the calls this turn touched as own-kind instances (envelope + extension row), dropping resolved
+   *  ones (their envelope drop cascades the extension and any capability route). The base additionally
+   *  flushes the caller-owned rows of the calls' inner delegations. The envelope status collapses
+   *  `awaitingAnswer` to the `running` instance lifecycle (alive, waiting); the extension row carries the
+   *  precise status plus the codec-encoded document — and a token-minting kind's capability route commits
+   *  alongside it. */
   async persist(tx: PersistenceTx): Promise<void> {
     const live = [...this.dirty].flatMap((delegation) => {
       const call = this.calls.get(delegation);
@@ -729,26 +741,33 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
       this.markInstance(route.instance, {
         delegationId: delegation,
         // The caller (reply-to) and the run (trace context) are the instance's ambient, written on the
-        // generic envelope here — not repeated in the concrete ext row.
+        // generic envelope here — not repeated in the extension document.
         callerReactor: route.caller,
         runId: route.run,
         status: call.status === "cancelling" ? "cancelling" : "running",
       });
     for (const instanceId of this.droppedInstances) this.markInstanceDropped(instanceId);
     await this.persistBase(tx.base);
-    for (const { delegation, call, route } of live)
-      await this.persistCallRow(tx, {
-        instance: route.instance,
-        delegation,
+    for (const { delegation, call, route } of live) {
+      await tx.external.putCall({
+        instanceId: route.instance,
         status: call.status,
-        payload: call.payload,
-        relays: [...call.relays].map(([escalation, relay]) => ({
-          escalation,
-          child: relay.child,
-          childEscalation: relay.escalation,
-        })),
-        innerCalls: this.innerCallRowsOf(delegation),
+        extension: this.encodeCallExtension({
+          instance: route.instance,
+          delegation,
+          status: call.status,
+          payload: call.payload,
+          relays: [...call.relays].map(([escalation, relay]) => ({
+            escalation,
+            child: relay.child,
+            childEscalation: relay.escalation,
+          })),
+          innerCalls: this.innerCallRowsOf(delegation),
+        }),
       });
+      const token = this.capabilityTokenOf(call.payload);
+      if (token !== null) await tx.routes.putRoute({ token, instance: route.instance });
+    }
     this.dirty.clear();
     this.droppedInstances = [];
   }
@@ -758,19 +777,20 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
    *  work fails at-most-once as a panic — and that error path cancels the call's inner delegations, so no
    *  orphans survive a restart), a `cancelling` call re-aborts (the transport confirms with a synthesised
    *  `cancelled`; its children's terminates replay from the outbox), an `awaitingAnswer` call just waits
-   *  (its request already stopped; the core side drives the escalation's resolution). The inner-delegation
-   *  bridges reload with each call. */
+   *  (its request already stopped; the core side drives the escalation's resolution). The payload + the
+   *  inner-delegation bridges reload through the reactor's extension codec. */
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
-    for (const row of await this.loadCallRows(loader)) {
+    for (const row of await loader.external.instances(this.name)) {
+      const decoded = this.decodeCallExtension(row.extension);
       // Re-seed the base received edge (instance + summoner + run) and the local transport status + payload.
       this.acceptDelegation(row.delegation, row.instance, row.caller, row.run);
       this.callByInstance.set(row.instance, row.delegation);
       this.calls.set(row.delegation, {
         status: row.status,
-        payload: row.payload,
+        payload: decoded.payload,
         relays: new Map(
-          row.relays.map((relay) => [
+          decoded.relays.map((relay) => [
             relay.escalation,
             { child: relay.child, escalation: relay.childEscalation },
           ]),
@@ -778,7 +798,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
         transportSettled: false,
         pendingOutcome: undefined,
       });
-      for (const inner of row.innerCalls) {
+      for (const inner of decoded.innerCalls) {
         this.innerCalls.set(inner.delegation, { parent: row.delegation, call: inner.call });
         this.indexInnerCall(row.delegation, inner.delegation);
       }

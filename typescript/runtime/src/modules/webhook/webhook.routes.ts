@@ -1,6 +1,6 @@
 // The public inbound-webhook endpoint: `POST /inbound/:token` — the URLs `webhook.inbound` mints. It
 // lives OUTSIDE the bearer-authenticated `/api` surface (an external webhook provider cannot present the
-// runtime's key); the unguessable token is the capability, and the durable `webhook_instances` row scopes
+// runtime's key); the unguessable token is the capability, and its durable `capability_routes` row scopes
 // it to exactly one endpoint of one project.
 //
 // The response contract is designed for third-party callers, not the console:

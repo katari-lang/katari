@@ -1,13 +1,13 @@
 // The durable shape of an mcp transport call's DISPATCH — a leaf module (it imports only value / type
-// leaves) so the `mcp_parked_instances` table (`$type` on its `call` column), the persistence ports, and
-// the `McpReactor` share one definition with no actor↔db import cycle, exactly like `time-schedule.ts`.
+// leaves), shared by the `McpReactor` and its extension codec (the `parked` variant of `McpExtension`
+// embeds it), exactly like `time-schedule.ts`.
 //
 // A transport call normally persists NO dispatch data (recovery is at-most-once: an interrupted in-flight
 // call is refused, never re-run, because the server may have executed it). A PARKED call is the one
 // exception with a proof: its attempt was REJECTED with an authorization failure (an HTTP 401 rejection
 // guarantees the server never executed it), so re-running after the authorize escalation is answered is
 // safe — across restarts too. This union is exactly the state that re-run needs, written while the call
-// is parked and deleted in the same commit that retires the answered escalation, so a crash mid-retry
+// is parked and reverted in the same commit that retires the answered escalation, so a crash mid-retry
 // reloads a plain in-flight call and the at-most-once refusal applies again.
 
 import type { JSONSchema } from "@katari-lang/types";

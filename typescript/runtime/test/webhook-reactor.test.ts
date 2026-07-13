@@ -6,8 +6,8 @@
 //
 // Covered: the delivery happy path; a schema-violating delivery (a typed `reflection.call_error`, the
 // callback never runs); an unknown token; the endpoint deactivating when the subscriber settles; and the
-// restart contract — the endpoint SURVIVES a restart (token + callback reload from `webhook_instances`,
-// the subscriber resumes as durable core work), the piece that separates webhook from ffi / http.
+// restart contract — the endpoint SURVIVES a restart (token + callback reload from its extension
+// document, the subscriber resumes as durable core work), the piece that separates webhook from ffi / http.
 
 import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
@@ -264,7 +264,7 @@ describe("the webhook reactor (restart survival)", () => {
     });
 
     // Restart: a fresh actor over the same durable rows. The endpoint must still serve — the token and
-    // callback reload from `webhook_instances`; nothing is re-dispatched.
+    // callback reload from the extension document; nothing is re-dispatched.
     const second = actorFor({ subscriber: "request", persistence });
     await second.activate();
     await expect(second.deliverWebhook(token, HELLO)).resolves.toEqual({

@@ -39,17 +39,18 @@
 //     settles; a `terminate` from above cancels it and releases the token either way.
 //
 // A payload is a three-way sum — `provide | serve | transport{callTool|directCall|recovered}` — so every
-// lifecycle method dispatches that axis once, structurally. `provide` and `serve` persist their endpoint
-// payloads in the sibling subtype extensions (`mcp_provide_instances` / `mcp_serve_instances`: a
-// provide's scope id + descriptor + still-listing continuation + inner-delegation bridges; a serve's token
-// + tools + bridges) and survive a restart COMPLETELY (re-registering the scope / token, the inner
-// delegation resuming as durable core work). The transport-backed shapes own their in-flight calls durably
-// as a status-only `mcp_instances` row (no argument is persisted) and recovery never re-runs, so a reloaded
-// transport call's payload is the explicit `recovered` variant — nothing dispatch-shaped survives a restart
-// by type. Connections are the TRANSPORT's business (a lazy, descriptor-keyed cache), not a program-visible
-// resource: a restart empties the cache and the next tool call reconnects. Every anticipated transport
-// failure is a typed `throw[mcp.server_error]` (including a direct call's argument-lowering failure and a
-// closed-scope rejection); a bare `error` completion is an engine-invariant panic.
+// lifecycle method dispatches that axis once, structurally. Durably the same sum is the `McpExtension`
+// document (`transport | serve | provide | parked`, one tag — see the codec below): `provide` and `serve`
+// persist their endpoint payloads in their variants (a provide's scope id + descriptor + still-listing
+// continuation + inner-delegation bridges; a serve's token + tools + bridges) and survive a restart
+// COMPLETELY (re-registering the scope / token, the inner delegation resuming as durable core work). The
+// transport-backed shapes persist the bare `transport` tag (no argument is persisted) and recovery never
+// re-runs, so a reloaded transport call's payload is the explicit `recovered` variant — nothing
+// dispatch-shaped survives a restart by type. Connections are the TRANSPORT's business (a lazy,
+// descriptor-keyed cache), not a program-visible resource: a restart empties the cache and the next tool
+// call reconnects. Every anticipated transport failure is a typed `throw[mcp.server_error]` (including a
+// direct call's argument-lowering failure and a closed-scope rejection); a bare `error` completion is an
+// engine-invariant panic.
 //
 // OAuth authorization is the one failure that is NEITHER: an `authorizationRequired` completion (an
 // `oauth`-descriptor operation that could not authenticate — see the transport's classification) PARKS the
@@ -61,12 +62,12 @@
 // fresh escalation; first authorization, refresh death, an empty answer, and every race collapse into this
 // ONE loop. Re-running is at-most-once-safe because the parked attempt was REJECTED (an HTTP 401 rejection
 // guarantees the server never executed it) — which is also why the park may persist dispatch-shaped state
-// no in-flight transport call ever does: a parked call's re-runnable dispatch rides the
-// `mcp_parked_instances` extension (written with the escalation row, deleted with its answer, in the same
-// commits), so a reload reconstructs the FULL park — a provide re-lists from its ext row, a transport call
-// re-dispatches its stored call — and a post-reload ack retries identically to a warm one. A reloaded call
-// with NO open authorize escalation stays the at-most-once `recovered` refusal, exactly as before: parked
-// versus in-flight is a true sum, discriminated by the escalation row's presence.
+// no in-flight transport call ever does: a parked call's re-runnable dispatch rides the extension's
+// `parked` variant (written with the escalation row, reverted to `transport` with its answer, in the same
+// commits), so a reload reconstructs the FULL park — a provide re-lists from its extension, a transport
+// call re-dispatches its stored call — and a post-reload ack retries identically to a warm one. A reloaded
+// call with NO open authorize escalation stays the at-most-once `recovered` refusal, exactly as before:
+// parked versus in-flight is a true sum, discriminated by the escalation row's presence.
 
 import { randomBytes } from "node:crypto";
 import type { JSONSchema, Json } from "@katari-lang/types";
@@ -95,16 +96,27 @@ import { jsonToSchema } from "../value/schema-json.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import { conformValue, renderConformFailures } from "../value/validation.js";
 import {
+  asJson,
+  documentOf,
+  encodeInnerCalls,
+  encodeRelays,
+  innerCallsOf,
+  relaysOf,
+  stringFieldOf,
+  warmFieldOf,
+} from "./extension-codec.js";
+import {
   type CallRow,
+  type DecodedCallExtension,
+  type EscalationRelayRow,
   ExternalCallReactor,
   type ExternalCompletion,
   type ExternalTarget,
+  type InnerCallRow,
   type InnerDelivery,
   innerOutcomeAsCompletion,
-  type LoadedCall,
 } from "./external-call-reactor.js";
 import { messageOf } from "./failure.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The reserved dispatch keys the compiled `prelude.mcp.*` externals arrive under — compared exactly
@@ -117,24 +129,23 @@ const MCP_CALL_KEY = "prelude.mcp.call";
 /** A transport-backed mcp call — the built-in client's OUTBOUND tool calls, told apart from a `provide` /
  *  `serve` endpoint at the TOP level of `McpPayload` (see below). The dispatch-shaped half (`callTool` /
  *  `directCall`) is the shared durable `McpDispatchCall` (see `mcp-dispatch.ts` — it persists as the
- *  `mcp_parked_instances` extension while the call is parked on an authorize escalation, which is what
- *  lets a reloaded park re-run); `recovered` is a reloaded NON-parked transport call, which by
- *  construction can never be re-dispatched (at-most-once; an interrupted in-flight call may have executed
- *  server-side, and nothing dispatch-shaped persists for it). The listing a `provide` performs is NOT
- *  here: it rides a side `listing` delegation, so its completion mints the toolbox instead of settling a
- *  call. */
+ *  extension's `parked` variant while the call is parked on an authorize escalation, which is what lets a
+ *  reloaded park re-run); `recovered` is a reloaded NON-parked transport call, which by construction can
+ *  never be re-dispatched (at-most-once; an interrupted in-flight call may have executed server-side, and
+ *  nothing dispatch-shaped persists for it). The listing a `provide` performs is NOT here: it rides a side
+ *  `listing` delegation, so its completion mints the toolbox instead of settling a call. */
 type TransportCall = McpDispatchCall | { kind: "recovered" };
 
 /** What an mcp call holds, a three-way sum whose TOP level every lifecycle method (dispatch / recover /
- *  abort / onDropCall / persistCallRow / loadCallRows) dispatches once: a `provide` scope (its scope id +
+ *  abort / onDropCall / the extension codec hooks) dispatches once: a `provide` scope (its scope id +
  *  descriptor + the not-yet-dispatched continuation — persisted, so the scope survives a restart), a
  *  `serve` endpoint (token + served tools — persisted), or a `transport` call (its `TransportCall`
  *  sub-shape plus its optional ack decoder). */
 type McpPayload =
   | {
       kind: "provide";
-      /** The snapshot the minted tools / continuation dispatch against — persisted as the ext row's version
-       *  pin (retention: a live scope keeps its snapshot undeletable). */
+      /** The snapshot the minted tools / continuation dispatch against — persisted in the extension
+       *  document, so a reloaded scope dispatches against the same version. */
       snapshot: SnapshotId;
       /** The runtime scope identity minted at open — carried in every minted tool's context, checked live at
        *  each tool call, closed at drop. Persisted so a restart re-registers exactly it. */
@@ -147,8 +158,8 @@ type McpPayload =
     }
   | {
       kind: "serve";
-      /** The snapshot the call was dispatched against — persisted as the ext row's version pin (retention:
-       *  a live endpoint keeps its snapshot undeletable, so the served agents stay resolvable). */
+      /** The snapshot the call was dispatched against — persisted in the extension document, so a
+       *  reloaded endpoint dispatches its served agents against the same version. */
       snapshot: SnapshotId;
       token: string;
       /** The served tools record (key = the published tool name, value = the agent it dispatches). */
@@ -163,6 +174,98 @@ type McpPayload =
        *  so the base wire decoder runs. */
       decodeAck?: (raw: Json) => Value;
     };
+
+/** An mcp call's durable extension document — a REAL sum, one tag: a bare `transport` call persists
+ *  nothing beyond the tag (at-most-once, no argument at rest), a `serve` / `provide` endpoint persists
+ *  the payload a restart re-registers (with its inner-delegation bridges — only the endpoint shapes open
+ *  inner delegations), and a `parked` transport call persists its re-runnable dispatch (its rejected
+ *  attempt provably never executed server-side, so a reloaded park may re-run it — written in the same
+ *  commit that opens the authorize escalation, reverted to `transport` in the one that answers it, so
+ *  "open authorize row" ⟺ "parked variant"). A parked PROVIDE stays the `provide` variant: its
+ *  still-stored continuation already says "re-list", and the open escalation row alone marks the park. */
+export type McpExtension =
+  | { kind: "transport" }
+  | {
+      kind: "serve";
+      snapshotId: SnapshotId;
+      token: string;
+      tools: Value;
+      relays: EscalationRelayRow[];
+      innerCalls: InnerCallRow[];
+    }
+  | {
+      kind: "provide";
+      snapshotId: SnapshotId;
+      scopeId: string;
+      descriptor: Value;
+      continuation: Value | null;
+      relays: EscalationRelayRow[];
+      innerCalls: InnerCallRow[];
+    }
+  | { kind: "parked"; call: McpDispatchCall };
+
+/** Encode an mcp call's extension document (pure — the persistence port seals it as a whole; the
+ *  descriptor / tools / continuation / parked call may carry private leaves, and they seal in place). */
+export function encodeMcpExtension(extension: McpExtension): Json {
+  switch (extension.kind) {
+    case "transport":
+      return { kind: "transport" };
+    case "serve":
+      return {
+        kind: "serve",
+        snapshotId: extension.snapshotId,
+        token: extension.token,
+        tools: asJson(extension.tools),
+        relays: encodeRelays(extension.relays),
+        innerCalls: encodeInnerCalls(extension.innerCalls),
+      };
+    case "provide":
+      return {
+        kind: "provide",
+        snapshotId: extension.snapshotId,
+        scopeId: extension.scopeId,
+        descriptor: asJson(extension.descriptor),
+        continuation: asJson(extension.continuation),
+        relays: encodeRelays(extension.relays),
+        innerCalls: encodeInnerCalls(extension.innerCalls),
+      };
+    case "parked":
+      return { kind: "parked", call: asJson(extension.call) };
+  }
+}
+
+/** Decode an mcp call's extension document (pure) — one tag dispatch, no "at most one non-null" prose. */
+export function decodeMcpExtension(extension: Json): McpExtension {
+  const document = documentOf(extension);
+  const kind = stringFieldOf(document, "kind");
+  switch (kind) {
+    case "transport":
+      return { kind: "transport" };
+    case "serve":
+      return {
+        kind: "serve",
+        snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+        token: stringFieldOf(document, "token"),
+        tools: warmFieldOf<Value>(document, "tools"),
+        relays: relaysOf(document),
+        innerCalls: innerCallsOf(document),
+      };
+    case "provide":
+      return {
+        kind: "provide",
+        snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+        scopeId: stringFieldOf(document, "scopeId"),
+        descriptor: warmFieldOf<Value>(document, "descriptor"),
+        continuation: warmFieldOf<Value | null>(document, "continuation"),
+        relays: relaysOf(document),
+        innerCalls: innerCallsOf(document),
+      };
+    case "parked":
+      return { kind: "parked", call: warmFieldOf<McpDispatchCall>(document, "call") };
+    default:
+      throw new Error(`unknown mcp extension kind "${kind}" (corrupt row)`);
+  }
+}
 
 /** The live endpoint's served tools, resolved on a reactor turn (values still engine `Value`s — the
  *  actor resolves each entry's metadata, the service lowers at the user-facing boundary). */
@@ -557,8 +660,8 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     const escalation = newEscalationId();
     this.parked.set(delegation, escalation);
     // The park's durable halves commit together: the escalation row (via the base `send` below) and — for
-    // a transport call — the parked-dispatch extension (persistCallRow reads the parked set, so marking
-    // the row dirty writes it this same turn). Atomic, so "open authorize row" ⟺ "re-runnable park".
+    // a transport call — the extension's `parked` variant (encodeCallExtension reads the parked set, so
+    // marking the row dirty writes it this same turn). Atomic, so "open authorize row" ⟺ "re-runnable park".
     this.markCallDirty(delegation);
     this.send(
       {
@@ -818,9 +921,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (this.parked.get(event.delegation) === event.escalation) {
       this.parked.delete(event.delegation);
       // The unpark commits whole before the transport re-attempts (durable-first): the base retires the
-      // escalation row, and marking the call dirty deletes the parked-dispatch extension in the same
-      // commit. A crash in between thus reloads a plain in-flight call — refused at-most-once by the
-      // reconciliation (the retry may have executed) — and never a double park.
+      // escalation row, and marking the call dirty reverts the extension to its bare `transport` variant
+      // in the same commit. A crash in between thus reloads a plain in-flight call — refused at-most-once
+      // by the reconciliation (the retry may have executed) — and never a double park.
       this.markCallDirty(event.delegation);
       this.pendingRetries.push(event.delegation);
       return;
@@ -860,9 +963,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             void this.dispatchDirectCall(delegation, call);
             return;
           case "recovered":
-            // Unreachable by construction: a park's escalation row and its parked-dispatch extension are
-            // written and deleted in the same commits, so a call the parked set names always holds its
-            // re-runnable dispatch (a reloaded park carries it; a non-parked reload is never in the set).
+            // Unreachable by construction: a park's escalation row and its extension's `parked` variant
+            // are written and reverted in the same commits, so a call the parked set names always holds
+            // its re-runnable dispatch (a reloaded park carries it; a non-parked reload is never in the set).
             throw new Error(`mcp: parked call ${delegation} reloaded without its dispatch (bug)`);
         }
       }
@@ -946,86 +1049,92 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<McpPayload>): Promise<void> {
-    // A transport call persists only its status (at-most-once; no inner delegations, so its bridges are
-    // empty — the status-only `mcp_instances` row) — plus, exactly while parked on an authorize
-    // escalation, its re-runnable dispatch (`mcp_parked_instances`: the rejected attempt provably never
-    // executed, so a reloaded park may re-run it). A serve / provide call persists its whole endpoint
-    // extension (`mcp_serve_instances` / `mcp_provide_instances`: the payload + its inner-delegation
-    // bridges), so a restart re-registers it.
-    await tx.mcp.putMcpInstance({
-      instanceId: row.instance,
-      status: row.status,
-      serve:
-        row.payload.kind === "serve"
-          ? {
-              snapshotId: row.payload.snapshot,
-              token: row.payload.token,
-              tools: row.payload.tools,
-              relays: row.relays,
-              innerCalls: row.innerCalls,
-            }
-          : null,
-      provide:
-        row.payload.kind === "provide"
-          ? {
-              snapshotId: row.payload.snapshot,
-              scopeId: row.payload.scope,
-              descriptor: row.payload.descriptor,
-              continuation: row.payload.continuation,
-              relays: row.relays,
-              innerCalls: row.innerCalls,
-            }
-          : null,
-      parked:
-        row.payload.kind === "transport" &&
-        row.payload.call.kind !== "recovered" &&
-        this.parked.has(row.delegation)
-          ? row.payload.call
-          : null,
-    });
+  /** Pick the durable extension variant for one call. A transport call persists only the `transport` tag
+   *  (at-most-once; no inner delegations, so no bridges) — EXCEPT while parked on an authorize escalation,
+   *  when its re-runnable dispatch persists as `parked` (the rejected attempt provably never executed, so
+   *  a reloaded park may re-run it; the parked set is reactor state, which is why this is a hook and the
+   *  codec stays pure). A serve / provide call persists its whole endpoint variant (payload + bridges),
+   *  so a restart re-registers it. */
+  protected encodeCallExtension(row: CallRow<McpPayload>): Json {
+    const payload = row.payload;
+    switch (payload.kind) {
+      case "serve":
+        return encodeMcpExtension({
+          kind: "serve",
+          snapshotId: payload.snapshot,
+          token: payload.token,
+          tools: payload.tools,
+          relays: row.relays,
+          innerCalls: row.innerCalls,
+        });
+      case "provide":
+        return encodeMcpExtension({
+          kind: "provide",
+          snapshotId: payload.snapshot,
+          scopeId: payload.scope,
+          descriptor: payload.descriptor,
+          continuation: payload.continuation,
+          relays: row.relays,
+          innerCalls: row.innerCalls,
+        });
+      case "transport":
+        return encodeMcpExtension(
+          payload.call.kind !== "recovered" && this.parked.has(row.delegation)
+            ? { kind: "parked", call: payload.call }
+            : { kind: "transport" },
+        );
+    }
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<McpPayload>>> {
-    return (await loader.mcp.instances()).map((row) => {
-      // A row with a serve / provide extension reloads as that live endpoint (the subscriber / continuation
-      // was dispatched at the original open — the provide only if its continuation is now null; never
-      // re-dispatched), carrying its inner-delegation bridges. A transport row with a parked extension
-      // reloads as its full dispatch-shaped call (the park's re-run needs it — the ack decoder is rebuilt
-      // exactly as `openPayload` built it); one with none reloads as `recovered`: nothing dispatch-shaped
-      // persists for an in-flight call, so the payload says so by type.
-      const endpoint = row.serve ?? row.provide;
-      const payload: McpPayload =
-        row.serve !== null
-          ? {
-              kind: "serve",
-              token: row.serve.token,
-              snapshot: row.serve.snapshotId,
-              tools: row.serve.tools,
-              subscriber: null,
-            }
-          : row.provide !== null
-            ? {
-                kind: "provide",
-                snapshot: row.provide.snapshotId,
-                scope: row.provide.scopeId,
-                descriptor: row.provide.descriptor,
-                continuation: row.provide.continuation,
-              }
-            : row.parked !== null
-              ? transportPayloadOf(row.parked)
-              : { kind: "transport", call: { kind: "recovered" } };
-      return {
-        delegation: row.delegation,
-        instance: row.instance,
-        caller: row.caller,
-        run: row.run,
-        status: row.status,
-        payload,
-        relays: endpoint?.relays ?? [],
-        innerCalls: endpoint?.innerCalls ?? [],
-      };
-    });
+  /** Reload one call from its extension variant. A `serve` / `provide` reloads as that live endpoint (the
+   *  subscriber / continuation was dispatched at the original open — the provide re-lists only if its
+   *  continuation is still stored; never re-dispatched), carrying its inner-delegation bridges. A `parked`
+   *  variant reloads as its full dispatch-shaped call (the park's re-run needs it — the ack decoder is
+   *  rebuilt exactly as `openPayload` built it); a bare `transport` reloads as `recovered`: nothing
+   *  dispatch-shaped persists for an in-flight call, so the payload says so by type. */
+  protected decodeCallExtension(extension: Json): DecodedCallExtension<McpPayload> {
+    const decoded = decodeMcpExtension(extension);
+    switch (decoded.kind) {
+      case "serve":
+        return {
+          payload: {
+            kind: "serve",
+            token: decoded.token,
+            snapshot: decoded.snapshotId,
+            tools: decoded.tools,
+            subscriber: null,
+          },
+          relays: decoded.relays,
+          innerCalls: decoded.innerCalls,
+        };
+      case "provide":
+        return {
+          payload: {
+            kind: "provide",
+            snapshot: decoded.snapshotId,
+            scope: decoded.scopeId,
+            descriptor: decoded.descriptor,
+            continuation: decoded.continuation,
+          },
+          relays: decoded.relays,
+          innerCalls: decoded.innerCalls,
+        };
+      case "parked":
+        return { payload: transportPayloadOf(decoded.call), relays: [], innerCalls: [] };
+      case "transport":
+        return {
+          payload: { kind: "transport", call: { kind: "recovered" } },
+          relays: [],
+          innerCalls: [],
+        };
+    }
+  }
+
+  /** A serve endpoint's minted URL token — the base commits its `capability_routes` row alongside the
+   *  call row, so a cold `POST /mcp/<token>` resolves this project before any actor is warm. The other
+   *  shapes mint no public token. */
+  protected override capabilityTokenOf(payload: McpPayload): string | null {
+    return payload.kind === "serve" ? payload.token : null;
   }
 
   override reset(): void {

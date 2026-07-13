@@ -78,6 +78,13 @@
       "when": 1783950154538,
       "tag": "0011_useful_shatterstar",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1783983023383,
+      "tag": "0012_external_call_spine",
+      "breakpoints": true
     }
   ]
 }

@@ -5,16 +5,17 @@
 // `delegateAck` (the `{ status, headers, body }` response), an `escalate` (a request that produced no response → a
 // `throw[http.fetch_error]` that bubbles to the caller's handler), or a `terminateAck` (an abort confirmed).
 //
-// It owns its in-flight calls durably as `http`-kind instances (`http_instances` — the call's status + caller),
-// and on recovery it does NOT re-send (an http request is not idempotent): the transport's `recover` leaves a
-// surviving request alone and reports an error for a gone one, so an interrupted running call fails like any
-// other no-response. This at-most-once guarantee is the whole reason http is a reactor rather than a
-// core-inline primitive.
+// It owns its in-flight calls durably as `http`-kind instances (an external-call row carrying only the
+// status — the extension document is empty), and on recovery it does NOT re-send (an http request is not
+// idempotent): the transport's `recover` leaves a surviving request alone and reports an error for a gone
+// one, so an interrupted running call fails like any other no-response. This at-most-once guarantee is the
+// whole reason http is a reactor rather than a core-inline primitive.
 //
 // A no-response error (DNS failure, refused connection, timeout, restart interruption) is a *program-
 // anticipatable* failure, so it escalates as `throw[http.fetch_error]` (the stdlib `prelude/http.ktr`
 // declares the effect) — a caller handles it to control retry; unhandled, it fails the run with the payload.
 
+import type { Json } from "@katari-lang/types";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { HttpTransport } from "../external/http-transport.js";
@@ -23,11 +24,10 @@ import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
   type CallRow,
+  type DecodedCallExtension,
   ExternalCallReactor,
   type ExternalTarget,
-  type LoadedCall,
 } from "./external-call-reactor.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The transport data an http call holds. The argument is kept only to dispatch the request; recovery never
@@ -82,27 +82,16 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     this.transport.abort(delegation);
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<HttpPayload>): Promise<void> {
-    // The inner-delegation bridges (`relays` / `innerCalls`) are not persisted: an http transport surfaces
-    // no inner agent calls, so both are empty by construction.
-    await tx.http.putHttpInstance({
-      instanceId: row.instance,
-      status: row.status,
-    });
+  /** The empty extension document: an http call's only kind-specific durable datum is its status (a row
+   *  column). No request (at-most-once recovery never re-sends), and no inner-delegation bridges — an
+   *  http transport surfaces no inner agent calls, so the fields do not exist rather than sit nullable. */
+  protected encodeCallExtension(_row: CallRow<HttpPayload>): Json {
+    return {};
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<HttpPayload>>> {
-    return (await loader.http.instances()).map((row) => ({
-      delegation: row.delegation,
-      instance: row.instance,
-      caller: row.caller,
-      run: row.run,
-      status: row.status,
-      // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
-      payload: { argument: null },
-      relays: [],
-      innerCalls: [],
-    }));
+  protected decodeCallExtension(_extension: Json): DecodedCallExtension<HttpPayload> {
+    // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
+    return { payload: { argument: null }, relays: [], innerCalls: [] };
   }
 }
 

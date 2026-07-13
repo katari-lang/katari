@@ -14,13 +14,7 @@ import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/typ
 import { and, eq, notInArray } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
-import {
-  instances,
-  mcpServeInstances,
-  runs,
-  TERMINAL_RUN_STATES,
-  webhookInstances,
-} from "../db/tables/execution.js";
+import { capabilityRoutes, instances, runs, TERMINAL_RUN_STATES } from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { decryptSecret, encryptSecret } from "../lib/crypto.js";
 import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
@@ -39,7 +33,7 @@ import { DbPersistence } from "./actor/db-persistence.js";
 import { messageOf } from "./actor/failure.js";
 import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
-import type { BlobEntry } from "./engine/types.js";
+import type { BlobEntry, InstanceKind } from "./engine/types.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
 import { decodeMcpOAuthCredential, type McpCredentialStore } from "./external/mcp-oauth.js";
 import { SdkMcpTransport } from "./external/mcp-transport.js";
@@ -200,6 +194,23 @@ const registry = new ProjectRegistry({
   publicBaseUrl: config.publicUrl,
 });
 
+/** Resolve a public capability token (`POST /inbound/<token>`, `POST /mcp/<token>`) to the project and
+ *  endpoint kind serving it — ONE query over `capability_routes` ⋈ `instances` for every token-minting
+ *  surface. The route row is the cold-start index (the token's SoT is the call's extension document);
+ *  the joined envelope `kind` lets each public surface accept only its own endpoints. `null` when no
+ *  live endpoint holds the token. */
+async function resolveCapabilityToken(
+  token: string,
+): Promise<{ projectId: string; kind: InstanceKind } | null> {
+  const [row] = await db
+    .select({ projectId: capabilityRoutes.projectId, kind: instances.kind })
+    .from(capabilityRoutes)
+    .innerJoin(instances, eq(capabilityRoutes.instanceId, instances.id))
+    .where(eq(capabilityRoutes.token, token))
+    .limit(1);
+  return row ?? null;
+}
+
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
 async function resolveSnapshot(projectId: string, snapshotId?: string): Promise<string> {
   if (snapshotId !== undefined) return snapshotId;
@@ -285,11 +296,11 @@ export const facade = {
     registry.evict(projectId as ProjectId);
   },
 
-  /** Deliver one inbound webhook POST. The token alone locates its endpoint — the durable
-   *  `webhook_instances` row resolves it to a project (waking a cold actor, whose reload re-registers the
-   *  token), and the actor's webhook reactor converts the body into a delegation of the endpoint's
-   *  callback. Returns the callback's outcome with its values lowered at THIS user-facing boundary
-   *  (private content redacts — a webhook caller is outside the trust boundary). */
+  /** Deliver one inbound webhook POST. The token alone locates its endpoint — its `capability_routes`
+   *  row resolves it to a project (waking a cold actor, whose reload re-registers the token), and the
+   *  actor's webhook reactor converts the body into a delegation of the endpoint's callback. Returns the
+   *  callback's outcome with its values lowered at THIS user-facing boundary (private content redacts —
+   *  a webhook caller is outside the trust boundary). */
   async deliverWebhook(input: {
     token: string;
     body: Json;
@@ -301,15 +312,12 @@ export const facade = {
     | { kind: "throw"; error: Json }
     | { kind: "error" }
   > {
-    const [row] = await db
-      .select({ projectId: instances.projectId })
-      .from(webhookInstances)
-      .innerJoin(instances, eq(webhookInstances.instanceId, instances.id))
-      .where(eq(webhookInstances.token, input.token))
-      .limit(1);
-    if (row === undefined) return { kind: "unknown" };
+    const route = await resolveCapabilityToken(input.token);
+    // A token minted by another kind of endpoint (an mcp serve URL posted here) is as unknown to THIS
+    // surface as a random string — exactly the per-kind token indexes' behaviour before routes unified.
+    if (route === null || route.kind !== "webhook") return { kind: "unknown" };
     const outcome = await registry
-      .actorFor(row.projectId as ProjectId)
+      .actorFor(route.projectId as ProjectId)
       .deliverWebhook(input.token, decodeClientJson(input.body, "the webhook body"));
     switch (outcome.kind) {
       case "unknown":
@@ -330,22 +338,18 @@ export const facade = {
     }
   },
 
-  /** Serve one inbound MCP request (`POST /mcp/<token>`). The token alone locates its endpoint — the
-   *  durable `mcp_serve_instances` row resolves it to a project (waking a cold actor, whose reload
-   *  re-registers the token) — and the JSON-RPC handling is stateless, so nothing session-shaped exists
-   *  to lose across a restart. Values lower inside the endpoint adapter at THIS user-facing boundary
-   *  (private content redacts — an MCP caller is outside the trust boundary, like a webhook caller). */
+  /** Serve one inbound MCP request (`POST /mcp/<token>`). The token alone locates its endpoint — its
+   *  `capability_routes` row resolves it to a project (waking a cold actor, whose reload re-registers
+   *  the token) — and the JSON-RPC handling is stateless, so nothing session-shaped exists to lose
+   *  across a restart. Values lower inside the endpoint adapter at THIS user-facing boundary (private
+   *  content redacts — an MCP caller is outside the trust boundary, like a webhook caller). */
   async deliverMcp(input: { token: string; body: string }): Promise<McpServeHttpReply> {
-    const [row] = await db
-      .select({ projectId: instances.projectId })
-      .from(mcpServeInstances)
-      .innerJoin(instances, eq(mcpServeInstances.instanceId, instances.id))
-      .where(eq(mcpServeInstances.serveToken, input.token))
-      .limit(1);
+    const route = await resolveCapabilityToken(input.token);
+    // A kind mismatch (a webhook token posted to /mcp) is as unknown to this surface as a random string.
     const endpoint =
-      row === undefined
+      route === null || route.kind !== "mcp"
         ? unknownMcpServeEndpoint()
-        : mcpServeEndpointOf(registry.actorFor(row.projectId as ProjectId), input.token);
+        : mcpServeEndpointOf(registry.actorFor(route.projectId as ProjectId), input.token);
     return serveMcpMessage(endpoint, input.body);
   },
 

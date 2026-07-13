@@ -6,7 +6,7 @@
 // the transport re-reads the credential store, so a deposit-then-ack succeeds while an ack over an
 // still-empty store simply parks again with a fresh escalation — the one unbounded loop that covers
 // first authorization, refresh death, empty answers, and every race. Recovery: the open escalation row
-// plus (for a transport call) the `mcp_parked_instances` dispatch twin ARE the park state — a reload
+// plus (for a transport call) the extension's `parked` dispatch variant ARE the park state — a reload
 // reconstructs the parked call whole (never refusing it through the at-most-once transport
 // reconciliation, which stays the fate of a genuinely IN-FLIGHT interrupted call), and a post-reload ack
 // re-runs identically to a warm one: a provide re-lists from its ext row, a tool call re-dispatches the
@@ -570,8 +570,8 @@ describe("mcp authorize escalation: recovery", () => {
     expect(second.dispatched).toHaveLength(0);
     expect(persistence.peekRun(run)?.state).toBe("running");
 
-    // Deposit + ack on the RELOADED actor: the parked dispatch survived the restart (the
-    // `mcp_parked_instances` twin — a 401-rejected attempt provably never executed, so re-running is
+    // Deposit + ack on the RELOADED actor: the parked dispatch survived the restart (the extension's
+    // `parked` variant — a 401-rejected attempt provably never executed, so re-running is
     // at-most-once-safe), and the retry re-runs the SAME call — tool, arguments, and delegation all
     // identical to the pre-restart attempt — exactly like a warm ack.
     store.seed();

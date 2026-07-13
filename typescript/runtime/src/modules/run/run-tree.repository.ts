@@ -17,10 +17,10 @@ import {
   type DelegationState,
   delegations,
   escalations,
-  ffiInstances,
-  httpInstances,
+  externalCallInstances,
   instances,
 } from "../../db/tables/execution.js";
+import { decodeFfiExtension } from "../../runtime/actor/ffi-reactor.js";
 import type { InstanceKind } from "../../runtime/engine/types.js";
 import type { DelegateTarget, ReactorName } from "../../runtime/event/types.js";
 
@@ -80,7 +80,7 @@ export interface TreeInstanceRow {
   target: DelegateTarget | null;
   /** The `ffi` extension's dispatch key. */
   ffiKey: string | null;
-  /** The `ffi` / `http` extension's own status (it distinguishes `awaitingAnswer`; the envelope cannot). */
+  /** An external call's own status (it distinguishes `awaitingAnswer`; the envelope cannot). */
   callStatus: "running" | "cancelling" | "awaitingAnswer" | null;
   snapshotId: string | null;
 }
@@ -213,16 +213,13 @@ export const runTreeRepository = {
           kind: instances.kind,
           status: instances.status,
           target: coreInstances.target,
-          ffiKey: ffiInstances.key,
-          ffiStatus: ffiInstances.status,
-          httpStatus: httpInstances.status,
           coreSnapshotId: coreInstances.snapshotId,
-          ffiSnapshotId: ffiInstances.snapshotId,
+          callStatus: externalCallInstances.status,
+          extension: externalCallInstances.extension,
         })
         .from(instances)
         .leftJoin(coreInstances, eq(coreInstances.instanceId, instances.id))
-        .leftJoin(ffiInstances, eq(ffiInstances.instanceId, instances.id))
-        .leftJoin(httpInstances, eq(httpInstances.instanceId, instances.id))
+        .leftJoin(externalCallInstances, eq(externalCallInstances.instanceId, instances.id))
         .where(eq(instances.projectId, projectId)),
       executor
         .select({
@@ -237,16 +234,24 @@ export const runTreeRepository = {
     ]);
     return assembleDelegationTree(runId, {
       delegations: delegationRows,
-      instances: instanceRows.map((row) => ({
-        id: row.id,
-        delegationId: row.delegationId,
-        kind: row.kind,
-        status: row.status,
-        target: row.target,
-        ffiKey: row.ffiKey,
-        callStatus: row.ffiStatus ?? row.httpStatus,
-        snapshotId: row.coreSnapshotId ?? row.ffiSnapshotId,
-      })),
+      instances: instanceRows.map((row) => {
+        // The ffi display fields (dispatch key, snapshot pin) live inside the extension document, so they
+        // decode through the reactor's exported pure codec — never SQL `->>` digging, which would
+        // silently duplicate the schema the codec owns. The volume is one run's live rows, and the
+        // decoded fields are not private (any `$sealed` node elsewhere in a document stays untouched).
+        const ffi =
+          row.kind === "ffi" && row.extension !== null ? decodeFfiExtension(row.extension) : null;
+        return {
+          id: row.id,
+          delegationId: row.delegationId,
+          kind: row.kind,
+          status: row.status,
+          target: row.target,
+          ffiKey: ffi === null ? null : ffi.key,
+          callStatus: row.callStatus,
+          snapshotId: row.coreSnapshotId ?? (ffi === null ? null : ffi.snapshotId),
+        };
+      }),
       escalations: escalationRows,
     });
   },

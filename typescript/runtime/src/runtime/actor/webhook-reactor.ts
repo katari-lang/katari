@@ -10,10 +10,11 @@
 //
 // It inverts the ffi / http direction — the outside world calls the program — which also inverts the
 // recovery story: there is no external process to reconcile with, so a webhook call survives a restart
-// COMPLETELY. The token + callback are persisted on its ext row (`webhook_instances`) and re-registered on
-// load; the subscriber's inner delegation is durable core work that resumes on its own. Only a delivery
-// whose HTTP waiter died with the process is lost — its response has no one to go to, and the webhook
-// provider's retry redelivers.
+// COMPLETELY. The token + callback are persisted in its extension document and re-registered on load (the
+// token also projects into `capability_routes`, so a cold inbound POST finds the project); the
+// subscriber's inner delegation is durable core work that resumes on its own. Only a delivery whose HTTP
+// waiter died with the process is lost — its response has no one to go to, and the webhook provider's
+// retry redelivers.
 //
 // The call settles when the SUBSCRIBER settles: its result becomes the call's `delegateAck` (so `inbound`
 // returns the subscriber's value), its throw / panic escalate like any callee failure, and a `terminate`
@@ -21,31 +22,78 @@
 // released. Either way the endpoint deactivates atomically with the call.
 
 import { randomBytes } from "node:crypto";
+import type { Json } from "@katari-lang/types";
 import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { DelegationId, SnapshotId } from "../ids.js";
 import type { Value } from "../value/types.js";
 import {
+  asJson,
+  documentOf,
+  encodeInnerCalls,
+  encodeRelays,
+  innerCallsOf,
+  relaysOf,
+  stringFieldOf,
+  warmFieldOf,
+} from "./extension-codec.js";
+import {
   type CallRow,
+  type DecodedCallExtension,
+  type EscalationRelayRow,
   ExternalCallReactor,
   type ExternalTarget,
+  type InnerCallRow,
   type InnerDelivery,
   innerOutcomeAsCompletion,
-  type LoadedCall,
 } from "./external-call-reactor.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The transport data a webhook call holds. `token` and `callback` are persisted (the endpoint and its
  *  deliveries survive a restart); `subscriber` is consumed by the one-time dispatch and never stored. */
 interface WebhookPayload {
   token: string;
-  /** The snapshot the call was dispatched against — persisted as the ext row's version pin (retention:
-   *  a live endpoint keeps its snapshot undeletable, so the callback stays resolvable). */
+  /** The snapshot the call was dispatched against — persisted as the extension's version pin (the
+   *  callback stays resolvable against it). */
   snapshot: SnapshotId;
   callback: Value;
   subscriber: Value | null;
+}
+
+/** The webhook extension document: everything a reload re-registers — the capability `token` (the public
+ *  URL), the `callback` each delivery dispatches (may capture private values, so the sealed subtree sits
+ *  inside this document), the version pin, and the inner-delegation bridges. The subscriber is absent:
+ *  dispatched exactly once, its inner delegation is durable core work. */
+export interface WebhookExtension {
+  snapshotId: SnapshotId;
+  token: string;
+  callback: Value;
+  relays: EscalationRelayRow[];
+  innerCalls: InnerCallRow[];
+}
+
+/** Encode a webhook call's extension document (pure — the persistence port seals it as a whole). */
+export function encodeWebhookExtension(extension: WebhookExtension): Json {
+  return {
+    snapshotId: extension.snapshotId,
+    token: extension.token,
+    callback: asJson(extension.callback),
+    relays: encodeRelays(extension.relays),
+    innerCalls: encodeInnerCalls(extension.innerCalls),
+  };
+}
+
+/** Decode a webhook call's extension document (pure). */
+export function decodeWebhookExtension(extension: Json): WebhookExtension {
+  const document = documentOf(extension);
+  return {
+    snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+    token: stringFieldOf(document, "token"),
+    callback: warmFieldOf<Value>(document, "callback"),
+    relays: relaysOf(document),
+    innerCalls: innerCallsOf(document),
+  };
 }
 
 /** How one inbound delivery ended, resolved to the waiting HTTP request (values still engine `Value`s —
@@ -250,35 +298,35 @@ export class WebhookReactor extends ExternalCallReactor<WebhookPayload> {
     if (payload !== undefined) this.tokens.delete(payload.token);
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<WebhookPayload>): Promise<void> {
-    await tx.webhook.putWebhookInstance({
-      instanceId: row.instance,
+  protected encodeCallExtension(row: CallRow<WebhookPayload>): Json {
+    return encodeWebhookExtension({
       snapshotId: row.payload.snapshot,
       token: row.payload.token,
       callback: row.payload.callback,
-      status: row.status,
       relays: row.relays,
       innerCalls: row.innerCalls,
     });
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<WebhookPayload>>> {
-    return (await loader.webhook.instances()).map((row) => ({
-      delegation: row.delegation,
-      instance: row.instance,
-      caller: row.caller,
-      run: row.run,
-      status: row.status,
+  protected decodeCallExtension(extension: Json): DecodedCallExtension<WebhookPayload> {
+    const decoded = decodeWebhookExtension(extension);
+    return {
       payload: {
-        token: row.token,
-        snapshot: row.snapshot,
-        callback: row.callback,
+        token: decoded.token,
+        snapshot: decoded.snapshotId,
+        callback: decoded.callback,
         // The subscriber was dispatched exactly once at the original open; never re-dispatched.
         subscriber: null,
       },
-      relays: row.relays,
-      innerCalls: row.innerCalls,
-    }));
+      relays: decoded.relays,
+      innerCalls: decoded.innerCalls,
+    };
+  }
+
+  /** The minted URL token — the base commits its `capability_routes` row alongside the call row, so a
+   *  cold `POST /inbound/<token>` resolves this project before any actor is warm. */
+  protected override capabilityTokenOf(payload: WebhookPayload): string {
+    return payload.token;
   }
 
   override reset(): void {
