@@ -429,7 +429,9 @@ function peelCallAgent(
   return { callable, args: argument.fields.args ?? null };
 }
 
-/** Raise a `return` / `break` / `break-for` exit, by the role of the block it targets. */
+/** Raise a `return` / `break` / `break-for` exit, by the role of the block it targets. A `for` and a
+ *  `forever` share the `break-for` ask: both catch it on the thread whose block the `target` names, and a
+ *  `forever` break completes the loop with the value exactly as a `for` break does. */
 function raiseExit(ctx: StepContext, thread: SequenceThread, operation: ExitOperation): void {
   const target = getBlock(ctx, operation.target);
   const value = requireVariable(ctx, thread.scopeId, operation.value);
@@ -438,7 +440,7 @@ function raiseExit(ctx: StepContext, thread: SequenceThread, operation: ExitOper
       ? { kind: "return", value, target: operation.target }
       : target.kind === "handle"
         ? { kind: "break", value, target: operation.target }
-        : target.kind === "for"
+        : target.kind === "for" || target.kind === "forever"
           ? { kind: "break-for", value, target: operation.target }
           : unreachableExit(operation.target);
   raiseControlAsk(ctx, thread, ask);
@@ -460,7 +462,7 @@ function raiseContinue(
   const ask: AskKind =
     target.kind === "handle"
       ? { kind: "next", value, modifiers, target: operation.target }
-      : target.kind === "for"
+      : target.kind === "for" || target.kind === "forever"
         ? { kind: "next-for", value, modifiers, target: operation.target }
         : unreachableContinue(operation.target);
   raiseControlAsk(ctx, thread, ask);

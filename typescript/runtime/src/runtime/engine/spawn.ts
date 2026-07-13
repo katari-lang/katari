@@ -103,7 +103,7 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
         thenPending: null,
       };
     case "forever":
-      return { ...base, kind: "forever", pending: null };
+      return { ...base, kind: "forever", pending: null, states: {}, postCancelAdvance: {} };
     case "handle":
       return {
         ...base,

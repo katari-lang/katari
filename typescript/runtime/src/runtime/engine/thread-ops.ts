@@ -8,7 +8,7 @@
 
 import type { Block } from "@katari-lang/types";
 import { isUserFacingRequest } from "../escalation-filter.js";
-import type { AskKind, ReactorName } from "../event/types.js";
+import type { AskKind, ModifierMap, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { isTainted, markPrivate } from "../value/privacy.js";
@@ -171,19 +171,20 @@ export function dispatchAsk(
     case "for":
       forAsk(ctx, thread, from, askId, ask);
       return;
+    case "forever":
+      foreverAsk(ctx, thread, from, askId, ask);
+      return;
     case "handle":
       handleAsk(ctx, thread, from, askId, ask);
       return;
     case "sequence":
     case "match":
-    case "forever":
     case "parallel":
     case "delegate":
     case "external":
-      // None of these is a control target or a request handler: bubble every ask up unchanged (`forever`
-      // deliberately owns no target — its composed exit IS an ask unwinding past it to a surrounding
-      // handler). (A delegate / external proxy has no in-instance children to ask it, so those two are
-      // reached only defensively.)
+      // None of these is a control target or a request handler: bubble every ask up unchanged. (A
+      // delegate / external proxy has no in-instance children to ask it, so those two are reached only
+      // defensively.)
       proxyAsk(ctx, thread, ask, from, askId);
       return;
     case "primitive":
@@ -353,6 +354,14 @@ export function dispatchCancelAck(ctx: StepContext, thread: Thread, callId: Call
     const action = thread.postCancelCollect[callId];
     delete thread.postCancelCollect[callId];
     collectIteration(ctx, thread, callId, action.value, action.modifiers);
+    return;
+  }
+  if (thread.kind === "forever" && thread.postCancelAdvance[callId] !== undefined) {
+    // A targeted `next`-cancel of a forever iteration finished: apply its modifiers and re-iterate (no
+    // value is collected — the forever analogue of the `for` case above).
+    const action = thread.postCancelAdvance[callId];
+    delete thread.postCancelAdvance[callId];
+    advanceForever(ctx, thread, action.modifiers);
     return;
   }
   noteChildGone(ctx, thread.id);
@@ -857,6 +866,17 @@ function finishFor(ctx: StepContext, thread: ForThread, thenClause: { body: numb
 // ─── forever (unbounded loop) ────────────────────────────────────────────────────────────────────
 
 function createForever(ctx: StepContext, thread: ForeverThread): void {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "forever") throw new Error(`thread ${thread.id} is not a forever block`);
+  // Seed the loop state keyed by each state's body variable (so a `with` modifier updates it directly),
+  // exactly as `createFor` does. Empty for a stateless `forever { … }`.
+  const bodyParameters = ctx.ir.block(block.body).parameters;
+  block.initialStates.forEach((initial, index) => {
+    const stateVariable = bodyParameters[`state_${index}`];
+    if (stateVariable !== undefined) {
+      thread.states[stateVariable] = readVariable(ctx.store, thread.scopeId, initial) ?? NULL_VALUE;
+    }
+  });
   startForeverIteration(ctx, thread);
 }
 
@@ -877,8 +897,50 @@ function startForeverIteration(ctx: StepContext, thread: ForeverThread): void {
     parentCallId: callId,
     parentScopeId: thread.scopeId,
     blockId: block.body,
-    parameters: {},
+    // Carry the current `var` state into the iteration (unchanged by an implicit next / fallthrough;
+    // updated by a `next … with (…)` before this is called).
+    parameters: stateParameters(ctx, thread, block.body),
   });
+}
+
+/** A `forever` catches its OWN `break` and its OWN `next`, both naming this loop's block. A `break value`
+ *  cancels the in-flight iteration and completes the loop with the value (the same cancel-then-complete
+ *  cascade a `for`'s `break-for` uses). A `next … with (…)` cancels the iteration, applies the state
+ *  modifiers, and starts the next iteration (collecting no value — the loop maps nothing). Every other ask
+ *  (a request, or a `return` / outer `break` unwinding past the loop) bubbles up unchanged. */
+function foreverAsk(
+  ctx: StepContext,
+  thread: ForeverThread,
+  from: ThreadId,
+  askId: AskId,
+  ask: AskKind,
+): void {
+  if (ask.kind === "break-for" && ask.target === thread.blockId) {
+    beginCancel(ctx, thread, { kind: "completeWith", value: ask.value });
+    return;
+  }
+  if (ask.kind === "next-for" && ask.target === thread.blockId) {
+    // Mirror `for`'s `next-for`: cancel that iteration's subtree (the `next` may have escaped from inside
+    // still-running nested structure), then apply the modifiers and re-iterate on its teardown.
+    const child = ctx.instance.threads[from];
+    const callId = child?.parentCallId ?? null;
+    if (child === undefined || callId === null) {
+      throw new Error(`next-for from ${from} has no iteration call`);
+    }
+    thread.postCancelAdvance[callId] = { modifiers: ask.modifiers };
+    beginCancel(ctx, child, { kind: "ackParent" });
+    return;
+  }
+  proxyAsk(ctx, thread, ask, from, askId);
+}
+
+/** Apply a `next … with (…)`'s state modifiers and start the next iteration (a `forever`'s advance, once
+ *  the previous iteration's targeted cancel has cleared — the analogue of a `for`'s `collectIteration`). */
+function advanceForever(ctx: StepContext, thread: ForeverThread, modifiers: ModifierMap): void {
+  for (const [variable, modifierValue] of Object.entries(modifiers)) {
+    thread.states[Number(variable)] = modifierValue;
+  }
+  startForeverIteration(ctx, thread);
 }
 
 // ─── handle (effect handler) ─────────────────────────────────────────────────────────────────────
@@ -1086,7 +1148,7 @@ function handleBusy(thread: HandleThread): boolean {
 /** Build the `state_N` parameter values for a block (body / handler / then-clause) from current states. */
 function stateParameters(
   ctx: StepContext,
-  thread: ForThread | HandleThread,
+  thread: ForThread | HandleThread | ForeverThread,
   blockId: number,
 ): Record<string, Value> {
   const parameters: Record<string, Value> = {};

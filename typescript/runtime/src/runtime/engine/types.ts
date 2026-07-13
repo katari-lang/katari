@@ -8,7 +8,7 @@
 // the engine's working set; its exact fields will firm up in the engine phase.
 
 import type { BlockId, ExternalReactorName, QualifiedName } from "@katari-lang/types";
-import type { DelegateTarget, ReactorName } from "../event/types.js";
+import type { DelegateTarget, ModifierMap, ReactorName } from "../event/types.js";
 import type {
   AskId,
   BlobId,
@@ -224,17 +224,27 @@ export type ForThread = ThreadBase & {
 
 /**
  * Drives a `forever` loop: one body iteration at a time, each spawned as a fresh child thread whose
- * completion value is DISCARDED and immediately followed by the next iteration. Nothing is collected and
- * no cursor exists, so the thread's state is one pending call id no matter how many iterations have run —
- * which, with the per-iteration child scopes reclaimed by the intra-instance GC, is what makes a
- * long-lived loop's durable footprint flat. The loop owns no asks (no `next` / `break` target, no
- * handlers): every ask from the body proxies up unchanged, and the loop ends only by cancellation or by
- * an ask unwinding past it (a surrounding handler's `break` — the composed exit).
+ * completion value is DISCARDED and immediately followed by the next iteration. It is `for` minus the
+ * source, the value collection, and the then-clause: it carries `var` state across iterations (`states`,
+ * re-seeded into each iteration's `state_N`, advanced by a `next … with (…)`) and is a `break` target (a
+ * `break value` — a `break-for` naming its block — cancels the in-flight iteration and completes the loop
+ * with that value). But nothing is collected and no cursor exists — the durable footprint is the current
+ * state values plus one pending call, flat no matter how many iterations have run (each completed
+ * iteration's child scope reclaimed by the intra-instance GC). Every other ask — a request, or a `return`
+ * / outer `break` unwinding toward a lexical ancestor — proxies up unchanged.
  */
 export type ForeverThread = ThreadBase & {
   kind: "forever";
   /** The in-flight iteration's child call (exactly one at any time once created). */
   pending: CallId | null;
+  /** Current `var` state values, keyed by each state's body variable id (so a `with (s = …)` modifier —
+   *  which names that variable — updates it directly). Re-seeded into the body's `state_N` each iteration.
+   *  Empty for a stateless `forever { … }`. */
+  states: Record<number, Value>;
+  /** An iteration body's call -> the state modifiers to apply once its targeted `next`-cancel completes,
+   *  then start the next iteration (the forever analogue of a `for`'s `postCancelCollect`, minus the
+   *  collected value forever discards). */
+  postCancelAdvance: Record<number, { modifiers: ModifierMap }>;
 };
 
 /**

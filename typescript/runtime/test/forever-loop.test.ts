@@ -41,7 +41,7 @@ function foreverIr(): IRModule {
         },
         parameters: { parameter: 1100 },
       },
-      2: { block: { kind: "forever", body: 3 }, parameters: {} },
+      2: { block: { kind: "forever", initialStates: [], body: 3 }, parameters: {} },
       // one iteration: probe(record {})
       3: {
         block: {
