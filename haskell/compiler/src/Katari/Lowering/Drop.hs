@@ -142,9 +142,9 @@ blockVariables = \case
   BlockExternal external -> [external.input]
   BlockMatch match -> match.subject : concatMap (patternVariables . (.pattern)) match.arms
   BlockFor for -> for.source : for.initialStates
-  -- A forever block carries only its body's block id — like the bodies above, the body's own variables
-  -- are counted where that block is walked as its own entry.
-  BlockForever _ -> []
+  -- A forever block references its caller-scope @var@ initials (seeded into the body's @state_N@); its
+  -- body's own variables are counted where that block is walked as its own entry.
+  BlockForever forever' -> forever'.initialStates
   BlockHandle handle -> handle.initialStates
   BlockParallel _ -> []
 

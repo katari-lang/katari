@@ -364,18 +364,32 @@ forExpression = do
   forSpan <- keyword "for"
   forBody False forSpan
 
--- | @forever { body }@ — repeat the block indefinitely (the expression types as @never@). `forever` is
--- deliberately NOT a reserved word (see 'reservedWords': the stdlib's `replay.forever` agent keeps its
--- name); it is recognised positionally, like the type-only words — only at an expression head with a `{`
--- directly after it. The `try` backtracks a call (`forever(...)`) or a bare reference into the ordinary
--- identifier expression. The body introduces no loop context of its own: `forever` has no jump target
--- (no built-in exit — escaping is composed with a surrounding handler's `break`), so `next` / `break`
--- inside the body keep meaning exactly what they mean outside it, as in a `match` arm.
+-- | @forever [(var name [: T] = initial, ...)] { body }@ — repeat the block indefinitely, carrying the
+-- head's @var@ state across iterations (advanced by a @next … with (…)@, like @for@'s state). The
+-- expression types as the union of the @break@ values that exit it (@never@ when there is no @break@, so a
+-- plain @forever { … }@ still conforms anywhere). `forever` is deliberately NOT a reserved word (see
+-- 'reservedWords': the stdlib's `replay.forever` agent keeps its name); it is recognised positionally —
+-- only at an expression head where a @{@ (or a @(var …)@ head followed by a @{@) directly follows. The
+-- `try` backtracks a call (`forever(...)`) or a bare reference into the ordinary identifier expression. The
+-- body runs in 'LoopContextForever': a @break value@ exits with that value, a @next … with (…)@ advances
+-- the loop state (collecting no value, unlike @for@).
 foreverExpression :: Parser ExpressionP
 foreverExpression = do
-  foreverSpan <- try (keyword "forever" <* lookAhead (string "{"))
-  body <- block
-  pure (ExpressionForever ForeverExpression {body = body, sourceSpan = mergeSpans foreverSpan (sourceSpanOf body), typeOf = ()})
+  (foreverSpan, varBindings) <-
+    try $ do
+      foreverSpan <- keyword "forever"
+      varBindings <- foreverHeader
+      _ <- lookAhead (string "{")
+      pure (foreverSpan, varBindings)
+  body <- withLoopContext LoopContextForever block
+  pure (ExpressionForever ForeverExpression {varBindings = varBindings, body = body, sourceSpan = mergeSpans foreverSpan (sourceSpanOf body), typeOf = ()})
+
+-- | The optional @(var name = initial, ...)@ state header of a @forever@ loop. Absent (a bare
+-- @forever { … }@) yields no bindings; a @(var …)@ header requires @var@ keywords, so a call
+-- @forever(x = 1)@ fails this parse (its argument is no @var@ binding) and the enclosing @try@ backtracks
+-- it to an ordinary call.
+foreverHeader :: Parser (List (VariableBinding Parsed))
+foreverHeader = option [] (try (fst <$> parens (commaSeparated1 variableBinding)))
 
 -- | @parallel [e, ...]@, @parallel for (...) {...}@, or @parallel handler ...@.
 parallelExpression :: Parser ExpressionP
@@ -690,6 +704,10 @@ nextStatement = do
       sourceSpan = mergeSpans nextSpan (nextEndSpan nextSpan value modifiers)
   case context of
     LoopContextFor -> pure (StatementForNext ForNextStatement {value = valueExpression, modifiers = modifiers, sourceSpan = sourceSpan})
+    -- A `forever` `next` advances the loop (updating its `var` state via the modifiers) but collects no
+    -- value, so it rides the same `ForNextStatement` node as a `for` `next`; the loop kind at the target
+    -- boundary decides whether the value is mapped (a `for`) or discarded (a `forever`).
+    LoopContextForever -> pure (StatementForNext ForNextStatement {value = valueExpression, modifiers = modifiers, sourceSpan = sourceSpan})
     LoopContextHandler -> pure (StatementNext NextStatement {value = valueExpression, modifiers = modifiers, sourceSpan = sourceSpan})
     LoopContextNone -> fail "`next` is only allowed inside a `for` loop or a request handler"
 
@@ -697,7 +715,9 @@ nextEndSpan :: SourceSpan -> Maybe ExpressionP -> List (Modifier Parsed) -> Sour
 nextEndSpan fallback value =
   lastSpanOr (maybe fallback sourceSpanOf value)
 
--- | @break [value]@ — a for-loop or request-handler @break@, by loop context.
+-- | @break [value]@ — a for-loop / @forever@ loop / request-handler @break@, by loop context. A
+-- `forever` break rides the same 'ForBreakStatement' node as a `for` break (both target the nearest
+-- loop's boundary); the loop kind at that boundary decides what catching it does.
 breakStatement :: Parser (Statement Parsed)
 breakStatement = do
   breakSpan <- keyword "break"
@@ -707,8 +727,9 @@ breakStatement = do
       sourceSpan = mergeSpans breakSpan (sourceSpanOf valueExpression)
   case context of
     LoopContextFor -> pure (StatementForBreak ForBreakStatement {value = valueExpression, sourceSpan = sourceSpan})
+    LoopContextForever -> pure (StatementForBreak ForBreakStatement {value = valueExpression, sourceSpan = sourceSpan})
     LoopContextHandler -> pure (StatementBreak BreakStatement {value = valueExpression, sourceSpan = sourceSpan})
-    LoopContextNone -> fail "`break` is only allowed inside a `for` loop or a request handler"
+    LoopContextNone -> fail "`break` is only allowed inside a `for` loop, a `forever` loop, or a request handler"
 
 -- | @finally { ... }@ — arm the braced block as a finalizer of the current agent instance.
 finallyStatement :: Parser (Statement Parsed)

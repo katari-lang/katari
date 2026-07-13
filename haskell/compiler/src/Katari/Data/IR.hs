@@ -203,12 +203,15 @@ data For = For
   }
   deriving stock (Eq, Show)
 
--- | @forever { body }@: each time 'body' completes, run it again — one iteration at a time, its value
--- discarded (nothing is collected, unlike 'For', so iteration count does not grow the loop's state). The
--- block never completes on its own; it ends only by cancellation or an ask (a request whose handler
--- @break@s, a jump to an enclosing target) unwinding past it.
-newtype Forever = Forever
-  { body :: BlockId
+-- | @forever [(var …)] { body }@: each time 'body' completes, run it again — one iteration at a time, its
+-- value discarded (nothing is collected, unlike 'For', so iteration count does not grow the loop's state).
+-- 'initialStates' seed the body's @state_N@ parameters exactly as 'For' does (empty for a stateless
+-- @forever { … }@); a @next … with (…)@ advances them across iterations. The block completes only when the
+-- body @break@s (unwinding an @EXIT@ to it, carrying the loop's result value); otherwise it never completes
+-- on its own, ending by cancellation or an ask unwinding past it.
+data Forever = Forever
+  { initialStates :: List VariableId,
+    body :: BlockId
   }
   deriving stock (Eq, Show)
 
@@ -554,7 +557,12 @@ instance ToJSON Block where
           "body" .= for.body,
           "thenClause" .= for.thenClause
         ]
-    BlockForever forever' -> taggedObject "forever" ["body" .= forever'.body]
+    BlockForever forever' ->
+      taggedObject
+        "forever"
+        [ "initialStates" .= forever'.initialStates,
+          "body" .= forever'.body
+        ]
     BlockHandle handle ->
       taggedObject
         "handle"

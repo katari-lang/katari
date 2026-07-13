@@ -293,8 +293,16 @@ spec = do
     it "parses a forever loop" $ do
       body <- parseClean "agent main() -> never { forever { tick() } }" >>= soleAgentBody
       case body.returnExpression of
-        Just (ExpressionForever node) -> length node.body.statements `shouldBe` 0
+        Just (ExpressionForever node) -> do
+          length node.body.statements `shouldBe` 0
+          length node.varBindings `shouldBe` 0
         _ -> expectationFailure "expected a forever loop"
+
+    it "parses a forever loop with a `var` state header" $ do
+      body <- parseClean "agent main() -> integer { forever (var n = 0) { break n } }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionForever node) -> length node.varBindings `shouldBe` 1
+        _ -> expectationFailure "expected a forever loop with a var header"
 
     it "keeps `forever` an ordinary identifier away from a loop head (a call, and a declared agent name)" $ do
       -- The word is recognised positionally (only directly before `{`), so the stdlib's `replay.forever`

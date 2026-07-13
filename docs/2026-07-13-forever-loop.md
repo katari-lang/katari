@@ -11,53 +11,58 @@ engine but a missing language form: a loop that repeats *in place*.
 ## The form
 
 ```katari
-forever {
+forever [(var name [: T] = initial, ...)] {
   <the block, re-run each time it completes>
 }
 ```
 
-An expression, the unbounded sibling of the sequential `for`:
+An expression, the unbounded sibling of the sequential `for` — in fact `for` minus its {source,
+per-iteration value collection, `then` clause}, with the SAME {`var` state, `next … with (…)`, `break`}
+machinery:
 
 - **One iterating thread inside one instance.** Each iteration spawns the body as a fresh child thread in a
   fresh scope; when it completes, its value is **discarded** and the next iteration starts. Nothing is
-  collected, no cursor exists — the loop's whole state is the one in-flight call — and the completed
-  iteration's thread and scope are reclaimed by the ordinary intra-instance GC at the turn boundary. **The
-  durable footprint is flat no matter how many iterations have run** (pinned by an engine test that runs
-  thirty iterations and asserts the persisted thread/scope counts did not move).
-- **It types as `never`.** The expression never yields a value, so it conforms anywhere, exactly like a
-  `-> never` call — including being an agent body's trailing expression for any declared return.
+  collected, no cursor exists — the loop's whole state is the current `var` values plus the one in-flight
+  call — and the completed iteration's thread and scope are reclaimed by the ordinary intra-instance GC at
+  the turn boundary. **The durable footprint is flat no matter how many iterations have run** (pinned by an
+  engine test that runs thirty iterations and asserts the persisted thread/scope counts did not move).
+- **It types as the union of its `break` values — `never` when it has none.** With no `break` the loop
+  never yields, so `forever { … }` conforms anywhere, exactly like a `-> never` call (including as an agent
+  body's trailing expression for any declared return). A `break value` makes the loop's type the value's.
 - **The body is an ordinary block.** Its tail value is discarded per iteration (where `for` would map it
   into the output array); its effects are the loop's effects, performed every iteration, and flow to the
   enclosing row unchanged.
-- **No jump target, no barrier.** `forever` owns no `next` / `break`; jumps and requests inside the body
-  mean exactly what they mean outside it, as in a `match` arm.
 
-## No built-in exit — escaping is composed
+## Break, next, and loop-carried state — symmetric with `for`
 
-`forever` cannot stop itself; that is the type (`never`), not a limitation. The exit is the same
-catch-and-break mechanism everything else uses: perform a request, and let a surrounding handler `break`
-out of the handled block with the value.
+`forever` owns two jumps, exactly the ones a `for` body owns, resolving to the loop as their nearest target:
+
+- **`break value` exits the loop with that value.** This is the built-in exit — the same `EXIT` machinery
+  `for`'s `break` uses (the value unwinds the loop and becomes its result). It is a lexical jump, not a
+  performable request, so nothing outside the loop can name or trigger it.
+- **`next [with (mods)]` advances to the next iteration**, updating the `var` state through the modifiers.
+  Unlike `for`'s `next`, it collects **no** value (there is no output array); falling off the body end is an
+  implicit `next` with the state unchanged. The `var` state is declared in the head and carried across
+  iterations — the only thing that persists, which is why the footprint stays flat.
 
 ```katari
-request done(value: integer) -> never
-
 agent poll_until_ready() -> integer {
-  use handler {
-    request done(value: integer) -> never { break value }
-  }
-  forever {
+  forever (var waited = 0) {
     match (check()) {
-      case ready(value => value) -> { done(value = value) }
-      case pending(_) -> { time.sleep(milliseconds = 1000.0) }
+      case ready(value => value) -> { break value }                 // exit with the value
+      case pending(_) -> {
+        time.sleep(milliseconds = 1000.0)
+        next with { waited = waited + 1 }                           // re-iterate, advancing state
+      }
     }
   }
 }
 ```
 
-This is deliberately identical to how a throw is caught: control leaves the loop only by an ask unwinding
-past it. Evolving per-iteration state composes the same way — a `use handler (var …)` outside the loop
-holds it (the ambient-counter pattern), so the body stays stateless. `prelude.replay`'s providers
-(`immediate` / `forever` / `exponential`) are exactly these compositions and nothing more.
+`prelude.replay`'s providers (`immediate` / `forever` / `exponential`) are exactly this shape: the loop's
+`var` holds the attempt count and backoff delay (one owner), `next … with (…)` advances them, `break`
+carries the success value out, and exhaustion is a typed `throw`. No separate state handler, no loop-control
+request.
 
 ## `forever` is a positional word, not a reserved one
 

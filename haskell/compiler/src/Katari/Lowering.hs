@@ -983,18 +983,45 @@ lowerFor forExpression = do
   emit (OperationCall CallOperation {target = forBlock, output = Just output})
   pure output
 
--- | @forever { body }@. The body lowers as a parameterless sequence block reading the enclosing scope
--- lexically — the runtime spawns a fresh iteration thread per pass, so per-iteration bindings live in
--- that thread's own scope and are reclaimed when it completes. The loop is entered by an ordinary call
--- whose output can never bind: the runtime's forever thread never completes, the @-> never@ call shape.
+-- | @forever [(var …)] { body }@. The body lowers to a sequence block seeded with the loop's @state_N@
+-- parameters (exactly as a @for@ body — 'lowerStateBindings' gives the initials, the @state_N@ mapping, and
+-- the state locals a @next … with (…)@ updates), reading the rest of the enclosing scope lexically. The
+-- runtime spawns a fresh iteration thread per pass carrying the current state, so per-iteration bindings
+-- live in that thread's own scope and are reclaimed when it completes. The loop is entered by an ordinary
+-- call; its output binds only when the body @break@s (an @EXIT@ targeting the forever block, which the
+-- forever thread catches and completes with the value), and never otherwise (the @-> never@ call shape).
+-- The body is lowered under @withForTarget@ so a @break@ / @next@ resolves to this block, as a @for@ does.
 lowerForever :: AST.ForeverExpression AST.Typed -> Lower VariableId
 lowerForever expression = do
-  body <- buildScopedBlock [] expression.body
   blockId <- freshBlockId
-  recordBlock blockId (BlockForever Forever {body = body}) mempty Nothing
+  (initialStates, stateParameters, stateLocals) <- lowerStateBindings expression.varBindings
+  body <- buildForeverBody blockId stateParameters stateLocals expression.body
+  recordBlock blockId (BlockForever Forever {initialStates = initialStates, body = body}) mempty Nothing
   output <- freshVariableId
   emit (OperationCall CallOperation {target = blockId, output = Just output})
   pure output
+
+-- | The body of a @forever@ loop: a sequence block whose @state_N@ parameters carry the loop's @var@ state
+-- into each iteration (re-seeded by a @next … with (…)@), lowered under @withForTarget@ so a @break@ /
+-- @next@ targets the forever block. Mirrors 'buildForBody' without the iterator element (a @forever@ has no
+-- source).
+buildForeverBody ::
+  BlockId ->
+  List (Text, VariableId) ->
+  List (LocalVariableId, VariableId) ->
+  AST.Block AST.Typed ->
+  Lower BlockId
+buildForeverBody foreverBlock stateParameters stateLocals body = do
+  (completion, operations) <-
+    withFreshOperations $
+      withForTarget foreverBlock (withLocals stateLocals (lowerBlockValue body))
+  blockId <- freshBlockId
+  recordBlock
+    blockId
+    (BlockSequence Sequence {operations = operations, result = completionResult completion})
+    (Map.fromList stateParameters)
+    Nothing
+  pure blockId
 
 -- | Lower a list of @var@ state bindings (of a @for@ or a @handle@). Returns the initial-value variables
 -- (in the outer scope, for @initialStates@), the @state_N@ -> body-variable parameter entries, and the

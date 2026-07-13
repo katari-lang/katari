@@ -39,6 +39,7 @@ import Katari.Error
     MalformedUseReason (..),
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
+    PanicHandlerParameterErrorInfo (..),
     ReservedReactorErrorInfo (..),
     TypeError (..),
     UnknownHoleLabelErrorInfo (..),
@@ -1930,21 +1931,38 @@ synthForExpression expression = do
           typeOf = semantic
         }
 
--- | @forever { body }@ types as @never@ (the bottom type): the loop repeats its body indefinitely and
--- never yields a value, so the expression conforms anywhere — exactly like a @-> never@ call, including
--- what follows it. The body is an ordinary block synthesized for its effects, which are performed on
--- every iteration and flow to the enclosing row unchanged; its tail value is discarded per iteration (a
--- @for@ maps its body values into an array — @forever@ deliberately collects nothing, which is what keeps
--- a long-lived loop's durable state flat). No boundary is introduced: @forever@ owns no @next@ / @break@
--- target (there is no built-in exit — a surrounding handler's @break@ is the composed escape), so jumps
--- and requests inside the body mean exactly what they mean outside it, as in a @match@ arm.
+-- | @forever [(var …)] { body }@ types as the union of the @break@ values that exit it — @never@ (the
+-- bottom type) when there is no @break@, so a plain @forever { … }@ still conforms anywhere, exactly like a
+-- @-> never@ call. It is @for@ minus the source, the per-iteration value collection, and the @then@ clause:
+-- like @for@ it establishes a control boundary its own @break@ / @next@ discharge, carries @var@ state
+-- across iterations (a @next … with (…)@ advances it), and re-emits the body's residual effect (performed
+-- every iteration). Unlike @for@ it collects NO value — the @next@'s continue value and the body tail are
+-- both DISCARDED, never mapped into an array — so a long-lived loop's durable state stays flat.
 synthForeverExpression :: ForeverExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthForeverExpression expression = do
-  (typedBody, _discardedTail) <- synthBlock expression.body
-  typedExpression expression.sourceSpan bottomType $ \semantic ->
+  -- The @var@ state scopes over the body (there is no @then@ clause). Mirrors @for@'s state handling.
+  (typedVarBindings, (typedBody, breakType)) <-
+    withVarBindingsTyped expression.varBindings $ do
+      boundaryId <- freshBoundaryId
+      -- Collect the body's whole effect: its @CONTINUE(forever)@ (a @next@ advancing the state), its
+      -- @EXIT(forever)@ (a @break value@), and any ordinary effects / outer escapes.
+      (bodyEffect, (typedBody, _discardedTail)) <-
+        withEffectInference $
+          enterForBody boundaryId $
+            synthBlock expression.body
+      -- Discharge the loop's own escapes. A @next@ carries no collected value (unlike @for@, whose
+      -- @next@ maps into the result array), so its continue type is discarded — @forever@ yields nothing
+      -- per iteration. A @break@ (@EXIT@) unwinds the loop; its value is the loop's result (@never@ when
+      -- there is no @break@, keeping @forever { }@ typed as @never@). The residual is the loop's effect.
+      let (_discardedContinue, afterContinue) = splitContinue boundaryId bodyEffect
+          (breakType, residualEffect) = splitExit boundaryId afterContinue
+      emitEffect expression.sourceSpan residualEffect
+      pure (typedBody, breakType)
+  typedExpression expression.sourceSpan breakType $ \semantic ->
     ExpressionForever
       ForeverExpression
-        { body = typedBody,
+        { varBindings = typedVarBindings,
+          body = typedBody,
           sourceSpan = expression.sourceSpan,
           typeOf = semantic
         }
@@ -2228,7 +2246,15 @@ walkRequestHandler handler =
   -- from its synthetic signature rather than the request environment. 'checkHandlerScheme' then keeps it
   -- out of the continuation's effect row, which is what makes it addable to any handler.
   if isPanicHandler handler
-    then Just <$> walkResolvedRequestHandler handler panicRequestName panicRequestInformation
+    then case handler.parameters of
+      -- Panic is undeclared, so its parameter name is wired in as @msg@ (the message). A single
+      -- differently-named parameter would otherwise fail as a cryptic object-subtype mismatch (K3001) —
+      -- report the specific fix instead and skip the handler.
+      [param]
+        | param.name /= "msg" -> do
+            reportType handler.sourceSpan (TypeErrorPanicHandlerParameter (PanicHandlerParameterErrorInfo {actualName = param.name}))
+            pure Nothing
+      _ -> Just <$> walkResolvedRequestHandler handler panicRequestName panicRequestInformation
     else do
       requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
       let resolvedRequest = case handler.typeReference.resolution of

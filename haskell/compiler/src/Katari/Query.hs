@@ -605,7 +605,8 @@ expressionFacts moduleName expression = case expression of
       <> foldMap (thenClauseFacts moduleName) for.thenClause
       <> typedSpanFacts for.sourceSpan for.typeOf
   ExpressionForever forever' ->
-    blockFacts moduleName forever'.body
+    foldMap (variableBindingFacts moduleName) forever'.varBindings
+      <> blockFacts moduleName forever'.body
       <> typedSpanFacts forever'.sourceSpan forever'.typeOf
   ExpressionBlock block ->
     blockFacts moduleName block.block

@@ -185,13 +185,16 @@ export type ForBlock = {
 };
 
 /**
- * `forever { body }`: each time `body` completes, run it again — one iteration at a time, its value
- * discarded (nothing is collected, unlike `for`, so iteration count never grows the loop's state). The
- * block never completes on its own; it ends only by cancellation or an ask (a request whose handler
- * breaks, a jump to an enclosing target) unwinding past it.
+ * `forever [(var s = init, ...)] { body }`: each time `body` completes, run it again — one iteration at a
+ * time, its value discarded (nothing is collected, unlike `for`, so iteration count never grows the loop's
+ * state). `initialStates` are in the caller's scope; the Nth seeds the body's `state_N` parameter, carried
+ * across iterations and advanced by a `next … with (…)` (empty for a stateless `forever { … }`). The block
+ * completes only when the body `break`s (unwinding an exit to it with the loop's result value); otherwise
+ * it ends only by cancellation or an ask unwinding past it.
  */
 export type ForeverBlock = {
   kind: "forever";
+  initialStates: VariableId[];
   body: BlockId;
 };
 

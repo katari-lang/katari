@@ -920,7 +920,7 @@ spec = do
       compiledCodes "external agent my_now() -> number from \"time\"" `shouldContain` ["K3022"]
 
   describe "forever loops (end to end)" $ do
-    it "types as never, so it conforms to any declared return" $
+    it "types as never with no break, so it conforms to any declared return" $
       compiledCodes "agent main() -> integer { forever { let _x = 1 } }" `shouldBe` []
 
     it "propagates the body's effects to the enclosing row (performed every iteration)" $
@@ -929,7 +929,46 @@ spec = do
     it "rejects a body effect the declared row does not carry (the loop performs it every iteration)" $
       compiledCodes "request tick() -> null\nagent daemon() -> never with pure { forever { tick() } }" `shouldSatisfy` (not . null)
 
-    it "escapes by the composed catch-and-break: a surrounding handler's break exits with the value" $
+    it "types as the break value's type: `break v` exits the loop with `v`" $
+      compiledCodes "agent main() -> integer { forever { break 1 } }" `shouldBe` []
+
+    it "rejects a break value that does not match the declared result (K3001)" $
+      compiledCodes "agent main() -> integer { forever { break \"x\" } }" `shouldContain` ["K3001"]
+
+    it "unions multiple break values into the loop's result" $
+      compiledCodes
+        ( "data a()\ndata b()\n"
+            <> "agent choose(flag: boolean) -> a | b {\n"
+            <> "  forever { if (flag) { break a() } else { break b() } }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "a break inside forever targets the forever, not an enclosing `for` (the for still yields an array)" $
+      compiledCodes
+        ( "agent main() -> array[integer] {\n"
+            <> "  for (let x in [1, 2, 3]) { forever { break x } }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "carries `var` state across iterations, advanced by `next … with (…)`, and broken out with a value" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  forever (var n = 0) {\n"
+            <> "    if (n < 3) { next with { n = n + 1 } } else { break n }\n"
+            <> "  }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "checks a `with` modifier against its `var` type (K3001 on a mismatch)" $
+      compiledCodes "agent main() -> never { forever (var n = 0) { next with { n = \"x\" } } }" `shouldContain` ["K3001"]
+
+    it "a bare `next` (implicit re-iterate) needs no var and keeps the loop typed as never" $
+      compiledCodes "request tick() -> null\nagent main() -> never with tick { forever { tick() } }" `shouldBe` []
+
+    it "still supports the composed catch-and-break (a surrounding handler's break exits with the value)" $
       compiledCodes
         ( "request done(value: integer) -> never\n"
             <> "agent main() -> integer {\n"

@@ -83,6 +83,19 @@ spec = describe "the ambient panic handler" $ do
       ]
       `shouldContain` ["K3017"]
 
+  it "rejects a bare panic handler whose parameter is not named `msg` with a targeted K3023 (not a cryptic K3001)" $ do
+    let codes =
+          diagnosticCodes
+            [ ( "test",
+                "agent f() -> integer {\n\
+                \  use handler { request panic(message: string) { break 0 } }\n\
+                \  42\n\
+                \}"
+              )
+            ]
+    codes `shouldContain` ["K3023"]
+    codes `shouldNotContain` ["K3001"]
+
 -- | Every diagnostic code the pipeline emits (identify + env + check), so a positive spec asserting @[]@
 -- catches an identifier-level error (e.g. an undefined-name K2001) too, not only type errors.
 diagnosticCodes :: [(Text, Text)] -> [Text]

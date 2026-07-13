@@ -1145,14 +1145,16 @@ data ForExpression (phase :: Phase) = ForExpression
 instance HasSourceSpan (ForExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | @forever { body }@ — the unbounded sibling of the sequential @for@: repeat @body@ indefinitely, one
--- iteration at a time, discarding each iteration's value (nothing is collected — the point of the form is
--- that a long-lived loop accumulates no state). The expression never yields a value, so it types as
--- @never@. There is deliberately no built-in exit and no jump target of its own: escaping is composed with
--- the existing catch-and-break mechanism (a surrounding handler whose request handler @break@s), exactly
--- like throw handling.
+-- | @forever [(var name [: T] = initial, ...)] { body }@ — the unbounded sibling of the sequential @for@,
+-- fully symmetric with it minus the source, the per-iteration value collection, and the @then@ clause. It
+-- repeats @body@ indefinitely, one iteration at a time, carrying the @var@ state across iterations (a
+-- @next … with (…)@ advances the loop with updated state; falling off the body end re-iterates with the
+-- state unchanged) and DISCARDING each iteration's value — nothing is collected, so a long-lived loop's
+-- durable footprint stays flat. A @break value@ exits the loop with that value (the loop's result type is
+-- the union of its breaks, @never@ when it has none, so a plain @forever { … }@ conforms anywhere).
 data ForeverExpression (phase :: Phase) = ForeverExpression
-  { body :: Block phase,
+  { varBindings :: List (VariableBinding phase),
+    body :: Block phase,
     sourceSpan :: SourceSpan,
     typeOf :: ExpressionType phase
   }

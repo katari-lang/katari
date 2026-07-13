@@ -72,8 +72,12 @@ resolveExpression = \case
     pure (ExpressionMatch MatchExpression {subject = subject, cases = cases, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionFor node -> resolveFor node
   ExpressionForever node -> do
-    body <- resolveBlock node.body
-    pure (ExpressionForever ForeverExpression {body = body, sourceSpan = node.sourceSpan, typeOf = ()})
+    -- Mirror `for`'s state handling: the `var` initials resolve in the enclosing scope, then the bindings
+    -- scope over the body and register as state variables a `next … with (…)` may target. There is no loop
+    -- pattern (no source / element), so the body carries no local element bindings.
+    (varBindings, varScope) <- resolveVariableBindings node.varBindings
+    body <- bindBodyWithState node.body.sourceSpan varScope [] (resolveBlock node.body)
+    pure (ExpressionForever ForeverExpression {varBindings = varBindings, body = body, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionBlock node -> do
     block <- resolveBlock node.block
     pure (ExpressionBlock BlockExpression {block = block, sourceSpan = node.sourceSpan, typeOf = ()})

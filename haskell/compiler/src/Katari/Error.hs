@@ -145,6 +145,11 @@ renderTypeError typeError =
         <> " instance's cancellation; a request would escalate through that parent (deadlocking against"
         <> " its own cancellation wait), and a control escape has no target there. Perform only `io`"
         <> " (routed to sibling reactors), or handle any request locally inside the `finally` body."
+    TypeErrorPanicHandlerParameter info ->
+      "A `panic` handler's parameter must be named `msg` (the wired-in panic message), but this one is"
+        <> " named `"
+        <> info.actualName
+        <> "`. Write `request panic(msg: string) { ... }`."
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -205,6 +210,11 @@ data TypeError where
   -- Distinct from an ordinary subtype failure (K3001): the restriction is peculiar to a finalizer,
   -- which runs while the parent may already be awaiting the instance's cancellation.
   TypeErrorFinallyEffect :: FinallyEffectErrorInfo -> TypeError
+  -- | A bare @panic@ handler (@request panic(…) { … }@) whose parameter is not named @msg@. Panic is
+  -- undeclared, so its parameter name is wired in as @msg@ (the message); a differently-named parameter
+  -- would otherwise fail as a cryptic object-subtype mismatch (K3001). Reported specifically so the fix
+  -- ("name it @msg@") is obvious.
+  TypeErrorPanicHandlerParameter :: PanicHandlerParameterErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -228,6 +238,7 @@ typeErrorCode = \case
   TypeErrorUnknownHoleLabel _ -> "K3020"
   TypeErrorFinallyEffect _ -> "K3021"
   TypeErrorReservedReactor _ -> "K3022"
+  TypeErrorPanicHandlerParameter _ -> "K3023"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -252,6 +263,7 @@ typeErrorSeverity = \case
   TypeErrorUnknownHoleLabel _ -> SeverityError
   TypeErrorFinallyEffect _ -> SeverityError
   TypeErrorReservedReactor _ -> SeverityError
+  TypeErrorPanicHandlerParameter _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -396,6 +408,12 @@ data UnknownHoleLabelErrorInfo = UnknownHoleLabelErrorInfo
 -- request it escalates), so the message can name why the body is not within @io@.
 newtype FinallyEffectErrorInfo = FinallyEffectErrorInfo
   { effect :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | The actual (wrong) name of a bare @panic@ handler's parameter — it must be @msg@.
+newtype PanicHandlerParameterErrorInfo = PanicHandlerParameterErrorInfo
+  { actualName :: Text
   }
   deriving (Eq, Ord, Show)
 
