@@ -1,12 +1,12 @@
 # `forever { … }` — the unbounded loop
 
 2026-07-13. Katari had no way to loop without an end. `for` iterates a materialized array; recursion is a
-real cross-instance delegation. So the first daemons (the `prelude.retry` providers, same release) looped by
-self-recursion — and since the engine has no tail-call collapse (a caller instance stays suspended awaiting
-its child's `delegateAck`, and its scopes stay live for the child's closures and its handlers), **every
-retry parked one permanent frame chain in durable state**. A `retry.forever` daemon grew by one delegation
-chain per failure, forever. The honest fix is not a smarter engine but a missing language form: a loop that
-repeats *in place*.
+real cross-instance delegation. So the first daemons (the failure-recovery providers, same release — now
+`prelude.replay`) looped by self-recursion — and since the engine has no tail-call collapse (a caller
+instance stays suspended awaiting its child's `delegateAck`, and its scopes stay live for the child's
+closures and its handlers), **every retry parked one permanent frame chain in durable state**. A
+`replay.forever` daemon grew by one delegation chain per failure, forever. The honest fix is not a smarter
+engine but a missing language form: a loop that repeats *in place*.
 
 ## The form
 
@@ -56,16 +56,16 @@ agent poll_until_ready() -> integer {
 
 This is deliberately identical to how a throw is caught: control leaves the loop only by an ask unwinding
 past it. Evolving per-iteration state composes the same way — a `use handler (var …)` outside the loop
-holds it (the ambient-counter pattern), so the body stays stateless. `prelude.retry`'s `forever` and
-`attended` are exactly these two compositions and nothing more.
+holds it (the ambient-counter pattern), so the body stays stateless. `prelude.replay`'s providers
+(`immediate` / `forever` / `exponential`) are exactly these compositions and nothing more.
 
 ## `forever` is a positional word, not a reserved one
 
 `reservedWords` (Lexer.hs) deliberately does not contain `forever`. The stdlib already exports an agent
-NAMED `forever` (`retry.forever`, its pinned public surface), and the lexer's own precedent covers this:
+NAMED `forever` (`replay.forever`, its pinned public surface), and the lexer's own precedent covers this:
 type-only words (`integer`, `never`, `array`, …) are recognised positionally and stay usable as
 identifiers. `forever` follows that rule at the expression head — it is the loop **only when a `{` directly
-follows**; `forever(...)` stays a call, `retry.forever` stays a name, `agent forever(...)` stays
+follows**; `forever(...)` stays a call, `replay.forever` stays a name, `agent forever(...)` stays
 declarable. The vscode grammar mirrors the same lookahead.
 
 ## Runtime shape (for the reader who wants the mechanism)
