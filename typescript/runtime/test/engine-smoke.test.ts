@@ -557,6 +557,96 @@ describe("in-memory core", () => {
     ).resolves.toEqual({ kind: "string", value: "other" });
   });
 
+  test("a forever loop carries `var` state across iterations and breaks out with a value", async () => {
+    // agent count_up() {
+    //   forever (var n = 0) { match n { 0 => next with (n = 1); 1 => next with (n = 2);
+    //                                    2 => next with (n = 3); _ => break n } }
+    // }
+    // The var advances 0→1→2→3 across four iterations (three `next … with`), then the fallback `break n`
+    // exits the loop with the accumulated state (3) — proving state persistence + break-with-value.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        // Load n's initial (0), enter the forever; its break value is the agent's result.
+        1: {
+          block: {
+            kind: "sequence",
+            result: 100,
+            operations: [
+              { kind: "loadLiteral", output: 99, value: { kind: "integer", value: 0 } },
+              { kind: "call", target: 2, output: 100 },
+            ],
+          },
+          parameters: { parameter: 98 },
+        },
+        2: { block: { kind: "forever", initialStates: [99], body: 3 }, parameters: {} },
+        // The body reads the state as `state_0` (var 200) and dispatches on it.
+        3: {
+          block: { kind: "sequence", result: 201, operations: [{ kind: "call", target: 4, output: 201 }] },
+          parameters: { state_0: 200 },
+        },
+        4: {
+          block: {
+            kind: "match",
+            subject: 200,
+            arms: [
+              { pattern: { kind: "literal", value: { kind: "integer", value: 0 } }, body: 5 },
+              { pattern: { kind: "literal", value: { kind: "integer", value: 1 } }, body: 6 },
+              { pattern: { kind: "literal", value: { kind: "integer", value: 2 } }, body: 7 },
+            ],
+            fallback: 8,
+          },
+          parameters: {},
+        },
+        // Each arm advances the loop to the next count via `next … with (n = …)` (a continue targeting the
+        // forever block, carrying only the state modifier — the value is discarded).
+        5: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 300, value: { kind: "integer", value: 1 } },
+              { kind: "continue", target: 2, value: null, modifiers: [[200, 300]] },
+            ],
+          },
+          parameters: {},
+        },
+        6: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 310, value: { kind: "integer", value: 2 } },
+              { kind: "continue", target: 2, value: null, modifiers: [[200, 310]] },
+            ],
+          },
+          parameters: {},
+        },
+        7: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "loadLiteral", output: 320, value: { kind: "integer", value: 3 } },
+              { kind: "continue", target: 2, value: null, modifiers: [[200, 320]] },
+            ],
+          },
+          parameters: {},
+        },
+        // n has reached 3: break out of the forever with the accumulated state.
+        8: {
+          block: { kind: "sequence", result: null, operations: [{ kind: "exit", target: 2, value: 200 }] },
+          parameters: {},
+        },
+      },
+      entries: { [createAgentName("count_up")]: 0 },
+      names: {},
+    };
+
+    await expect(run(ir, "count_up", null)).resolves.toEqual({ kind: "integer", value: 3 });
+  });
+
   test("suspends on an external (FFI) leaf and resumes from its completion", async () => {
     // agent main() { return greet({ name: "world" }) }   (greet is an external agent — its body is an
     // ExternalThread proxy that delegates to the `ffi` reactor, which dispatches through the transport)
@@ -1189,6 +1279,51 @@ describe("in-memory core", () => {
     actor.answerEscalation(escalation, { kind: "integer", value: 42 });
     await expect(result).resolves.toEqual({ kind: "integer", value: 42 });
     expect(actor.listOpenEscalations()).toHaveLength(0);
+  });
+
+  test("an orphan `prelude.replay.interrupted` (no provider in scope) FAILS the run, not parks", async () => {
+    // `interrupted` is a `-> never` control channel like `throw` / `panic`: with no `replay` provider to
+    // catch it, it must fail the run — never open an un-answerable escalation (its answer type is `never`).
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        1: {
+          block: {
+            kind: "sequence",
+            result: 21,
+            operations: [
+              { kind: "loadLiteral", output: 19, value: { kind: "string", value: "boom" } },
+              { kind: "makeRecord", entries: [["failure", 19]], output: 20 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("signal") },
+                argument: 20,
+                output: 21,
+              },
+              { kind: "exit", target: 0, value: 21 },
+            ],
+          },
+          parameters: { parameter: 11 },
+        },
+        // `signal` performs the bare `prelude.replay.interrupted` request with the failure it was handed.
+        5: { block: { kind: "agent", body: 6, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+        6: {
+          block: { kind: "request", name: createAgentName("prelude.replay.interrupted"), input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("signal")]: 5,
+      },
+      names: {},
+    };
+
+    const actor = makeActor(ir);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/prelude\.replay\.interrupted/);
+    expect(actor.listOpenEscalations()).toHaveLength(0); // failed, not parked awaiting an impossible answer
   });
 
   test("cancels a suspended run, rejecting its result with RunCancelledError", async () => {

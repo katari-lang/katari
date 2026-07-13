@@ -616,7 +616,18 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
 
   /** The escalation a typed `throw` completion becomes: the payload decodes at this seam (the transport
    *  boundary, like a result's value) and re-raises as `prelude.throw`. A payload that does not decode is
-   *  protocol drift, not a program-anticipatable error — that one degrades to a panic. */
+   *  protocol drift, not a program-anticipatable error — that one degrades to a panic.
+   *
+   *  KNOWN GAP (FFI typing): the payload is decoded with the plain wire decoder and is NOT validated /
+   *  coerced against the external agent's DECLARED `throw[T]`. An FFI author who raises a plain record
+   *  (forgetting the port's `KatariData` nominal tag) yields a value that statically claims `T` but carries
+   *  no constructor tag, so a downstream `case T(...)` match finds no arm — a silent no-match (surfaced, not
+   *  introduced, by replay converters doing a nominal `match`; the `replay_probe` fixture works around it by
+   *  re-tagging the payload as a nominal `data` in Katari). PROPOSED FIX: add a `decodeThrow?: (raw: Json) =>
+   *  Value` seam to the call payload, exactly mirroring `AckDecodingPayload.decodeAck` — populated by the ffi
+   *  reactor's `openPayload` from the external agent's declared throw generic — so this site coerces the raw
+   *  payload against `T` (reconstructing / tagging it) or raises a loud typed `decode_error` when its
+   *  constructor does not match, instead of `jsonToValue`. Deferred here to avoid an FFI-typing overhaul. */
   private escalateThrow(
     delegation: DelegationId,
     error: Json,

@@ -24,16 +24,23 @@ agent readiness(attempt: integer) -> not_ready | ready {
 replay provider, so it survives the re-runs and counts across them."
 request warmup() -> integer
 
-@"Connect to a flaky resource. With @fatal@ false: warms up (throws `warming_up`) on attempts 1 and 2, then
-connects on attempt 3. With @fatal@ true: the credential is rejected (`unauthorized`) — a failure retrying
-cannot fix. Both are thrown; the converter decides which one replays."
-agent connect(fatal: boolean) -> string with warmup | prelude.throw[warming_up | unauthorized] {
-  if (fatal) {
-    prelude.throw(error = unauthorized(reason = "revoked credential"))
-  } else {
-    match (readiness(attempt = warmup())) {
-      case not_ready(attempt => a) -> { prelude.throw(error = warming_up(attempt = a)) }
-      case ready(attempt => a) -> { f"connected on attempt ${string.to_string(value = a)}" }
+@"How a `connect` attempt behaves — a two-constructor sum, not a boolean flag: a `transient_fault` warms up
+and eventually succeeds; a `fatal_fault` is rejected outright. Dispatched by `match` (the file's `readiness`
+/ `token_state` idiom), never an `if (flag)`."
+data transient_fault()
+data fatal_fault()
+
+@"Connect to a flaky resource. `transient_fault`: warms up (throws `warming_up`) on attempts 1 and 2, then
+connects on attempt 3. `fatal_fault`: the credential is rejected (`unauthorized`) — a failure retrying cannot
+fix. Both are thrown; the converter decides which one replays."
+agent connect(mode: transient_fault | fatal_fault) -> string with warmup | prelude.throw[warming_up | unauthorized] {
+  match (mode) {
+    case fatal_fault(_) -> { prelude.throw(error = unauthorized(reason = "revoked credential")) }
+    case transient_fault(_) -> {
+      match (readiness(attempt = warmup())) {
+        case not_ready(attempt => a) -> { prelude.throw(error = warming_up(attempt = a)) }
+        case ready(attempt => a) -> { f"connected on attempt ${string.to_string(value = a)}" }
+      }
     }
   }
 }
@@ -67,7 +74,7 @@ agent main() -> string {
       }
     }
   }
-  f"result: ${connect(fatal = false)}"
+  f"result: ${connect(mode = transient_fault())}"
 }
 
 @"Exhaustion, with the error type preserved. A 2-attempt budget never reaches the attempt-3 success, so the
@@ -95,10 +102,10 @@ agent exhausting() -> string {
       }
     }
   }
-  f"result: ${connect(fatal = false)}"
+  f"result: ${connect(mode = transient_fault())}"
 }
 
-@"Selective retry, the fatal side. `connect(fatal = true)` throws `unauthorized`, which the converter
+@"Selective retry, the fatal side. `connect(mode = fatal_fault())` throws `unauthorized`, which the converter
 RETHROWS rather than replaying — so it leaves the provider immediately (no backoff, no attempts spent) and
 the outer fallback catches it. The revoked credential does not spin; only `warming_up` would have."
 agent rejected() -> string {
@@ -122,7 +129,7 @@ agent rejected() -> string {
       }
     }
   }
-  f"result: ${connect(fatal = true)}"
+  f"result: ${connect(mode = fatal_fault())}"
 }
 
 // ── Demo (b): the daemon — `replay.forever` over `time.watch` ─────────────────────────────────────────────
@@ -151,10 +158,17 @@ agent daemon() -> never with io {
   time.watch(schedule = time.interval(milliseconds = 1000), deliver_to = flaky_deliver)
 }
 
-// ── Demo (c): the human in the loop — `replay.immediate` + a converter that performs `replay.attention` ────
+// ── Demo (c): the human in the loop — `replay.immediate` + a converter that performs its OWN escalation ────
 
 @"A revoked-session error: the access token expired and must be re-authorized before the call can succeed."
 data session_expired(scope: string)
+
+@"The human-in-the-loop escalation this demo declares FOR ITSELF — not part of `replay`. It carries the
+@detail@ of the expiry and, unhandled, escalates to a durable open question that parks the run until `katari
+answer`, then resolves `null`. The attended / re-auth loop is `replay.immediate()` plus a converter that
+performs THIS request (park) and then `replay.interrupted` (re-run on the answer): escalation is an ordinary
+capability, not replay machinery, so a converter brings its own."
+request needs_reauth(detail: session_expired) -> null
 
 @"THE one comparison boundary for the token: classify an attempt number into expired / valid once."
 data expired(attempt: integer)
@@ -172,33 +186,34 @@ agent refresh() -> string with warmup | prelude.throw[session_expired] {
   }
 }
 
-@"The attended / re-auth story, DISSOLVED into `immediate` + a converter — no dedicated `attended` provider.
-On the expired token the converter performs `replay.attention`, which (unhandled) escalates to a durable
+@"The attended / re-auth story, composed from `immediate` + a converter that performs the demo's OWN
+`needs_reauth` escalation — no dedicated `attended` provider, and nothing replay-specific about the human
+step. On the expired token the converter performs `needs_reauth`, which (unhandled) escalates to a durable
 open question that parks the run until a human answers via `katari answer`; on the answer it performs
 `replay.interrupted`, and `immediate` re-runs the block against the restored credential. Typecheck-only here
 (running it parks on a human); the intercepted variant below runs to completion, and the runtime tests drive
 the full park → answer → re-run round-trip."
-agent reauth() -> string with replay.attention[session_expired] {
+agent reauth() -> string with needs_reauth {
   use handler (var attempts = 0) {
     request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
   }
   use replay.immediate()
   use handler {
     request prelude.throw(error: session_expired) -> never {
-      replay.attention(detail = error)      // park for a human to re-authorize; resolves null on the answer
+      needs_reauth(detail = error)          // park for a human to re-authorize; resolves null on the answer
       replay.interrupted(failure = error)   // then re-run the block against the fresh token
     }
   }
   f"session: ${refresh()}"
 }
 
-@"The same composition, but an application intercepts `replay.attention` with its own handler (here it
+@"The same composition, but an application intercepts `needs_reauth` with its own handler (here it
 re-authorizes in-process by answering `next null`) so nothing escalates and the run completes. This is the
-interceptability the mechanism gives for free: default (escalate-and-park) vs interception (handle in
-process) is the same request, chosen by whether a handler is in scope."
+interceptability an ordinary escalation gives for free: default (escalate-and-park) vs interception (handle
+in process) is the same request, chosen by whether a handler is in scope."
 agent reauth_intercepted() -> string {
   use handler {
-    request replay.attention(detail: session_expired) { next null }
+    request needs_reauth(detail: session_expired) { next null }
   }
   use handler (var attempts = 0) {
     request warmup() { next attempts + 1 with { attempts = attempts + 1 } }
@@ -206,7 +221,7 @@ agent reauth_intercepted() -> string {
   use replay.immediate()
   use handler {
     request prelude.throw(error: session_expired) -> never {
-      replay.attention(detail = error)
+      needs_reauth(detail = error)
       replay.interrupted(failure = error)
     }
   }

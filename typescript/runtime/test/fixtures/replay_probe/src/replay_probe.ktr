@@ -15,7 +15,7 @@ structural record (the wire decoder tags nothing), so `probe` below re-raises it
 external agent probe_source(kind: string) -> string with prelude.throw[probe_failed]
 
 @"Re-tag the FFI throw as a nominal `probe_failed` (a Katari-constructed value), so a converter can pass the
-error straight to `replay.attention` / `replay.interrupted` — as it would for any throw raised in Katari —
+error straight to its own escalation / `replay.interrupted` — as it would for any throw raised in Katari —
 without the escalation boundary rejecting an untagged record. A panic proxies through untouched."
 agent probe(kind: string) -> string with prelude.throw[probe_failed] | io {
   use handler {
@@ -26,18 +26,24 @@ agent probe(kind: string) -> string with prelude.throw[probe_failed] | io {
   probe_source(kind = kind)
 }
 
+@"The converter's OWN failure sum for the both-channels case — a typed `throw` folds to `threw`, a `panic`
+to `crashed`. Declared locally (not by `replay`): a converter brings its own `F`; the mechanism never sees
+these constructors, only the `interrupted[threw | crashed]` they settle to."
+data threw(attempt: integer)
+data crashed(message: string)
+
 @"Entry (a): `replay.forever` over a converter that folds BOTH channels — a typed `throw` AND a `panic` —
-into `replay.interrupted` (using the standard `replay.failure` fold). Failures back off through durable
+into `replay.interrupted`, using the converter's OWN two-constructor sum. Failures back off through durable
 sleeps (the test drives a ManualClock); when the probe finally succeeds, the value escapes the loop and
 returns. Proves the converter can opt into retrying panics, explicitly, in source."
 agent forever_main() -> string with io {
   use replay.forever(initial_delay_milliseconds = 5.0, factor = 2.0, max_delay_milliseconds = 20.0)
   use handler {
     request prelude.throw(error: probe_failed) -> never {
-      replay.interrupted(failure = replay.thrown(error = error))
+      replay.interrupted(failure = threw(attempt = error.attempt))
     }
     request panic(msg: string) {
-      replay.interrupted(failure = replay.panicked(message = msg))
+      replay.interrupted(failure = crashed(message = msg))
     }
   }
   probe(kind = "forever")
@@ -73,14 +79,20 @@ agent exponential_exhaust_main() -> string with io {
   probe(kind = "exponential-exhaust")
 }
 
-@"Entry (d): `replay.immediate` + a converter that performs `replay.attention` (NO application handler) —
-each failure escalates to a durable open question; answering it re-runs the block, and the eventual success
-returns. The attended / re-auth loop, composed."
-agent attended_main() -> string with replay.attention[probe_failed] | io {
+@"The human-in-the-loop escalation this fixture declares FOR ITSELF — NOT part of `replay`. Unhandled, it
+escalates to a durable open question that parks the run until answered, then resolves `null`. The attended /
+re-auth loop is `replay.immediate()` plus a converter that performs THIS request (park) and then
+`replay.interrupted` (re-run on the answer): escalation is an ordinary capability, not replay machinery."
+request needs_reauth(detail: probe_failed) -> null
+
+@"Entry (d): `replay.immediate` + a converter that performs the fixture's OWN `needs_reauth` escalation (NO
+application handler) — each failure escalates to a durable open question; answering it re-runs the block, and
+the eventual success returns. The attended / re-auth loop, composed from a user-declared escalation."
+agent attended_main() -> string with needs_reauth | io {
   use replay.immediate()
   use handler {
     request prelude.throw(error: probe_failed) -> never {
-      replay.attention(detail = error)
+      needs_reauth(detail = error)
       replay.interrupted(failure = error)
     }
   }
@@ -88,15 +100,15 @@ agent attended_main() -> string with replay.attention[probe_failed] | io {
 }
 
 @"Entry (e): the same composition INTERCEPTED — an application handler above the provider answers
-`replay.attention` with `next null`, so each failure re-runs immediately and nothing escalates."
+`needs_reauth` with `next null`, so each failure re-runs immediately and nothing escalates."
 agent intercepted_main() -> string {
   use handler {
-    request replay.attention(detail: probe_failed) { next null }
+    request needs_reauth(detail: probe_failed) { next null }
   }
   use replay.immediate()
   use handler {
     request prelude.throw(error: probe_failed) -> never {
-      replay.attention(detail = error)
+      needs_reauth(detail = error)
       replay.interrupted(failure = error)
     }
   }

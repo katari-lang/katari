@@ -8,17 +8,20 @@
 //
 // (The suite fails loudly on drift — a stale fixture cannot silently pass.) The redesign splits the retry
 // MECHANISM (a `replay` provider that catches only `replay.interrupted`) from the failure POLICY (a user
-// converter that turns the failures it chooses into that signal). Covered here:
+// converter that turns the failures it chooses into that signal). The providers are ordinary `forever`
+// loops: their loop state is the `forever`'s own `var`, and `interrupted` is the module's ONLY performable
+// request. Covered here:
 //   (a) `replay.forever` + a converter that folds BOTH channels — a typed FFI throw, then a JS-error panic —
-//       into `replay.interrupted`, backs off through real durable `time.sleep` timers on a ManualClock, and
-//       the continuation's eventual success value escapes the loop and returns.
+//       into `replay.interrupted` (via the converter's OWN two-constructor sum), backs off through real
+//       durable `time.sleep` timers on a ManualClock, and the eventual success value escapes and returns.
 //   (b) `replay.exponential` recovers within budget: the converter replays the typed throw, the probe
 //       succeeds inside the attempt budget, and the success value returns.
 //   (c) `replay.exponential` EXHAUSTS: the probe always fails, the budget is spent, and the provider
 //       re-raises the last failure as a TYPED `throw[probe_failed]` the program catches by payload.
-//   (d) `replay.immediate` + a converter that performs `replay.attention`, unhandled: a failure surfaces as
-//       an OPEN run-root escalation; answering it re-runs the block, and the re-run's success value returns.
-//   (e) the same composition intercepted: an application handler answers `attention` with `next null`, so
+//   (d) `replay.immediate` + a converter that performs the fixture's OWN `needs_reauth` escalation,
+//       unhandled: a failure surfaces as an OPEN run-root escalation; answering it re-runs the block, and
+//       the re-run's success value returns.
+//   (e) the same composition intercepted: an application handler answers `needs_reauth` with `next null`, so
 //       failures re-run immediately and nothing ever escalates.
 
 import { readFileSync } from "node:fs";
@@ -166,12 +169,13 @@ describe("prelude.replay over compiled IR", () => {
       value = resolved;
     });
 
-    // The failure surfaces as an open run-root escalation carrying the attention request.
+    // The failure surfaces as an open run-root escalation carrying the fixture's OWN `needs_reauth` request
+    // (the attended loop composes from a user-declared escalation, not any replay-specific request).
     const open = await eventually(() => {
       const escalations = actor.listOpenEscalations();
       return escalations.length > 0 ? escalations[0] : undefined;
     });
-    expect(open.request).toBe("prelude.replay.attention");
+    expect(open.request).toBe("replay_probe.needs_reauth");
     expect(value).toBeUndefined(); // the run is parked, not failed
 
     // Answer through the same facade the escalation service uses: attention answers `null`, re-running
