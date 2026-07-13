@@ -252,9 +252,14 @@ export class CoreReactor extends Reactor {
     // has the IR, the wrapper instance's schema, and its generics (mirroring the input conform at
     // `onDelegate`). A violation is a broken contract, not a program-anticipatable error, so it fails the
     // call as a panic raised at the proxy — exactly as an external *error* does — naming the boundary,
-    // rather than corrupting a match / field read far downstream. A core sub-call is statically typed by
-    // construction and skips this.
-    if (proxy.kind === "external") {
+    // rather than corrupting a match / field read far downstream. Only the WRAPPER role conforms: there
+    // the instance's whole body is the external leaf, so the ack value IS the instance's own result. A
+    // `dispatched` proxy (a mid-body dynamically dispatched tool) delivers an ordinary intermediate —
+    // conforming that against the CALLER's output schema would wrongly reject a typed caller mid-body;
+    // its value meets the ordinary schema boundaries instead (the tool's runtime schema at dispatch, this
+    // instance's own output conform when it returns). A core sub-call is statically typed by construction
+    // and skips this entirely.
+    if (proxy.kind === "external" && proxy.role === "wrapper") {
       const failure = await this.conformExternalResult(caller, event.value);
       if (failure !== null) {
         await this.runTurnWith(caller, (ctx) =>

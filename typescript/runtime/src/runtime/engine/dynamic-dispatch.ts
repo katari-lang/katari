@@ -7,17 +7,20 @@
 // Keeping them on one function means a tool's runtime schema check and the target shapes cannot drift
 // between the language-level and the boundary entry points.
 
-import type { DelegateTarget, ReactorName } from "../event/types.js";
+import type { ExternalReactorName } from "@katari-lang/types";
+import type { DelegateTarget } from "../event/types.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import { conformValue, renderConformFailures } from "../value/validation.js";
 
 /** A resolved dynamic dispatch: the delegate `target` the callable stands for, the `argument` to run it
  *  with, the reactor the delegate routes `to` (core for compiled callables, the tool's own reactor for a
- *  reactor-backed one), and the callable's carried generic instantiation. */
+ *  reactor-backed one — kept narrower than the full `ReactorName` so an emit site can build the proxy
+ *  whose downward legs route back to that same reactor), and the callable's carried generic
+ *  instantiation. */
 export interface DispatchResult {
   target: DelegateTarget;
   argument: Value | null;
-  to: ReactorName;
+  to: "core" | ExternalReactorName;
   generics?: GenericSubstitution;
 }
 

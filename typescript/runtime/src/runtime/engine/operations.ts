@@ -354,20 +354,30 @@ function emitDelegate(
   thread.pending = { callId, output };
   const delegationId = newDelegationId();
   const proxyId = allocateThreadId(ctx.instance);
-  ctx.instance.threads[proxyId] = {
+  const proxyBase = {
     id: proxyId,
     parent: thread.id,
     parentCallId: callId,
     scopeId: thread.scopeId,
     blockId: thread.blockId,
-    status: "running",
+    status: "running" as const,
     // The proxy for an outbound delegate shares the spawning thread's origin (a finalizer's sub-calls too).
     origin: thread.origin,
     forwardRoutes: {},
-    kind: "delegate",
     delegationId,
     relays: {},
   };
+  // A callee resolved to another reactor (a dynamically dispatched tool) gets an `external` proxy
+  // carrying that reactor, so the proxy's downward legs — a descending `escalateAck` (a parked mcp
+  // call's authorize answer), a cancel's `terminate` — route back to the reactor actually running the
+  // callee. A `delegate` proxy would send them to core, which never handled the delegation and would
+  // drop them on the floor. The role is `dispatched`: the ack value is an ordinary mid-body
+  // intermediate, so the core reactor must NOT conform it against this instance's own output schema
+  // (that check belongs to the `wrapper` role, whose ack value is the instance's result).
+  ctx.instance.threads[proxyId] =
+    plan.to === "core"
+      ? { ...proxyBase, kind: "delegate" }
+      : { ...proxyBase, kind: "external", reactor: plan.to, role: "dispatched" };
   ctx.emit(
     {
       kind: "delegate",

@@ -80,13 +80,16 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
     case "external":
       // Born like a delegate proxy: a fresh delegation it will open on `create` when it emits its
       // `delegate` to its reactor. The block's marker is copied verbatim — the compiler already pins it
-      // to the known reactor names (and stamps `ffi` when the `from` clause is absent).
+      // to the known reactor names (and stamps `ffi` when the `from` clause is absent). This is the
+      // `wrapper` role: the spawning instance's whole body is this external leaf, so the ack value is
+      // the instance's own result (conformed against its declared output at the core reactor).
       return {
         ...base,
         kind: "external",
         delegationId: newDelegationId(),
         relays: {},
         reactor: block.reactor,
+        role: "wrapper",
       };
     case "match":
       return { ...base, kind: "match", pending: null };

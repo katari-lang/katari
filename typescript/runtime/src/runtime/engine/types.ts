@@ -307,22 +307,33 @@ export type DelegateThread = ThreadBase & {
 };
 
 /**
- * The thread running an `ExternalBlock` body. It behaves exactly like a `DelegateThread`, but its callee is
- * the `ffi` reactor instead of another core instance: on `create` it emits a `delegate` to ffi (target
- * `{ external, key }`) and suspends as the caller-side proxy, resuming on the `delegateAck` (its result), an
- * `escalate` (an FFI error → a panic it relays inward), or a `terminateAck` (its abort confirmed). The engine
- * drives it through the same proxy machinery as `DelegateThread`: `delegationId` is the ffi delegation it
- * proxies, `relays` carries an inbound escalation it is relaying inward.
+ * A proxy whose callee runs in an external reactor rather than another core instance. It behaves exactly
+ * like a `DelegateThread` — suspending until the `delegateAck` (its result), an `escalate` (an external
+ * error → a panic it relays inward), or a `terminateAck` (its abort confirmed) — but it carries the
+ * callee's `reactor`, so its downward legs (a descending `escalateAck`, a cancel's `terminate`) route to
+ * the reactor actually running the callee instead of core. Two roles wear this shape (the `role` sum
+ * below); only the `wrapper` one is spawned from an `ExternalBlock` and emits its own `delegate` on
+ * `create` — a `dispatched` proxy is installed by the delegate operation, which already emitted it.
  */
 export type ExternalThread = ThreadBase & {
   kind: "external";
   delegationId: DelegationId;
   relays: Record<number, EscalationId>;
   /** The reactor this proxy's callee runs in — e.g. `ffi` (a sidecar handler) or `http` (the built-in
-   *  fetch). Copied from the external block's `reactor` marker at spawn (the compiler guarantees the
-   *  marker is one of these names), so the proxy's downward legs (its `delegate` / `terminate`) route to
-   *  the right reactor without re-reading the block. */
+   *  fetch). Copied from the external block's `reactor` marker at spawn, or from the dynamic dispatch's
+   *  resolved routing (the compiler / the tool value guarantee the name), so the proxy's downward legs
+   *  route to the right reactor without re-reading the block. */
   reactor: ExternalReactorName;
+  /** WHY this proxy exists — a sum decided at creation, dispatched where the ack value's meaning differs:
+   *   - `wrapper`: the compiled `external agent` hop. The instance's whole body is this external leaf, so
+   *     the ack value IS the instance's own result — the core reactor conforms it against the instance's
+   *     declared output schema (the untyped-boundary check).
+   *   - `dispatched`: a mid-body dynamically dispatched external callee (a minted tool). The ack value is
+   *     an ordinary intermediate bound into the calling body, NOT the instance's result — conforming it
+   *     against the instance's output would reject (or hang) a typed caller mid-body; the engine's
+   *     ordinary schema boundaries (the callee's own wrapper conform, this instance's conform when IT
+   *     returns) apply instead. */
+  role: "wrapper" | "dispatched";
 };
 
 // ─── Cancel exits ─────────────────────────────────────────────────────────────────────────────
