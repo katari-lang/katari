@@ -48,3 +48,12 @@ export class UnprocessableEntityError extends AppError {
     super(422, "unprocessable_entity", message, details);
   }
 }
+
+/** A transient, RETRYABLE failure — the operation could not complete now but is not the client's fault
+ *  (an infrastructure blip, e.g. a transient IR-store read at the run-start validation boundary). The
+ *  client should retry; nothing durable changed. */
+export class ServiceUnavailableError extends AppError {
+  constructor(message = "Service Unavailable", details?: unknown) {
+    super(503, "service_unavailable", message, details);
+  }
+}

@@ -147,6 +147,14 @@ export function escalateValue(ask: AskKind): Value | null {
   return ask.kind === "request" ? ask.argument : ask.value;
 }
 
+/** The `request` column an escalation row records for an ask: a capability request's qualified name, or a
+ *  control escape's bare kind (`next` / `break` / `return` / …). The two never collide — capability names
+ *  are qualified — so a reader classifies an escalation (user-facing vs failure vs control) from this one
+ *  string, and the base opens every escalate's row without ever having to. */
+export function askRequestName(ask: AskKind): string {
+  return ask.kind === "request" ? ask.request : ask.kind;
+}
+
 // FFI is no longer a private side channel on the external thread: an external call is a `delegate` to the
 // `ffi` reactor (above), and its completion comes back as a `delegateAck` / `escalate` / `terminateAck` like
 // any sub-call. The transport's own completion shape (ffi reactor ↔ sidecar) lives with the transport, in

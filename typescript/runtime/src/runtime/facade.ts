@@ -17,7 +17,12 @@ import { db } from "../db/client.js";
 import { capabilityRoutes, instances, runs, TERMINAL_RUN_STATES } from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
 import { decryptSecret, encryptSecret } from "../lib/crypto.js";
-import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
+import {
+  BadRequestError,
+  ConflictError,
+  NotFoundError,
+  ServiceUnavailableError,
+} from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
 import { envReader } from "../modules/env/env.service.js";
 import {
@@ -29,7 +34,7 @@ import {
 import { mcpCredentialRepository } from "../modules/mcp-credential/mcp-credential.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
-import { messageOf } from "./actor/failure.js";
+import { isTransientError, messageOf } from "./actor/failure.js";
 import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry, InstanceKind } from "./engine/types.js";
@@ -233,18 +238,29 @@ export const facade = {
     const argument =
       input.argument !== undefined ? decodeClientJson(input.argument, "the run argument") : null;
     const actor = registry.actorFor(input.projectId as ProjectId);
-    // The run-start API is an external input boundary: pre-validate the argument against the entry agent's
-    // declared input schema and reject a malformed one as a 400, rather than letting it reach the acceptance
-    // surface as a panic that kills a just-born run.
-    const mismatch = await actor.conformRunArgument(
-      createAgentName(input.qualifiedName),
-      snapshotId as SnapshotId,
-      argument,
-    );
-    if (mismatch !== null) {
-      throw new BadRequestError(
-        `the run argument does not conform to ${input.qualifiedName}'s input schema — ${mismatch}`,
+    // The run-start API is an external input boundary: resolve the entry agent and conform the argument up
+    // front, rejecting an unresolvable entry OR a malformed argument as a 400 — rather than letting either
+    // reach core's acceptance surface as a pre-birth panic (whose raiser would be the permanent run
+    // instance). `conformRunArgument` returns a self-contained rejection sentence, `null` when it is safe to
+    // launch, or THROWS a transient error (an IR-store blip) — which must NOT launch an unvalidated run
+    // (a deterministic pre-birth failure would then wedge it), so surface it as retryable (a 503).
+    let rejection: string | null;
+    try {
+      rejection = await actor.conformRunArgument(
+        createAgentName(input.qualifiedName),
+        snapshotId as SnapshotId,
+        argument,
       );
+    } catch (error) {
+      if (isTransientError(error)) {
+        throw new ServiceUnavailableError(
+          "the run could not be validated (a transient error); retry",
+        );
+      }
+      throw error;
+    }
+    if (rejection !== null) {
+      throw new BadRequestError(rejection);
     }
     // The engine mints the run's permanent run instance and kicks the run off; that instance's id is the
     // durable run handle (`runs.id`). The run's metadata (`runs` row) is written by the engine in the SAME

@@ -22,6 +22,7 @@ import {
 } from "../../db/tables/execution.js";
 import { decodeFfiExtension } from "../../runtime/actor/ffi-reactor.js";
 import type { InstanceKind } from "../../runtime/engine/types.js";
+import { isUserFacingRequest } from "../../runtime/escalation-filter.js";
 import type { DelegateTarget, ReactorName } from "../../runtime/event/types.js";
 
 /** What a tree node's instance runs, projected for display: a named agent, a closure, or an external
@@ -154,7 +155,10 @@ export function assembleDelegationTree(
         .map((escalation) => ({
           id: escalation.id,
           request: escalation.request,
-          answerable: escalation.toReactor === "api",
+          // Answerable = addressed to the api root AND a genuine user-facing request. A run-root failure
+          // (panic / throw / control escape) is a `to = api` row too now (the base opens every escalate a
+          // row), so the user-facing check — not `to === 'api'` alone — is what marks it un-answerable.
+          answerable: escalation.toReactor === "api" && isUserFacingRequest(escalation.request),
           createdAt: escalation.createdAt,
         }))
         .sort(byAge),

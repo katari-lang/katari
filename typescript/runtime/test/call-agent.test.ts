@@ -599,16 +599,32 @@ describe("delegate argument validation", () => {
     ).resolves.toMatch(/name: expected a value of type string/);
   });
 
-  test("a malformed entry argument that bypasses the API pre-check panics at the acceptance surface", async () => {
-    // Driving the actor directly bypasses the API's `conformRunArgument` 400 (above), so the mismatch reaches
-    // the acceptance surface's last-line defence — a PANIC, not a `call_error` (injecting a throw the entry
-    // agent's row does not declare would be unsound; a panic is orthogonal to the row).
-    await expect(
-      actorFor(fixture()).startRun(createAgentName("greeter"), SNAPSHOT, {
-        kind: "record",
-        fields: { name: { kind: "integer", value: 7 } },
-      }).result,
-    ).rejects.toThrow(/panic.*greeter.*input schema/);
+  test("a malformed argument on a static sub-call panics at the acceptance surface (last-line defence)", async () => {
+    // A statically-typed direct `delegate` to `greeter` with a wrongly-typed `name` — the mismatch reaches
+    // the acceptance surface's last-line defence, a PANIC (not a `call_error`: injecting a throw the callee's
+    // row does not declare would be unsound; a panic is orthogonal to the row). The panic is raised at the
+    // MORTAL caller (`main`), so it fails the run gracefully. (A malformed RUN ENTRY argument is instead
+    // rejected at the run-start boundary — `conformRunArgument` above — never reaching this surface.)
+    const ir = fixture();
+    ir.blocks[1] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadLiteral", output: 30, value: { kind: "integer", value: 7 } },
+          { kind: "makeRecord", entries: [["name", 30]], output: 31 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("greeter") },
+            argument: 31,
+            output: 32,
+          },
+          { kind: "exit", target: 0, value: 32 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    };
+    await expect(runMain(ir, null)).rejects.toThrow(/panic.*greeter.*input schema/);
   });
 
   test("the call_error is catchable by a throw handle around the call_agent call site", async () => {

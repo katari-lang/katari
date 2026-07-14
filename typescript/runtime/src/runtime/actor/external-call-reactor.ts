@@ -607,16 +607,17 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
         // The callee raised a typed error of its own: re-raise it as `prelude.throw`, so a katari-side
         // handler catches the sidecar's error exactly like a stdlib throw. Like the error case the call
         // then waits — a throw answers with `never`, so resolution comes as a `terminate` (a handler broke
-        // out of its handle, or the run is failing).
-        this.escalateThrow(delegation, outcome.error, caller, run);
+        // out of its handle, or the run is failing). The raiser of the row is this call's own instance.
+        this.escalateThrow(delegation, outcome.error, caller, run, instance);
         call.status = "awaitingAnswer";
         this.dirty.add(delegation);
         return;
       case "error":
         // A no-result error escalates to the caller (panic by default; a reactor whose errors a program
         // anticipates — http — overrides with a typed throw). Unhandled, it fails the run; if a handler
-        // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer).
-        this.escalateError(delegation, outcome.message, caller, run);
+        // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer). The
+        // raiser of the row is this call's own instance.
+        this.escalateError(delegation, outcome.message, caller, run, instance);
         call.status = "awaitingAnswer";
         this.dirty.add(delegation);
         return;
@@ -642,6 +643,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     error: Json,
     caller: ReactorName,
     run: InstanceId,
+    raiser: InstanceId,
   ): void {
     let payload: Value;
     try {
@@ -652,10 +654,11 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
         `the callee threw an undecodable error payload: ${messageOf(cause)}`,
         caller,
         run,
+        raiser,
       );
       return;
     }
-    this.raiseThrow(delegation, payload, caller, run);
+    this.raiseThrow(delegation, payload, caller, run, raiser);
   }
 
   /** The escalation a no-result error becomes. Panic by default — an external process / infrastructure
@@ -666,8 +669,9 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     message: string,
     caller: ReactorName,
     run: InstanceId,
+    raiser: InstanceId,
   ): void {
-    this.raisePanic(delegation, message, caller, run);
+    this.raisePanic(delegation, message, caller, run, raiser);
   }
 
   /** Bridge a settled inner delegation to its transport token and stage the post-commit delivery. A missing

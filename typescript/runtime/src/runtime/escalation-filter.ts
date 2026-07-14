@@ -1,6 +1,9 @@
-// What counts as a *user-facing* escalation — one a user can answer. Shared by the actor's recovery
-// rehydration (`reactivate`) and the API's open-escalation list (`escalation.repository`), so both agree:
-// the engine and the durable Layer 1 read present the same set.
+// What counts as a *user-facing* escalation — one a user can answer. Every escalation is durable and uniform
+// (the base opens a row for every escalate — a failure, a control escape, a user-facing request — without
+// classifying); this predicate is where the classification lives, applied at the READS that need it: the api
+// reactor's answerable set (its live load + the durable `answerableEscalations`), the API's open-escalation
+// list (`escalation.repository`), and the run-tree's `answerable` mark. So the engine and every durable read
+// present the same answerable set, and a failure row never surfaces as answerable.
 
 import { PANIC_REQUEST } from "./engine/common.js";
 import { THROW_REQUEST } from "./engine/throw-signal.js";
@@ -18,10 +21,9 @@ export const REPLAY_INTERRUPTED_REQUEST = "prelude.replay.interrupted";
 /** Whether an escalation's `request` is a *failure* channel — a panic (a deterministic defect, uncatchable),
  *  a `prelude.throw` (a typed anticipated error), or a `prelude.replay.interrupted` (the replay seam, also
  *  `-> never`). All fail rather than wait for an answer (their answer type is `never`, so no valid answer
- *  exists), and all are caught at a callee boundary as the call *failing* (the external-call reactor settles
- *  the inner call as a failure) rather than proxied up as an answerable ask. Named once here so every site
- *  that distinguishes "a failure" from "an answerable request" reads the same set — adding a failure channel
- *  updates one place. */
+ *  exists): reaching the run root, they fail the run rather than open an answerable escalation. Named once
+ *  here so every site that distinguishes "a failure" from "an answerable request" reads the same set —
+ *  adding a failure channel updates one place. */
 export function isFailureRequest(request: string): boolean {
   return (
     request === PANIC_REQUEST || request === THROW_REQUEST || request === REPLAY_INTERRUPTED_REQUEST

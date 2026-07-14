@@ -238,6 +238,16 @@ function resolveInnerCall(
       switch (reactor) {
         case "core": {
           const name = createAgentName(callee.agent);
+          // Resolve the target up front. `context.call` is dynamic dispatch, so an unresolvable named agent
+          // (a spelling error in the sidecar's call) is the CALLER's dispatch error — a catchable `{ error }`
+          // here, exactly like a non-conforming argument — never core's acceptance-surface panic, which the
+          // ffi call instance (not core) would have to own the escalation row for. The parent call's snapshot
+          // is loaded (its handler is running against it), so this resolves synchronously.
+          try {
+            irSource.locate(snapshot, name);
+          } catch (error) {
+            return { error: `${callee.agent}: the agent cannot be resolved — ${messageOf(error)}` };
+          }
           const failures = conformCallableArgumentSync(
             { kind: "agent", name, snapshot },
             decoded.value,

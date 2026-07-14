@@ -246,14 +246,16 @@ describe("FFI inner delegation", () => {
   });
 
   test("a callee's panic is not catchable by the JS handler — it proxies up and fails the run", async () => {
-    // The handler's try/catch cannot turn a callee's panic into a fallback: `context.call` no longer rejects
-    // on a callee failure, so the `await` neither resolves nor rejects with the panic — the panic proxies UP
-    // past the ffi call to the run root, failing the run. (The cancel cascade later unwinds the handler's
-    // await, but its result is discarded — the run has already failed.)
+    // The callee RESOLVES (`prelude.add`) but PANICS during execution (a string is not a number) — a genuine
+    // callee execution failure, distinct from a caller-side dispatch error (an unknown name / non-callable /
+    // bad argument, all catchable at the boundary above). The handler's try/catch cannot turn this panic into
+    // a fallback: `context.call` no longer rejects on a callee failure, so the `await` neither resolves nor
+    // rejects — the panic proxies UP past the ffi call to the run root, failing the run. (The cancel cascade
+    // later unwinds the handler's await, but its result is discarded — the run has already failed.)
     const result = run({
       compute: async (_argument, context) => {
         try {
-          await context.call("no.such.agent");
+          await context.call("prelude.add", { left: 1, right: "not-a-number" });
           return "unreachable";
         } catch {
           return "fallback";

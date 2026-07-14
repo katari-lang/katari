@@ -68,14 +68,15 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
   }
 
   /** An http no-response is program-anticipatable: escalate `throw[http.fetch_error]` (not a panic), so a
-   *  caller's throw handler controls retry. */
+   *  caller's throw handler controls retry. `raiser` (this http call's instance) owns the durable row. */
   protected override escalateError(
     delegation: DelegationId,
     message: string,
     caller: ReactorName,
     run: InstanceId,
+    raiser: InstanceId,
   ): void {
-    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller, run);
+    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller, run, raiser);
   }
 
   protected abort(delegation: DelegationId): void {

@@ -1123,10 +1123,13 @@ describe("in-memory core", () => {
     await expect(run(ir, "main", null)).rejects.toThrow(/panic.*number/);
   });
 
-  test("fails the run (not hangs) when the run's agent cannot be resolved", async () => {
-    // `katari run missing.agent` — the run-root delegate resolves to no IR. A deterministic failure must
-    // fail the run as a panic, never throw from `react` (which the substrate would treat as a transient
-    // poison and replay-loop forever — a silent hang). The run's `result` rejects with the resolution error.
+  test("fails the run (not hangs) when a SUB-CALL's agent cannot be resolved", async () => {
+    // agent main() { missing.sub({}) } — a stale reference to a non-existent sub-agent. The sub-call
+    // delegate reaches core's acceptance surface, which cannot resolve it: a deterministic failure must fail
+    // the run as a panic (raised at the mortal caller `main`), never throw from `react` (which the substrate
+    // would treat as a transient poison and replay-loop forever — a silent hang). The run's `result` rejects
+    // with the resolution error. (An unresolvable RUN ENTRY is instead rejected at the run-start boundary —
+    // see the uniform-escalation suite — so a run's own root delegate never reaches this surface unresolved.)
     const ir: IRModule = {
       metadata: { schemaVersion: 1 },
       blocks: {
@@ -1134,17 +1137,26 @@ describe("in-memory core", () => {
         1: {
           block: {
             kind: "sequence",
-            result: 2,
-            operations: [{ kind: "loadLiteral", output: 2, value: { kind: "integer", value: 1 } }],
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 20 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("missing.sub") },
+                argument: 20,
+                output: 21,
+              },
+              { kind: "exit", target: 0, value: 21 },
+            ],
           },
           parameters: { parameter: 1 },
         },
       },
-      entries: { [createAgentName("main")]: 0 }, // only `main` exists — `missing.agent` does not
+      entries: { [createAgentName("main")]: 0 }, // only `main` exists — `missing.sub` does not
       names: {},
     };
 
-    await expect(run(ir, "missing.agent", null)).rejects.toThrow(/no IR for module/i);
+    await expect(run(ir, "main", null)).rejects.toThrow(/no IR for module/i);
   });
 
   test("catches a panic with a handler", async () => {

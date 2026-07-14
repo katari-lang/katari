@@ -122,6 +122,17 @@ class MapRowStore implements RowStore {
 
   async insertEscalation(row: PersistedEscalation): Promise<void> {
     if (this.escalations.has(row.escalation)) return;
+    // Witness the DB's IMMEDIATE (non-deferrable) `raiser_instance_id` FK: a raiser-owned row whose raiser
+    // envelope is absent is a dangling insert that real Postgres rejects at statement time (unlike the
+    // deferred `delegations.caller_instance_id`). Enforcing it here keeps the twin honest — a reactor that
+    // opened a row without persisting its raiser (or that tries to insert one whose raiser is dropped the same
+    // batch) passes silently in a lenient Map but crashes production. The shared `flushEscalations` skips a
+    // same-batch-dropped raiser's row, so a well-formed commit never reaches this guard.
+    if (!this.envelopes.has(row.raiser)) {
+      throw new Error(
+        `escalations_raiser_instance_id FK: raiser instance ${row.raiser} absent for escalation ${row.escalation}`,
+      );
+    }
     this.escalations.set(row.escalation, row);
   }
 
@@ -406,7 +417,8 @@ export class StoringPersistence implements Persistence {
     return { ...stored, result: unsealFromStorage(stored.result) };
   }
 
-  /** Test helper: the answered-escalation audit rows recorded for a run, in answer order, unsealed. */
+  /** Test helper: the resolved-escalation audit rows recorded for a run, in resolution order, unsealed. An
+   *  answered user-facing escalation carries its answer; a failed / cancelled one a `null` answer. */
   auditsFor(run: InstanceId): PersistedRunEscalationAudit[] {
     return this.store.audits
       .filter((audit) => audit.run === run)
@@ -415,5 +427,12 @@ export class StoringPersistence implements Persistence {
         question: unsealFromStorage(audit.question),
         answer: unsealFromStorage(audit.answer),
       }));
+  }
+
+  /** Test helper: how many durable escalation rows are live across the whole project — the leak-freedom
+   *  assertion (every escalation, failure or answerable, is retired / cascaded once resolved, so a quiesced
+   *  project holds zero). */
+  escalationCount(): number {
+    return this.store.escalations.size;
   }
 }

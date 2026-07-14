@@ -35,6 +35,7 @@ import type { Value } from "../value/types.js";
 import { renderConformFailures } from "../value/validation.js";
 import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
+import { isTransientError, messageOf } from "./failure.js";
 import { FfiReactor } from "./ffi-reactor.js";
 import { HttpReactor } from "./http-reactor.js";
 import { McpReactor, type McpServeCallOutcome, type McpServeToolsOutcome } from "./mcp-reactor.js";
@@ -250,11 +251,15 @@ export class ProjectActor {
     return this.api.startRun(qualifiedName, snapshot, argument, name ?? qualifiedName);
   }
 
-  /** Validate a run's entry argument against the entry agent's declared input schema — the run-start API is
-   *  an external input boundary like a webhook, so a malformed argument is rejected (400) BEFORE the run
-   *  starts rather than reaching the acceptance surface as a panic that kills a just-born run. Returns a
-   *  failure message, or `null` when it conforms (or the entry cannot be resolved — an unknown entry is a
-   *  separate failure the run itself reports, not this pre-check's to pre-empt). */
+  /** Validate a run's entry at the run-start boundary — the run-start API is an external input boundary like
+   *  a webhook, so BOTH an unresolvable entry agent AND a malformed argument are rejected (a 400) BEFORE the
+   *  run starts, rather than reaching core's acceptance surface as a pre-birth panic whose raiser would be
+   *  the PERMANENT run instance (which must never own an ephemeral escalation row — it is the run's result
+   *  container). Returns a rejection message, or `null` when the entry resolves and the argument conforms.
+   *  A *transient* resolution failure (an IR-store read blip) is NOT a rejection but must NOT defer-and-launch
+   *  either: launching an UNVALIDATED run would let a deterministic pre-birth failure at core wedge it (its
+   *  raiser being the permanent run instance, whose loud throw drops the delegate). So the transient error is
+   *  rethrown for the caller to surface as retryable (a 503) — the run is never launched unvalidated. */
   async conformRunArgument(
     qualifiedName: QualifiedName,
     snapshot: SnapshotId,
@@ -266,9 +271,14 @@ export class ProjectActor {
         argument,
         this.ir,
       );
-      return failures === null ? null : renderConformFailures(failures);
-    } catch {
-      return null; // unresolvable entry — let the run start and report that failure itself
+      return failures === null
+        ? null
+        : `the run argument does not conform to ${qualifiedName}'s input schema — ${renderConformFailures(failures)}`;
+    } catch (error) {
+      // A transient IR-store blip is retryable — rethrow it (the caller maps it to a 503) rather than defer,
+      // which would launch an unvalidated run. A deterministic failure means the entry does not exist → 400.
+      if (isTransientError(error)) throw error;
+      return `the entry agent ${qualifiedName} cannot be resolved: ${messageOf(error)}`;
     }
   }
 

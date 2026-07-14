@@ -161,18 +161,26 @@ export class CoreReactor extends Reactor {
     const argument = event.argument;
     const generics = event.generics;
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
-    // agent — e.g. a bad qualified name from a run command, or a stale `$agent` reference) is a program
-    // failure, so fail it to the caller as a panic. A *transient* infra failure (a `TransientError` — an
-    // IR DB read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from
-    // durable state (failing it would wrongly fail the run forever). Neither failure path opens a row or
-    // needs a turn owner, so it births no instance.
+    // agent — a stale `$agent` reference in a sub-call) is a program failure, so fail it to the caller as a
+    // panic. A *transient* infra failure (a `TransientError` — an IR DB read blip) is NOT a program failure:
+    // rethrow it so the substrate retries the delegate from durable state (failing it would wrongly fail the
+    // run forever). The panic is an escalation like any other, so it opens a durable raiser-owned row — but
+    // the callee is not born yet, so the row is owned by the delegate's ISSUER (`preInstanceRaiser`), always
+    // a MORTAL sub-call caller (a run / inner delegate is validated at its boundary and never reaches here),
+    // whose teardown cascades the row.
     let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
     try {
       await this.ir.preload(agentSnapshot(target));
       resolved = this.resolveTarget(target);
     } catch (error) {
       if (isTransientError(error)) throw error;
-      this.raisePanic(event.delegation, messageOf(error), event.from, event.run);
+      this.raisePanic(
+        event.delegation,
+        messageOf(error),
+        event.from,
+        event.run,
+        this.preInstanceRaiser(event),
+      );
       return;
     }
     // The delegate acceptance check: the argument must conform to the target's input schema. This is the
@@ -200,6 +208,7 @@ export class CoreReactor extends Reactor {
           `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
           event.from,
           event.run,
+          this.preInstanceRaiser(event),
         );
         return;
       }
@@ -431,6 +440,26 @@ export class CoreReactor extends Reactor {
   /** The loaded core instance under `id` (the engine store holds only core instances). */
   private coreInstance(id: InstanceId | undefined): CoreInstance | undefined {
     return id !== undefined ? this.store.instances[id] : undefined;
+  }
+
+  /** The raiser a pre-instance failure (an unresolvable / non-conforming delegate, before the callee is
+   *  born) is attributed to: the delegate's ISSUER, which core owns the caller-side row for (a mortal core
+   *  instance — its teardown cascades the failure row). A pre-instance failure can ONLY happen for a
+   *  sub-call (`from = core`): a RUN delegate is validated at the run-start boundary (an unresolvable /
+   *  malformed entry is a 400, never launched), and an INNER delegate (ffi / mcp / webhook) has its target +
+   *  argument validated at that reactor's own boundary — so neither ever reaches this pre-instance panic.
+   *  Attributing to the permanent run instance (the old `?? event.run`) would make it the raiser of an
+   *  ephemeral row that no cascade reclaims, which the design forbids (the run instance is the run's
+   *  permanent result container). So a missing caller here is an engine invariant break — fail loudly rather
+   *  than resurrect the permanent-raiser leak. */
+  private preInstanceRaiser(event: Extract<ExternalEvent, { kind: "delegate" }>): InstanceId {
+    const caller = this.callerInstanceOf(event.delegation);
+    if (caller === undefined) {
+      throw new Error(
+        `core pre-instance failure for ${event.delegation} has no issuer core owns (a run / inner delegate reached the acceptance surface unvalidated — engine bug)`,
+      );
+    }
+    return caller;
   }
 
   private resolveTarget(target: DelegateTarget): {

@@ -18,6 +18,7 @@ import {
   type RunState,
 } from "../../db/tables/execution.js";
 import type { InstanceKind } from "../engine/types.js";
+import { isUserFacingRequest } from "../escalation-filter.js";
 import type { ExternalEvent, ReactorName } from "../event/types.js";
 import type { BlobId, DelegationId, EscalationId, InstanceId, OutboxSeq, ScopeId } from "../ids.js";
 import type { Value } from "../value/types.js";
@@ -270,8 +271,14 @@ export function storeLoader(store: RowStore): Loader {
       },
     },
     api: {
+      // The api root's answerable set: rows addressed to it (`to = api`) whose `request` is user-facing. The
+      // base opens a `to = api` row for a run-root FAILURE too (a panic / throw / control escape fails the
+      // run), so the `isUserFacingRequest` filter — applied here, at the handler's read, not in the base — is
+      // what keeps a reloaded failure out of the answerable set.
       answerableEscalations: async () =>
-        unsealEscalations(await store.openEscalations({ to: "api" })),
+        unsealEscalations(await store.openEscalations({ to: "api" })).filter((row) =>
+          isUserFacingRequest(row.request),
+        ),
     },
     external: {
       instances: async (reactor) => {

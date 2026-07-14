@@ -105,14 +105,16 @@ export interface PersistedRunOutcome {
   cancelReason?: string | null;
 }
 
-/** One answered user-facing escalation, recorded for the run's history (`run_escalations_audit`) when the
- *  api reactor relays the answer back — live escalations are open-only and raiser-owned, so the answered
- *  ones live as this projection. */
+/** One resolved escalation, recorded for the run's history (`run_escalations_audit`) — live escalations are
+ *  open-only and raiser-owned, so the resolved ones live as this projection. The audit is the complete log
+ *  of resolved escalations: an ANSWERED user-facing request carries its answer; a FAILED / cancelled one (a
+ *  panic / throw / control escape the api resolved by failing the run) carries a `null` answer (the failure
+ *  text lives on `runs.error`). The `answer` column is nullable to hold that failure case. */
 export interface PersistedRunEscalationAudit {
   run: InstanceId;
   escalation: EscalationId;
   question: Value | null;
-  answer: Value;
+  answer: Value | null;
 }
 
 /** The envelope half every reloaded in-flight call shares (the join key + routing): `delegation` keys the
