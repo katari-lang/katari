@@ -6,10 +6,11 @@
 // The response contract is designed for third-party callers, not the console:
 //   200 — the callback's result, RAW as the response body (so a program controls the exact reply — e.g. a
 //         provider's URL-verification handshake echoes what the callback returns);
-//   400 — the body is not JSON, or it violates the callback's input schema (`reflection.call_error` — the
-//         callback never ran);
+//   400 — the body is not JSON, or it does not conform to the callback's input schema (pre-validated —
+//         `reflection.call_error`, the callback never ran, and the endpoint keeps serving);
 //   404 — no endpoint serves this token; 410 — the endpoint is winding down (cancelled / settled);
-//   500 — the callback threw or panicked on a well-formed delivery (details stay server-side).
+//   500 — a residual internal error. A WELL-FORMED delivery whose callback throws or panics does NOT 500:
+//         it proxies UP and cancels the endpoint (per-request resilience is the callback's own handler).
 
 import type { Json } from "@katari-lang/types";
 import { Hono } from "hono";
@@ -43,8 +44,6 @@ export const inboundRoutes = new Hono<AppEnv>().post("/:token", async (c) => {
     case "rejected":
       // Rejected at the schema boundary — the callback never ran, so the delivery itself was bad.
       return c.json({ error: outcome.error }, 400);
-    case "throw":
-      return c.json({ error: outcome.error }, 500);
     case "error":
       return c.json({ error: "the callback failed" }, 500);
   }

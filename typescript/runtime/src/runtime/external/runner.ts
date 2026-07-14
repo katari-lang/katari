@@ -127,9 +127,10 @@ export class StubFfiTransport implements FfiTransport {
   }
 }
 
-/** Thrown by an in-process FFI handler to fail its call as a typed `prelude.throw` with `error` (plain wire
- *  `Json`) as the payload — the in-process analogue of the real port's `katari.throw`. An inner call whose
- *  callee threw rejects with one too, so a handler that does not catch it rethrows the payload unchanged. */
+/** Thrown by an in-process FFI handler to fail ITS OWN call as a typed `prelude.throw` with `error` (plain
+ *  wire `Json`) as the payload — the in-process analogue of the real port's `katari.throw`. Only for the
+ *  handler's own outward throw: an inner `context.call` whose callee throws no longer rejects with this — the
+ *  callee's throw proxies UP the delegation to be caught in katari, never surfacing as a JS rejection here. */
 export class FfiThrow extends Error {
   constructor(readonly error: Json) {
     super(`katari throw: ${JSON.stringify(error)}`);
@@ -258,20 +259,27 @@ export class InProcessFfiTransport implements FfiTransport {
     const pending = this.pendingCalls.get(result.call);
     if (pending === undefined) return; // already settled (an abort rejection), or a stale token
     this.pendingCalls.delete(result.call);
+    // The inner channel settles only result / error / cancelled: a callee's OWN failure (a panic or a typed
+    // `prelude.throw`) no longer settles this call — it proxies UP the delegation to be caught by a katari
+    // handler above or to fail the run. So `context.call` never rejects on a callee failure; the only
+    // rejections are a LOCAL bad dispatch (`error`, see `resolveInnerCall`) and a cancellation. The wire's
+    // `throw` outcome is never produced here.
     switch (result.outcome.kind) {
       case "result":
         pending.resolve(result.outcome.value);
-        return;
-      case "throw":
-        // The typed rejection: an awaiting handler catches it by class, or lets it propagate — which
-        // rethrows the payload as this call's own typed throw (the dispatch catch above).
-        pending.reject(new FfiThrow(result.outcome.error));
         return;
       case "error":
         pending.reject(new Error(result.outcome.message));
         return;
       case "cancelled":
         pending.reject(new Error("the call was cancelled"));
+        return;
+      default:
+        // The inner channel never produces a `throw` (a callee's throw proxies up). A stray one is protocol
+        // drift — reject loudly rather than leave the awaiting handler hanging forever.
+        pending.reject(
+          new Error(`unexpected inner delegateResult outcome "${result.outcome.kind}"`),
+        );
         return;
     }
   }

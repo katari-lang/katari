@@ -1,10 +1,12 @@
 // Schema conformance for runtime values — the checking half of the JSON boundary, and a *separate* pass
 // from the codec. The codec (`./codec.ts`, `../engine/json-value.ts`) is a blind, total bijection: it
 // turns wire JSON into a `Value` (and back) with no schema in sight. This module then decides whether a
-// decoded `Value` fits a `JSONSchema`, so the delegate surface can reject a malformed argument (an AI-built
-// `call_agent` args record, a `katari run` argument) as a panic. It only *checks* — it never rewrites the
-// value to fit (the AI supplies a value already in wire shape, e.g. a `data` value's `$constructor` tag,
-// so there is nothing to repair).
+// decoded `Value` fits a `JSONSchema`, so each dynamic input boundary can reject a malformed argument in its
+// OWN terms: a `call_agent` args record as a catchable `reflection.call_error` (engine-side), an mcp / webhook
+// delivery and a `katari run` argument as a per-request 400 (actor-side), and the delegate acceptance surface
+// — the last-line defence every path has already pre-validated — as a PANIC (a genuine defect). It only
+// *checks* — it never rewrites the value to fit (the AI supplies a value already in wire shape, e.g. a `data`
+// value's `$constructor` tag, so there is nothing to repair).
 //
 // The compiler emits a `data` type as a nested schema — `{ "$constructor": {const}, "value": {fields} }`
 // (Haskell `Katari.Schema`) — matching the wire form, while the engine keeps a `data` value's constructor

@@ -14,6 +14,7 @@
 // private part of the argument marks the whole result private, so these walks keep content.
 
 import {
+  type Block,
   createAgentName,
   type GenericId,
   type JSONSchema,
@@ -26,6 +27,7 @@ import { jsonToValue, valueEquals } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
 import type { BlobRefValue, GenericSubstitution, Value } from "../value/types.js";
 import {
+  type ConformFailure,
   conformValue,
   fillGenericSchema,
   renderConformFailures,
@@ -501,6 +503,56 @@ export async function callableMetadata(
     output: fillGenericSchema(typeSubstitution, callable.schema.output),
     requests: requestsToJson(callable.schema.requests, typeSubstitution, requestSubstitution),
   };
+}
+
+/** Whether `argument` conforms to `value`'s DECLARED input schema — the pure pre-validation the async input
+ *  boundaries (`mcp.serve`, `webhook.inbound`, and the run-start API) run before dispatching, so a malformed
+ *  external argument is caught as each boundary's own error (invalid-params / HTTP 400) and never reaches the
+ *  acceptance surface (whose mismatch is a defensive panic). Resolves the input schema through the SAME
+ *  `callableMetadata` seam the listing uses — so the validated schema can never drift from the advertised one
+ *  — and checks it (generics already filled by `callableMetadata`). Returns the mismatches, or `null` when the
+ *  argument conforms. Only this pure predicate is shared; each boundary renders a failure into its own error
+ *  shape. (The engine's synchronous `call_agent` path validates separately — it cannot await a preload.) */
+export async function conformCallableArgument(
+  value: Value,
+  argument: Value | null,
+  ir: IrSource,
+): Promise<ConformFailure[] | null> {
+  const metadata = await callableMetadata(value, ir);
+  const check = conformValue(argument ?? { kind: "record", fields: {} }, metadata.input);
+  return check.ok ? null : check.failures;
+}
+
+/** The SYNCHRONOUS twin of `conformCallableArgument`, for the hot dynamic-dispatch paths that cannot await a
+ *  preload — the engine's `call_agent` and the FFI reactor's inner call. It pre-validates an agent / closure
+ *  callee's argument against its declared input schema, resolved from the ALREADY-LOADED snapshot the way
+ *  `resolveLeafBody` does (a foreign / unloaded snapshot, or a non-agent block, falls back to `null`: no
+ *  pre-check, leaving the acceptance surface as the guard). A `tool` value (validated by `dispatchCallable`)
+ *  and a non-callable value (a dispatch error) also fall through to `null`. Returns the mismatches, or `null`
+ *  when the argument conforms (or cannot be pre-checked). The input schema resolves from the callee's OWN
+ *  carried generics — a dynamic caller's generics never rebind the callee's input params. */
+export function conformCallableArgumentSync(
+  value: Value,
+  argument: Value | null,
+  irSource: IrSource,
+): ConformFailure[] | null {
+  if (value.kind !== "agent" && value.kind !== "closure") return null;
+  let block: Block;
+  try {
+    if (value.kind === "agent") {
+      const located = irSource.locate(value.snapshot, value.name);
+      block = irSource.access(value.snapshot, located.module).block(located.blockId).block;
+    } else {
+      block = irSource.access(value.snapshot, value.module).block(value.blockId).block;
+    }
+  } catch {
+    return null; // an unloaded / foreign snapshot — the acceptance surface guards it
+  }
+  if (block.kind !== "agent") return null; // not an agent body — the acceptance surface guards it
+  const substitution = typeSubstitutionOf(block.schema.genericBindings, value.generics);
+  const inputSchema = fillGenericSchema(substitution, block.schema.input);
+  const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
+  return check.ok ? null : check.failures;
 }
 
 /** Resolve a callable value to its agent block's schema / description (following the value's own

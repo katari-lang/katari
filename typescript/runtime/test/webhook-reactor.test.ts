@@ -4,10 +4,12 @@
 // subscriber once with the URL, converts each delivery into a `call_agent` delegation of the callback
 // (schema-validated at the acceptance surface), and settles the whole call with the subscriber's result.
 //
-// Covered: the delivery happy path; a schema-violating delivery (a typed `reflection.call_error`, the
-// callback never runs); an unknown token; the endpoint deactivating when the subscriber settles; and the
-// restart contract — the endpoint SURVIVES a restart (token + callback reload from its extension
-// document, the subscriber resumes as durable core work), the piece that separates webhook from ffi / http.
+// Covered: the delivery happy path; a MALFORMED delivery (pre-validated against the callback's declared
+// input schema and rejected as a per-request 400 — the callback never runs, the endpoint keeps serving; a
+// genuine failure while the callback RUNS instead proxies up and drops the endpoint, the shared
+// ExternalCallReactor mechanism the mcp-serve / ffi suites pin); an unknown token; the endpoint deactivating
+// when the subscriber settles; and the restart contract — the endpoint SURVIVES a restart (token + callback
+// reload from its extension document, the subscriber resumes as durable core work).
 
 import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
@@ -216,19 +218,24 @@ describe("the webhook reactor (an ffi-held subscriber)", () => {
       value: { kind: "string", value: "hello" },
     });
 
-    // A violating delivery fails at the dynamic-dispatch boundary — a typed `reflection.call_error`,
-    // the callback never runs, the endpoint stays live.
+    // A MALFORMED delivery is pre-validated against the callback's declared input schema and rejected as a
+    // per-request `reflection.call_error` (the route's 400) — the callback never runs and the endpoint stays
+    // LIVE. (Only a genuine failure while the callback RUNS proxies up and drops the endpoint — the shared
+    // ExternalCallReactor mechanism pinned by the mcp-serve `boom` and ffi suites.)
     const violation = await actor.deliverWebhook(
       token,
       bodyOf({ wrong: { kind: "integer", value: 1 } }),
     );
     expect(violation.kind).toBe("throw");
-    if (violation.kind === "throw") {
-      expect(violation.value.kind).toBe("record");
-      if (violation.value.kind === "record") {
-        expect(String(violation.value.ctor)).toBe("prelude.reflection.call_error");
-      }
+    if (violation.kind === "throw" && violation.value.kind === "record") {
+      expect(String(violation.value.ctor)).toBe("prelude.reflection.call_error");
     }
+
+    // The endpoint is unaffected by the rejected delivery: a conforming delivery right after still works.
+    await expect(actor.deliverWebhook(token, HELLO)).resolves.toEqual({
+      kind: "result",
+      value: { kind: "string", value: "hello" },
+    });
 
     // A token nobody minted resolves `unknown`.
     await expect(actor.deliverWebhook("no-such-token", HELLO)).resolves.toEqual({
@@ -241,6 +248,7 @@ describe("the webhook reactor (an ffi-held subscriber)", () => {
     await expect(result).resolves.toEqual({ kind: "string", value: "served" });
     await expect(actor.deliverWebhook(token, HELLO)).resolves.toEqual({ kind: "unknown" });
   });
+
 });
 
 describe("the webhook reactor (restart survival)", () => {

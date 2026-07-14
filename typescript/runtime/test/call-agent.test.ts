@@ -263,10 +263,127 @@ describe("call-site generics on the delegate operation", () => {
     });
   });
 
-  test("rejects an argument violating the instantiated schema (as reflection.call_error)", async () => {
+  test("rejects an argument violating the instantiated schema (a defensive acceptance PANIC)", async () => {
+    // This is a DIRECT delegate by name (not `call_agent`): the type checker guarantees a direct call site
+    // conforms, so the runtime adds no pre-check for it. This synthetic IR bypasses that guarantee, so the
+    // mismatch reaches the acceptance surface — the last-line defence — as a PANIC (a genuine defect / type
+    // hole), not a `call_error`. (A DYNAMIC `call_agent` mismatch, by contrast, is a catchable `call_error`,
+    // pinned above — that path pre-validates in the engine.)
     await expect(runMain(genericFixture({ kind: "string", value: "seven" }), null)).rejects.toThrow(
-      /reflection\.call_error.*pick.*\$\.x: expected a value of type integer/,
+      /panic.*pick.*\$\.x: expected a value of type integer/,
     );
+  });
+});
+
+describe("call_agent generic resolution — the target's own generics validate its input", () => {
+  // agent transform[R](x: R) -> R { x }   — its OWN param is named `R`, colliding with call_agent[R,E]'s.
+  // main instantiates the target's R to `integer` (on the value, via applyGenerics), then delegates through
+  // call_agent whose OWN `R` is stamped as `string` on the operation. call_agent's `R` parameterises
+  // call_agent's result, NOT the target's input — so the target's input must be validated at `integer`
+  // (the value's carried generic), never rebound to call_agent's `string`. Both the engine pre-check and the
+  // acceptance surface must resolve the input from that ONE source, or a valid arg would panic uncatchably.
+  function transformFixture(): IRModule {
+    return {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: {
+          block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+          parameters: {},
+        },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "getField", source: 10, field: "args", output: 11 },
+              { kind: "loadAgent", output: 12, name: createAgentName("transform") },
+              {
+                kind: "applyGenerics",
+                source: 12,
+                generics: [["R", { kind: "type", schema: { type: "integer" } }]],
+                output: 13,
+              },
+              {
+                kind: "makeRecord",
+                entries: [
+                  ["target", 13],
+                  ["args", 11],
+                ],
+                output: 14,
+              },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
+                argument: 14,
+                output: 15,
+                // call_agent's OWN `R`, inferred as `string` — must NOT leak into the target's input.
+                generics: [["R", { kind: "type", schema: { type: "string" } }]],
+              },
+              { kind: "exit", target: 0, value: 15 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        2: {
+          block: {
+            kind: "agent",
+            body: 3,
+            schema: {
+              input: {
+                type: "object",
+                properties: { x: { $generic: 7 } },
+                required: ["x"],
+                additionalProperties: true,
+              },
+              output: { $generic: 7 },
+              requests: [],
+              genericBindings: { R: 7 },
+            },
+            description: "",
+            defaults: {},
+          },
+          parameters: {},
+        },
+        3: {
+          block: {
+            kind: "sequence",
+            result: 21,
+            operations: [{ kind: "getField", source: 20, field: "x", output: 21 }],
+          },
+          parameters: { parameter: 20 },
+        },
+        4: {
+          block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+          parameters: {},
+        },
+        5: {
+          block: { kind: "primitive", name: "prelude.reflection.call_agent", input: 50 },
+          parameters: { parameter: 50 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: 0,
+        [createAgentName("transform")]: 2,
+        [createAgentName("prelude.reflection.call_agent")]: 4,
+      },
+      names: {},
+    };
+  }
+
+  test("an arg valid at the TARGET's R runs — call_agent's own R does not rebind the target's input", async () => {
+    // `x = 42` conforms to the target's R (= integer). It must run and return 42, NOT be validated against
+    // call_agent's R (= string) and panic — the regression this fix prevents.
+    await expect(
+      runMain(transformFixture(), argsOf({ x: { kind: "integer", value: 42 } })),
+    ).resolves.toEqual({ kind: "integer", value: 42 });
+  });
+
+  test("an arg violating the TARGET's R is a catchable call_error, not a panic", async () => {
+    // `x = "hello"` violates the target's R (= integer): the engine pre-check catches it as a catchable
+    // `reflection.call_error` (unhandled here, it fails the run), never reaching the acceptance-surface panic.
+    const failure = runMain(transformFixture(), argsOf({ x: { kind: "string", value: "hello" } }));
+    await expect(failure).rejects.toThrow(/reflection\.call_error.*transform.*input schema/);
+    await expect(failure).rejects.not.toThrow(/panic/);
   });
 });
 
@@ -463,16 +580,35 @@ describe("delegate argument validation", () => {
     ).resolves.toEqual({ kind: "string", value: "bob" });
   });
 
-  test("a run whose argument violates the entry agent's schema fails with reflection.call_error", async () => {
-    // A non-conforming argument at the delegation boundary is the callee's schema rejecting an input —
-    // always `reflection.call_error` (recoverable), whoever the caller is. Unhandled here (no handler
-    // above the run root), it still fails the run, carrying the schema-mismatch message.
+  test("the run-start API rejects a malformed entry argument before starting the run (400)", async () => {
+    // The run-start API is an external input boundary: `conformRunArgument` is what the facade calls to
+    // reject a malformed argument as a 400 BEFORE the run starts. A conforming argument passes (null); a
+    // violating one yields the schema-mismatch message the facade turns into the 400 body.
+    const actor = actorFor(fixture());
+    await expect(
+      actor.conformRunArgument(createAgentName("greeter"), SNAPSHOT, {
+        kind: "record",
+        fields: { name: { kind: "string", value: "bob" } },
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      actor.conformRunArgument(createAgentName("greeter"), SNAPSHOT, {
+        kind: "record",
+        fields: { name: { kind: "integer", value: 7 } },
+      }),
+    ).resolves.toMatch(/name: expected a value of type string/);
+  });
+
+  test("a malformed entry argument that bypasses the API pre-check panics at the acceptance surface", async () => {
+    // Driving the actor directly bypasses the API's `conformRunArgument` 400 (above), so the mismatch reaches
+    // the acceptance surface's last-line defence — a PANIC, not a `call_error` (injecting a throw the entry
+    // agent's row does not declare would be unsound; a panic is orthogonal to the row).
     await expect(
       actorFor(fixture()).startRun(createAgentName("greeter"), SNAPSHOT, {
         kind: "record",
         fields: { name: { kind: "integer", value: 7 } },
       }).result,
-    ).rejects.toThrow(/reflection\.call_error.*greeter.*input schema/);
+    ).rejects.toThrow(/panic.*greeter.*input schema/);
   });
 
   test("the call_error is catchable by a throw handle around the call_agent call site", async () => {

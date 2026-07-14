@@ -241,14 +241,14 @@ export class TimeReactor extends ExternalCallReactor<TimePayload> {
   }
 
   /** A settled tick delivery. A success re-arms the next occurrence (the cursor already advanced when the tick
-   *  fired); a failure kills the whole watch (fed back as the call's outcome, exactly as a subscriber's
-   *  failure settles `webhook.inbound`); a cancelled tick is part of teardown, so nothing to do. */
+   *  fired); a cancelled tick is part of teardown, so nothing to do. A tick's EXECUTION failure no longer
+   *  settles the delivery — it proxies UP like any escalation and cancels the whole watch — so the only
+   *  outcomes that reach here are `result` and `cancelled` (the `error` arm is a defensive residue). */
   protected override deliverInnerOutcome(delivery: InnerDelivery): void {
     switch (delivery.outcome.kind) {
       case "result":
         this.armWatch(delivery.delegation);
         return;
-      case "throw":
       case "error":
         this.schedule(() =>
           this.complete({

@@ -10,6 +10,7 @@ import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import { createProjectStore } from "../src/runtime/engine/store.js";
 import type { ExternalEvent } from "../src/runtime/event/types.js";
+import { SnapshotRegistry } from "../src/runtime/ir.js";
 import {
   type BlobId,
   type DelegationId,
@@ -33,7 +34,7 @@ function openCall(): {
 } {
   const store = createProjectStore();
   const pool = new ResourcePool(PROJECT, store);
-  const ffi = new FfiReactor(PROJECT, new StubFfiTransport(), pool);
+  const ffi = new FfiReactor(PROJECT, new StubFfiTransport(), pool, new SnapshotRegistry());
   const delegate: ExternalEvent = {
     kind: "delegate",
     delegation: DELEGATION,

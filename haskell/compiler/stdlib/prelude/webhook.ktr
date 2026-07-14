@@ -18,10 +18,14 @@
 // runs, e.g. deleting the registration) and deactivates the URL the same way.
 //
 // Delivery semantics: the HTTP caller waits for the callback and receives its result as JSON with
-// status 200; a request whose body does not conform to the callback's input schema is rejected with
-// status 400 (the callback never runs); a callback that throws or panics yields status 500. A
-// delivery in flight across a runtime restart is lost (the webhook provider's retry redelivers);
-// the URL itself is durable — it survives restarts until @subscriber@ settles.
+// status 200. A MALFORMED body — one that does not conform to @callback@'s declared input schema — is
+// pre-validated at the boundary and rejected with status 400 (the callback never runs, and the endpoint
+// keeps serving). An EXECUTION failure is different: a callback that throws or panics on a WELL-FORMED
+// delivery proxies UP like any escalation and cancels the whole endpoint (the run fails unless a katari
+// handler above @subscriber@ catches it) — one bad delivery can drop the endpoint, so for per-request
+// resilience wrap the callback's body in a handler that turns a failure into a value it returns. A delivery
+// in flight across a runtime restart is lost (the webhook provider's retry redelivers); the URL itself is
+// durable — it survives restarts until @subscriber@ settles.
 
 @"Serve a fresh, dynamically generated public webhook URL for the extent of @subscriber@. The
 runtime converts every POST to the URL into a call of @callback@ (JSON body in, JSON result out,

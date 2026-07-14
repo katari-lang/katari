@@ -22,11 +22,9 @@ import {
 } from "../engine/common.js";
 import { makeStepContext, type PrimRunner, type StepContext } from "../engine/context.js";
 import { drive } from "../engine/drive.js";
-import { CALL_ERROR } from "../engine/dynamic-dispatch.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { rebuildScopeOwnerIndex } from "../engine/scope.js";
-import { errorData } from "../engine/throw-signal.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import {
   agentSnapshot,
@@ -178,12 +176,15 @@ export class CoreReactor extends Reactor {
       return;
     }
     // The delegate acceptance check: the argument must conform to the target's input schema. This is the
-    // enforcement point for every *dynamic* entry — a `call_agent` args record, a run command's JSON
-    // argument, a webhook delivery's body — and it validates the argument against the CALLEE's own schema
-    // as the callee is summoned, so validation is the callee's regardless of who is calling. A mismatch is
-    // an anticipated, recoverable error (`reflection.call_error`, a throw a caller may catch), never a panic;
-    // a statically checked call site conforms by construction, so this never fires for one. The argument is
-    // passed through unchanged: the codec already decoded it, and this is a pure check, never a rewrite.
+    // last-line DEFENCE, not the enforcement point — every dynamic entry pre-validates its own argument and
+    // renders its own error upstream: a `call_agent` args record as a catchable `reflection.call_error`
+    // (engine-side), and an mcp / webhook delivery and a run command's JSON argument as a per-request 400
+    // (actor-side). So a mismatch reaching HERE is a type-system hole or a genuine defect (an FFI handler
+    // passing a malformed argument) — never an anticipated error, so it is a PANIC. Panic (unlike a
+    // `call_error`) is orthogonal to the callee's effect row, so injecting it cannot make the row lie by
+    // introducing a throw the row does not declare; a `call_error` here would. A statically checked call site
+    // conforms by construction, so this never fires for one. The argument is passed through unchanged: the
+    // codec already decoded it, and this is a pure check, never a rewrite.
     const targetBlock = this.ir
       .access(resolved.snapshot, moduleOf(target))
       .block(resolved.agentBlockId).block;
@@ -194,12 +195,9 @@ export class CoreReactor extends Reactor {
       // data / required-field input rightly fails.
       const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
       if (!check.ok) {
-        this.raiseThrow(
+        this.raisePanic(
           event.delegation,
-          errorData(
-            CALL_ERROR,
-            `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
-          ),
+          `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
           event.from,
           event.run,
         );

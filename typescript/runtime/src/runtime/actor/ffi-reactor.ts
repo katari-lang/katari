@@ -20,12 +20,15 @@
 
 import { createAgentName, type Json } from "@katari-lang/types";
 import { type DispatchResult, dispatchCallable } from "../engine/dynamic-dispatch.js";
+import { conformCallableArgumentSync } from "../engine/interop-prims.js";
 import type { ReactorName } from "../event/types.js";
 import type { FfiInnerDelegate, FfiTransport } from "../external/runner.js";
 import type { DelegateOutcome } from "../external/sidecar-protocol.js";
 import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
+import type { IrSource } from "../ir.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
+import { renderConformFailures } from "../value/validation.js";
 import {
   documentOf,
   encodeInnerCalls,
@@ -95,6 +98,7 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     private readonly projectId: ProjectId,
     private readonly transport: FfiTransport,
     pool: ResourcePool,
+    private readonly irSource: IrSource,
   ) {
     super(pool);
   }
@@ -154,7 +158,7 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
       this.failInnerDelegate(request, { kind: "cancelled" });
       return;
     }
-    const resolved = resolveInnerCall(request, payload.snapshot);
+    const resolved = resolveInnerCall(request, payload.snapshot, this.irSource);
     if ("error" in resolved) {
       this.failInnerDelegate(request, { kind: "error", message: resolved.error });
       return;
@@ -197,14 +201,13 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
   // tool result's image content the same way.
 }
 
-/** Lower a settled inner outcome to the sidecar's wire form. A result — and a typed throw's payload — cross
- *  the same boundary: the FFI sidecar is the allowed secret sink, exactly like the outer call's argument. */
+/** Lower a settled inner outcome to the sidecar's wire form. A `result` crosses the FFI sidecar's secret sink
+ *  (revealed, exactly like the outer call's argument); an `error` / `cancelled` pass through unchanged. A
+ *  callee's failure no longer settles the inner call (it proxies up), so no `throw` reaches this boundary. */
 function lowerInnerOutcome(outcome: InnerDelivery["outcome"]): DelegateOutcome {
   switch (outcome.kind) {
     case "result":
       return { kind: "result", value: valueToJson(outcome.value, "reveal") };
-    case "throw":
-      return { kind: "throw", error: valueToJson(outcome.value, "reveal") };
     default:
       return outcome;
   }
@@ -214,13 +217,16 @@ function lowerInnerOutcome(outcome: InnerDelivery["outcome"]): DelegateOutcome {
  *  snapshot — an agent and its FFI handlers deploy together, so the sidecar names siblings of its own
  *  version (`core` runs a named agent, `ffi` / `http` an external key; http ignores the snapshot; `api` is
  *  not a callee, and an unknown name is a spelling error). A `value` callee is a callable the handler
- *  received: the shared dynamic dispatch resolves it to its target (validating an `as_tool`'s argument) and
- *  it runs on `core`, carrying its own generics. Every failure — an undecodable argument / callable, an
- *  unknown reactor, a non-callable value, a tool schema violation — fails the call as a plain error (a
- *  panic on the katari side); a bad value crossing the FFI boundary is a bug, not a catchable dispatch. */
+ *  received: the shared dynamic dispatch resolves it to its target and it runs on `core`, carrying its own
+ *  generics. `context.call` is DYNAMIC dispatch, like the AI's `call_agent`: an INPUT / dispatch error is the
+ *  CALLER's, so it is a catchable `{ error }` (surfaced to `context.call` as `KatariCallError`) — the
+ *  argument is pre-validated against the callee's declared input schema here (a `tool` by `dispatchCallable`,
+ *  an agent / closure by `conformCallableArgumentSync`), so a mismatch never reaches the acceptance surface as
+ *  an uncatchable panic. Only a callee's EXECUTION failure proxies up (the no-catch model, unchanged). */
 function resolveInnerCall(
   request: FfiInnerDelegate,
   snapshot: SnapshotId,
+  irSource: IrSource,
 ): DispatchResult | { error: string } {
   const decoded = decodeArgument(request.argument);
   if ("error" in decoded) return decoded;
@@ -230,12 +236,20 @@ function resolveInnerCall(
       if (callee.agent.length === 0) return { error: "the agent to call must be a non-empty name" };
       const reactor = callee.reactor ?? "core";
       switch (reactor) {
-        case "core":
-          return {
-            target: { kind: "named", name: createAgentName(callee.agent), snapshot },
-            to: "core",
-            argument: decoded.value,
-          };
+        case "core": {
+          const name = createAgentName(callee.agent);
+          const failures = conformCallableArgumentSync(
+            { kind: "agent", name, snapshot },
+            decoded.value,
+            irSource,
+          );
+          if (failures !== null) {
+            return {
+              error: `${callee.agent}: the argument does not conform to the input schema — ${renderConformFailures(failures)}`,
+            };
+          }
+          return { target: { kind: "named", name, snapshot }, to: "core", argument: decoded.value };
+        }
         case "ffi":
         case "http":
           return {
@@ -253,6 +267,15 @@ function resolveInnerCall(
         callable = jsonToValue(callee.callable);
       } catch (error) {
         return { error: `the callable is not a decodable value: ${messageOf(error)}` };
+      }
+      // An agent / closure callee's input is pre-validated here (a `tool` and a non-callable value fall to
+      // `dispatchCallable`, which validates the tool and errors on the non-callable), so a bad argument is a
+      // catchable dispatch error rather than the acceptance surface's panic.
+      const failures = conformCallableArgumentSync(callable, decoded.value, irSource);
+      if (failures !== null) {
+        return {
+          error: `the argument does not conform to the input schema — ${renderConformFailures(failures)}`,
+        };
       }
       // The shared dispatch already returns the exact `DispatchResult` this resolver promises.
       return dispatchCallable(callable, decoded.value);

@@ -494,6 +494,10 @@ describe("the time reactor — watch", () => {
     expect(persistence.envelopeCount("time")).toBe(0);
   });
 
+  // A tick's `deliver_to` failure now PROXIES UP under the watch call (the uniform reactor behaviour: a
+  // callee failure is not caught by the reactor, it escalates up) rather than being settled as the watch
+  // call's own completion. With the watch running at the run root and no handler above it, the outcome is the
+  // same — the proxied panic fails the run — but the path is proxy, not a fed-back completion.
   test("a deliver_to failure propagates and kills the watch", async () => {
     const persistence = new StoringPersistence();
     const clock = new ManualClock(BASE);

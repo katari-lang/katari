@@ -742,6 +742,12 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       payload.scope,
       payload.snapshot,
     );
+    // `{ value: toolbox }` conforms to the continuation's declared input BY CONSTRUCTION: `mcp.provide`'s
+    // signature types the continuation as `agent (value: toolbox[URL]) -> ...`, and `mintToolbox` produces
+    // exactly a `toolbox[URL]` (a record of the minted tools) for this same provide's URL. So this internal
+    // dispatch — which does not go through a dynamic-input boundary's pre-check — never mismatches at the
+    // acceptance surface, and needs no guard of its own (a `dispatchCallable` error is a non-callable
+    // continuation, still handled below).
     const argument: Value = { kind: "record", fields: { value: toolbox } };
     const dispatched = dispatchCallable(continuation, argument);
     if ("error" in dispatched) {
@@ -896,9 +902,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     switch (delivery.outcome.kind) {
       case "result":
         waiter({ kind: "result", value: delivery.outcome.value });
-        return;
-      case "throw":
-        waiter({ kind: "throw", value: delivery.outcome.value });
         return;
       case "error":
         waiter({ kind: "error", message: delivery.outcome.message });

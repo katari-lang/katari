@@ -9,9 +9,11 @@
 import type { JSONSchema, QualifiedName } from "@katari-lang/types";
 import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
-import { callableMetadata } from "../engine/interop-prims.js";
+import { CALL_ERROR } from "../engine/dynamic-dispatch.js";
+import { callableMetadata, conformCallableArgument } from "../engine/interop-prims.js";
 import { blobStoreStringReader } from "../engine/json-value.js";
 import { createProjectStore } from "../engine/store.js";
+import { errorData } from "../engine/throw-signal.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
 import { type Clock, SystemClock } from "../external/clock.js";
@@ -30,6 +32,7 @@ import {
 import type { IrSource } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
+import { renderConformFailures } from "../value/validation.js";
 import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
 import { FfiReactor } from "./ffi-reactor.js";
@@ -143,7 +146,7 @@ export class ProjectActor {
     );
     // The ffi reactor runs external (FFI) handlers through the injected transport; an external call reaches
     // it as a `delegate` from core's external proxy.
-    this.ffi = new FfiReactor(this.projectId, dependencies.external, pool);
+    this.ffi = new FfiReactor(this.projectId, dependencies.external, pool, dependencies.ir);
     // The http reactor performs built-in `http.fetch` calls through the injected transport (an in-runtime
     // fetch); an http call reaches it as a `delegate` from core's external proxy, exactly like ffi.
     this.http = new HttpReactor(dependencies.http, pool);
@@ -247,6 +250,28 @@ export class ProjectActor {
     return this.api.startRun(qualifiedName, snapshot, argument, name ?? qualifiedName);
   }
 
+  /** Validate a run's entry argument against the entry agent's declared input schema — the run-start API is
+   *  an external input boundary like a webhook, so a malformed argument is rejected (400) BEFORE the run
+   *  starts rather than reaching the acceptance surface as a panic that kills a just-born run. Returns a
+   *  failure message, or `null` when it conforms (or the entry cannot be resolved — an unknown entry is a
+   *  separate failure the run itself reports, not this pre-check's to pre-empt). */
+  async conformRunArgument(
+    qualifiedName: QualifiedName,
+    snapshot: SnapshotId,
+    argument: Value | null,
+  ): Promise<string | null> {
+    try {
+      const failures = await conformCallableArgument(
+        { kind: "agent", name: qualifiedName, snapshot },
+        argument,
+        this.ir,
+      );
+      return failures === null ? null : renderConformFailures(failures);
+    } catch {
+      return null; // unresolvable entry — let the run start and report that failure itself
+    }
+  }
+
   /** Request a run's cancellation (terminate cascade + durable cancel reason). Resolves once the cancel
    *  commit is durable; a no-op in the engine if the run already finished. */
   cancelRun(run: InstanceId, reason?: string): Promise<void> {
@@ -317,11 +342,51 @@ export class ProjectActor {
 
   /** Deliver one inbound webhook POST to the endpoint serving `token`: the webhook reactor converts it into
    *  a delegation of the endpoint's callback on a serial turn, and the returned promise resolves with the
-   *  callback's outcome (or `unknown` / `gone` for a dead endpoint) once it settles. */
-  deliverWebhook(token: string, argument: Value): Promise<WebhookDeliveryOutcome> {
+   *  callback's outcome (or `unknown` / `gone` for a dead endpoint) once it settles. The body is
+   *  pre-validated against the callback's declared input schema first, so a MALFORMED delivery is a
+   *  per-request 400 and the endpoint keeps serving — only a genuine failure while the callback RUNS proxies
+   *  up and drops the endpoint. */
+  async deliverWebhook(token: string, argument: Value): Promise<WebhookDeliveryOutcome> {
+    const callback = await this.webhookCallbackOf(token);
+    if (callback !== undefined) {
+      const rejection = await this.boundaryRejection(callback, argument);
+      if (rejection !== null) return { kind: "throw", value: rejection };
+    }
     return new Promise((resolve) => {
       this.substrate.submit(this.webhook, () => this.webhook.deliver(token, argument, resolve));
     });
+  }
+
+  /** The callback value the webhook endpoint serving `token` holds, read on a serial turn — the seam the
+   *  delivery pre-validation resolves the declared input schema from (the actor resolves schemas, a reactor
+   *  turn cannot await), mirroring how the mcp listing reads its served entries. */
+  private webhookCallbackOf(token: string): Promise<Value | undefined> {
+    return new Promise((resolve) => {
+      this.substrate.submit(this.webhook, () => resolve(this.webhook.callbackFor(token)));
+    });
+  }
+
+  /** Pre-validate an external delivery / run argument against a served callable's DECLARED input schema (the
+   *  same `callableMetadata` seam the mcp listing uses). Returns the `reflection.call_error` value to answer
+   *  the request with on a mismatch — which each user-facing boundary maps to its own 400 / invalid-params —
+   *  or `null` when the argument conforms. A genuine failure while the callee RUNS is a separate concern (it
+   *  proxies up); this catches only a malformed request before anything runs. */
+  private async boundaryRejection(value: Value, argument: Value | null): Promise<Value | null> {
+    let failures: Awaited<ReturnType<typeof conformCallableArgument>>;
+    try {
+      failures = await conformCallableArgument(value, argument, this.ir);
+    } catch {
+      // A served value that is not callable / cannot be resolved: we cannot pre-validate it, so fall through
+      // to the reactor's own dispatch — which rejects it gracefully as a per-request error — rather than let
+      // the resolution throw surface as a 500. (Mirrors `dispatchCallable`'s own gracefulness.)
+      return null;
+    }
+    return failures === null
+      ? null
+      : errorData(
+          CALL_ERROR,
+          `the argument does not conform to the input schema — ${renderConformFailures(failures)}`,
+        );
   }
 
   /** Whether a live `mcp.serve` endpoint holds `token` — the MCP `initialize` liveness probe (cheap: the
@@ -353,7 +418,23 @@ export class ProjectActor {
   /** Deliver one MCP `tools/call` to the endpoint serving `token`: the mcp reactor converts it into a
    *  delegation of the served record's agent on a serial turn, and the returned promise resolves with
    *  the agent's outcome (or the dead-endpoint / unknown-tool variants) once it settles. */
-  deliverMcpServeCall(token: string, tool: string, argument: Value): Promise<McpServeCallOutcome> {
+  async deliverMcpServeCall(
+    token: string,
+    tool: string,
+    argument: Value,
+  ): Promise<McpServeCallOutcome> {
+    // Pre-validate the argument against the served tool's declared input schema (resolved actor-side through
+    // the same `callableMetadata` seam as the listing). A malformed call is a per-request invalid-params and
+    // the endpoint keeps serving; a genuine failure while the tool RUNS still proxies up. An unknown token /
+    // tool falls through to `serveCall`, which answers it.
+    const entries = await this.mcpServeToolEntries(token);
+    if (entries.kind === "tools") {
+      const entry = entries.entries.find((candidate) => candidate.name === tool);
+      if (entry !== undefined) {
+        const rejection = await this.boundaryRejection(entry.value, argument);
+        if (rejection !== null) return { kind: "throw", value: rejection };
+      }
+    }
     return new Promise((resolve) => {
       this.substrate.submit(this.mcp, () => this.mcp.serveCall(token, tool, argument, resolve));
     });

@@ -21,7 +21,6 @@ import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js"
 import type { Logger } from "../lib/logger.js";
 import { envReader } from "../modules/env/env.service.js";
 import {
-  isCallError,
   type McpServeHttpReply,
   mcpServeEndpointOf,
   serveMcpMessage,
@@ -233,19 +232,31 @@ export const facade = {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
     const argument =
       input.argument !== undefined ? decodeClientJson(input.argument, "the run argument") : null;
+    const actor = registry.actorFor(input.projectId as ProjectId);
+    // The run-start API is an external input boundary: pre-validate the argument against the entry agent's
+    // declared input schema and reject a malformed one as a 400, rather than letting it reach the acceptance
+    // surface as a panic that kills a just-born run.
+    const mismatch = await actor.conformRunArgument(
+      createAgentName(input.qualifiedName),
+      snapshotId as SnapshotId,
+      argument,
+    );
+    if (mismatch !== null) {
+      throw new BadRequestError(
+        `the run argument does not conform to ${input.qualifiedName}'s input schema — ${mismatch}`,
+      );
+    }
     // The engine mints the run's permanent run instance and kicks the run off; that instance's id is the
     // durable run handle (`runs.id`). The run's metadata (`runs` row) is written by the engine in the SAME
     // commit as the run's `delegate` — `await started` resolves once that launch commit is durable, so the
     // run is immediately visible to the API's reads. The in-process `result` promise is ignored (the API
     // reads the outcome from the `runs` row, correct even after a crash + recovery).
-    const { run, result, started } = registry
-      .actorFor(input.projectId as ProjectId)
-      .startRun(
-        createAgentName(input.qualifiedName),
-        snapshotId as SnapshotId,
-        argument,
-        input.name ?? input.qualifiedName,
-      );
+    const { run, result, started } = actor.startRun(
+      createAgentName(input.qualifiedName),
+      snapshotId as SnapshotId,
+      argument,
+      input.name ?? input.qualifiedName,
+    );
     void result.catch(() => {}); // swallow: the durable outcome is the delegation, not this promise
     await started;
     return { runId: run };
@@ -309,7 +320,6 @@ export const facade = {
     | { kind: "gone" }
     | { kind: "result"; value: Json }
     | { kind: "rejected"; error: Json }
-    | { kind: "throw"; error: Json }
     | { kind: "error" }
   > {
     const route = await resolveCapabilityToken(input.token);
@@ -325,13 +335,11 @@ export const facade = {
         return { kind: outcome.kind };
       case "result":
         return { kind: "result", value: valueToJson(outcome.value, "redact") };
-      case "throw": {
-        // A schema violation at the dynamic-dispatch boundary is the caller's fault — the callback never
-        // ran, so it surfaces as a distinct rejection (the route's 400) rather than as the throw variant
-        // a program failing on a well-formed delivery produces (the route's 500).
-        const error = valueToJson(outcome.value, "redact");
-        return isCallError(outcome.value) ? { kind: "rejected", error } : { kind: "throw", error };
-      }
+      case "throw":
+        // A webhook delivery's `throw` outcome is now always a `reflection.call_error` — a malformed body,
+        // pre-validated, so the callback never ran. (A genuine execution failure proxies UP and never settles
+        // a delivery.) It surfaces as the per-request rejection, the route's 400.
+        return { kind: "rejected", error: valueToJson(outcome.value, "redact") };
       case "error":
         // The panic message stays server-side (it may name internals); the caller gets a bare 500.
         return { kind: "error" };

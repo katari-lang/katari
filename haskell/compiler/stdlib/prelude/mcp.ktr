@@ -55,7 +55,10 @@
 // bearer-authenticated API surface, and the token is generated fresh per call); when the subscriber
 // returns, or the run is cancelled, the URL deactivates. A served agent is self-contained (its effects
 // are handled, or are at most `io` and this module's throws), so a user's own typed agents fit as tools
-// without ceremony.
+// without ceremony. A served tool that FAILS is not answered per-call: an unhandled throw or panic proxies
+// UP like any escalation and cancels the whole endpoint (the run fails unless a handler above @subscriber@
+// catches it) — one buggy tool drops the server, so for per-request resilience wrap the tool's body in a
+// handler that turns a failure into a value it returns.
 
 @"The MCP server rejected a listing or a tool call, or the transport failed (the server-reported or
 transport message). Also raised as the scope backstop: a tool called after its `provide` returned reports
@@ -139,7 +142,9 @@ calls should be served; when it returns the URL deactivates and its result becom
 result. Cancelling the run cancels @subscriber@ and deactivates the URL the same way. The
 subscriber's effects flow to the caller's handlers unchanged; the served agents are self-contained
 (their effects are handled, or are at most `io` and this module's throws), so any agent fits once its
-own effects are handled."
+own effects are handled. A served tool that throws or panics with no handler of its own cancels the
+whole endpoint (its failure proxies up and fails the run unless caught above @subscriber@) — wrap a
+tool's body in a handler for per-request resilience."
 external agent serve[R, effect E](
   tools: toolbox[string],
   subscriber: agent (url: string) -> R with E,

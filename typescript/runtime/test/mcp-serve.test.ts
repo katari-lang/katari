@@ -4,9 +4,11 @@
 //     `mcp.serve(tools = {...}, subscriber = ...)`; the mcp reactor mints a token, dispatches the
 //     subscriber once with the capability URL, lists the served record through the same
 //     `callableMetadata` reflection as `reflection.get_metadata`, and converts each `tools/call`
-//     into a delegation of the named agent — covering value / throw / schema-violation outcomes,
-//     settlement with the subscriber, cancellation deactivating the token, and the restart contract
-//     (token + tools reload from the extension's `serve` variant);
+//     into a delegation of the named agent — covering the value outcome, a MALFORMED call (pre-validated
+//     against the tool's declared input schema and rejected as per-request invalid-params, endpoint survives),
+//     an unknown tool, and the run-time failure-proxies-up outcome (a tool that throws/panics IN ITS BODY
+//     cancels the whole endpoint), settlement with the subscriber, cancellation deactivating the token, and
+//     the restart contract (token + tools reload from the extension's `serve` variant);
 //   - through the hand-rolled JSON-RPC layer (`serveMcpMessage`) with the REAL SDK client over
 //     `StreamableHTTPClientTransport` against a live loopback server, pinning wire compatibility of
 //     the stateless POST-only contract (initialize / tools/list / tools/call, 405 on GET, 404 on a
@@ -332,7 +334,7 @@ describe("the mcp reactor (serve, through the actor)", () => {
     await expect(actor.probeMcpServe("no-such-token")).resolves.toBe(false);
   });
 
-  test("a tools/call round-trips into the agent and back: value, throw, violation, unknown tool", async () => {
+  test("a tools/call round-trips: value, a malformed call is per-request invalid-params, unknown tool", async () => {
     const actor = actorFor();
     actor.startRun(createAgentName("main"), SNAPSHOT, null);
     const token = await mintedToken(actor);
@@ -343,15 +345,9 @@ describe("the mcp reactor (serve, through the actor)", () => {
       value: { kind: "string", value: "hello" },
     });
 
-    // A throwing agent surfaces as the typed throw (the endpoint maps it to an MCP tool error).
-    const thrown = await actor.deliverMcpServeCall(token, "boom", bodyOf({}));
-    expect(thrown.kind).toBe("throw");
-    if (thrown.kind === "throw" && thrown.value.kind === "record") {
-      expect(thrown.value.fields.message).toEqual({ kind: "string", value: "boom" });
-    }
-
-    // A violating call fails at the delegation boundary — a typed `reflection.call_error`, the agent
-    // never runs, the endpoint stays live.
+    // A MALFORMED call is pre-validated against the tool's declared input schema and rejected as a
+    // per-request `reflection.call_error` (the endpoint's invalid-params) — the tool never runs and the
+    // endpoint stays LIVE. (Only a genuine failure while the tool RUNS proxies up and drops the endpoint.)
     const violation = await actor.deliverMcpServeCall(
       token,
       "echo",
@@ -362,9 +358,38 @@ describe("the mcp reactor (serve, through the actor)", () => {
       expect(String(violation.value.ctor)).toBe("prelude.reflection.call_error");
     }
 
-    // A name the record does not serve is the caller's mistake, not a dead endpoint.
+    // The endpoint is unaffected: a conforming call right after the rejected one still runs.
+    await expect(actor.deliverMcpServeCall(token, "echo", HELLO)).resolves.toEqual({
+      kind: "result",
+      value: { kind: "string", value: "hello" },
+    });
+
+    // A name the record does not serve is the caller's mistake, not a dead endpoint — it resolves without
+    // ever delegating, so it does not proxy up and the endpoint stays live.
     await expect(actor.deliverMcpServeCall(token, "nope", HELLO)).resolves.toEqual({
       kind: "unknownTool",
+    });
+  });
+
+  test("a served tool that fails at run time with no handler proxies up and cancels the endpoint", async () => {
+    // A served tool that throws/panics IN ITS BODY (a well-formed call, so it passes pre-validation) no longer
+    // answers just that one call: its escalate proxies UP past the serve call to the run root, failing the run
+    // and deactivating the endpoint (one buggy tool drops the whole server). Per-request resilience is the
+    // agent author's job now — wrap the tool body in a katari handler to turn a failure into a value.
+    const actor = actorFor();
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    void result.catch(() => {});
+    const token = await mintedToken(actor);
+
+    // The throwing tool's escalate proxies up (its own waiter never answers, so do not await it) and fails
+    // the run.
+    void actor.deliverMcpServeCall(token, "boom", bodyOf({})).catch(() => {});
+    await expect(result).rejects.toThrow(/boom|throw/);
+
+    // The endpoint is gone: the capability URL now answers nothing.
+    await eventually(() => (actor.listOpenEscalations().length === 0 ? true : undefined));
+    await expect(actor.deliverMcpServeCall(token, "echo", HELLO)).resolves.toEqual({
+      kind: "unknown",
     });
   });
 
@@ -504,7 +529,12 @@ afterAll(async () => {
 });
 
 describe("the mcp serve wire contract (real SDK client, stateless streamable http)", () => {
-  test("initialize → tools/list → tools/call, all shapes", async () => {
+  test("initialize → tools/list → tools/call: value, structured, invalid params, unknown tool, secret redaction", async () => {
+    // The wire shapes over a shared, LIVE endpoint. A malformed call (a schema violation) is a per-request
+    // invalid-params and the endpoint keeps serving, so it is exercised here. A tool whose BODY fails (the
+    // `boom` throw) is deliberately NOT: a run-time failure proxies its escalate up and cancels the whole
+    // endpoint (pinned at the actor level in "a served tool that fails at run time …"), so it cannot be a
+    // per-call wire outcome on this shared endpoint.
     const client = new Client({ name: "mcp-serve-test", version: "1.0.0" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp/${serveToken}`)));
     try {
@@ -529,17 +559,14 @@ describe("the mcp serve wire contract (real SDK client, stateless streamable htt
       expect(wrapped.structuredContent).toEqual({ echoed: "hi" });
       expect(wrapped.content).toEqual([{ type: "text", text: '{"echoed":"hi"}' }]);
 
-      // A typed throw is an MCP tool error carrying the error JSON.
-      const boom = await client.callTool({ name: "boom", arguments: {} });
-      expect(boom.isError).toBe(true);
-      expect(JSON.stringify(boom.content)).toContain("boom");
-
-      // A schema violation is the JSON-RPC invalid-params error — the agent never ran.
+      // A schema violation is the JSON-RPC invalid-params error — pre-validated, so the tool never ran and
+      // the endpoint stays live.
       await expect(
         client.callTool({ name: "echo", arguments: { wrong: 1 } }),
-      ).rejects.toThrow(/schema/);
+      ).rejects.toThrow(/schema|conform/);
 
-      // An unserved name is invalid params too, not a dead endpoint.
+      // An unserved name is invalid params too, not a dead endpoint — resolved without ever delegating, so it
+      // does not proxy up.
       await expect(client.callTool({ name: "nope", arguments: {} })).rejects.toThrow(/not served/);
 
       // A secret in a result redacts at this user-facing boundary — the material never crosses.

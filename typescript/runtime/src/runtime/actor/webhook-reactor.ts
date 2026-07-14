@@ -179,6 +179,14 @@ export class WebhookReactor extends ExternalCallReactor<WebhookPayload> {
     this.waiters.set(call, resolve);
   }
 
+  /** The callback value this endpoint dispatches each delivery through — the seam the actor's delivery
+   *  pre-validation resolves the declared input schema from. `undefined` once the endpoint is gone. */
+  callbackFor(token: string): Value | undefined {
+    const delegation = this.tokens.get(token);
+    const payload = delegation === undefined ? undefined : this.payloadOf(delegation);
+    return payload?.callback;
+  }
+
   // ─── the ExternalCallReactor hooks ───────────────────────────────────────────────────────────────
 
   protected openPayload(target: ExternalTarget, argument: Value | null): WebhookPayload {
@@ -264,9 +272,6 @@ export class WebhookReactor extends ExternalCallReactor<WebhookPayload> {
     switch (delivery.outcome.kind) {
       case "result":
         waiter({ kind: "result", value: delivery.outcome.value });
-        return;
-      case "throw":
-        waiter({ kind: "throw", value: delivery.outcome.value });
         return;
       case "error":
         waiter({ kind: "error", message: delivery.outcome.message });

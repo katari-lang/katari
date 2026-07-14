@@ -1,9 +1,10 @@
 // FFI inner delegation, end to end through the ProjectActor: a running FFI handler calls back into the
 // runtime (`context.call` on the in-process transport — the same channel the real port speaks over stdio).
-// Covers the core default target, ffi→ffi calls, the panic → inner-call error mapping (a handler's
-// try/catch as its panic handle), the escalation proxy chain (a callee's user-facing request surfaces at the
-// run root and its answer descends back), the held completion (a handler returning with a fire-and-forget
-// child still running), and the cancel cascade distributing a terminate through the call's children.
+// Covers the core default target, ffi→ffi calls, the uniform proxy-up of a callee's failure (a callee panic
+// is NOT catchable by the handler's JS try/catch — it proxies up past the ffi call, and the cancel cascade
+// tears the dead callee's siblings down), the escalation proxy chain (a callee's user-facing request surfaces
+// at the run root and its answer descends back), the held completion (a handler returning with a
+// fire-and-forget child still running), and the cancel cascade distributing a terminate through the children.
 
 import {
   createAgentName,
@@ -102,6 +103,35 @@ function ir(): IRModule {
         },
         parameters: { parameter: 1 },
       },
+      // strict: a core agent with a CONSTRAINED input schema (`value: integer`) — a handler passing a bad
+      // argument to it exercises the dynamic-dispatch input pre-check on the FFI inner-call channel.
+      30: {
+        block: {
+          kind: "agent",
+          body: 31,
+          schema: {
+            input: {
+              type: "object",
+              properties: { value: { type: "integer" } },
+              required: ["value"],
+              additionalProperties: true,
+            },
+            output: {},
+            requests: [],
+            genericBindings: {},
+          },
+          defaults: {},
+        },
+        parameters: {},
+      },
+      31: {
+        block: {
+          kind: "sequence",
+          result: 41,
+          operations: [{ kind: "getField", source: 40, field: "value", output: 41 }],
+        },
+        parameters: { parameter: 40 },
+      },
     },
     entries: {
       [createAgentName("main")]: 0,
@@ -110,6 +140,7 @@ function ir(): IRModule {
       [createAgentName("ask_value")]: 15,
       [createAgentName("typed_compute")]: 20,
       [createAgentName("typed_main")]: 25,
+      [createAgentName("strict")]: 30,
     },
     names: {},
   };
@@ -193,12 +224,16 @@ describe("FFI inner delegation", () => {
     expect(caught).toMatch(/not a callable value/);
   });
 
-  test("a callee's panic settles the inner call as an error the handler can catch", async () => {
+  test("a bad-arg context.call to an agent target fails the inner call as a catchable error", async () => {
+    // `context.call` is DYNAMIC dispatch, like the AI's `call_agent`: a bad ARGUMENT is the caller's dispatch
+    // error, pre-validated against the callee's declared input schema and delivered back as a catchable inner
+    // error — never the acceptance surface's uncatchable panic. (Only a callee's EXECUTION failure proxies up.)
+    // This matches the tool-typed callee's behaviour, removing the tool-vs-agent asymmetry.
     let caught = "";
     const result = run({
       compute: async (_argument, context) => {
         try {
-          await context.call("no.such.agent");
+          await context.call("strict", { value: "not-an-integer" });
           return "unreachable";
         } catch (error) {
           caught = error instanceof Error ? error.message : String(error);
@@ -207,14 +242,54 @@ describe("FFI inner delegation", () => {
       },
     });
     await expect(result).resolves.toEqual({ kind: "string", value: "fallback" });
-    expect(caught.length).toBeGreaterThan(0);
+    expect(caught).toMatch(/strict.*input schema/);
   });
 
-  test("an uncaught inner-call failure fails the handler, and with it the run", async () => {
+  test("a callee's panic is not catchable by the JS handler — it proxies up and fails the run", async () => {
+    // The handler's try/catch cannot turn a callee's panic into a fallback: `context.call` no longer rejects
+    // on a callee failure, so the `await` neither resolves nor rejects with the panic — the panic proxies UP
+    // past the ffi call to the run root, failing the run. (The cancel cascade later unwinds the handler's
+    // await, but its result is discarded — the run has already failed.)
+    const result = run({
+      compute: async (_argument, context) => {
+        try {
+          await context.call("no.such.agent");
+          return "unreachable";
+        } catch {
+          return "fallback";
+        }
+      },
+    });
+    await expect(result).rejects.toThrow();
+  });
+
+  test("a callee failure with no katari handler proxies up and fails the run", async () => {
+    // No try/catch — and the mechanism is the same either way now: the callee's panic proxies UP under the
+    // ffi call and, uncaught, fails the run (the outcome the old inner-call rejection produced, reached by
+    // proxy instead of by settling the inner call as an error).
     const result = run({
       compute: (_argument, context) => context.call("no.such.agent"),
     });
     await expect(result).rejects.toThrow();
+  });
+
+  test("a callee panic that proxies up tears down the handler's sibling inner call via the cascade", async () => {
+    // The dead callee's cleanup rides the cancel cascade, not a special-cased terminate: when the panic
+    // proxies up and fails the run, the ffi handler is terminated and `terminateChildren` unwinds its OTHER
+    // in-flight inner call too — so a sibling child does not leak.
+    let siblingUnwound = false;
+    const result = run({
+      compute: async (_argument, context) => {
+        context.call("slow", null, { reactor: "ffi" }).catch(() => {
+          siblingUnwound = true;
+        });
+        await context.call("no.such.agent"); // proxies up (uncatchable) → fails the run
+        return "unreachable";
+      },
+      slow: () => new Promise((resolve) => setTimeout(() => resolve("late"), 100)),
+    });
+    await expect(result).rejects.toThrow();
+    await waitUntil(() => (siblingUnwound ? true : undefined));
   });
 
   test("an ffi→ffi inner call runs a sibling handler through the same transport", async () => {
