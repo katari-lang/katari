@@ -11,7 +11,7 @@ import oniguruma from "vscode-oniguruma";
 import vsctm from "vscode-textmate";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const grammarPath = resolve(here, "../syntaxes/katari.tmLanguage.json");
+const grammarPath = resolve(here, "../katari.tmLanguage.json");
 
 const require_ = createRequire(import.meta.url);
 const onigWasmPath = require_.resolve("vscode-oniguruma/release/onig.wasm");
@@ -86,6 +86,7 @@ const samples = [
       ["->", "keyword.operator.arrow", "return arrow"],
       ["string", "support.type.primitive", "primitive type"],
       ["hello, world", "string.quoted.double", "string literal content"],
+      ["Returns the canonical greeting.", "comment.documentation", "annotation body"],
     ],
   },
   {
@@ -153,6 +154,41 @@ const samples = [
       ["public", "support.type.attribute", "public attribute"],
     ],
   },
+  {
+    name: "forever is positional",
+    source: 'agent main() -> integer {\n  forever {\n    break 42\n  }\n}\nagent retried() -> integer with replay.interrupted {\n  use replay.forever()\n  main()\n}\n',
+    checks: [
+      // The loop head is a keyword; the stdlib provider of the same name stays a plain call.
+      ["forever", "keyword.control", "forever loop head"],
+      ["forever", "entity.name.function.call", "replay.forever stays a call"],
+      ["break", "keyword.control", "break keyword"],
+    ],
+  },
+  {
+    name: "finally and parallel",
+    source: 'agent main(sources: array[string]) -> string {\n  finally { let _note = "bookkeeping" }\n  parallel for (let source in sources) {\n    next source\n  }\n}\n',
+    checks: [
+      ["finally", "keyword.control", "finally keyword"],
+      ["parallel", "keyword.control", "parallel keyword"],
+      ["array", "support.type.primitive", "array type"],
+    ],
+  },
+  {
+    name: "parameter defaults and holes",
+    source: 'agent decorate(prefix: string, body: string, suffix: string ?= "!") -> string {\n  concat(prefix, body, suffix)\n}\nagent main() -> string {\n  let residual = decorate(prefix = ">", body = _, suffix = _)\n  residual(body = "x")\n}\n',
+    checks: [
+      ["?=", "keyword.operator.default", "parameter default operator"],
+      ["_", "variable.language.hole", "partial-application hole"],
+    ],
+  },
+  {
+    name: "literal-binding generics",
+    source: 'agent remember[literal name extends string](value: name) -> name { value }\nagent main() -> string {\n  let literal = "not a keyword"\n  literal\n}\n',
+    checks: [
+      ["literal", "storage.modifier.literal", "literal generic-kind marker"],
+      ["literal", "variable.other", "ordinary identifier named literal"],
+    ],
+  },
 ];
 
 let passed = 0;
@@ -164,6 +200,52 @@ for (const s of samples) {
     if (expectScope(result, text, scopeFragment, `[${s.name}] ${label}`)) {
       passed += 1;
     }
+  }
+}
+
+// Tripwire: every word the compiler reserves must be matched somewhere in the grammar, so a
+// keyword added to the language cannot silently render as a plain identifier again (this is
+// exactly how `finally` slipped through once). Mirrors `reservedWords` in
+// haskell/compiler/src/Katari/Parser/Lexer.hs, plus the positional words the lexer deliberately
+// leaves unreserved (`forever`, `extends`, `literal`) but the grammar still highlights.
+const reservedWords = [
+  "agent", "request", "external", "primitive", "data", "type", "import", "from", "as",
+  "use", "handler", "for", "parallel", "if", "else", "match", "case", "return", "next",
+  "break", "var", "let", "finally", "then", "in", "with", "of", "true", "false", "null",
+];
+const positionalWords = ["forever", "extends", "literal"];
+
+function collectMatchSources(node, out) {
+  if (Array.isArray(node)) {
+    for (const item of node) collectMatchSources(item, out);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    for (const [key, value] of Object.entries(node)) {
+      if ((key === "match" || key === "begin" || key === "end") && typeof value === "string") {
+        out.push(value);
+      } else {
+        collectMatchSources(value, out);
+      }
+    }
+  }
+}
+
+const matchSources = [];
+collectMatchSources(JSON.parse(grammarSource), matchSources);
+// `\b` assertions in a pattern would glue their literal `b` onto the word ("\bforever\b" contains
+// "bforeverb"), so strip them before the word-boundary search.
+const normalizedSources = matchSources.map((source) => source.replaceAll("\\b", " "));
+for (const word of [...reservedWords, ...positionalWords]) {
+  total += 1;
+  const covered = normalizedSources.some((source) => new RegExp(`\\b${word}\\b`).test(source));
+  if (covered) {
+    passed += 1;
+  } else {
+    console.error(
+      `FAIL: [keyword coverage] "${word}" is reserved by the compiler's lexer but no grammar rule matches it`,
+    );
+    process.exitCode = 1;
   }
 }
 

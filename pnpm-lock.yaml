@@ -126,6 +126,15 @@ importers:
         specifier: workspace:*
         version: link:../mcp
 
+  typescript/language:
+    devDependencies:
+      vscode-oniguruma:
+        specifier: ^2.0.1
+        version: 2.0.1
+      vscode-textmate:
+        specifier: ^9.1.0
+        version: 9.3.2
+
   typescript/mcp:
     dependencies:
       '@modelcontextprotocol/sdk':
@@ -240,6 +249,9 @@ importers:
         specifier: ^9.0.1
         version: 9.0.1
     devDependencies:
+      '@katari-lang/language':
+        specifier: workspace:*
+        version: link:../language
       '@types/vscode':
         specifier: ^1.80.0
         version: 1.125.0
@@ -252,12 +264,6 @@ importers:
       typescript:
         specifier: ^5.4.0
         version: 5.9.3
-      vscode-oniguruma:
-        specifier: ^2.0.1
-        version: 2.0.1
-      vscode-textmate:
-        specifier: ^9.1.0
-        version: 9.3.2
 
 packages:
 

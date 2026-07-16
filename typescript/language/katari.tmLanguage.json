@@ -69,6 +69,7 @@
         { "include": "#keywords" },
         { "include": "#types" },
         { "include": "#constants" },
+        { "include": "#hole" },
         { "include": "#operators" },
         { "include": "#punctuation" },
         { "include": "#function-call" },
@@ -79,12 +80,17 @@
       "patterns": [
         {
           "name": "keyword.control.katari",
-          "match": "\\b(if|else|match|case|return|next|break|for|then|handler|use|parallel|in|with)\\b"
+          "match": "\\b(if|else|match|case|return|next|break|for|then|handler|use|parallel|in|with|finally)\\b"
         },
         {
           "comment": "`forever` is a positional word (only a loop head directly before `{`), so the lookahead keeps `replay.forever(...)` an ordinary identifier.",
           "name": "keyword.control.katari",
           "match": "\\bforever\\b(?=\\s*\\{)"
+        },
+        {
+          "comment": "`literal` is positional too (a generic-kind marker, as in `[literal name extends string]`); the lookahead for a following identifier keeps ordinary uses of the name untouched.",
+          "name": "storage.modifier.literal.katari",
+          "match": "\\bliteral\\b(?=\\s+[A-Za-z_])"
         },
         {
           "name": "keyword.declaration.katari",
@@ -108,12 +114,22 @@
       "name": "constant.language.katari",
       "match": "\\b(null|true|false)\\b"
     },
+    "hole": {
+      "comment": "A bare `_` is a partial-application hole (`scale(factor = 2.0, value = _)`), not an identifier.",
+      "name": "variable.language.hole.katari",
+      "match": "(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])"
+    },
     "numbers": {
       "name": "constant.numeric.katari",
       "match": "\\b\\d+(\\.\\d+)?([eE][+\\-]?\\d+)?\\b"
     },
     "operators": {
       "patterns": [
+        {
+          "comment": "`?=` marks a parameter default; matched before `=` so the `?` is not left unscoped.",
+          "name": "keyword.operator.default.katari",
+          "match": "\\?="
+        },
         {
           "name": "keyword.operator.arrow.katari",
           "match": "->|=>"

@@ -99,28 +99,22 @@
       }
     }
   },
-  "exports": {
-    "./grammar": "./syntaxes/katari.tmLanguage.json",
-    "./language-configuration": "./language-configuration.json"
-  },
   "scripts": {
     "build": "node scripts/bundle.mjs",
     "typecheck": "tsc -p . --noEmit",
     "vscode:prepublish": "NODE_ENV=production node scripts/bundle.mjs",
     "server:copy": "node scripts/copy-server-binary.mjs",
     "package": "vsce package --no-dependencies --out katari-vscode.vsix",
-    "package:local": "node scripts/copy-server-binary.mjs && node scripts/bundle.mjs && vsce package --no-dependencies --out katari-vscode.vsix",
-    "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
+    "package:local": "node scripts/copy-server-binary.mjs && node scripts/bundle.mjs && vsce package --no-dependencies --out katari-vscode.vsix"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
+    "@katari-lang/language": "workspace:*",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",
-    "typescript": "^5.4.0",
-    "vscode-oniguruma": "^2.0.1",
-    "vscode-textmate": "^9.1.0"
+    "typescript": "^5.4.0"
   }
 }
