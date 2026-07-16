@@ -63,6 +63,7 @@ module Katari.Cli.Api
     -- * Escalations
     EscalationView (..),
     EscalationPresentation (..),
+    oauthTargetDescription,
     listEscalations,
     answerEscalation,
     startOauthEscalationFlow,
@@ -599,18 +600,30 @@ cancelRun client projectId runId reason = do
 -- and the credential it needs, which the CLI drives to completion instead of asking for a value.
 data EscalationPresentation
   = PresentationForm (Maybe Value)
-  | PresentationOauth {url :: Text, name :: Text}
+  | -- | An OAuth authorization. @url@ is the server a run paused on (an mcp credential); it is 'Nothing'
+    -- for a configured credential, which authenticates against an operator-registered client and so names
+    -- no server (a genuine absence, not a missing field).
+    PresentationOauth {url :: Maybe Text, name :: Text}
   deriving stock (Show, Eq)
 
 -- | Decode the presentation by dispatching on its @kind@ tag exactly once. An unknown kind is a decode
--- failure rather than a silent fallback, so wire drift surfaces loudly instead of mis-rendering.
+-- failure rather than a silent fallback, so wire drift surfaces loudly instead of mis-rendering. The
+-- oauth @url@ is read with @.:?@ (present-and-string, or @null@ / absent → 'Nothing').
 instance FromJSON EscalationPresentation where
   parseJSON = withObject "EscalationPresentation" $ \object' -> do
     kind <- object' .: "kind"
     case kind :: Text of
       "form" -> PresentationForm <$> object' .:? "answerSchema"
-      "oauth" -> PresentationOauth <$> object' .: "url" <*> object' .: "name"
+      "oauth" -> PresentationOauth <$> object' .:? "url" <*> object' .: "name"
       other -> fail ("unknown escalation presentation kind: " <> Text.unpack other)
+
+-- | A human phrase for what an oauth escalation authorizes: the server url when present (an mcp
+-- credential), or just the credential name (a configured credential names no server). Shared by every
+-- surface that renders an oauth escalation, so the null-url case reads uniformly.
+oauthTargetDescription :: Maybe Text -> Text -> Text
+oauthTargetDescription maybeUrl credentialName = case maybeUrl of
+  Just serverUrl -> serverUrl <> " (credential \"" <> credentialName <> "\")"
+  Nothing -> "credential \"" <> credentialName <> "\""
 
 -- | One open escalation: which request is being asked, its question (already secret-redacted by the
 -- runtime), the run waiting on it, and how to present / resolve it (the 'EscalationPresentation' sum,

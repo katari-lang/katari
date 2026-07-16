@@ -1,0 +1,2 @@
+ALTER TABLE "credentials" ADD COLUMN "profile" text DEFAULT 'mcp' NOT NULL;--> statement-breakpoint
+ALTER TABLE "credentials" ADD CONSTRAINT "credentials_profile_check" CHECK ("credentials"."profile" in ('mcp', 'configured'));

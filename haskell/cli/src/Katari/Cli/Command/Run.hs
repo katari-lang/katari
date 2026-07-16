@@ -48,6 +48,7 @@ import Katari.Cli.Api
     listAgents,
     listEscalations,
     listRunEvents,
+    oauthTargetDescription,
     startRun,
   )
 import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, exitInterrupted, withRuntimeContext)
@@ -291,20 +292,18 @@ surfaceForm context notified escalation rawAnswerSchema
 -- The browser round-trip and its poll loop would freeze this run's live trace tail, so authorization
 -- belongs in a separate process; the wait keeps tailing and resumes automatically once it completes.
 -- Off a terminal there is likewise no one to authorize in this session, so it fails fast the same way.
-surfaceOauth :: RuntimeContext -> Set Text -> EscalationView -> Text -> Text -> IO (Set Text)
+surfaceOauth :: RuntimeContext -> Set Text -> EscalationView -> Maybe Text -> Text -> IO (Set Text)
 surfaceOauth context notified escalation serverUrl credentialName
   | context.output.interactive = do
       progress context.output ""
-      progress context.output ("The run needs OAuth authorization for " <> serverUrl <> " (credential \"" <> credentialName <> "\"); authorize it from another session with `katari answer " <> Text.take 8 escalation.id <> "` — the run resumes automatically")
+      progress context.output ("The run needs OAuth authorization for " <> oauthTargetDescription serverUrl credentialName <> "; authorize it from another session with `katari answer " <> Text.take 8 escalation.id <> "` — the run resumes automatically")
       pure (Set.insert escalation.id notified)
   | otherwise =
       dieIn
         "run"
         ( "the run needs OAuth authorization for "
-            <> serverUrl
-            <> " (credential \""
-            <> credentialName
-            <> "\"); authorize it from another session with `katari answer "
+            <> oauthTargetDescription serverUrl credentialName
+            <> "; authorize it from another session with `katari answer "
             <> Text.take 8 escalation.id
             <> "`, or re-run with --detach and authorize it later"
         )

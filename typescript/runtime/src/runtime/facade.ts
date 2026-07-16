@@ -32,6 +32,7 @@ import {
   serveMcpMessage,
   unknownMcpServeEndpoint,
 } from "../modules/mcp/mcp-serve.js";
+import { oauthClientService } from "../modules/oauth-client/oauth-client.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { isTransientError, messageOf } from "./actor/failure.js";
@@ -156,6 +157,12 @@ function credentialStoreFor(projectId: ProjectId): CredentialStore {
         expectedGeneration,
       );
     },
+    // A `configured` credential's refresh reads its registered client LIVE from the `oauth_clients`
+    // registry (so a rotated secret takes effect); `null` when the operator deleted the client — the
+    // refresh is then dead and the resolution parks for re-login.
+    resolveConfiguredClient(clientName) {
+      return oauthClientService.resolveClientCredentials(projectId, clientName);
+    },
   };
 }
 
@@ -193,6 +200,9 @@ const registry = new ProjectRegistry({
       },
       credentials: credentialStoreFor(projectId),
     }),
+  // The oauth reactor resolves `oauth.token(name)` calls through the same per-project credential store the
+  // mcp transport reads its bearer from (the `credentials` table + the `oauth_clients` registry).
+  credentialsFactory: (projectId) => credentialStoreFor(projectId),
   // The public base the dynamically generated endpoints (`webhook.inbound`, `mcp.serve`) mint their
   // capability URLs under (KATARI_PUBLIC_URL, or the local port) — one address, one knob.
   publicBaseUrl: config.publicUrl,

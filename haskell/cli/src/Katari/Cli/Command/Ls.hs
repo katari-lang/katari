@@ -37,6 +37,7 @@ import Katari.Cli.Api
     listProjects,
     listRuns,
     listSnapshots,
+    oauthTargetDescription,
   )
 import Katari.Cli.Common (RuntimeContext (..), dieIn, makeRuntimeClient, tryLoadNearestConfig, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
@@ -195,7 +196,7 @@ preview text
 -- a truncated question preview.
 escalationCells :: EscalationView -> (Text, Text)
 escalationCells row = case row.presentation of
-  PresentationOauth {url, name} -> ("OAuth authorization", url <> " (credential \"" <> name <> "\")")
+  PresentationOauth {url, name} -> ("OAuth authorization", oauthTargetDescription url name)
   PresentationForm _ -> (row.request, maybe "" (preview . compactJson) row.argument)
 
 -- | A schema cell: the decoded brief form, or a shrug when the document does not decode (version skew).

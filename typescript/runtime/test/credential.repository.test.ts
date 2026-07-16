@@ -55,18 +55,18 @@ describe.skipIf(!databaseAvailable)("credentialRepository", () => {
   });
 
   test("upsert stores the value and every replace strictly raises the generation", async () => {
-    await credentialRepository.upsert(db, projectId, "github", "sealed-1");
+    await credentialRepository.upsert(db, projectId, "github", "sealed-1", "mcp");
     const first = await credentialRepository.load(db, projectId, "github");
     expect(first?.value).toBe("sealed-1");
 
-    await credentialRepository.upsert(db, projectId, "github", "sealed-2");
+    await credentialRepository.upsert(db, projectId, "github", "sealed-2", "mcp");
     const second = await credentialRepository.load(db, projectId, "github");
     expect(second?.value).toBe("sealed-2");
     expect(second?.generation).toBeGreaterThan(first?.generation ?? Number.POSITIVE_INFINITY);
   });
 
   test("saveWithGeneration lands only while the row still holds the generation it read", async () => {
-    await credentialRepository.upsert(db, projectId, "cas", "sealed-original");
+    await credentialRepository.upsert(db, projectId, "cas", "sealed-original", "mcp");
     const read = await generationOf(projectId, "cas");
 
     // The rotation that read the current generation wins and moves the row past it…
@@ -85,11 +85,11 @@ describe.skipIf(!databaseAvailable)("credentialRepository", () => {
   });
 
   test("a completed authorization's upsert defeats a refresh that read the previous generation", async () => {
-    await credentialRepository.upsert(db, projectId, "race", "sealed-old");
+    await credentialRepository.upsert(db, projectId, "race", "sealed-old", "mcp");
     const read = await generationOf(projectId, "race");
 
     // A re-authorization lands between the refresh's read and its write-back…
-    await credentialRepository.upsert(db, projectId, "race", "sealed-fresh-grant");
+    await credentialRepository.upsert(db, projectId, "race", "sealed-fresh-grant", "mcp");
 
     // …so the refresh's compare-and-set against the old generation loses.
     expect(
@@ -105,12 +105,12 @@ describe.skipIf(!databaseAvailable)("credentialRepository", () => {
     // credential (switching accounts) → a NEW authorization creates a fresh row. The refresh
     // write-back still holding the pre-forget generation must not match the new row — that would hand
     // the old account's rotated tokens to the credential the new account just established.
-    await credentialRepository.upsert(db, projectId, "switch", "sealed-old-account");
+    await credentialRepository.upsert(db, projectId, "switch", "sealed-old-account", "mcp");
     const preForgetGeneration = await generationOf(projectId, "switch");
 
     expect(await credentialRepository.delete(db, projectId, "switch")).toBe(true);
     await nextMillisecond();
-    await credentialRepository.upsert(db, projectId, "switch", "sealed-new-account");
+    await credentialRepository.upsert(db, projectId, "switch", "sealed-new-account", "mcp");
 
     expect(
       await credentialRepository.saveWithGeneration(
@@ -127,7 +127,7 @@ describe.skipIf(!databaseAvailable)("credentialRepository", () => {
   });
 
   test("saveWithGeneration never resurrects a deleted credential", async () => {
-    await credentialRepository.upsert(db, projectId, "forgotten", "sealed-1");
+    await credentialRepository.upsert(db, projectId, "forgotten", "sealed-1", "mcp");
     const read = await generationOf(projectId, "forgotten");
     expect(await credentialRepository.delete(db, projectId, "forgotten")).toBe(true);
 
@@ -144,22 +144,32 @@ describe.skipIf(!databaseAvailable)("credentialRepository", () => {
   });
 
   test("list shows metadata only, and delete reports absence", async () => {
-    await credentialRepository.upsert(db, projectId, "list-b", "sealed-b");
-    await credentialRepository.upsert(db, projectId, "list-a", "sealed-a");
+    await credentialRepository.upsert(db, projectId, "list-b", "sealed-b", "mcp");
+    await credentialRepository.upsert(db, projectId, "list-a", "sealed-a", "configured");
 
     const listed = await credentialRepository.list(db, projectId);
     const names = listed.map((entry) => entry.name);
     expect(names).toContain("list-a");
     expect(names).toContain("list-b");
-    // Name-ordered, and no sealed value in the listing shape.
+    // Name-ordered, and no sealed value in the listing shape — but the profile discriminant IS there
+    // (the admin dispatches mcp-vs-configured on it; it is how the credential was acquired, not a secret).
     expect(names.indexOf("list-a")).toBeLessThan(names.indexOf("list-b"));
+    expect(listed.find((entry) => entry.name === "list-a")?.profile).toBe("configured");
+    expect(listed.find((entry) => entry.name === "list-b")?.profile).toBe("mcp");
     for (const entry of listed) {
       expect(entry.updatedAt).toBeInstanceOf(Date);
-      expect(Object.keys(entry).sort()).toEqual(["name", "updatedAt"]);
+      expect(Object.keys(entry).sort()).toEqual(["name", "profile", "updatedAt"]);
     }
 
     expect(await credentialRepository.delete(db, projectId, "list-a")).toBe(true);
     expect(await credentialRepository.delete(db, projectId, "list-a")).toBe(false);
+  });
+
+  test("a re-deposit through the other acquisition path switches the profile discriminant", async () => {
+    await credentialRepository.upsert(db, projectId, "switcher", "sealed-mcp", "mcp");
+    await credentialRepository.upsert(db, projectId, "switcher", "sealed-conf", "configured");
+    const listed = await credentialRepository.list(db, projectId);
+    expect(listed.find((entry) => entry.name === "switcher")?.profile).toBe("configured");
   });
 
   test("load returns null for a name never stored", async () => {

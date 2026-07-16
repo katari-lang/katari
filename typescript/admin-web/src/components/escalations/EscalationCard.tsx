@@ -67,8 +67,8 @@ export function EscalationCard({
         <OauthBody
           projectId={projectId}
           escalationId={escalation.id}
-          url={presentation.url}
           name={presentation.name}
+          url={presentation.url}
         />
       )}
     </Card>
@@ -145,20 +145,21 @@ type OauthHandoff =
   | { kind: "waiting"; popup: Window }
   | { kind: "blocked"; authorizationUrl: string };
 
-/** The MCP OAuth authorization variant: the server that needs authorizing and an Authorize button
- *  that hands off to the runtime-hosted flow. The runtime answers the escalation from its OAuth
- *  callback once the user completes the flow, so there is nothing to submit here — the card drops on
- *  the next inbox refetch. */
+/** The OAuth authorization variant: the credential that needs authorizing (and its server, when the
+ *  credential names one — an mcp credential; a configured credential has a null url and shows only the
+ *  name) and an Authorize button that hands off to the runtime-hosted flow. The runtime answers the
+ *  escalation from its OAuth callback once the user completes the flow, so there is nothing to submit
+ *  here — the card drops on the next inbox refetch. */
 function OauthBody({
   projectId,
   escalationId,
-  url,
   name,
+  url,
 }: {
   projectId: string;
   escalationId: string;
-  url: string;
   name: string;
+  url: string | null;
 }) {
   const toast = useToast();
   const startFlow = useStartOauthFlow(projectId);
@@ -206,16 +207,19 @@ function OauthBody({
       <div>
         <SectionLabel text="Authorization required" />
         <p className="text-sm text-fg-muted">
-          This MCP server needs you to authorize access before the run can continue.
+          This credential needs you to authorize access before the run can continue.
         </p>
       </div>
       <KeyValueList>
-        <KeyValueRow label="Server">
-          <span className="font-mono break-all">{url}</span>
-        </KeyValueRow>
         <KeyValueRow label="Credential">
           <span className="font-mono">{name}</span>
         </KeyValueRow>
+        {/* A configured credential names no server (url is null) — show the Server row only when present. */}
+        {url !== null && (
+          <KeyValueRow label="Server">
+            <span className="font-mono break-all">{url}</span>
+          </KeyValueRow>
+        )}
       </KeyValueList>
       <div className="flex items-center gap-3">
         <Button

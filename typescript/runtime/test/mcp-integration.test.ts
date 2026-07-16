@@ -36,6 +36,9 @@ const UNUSED_CREDENTIALS: CredentialStore = {
   save() {
     throw new Error("mcp-integration: no oauth credential should be written on the headers path");
   },
+  resolveConfiguredClient() {
+    throw new Error("mcp-integration: no configured client should be read on the headers path");
+  },
 };
 
 // agent main(url) {

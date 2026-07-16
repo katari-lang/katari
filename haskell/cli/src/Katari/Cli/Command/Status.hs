@@ -16,7 +16,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations)
+import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), RunDetail (..), RunEventView (..), RunEventsQuery (..), emptyRunEventsQuery, getRunDetail, listAllRunEvents, listEscalations, oauthTargetDescription)
 import Katari.Cli.Common (RuntimeContext (..), withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (compactTime, compactTimestamp, printJson, printText)
@@ -102,7 +102,7 @@ run options = do
 renderWaiting :: EscalationView -> Text
 renderWaiting escalation = case escalation.presentation of
   PresentationOauth {url, name} ->
-    "  OAuth authorization required for " <> url <> " (credential \"" <> name <> "\")  — run: katari answer " <> shortId
+    "  OAuth authorization required for " <> oauthTargetDescription url name <> "  — run: katari answer " <> shortId
   PresentationForm _ ->
     "  " <> escalation.request <> maybe "" (\question -> " " <> compactJson question) escalation.argument <> "  — answer with: katari answer " <> shortId
   where

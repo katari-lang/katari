@@ -114,7 +114,7 @@ export const instances = pgTable(
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
     check(
       "instances_kind_check",
-      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time')`,
+      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth')`,
     ),
   ],
 );
@@ -242,10 +242,11 @@ export const escalations = pgTable(
      *  alone and the API lists escalations by run without inferring it from routing. */
     runId: uuid("run_id").notNull(),
     /** The reactors this escalation runs between: `from` = the raiser's reactor (`core` for an
-     *  instance-raised or relayed ask; `mcp` for a parked call's `prelude.oauth.authorize` and for a
-     *  provide relaying its child's — each reactor reloads its own rows by this column), `to` = the
-     *  reactor the escalate was addressed to (`api` ⟺ the raiser is a run root, i.e. a user-facing
-     *  escalation). The api root self-selects its answerable set by `to_reactor`. */
+     *  instance-raised or relayed ask; a parking call reactor — `mcp` or `oauth` — for its parked call's
+     *  `prelude.oauth.authorize`, and `mcp` also for a provide relaying its child's — each reactor
+     *  reloads its own rows by this column), `to` = the reactor the escalate was addressed to (`api` ⟺
+     *  the raiser is a run root, i.e. a user-facing escalation). The api root self-selects its
+     *  answerable set by `to_reactor`. */
     fromReactor: text("from_reactor").$type<ReactorName>().notNull(),
     toReactor: text("to_reactor").$type<ReactorName>().notNull(),
     /** The requested capability (the `request` qualified name). */

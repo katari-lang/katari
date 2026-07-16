@@ -136,6 +136,20 @@ export function useEnv(projectId: string) {
   });
 }
 
+export function useCredentials(projectId: string) {
+  return useQuery({
+    queryKey: ["projects", projectId, "credentials"],
+    queryFn: () => api.listCredentials(projectId),
+  });
+}
+
+export function useOauthClients(projectId: string) {
+  return useQuery({
+    queryKey: ["projects", projectId, "oauth-clients"],
+    queryFn: () => api.listOauthClients(projectId),
+  });
+}
+
 export function useStartRun(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({

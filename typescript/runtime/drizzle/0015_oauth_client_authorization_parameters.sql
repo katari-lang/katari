@@ -1,0 +1,1 @@
+ALTER TABLE "oauth_clients" ADD COLUMN "authorization_parameters" jsonb DEFAULT '{}'::jsonb NOT NULL;

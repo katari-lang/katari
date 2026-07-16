@@ -83,9 +83,11 @@ export type DelegateTarget =
  *  (sidecar) handlers, `http` the built-in http client — an external call is a `delegate` to one of them,
  *  exactly like a core sub-call, `webhook` the dynamically generated inbound endpoints
  *  (`webhook.inbound` — the outside world calling the program), `mcp` the built-in MCP client
- *  (`prelude.mcp.*` — connect / list / call against an MCP server), and `time` durable wall-clock time
- *  (`prelude.time.*` — a clock reading and the durable timers `sleep` / `watch` wait on). */
-export type ReactorName = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time";
+ *  (`prelude.mcp.*` — connect / list / call against an MCP server), `time` durable wall-clock time
+ *  (`prelude.time.*` — a clock reading and the durable timers `sleep` / `watch` wait on), and `oauth`
+ *  on-demand OAuth token resolution (`prelude.oauth.token` — a bearer token for a stored credential, its
+ *  authorization escalated when the credential needs a human). */
+export type ReactorName = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =

@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/shell/AppShell";
 import { AgentDetailPage } from "./pages/AgentDetailPage";
 import { AgentsPage } from "./pages/AgentsPage";
+import { CredentialsPage } from "./pages/CredentialsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EnvPage } from "./pages/EnvPage";
 import { EscalationsPage } from "./pages/EscalationsPage";
@@ -26,6 +27,7 @@ export function App() {
         <Route path="/projects/:projectId/snapshots" element={<SnapshotsPage />} />
         <Route path="/projects/:projectId/files" element={<FilesPage />} />
         <Route path="/projects/:projectId/env" element={<EnvPage />} />
+        <Route path="/projects/:projectId/credentials" element={<CredentialsPage />} />
       </Route>
     </Routes>
   );

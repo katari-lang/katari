@@ -17,6 +17,7 @@ import { errorData } from "../engine/throw-signal.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
 import { type Clock, SystemClock } from "../external/clock.js";
+import type { CredentialStore } from "../external/credentials.js";
 import type { HttpTransport } from "../external/http-transport.js";
 import { type McpTransport, StubMcpTransport } from "../external/mcp-transport.js";
 import type { FfiTransport } from "../external/runner.js";
@@ -39,6 +40,7 @@ import { isTransientError, messageOf } from "./failure.js";
 import { FfiReactor } from "./ffi-reactor.js";
 import { HttpReactor } from "./http-reactor.js";
 import { McpReactor, type McpServeCallOutcome, type McpServeToolsOutcome } from "./mcp-reactor.js";
+import { OauthReactor } from "./oauth-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { ResourcePool } from "./resource-pool.js";
@@ -86,8 +88,27 @@ export interface ProjectActorDependencies {
    *  reading). Defaults to the real `SystemClock` (fine in production; tests inject a controllable clock so
    *  durable time is deterministic and needs no real waits). */
   clock?: Clock;
+  /** The credential store the `oauth` reactor resolves `oauth.token(name)` calls through (the same
+   *  `credentials` table the mcp transport reads its bearer from). Defaults to the empty store — every
+   *  resolution parks pending authorization — which is fine for tests that never call `oauth.token`. */
+  credentials?: CredentialStore;
   persistence: Persistence;
 }
+
+/** The empty credential store the `oauth` reactor falls back to when the host wires none: nothing is ever
+ *  stored, so every `oauth.token` resolution parks pending authorization. Keeps the actor constructible in
+ *  tests that do not exercise OAuth without threading a store through every one. */
+const EMPTY_CREDENTIAL_STORE: CredentialStore = {
+  async load() {
+    return null;
+  },
+  async save() {
+    return false;
+  },
+  async resolveConfiguredClient() {
+    return null;
+  },
+};
 
 export class ProjectActor {
   private readonly projectId: ProjectId;
@@ -115,6 +136,9 @@ export class ProjectActor {
   private readonly mcp: McpReactor;
   /** The time reactor: built-in `prelude.time.*` calls — durable `sleep` / `watch` and the `now` reading. */
   private readonly time: TimeReactor;
+  /** The oauth reactor: built-in `prelude.oauth.token` calls — on-demand bearer-token resolution, with an
+   *  authorization escalation when the named credential needs a human. */
+  private readonly oauth: OauthReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -181,6 +205,13 @@ export class ProjectActor {
       (work) => this.substrate.submit(this.time, work),
       pool,
     );
+    // The oauth reactor resolves `prelude.oauth.token` calls through the credential store, re-entering the
+    // serial loop for its post-commit work (an async token resolution's settle / park / throw) the same way.
+    this.oauth = new OauthReactor(
+      dependencies.credentials ?? EMPTY_CREDENTIAL_STORE,
+      (work) => this.substrate.submit(this.oauth, work),
+      pool,
+    );
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
@@ -196,6 +227,7 @@ export class ProjectActor {
       webhook: this.webhook,
       mcp: this.mcp,
       time: this.time,
+      oauth: this.oauth,
     };
     this.substrate = new Substrate(
       this.projectId,
@@ -494,6 +526,7 @@ export class ProjectActor {
     this.webhook.reset();
     this.mcp.reset();
     this.time.reset();
+    this.oauth.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
@@ -506,12 +539,15 @@ export class ProjectActor {
       // (unlike ffi / http) a webhook call survives a restart completely.
       // The time load re-arms each call's durable timer (a passed deadline fires at once) — like webhook,
       // there is no external process to reconcile, so a time call survives a restart completely.
+      // The oauth load, like time, has no external process to reconcile: a reloaded resolution re-resolves
+      // (at-most-once-safe), and a parked call reconstructs from its open authorize escalation row.
       await Promise.all([
         this.ffi.load(loader),
         this.http.load(loader),
         this.webhook.load(loader),
         this.mcp.load(loader),
         this.time.load(loader),
+        this.oauth.load(loader),
       ]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {

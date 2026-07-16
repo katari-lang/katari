@@ -31,7 +31,13 @@ spec = do
       case decodeEscalation oauthPayload of
         Left message -> expectationFailure message
         Right escalation ->
-          escalation.presentation `shouldBe` PresentationOauth {url = "https://mcp.example.test/mcp", name = "github"}
+          escalation.presentation `shouldBe` PresentationOauth {url = Just "https://mcp.example.test/mcp", name = "github"}
+
+    it "decodes a configured oauth presentation whose url is null as Nothing" $
+      case decodeEscalation oauthNoUrlPayload of
+        Left message -> expectationFailure message
+        Right escalation ->
+          escalation.presentation `shouldBe` PresentationOauth {url = Nothing, name = "stripe"}
 
     it "rejects an unknown presentation kind rather than guessing" $
       decodeEscalation unknownKindPayload `shouldSatisfy` isLeft
@@ -50,6 +56,12 @@ spec = do
     oauthPayload :: ByteString
     oauthPayload =
       "{\"id\":\"esc-3\",\"request\":\"prelude.oauth.authorize\",\"argument\":{\"url\":\"https://mcp.example.test/mcp\",\"name\":\"github\"},\"runId\":\"run-1\",\"createdAt\":\"2026-07-13T00:00:00.000Z\",\"presentation\":{\"kind\":\"oauth\",\"url\":\"https://mcp.example.test/mcp\",\"name\":\"github\"}}"
+
+    -- A configured credential authorizes against an operator-registered endpoint, so its escalation
+    -- carries no server url to show a human — the presentation url arrives as null and decodes to Nothing.
+    oauthNoUrlPayload :: ByteString
+    oauthNoUrlPayload =
+      "{\"id\":\"esc-5\",\"request\":\"prelude.oauth.authorize\",\"argument\":{\"name\":\"stripe\"},\"runId\":\"run-1\",\"createdAt\":\"2026-07-13T00:00:00.000Z\",\"presentation\":{\"kind\":\"oauth\",\"url\":null,\"name\":\"stripe\"}}"
 
     unknownKindPayload :: ByteString
     unknownKindPayload =

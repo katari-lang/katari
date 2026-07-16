@@ -1,0 +1,48 @@
+// The `prelude.oauth` sub-module: on-demand OAuth bearer tokens for any workflow. `token` is an `external`
+// whose calls route to the runtime's `oauth` reactor (in-runtime, like `http.fetch` — no FFI sidecar) via
+// the `from "oauth"` clause. It is called as `oauth.token`.
+//
+// WHAT IT IS FOR. Any workflow that must call an OAuth-protected API names a stored CREDENTIAL and asks the
+// runtime for a usable bearer token; the runtime holds the token material (it never enters the program) and
+// refreshes it on demand. The credential is registered and authorized out of band — an operator registers
+// an OAuth client (the `oauth_clients` registry) and logs in once, or the FIRST use triggers the login. So
+// `token` composes with `http.fetch` to reach any bearer-authenticated endpoint:
+//
+//   let bearer : string of private = oauth.token(name = "github")
+//   let headers = record.set(
+//     target = record.empty(),
+//     key = "Authorization",
+//     value = prelude.concat(left = "Bearer ", right = bearer),
+//   )
+//   let response = http.fetch(url = "https://api.github.com/user", method = "GET", headers = headers, body = "")
+//
+// The token is a `string of private` (a secret): it may flow ONLY toward a submission sink — an http
+// `Authorization` header, whose values are `string of private` — and it is redacted at every user-facing
+// boundary (a run result, the trace). This is the same information-flow contract as `env.get_secret`; the
+// difference is that the runtime, not the operator's env, owns and rotates the token.
+//
+// THE PAUSE-AND-ASK CONTRACT. When the named credential has no usable token — it was never authorized, or
+// its refresh died beyond what the runtime can fix, even mid-run — `token` does NOT fail. The run PAUSES on
+// a user-facing `prelude.oauth.authorize` escalation; the admin console renders it as an authorization
+// request, and completing the browser flow (or a proactive login before the run) establishes the credential
+// and resumes the run right where it stopped. So a workflow author never handles "not logged in" — it is a
+// pause, not an error. A pause the runtime cannot resolve without a human is never a throw.
+//
+// Because it is an external call it performs io (the un-dischargeable `io` effect, which propagates to the
+// run root) — the strict, non-lifting call path, the same as `http.fetch`.
+
+@"The OAuth token could not be resolved for a TRANSIENT reason — a network error, or the token endpoint
+failing (5xx) while refreshing. Thrown by `token`. Catch it to control retry — a retried call re-resolves.
+(A credential that needs a human to (re)authorize is never a throw: the run pauses on an authorization
+escalation instead.)"
+data server_error(message: string)
+
+@"Resolve a usable OAuth bearer token for the stored credential @name@, as a private string (the token is
+tainted secret and may flow only to a submission sink — an http `Authorization` header — never to a
+user-facing boundary). The runtime holds the token material and refreshes it on demand, so no token ever
+enters the program. When @name@ has no usable token (never authorized, or refresh-dead), the run PAUSES on
+a `prelude.oauth.authorize` escalation and resumes once the credential is established (the runtime-hosted
+browser flow, or a proactive login) — it does not fail. A transient resolution failure throws
+`server_error` (catchable with `use handler { request throw(error: oauth.server_error) -> never { ... } }`);
+uncaught, it fails the run."
+external agent token(name: string) -> string of private with io | prelude.throw[server_error] from "oauth"

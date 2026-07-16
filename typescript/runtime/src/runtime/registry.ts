@@ -12,6 +12,7 @@ import { InMemoryPersistence, type Persistence } from "./actor/persistence.js";
 import { ProjectActor } from "./actor/project-actor.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
+import type { CredentialStore } from "./external/credentials.js";
 import { type HttpTransport, StubHttpTransport } from "./external/http-transport.js";
 import { type McpTransport, StubMcpTransport } from "./external/mcp-transport.js";
 import { type FfiTransport, StubFfiTransport } from "./external/runner.js";
@@ -38,6 +39,10 @@ export interface ProjectRegistryDependencies {
    *  id lets the host bind a blob producer for image tool results). Defaults to the stub (mcp fails
    *  loudly until the SDK-backed transport is injected). */
   mcpFactory?: (projectId: ProjectId) => McpTransport;
+  /** Builds the per-project `CredentialStore` the `oauth` reactor resolves `oauth.token` calls through
+   *  (the `credentials` table + the `oauth_clients` registry). Defaults to omitted — the actor then falls
+   *  back to its empty store (every resolution parks), fine for tests that never call `oauth.token`. */
+  credentialsFactory?: (projectId: ProjectId) => CredentialStore;
   /** The public base URL the dynamically generated endpoints (webhook inbound, mcp serve) are minted
    *  under. Defaults to the local dev address. */
   publicBaseUrl?: string;
@@ -53,6 +58,7 @@ export class ProjectRegistry {
   private readonly externalFactory: () => FfiTransport;
   private readonly httpFactory: () => HttpTransport;
   private readonly mcpFactory: (projectId: ProjectId) => McpTransport;
+  private readonly credentialsFactory?: (projectId: ProjectId) => CredentialStore;
   private readonly publicBaseUrl: string;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
@@ -63,6 +69,7 @@ export class ProjectRegistry {
     this.externalFactory = dependencies.externalFactory ?? (() => new StubFfiTransport());
     this.httpFactory = dependencies.httpFactory ?? (() => new StubHttpTransport());
     this.mcpFactory = dependencies.mcpFactory ?? (() => new StubMcpTransport());
+    this.credentialsFactory = dependencies.credentialsFactory;
     this.publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
   }
 
@@ -88,6 +95,9 @@ export class ProjectRegistry {
       external: this.externalFactory(),
       http: this.httpFactory(),
       mcp: this.mcpFactory(projectId),
+      ...(this.credentialsFactory !== undefined
+        ? { credentials: this.credentialsFactory(projectId) }
+        : {}),
       publicBaseUrl: this.publicBaseUrl,
       persistence: this.persistence,
     });

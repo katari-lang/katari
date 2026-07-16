@@ -33,13 +33,10 @@ export const OAUTH_AUTHORIZE_REQUEST = "prelude.oauth.authorize" as QualifiedNam
  *  park. ~60s covers clock skew and the request's own latency. */
 const REFRESH_MARGIN_MILLISECONDS = 60_000;
 
-/** One stored credential — the sealed `value` of a `credentials` row (docs §1). Profile-tagged: `mcp` is
- *  the only profile in Phase 1 (its client is dynamically registered and its resource url comes from RFC
- *  9728 discovery), and a Phase 2 `configured` profile joins as a sibling arm. Everything past acquisition
- *  (expiry judgement, refresh grant, bearer injection) reads only the profile-independent fields, so the
- *  discriminator matters just to the acquisition path. */
-export interface StoredCredential {
-  profile: "mcp";
+/** The profile-independent core of a stored credential — everything past acquisition (expiry judgement,
+ *  refresh grant, bearer injection) reads only these fields, so the profile discriminator matters just to
+ *  how the refresh grant authenticates. */
+interface StoredCredentialCore {
   /** The bearer token injected on the wire — the expiry SoT is `expiresAt`, not this opaque string. */
   accessToken: string;
   /** The refresh token, or `null` when the grant issued none (then an expired credential can only re-login). */
@@ -53,13 +50,31 @@ export interface StoredCredential {
   tokenEndpoint: string;
   /** The granted scopes (for the operator's read; not re-sent on refresh). */
   scopes: string[];
-  /** The dynamically registered client the tokens belong to (client_id + optional secret) — the refresh
-   *  grant authenticates as it. */
-  clientInformation: OAuthClientInformationMixed;
-  /** The RFC 9728 resource url the flow ran against — the refresh grant's `resource` indicator, and the
-   *  discovery base for a migrated credential with no stored token endpoint. */
-  resourceUrl: string;
 }
+
+/** One stored credential — the sealed `value` of a `credentials` row (docs §1). Profile-tagged: the `mcp`
+ *  profile's client is dynamically registered and its resource url comes from RFC 9728 discovery; the
+ *  Phase 2 `configured` profile's client is an operator-registered `oauth_clients` row referenced by name
+ *  (so a rotated client secret is picked up at refresh time — the credential stores no client secret of
+ *  its own). The refresh grant is a plain OAuth 2.1 `refresh_token` POST either way; only the client
+ *  authentication material differs by arm. */
+export type StoredCredential =
+  | (StoredCredentialCore & {
+      profile: "mcp";
+      /** The dynamically registered client the tokens belong to (client_id + optional secret) — the
+       *  refresh grant authenticates as it. */
+      clientInformation: OAuthClientInformationMixed;
+      /** The RFC 9728 resource url the flow ran against — the refresh grant's `resource` indicator, and
+       *  the discovery base for a migrated credential with no stored token endpoint. */
+      resourceUrl: string;
+    })
+  | (StoredCredentialCore & {
+      profile: "configured";
+      /** The operator-registered `oauth_clients` row this credential authenticates as — looked up by name
+       *  on every refresh (`CredentialStore.resolveConfiguredClient`), so a rotated client secret takes
+       *  effect without re-authorizing. `tokenEndpoint` is always the registered endpoint (never empty). */
+      clientName: string;
+    });
 
 /** A credential as read out of the store, paired with the integer `generation` of THAT stored version (a
  *  real column, bumped on every write). `resolveToken` captures the generation at load and echoes it back
@@ -70,15 +85,28 @@ export interface LoadedCredential {
   generation: number;
 }
 
+/** An operator-registered OAuth client's authentication material, as a `configured` credential's refresh
+ *  reads it from the `oauth_clients` registry: the `client_id`, and the `client_secret` when the client is
+ *  confidential (`null` for a public client — a GENUINE absence, not a missing lookup). */
+export interface ConfiguredClientCredentials {
+  clientId: string;
+  clientSecret: string | null;
+}
+
 /** The credential store port the core reaches credentials through, keyed by credential NAME (never token
  *  material). `save` is the refresh write-back: a rotated token set must outlive the process, or every
  *  restart would burn the refresh token's single use — but it is CONDITIONAL on the generation the caller
  *  loaded, resolving to whether the write took: a stale write (a refresh off a credential a re-authorization
  *  has since replaced) resolves `false` and leaves the newer record standing. The flow-completion writer
- *  upserts unconditionally, but through the repository directly — this port stays the engine-side seam. */
+ *  upserts unconditionally, but through the repository directly — this port stays the engine-side seam.
+ *  `resolveConfiguredClient` reaches the `oauth_clients` registry a `configured` credential's refresh
+ *  authenticates as (read live so a rotated secret takes effect); it is never consulted for an `mcp`
+ *  credential (whose client is embedded), and resolves `null` when the operator deleted the client — the
+ *  refresh is then dead and the resolution parks for re-login. */
 export interface CredentialStore {
   load(name: string): Promise<LoadedCredential | null>;
   save(name: string, credential: StoredCredential, expectedGeneration: number): Promise<boolean>;
+  resolveConfiguredClient(clientName: string): Promise<ConfiguredClientCredentials | null>;
 }
 
 /** The park signal: the named credential cannot authenticate this operation without a human — it is
@@ -114,7 +142,10 @@ export function decodeStoredCredential(name: string, raw: string): StoredCredent
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isObject(parsed)) throw new Error("not a credential object");
-    // The current shape carries a string `accessToken`; the migrated triple carries a `tokens` object.
+    // Dispatch on the stored `profile` tag: a `configured` credential (Phase 2) references its client by
+    // name, an `mcp` credential embeds its dynamically registered client. A value with no tag is either the
+    // current `mcp` shape (a string `accessToken`) or the migrated prototype triple (a `tokens` object).
+    if (parsed.profile === "configured") return decodeConfiguredCredential(parsed);
     return typeof parsed.accessToken === "string"
       ? decodeCurrentCredential(parsed)
       : decodeMigratedTriple(parsed);
@@ -142,6 +173,25 @@ function decodeCurrentCredential(source: Record<string, unknown>): StoredCredent
     scopes: Array.isArray(scopes) ? scopes.filter((scope) => typeof scope === "string") : [],
     clientInformation: OAuthClientInformationSchema.parse(source.clientInformation),
     resourceUrl,
+  };
+}
+
+/** Decode the `configured` stored shape: a plain OAuth 2.1 credential referencing an operator-registered
+ *  client by name. It embeds no client material (the refresh reads the `oauth_clients` registry live), so
+ *  it carries only the tokens, the registered token endpoint, the scopes, and the client name. */
+function decodeConfiguredCredential(source: Record<string, unknown>): StoredCredential {
+  const { accessToken, refreshToken, expiresAt, tokenEndpoint, scopes, clientName } = source;
+  if (typeof accessToken !== "string") throw new Error("missing accessToken");
+  if (typeof tokenEndpoint !== "string") throw new Error("missing tokenEndpoint");
+  if (typeof clientName !== "string") throw new Error("missing clientName");
+  return {
+    profile: "configured",
+    accessToken,
+    refreshToken: typeof refreshToken === "string" ? refreshToken : null,
+    expiresAt: typeof expiresAt === "number" ? expiresAt : null,
+    tokenEndpoint,
+    scopes: Array.isArray(scopes) ? scopes.filter((scope) => typeof scope === "string") : [],
+    clientName,
   };
 }
 
@@ -268,7 +318,7 @@ async function refreshAndSave(
 ): Promise<TokenResolution> {
   let refreshed: { tokens: OAuthTokens; tokenEndpoint: string };
   try {
-    refreshed = await refreshGrant(loaded.credential, refreshToken);
+    refreshed = await refreshGrant(store, loaded.credential, refreshToken);
   } catch (error) {
     if (error instanceof RefreshRefused) return { kind: "needsAuthorize", name };
     throw error;
@@ -286,28 +336,51 @@ async function refreshAndSave(
 }
 
 /** Run one OAuth 2.1 `refresh_token` grant against the credential's STORED token endpoint — a plain
- *  token-endpoint POST, the profile-independent grant (docs §2). The endpoint comes from the stored value,
- *  not re-discovery — EXCEPT a credential migrated from the prototype triple carries no endpoint, so it is
- *  discovered once here (RFC 9728) and returned for the write-back to persist. Client authentication is the
- *  SDK's own method selection applied to the registered client (a public mcp client puts its `client_id` in
- *  the body). A 4xx from the endpoint is `RefreshRefused` (the grant is dead); anything else that fails —
+ *  token-endpoint POST, the profile-independent grant (docs §2). Only the client authentication material
+ *  differs by profile: an `mcp` credential authenticates as its embedded dynamically registered client
+ *  (the SDK's own method selection — a public mcp client puts its `client_id` in the body) and carries the
+ *  RFC 8707 resource indicator, discovering its endpoint once when migrated from the prototype triple; a
+ *  `configured` credential authenticates as its operator-registered client, read LIVE from the registry so
+ *  a rotated secret takes effect (a deleted client — or a stored endpoint gone missing — is `RefreshRefused`,
+ *  a re-login). A 4xx from the endpoint is `RefreshRefused` (the grant is dead); anything else that fails —
  *  network, 5xx, an unparseable success body — throws plain and is treated as transient by the caller. */
 async function refreshGrant(
+  store: CredentialStore,
   credential: StoredCredential,
   refreshToken: string,
 ): Promise<{ tokens: OAuthTokens; tokenEndpoint: string }> {
-  const tokenEndpoint =
-    credential.tokenEndpoint !== ""
-      ? credential.tokenEndpoint
-      : await discoverTokenEndpoint(credential.resourceUrl);
   const params = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken });
   const headers = new Headers({
     "Content-Type": "application/x-www-form-urlencoded",
     Accept: "application/json",
   });
-  applyClientAuthentication(credential.clientInformation, headers, params);
-  // RFC 8707 resource indicator — the same one the acquisition flow authorized against.
-  if (credential.resourceUrl !== "") params.set("resource", credential.resourceUrl);
+  let tokenEndpoint: string;
+  switch (credential.profile) {
+    case "mcp": {
+      tokenEndpoint =
+        credential.tokenEndpoint !== ""
+          ? credential.tokenEndpoint
+          : await discoverTokenEndpoint(credential.resourceUrl);
+      applyClientAuthentication(credential.clientInformation, headers, params);
+      // RFC 8707 resource indicator — the same one the acquisition flow authorized against.
+      if (credential.resourceUrl !== "") params.set("resource", credential.resourceUrl);
+      break;
+    }
+    case "configured": {
+      if (credential.tokenEndpoint === "") {
+        throw new RefreshRefused("a configured credential has no stored token endpoint");
+      }
+      tokenEndpoint = credential.tokenEndpoint;
+      const client = await store.resolveConfiguredClient(credential.clientName);
+      if (client === null) {
+        throw new RefreshRefused(
+          `the registered client "${credential.clientName}" no longer exists`,
+        );
+      }
+      applyConfiguredClientAuthentication(client, headers, params);
+      break;
+    }
+  }
   const response = await fetch(tokenEndpoint, { method: "POST", headers, body: params });
   if (!response.ok) {
     if (response.status >= 400 && response.status < 500) {
@@ -357,4 +430,20 @@ function applyClientAuthentication(
       params.set("client_id", clientId);
       return;
   }
+}
+
+/** Apply an operator-registered `configured` client's authentication to a token request: HTTP Basic
+ *  (`client_secret_basic`) when the client is confidential, or the `client_id` in the body when it is a
+ *  public client (a `null` secret — a genuine absence). Matches the acquisition flow's code exchange, so a
+ *  refresh authenticates exactly as the original authorization did. */
+function applyConfiguredClientAuthentication(
+  client: ConfiguredClientCredentials,
+  headers: Headers,
+  params: URLSearchParams,
+): void {
+  if (client.clientSecret !== null) {
+    headers.set("Authorization", `Basic ${btoa(`${client.clientId}:${client.clientSecret}`)}`);
+    return;
+  }
+  params.set("client_id", client.clientId);
 }

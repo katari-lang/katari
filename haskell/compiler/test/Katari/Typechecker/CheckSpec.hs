@@ -912,12 +912,17 @@ spec = do
       let rejected reactor =
             let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just reactor))
              in hasErrorCode "K3022" diagnostics
-       in all rejected ["http", "webhook", "mcp", "time"] `shouldBe` True
+       in all rejected ["http", "webhook", "mcp", "time", "oauth"] `shouldBe` True
     it "accepts a built-in reactor from an embedded stdlib module (its compiled externals ARE the reactor's keys)" $
       let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (ModuleName "prelude.time") (Just "time"))
        in toList diagnostics `shouldBe` []
     it "rejects a user source declaring `from \"time\"` end to end (K3022, not a runtime dispatch panic)" $
       compiledCodes "external agent my_now() -> number from \"time\"" `shouldContain` ["K3022"]
+    it "rejects a user source declaring `from \"oauth\"` end to end (K3022 — the oauth reactor is stdlib-only)" $
+      compiledCodes "external agent my_token(name: string) -> string from \"oauth\"" `shouldContain` ["K3022"]
+    it "accepts a program calling the stdlib `oauth.token` (the new prelude.oauth module compiles)" $
+      compiledCodes "agent main() -> string of private with io | prelude.throw[oauth.server_error] { oauth.token(name = \"github\") }"
+        `shouldBe` []
 
   describe "forever loops (end to end)" $ do
     it "types as never with no break, so it conforms to any declared return" $

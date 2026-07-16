@@ -8,7 +8,7 @@
 // server exercising the classification split: `headers` + 401 → typed `auth_error`, `oauth` + 401 →
 // `authorizationRequired` (the park signal the reactor escalates — never a typed error). What is NOT
 // tested here: the park/retry loop itself (the reactor's — see mcp-authorize-escalation.test.ts) and a
-// real IdP round-trip (the interactive flow is runtime-hosted and exercised in mcp-authorization-flow).
+// real IdP round-trip (the interactive flow is runtime-hosted and exercised in authorization-flow).
 
 import {
   createServer,
@@ -23,6 +23,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
+  type ConfiguredClientCredentials,
   CredentialAuthorizationRequired,
   type CredentialStore,
   decodeStoredCredential,
@@ -58,7 +59,10 @@ const MIGRATED_TRIPLE = {
 /** An in-memory credential store: what the facade's repository-backed store does, minus the database.
  *  Each stored credential carries a monotonically increasing integer generation; `save` is a
  *  compare-and-set against it (resolving to whether the write took). */
-function memoryStore(seed: Record<string, StoredCredential> = {}): CredentialStore & {
+function memoryStore(
+  seed: Record<string, StoredCredential> = {},
+  clients: Record<string, ConfiguredClientCredentials> = {},
+): CredentialStore & {
   saved: Array<{ name: string; credential: StoredCredential }>;
 } {
   const entries = new Map<string, { credential: StoredCredential; generation: number }>();
@@ -85,6 +89,9 @@ function memoryStore(seed: Record<string, StoredCredential> = {}): CredentialSto
       entries.set(name, { credential, generation: sequence });
       saved.push({ name, credential });
       return true;
+    },
+    async resolveConfiguredClient(clientName) {
+      return clients[clientName] ?? null;
     },
   };
 }
@@ -154,7 +161,7 @@ describe("decodeStoredCredential", () => {
 
   test("decodes the migrated prototype triple, stamping the mcp profile and an empty token endpoint", () => {
     const decoded = decodeStoredCredential("github", JSON.stringify(MIGRATED_TRIPLE));
-    expect(decoded.profile).toBe("mcp");
+    if (decoded.profile !== "mcp") throw new Error("expected the mcp profile");
     expect(decoded.accessToken).toBe("token-legacy");
     expect(decoded.refreshToken).toBe("refresh-legacy");
     // No token endpoint was persisted by the prototype — the first refresh re-discovers it.
@@ -172,6 +179,7 @@ describe("decodeStoredCredential", () => {
         clientInformation: { client_id: "client-123", client_secret: "secret-123" },
       }),
     );
+    if (decoded.profile !== "mcp") throw new Error("expected the mcp profile");
     expect(decoded.clientInformation.client_secret).toBe("secret-123");
   });
 
@@ -204,6 +212,9 @@ let tokenEndpoint = "";
 let discoveryBase = "";
 /** Every refresh grant the fake token endpoint received, in arrival order (for asserting what was sent). */
 const refreshRequests: Array<URLSearchParams> = [];
+/** The `Authorization` header of each refresh grant (undefined when none) — for asserting a configured
+ *  confidential client authenticates with `client_secret_basic` while a public one does not. */
+const refreshAuthHeaders: Array<string | undefined> = [];
 /** How the fake token endpoint answers a grant: rotate to a fresh token, refuse with a 400
  *  `invalid_grant` (a dead refresh token — the permanent failure), or fail with a 503 (an outage — the
  *  transient one). */
@@ -244,6 +255,7 @@ beforeAll(async () => {
       request.setEncoding("utf8");
       for await (const chunk of request) raw += chunk;
       refreshRequests.push(new URLSearchParams(raw));
+      refreshAuthHeaders.push(request.headers.authorization);
       if (tokenServerMode === "refuse") {
         response.writeHead(400, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: "invalid_grant" }));
@@ -460,11 +472,89 @@ describe("resolveToken", () => {
         generation: 1,
       }),
       save: async () => false,
+      resolveConfiguredClient: async () => null,
     };
     const resolution = await resolveToken(refusingStore, "github");
     expect(resolution.kind).toBe("token");
     if (resolution.kind !== "token") throw new Error("unreachable");
     expect(resolution.token).toMatch(/^rotated-/);
+  });
+
+  test("a configured PUBLIC client refreshes with its client_id in the body (no Basic auth)", async () => {
+    tokenServerMode = "rotate";
+    refreshRequests.length = 0;
+    refreshAuthHeaders.length = 0;
+    const store = memoryStore(
+      {
+        stripe: {
+          profile: "configured",
+          accessToken: "conf-token",
+          refreshToken: "refresh-conf",
+          expiresAt: Date.now() - 1000,
+          tokenEndpoint,
+          scopes: ["read"],
+          clientName: "stripe-client",
+        },
+      },
+      { "stripe-client": { clientId: "conf-public", clientSecret: null } },
+    );
+    const resolution = await resolveToken(store, "stripe");
+    expect(resolution.kind).toBe("token");
+    // The configured refresh reads the registry LIVE for its client id, sends it in the body, and uses no
+    // Basic auth (a public client — a rotated secret would be picked up here, but there is none).
+    expect(refreshRequests.at(-1)?.get("grant_type")).toBe("refresh_token");
+    expect(refreshRequests.at(-1)?.get("client_id")).toBe("conf-public");
+    expect(refreshAuthHeaders.at(-1)).toBeUndefined();
+  });
+
+  test("a configured CONFIDENTIAL client refreshes with client_secret_basic (read live from the registry)", async () => {
+    tokenServerMode = "rotate";
+    refreshRequests.length = 0;
+    refreshAuthHeaders.length = 0;
+    const store = memoryStore(
+      {
+        salesforce: {
+          profile: "configured",
+          accessToken: "conf-token",
+          refreshToken: "refresh-conf",
+          expiresAt: Date.now() - 1000,
+          tokenEndpoint,
+          scopes: ["read"],
+          clientName: "sf-client",
+        },
+      },
+      { "sf-client": { clientId: "conf-secret", clientSecret: "s3cr3t" } },
+    );
+    const resolution = await resolveToken(store, "salesforce");
+    expect(resolution.kind).toBe("token");
+    // The confidential client authenticates by HTTP Basic (id:secret), NOT the body client_id — the secret
+    // is read live from the registry, so a rotation takes effect on the next refresh.
+    expect(refreshAuthHeaders.at(-1)).toBe(
+      `Basic ${Buffer.from("conf-secret:s3cr3t").toString("base64")}`,
+    );
+    expect(refreshRequests.at(-1)?.get("client_id")).toBeNull();
+  });
+
+  test("a configured credential whose registered client was deleted parks (refresh-dead → re-login)", async () => {
+    tokenServerMode = "rotate";
+    // The client the credential names is gone from the registry — its refresh can no longer authenticate,
+    // so the resolution parks for a fresh authorization rather than throwing a transient error.
+    const store = memoryStore(
+      {
+        stripe: {
+          profile: "configured",
+          accessToken: "conf-token",
+          refreshToken: "refresh-conf",
+          expiresAt: Date.now() - 1000,
+          tokenEndpoint,
+          scopes: ["read"],
+          clientName: "deleted-client",
+        },
+      },
+      {},
+    );
+    expect(await resolveToken(store, "stripe")).toEqual({ kind: "needsAuthorize", name: "stripe" });
+    expect(store.saved).toHaveLength(0);
   });
 });
 

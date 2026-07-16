@@ -21,6 +21,7 @@ import Katari.Cli.Api
     getRun,
     listEscalations,
     listRuns,
+    oauthTargetDescription,
   )
 import Katari.Cli.Common (RuntimeContext (..), dieIn, renderPrefixError, resolveIdPrefix)
 import Katari.Cli.Output (OutputContext (..), compactTimestamp)
@@ -111,7 +112,7 @@ escalationLabel escalation =
   Text.intercalate "  " ([Text.take 8 escalation.id] <> descriptor <> [compactTimestamp escalation.createdAt])
   where
     descriptor = case escalation.presentation of
-      PresentationOauth {url, name} -> ["OAuth authorization", url <> " (credential \"" <> name <> "\")"]
+      PresentationOauth {url, name} -> ["OAuth authorization", oauthTargetDescription url name]
       PresentationForm _ -> [escalation.request, previewArgument escalation.argument]
 
 -- | The question, compact and truncated so one bulky argument does not wreck the picker layout.

@@ -24,7 +24,7 @@ import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), answerEscalation, listEscalations, startOauthEscalationFlow)
+import Katari.Cli.Api (EscalationPresentation (..), EscalationView (..), answerEscalation, listEscalations, oauthTargetDescription, startOauthEscalationFlow)
 import Katari.Cli.Common (RuntimeContext (..), dieIn, dieProgram, withRuntimeContext)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (OutputContext (..), printText, progress)
@@ -112,10 +112,10 @@ resolveFormValue context escalation rawAnswerSchema valueJson = case valueJson o
 -- best-effort open that URL, then poll until the escalation disappears (the redirect callback answers
 -- it) and dispatch on what the disappearance meant. No value is ever submitted, so @--value@ plays no
 -- part here.
-answerOauth :: RuntimeContext -> EscalationView -> Text -> Text -> IO ()
+answerOauth :: RuntimeContext -> EscalationView -> Maybe Text -> Text -> IO ()
 answerOauth context escalation serverUrl credentialName = do
   authorizationUrl <- startOauthEscalationFlow context.client context.projectId escalation.id
-  progress context.output ("Authorize the credential \"" <> credentialName <> "\" for " <> serverUrl <> " in your browser:")
+  progress context.output ("Authorize " <> oauthTargetDescription serverUrl credentialName <> " in your browser:")
   progress context.output ("  " <> authorizationUrl)
   openInBrowser authorizationUrl
   progress context.output "Waiting for authorization to complete (Ctrl-C stops waiting; the escalation stays open)..."
@@ -127,10 +127,8 @@ answerOauth context escalation serverUrl credentialName = do
     AuthorizationReopened successorId ->
       dieProgram
         "answer"
-        ( "the authorization did not take — the run asked again for credential \""
-            <> credentialName
-            <> "\" on "
-            <> serverUrl
+        ( "the authorization did not take — the run asked again for "
+            <> oauthTargetDescription serverUrl credentialName
             <> "; retry with `katari answer "
             <> Text.take 8 successorId
             <> "` (e.g. with a different account)"
@@ -163,7 +161,7 @@ openInBrowser targetUrl = do
 -- fixed" cause without special-casing them. A generous overall cap keeps a forgotten browser tab from
 -- hanging the terminal forever; hitting it is not a failure of the run, so it exits with the
 -- actionable "re-run once authorized" message.
-waitForAuthorization :: RuntimeContext -> Text -> Text -> Text -> IO AuthorizationOutcome
+waitForAuthorization :: RuntimeContext -> Text -> Maybe Text -> Text -> IO AuthorizationOutcome
 waitForAuthorization context escalationId serverUrl credentialName = go oauthWaitAttempts
   where
     go remaining

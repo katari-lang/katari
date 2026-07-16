@@ -206,6 +206,9 @@ function credentialStore(): CredentialStore & { seed: () => void; clear: () => v
     async save() {
       return false;
     },
+    async resolveConfiguredClient() {
+      return null;
+    },
     seed() {
       entry = { credential: CREDENTIAL, generation: 1 };
     },

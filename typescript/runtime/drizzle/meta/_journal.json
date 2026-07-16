@@ -92,6 +92,27 @@
       "when": 1784069423383,
       "tag": "0013_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1784184896660,
+      "tag": "0014_oauth_clients",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1784198834287,
+      "tag": "0015_oauth_client_authorization_parameters",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1784200338667,
+      "tag": "0016_credential_profile",
+      "breakpoints": true
     }
   ]
 }

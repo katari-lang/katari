@@ -6,6 +6,7 @@
 import type {
   AgentDetail,
   AgentList,
+  Credential,
   EnvEntry,
   EnvEntryDetail,
   Escalation,
@@ -13,6 +14,8 @@ import type {
   HeadSnapshot,
   Health,
   Json,
+  OauthClient,
+  OauthClientInput,
   Page,
   Project,
   Run,
@@ -222,4 +225,54 @@ export const api = {
     ),
   deleteEnvEntry: (projectId: string, key: string) =>
     requestJson<{ key: string }>("DELETE", `/projects/${projectId}/env/${encodeURIComponent(key)}`),
+
+  /** The stored OAuth credentials as metadata (token material is write-only, never returned). */
+  listCredentials: (projectId: string) =>
+    get<{ credentials: Credential[] }>(`/projects/${projectId}/credentials`).then(
+      (body) => body.credentials,
+    ),
+  /** Begin a proactive login for a credential BY NAME (before any run needs it, or to re-authorize). An
+   *  mcp login supplies the server `url`; a configured login sends none. Returns the authorization URL. */
+  loginCredential: (projectId: string, name: string, url?: string) =>
+    requestJson<{ authorizationUrl: string }>(
+      "POST",
+      `/projects/${projectId}/credentials/${encodeURIComponent(name)}/login`,
+      url === undefined ? {} : { url },
+    ),
+  /** Forget a stored credential (a forced re-authorization — e.g. to switch accounts). */
+  forgetCredential: (projectId: string, name: string) =>
+    fetch(`${BASE}/projects/${projectId}/credentials/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }).then((response) => {
+      if (!response.ok && response.status !== 204) {
+        throw new ApiError(response.status, "forget_failed", `Forget failed (${response.status}).`);
+      }
+    }),
+
+  /** The operator-registered OAuth clients (secret write-only — never returned). */
+  listOauthClients: (projectId: string) =>
+    get<{ clients: OauthClient[] }>(`/projects/${projectId}/oauth-clients`).then(
+      (body) => body.clients,
+    ),
+  /** Register (or replace) an OAuth client — a full idempotent PUT. */
+  setOauthClient: (projectId: string, name: string, body: OauthClientInput) =>
+    fetch(`${BASE}/projects/${projectId}/oauth-clients/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    }).then((response) => {
+      if (!response.ok && response.status !== 204) return unwrap<unknown>(response);
+      return undefined;
+    }),
+  /** Delete a registered OAuth client. */
+  deleteOauthClient: (projectId: string, name: string) =>
+    fetch(`${BASE}/projects/${projectId}/oauth-clients/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }).then((response) => {
+      if (!response.ok && response.status !== 204) {
+        throw new ApiError(response.status, "delete_failed", `Delete failed (${response.status}).`);
+      }
+    }),
 };

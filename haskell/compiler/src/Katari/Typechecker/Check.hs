@@ -2694,13 +2694,14 @@ signatureValueScheme ::
 -- on these. Kept in one place so adding a reactor is a single edit here; the runtime's routing must stay
 -- in step with this set.
 externalReactorNames :: List Text
-externalReactorNames = ["ffi", "http", "webhook", "mcp", "time"]
+externalReactorNames = ["ffi", "http", "webhook", "mcp", "time", "oauth"]
 
 -- | The reactors reserved to the embedded stdlib modules. Each dispatches on the compiled stdlib
--- externals' fully-qualified keys (@prelude.http.fetch@, @prelude.time.sleep@, ...), so an external a
--- user module declared would reach it with a key it cannot serve. The one user-facing channel is @ffi@.
+-- externals' fully-qualified keys (@prelude.http.fetch@, @prelude.time.sleep@, @prelude.oauth.token@,
+-- ...), so an external a user module declared would reach it with a key it cannot serve. The one
+-- user-facing channel is @ffi@.
 stdlibOnlyReactorNames :: List Text
-stdlibOnlyReactorNames = ["http", "webhook", "mcp", "time"]
+stdlibOnlyReactorNames = ["http", "webhook", "mcp", "time", "oauth"]
 
 -- | Validate an @external@'s @from "name"@ clause, in the module named @declaringModule@: a name outside
 -- 'externalReactorNames' (a typo, an unimplemented reactor) is K3018, and a built-in reactor named by a

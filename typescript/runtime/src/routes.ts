@@ -6,6 +6,7 @@ import { escalationRoutes } from "./modules/escalation/escalation.routes.js";
 import { fileRoutes } from "./modules/file/file.routes.js";
 import { healthRoutes } from "./modules/health/health.routes.js";
 import { oauthFlowRoutes } from "./modules/oauth/oauth.routes.js";
+import { oauthClientRoutes } from "./modules/oauth-client/oauth-client.routes.js";
 import { projectRoutes } from "./modules/project/project.routes.js";
 import { runRoutes } from "./modules/run/run.routes.js";
 import { snapshotRoutes } from "./modules/snapshot/snapshot.routes.js";
@@ -25,6 +26,7 @@ export const apiRoutes = new Hono<AppEnv>()
   .route("/", escalationRoutes)
   .route("/", oauthFlowRoutes)
   .route("/", credentialRoutes)
+  .route("/", oauthClientRoutes)
   .route("/", fileRoutes)
   .route("/", envRoutes)
   .route("/", agentRoutes);

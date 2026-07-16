@@ -69,16 +69,25 @@ export const credentialRepository = {
   /** The authorization flow's deposit: insert or replace unconditionally, bumping the generation so any
    *  in-flight refresh that read the previous version is refused by its own compare-and-set. A fresh row
    *  seeds at the epoch-millisecond clock (not a constant), so it also outranks every generation a
-   *  deleted predecessor row handed out — see the lifetime rule in the header. */
-  async upsert(executor: Executor, projectId: string, name: string, value: string): Promise<void> {
+   *  deleted predecessor row handed out — see the lifetime rule in the header. `profile` mirrors the
+   *  sealed value's own tag onto the plaintext discriminant column (a re-authorization may switch it —
+   *  the same name deposited through the other acquisition path replaces profile and value together). */
+  async upsert(
+    executor: Executor,
+    projectId: string,
+    name: string,
+    value: string,
+    profile: "mcp" | "configured",
+  ): Promise<void> {
     await executor
       .insert(credentials)
-      .values({ projectId, name, value, generation: Date.now() })
+      .values({ projectId, name, profile, value, generation: Date.now() })
       .onConflictDoUpdate({
         target: [credentials.projectId, credentials.name],
         // `updatedAt` must be set explicitly: the column's `$onUpdate` callback fires only for `.update()`
         // statements, not for an `onConflictDoUpdate` set-clause.
         set: {
+          profile,
           value,
           generation: bumpedGeneration(),
           updatedAt: new Date(),
@@ -86,14 +95,20 @@ export const credentialRepository = {
       });
   },
 
-  /** The stored credentials as metadata (name / updatedAt). The sealed value is withheld: a credential is
-   *  write-only over the API — deposited by the flow, only ever read by the runtime's own transport. */
+  /** The stored credentials as metadata (name / profile / updatedAt). The sealed value is withheld: a
+   *  credential is write-only over the API — deposited by the flow, only ever read by the runtime's own
+   *  transport. The profile IS returned: it is the acquisition discriminant the admin dispatches on (a
+   *  configured credential re-authorizes without a server URL), never token material. */
   async list(
     executor: Executor,
     projectId: string,
-  ): Promise<Array<{ name: string; updatedAt: Date }>> {
+  ): Promise<Array<{ name: string; profile: "mcp" | "configured"; updatedAt: Date }>> {
     return executor
-      .select({ name: credentials.name, updatedAt: credentials.updatedAt })
+      .select({
+        name: credentials.name,
+        profile: credentials.profile,
+        updatedAt: credentials.updatedAt,
+      })
       .from(credentials)
       .where(eq(credentials.projectId, projectId))
       .orderBy(credentials.name);

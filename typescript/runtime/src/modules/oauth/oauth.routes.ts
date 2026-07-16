@@ -11,10 +11,10 @@
 import { Hono } from "hono";
 import { success } from "../../lib/response.js";
 import { zValidator } from "../../lib/validation.js";
-import type { AuthorizationCallbackOutcome } from "../../runtime/external/mcp-authorization-flow.js";
+import type { AuthorizationCallbackOutcome } from "../../runtime/external/authorization-flow.js";
 import type { AppEnv } from "../../types/app-env.js";
 import { escalationParamSchema } from "../escalation/escalation.schema.js";
-import { mcpAuthorizationFlow } from "./oauth.service.js";
+import { authorizationFlow } from "./oauth.service.js";
 
 /** Escape user-influenced text for the HTML pages: the credential name is project data and the failure
  *  reason can echo identity-provider strings, so neither may reach the page unescaped. */
@@ -70,17 +70,19 @@ function renderCallbackOutcome(outcome: AuthorizationCallbackOutcome): {
   }
 }
 
+// The escalation-driven login: a thin derivation over the proactive flow — the service reads `{ name, url? }`
+// off the escalation argument and calls the same `startForCredential`.
 export const oauthFlowRoutes = new Hono<AppEnv>().post(
   "/projects/:projectId/escalations/:escalationId/oauth-flow",
   zValidator("param", escalationParamSchema),
   async (c) => {
     const { projectId, escalationId } = c.req.valid("param");
-    return c.json(success(await mcpAuthorizationFlow.start(projectId, escalationId)));
+    return c.json(success(await authorizationFlow.startFromEscalation(projectId, escalationId)));
   },
 );
 
 export const oauthCallbackRoutes = new Hono<AppEnv>().get("/callback", async (c) => {
-  const outcome = await mcpAuthorizationFlow.handleCallback({
+  const outcome = await authorizationFlow.handleCallback({
     code: c.req.query("code"),
     state: c.req.query("state"),
     error: c.req.query("error"),

@@ -6,6 +6,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Play,
+  ShieldCheck,
 } from "lucide-react";
 import { NavLink, useParams } from "react-router-dom";
 import { useEscalations } from "../../api/queries";
@@ -20,6 +21,7 @@ const links = [
   { to: "snapshots", icon: Camera, label: "Snapshots" },
   { to: "files", icon: FileIcon, label: "Files" },
   { to: "env", icon: KeyRound, label: "Env" },
+  { to: "credentials", icon: ShieldCheck, label: "Credentials" },
 ];
 
 export function Sidebar() {
