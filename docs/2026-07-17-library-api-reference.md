@@ -25,8 +25,14 @@ katari docs --stdlib         # prelude(stdlib 全モジュール)の docs JSON
 - ロードは `loadProjectOffline`(build/check と同じ、決定論・オフライン)。
 - `Compile.compile` を直接呼ぶ(`compileSourcesOrExit` は loweredModules しか返さない。docs は
   `typedModules` + `loweredModules` の両方を使う)。
-- 対象は **root package の自モジュールのみ**(依存パッケージのモジュールは含めない)。private
-  宣言は出さない。
+- 対象は **root package の自モジュールのみ**(依存パッケージのモジュールは含めない)。
+- **private agent も出す**(owner 判断 2026-07-17)。`private` はカプセル化ではなく privacy 属性系
+  — handle が private world からのみ呼べるという意味で、private な呼び出し側にとっては API
+  サーフェスの一部。JSON に `"private": true|false` を載せ、web はバッジで示す。
+  なお現状 Lowering は private を見ずに全 agent を entry 登録しており(Lowering.hs:456)、runtime
+  トップレベルからも起動できてしまう。private escalation が operator へ流れうるので、IR entry に
+  privacy を載せて run-start 境界で拒否するのが筋(entries は first-class agent 解決にも使われる
+  ため entry から外す方式は不可)。**別件のフォローアップ**。
 - schema は再導出しない: Lowering 済み IR の `SchemaInformation`(agent の input/output/requests)
   を宣言名で引く。generic fallback(`SchemaAny`/`SchemaAny`)は「schema なし」として null。
 - `--stdlib` は `Compile.stdlibParsed`(Parsed 相)から抽出する。Parsed には resolution が無いので
@@ -44,6 +50,7 @@ katari docs --stdlib         # prelude(stdlib 全モジュール)の docs JSON
     "declarations": [{
       "kind": "agent",       // agent | external_agent | primitive_agent | request | marker_effect | data | type_synonym
       "name": "infer_with_tools",
+      "private": false,                          // agent のみ(handle privacy)。他 kind では省略
       "documentation": "…",                      // @"..." 本文。無ければ null
       "signature": "agent infer_with_tools[E](…) -> string with E",   // 表層構文、コピー用
       "generics": [{ "name": "E", "kind": "effect", "bindsLiteral": false, "upperBound": null }],
