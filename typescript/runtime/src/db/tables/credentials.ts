@@ -1,10 +1,12 @@
-// The MCP OAuth credential store: the single source of truth for the token material an `mcp.oauth(name)`
-// descriptor authenticates through. It replaces the reserved `mcp.oauth.<name>` env-secret namespace the
-// prototype used (see docs/2026-07-13-oauth-escalation.md §2) — a dedicated table so a credential carries
-// its own compare-and-set `generation` column rather than a content hash, and so it never mingles with the
-// user's real env keys.
+// The credential store: the single source of truth for the OAuth token material a workflow authenticates
+// through (docs/2026-07-14-credentials-core.md §1). It generalizes the prototype's `mcp_credentials` table
+// into a profile-tagged store — the sealed `value` carries a `profile` discriminator ("mcp" today), so the
+// acquisition path (mcp discovery + dynamic client registration) is one variant of a common
+// store / expiry / refresh / bearer-injection machinery. A dedicated table (not an env secret) so a
+// credential carries its own compare-and-set `generation` column rather than a content hash, and so it
+// never mingles with the user's real env keys.
 //
-// The `value` is the credential triple `{ tokens, clientInformation, resourceUrl }` as JSON, AES-GCM sealed
+// The `value` is the sealed `StoredCredential` JSON (see `runtime/external/credentials.ts`), AES-GCM sealed
 // at rest exactly like an env secret (via `lib/crypto`); it is write-only over the admin API (a credential
 // is deposited by the OAuth flow, listed and deleted by an operator, but never read back in plaintext). Two
 // writers touch `generation` with different intent: the runtime-hosted flow's completion upserts
@@ -14,15 +16,16 @@
 import { bigint, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { projects } from "./projects.js";
 
-export const mcpCredentials = pgTable(
-  "mcp_credentials",
+export const credentials = pgTable(
+  "credentials",
   {
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    /** The credential's name — what an `mcp.oauth(name = ...)` descriptor references. */
+    /** The credential's name — what an `mcp.oauth(name = ...)` descriptor (and, in Phase 2, an
+     *  `oauth.token(name)` request) references. */
     name: text("name").notNull(),
-    /** The AES-GCM sealed `{ tokens, clientInformation, resourceUrl }` JSON. Write-only over the API. */
+    /** The AES-GCM sealed `StoredCredential` JSON. Write-only over the API. */
     value: text("value").notNull(),
     /** The compare-and-set marker. The rule: every write stamps a generation strictly greater than any
      *  generation previously minted for this (project, name) — INCLUDING across a delete and a later

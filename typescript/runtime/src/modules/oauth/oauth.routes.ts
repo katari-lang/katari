@@ -1,7 +1,7 @@
 // The two HTTP faces of the runtime-hosted OAuth flow:
 //
 //   - `oauthFlowRoutes` (mounted under the bearer-authenticated `/api/v1`): start the flow for one open
-//     `prelude.mcp.authorize` escalation and hand back the authorization URL for the caller (console,
+//     `prelude.oauth.authorize` escalation and hand back the authorization URL for the caller (console,
 //     CLI) to open. 404 when the escalation is not open, 409 when it is not an oauth escalation.
 //   - `oauthCallbackRoutes` (mounted PUBLIC at `/oauth`, like `/inbound` and `/mcp`): the identity
 //     provider redirects the user's browser here; the minted `state` parameter is the capability that

@@ -242,7 +242,7 @@ export const escalations = pgTable(
      *  alone and the API lists escalations by run without inferring it from routing. */
     runId: uuid("run_id").notNull(),
     /** The reactors this escalation runs between: `from` = the raiser's reactor (`core` for an
-     *  instance-raised or relayed ask; `mcp` for a parked call's `prelude.mcp.authorize` and for a
+     *  instance-raised or relayed ask; `mcp` for a parked call's `prelude.oauth.authorize` and for a
      *  provide relaying its child's — each reactor reloads its own rows by this column), `to` = the
      *  reactor the escalate was addressed to (`api` ⟺ the raiser is a run root, i.e. a user-facing
      *  escalation). The api root self-selects its answerable set by `to_reactor`. */

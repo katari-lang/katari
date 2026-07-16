@@ -1,15 +1,17 @@
-// The runtime-hosted OAuth authorization flow (docs/2026-07-13-oauth-escalation.md §3): the interactive
-// counterpart of a `prelude.mcp.authorize` escalation. The runtime is a continuously running server, so it
-// hosts the whole OAuth 2.1 authorization-code + PKCE flow itself (discovery, dynamic client registration,
-// code exchange) through the SDK's `auth(...)` orchestrator — the CLI and the console only open the URL
-// this service mints. Two rounds, same structure as the retired `katari mcp login` helper:
+// The runtime-hosted OAuth authorization flow (docs/2026-07-14-credentials-core.md §5): the `mcp`-profile
+// acquisition path — the interactive counterpart of a `prelude.oauth.authorize` escalation. The runtime is
+// a continuously running server, so it hosts the whole OAuth 2.1 authorization-code + PKCE flow itself
+// (discovery, dynamic client registration, code exchange) through the SDK's `auth(...)` orchestrator — the
+// CLI and the console only open the URL this service mints. Two rounds, same structure as the retired
+// `katari mcp login` helper:
 //
 //   round 1 (`start`)          — discovery + registration + PKCE; the provider captures the authorization
 //                                URL instead of opening a browser, and the flow parks its state in memory
 //                                under the minted OAuth `state` parameter;
 //   round 2 (`handleCallback`) — the identity provider redirects the user's browser to the runtime's
-//                                public `/oauth/callback`; the code is exchanged for tokens, the credential
-//                                triple is deposited, and every open authorize escalation waiting on that
+//                                public `/oauth/callback`; the code is exchanged for tokens, the resolved
+//                                `StoredCredential` (with the discovered token endpoint the core refreshes
+//                                against) is deposited, and every open authorize escalation waiting on that
 //                                credential name is answered (value null — token material never rides an
 //                                answer).
 //
@@ -18,7 +20,11 @@
 // owner of the pending entries — created at `start`, deleted at callback or expiry, never persisted.
 
 import { randomUUID } from "node:crypto";
-import { auth, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import {
+  auth,
+  type OAuthClientProvider,
+  type OAuthDiscoveryState,
+} from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
   OAuthClientInformationMixed,
   OAuthClientMetadata,
@@ -27,16 +33,16 @@ import type {
 import { ConflictError, NotFoundError } from "../../lib/errors.js";
 import { messageOf } from "../actor/failure.js";
 import type { Value } from "../value/types.js";
-import { MCP_AUTHORIZE_REQUEST, type McpOAuthCredential } from "./mcp-oauth.js";
+import { OAUTH_AUTHORIZE_REQUEST, type StoredCredential } from "./credentials.js";
 
 /** How long a started flow stays redeemable. Long enough for a human to authenticate at the identity
  *  provider; short enough that an abandoned `state` capability does not accumulate. */
 export const AUTHORIZATION_FLOW_TIME_TO_LIVE_MILLISECONDS = 10 * 60 * 1000;
 
-/** The `{ url, name }` payload of a `prelude.mcp.authorize` escalation, read out of its argument `Value`.
+/** The `{ url, name }` payload of a `prelude.oauth.authorize` escalation, read out of its argument `Value`.
  *  Null when the argument does not carry the shape — the argument is runtime-synthesized (the mcp reactor
  *  raises it), so null means the row is unreadable, not that a user sent something odd. */
-export function mcpAuthorizeArgumentOf(
+export function oauthAuthorizeArgumentOf(
   argument: Value | null,
 ): { url: string; name: string } | null {
   if (argument === null || argument.kind !== "record") return null;
@@ -68,8 +74,8 @@ export interface McpAuthorizationFlowDependencies {
   ): Promise<OpenEscalationCandidate | undefined>;
   /** Every open escalation of a project — the callback answers all authorize rows naming the credential. */
   listOpenEscalations(projectId: string): Promise<OpenEscalationCandidate[]>;
-  /** Deposit the completed credential triple (the unconditional, generation-bumping upsert). */
-  depositCredential(projectId: string, name: string, credential: McpOAuthCredential): Promise<void>;
+  /** Deposit the completed `StoredCredential` (the unconditional, generation-bumping upsert). */
+  depositCredential(projectId: string, name: string, credential: StoredCredential): Promise<void>;
   /** Answer one open escalation with value null (the resume signal; the raiser re-reads the store). */
   answerEscalation(projectId: string, escalationId: string): Promise<void>;
   /** Operator-facing logging for the one swallowed failure (a per-escalation answer that did not land
@@ -103,6 +109,9 @@ interface AuthorizationFlowSeed {
  *  registered client / PKCE verifier are read back into the pending-flow entry. */
 class AuthorizationFlowProvider implements OAuthClientProvider {
   capturedAuthorizationUrl: URL | null = null;
+  /** The token endpoint the SDK discovered (RFC 8414 / OIDC) — captured so the deposited credential
+   *  persists it and the core's later refreshes need no re-discovery (the crux of the rebuild). */
+  private discoveredTokenEndpoint: string | undefined;
   private registeredClient: OAuthClientInformationMixed | undefined;
   private exchangedTokens: OAuthTokens | undefined;
   private pkceCodeVerifier: string | undefined;
@@ -158,6 +167,11 @@ class AuthorizationFlowProvider implements OAuthClientProvider {
     this.capturedAuthorizationUrl = authorizationUrl;
   }
 
+  /** The SDK calls this after discovery — the one place the token endpoint surfaces to the client. */
+  saveDiscoveryState(state: OAuthDiscoveryState): void {
+    this.discoveredTokenEndpoint = state.authorizationServerMetadata?.token_endpoint;
+  }
+
   saveCodeVerifier(codeVerifier: string): void {
     this.pkceCodeVerifier = codeVerifier;
   }
@@ -177,13 +191,23 @@ class AuthorizationFlowProvider implements OAuthClientProvider {
     return { clientInformation: this.registeredClient, codeVerifier: this.pkceCodeVerifier };
   }
 
-  /** Round 2's result — the credential triple to deposit, once `auth(...)` reported AUTHORIZED. */
-  credential(resourceUrl: string): McpOAuthCredential {
+  /** Round 2's result — the `StoredCredential` to deposit, once `auth(...)` reported AUTHORIZED. The token
+   *  endpoint discovered during the flow is persisted so the core refreshes without re-discovery;
+   *  `expiresAt` is stamped from the grant's `expires_in` against `now`. */
+  credential(resourceUrl: string, now: number): StoredCredential {
     if (this.exchangedTokens === undefined || this.registeredClient === undefined) {
       throw new Error("the token exchange completed without tokens or client information");
     }
+    const tokens = this.exchangedTokens;
     return {
-      tokens: this.exchangedTokens,
+      profile: "mcp",
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token ?? null,
+      expiresAt: tokens.expires_in === undefined ? null : now + tokens.expires_in * 1000,
+      // Empty only if discovery somehow never fired (the SDK always calls saveDiscoveryState before the
+      // code exchange); then the first in-core refresh re-discovers and backfills it.
+      tokenEndpoint: this.discoveredTokenEndpoint ?? "",
+      scopes: tokens.scope === undefined ? [] : tokens.scope.split(" ").filter((s) => s !== ""),
       clientInformation: this.registeredClient,
       resourceUrl,
     };
@@ -232,13 +256,13 @@ export function createMcpAuthorizationFlow(
       if (escalation === undefined) {
         throw new NotFoundError(`Escalation ${escalationId} not found (or already answered).`);
       }
-      if (escalation.request !== MCP_AUTHORIZE_REQUEST) {
+      if (escalation.request !== OAUTH_AUTHORIZE_REQUEST) {
         throw new ConflictError(
           `Escalation ${escalationId} is not an OAuth authorization request (its request is ` +
             `"${escalation.request}"); answer it through the ordinary answer endpoint.`,
         );
       }
-      const argument = mcpAuthorizeArgumentOf(escalation.argument);
+      const argument = oauthAuthorizeArgumentOf(escalation.argument);
       if (argument === null) {
         throw new ConflictError(
           `Escalation ${escalationId} carries no readable { url, name } payload to authorize against.`,
@@ -312,7 +336,7 @@ export function createMcpAuthorizationFlow(
         clientInformation: entry.clientInformation,
         codeVerifier: entry.codeVerifier,
       });
-      let credential: McpOAuthCredential;
+      let credential: StoredCredential;
       try {
         const secondRound = await auth(provider, {
           serverUrl: entry.url,
@@ -321,7 +345,7 @@ export function createMcpAuthorizationFlow(
         if (secondRound !== "AUTHORIZED") {
           return { kind: "failed", reason: "the token exchange did not authorize" };
         }
-        credential = provider.credential(entry.url);
+        credential = provider.credential(entry.url, dependencies.now());
       } catch (error) {
         return { kind: "failed", reason: `the token exchange failed: ${messageOf(error)}` };
       }
@@ -333,8 +357,8 @@ export function createMcpAuthorizationFlow(
         await dependencies.depositCredential(entry.projectId, entry.name, credential);
         const open = await dependencies.listOpenEscalations(entry.projectId);
         for (const candidate of open) {
-          if (candidate.request !== MCP_AUTHORIZE_REQUEST) continue;
-          const waitingOn = mcpAuthorizeArgumentOf(candidate.argument);
+          if (candidate.request !== OAUTH_AUTHORIZE_REQUEST) continue;
+          const waitingOn = oauthAuthorizeArgumentOf(candidate.argument);
           if (waitingOn === null || waitingOn.name !== entry.name) continue;
           // Best-effort per row: the deposit above is already durable, so an escalation that settled in
           // the meantime (answered by a concurrent flow, or its run cancelled) needs nothing from us —

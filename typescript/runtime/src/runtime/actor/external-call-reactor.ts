@@ -34,7 +34,7 @@
 // Execution is AT-MOST-ONCE: the runtime never re-runs external work (see `recover`) — a call whose process
 // died fails as a panic, and whether to retry is a katari-level decision, not the runtime's.
 
-import type { Json } from "@katari-lang/types";
+import type { Json, QualifiedName } from "@katari-lang/types";
 import type { ExternalCallStatus } from "../../db/tables/execution.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
@@ -191,6 +191,15 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
    *  needs no adoption. In-memory only: recovery is at-most-once, so an interrupted call fails and its
    *  produced blobs reclaim at its drop. */
   private readonly producedBlobs = new Map<DelegationId, Set<BlobId>>();
+  /** The calls parked pending a credential, awaiting an authorize answer: the call (a listing's park
+   *  belongs to its provide) to the escalation it raised. A cross-cutting concern — a call parks pending a
+   *  credential and re-runs its dispatch on the answering ack — owned here so any transport reactor gets it
+   *  by naming its park request (`parkRequestName`) and its re-dispatch (`redispatchParked`); the map is a
+   *  derived index over durable state (the open escalation row is the SoT, rebuilt by `reconstructPark`). */
+  private readonly parked = new Map<DelegationId, EscalationId>();
+  /** Park retries staged by this turn's authorize acks, re-dispatched strictly post-commit (durable-first:
+   *  the retired escalation row commits before the transport re-attempts). */
+  private parkRetries: DelegationId[] = [];
 
   // ─── concrete-reactor hooks (the only transport-specific surface) ────────────────────────────────
 
@@ -241,6 +250,21 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
   /** A call resolved and is being dropped — a concrete reactor releases the per-call state it indexes
    *  outside the base (the webhook reactor's token registry). Default no-op. */
   protected onDropCall(_delegation: DelegationId): void {}
+
+  /** The request name a parked call escalates and is reconstructed from on reload — `null` (the default)
+   *  for a reactor that never parks (ffi / http / webhook / time). A parking reactor names its authorize
+   *  request here (the mcp reactor returns `prelude.oauth.authorize`), which is the ONE thing that turns
+   *  the base's dormant park machinery on for it. */
+  protected parkRequestName(): QualifiedName | null {
+    return null;
+  }
+
+  /** Re-run one parked call's operation after its authorize escalation was answered — the transport
+   *  side-effect slot, called strictly post-commit and only while the call is still `running`. A parking
+   *  reactor overrides this to re-dispatch its own operation FROM SCRATCH (the mcp reactor re-lists a
+   *  provide, or re-dispatches a tool / direct call); a still-failing attempt parks again with a fresh
+   *  escalation — the one unbounded authorize loop. Default no-op (a non-parking reactor stages none). */
+  protected redispatchParked(_delegation: DelegationId): void {}
 
   /** The instance handling `delegation`, or `undefined` — for a concrete reactor that owns per-call resources
    *  (an ffi call's produced blob) to attribute them to the right instance. Reads the base received edge. */
@@ -295,6 +319,74 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
    *  a resolved call (its drop supersedes any upsert). */
   protected markCallDirty(delegation: DelegationId): void {
     if (this.calls.has(delegation)) this.dirty.add(delegation);
+  }
+
+  // ─── the credential park (a general "call parked pending a credential, re-runnable" concern) ─────
+
+  /** Park a live call pending a credential: raise the reactor's authorize request from the call's own
+   *  instance (through the base `send` path, so a durable escalation row opens — the park state's SoT —
+   *  and the ask relays to the api root like any escalate), and leave the call unsettled until the
+   *  answering ack retries it (`redispatchParked`). The status guard is the general call lifecycle: a
+   *  cancelling call's park doubles as the transport's abort confirmation (any completion of a cancelling
+   *  call confirms it), an errored call (`awaitingAnswer`) has no in-flight work to park, and only a
+   *  `running` call parks. The park's durable halves commit together — the escalation row (via `send`) and,
+   *  for a reactor that persists a re-runnable dispatch while parked, its extension (marking the row dirty
+   *  writes it this same turn) — so "open authorize row" ⟺ "re-runnable park". */
+  protected parkCall(delegation: DelegationId, argument: Value | null): void {
+    const call = this.calls.get(delegation);
+    if (call === undefined) return; // the call resolved meanwhile — the signal is moot
+    switch (call.status) {
+      case "cancelling":
+        this.complete({ delegation, outcome: { kind: "cancelled" } });
+        return;
+      case "awaitingAnswer":
+        return;
+      case "running":
+        break;
+    }
+    const request = this.parkRequestName();
+    if (request === null) {
+      throw new Error(`${this.name} parked a call with no park request name (bug)`);
+    }
+    const { instance, caller, run } = this.routeOf(delegation);
+    const escalation = newEscalationId();
+    this.parked.set(delegation, escalation);
+    this.markCallDirty(delegation);
+    this.send(
+      {
+        kind: "escalate",
+        delegation,
+        escalation,
+        ask: { kind: "request", request, argument },
+        from: this.name,
+        to: caller,
+        run,
+      },
+      instance,
+    );
+  }
+
+  /** Whether a live call is parked on an authorize escalation — a parking reactor's extension codec reads
+   *  this to persist the call's re-runnable dispatch (vs the at-most-once tag), since the parked set is
+   *  reactor-lifecycle state, not something the pure codec can see. */
+  protected isParked(delegation: DelegationId): boolean {
+    return this.parked.has(delegation);
+  }
+
+  /** Rebuild a reloaded call's park from its open authorize escalation row, if it has one — called by a
+   *  parking reactor's `recover` (an open authorize row IS the durable park state, so the call reconstructs
+   *  as parked, waiting for the ack, never refused by the at-most-once reconciliation). A row that is a
+   *  RELAY bridge does NOT count, and that case is reachable: a parked child's ask escapes its calling core
+   *  instance, whose caller is this reactor, so an active PARENT re-raises it upward under its own
+   *  delegation — an open row with the same reactor and request name as a genuine park — but its answer must
+   *  descend the bridge to the child, never resume the parent. Returns whether it reconstructed as parked. */
+  protected reconstructPark(delegation: DelegationId): boolean {
+    const request = this.parkRequestName();
+    if (request === null) return false;
+    const escalation = this.openRaisedEscalationOf(delegation, request);
+    if (escalation === undefined || this.hasEscalationRelay(delegation, escalation)) return false;
+    this.parked.set(delegation, escalation);
+    return true;
   }
 
   /** The instance + caller (reply-to) + run (trace context) of a live call, read from the base
@@ -485,6 +577,19 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     event: Extract<ExternalEvent, { kind: "escalateAck" }>,
     _context: { raiser: InstanceId | undefined },
   ): void {
+    // An authorize answer resumes a parked call. The base has already retired the escalation row, and the
+    // answer's VALUE is deliberately ignored — the contract is "the credential store now holds what you
+    // need", so the retry re-reads the store rather than trusting a wire value (which would also leak token
+    // material through the plaintext audit). The unpark commits whole before the transport re-attempts
+    // (durable-first): marking the call dirty reverts its extension to the non-parked variant in the same
+    // commit that retires the row, so a crash in between reloads a plain call (refused at-most-once by the
+    // reconciliation — the retry may have executed), never a double park.
+    if (this.parked.get(event.delegation) === event.escalation) {
+      this.parked.delete(event.delegation);
+      this.markCallDirty(event.delegation);
+      this.parkRetries.push(event.delegation);
+      return;
+    }
     const call = this.calls.get(event.delegation);
     if (call === undefined) return;
     const relay = call.relays.get(event.escalation);
@@ -703,6 +808,14 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     const deliveries = this.pendingDeliveries;
     this.pendingDeliveries = [];
     for (const delivery of deliveries) this.deliverInnerOutcome(delivery);
+    // The parked calls this turn's authorize acks resumed: re-run each from scratch (the transport
+    // side-effect slot). A call that resolved (a racing cancel) or moved to cancelling since the ack is
+    // skipped — its teardown owns it now; a still-`running` one is re-dispatched by the concrete reactor.
+    const retries = this.parkRetries;
+    this.parkRetries = [];
+    for (const delegation of retries) {
+      if (this.calls.get(delegation)?.status === "running") this.redispatchParked(delegation);
+    }
   }
 
   /** Write the calls this turn touched as own-kind instances (envelope + extension row), dropping resolved
@@ -797,6 +910,10 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     this.dirty.clear();
     this.droppedInstances = [];
     this.producedBlobs.clear();
+    // Parks and staged retries are derived from the durable escalation rows; the reload after a poisoned
+    // commit rebuilds them (`reconstructPark`), and an unretired row replays its ack from the outbox.
+    this.parked.clear();
+    this.parkRetries = [];
   }
 
   private innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
@@ -849,6 +966,9 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
   private drop(delegation: DelegationId): void {
     this.onDropCall(delegation);
     this.producedBlobs.delete(delegation);
+    // A parked call resolves only by teardown (its durable escalation row cascades with the raiser
+    // instance); forget the derived park index so a stray later ack finds nothing to resume.
+    this.parked.delete(delegation);
     const instance = this.handledInstanceOf(delegation);
     if (instance !== undefined) {
       this.droppedInstances.push(instance);

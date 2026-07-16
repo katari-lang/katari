@@ -1,11 +1,11 @@
 // The wire presentation sum: the ONE place a request name becomes a rendering decision
 // (docs/2026-07-13-oauth-escalation.md §4). Every escalation is either a schema-driven `form`
 // (the answer schema moved inside this variant) or an `oauth` authorization card carrying the
-// `{ url, name }` its flow runs against — no surface downstream sniffs `prelude.mcp.authorize` itself.
+// `{ url, name }` its flow runs against — no surface downstream sniffs `prelude.oauth.authorize` itself.
 
 import { describe, expect, test } from "vitest";
 import { presentEscalation } from "../src/modules/escalation/escalation.presentation.js";
-import { MCP_AUTHORIZE_REQUEST } from "../src/runtime/external/mcp-oauth.js";
+import { OAUTH_AUTHORIZE_REQUEST } from "../src/runtime/external/credentials.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const AUTHORIZE_ARGUMENT: Value = {
@@ -33,14 +33,14 @@ describe("presentEscalation", () => {
 
   test("the authorize request presents as oauth with its { url, name } payload", () => {
     expect(
-      presentEscalation({ request: MCP_AUTHORIZE_REQUEST, argument: AUTHORIZE_ARGUMENT }, null),
+      presentEscalation({ request: OAUTH_AUTHORIZE_REQUEST, argument: AUTHORIZE_ARGUMENT }, null),
     ).toEqual({ kind: "oauth", url: "https://mcp.example.test/mcp", name: "github" });
   });
 
   test("an authorize row with an unreadable argument degrades to the form variant", () => {
     // The argument is runtime-synthesized, so this is damage handling: better an inert generic form
     // than an OAuth card whose flow has nothing to authorize against.
-    expect(presentEscalation({ request: MCP_AUTHORIZE_REQUEST, argument: null }, null)).toEqual({
+    expect(presentEscalation({ request: OAUTH_AUTHORIZE_REQUEST, argument: null }, null)).toEqual({
       kind: "form",
       answerSchema: null,
     });

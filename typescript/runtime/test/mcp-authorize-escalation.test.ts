@@ -1,6 +1,6 @@
 // The mcp reactor's authorize park/retry loop, driven through the whole ProjectActor with a controlled
 // store-gated transport (no real MCP server): an oauth operation whose transport reports
-// `authorizationRequired` does not settle — the reactor raises a genuine `prelude.mcp.authorize`
+// `authorizationRequired` does not settle — the reactor raises a genuine `prelude.oauth.authorize`
 // escalation from the call's own instance (a DURABLE row, relayed to the api root like any user request)
 // and parks. Answering the escalation (the value is ignored) re-runs the parked operation from scratch;
 // the transport re-reads the credential store, so a deposit-then-ack succeeds while an ack over an
@@ -27,11 +27,11 @@ import {
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
-import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import type {
-  McpCredentialStore,
-  McpOAuthCredential,
-} from "../src/runtime/external/mcp-oauth.js";
+  CredentialStore,
+  StoredCredential,
+} from "../src/runtime/external/credentials.js";
+import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
 import type {
   McpCall,
   McpCompletion,
@@ -48,8 +48,13 @@ const SERVER_URL = "https://mcp.example.test/mcp";
 const CREDENTIAL_NAME = "github";
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
-const CREDENTIAL: McpOAuthCredential = {
-  tokens: { access_token: "token-123", token_type: "Bearer" },
+const CREDENTIAL: StoredCredential = {
+  profile: "mcp",
+  accessToken: "token-123",
+  refreshToken: null,
+  expiresAt: null,
+  tokenEndpoint: "https://mcp.example.test/token",
+  scopes: [],
   clientInformation: { client_id: "client-123" },
   resourceUrl: SERVER_URL,
 };
@@ -191,9 +196,9 @@ const ADD_LISTING: McpCompletion["outcome"] = {
 
 /** A one-credential in-memory store the gated transport reads through — `seed` plays the runtime-hosted
  *  authorization flow's deposit, `clear` a deletion. `save` is unused here (the reactor never writes;
- *  refresh write-back is the provider's business, tested in mcp-oauth.test.ts). */
-function credentialStore(): McpCredentialStore & { seed: () => void; clear: () => void } {
-  let entry: { credential: McpOAuthCredential; generation: number } | null = null;
+ *  the refresh write-back is `resolveToken`'s business, tested in mcp-oauth.test.ts). */
+function credentialStore(): CredentialStore & { seed: () => void; clear: () => void } {
+  let entry: { credential: StoredCredential; generation: number } | null = null;
   return {
     async load(name) {
       return name === CREDENTIAL_NAME ? entry : null;
@@ -231,7 +236,7 @@ class AuthGatedMcpTransport implements McpTransport {
   private sink: ((completion: McpCompletion) => void) | null = null;
 
   constructor(
-    private readonly store: McpCredentialStore,
+    private readonly store: CredentialStore,
     private readonly gated: { listing: boolean; tools: boolean },
   ) {}
 
@@ -399,13 +404,13 @@ describe("mcp authorize escalation: the park/retry loop", () => {
     const listing = await waitUntil(() => transport.dispatched[0]);
     expect(listing.kind).toBe("listTools");
     const open = await waitUntil(() => actor.listOpenEscalations()[0]);
-    expect(open.request).toBe("prelude.mcp.authorize");
+    expect(open.request).toBe("prelude.oauth.authorize");
     expect(open.argument).toEqual(AUTHORIZE_ARGUMENT);
 
     // The park state is DURABLE: the mcp reactor holds the open escalation row (what a reload rebuilds
     // the park from), same request and argument.
     const durable = await waitUntilAsync(async () => (await durableMcpEscalations(persistence))[0]);
-    expect(durable.request).toBe("prelude.mcp.authorize");
+    expect(durable.request).toBe("prelude.oauth.authorize");
     expect(durable.argument).toEqual(AUTHORIZE_ARGUMENT);
 
     // Deposit the credential (what the runtime-hosted flow's callback does), then ack with null — the
@@ -435,7 +440,7 @@ describe("mcp authorize escalation: the park/retry loop", () => {
       const open = actor.listOpenEscalations()[0];
       return open !== undefined && open.escalation !== first.escalation ? open : undefined;
     });
-    expect(second.request).toBe("prelude.mcp.authorize");
+    expect(second.request).toBe("prelude.oauth.authorize");
     expect(actor.listOpenEscalations()).toHaveLength(1);
 
     // The loop exits the moment an ack finds usable material.
@@ -456,7 +461,7 @@ describe("mcp authorize escalation: the park/retry loop", () => {
     expect(toolCall.tool).toBe("add");
     expect(toolCall.argument).toEqual({ x: 19, y: 23 });
     const open = await waitUntil(() => actor.listOpenEscalations()[0]);
-    expect(open.request).toBe("prelude.mcp.authorize");
+    expect(open.request).toBe("prelude.oauth.authorize");
 
     store.seed();
     await actor.answerEscalation(open.escalation, { kind: "null" });

@@ -693,19 +693,20 @@ newtype McpCredentialsResponse = McpCredentialsResponse
 instance FromJSON McpCredentialsResponse where
   parseJSON = withObject "McpCredentialsResponse" $ \object' -> McpCredentialsResponse <$> object' .: "credentials"
 
--- | The project's stored MCP OAuth credentials.
+-- | The project's stored OAuth credentials (the generalized `credentials` store; `katari mcp
+-- credentials` keeps its command surface while pointing at it).
 listMcpCredentials :: RuntimeClient -> Text -> IO (List McpCredentialRow)
 listMcpCredentials client projectId = do
   SuccessEnvelope (response :: McpCredentialsResponse) <-
-    requestJson client "GET" ("/projects/" <> projectId <> "/mcp-credentials") Nothing
+    requestJson client "GET" ("/projects/" <> projectId <> "/credentials") Nothing
   pure response.credentials
 
--- | Delete a stored MCP OAuth credential, forcing re-authorization on its next use. The runtime answers
+-- | Delete a stored OAuth credential, forcing re-authorization on its next use. The runtime answers
 -- 204 on success and 404 when no credential of that name exists, so the body carries nothing to decode
 -- and only the status class matters; the caller distinguishes the 404 to word a friendly message.
 deleteMcpCredential :: RuntimeClient -> Text -> Text -> IO ()
 deleteMcpCredential client projectId name =
-  requestDiscardingBody client "DELETE" ("/projects/" <> projectId <> "/mcp-credentials/" <> encodePathSegment name) Nothing
+  requestDiscardingBody client "DELETE" ("/projects/" <> projectId <> "/credentials/" <> encodePathSegment name) Nothing
 
 -- ===========================================================================
 -- Env entries

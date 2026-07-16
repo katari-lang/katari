@@ -54,42 +54,37 @@
 //
 // OAuth authorization is the one failure that is NEITHER: an `authorizationRequired` completion (an
 // `oauth`-descriptor operation that could not authenticate — see the transport's classification) PARKS the
-// operation instead of settling it. The reactor raises a genuine user-facing `prelude.mcp.authorize`
-// escalation from the call's own instance (the request-flavoured sibling of `raiseThrow` / `raisePanic`,
-// but through the base `send` path, so a durable escalation row opens and relays to the api root), and the
-// answering `escalateAck` — its value deliberately ignored — RE-RUNS the parked operation from scratch:
-// the transport reconnects and re-reads the credential store. Still-unusable material parks again with a
-// fresh escalation; first authorization, refresh death, an empty answer, and every race collapse into this
-// ONE loop. Re-running is at-most-once-safe because the parked attempt was REJECTED (an HTTP 401 rejection
-// guarantees the server never executed it) — which is also why the park may persist dispatch-shaped state
-// no in-flight transport call ever does: a parked call's re-runnable dispatch rides the extension's
+// operation instead of settling it, through the BASE reactor's shared credential-park machinery (a general
+// "a call parks pending a credential, and re-runs its dispatch on the answering ack" concern). The reactor
+// supplies only its two profile-specific bits: the TRIGGER (`complete`'s `authorizationRequired` branch
+// calls `parkCall`, which raises the base `prelude.oauth.authorize` escalation from the call's own instance)
+// and the RE-DISPATCH (`redispatchParked` re-lists a provide, or re-runs a tool / direct call, from
+// scratch). The answering `escalateAck` — its value deliberately ignored — makes the base re-run the parked
+// operation: the transport reconnects and re-reads the credential store. Still-unusable material parks again
+// with a fresh escalation; first authorization, refresh death, an empty answer, and every race collapse into
+// this ONE loop. Re-running is at-most-once-safe because the parked attempt was REJECTED (an HTTP 401
+// rejection guarantees the server never executed it) — which is also why the park may persist dispatch-shaped
+// state no in-flight transport call ever does: a parked call's re-runnable dispatch rides the extension's
 // `parked` variant (written with the escalation row, reverted to `transport` with its answer, in the same
 // commits), so a reload reconstructs the FULL park — a provide re-lists from its extension, a transport
-// call re-dispatches its stored call — and a post-reload ack retries identically to a warm one. A reloaded
-// call with NO open authorize escalation stays the at-most-once `recovered` refusal, exactly as before:
-// parked versus in-flight is a true sum, discriminated by the escalation row's presence.
+// call re-dispatches its stored call — and a post-reload ack retries identically to a warm one. A
+// reloaded call with NO open authorize escalation stays the at-most-once `recovered` refusal, exactly as
+// before: parked versus in-flight is a true sum, discriminated by the escalation row's presence.
 
 import { randomBytes } from "node:crypto";
-import type { JSONSchema, Json } from "@katari-lang/types";
+import type { JSONSchema, Json, QualifiedName } from "@katari-lang/types";
 import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
 import { jsonValueFromJson, jsonValueToJson, type StringReader } from "../engine/json-value.js";
 import { errorData } from "../engine/throw-signal.js";
-import type { ExternalEvent, ReactorName } from "../event/types.js";
-import { MCP_AUTHORIZE_REQUEST } from "../external/mcp-oauth.js";
+import type { ReactorName } from "../event/types.js";
+import { OAUTH_AUTHORIZE_REQUEST } from "../external/credentials.js";
 import {
   descriptorKeyOf,
   type McpCompletion,
   type McpToolListing,
   type McpTransport,
 } from "../external/mcp-transport.js";
-import {
-  type DelegationId,
-  type EscalationId,
-  type InstanceId,
-  newDelegationId,
-  newEscalationId,
-  type SnapshotId,
-} from "../ids.js";
+import { type DelegationId, newDelegationId, type SnapshotId } from "../ids.js";
 import type { McpDispatchCall } from "../mcp-dispatch.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import { jsonToSchema } from "../value/schema-json.js";
@@ -185,6 +180,7 @@ type McpPayload =
  *  still-stored continuation already says "re-list", and the open escalation row alone marks the park. */
 export type McpExtension =
   | { kind: "transport" }
+  | { kind: "parked"; call: McpDispatchCall }
   | {
       kind: "serve";
       snapshotId: SnapshotId;
@@ -201,8 +197,7 @@ export type McpExtension =
       continuation: Value | null;
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
-    }
-  | { kind: "parked"; call: McpDispatchCall };
+    };
 
 /** Encode an mcp call's extension document (pure — the persistence port seals it as a whole; the
  *  descriptor / tools / continuation / parked call may carry private leaves, and they seal in place). */
@@ -210,6 +205,8 @@ export function encodeMcpExtension(extension: McpExtension): Json {
   switch (extension.kind) {
     case "transport":
       return { kind: "transport" };
+    case "parked":
+      return { kind: "parked", call: asJson(extension.call) };
     case "serve":
       return {
         kind: "serve",
@@ -229,8 +226,6 @@ export function encodeMcpExtension(extension: McpExtension): Json {
         relays: encodeRelays(extension.relays),
         innerCalls: encodeInnerCalls(extension.innerCalls),
       };
-    case "parked":
-      return { kind: "parked", call: asJson(extension.call) };
   }
 }
 
@@ -241,6 +236,8 @@ export function decodeMcpExtension(extension: Json): McpExtension {
   switch (kind) {
     case "transport":
       return { kind: "transport" };
+    case "parked":
+      return { kind: "parked", call: warmFieldOf<McpDispatchCall>(document, "call") };
     case "serve":
       return {
         kind: "serve",
@@ -260,8 +257,6 @@ export function decodeMcpExtension(extension: Json): McpExtension {
         relays: relaysOf(document),
         innerCalls: innerCallsOf(document),
       };
-    case "parked":
-      return { kind: "parked", call: warmFieldOf<McpDispatchCall>(document, "call") };
     default:
       throw new Error(`unknown mcp extension kind "${kind}" (corrupt row)`);
   }
@@ -319,14 +314,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
    *  waiter that dies with the process simply never answers (the MCP caller retries); the delivery
    *  itself is durable. */
   private readonly waiters = new Map<string, (outcome: McpServeCallOutcome) => void>();
-  /** The parked operations awaiting an authorize answer: the call (a provide parked at its listing, or a
-   *  transport call) to the `prelude.mcp.authorize` escalation it raised. The map is a derived index over
-   *  durable state — the open escalation row is the source of truth (rebuilt from it on reload), so the
-   *  entry only routes a warm `escalateAck` to its retry. */
-  private readonly parked = new Map<DelegationId, EscalationId>();
-  /** Retries staged by this turn's authorize `escalateAck`s, re-dispatched strictly post-commit
-   *  (durable-first: the retired escalation row commits before the transport re-attempts). */
-  private pendingRetries: DelegationId[] = [];
   private deliverySequence = 0;
 
   constructor(
@@ -610,17 +597,27 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     });
   }
 
+  /** The park request the mcp reactor raises and reconstructs from — turning on the base's credential-park
+   *  machinery (`parkCall` / `reconstructPark` / `isParked` / `redispatchParked`). */
+  protected override parkRequestName(): QualifiedName {
+    return OAUTH_AUTHORIZE_REQUEST;
+  }
+
   /** A transport completion. An `authorizationRequired` outcome settles nothing — it parks the operation
-   *  and asks (a listing's park belongs to its provide; every other operation parks its own call). A
-   *  listing completion (its delegation is a live `listing`) mints the provide's toolbox and dispatches
-   *  its continuation — it never settles a call; every other completion is an ordinary call completion
-   *  the base handles. This is the ONE place a listing is told from a call. */
+   *  (a listing's park belongs to its provide; every other operation parks its own call), raising the base
+   *  authorize escalation with the descriptor's `{ url, name }`. A listing completion (its delegation is a
+   *  live `listing`) mints the provide's toolbox and dispatches its continuation — it never settles a call;
+   *  every other completion is an ordinary call completion the base handles. This is the ONE place a
+   *  listing is told from a call. */
   override complete(completion: McpCompletion): void {
     const outcome = completion.outcome;
     const provideDelegation = this.listings.get(completion.delegation);
     if (outcome.kind === "authorizationRequired") {
       if (provideDelegation !== undefined) this.listings.delete(completion.delegation);
-      this.park(provideDelegation ?? completion.delegation, outcome.url, outcome.name);
+      this.parkCall(
+        provideDelegation ?? completion.delegation,
+        authorizeArgument(outcome.url, outcome.name),
+      );
       return;
     }
     if (provideDelegation === undefined) {
@@ -629,56 +626,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
     this.listings.delete(completion.delegation);
     this.onListingSettled(provideDelegation, outcome);
-  }
-
-  /** Park one operation on the transport's `authorizationRequired` signal: raise a genuine user-facing
-   *  `prelude.mcp.authorize` escalation from the call's own instance — through the base `send` path, so
-   *  the durable escalation row opens (the park state's source of truth) and the ask relays to the api
-   *  root like any escalate — and leave the call unsettled until the answering ack retries it. */
-  private park(delegation: DelegationId, url: string, name: string): void {
-    const status = this.callStatusOf(delegation);
-    if (status === undefined) return; // the call resolved meanwhile — the signal is moot
-    switch (status) {
-      case "cancelling":
-        // The abort raced the authentication failure: the operation is over either way, so the signal
-        // doubles as the transport's abort confirmation (the base treats any completion of a cancelling
-        // call as exactly that).
-        super.complete({ delegation, outcome: { kind: "cancelled" } });
-        return;
-      case "awaitingAnswer":
-        // No transport work can be in flight for an errored call — a stray signal, dropped.
-        return;
-      case "running":
-        break;
-    }
-    const instance = this.handledInstanceOf(delegation);
-    const caller = this.handledCallerOf(delegation);
-    const run = this.handledRunOf(delegation);
-    if (instance === undefined || caller === undefined || run === undefined) {
-      throw new Error(`mcp holds a call for ${delegation} with no received edge (bug)`);
-    }
-    const escalation = newEscalationId();
-    this.parked.set(delegation, escalation);
-    // The park's durable halves commit together: the escalation row (via the base `send` below) and — for
-    // a transport call — the extension's `parked` variant (encodeCallExtension reads the parked set, so
-    // marking the row dirty writes it this same turn). Atomic, so "open authorize row" ⟺ "re-runnable park".
-    this.markCallDirty(delegation);
-    this.send(
-      {
-        kind: "escalate",
-        delegation,
-        escalation,
-        ask: {
-          kind: "request",
-          request: MCP_AUTHORIZE_REQUEST,
-          argument: authorizeArgument(url, name),
-        },
-        from: this.name,
-        to: caller,
-        run,
-      },
-      instance,
-    );
   }
 
   /** A direct call's transport completion, with a reply that does not conform to its `T` re-shaped into
@@ -912,42 +859,13 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
   }
 
-  /** The answer to an escalation under an mcp call. An authorize answer resumes its parked operation: the
-   *  base has already retired the escalation row, and the answer's VALUE is deliberately ignored — the
-   *  contract is "the credential store now holds what you need", so the retry re-reads the store rather
-   *  than trusting a wire value (which would also leak token material through the plaintext audit). Any
-   *  other ack is the base's business (a relayed child ask, a caught error panic). */
-  protected override onEscalateAck(
-    event: Extract<ExternalEvent, { kind: "escalateAck" }>,
-    context: { raiser: InstanceId | undefined },
-  ): void {
-    if (this.parked.get(event.delegation) === event.escalation) {
-      this.parked.delete(event.delegation);
-      // The unpark commits whole before the transport re-attempts (durable-first): the base retires the
-      // escalation row, and marking the call dirty reverts the extension to its bare `transport` variant
-      // in the same commit. A crash in between thus reloads a plain in-flight call — refused at-most-once
-      // by the reconciliation (the retry may have executed) — and never a double park.
-      this.markCallDirty(event.delegation);
-      this.pendingRetries.push(event.delegation);
-      return;
-    }
-    super.onEscalateAck(event, context);
-  }
-
-  override afterCommit(event: ExternalEvent): void {
-    super.afterCommit(event);
-    const retries = this.pendingRetries;
-    this.pendingRetries = [];
-    for (const delegation of retries) this.retryParked(delegation);
-  }
-
-  /** Re-run one parked operation after its authorize escalation was answered (post-commit, the transport
-   *  side-effect slot). The re-run starts FROM SCRATCH — reconnect, re-read the credential store — and a
-   *  still-failing attempt parks again with a fresh escalation: the one unbounded authorize loop. */
-  private retryParked(delegation: DelegationId): void {
+  /** Re-run one parked operation after its authorize escalation was answered — the base calls this
+   *  post-commit and only while the call is still `running`. The re-run starts FROM SCRATCH — reconnect,
+   *  re-read the credential store — and a still-failing attempt parks again with a fresh escalation: the
+   *  one unbounded authorize loop (the base owns the loop; this only re-dispatches mcp's own operation). */
+  protected override redispatchParked(delegation: DelegationId): void {
     const payload = this.payloadOf(delegation);
     if (payload === undefined) return; // the call resolved while the retry was staged (a racing cancel)
-    if (this.callStatusOf(delegation) !== "running") return; // cancelling — the teardown owns it now
     switch (payload.kind) {
       case "provide":
         // Parked at the listing, so the toolbox was never minted and the continuation is still stored:
@@ -967,8 +885,8 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             return;
           case "recovered":
             // Unreachable by construction: a park's escalation row and its extension's `parked` variant
-            // are written and reverted in the same commits, so a call the parked set names always holds
-            // its re-runnable dispatch (a reloaded park carries it; a non-parked reload is never in the set).
+            // are written and reverted in the same commits, so a call the parked set names always holds its
+            // re-runnable dispatch (a reloaded park carries it; a non-parked reload is never in the set).
             throw new Error(`mcp: parked call ${delegation} reloaded without its dispatch (bug)`);
         }
       }
@@ -997,22 +915,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.transport.recover(delegation);
   }
 
-  /** Rebuild a reloaded call's park from its open authorize escalation row, if it has one. An open
-   *  authorize row that is a RELAY bridge entry does not count — and that case is REACHABLE, not
-   *  defensive: a parked tool call's ask escapes its calling core instance (the provide's continuation),
-   *  whose caller is this reactor, so the ACTIVE provide re-raises it upward under its own delegation —
-   *  an open row with the same raiser reactor and request name as a genuine park. That answer must
-   *  descend the provide's `relays` bridge to the parked child; only a row the call raised for ITSELF
-   *  resumes the call (the reload-with-parked-tool-call test fails without this exclusion). */
-  private reconstructPark(delegation: DelegationId): boolean {
-    const parkedEscalation = this.openRaisedEscalationOf(delegation, MCP_AUTHORIZE_REQUEST);
-    if (parkedEscalation === undefined || this.hasEscalationRelay(delegation, parkedEscalation)) {
-      return false;
-    }
-    this.parked.set(delegation, parkedEscalation);
-    return true;
-  }
-
   protected abort(delegation: DelegationId): void {
     // A serve / provide call has no transport half of its own: deactivate the endpoint / abort any in-flight
     // listing and confirm the cancel on a fresh turn (the children — subscriber, continuation, in-flight
@@ -1033,11 +935,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.transport.abort(delegation);
   }
 
-  /** A call resolved: forget its park entry (a parked call resolves only by teardown — the durable
-   *  escalation row cascades with the raiser instance), release a serve's token / close a provide's scope
-   *  (the drop hook covers every resolution path at once), and forget any dangling listing bridge. */
+  /** A call resolved: release a serve's token / close a provide's scope (the drop hook covers every
+   *  resolution path at once), and forget any dangling listing bridge. The park index is the base's to
+   *  evict (a parked call resolves only by teardown — the durable escalation row cascades with the raiser). */
   protected override onDropCall(delegation: DelegationId): void {
-    this.parked.delete(delegation);
     const payload = this.payloadOf(delegation);
     if (payload === undefined) return;
     if (payload.kind === "serve") {
@@ -1055,9 +956,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   /** Pick the durable extension variant for one call. A transport call persists only the `transport` tag
    *  (at-most-once; no inner delegations, so no bridges) — EXCEPT while parked on an authorize escalation,
    *  when its re-runnable dispatch persists as `parked` (the rejected attempt provably never executed, so
-   *  a reloaded park may re-run it; the parked set is reactor state, which is why this is a hook and the
-   *  codec stays pure). A serve / provide call persists its whole endpoint variant (payload + bridges),
-   *  so a restart re-registers it. */
+   *  a reloaded park may re-run it; `isParked` is the base's park state, which is why this is a hook and
+   *  the codec stays pure). A serve / provide call persists its whole endpoint variant (payload +
+   *  bridges), so a restart re-registers it. */
   protected encodeCallExtension(row: CallRow<McpPayload>): Json {
     const payload = row.payload;
     switch (payload.kind) {
@@ -1082,7 +983,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         });
       case "transport":
         return encodeMcpExtension(
-          payload.call.kind !== "recovered" && this.parked.has(row.delegation)
+          payload.call.kind !== "recovered" && this.isParked(row.delegation)
             ? { kind: "parked", call: payload.call }
             : { kind: "transport" },
         );
@@ -1146,10 +1047,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     this.scopes.clear();
     this.liveDescriptors.clear();
     this.listings.clear();
-    // Parks and staged retries are derived from the durable escalation rows; the reload after a poisoned
-    // commit rebuilds them (and an unretired row replays its ack from the outbox, re-staging the retry).
-    this.parked.clear();
-    this.pendingRetries = [];
     // Waiters are in-process HTTP requests; a reset (poisoned commit) makes their calls unresolvable.
     for (const waiter of this.waiters.values()) waiter({ kind: "gone" });
     this.waiters.clear();
@@ -1227,7 +1124,7 @@ function decodeDirectReply(
   return { value: wire, mismatch: result.ok ? null : renderConformFailures(result.failures) };
 }
 
-/** The `{ url, name }` record a `prelude.mcp.authorize` escalation carries — the server url and the
+/** The `{ url, name }` record a `prelude.oauth.authorize` escalation carries — the server url and the
  *  credential name, stamped from the descriptor at the transport's classification boundary. Identity
  *  only, never token material: the argument rides the plaintext audit and the admin wire, and the
  *  answer's value is ignored (the credential travels through the store, not the escalation). */

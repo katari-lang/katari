@@ -14,7 +14,7 @@
 // the given headers ride on every request. `oauth` names an OAuth credential stored server-side; the
 // runtime injects (and refreshes) its tokens itself, so no token material appears in the program. When
 // the named credential is missing — or dies beyond what a refresh can fix, even mid-run — the program
-// does not fail: the run PAUSES on a user-facing `prelude.mcp.authorize` escalation, the admin console
+// does not fail: the run PAUSES on a user-facing `prelude.oauth.authorize` escalation, the admin console
 // and CLI render it as an OAuth authorization request, and completing the browser flow resumes the run
 // right where it stopped.
 //
@@ -77,7 +77,7 @@ data headers(values: record[string of private])
 
 @"A named OAuth credential, stored server-side. The runtime injects and refreshes its tokens itself;
 the name is not a secret. While the name has no usable credential, any use pauses the run on a
-`prelude.mcp.authorize` escalation — answering it (the runtime-hosted browser flow) establishes the
+`prelude.oauth.authorize` escalation — answering it (the runtime-hosted browser flow) establishes the
 credential and resumes the run."
 data oauth(name: string)
 

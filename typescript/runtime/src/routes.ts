@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import { agentRoutes } from "./modules/agent/agent.routes.js";
+import { credentialRoutes } from "./modules/credential/credential.routes.js";
 import { envRoutes } from "./modules/env/env.routes.js";
 import { escalationRoutes } from "./modules/escalation/escalation.routes.js";
 import { fileRoutes } from "./modules/file/file.routes.js";
 import { healthRoutes } from "./modules/health/health.routes.js";
-import { mcpCredentialRoutes } from "./modules/mcp-credential/mcp-credential.routes.js";
 import { oauthFlowRoutes } from "./modules/oauth/oauth.routes.js";
 import { projectRoutes } from "./modules/project/project.routes.js";
 import { runRoutes } from "./modules/run/run.routes.js";
@@ -24,7 +24,7 @@ export const apiRoutes = new Hono<AppEnv>()
   .route("/", runRoutes)
   .route("/", escalationRoutes)
   .route("/", oauthFlowRoutes)
-  .route("/", mcpCredentialRoutes)
+  .route("/", credentialRoutes)
   .route("/", fileRoutes)
   .route("/", envRoutes)
   .route("/", agentRoutes);

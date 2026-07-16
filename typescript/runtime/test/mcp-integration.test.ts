@@ -16,7 +16,7 @@ import { InMemoryPersistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
-import type { McpCredentialStore } from "../src/runtime/external/mcp-oauth.js";
+import type { CredentialStore } from "../src/runtime/external/credentials.js";
 import { SdkMcpTransport } from "../src/runtime/external/mcp-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
@@ -29,7 +29,7 @@ const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericB
 
 /** The transport's now-required credential store; this test's descriptor is `headers`, so it is never
  *  consulted (an oauth read here would be a test bug — fail loudly like the transport stubs do). */
-const UNUSED_CREDENTIALS: McpCredentialStore = {
+const UNUSED_CREDENTIALS: CredentialStore = {
   load() {
     throw new Error("mcp-integration: no oauth credential should be read on the headers path");
   },

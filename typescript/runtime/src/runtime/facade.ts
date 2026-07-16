@@ -24,6 +24,7 @@ import {
   ServiceUnavailableError,
 } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
+import { credentialRepository } from "../modules/credential/credential.repository.js";
 import { envReader } from "../modules/env/env.service.js";
 import {
   type McpServeHttpReply,
@@ -31,15 +32,14 @@ import {
   serveMcpMessage,
   unknownMcpServeEndpoint,
 } from "../modules/mcp/mcp-serve.js";
-import { mcpCredentialRepository } from "../modules/mcp-credential/mcp-credential.repository.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { isTransientError, messageOf } from "./actor/failure.js";
 import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { BlobEntry, InstanceKind } from "./engine/types.js";
+import { type CredentialStore, decodeStoredCredential } from "./external/credentials.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
-import { decodeMcpOAuthCredential, type McpCredentialStore } from "./external/mcp-oauth.js";
 import { SdkMcpTransport } from "./external/mcp-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
@@ -126,15 +126,15 @@ const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 const prims = new PrimRegistry();
 registerHostPrims(prims, { env: envReader });
 
-/** The per-project OAuth credential store the mcp transport authenticates through: the `mcp_credentials`
- *  table (the AES-GCM sealed triple + its integer generation — see `db/tables/mcp-credentials.ts`).
+/** The per-project credential store the credentials core resolves tokens through: the `credentials` table
+ *  (the AES-GCM sealed `StoredCredential` + its integer generation — see `db/tables/credentials.ts`).
  *  `load` unseals and decodes a stored credential; `save` is the token-refresh write-back, an atomic
  *  compare-and-set on the generation the caller loaded — refused when a completed authorization flow
  *  (whose upsert always wins) replaced the credential in between. */
-function mcpCredentialStoreFor(projectId: ProjectId): McpCredentialStore {
+function credentialStoreFor(projectId: ProjectId): CredentialStore {
   return {
     async load(name) {
-      const row = await mcpCredentialRepository.load(db, projectId, name);
+      const row = await credentialRepository.load(db, projectId, name);
       if (row === null) return null;
       // An unsealable value (key rotation, storage corruption) is funnelled through the decoder's own
       // failure path, so it classifies exactly like an undecodable blob: unreadable credential material,
@@ -145,10 +145,10 @@ function mcpCredentialStoreFor(projectId: ProjectId): McpCredentialStore {
       } catch {
         raw = "";
       }
-      return { credential: decodeMcpOAuthCredential(name, raw), generation: row.generation };
+      return { credential: decodeStoredCredential(name, raw), generation: row.generation };
     },
     save(name, credential, expectedGeneration) {
-      return mcpCredentialRepository.saveWithGeneration(
+      return credentialRepository.saveWithGeneration(
         db,
         projectId,
         name,
@@ -177,7 +177,7 @@ const registry = new ProjectRegistry({
   // by the mcp call's instance — the exact ownership + ascent path an FFI handler's mid-call upload
   // takes (`produceFfiBlob`), just in-process. A vanished call (ConflictError) returns null, so the
   // transport degrades that block to its text placeholder instead of failing the whole result. Its
-  // credential store resolves `mcp.oauth(...)` names against the project's env secrets.
+  // credential store resolves `mcp.oauth(...)` names against the project's `credentials` table.
   mcpFactory: (projectId) =>
     new SdkMcpTransport({
       produceBlob: async (delegation, bytes, contentType) => {
@@ -191,7 +191,7 @@ const registry = new ProjectRegistry({
           return null;
         }
       },
-      credentials: mcpCredentialStoreFor(projectId),
+      credentials: credentialStoreFor(projectId),
     }),
   // The public base the dynamically generated endpoints (`webhook.inbound`, `mcp.serve`) mint their
   // capability URLs under (KATARI_PUBLIC_URL, or the local port) — one address, one knob.

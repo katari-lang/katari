@@ -13,14 +13,17 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { ConflictError, NotFoundError } from "../src/lib/errors.js";
 import {
+  OAUTH_AUTHORIZE_REQUEST,
+  type StoredCredential,
+} from "../src/runtime/external/credentials.js";
+import {
   AUTHORIZATION_FLOW_TIME_TO_LIVE_MILLISECONDS,
   type AuthorizationCallbackOutcome,
   createMcpAuthorizationFlow,
   type McpAuthorizationFlow,
-  mcpAuthorizeArgumentOf,
+  oauthAuthorizeArgumentOf,
   type OpenEscalationCandidate,
 } from "../src/runtime/external/mcp-authorization-flow.js";
-import { MCP_AUTHORIZE_REQUEST, type McpOAuthCredential } from "../src/runtime/external/mcp-oauth.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const PUBLIC_URL = "https://runtime.example.test";
@@ -169,13 +172,13 @@ function authorizeArgument(url: string, name: string): Value {
 }
 
 function authorizeEscalation(id: string, url: string, name: string): OpenEscalationCandidate {
-  return { id, request: MCP_AUTHORIZE_REQUEST, argument: authorizeArgument(url, name) };
+  return { id, request: OAUTH_AUTHORIZE_REQUEST, argument: authorizeArgument(url, name) };
 }
 
 interface FlowHarness {
   flow: McpAuthorizationFlow;
   openEscalations: OpenEscalationCandidate[];
-  deposits: Array<{ projectId: string; name: string; credential: McpOAuthCredential }>;
+  deposits: Array<{ projectId: string; name: string; credential: StoredCredential }>;
   answered: string[];
   warnings: Array<{ message: string; context: Record<string, unknown> }>;
   clock: { now: number };
@@ -187,7 +190,7 @@ interface FlowHarness {
 
 function flowHarness(): FlowHarness {
   const openEscalations: OpenEscalationCandidate[] = [];
-  const deposits: Array<{ projectId: string; name: string; credential: McpOAuthCredential }> = [];
+  const deposits: Array<{ projectId: string; name: string; credential: StoredCredential }> = [];
   const answered: string[] = [];
   const warnings: Array<{ message: string; context: Record<string, unknown> }> = [];
   const failingAnswers = new Set<string>();
@@ -234,11 +237,11 @@ function expectFailed(outcome: AuthorizationCallbackOutcome): string {
   return outcome.reason;
 }
 
-// ─── mcpAuthorizeArgumentOf ───────────────────────────────────────────────────────────────────────
+// ─── oauthAuthorizeArgumentOf ───────────────────────────────────────────────────────────────────────
 
-describe("mcpAuthorizeArgumentOf", () => {
+describe("oauthAuthorizeArgumentOf", () => {
   test("reads { url, name } out of the authorize argument", () => {
-    expect(mcpAuthorizeArgumentOf(authorizeArgument("https://mcp.example.test", "github"))).toEqual(
+    expect(oauthAuthorizeArgumentOf(authorizeArgument("https://mcp.example.test", "github"))).toEqual(
       { url: "https://mcp.example.test", name: "github" },
     );
   });
@@ -258,7 +261,7 @@ describe("mcpAuthorizeArgumentOf", () => {
       },
     ],
   ])("%s is unreadable (null)", (_label, argument) => {
-    expect(mcpAuthorizeArgumentOf(argument)).toBeNull();
+    expect(oauthAuthorizeArgumentOf(argument)).toBeNull();
   });
 });
 
@@ -278,7 +281,7 @@ describe("start", () => {
 
   test("an authorize escalation with an unreadable argument is 409", async () => {
     const { flow, openEscalations } = flowHarness();
-    openEscalations.push({ id: "broken-1", request: MCP_AUTHORIZE_REQUEST, argument: null });
+    openEscalations.push({ id: "broken-1", request: OAUTH_AUTHORIZE_REQUEST, argument: null });
     await expect(flow.start("project-1", "broken-1")).rejects.toThrowError(ConflictError);
   });
 
@@ -330,9 +333,14 @@ describe("handleCallback", () => {
     const deposit = deposits[0];
     expect(deposit?.projectId).toBe("project-1");
     expect(deposit?.name).toBe("github");
+    expect(deposit?.credential.profile).toBe("mcp");
     expect(deposit?.credential.resourceUrl).toBe(mcpServerUrl);
-    expect(deposit?.credential.tokens.access_token).toBe(issuedAccessTokens.at(-1));
-    expect(deposit?.credential.tokens.refresh_token).toBeDefined();
+    expect(deposit?.credential.accessToken).toBe(issuedAccessTokens.at(-1));
+    expect(deposit?.credential.refreshToken).toBeDefined();
+    // The token endpoint is captured at acquisition (the crux) so the core refreshes without re-discovery.
+    expect(deposit?.credential.tokenEndpoint).toBe(`${identityProviderBase}/token`);
+    // The grant's `expires_in: 3600` is stamped against the flow's clock: 1_000_000 + 3600 * 1000.
+    expect(deposit?.credential.expiresAt).toBe(1_000_000 + 3_600_000);
     expect(deposit?.credential.clientInformation.client_id).toBe(
       registeredClients.at(-1)?.client_id,
     );

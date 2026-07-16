@@ -16995,7 +16995,7 @@
                 "block": {
                     "body": 13,
                     "defaults": {},
-                    "description": "Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,\nunguessable capability URL and serves the record's agents as MCP tools there — each record key is\nthe published tool name, each agent's declared signature the tool's advertised schema. The URL is\nthe key: possession grants access, nobody without it can call in. @subscriber@ receives the URL,\nhands it to whoever should connect (an AI session, a teammate's MCP client), and stays alive while\ncalls should be served; when it returns the URL deactivates and its result becomes `serve`'s\nresult. Cancelling the run cancels @subscriber@ and deactivates the URL the same way. The\nsubscriber's effects flow to the caller's handlers unchanged; the served agents are self-contained\n(their effects are handled, or are at most `io` and this module's throws), so any agent fits once its\nown effects are handled.",
+                    "description": "Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,\nunguessable capability URL and serves the record's agents as MCP tools there — each record key is\nthe published tool name, each agent's declared signature the tool's advertised schema. The URL is\nthe key: possession grants access, nobody without it can call in. @subscriber@ receives the URL,\nhands it to whoever should connect (an AI session, a teammate's MCP client), and stays alive while\ncalls should be served; when it returns the URL deactivates and its result becomes `serve`'s\nresult. Cancelling the run cancels @subscriber@ and deactivates the URL the same way. The\nsubscriber's effects flow to the caller's handlers unchanged; the served agents are self-contained\n(their effects are handled, or are at most `io` and this module's throws), so any agent fits once its\nown effects are handled. A served tool that throws or panics with no handler of its own cancels the\nwhole endpoint (its failure proxies up and fails the run unless caught above @subscriber@) — wrap a\ntool's body in a handler for per-request resilience.",
                     "kind": "agent",
                     "schema": {
                         "genericBindings": {
@@ -17195,7 +17195,7 @@
                 "block": {
                     "body": 7,
                     "defaults": {},
-                    "description": "A named OAuth credential, stored server-side. The runtime injects and refreshes its tokens itself;\nthe name is not a secret. While the name has no usable credential, any use pauses the run on a\n`prelude.mcp.authorize` escalation — answering it (the runtime-hosted browser flow) establishes the\ncredential and resumes the run.",
+                    "description": "A named OAuth credential, stored server-side. The runtime injects and refreshes its tokens itself;\nthe name is not a secret. While the name has no usable credential, any use pauses the run on a\n`prelude.oauth.authorize` escalation — answering it (the runtime-hosted browser flow) establishes the\ncredential and resumes the run.",
                     "kind": "agent",
                     "schema": {
                         "genericBindings": {},

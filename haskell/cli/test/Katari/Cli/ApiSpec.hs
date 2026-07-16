@@ -49,7 +49,7 @@ spec = do
 
     oauthPayload :: ByteString
     oauthPayload =
-      "{\"id\":\"esc-3\",\"request\":\"prelude.mcp.authorize\",\"argument\":{\"url\":\"https://mcp.example.test/mcp\",\"name\":\"github\"},\"runId\":\"run-1\",\"createdAt\":\"2026-07-13T00:00:00.000Z\",\"presentation\":{\"kind\":\"oauth\",\"url\":\"https://mcp.example.test/mcp\",\"name\":\"github\"}}"
+      "{\"id\":\"esc-3\",\"request\":\"prelude.oauth.authorize\",\"argument\":{\"url\":\"https://mcp.example.test/mcp\",\"name\":\"github\"},\"runId\":\"run-1\",\"createdAt\":\"2026-07-13T00:00:00.000Z\",\"presentation\":{\"kind\":\"oauth\",\"url\":\"https://mcp.example.test/mcp\",\"name\":\"github\"}}"
 
     unknownKindPayload :: ByteString
     unknownKindPayload =
