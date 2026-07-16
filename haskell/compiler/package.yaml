@@ -84,6 +84,7 @@ library:
     - Katari.Lowering
     - Katari.Lowering.Drop
     - Katari.Compile
+    - Katari.Docs
     - Katari.Query
     - Katari.Query.Completion
 

@@ -30,6 +30,7 @@ module Katari.Cli.Common
     tryLoadNearestConfig,
     warnCompilerMismatch,
     assembleSourcesOrExit,
+    compileResultOrExit,
     compileSourcesOrExit,
     writeOrExit,
     resolveNodeHelperInvocation,
@@ -256,15 +257,21 @@ writeOrExit subcommand description action =
     dieIn subcommand (description <> ": " <> Text.pack (show ioException))
 
 -- | Compile the assembled sources, print any diagnostics to stderr, and either exit with code 1 (on
--- an error-severity diagnostic) or return the lowered IR per module. Warnings are printed but do not
--- block.
-compileSourcesOrExit :: Map ModuleName Text -> IO (Map ModuleName IRModule)
-compileSourcesOrExit sources = do
+-- an error-severity diagnostic) or return the full 'Compile.CompileResult'. Warnings are printed but
+-- do not block. The full result exists for consumers that need more than the IR (docs reads the
+-- typed ASTs next to the lowered modules).
+compileResultOrExit :: Map ModuleName Text -> IO Compile.CompileResult
+compileResultOrExit sources = do
   let result = Compile.compile Compile.CompileInput {Compile.sources = sources}
       rendered = renderDiagnostics result.diagnostics
   unless (Text.null rendered) $ TextIO.hPutStrLn stderr rendered
   when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
-  pure result.loweredModules
+  pure result
+
+-- | 'compileResultOrExit' narrowed to the lowered IR per module, the only artifact most commands
+-- consume.
+compileSourcesOrExit :: Map ModuleName Text -> IO (Map ModuleName IRModule)
+compileSourcesOrExit sources = (.loweredModules) <$> compileResultOrExit sources
 
 -- | Where a spawned node helper (@katari-bundle@ during apply, @katari-mcp@ during @mcp pull@) comes
 -- from, as @Just (command, prefixArgs)@ in npm-convention order (a local install beats a global

@@ -13,6 +13,7 @@ import Katari.Cli.Command.Apply qualified as Apply
 import Katari.Cli.Command.Build qualified as Build
 import Katari.Cli.Command.Cancel qualified as Cancel
 import Katari.Cli.Command.Check qualified as Check
+import Katari.Cli.Command.Docs qualified as Docs
 import Katari.Cli.Command.Env qualified as Env
 import Katari.Cli.Command.File qualified as File
 import Katari.Cli.Command.Init qualified as Init
@@ -28,6 +29,7 @@ data Command
   = CommandInit Init.Options
   | CommandCheck Check.Options
   | CommandBuild Build.Options
+  | CommandDocs Docs.Options
   | CommandApply Apply.Options
   | CommandAdd Add.Options
   | CommandRemove Add.Options
@@ -47,6 +49,7 @@ commandParser =
     ( command "init" (info (CommandInit <$> Init.optionsParser) (progDesc "Scaffold a new Katari project"))
         <> command "check" (info (CommandCheck <$> Check.optionsParser) (progDesc "Compile the project and report diagnostics"))
         <> command "build" (info (CommandBuild <$> Build.optionsParser) (progDesc "Compile the project to IR JSON"))
+        <> command "docs" (info (CommandDocs <$> Docs.optionsParser) (progDesc "Emit the package's library API reference as JSON (--stdlib for the prelude)"))
         <> command "apply" (info (CommandApply <$> Apply.optionsParser) (progDesc "Compile and deploy the project to the runtime as a new snapshot"))
         <> command "add" (info (CommandAdd <$> Add.optionsParser) (progDesc "Add dependencies to katari.toml and refresh katari.lock"))
         <> command "remove" (info (CommandRemove <$> Add.optionsParser) (progDesc "Remove dependencies from katari.toml and refresh katari.lock"))
@@ -96,6 +99,7 @@ dispatch = \case
   CommandInit options -> ("init", Init.run options)
   CommandCheck options -> ("check", Check.run options)
   CommandBuild options -> ("build", Build.run options)
+  CommandDocs options -> ("docs", Docs.run options)
   CommandApply options -> ("apply", Apply.run options)
   CommandAdd options -> ("add", Add.run Add.ModeAdd options)
   CommandRemove options -> ("remove", Add.run Add.ModeRemove options)

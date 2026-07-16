@@ -66,6 +66,7 @@ library:
     - Katari.Cli.Command.Init
     - Katari.Cli.Command.Check
     - Katari.Cli.Command.Build
+    - Katari.Cli.Command.Docs
     - Katari.Cli.Command.Apply
     - Katari.Cli.Command.Add
     - Katari.Cli.Command.Run
