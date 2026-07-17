@@ -9,7 +9,8 @@
 //   - Sum types are tagged with a `kind` discriminator.
 //   - `BlockId` / `VariableId` / `GenericId` are integers (Haskell `Word32` / `Int`).
 //   - Maps keyed by `BlockId` serialise as JSON objects with stringified-number keys; the
-//     `QualifiedName`-keyed `entries` map uses the rendered "module.name" string as the key.
+//     `QualifiedName`-keyed `entries` map uses the rendered "module.name" string as the key, and each
+//     value is an `EntryInformation` (`{ block, private }`).
 
 import type { Json } from "./json";
 
@@ -43,10 +44,26 @@ export type IRModule = {
   metadata: Metadata;
   /** Every block, wrapped in a `BlockInformation` that carries the parameters its scope is seeded with. */
   blocks: Record<number, BlockInformation>;
-  /** Top-level callable name -> its agent `BlockId`, for resolving a delegate `CalleeName` at run time. */
-  entries: Record<QualifiedName, BlockId>;
+  /** Top-level callable name -> its `EntryInformation`, for resolving a delegate `CalleeName` (and a
+   *  first-class agent value by name) at run time. */
+  entries: Record<QualifiedName, EntryInformation>;
   /** Debug-only block names (pretty printer / traces); ignored on the hot path. */
   names: Record<number, string>;
+};
+
+/**
+ * One top-level callable entry: the agent `BlockId` it resolves to, plus whether the source
+ * declaration marked the agent's handle private. Privacy rides on the entry — rather than stripping a
+ * private agent from `entries` — because `entries` is also the module's first-class / delegate
+ * resolution table, which must keep resolving a private agent (the compiler already gates the call
+ * side). The runtime reads `private` only at its run-start boundary, to refuse starting a private agent
+ * from the operator surface; every other resolution ignores it. Only a user `agent` declaration can be
+ * private, so a signature-determined callable (data constructor / request / external / primitive) is
+ * always public.
+ */
+export type EntryInformation = {
+  block: BlockId;
+  private: boolean;
 };
 
 // ─── Block wrapper ─────────────────────────────────────────────────────────────────────────────

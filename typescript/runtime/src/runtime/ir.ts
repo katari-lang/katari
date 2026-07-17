@@ -21,8 +21,13 @@ export interface IrSource {
   preload(snapshot: SnapshotId): Promise<void>;
   /** A snapshot+module-bound access for the engine (must have been `preload`ed). */
   access(snapshot: SnapshotId, module: string): IrAccess;
-  /** Resolve a named callable to its module + agent block (the actor's delegate-target resolution). */
-  locate(snapshot: SnapshotId, name: QualifiedName): { module: string; blockId: BlockId };
+  /** Resolve a named callable to its module + agent block, plus the entry's handle privacy (the actor's
+   *  delegate-target resolution). `private` is read only at the run-start boundary; delegation and
+   *  first-class resolution ignore it, so resolving a private agent stays unchanged. */
+  locate(
+    snapshot: SnapshotId,
+    name: QualifiedName,
+  ): { module: string; blockId: BlockId; private: boolean };
 }
 
 /** An in-memory `IrSource`: modules registered directly (deploy / tests). `preload` is a no-op. */
@@ -63,12 +68,15 @@ export class SnapshotRegistry implements IrSource {
     };
   }
 
-  locate(snapshot: SnapshotId, name: QualifiedName): { module: string; blockId: BlockId } {
+  locate(
+    snapshot: SnapshotId,
+    name: QualifiedName,
+  ): { module: string; blockId: BlockId; private: boolean } {
     const module = moduleOfName(name);
-    const blockId = this.moduleIr(snapshot, module).entries[name];
-    if (blockId === undefined) {
+    const entry = this.moduleIr(snapshot, module).entries[name];
+    if (entry === undefined) {
       throw new Error(`callable "${name}" not found in snapshot ${snapshot}`);
     }
-    return { module, blockId };
+    return { module, blockId: entry.block, private: entry.private };
   }
 }

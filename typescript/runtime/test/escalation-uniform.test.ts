@@ -188,9 +188,9 @@ describe("uniform escalation — leak-freedom on a run-failing panic", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("helper")]: 2,
-        [createAgentName("prelude.add")]: 4,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("helper")]: { block: 2, private: false },
+        [createAgentName("prelude.add")]: { block: 4, private: false },
       },
       names: {},
     };
@@ -296,9 +296,9 @@ describe("uniform escalation — leak-freedom on a CAUGHT throw", () => {
         ...throwWrapper(7, 8, 80),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("sub")]: 5,
-        [THROW]: 7,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("sub")]: { block: 5, private: false },
+        [THROW]: { block: 7, private: false },
       },
       names: {},
     };
@@ -340,7 +340,7 @@ describe("uniform escalation — run-start boundary rejection", () => {
           parameters: { parameter: 11 },
         },
       },
-      entries: { [createAgentName("main")]: 0 }, // only `main` exists — `missing.agent` does not
+      entries: { [createAgentName("main")]: { block: 0, private: false } }, // only `main` exists — `missing.agent` does not
       names: {},
     };
     const persistence = new StoringPersistence();
@@ -485,8 +485,8 @@ describe("uniform escalation — recovery of an in-flight failure (cascade, no e
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("compute")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("compute")]: { block: 6, private: false },
       },
       names: {},
     };

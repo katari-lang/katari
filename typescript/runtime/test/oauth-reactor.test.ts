@@ -126,10 +126,10 @@ const OAUTH_IR: IRModule = {
     21: { block: { kind: "request", name: THROW, input: 70 }, parameters: { parameter: 70 } },
   },
   entries: {
-    [createAgentName("main")]: 0,
-    [createAgentName("guarded")]: 4,
-    [TOKEN]: 2,
-    [THROW]: 20,
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("guarded")]: { block: 4, private: false },
+    [TOKEN]: { block: 2, private: false },
+    [THROW]: { block: 20, private: false },
   },
   names: {},
 };

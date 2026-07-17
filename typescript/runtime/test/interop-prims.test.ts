@@ -551,8 +551,8 @@ describe("prelude.reflection.get_metadata", () => {
         3: { block: { kind: "sequence", operations: [], result: null }, parameters: {} },
       },
       entries: {
-        [createAgentName("main.greeter")]: 0,
-        [createAgentName("main.identity")]: 2,
+        [createAgentName("main.greeter")]: { block: 0, private: false },
+        [createAgentName("main.identity")]: { block: 2, private: false },
       },
       names: {},
     };

@@ -103,9 +103,9 @@ describe("secret information flow", () => {
         ...primitiveWrapper(20, 21, 22, "prelude.concat"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.secret")]: 10,
-        [createAgentName("prelude.concat")]: 20,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.secret")]: { block: 10, private: false },
+        [createAgentName("prelude.concat")]: { block: 20, private: false },
       },
       names: {},
     };
@@ -135,7 +135,7 @@ describe("secret information flow", () => {
           parameters: { parameter: 10 },
         },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -169,7 +169,7 @@ describe("secret information flow", () => {
           parameters: { parameter: 10 },
         },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -213,7 +213,7 @@ describe("secret information flow", () => {
         // identity body: the iteration's value is the element itself (an implicit next on fall-through)
         3: { block: { kind: "sequence", result: 20, operations: [] }, parameters: { iterator: 20 } },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -279,9 +279,9 @@ describe("secret information flow", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.secret")]: 10,
-        [createAgentName("prelude.panic")]: 20,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.secret")]: { block: 10, private: false },
+        [createAgentName("prelude.panic")]: { block: 20, private: false },
       },
       names: {},
     };

@@ -298,6 +298,17 @@ export class ProjectActor {
     argument: Value | null,
   ): Promise<string | null> {
     try {
+      // A private agent is handle-private: the compiler permits a call to it only from within a private
+      // world, and the run-start API is the runtime's operator-facing boundary — outside any world — so
+      // starting one here would surface its private escalations to the operator. Refuse it up front, the
+      // same 400 an unresolvable entry gets. Delegation / first-class resolution still resolve the entry
+      // (the block is untouched), so only this boundary is closed. `preload` first, so `locate` (a sync
+      // read of the loaded snapshot) can see the entry; a transient preload failure funnels through the
+      // catch as retryable, exactly as `conformCallableArgument`'s own preload would.
+      await this.ir.preload(snapshot);
+      if (this.ir.locate(snapshot, qualifiedName).private) {
+        return `the agent ${qualifiedName} is private and cannot be started from the runtime boundary`;
+      }
       const failures = await conformCallableArgument(
         { kind: "agent", name: qualifiedName, snapshot },
         argument,

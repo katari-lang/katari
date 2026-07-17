@@ -154,11 +154,11 @@ function ir(): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("plain")]: 10,
-      [createAgentName("compute")]: 6,
-      [createAgentName("thrower")]: 15,
-      [THROW]: 20,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("plain")]: { block: 10, private: false },
+      [createAgentName("compute")]: { block: 6, private: false },
+      [createAgentName("thrower")]: { block: 15, private: false },
+      [THROW]: { block: 20, private: false },
     },
     names: {},
   };

@@ -65,7 +65,7 @@ function constantIr(): IRModule {
         parameters: { parameter: 11 },
       },
     },
-    entries: { [createAgentName("main")]: 0 },
+    entries: { [createAgentName("main")]: { block: 0, private: false } },
     names: {},
   };
 }
@@ -100,8 +100,8 @@ function runRootRequestIr(): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("ask_value")]: 5,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("ask_value")]: { block: 5, private: false },
     },
     names: {},
   };
@@ -227,7 +227,7 @@ describe("leaf call inlining", () => {
           parameters: { parameter: 11 },
         },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     };
     const leaf: IRModule = {
@@ -248,8 +248,8 @@ describe("leaf call inlining", () => {
         },
       },
       entries: {
-        [createAgentName("leaf.add")]: 0,
-        [createAgentName("leaf.box")]: 2,
+        [createAgentName("leaf.add")]: { block: 0, private: false },
+        [createAgentName("leaf.box")]: { block: 2, private: false },
       },
       names: {},
     };

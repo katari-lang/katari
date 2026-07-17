@@ -27,7 +27,7 @@ import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
-import Katari.Data.IR (Agent (..), Block (..), BlockInformation (..), IRModule (..), SchemaInformation (..))
+import Katari.Data.IR (Agent (..), Block (..), BlockInformation (..), EntryInformation (..), IRModule (..), SchemaInformation (..))
 import Katari.Data.Id (TypeResolution (..))
 import Katari.Data.JSONSchema (JSONSchema (..))
 import Katari.Data.ModuleName (ModuleName)
@@ -683,8 +683,8 @@ renderEffectsClause = maybe "" (\effects -> " with " <> effects.rendered)
 wireSchema :: Map ModuleName IRModule -> ModuleName -> Text -> Maybe SchemaInformation
 wireSchema loweredModules moduleName declarationName = do
   irModule <- Map.lookup moduleName loweredModules
-  blockId <- Map.lookup QualifiedName {moduleName = moduleName, name = declarationName} irModule.entries
-  blockInformation <- Map.lookup blockId irModule.blocks
+  entry <- Map.lookup QualifiedName {moduleName = moduleName, name = declarationName} irModule.entries
+  blockInformation <- Map.lookup entry.block irModule.blocks
   case blockInformation.block of
     BlockAgent agent -> closedSchema agent.schema
     _ -> Nothing

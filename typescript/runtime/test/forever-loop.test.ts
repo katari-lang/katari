@@ -67,8 +67,8 @@ function foreverIr(): IRModule {
       5: { block: { kind: "external", key: "probe", input: 1101, reactor: "ffi" }, parameters: { parameter: 1101 } },
     },
     entries: {
-      [createAgentName("daemon_main")]: 0,
-      [createAgentName("probe")]: 4,
+      [createAgentName("daemon_main")]: { block: 0, private: false },
+      [createAgentName("probe")]: { block: 4, private: false },
     },
     names: {},
   };

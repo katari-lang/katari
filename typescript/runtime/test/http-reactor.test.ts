@@ -98,9 +98,9 @@ const FETCH_IR: IRModule = {
     },
   },
   entries: {
-    [createAgentName("main")]: 0,
-    [createAgentName("prelude.env.get_secret")]: 6,
-    [createAgentName("prelude.http.fetch")]: 8,
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("prelude.env.get_secret")]: { block: 6, private: false },
+    [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
   },
   names: {},
 };
@@ -167,8 +167,8 @@ const CANCELLING_FETCH_IR: IRModule = {
     },
   },
   entries: {
-    [createAgentName("main")]: 0,
-    [createAgentName("prelude.http.fetch")]: 8,
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
   },
   names: {},
 };
@@ -241,9 +241,9 @@ function postSecretBodyIr(url: string): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("prelude.env.get_secret")]: 6,
-      [createAgentName("prelude.http.fetch")]: 8,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.env.get_secret")]: { block: 6, private: false },
+      [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
     },
     names: {},
   };
@@ -294,8 +294,8 @@ function postPublicBodyIr(url: string): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("prelude.http.fetch")]: 8,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
     },
     names: {},
   };

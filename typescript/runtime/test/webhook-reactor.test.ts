@@ -138,12 +138,12 @@ function webhookIr(subscriber: "ffi" | "request"): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("echo")]: 2,
-      [createAgentName("prelude.webhook.inbound")]: 4,
-      [createAgentName("subscriber")]: 6,
-      [createAgentName("subscribe")]: 8,
-      [createAgentName("wait")]: 10,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("echo")]: { block: 2, private: false },
+      [createAgentName("prelude.webhook.inbound")]: { block: 4, private: false },
+      [createAgentName("subscriber")]: { block: 6, private: false },
+      [createAgentName("subscribe")]: { block: 8, private: false },
+      [createAgentName("wait")]: { block: 10, private: false },
     },
     names: {},
   };

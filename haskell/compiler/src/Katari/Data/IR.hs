@@ -64,10 +64,25 @@ data IRModule = IRModule
     -- | Every block (a 'BlockAgent' wrapper, an agent body, a leaf body, or a structural node), keyed by id.
     -- Each is wrapped in a 'BlockInformation' that carries how its thread's scope is seeded on entry.
     blocks :: Map BlockId BlockInformation,
-    -- | Top-level callable name -> its 'BlockAgent', for resolving an 'OperationDelegate' 'CalleeName' at run time.
-    entries :: Map QualifiedName BlockId,
+    -- | Top-level callable name -> its 'EntryInformation', for resolving an 'OperationDelegate'
+    -- 'CalleeName' at run time (and for materialising a first-class agent value by name).
+    entries :: Map QualifiedName EntryInformation,
     -- | Debug-only block names (pretty printer / traces). The runtime's hot path ignores it.
     names :: Map BlockId Text
+  }
+  deriving stock (Eq, Show)
+
+-- | One top-level callable entry: the 'BlockAgent' wrapper it resolves to, plus whether the source
+-- declaration marked the agent's handle private. Privacy is carried on the entry — rather than
+-- stripping a private agent from 'entries' — because entries is also the module's first-class /
+-- delegate resolution table, which must keep resolving a private agent (the compiler already gates the
+-- call side). The runtime reads this flag only at its run-start boundary, to refuse starting a private
+-- agent from the operator surface; every other resolution ignores it. Only an 'AgentDeclaration' can be
+-- private, so a signature-determined callable (data constructor / request / external / primitive) is
+-- always public.
+data EntryInformation = EntryInformation
+  { block :: BlockId,
+    private :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -521,6 +536,9 @@ instance ToJSON IRModule where
         "entries" .= irModule.entries,
         "names" .= irModule.names
       ]
+
+instance ToJSON EntryInformation where
+  toJSON entry = object ["block" .= entry.block, "private" .= entry.private]
 
 instance ToJSON BlockInformation where
   toJSON blockInformation =

@@ -571,7 +571,8 @@
                             "additionalProperties": true,
                             "properties": {
                                 "error": {
-                                    "$generic": 11
+                                    "$generic": 11,
+                                    "description": "The error payload; a handler naming this payload type catches it."
                                 }
                             },
                             "required": [
@@ -677,10 +678,12 @@
                             "additionalProperties": true,
                             "properties": {
                                 "left": {
-                                    "$generic": 3
+                                    "$generic": 3,
+                                    "description": "The dividend."
                                 },
                                 "right": {
-                                    "$generic": 3
+                                    "$generic": 3,
+                                    "description": "The divisor."
                                 }
                             },
                             "required": [
@@ -719,9 +722,11 @@
                             "additionalProperties": true,
                             "properties": {
                                 "left": {
+                                    "description": "The dividend.",
                                     "type": "number"
                                 },
                                 "right": {
+                                    "description": "The divisor.",
                                     "type": "number"
                                 }
                             },
@@ -751,23 +756,74 @@
             }
         },
         "entries": {
-            "prelude.add": 0,
-            "prelude.and": 24,
-            "prelude.concat": 30,
-            "prelude.divide": 8,
-            "prelude.equal": 12,
-            "prelude.greater_or_equal": 22,
-            "prelude.greater_than": 20,
-            "prelude.less_or_equal": 18,
-            "prelude.less_than": 16,
-            "prelude.modulo": 6,
-            "prelude.multiply": 4,
-            "prelude.negate": 10,
-            "prelude.not": 28,
-            "prelude.not_equal": 14,
-            "prelude.or": 26,
-            "prelude.subtract": 2,
-            "prelude.throw": 32
+            "prelude.add": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.and": {
+                "block": 24,
+                "private": false
+            },
+            "prelude.concat": {
+                "block": 30,
+                "private": false
+            },
+            "prelude.divide": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.equal": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.greater_or_equal": {
+                "block": 22,
+                "private": false
+            },
+            "prelude.greater_than": {
+                "block": 20,
+                "private": false
+            },
+            "prelude.less_or_equal": {
+                "block": 18,
+                "private": false
+            },
+            "prelude.less_than": {
+                "block": 16,
+                "private": false
+            },
+            "prelude.modulo": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.multiply": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.negate": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.not": {
+                "block": 28,
+                "private": false
+            },
+            "prelude.not_equal": {
+                "block": 14,
+                "private": false
+            },
+            "prelude.or": {
+                "block": 26,
+                "private": false
+            },
+            "prelude.subtract": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.throw": {
+                "block": 32,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -1339,17 +1395,50 @@
             }
         },
         "entries": {
-            "prelude.array.append": 4,
-            "prelude.array.concat": 6,
-            "prelude.array.contains": 10,
-            "prelude.array.empty": 20,
-            "prelude.array.flatten": 14,
-            "prelude.array.get": 0,
-            "prelude.array.index_of": 12,
-            "prelude.array.length": 2,
-            "prelude.array.range": 18,
-            "prelude.array.reverse": 16,
-            "prelude.array.slice": 8
+            "prelude.array.append": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.array.concat": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.array.contains": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.array.empty": {
+                "block": 20,
+                "private": false
+            },
+            "prelude.array.flatten": {
+                "block": 14,
+                "private": false
+            },
+            "prelude.array.get": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.array.index_of": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.array.length": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.array.range": {
+                "block": 18,
+                "private": false
+            },
+            "prelude.array.reverse": {
+                "block": 16,
+                "private": false
+            },
+            "prelude.array.slice": {
+                "block": 8,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -1393,6 +1482,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "key": {
+                                    "description": "The key that had no secret entry.",
                                     "type": "string"
                                 },
                                 "message": {
@@ -1461,6 +1551,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "key": {
+                                    "description": "The secret entry's key in the project's env store.",
                                     "type": "string"
                                 }
                             },
@@ -1574,9 +1665,18 @@
             }
         },
         "entries": {
-            "prelude.env.get_all": 4,
-            "prelude.env.get_secret": 2,
-            "prelude.env.missing_secret": 0
+            "prelude.env.get_all": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.env.get_secret": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.env.missing_secret": {
+                "block": 0,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -1744,9 +1844,18 @@
             }
         },
         "entries": {
-            "prelude.file.content_type": 2,
-            "prelude.file.read_base64": 0,
-            "prelude.file.size": 4
+            "prelude.file.content_type": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.file.read_base64": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.file.size": {
+                "block": 4,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -2243,20 +2352,24 @@
                             "additionalProperties": true,
                             "properties": {
                                 "body": {
+                                    "description": "The raw request body, sent verbatim (an explicit \"\" sends an empty body; dropped for GET / HEAD); may be a secret.",
                                     "type": "string"
                                 },
                                 "headers": {
                                     "additionalProperties": {
                                         "type": "string"
                                     },
+                                    "description": "Request headers by name; each value may be a secret, revealed only to @url@'s server.",
                                     "properties": {},
                                     "required": [],
                                     "type": "object"
                                 },
                                 "method": {
+                                    "description": "The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent.",
                                     "type": "string"
                                 },
                                 "url": {
+                                    "description": "The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error).",
                                     "type": "string"
                                 }
                             },
@@ -2365,9 +2478,11 @@
                             "additionalProperties": true,
                             "properties": {
                                 "body": {
+                                    "description": "The response body text.",
                                     "type": "string"
                                 },
                                 "status": {
+                                    "description": "The response's non-2xx status code.",
                                     "type": "integer"
                                 }
                             },
@@ -2433,17 +2548,20 @@
                             "additionalProperties": true,
                             "properties": {
                                 "body": {
+                                    "description": "The JSON document text to send (already serialized, e.g. `json.stringify`'s output); may be a secret.",
                                     "type": "string"
                                 },
                                 "headers": {
                                     "additionalProperties": {
                                         "type": "string"
                                     },
+                                    "description": "Extra headers by name, merged over the Content-Type default (the caller wins on a shared name); values may be secrets.",
                                     "properties": {},
                                     "required": [],
                                     "type": "object"
                                 },
                                 "url": {
+                                    "description": "The absolute URL to POST to; public by type.",
                                     "type": "string"
                                 }
                             },
@@ -2701,10 +2819,22 @@
             }
         },
         "entries": {
-            "prelude.http.fetch": 2,
-            "prelude.http.fetch_error": 0,
-            "prelude.http.post_json": 6,
-            "prelude.http.status_error": 4
+            "prelude.http.fetch": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.http.fetch_error": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.http.post_json": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.http.status_error": {
+                "block": 4,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -5026,6 +5156,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "text": {
+                                    "description": "The text of one complete JSON document.",
                                     "type": "string"
                                 }
                             },
@@ -5882,6 +6013,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "text": {
+                                    "description": "The text of one complete JSON document.",
                                     "type": "string"
                                 }
                             },
@@ -15664,25 +15796,82 @@
             }
         },
         "entries": {
-            "prelude.json.decode": 28,
-            "prelude.json.decode_error": 16,
-            "prelude.json.element": 40,
-            "prelude.json.encode": 24,
-            "prelude.json.field": 35,
-            "prelude.json.json_array": 10,
-            "prelude.json.json_boolean": 2,
-            "prelude.json.json_integer": 4,
-            "prelude.json.json_null": 0,
-            "prelude.json.json_number": 6,
-            "prelude.json.json_object": 12,
-            "prelude.json.json_string": 8,
-            "prelude.json.or_null": 30,
-            "prelude.json.parse": 18,
-            "prelude.json.parse_as": 20,
-            "prelude.json.parse_error": 14,
-            "prelude.json.stringify": 22,
-            "prelude.json.text": 45,
-            "prelude.json.to_text": 26
+            "prelude.json.decode": {
+                "block": 28,
+                "private": false
+            },
+            "prelude.json.decode_error": {
+                "block": 16,
+                "private": false
+            },
+            "prelude.json.element": {
+                "block": 40,
+                "private": false
+            },
+            "prelude.json.encode": {
+                "block": 24,
+                "private": false
+            },
+            "prelude.json.field": {
+                "block": 35,
+                "private": false
+            },
+            "prelude.json.json_array": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.json.json_boolean": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.json.json_integer": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.json.json_null": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.json.json_number": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.json.json_object": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.json.json_string": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.json.or_null": {
+                "block": 30,
+                "private": false
+            },
+            "prelude.json.parse": {
+                "block": 18,
+                "private": false
+            },
+            "prelude.json.parse_as": {
+                "block": 20,
+                "private": false
+            },
+            "prelude.json.parse_error": {
+                "block": 14,
+                "private": false
+            },
+            "prelude.json.stringify": {
+                "block": 22,
+                "private": false
+            },
+            "prelude.json.text": {
+                "block": 45,
+                "private": false
+            },
+            "prelude.json.to_text": {
+                "block": 26,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -15974,12 +16163,30 @@
             }
         },
         "entries": {
-            "prelude.math.abs": 0,
-            "prelude.math.ceil": 8,
-            "prelude.math.floor": 6,
-            "prelude.math.max": 4,
-            "prelude.math.min": 2,
-            "prelude.math.round": 10
+            "prelude.math.abs": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.math.ceil": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.math.floor": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.math.max": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.math.min": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.math.round": {
+                "block": 10,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -16798,7 +17005,8 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "The tool's arguments object, as a literal `json` tree; only the server validates it."
                                 },
                                 "auth": {
                                     "anyOf": [
@@ -16857,13 +17065,16 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "How the runtime authenticates with the server: `headers(...)` or `oauth(...)`."
                                 },
                                 "tool": {
+                                    "description": "The server-declared tool name.",
                                     "type": "string"
                                 },
                                 "url": {
-                                    "$generic": 6
+                                    "$generic": 6,
+                                    "description": "The MCP server's endpoint URL (the same descriptor the surrounding `provide` scope was opened with)."
                                 }
                             },
                             "required": [
@@ -17007,6 +17218,7 @@
                             "properties": {
                                 "subscriber": {
                                     "additionalProperties": true,
+                                    "description": "The endpoint's owner: receives the capability URL, and the server serves exactly while it runs.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -17026,6 +17238,7 @@
                                         ],
                                         "type": "object"
                                     },
+                                    "description": "The agents to publish, keyed by the tool name each is published under.",
                                     "properties": {},
                                     "required": [],
                                     "type": "object"
@@ -17136,6 +17349,7 @@
                                     "additionalProperties": {
                                         "type": "string"
                                     },
+                                    "description": "The headers sent on every request, by name; a value may be a secret.",
                                     "properties": {},
                                     "required": [],
                                     "type": "object"
@@ -17203,6 +17417,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "name": {
+                                    "description": "The stored credential's registered name; not a secret.",
                                     "type": "string"
                                 }
                             },
@@ -17323,10 +17538,12 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "How the runtime authenticates with the server: `headers(...)` or `oauth(...)`."
                                 },
                                 "continuation": {
                                     "additionalProperties": true,
+                                    "description": "The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -17336,7 +17553,8 @@
                                     "type": "object"
                                 },
                                 "url": {
-                                    "$generic": 3
+                                    "$generic": 3,
+                                    "description": "The MCP server's endpoint URL (streamable HTTP, with SSE fallback)."
                                 }
                             },
                             "required": [
@@ -17372,13 +17590,34 @@
             }
         },
         "entries": {
-            "prelude.mcp.auth_error": 2,
-            "prelude.mcp.call": 10,
-            "prelude.mcp.headers": 4,
-            "prelude.mcp.oauth": 6,
-            "prelude.mcp.provide": 8,
-            "prelude.mcp.serve": 12,
-            "prelude.mcp.server_error": 0
+            "prelude.mcp.auth_error": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.mcp.call": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.mcp.headers": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.mcp.oauth": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.mcp.provide": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.mcp.serve": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.mcp.server_error": {
+                "block": 0,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -17398,6 +17637,173 @@
             "7": "oauth.leaf",
             "8": "provide",
             "9": "provide.leaf"
+        }
+    },
+    "prelude.oauth": {
+        "blocks": {
+            "0": {
+                "block": {
+                    "body": 1,
+                    "defaults": {},
+                    "description": "The OAuth token could not be resolved for a TRANSIENT reason — a network error, or the token endpoint\nfailing (5xx) while refreshing. Thrown by `token`. Catch it to control retry — a retried call re-resolves.\n(A credential that needs a human to (re)authorize is never a throw: the run pauses on an authorization\nescalation instead.)",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "message": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "message"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "$constructor": {
+                                    "const": "prelude.oauth.server_error"
+                                },
+                                "value": {
+                                    "additionalProperties": true,
+                                    "properties": {
+                                        "message": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "message"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "$constructor",
+                                "value"
+                            ],
+                            "type": "object"
+                        },
+                        "requests": []
+                    }
+                },
+                "parameters": {}
+            },
+            "1": {
+                "block": {
+                    "input": 0,
+                    "kind": "construct",
+                    "name": "prelude.oauth.server_error"
+                },
+                "parameters": {
+                    "parameter": 0
+                }
+            },
+            "2": {
+                "block": {
+                    "body": 3,
+                    "defaults": {},
+                    "description": "Resolve a usable OAuth bearer token for the stored credential @name@, as a private string (the token is\ntainted secret and may flow only to a submission sink — an http `Authorization` header — never to a\nuser-facing boundary). The runtime holds the token material and refreshes it on demand, so no token ever\nenters the program. When @name@ has no usable token (never authorized, or refresh-dead), the run PAUSES on\na `prelude.oauth.authorize` escalation and resumes once the credential is established (the runtime-hosted\nbrowser flow, or a proactive login) — it does not fail. A transient resolution failure throws\n`server_error` (catchable with `use handler { request throw(error: oauth.server_error) -> never { ... } }`);\nuncaught, it fails the run.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "name": {
+                                    "description": "The registered name of a stored credential (e.g. \"github\"); the name itself is not a secret.",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "name"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "type": "string"
+                        },
+                        "requests": [
+                            {
+                                "descriptor": {
+                                    "input": {
+                                        "additionalProperties": true,
+                                        "properties": {
+                                            "error": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "$constructor": {
+                                                        "const": "prelude.oauth.server_error"
+                                                    },
+                                                    "value": {
+                                                        "additionalProperties": true,
+                                                        "properties": {
+                                                            "message": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "message"
+                                                        ],
+                                                        "type": "object"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "$constructor",
+                                                    "value"
+                                                ],
+                                                "type": "object"
+                                            }
+                                        },
+                                        "required": [
+                                            "error"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "name": "prelude.throw",
+                                    "output": {
+                                        "not": {}
+                                    }
+                                },
+                                "kind": "concrete"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "3": {
+                "block": {
+                    "input": 1,
+                    "key": "prelude.oauth.token",
+                    "kind": "external",
+                    "reactor": "oauth"
+                },
+                "parameters": {
+                    "parameter": 1
+                }
+            }
+        },
+        "entries": {
+            "prelude.oauth.server_error": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.oauth.token": {
+                "block": 2,
+                "private": false
+            }
+        },
+        "metadata": {
+            "schemaVersion": 3
+        },
+        "names": {
+            "0": "server_error",
+            "1": "server_error.leaf",
+            "2": "token",
+            "3": "token.leaf"
         }
     },
     "prelude.record": {
@@ -18000,16 +18406,46 @@
             }
         },
         "entries": {
-            "prelude.record.empty": 20,
-            "prelude.record.entries": 12,
-            "prelude.record.get": 0,
-            "prelude.record.has": 8,
-            "prelude.record.keys": 6,
-            "prelude.record.merge": 18,
-            "prelude.record.remove": 4,
-            "prelude.record.set": 2,
-            "prelude.record.size": 10,
-            "prelude.record.values": 14
+            "prelude.record.empty": {
+                "block": 20,
+                "private": false
+            },
+            "prelude.record.entries": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.record.get": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.record.has": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.record.keys": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.record.merge": {
+                "block": 18,
+                "private": false
+            },
+            "prelude.record.remove": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.record.set": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.record.size": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.record.values": {
+                "block": 14,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -18051,6 +18487,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "description": {
+                                    "description": "The `@\"...\"` documentation text; empty when undocumented.",
                                     "type": "string"
                                 },
                                 "input": {
@@ -18776,9 +19213,11 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "The input record's JSON Schema."
                                 },
                                 "name": {
+                                    "description": "The qualified name; empty for a local closure.",
                                     "type": "string"
                                 },
                                 "output": {
@@ -19504,7 +19943,8 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "The output's JSON Schema."
                                 },
                                 "requests": {
                                     "anyOf": [
@@ -20229,7 +20669,8 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "The requests' schemas: one { name, input, output } object per request the callable may perform."
                                 }
                             },
                             "required": [
@@ -22476,6 +22917,7 @@
                             "properties": {
                                 "value": {
                                     "additionalProperties": true,
+                                    "description": "The callable value to inspect.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -24724,6 +25166,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "message": {
+                                    "description": "The non-callable kind, or the offending path of the schema mismatch.",
                                     "type": "string"
                                 }
                             },
@@ -24786,9 +25229,12 @@
                         "input": {
                             "additionalProperties": true,
                             "properties": {
-                                "args": {},
+                                "args": {
+                                    "description": "The target's whole argument record, keyed by its parameter names."
+                                },
                                 "target": {
                                     "additionalProperties": true,
+                                    "description": "The callable value to dispatch (e.g. the tool an AI picked).",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -24872,10 +25318,22 @@
             }
         },
         "entries": {
-            "prelude.reflection.agent_metadata": 0,
-            "prelude.reflection.call_agent": 6,
-            "prelude.reflection.call_error": 4,
-            "prelude.reflection.get_metadata": 2
+            "prelude.reflection.agent_metadata": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.reflection.call_agent": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.reflection.call_error": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.reflection.get_metadata": {
+                "block": 2,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -24907,7 +25365,8 @@
                             "additionalProperties": true,
                             "properties": {
                                 "failure": {
-                                    "$generic": 0
+                                    "$generic": 0,
+                                    "description": "The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)."
                                 }
                             },
                             "required": [
@@ -25207,6 +25666,7 @@
                             "properties": {
                                 "continuation": {
                                     "additionalProperties": true,
+                                    "description": "The rest of the block (bound by `use`).",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -25328,7 +25788,8 @@
                             "additionalProperties": true,
                             "properties": {
                                 "value": {
-                                    "$generic": 1
+                                    "$generic": 1,
+                                    "description": "The completed run's result."
                                 }
                             },
                             "required": [
@@ -25476,6 +25937,7 @@
                             "properties": {
                                 "continuation": {
                                     "additionalProperties": true,
+                                    "description": "The rest of the block (bound by `use`).",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -25485,12 +25947,15 @@
                                     "type": "object"
                                 },
                                 "factor": {
+                                    "description": "The per-replay delay multiplier (e.g. 2 doubles the delay each replay).",
                                     "type": "number"
                                 },
                                 "initial_delay_milliseconds": {
+                                    "description": "The delay before the first re-run, in milliseconds.",
                                     "type": "number"
                                 },
                                 "max_delay_milliseconds": {
+                                    "description": "The backoff ceiling, in milliseconds; the delay never grows past it.",
                                     "type": "number"
                                 }
                             },
@@ -25956,6 +26421,7 @@
                             "properties": {
                                 "continuation": {
                                     "additionalProperties": true,
+                                    "description": "The rest of the block (bound by `use`).",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -25965,12 +26431,15 @@
                                     "type": "object"
                                 },
                                 "factor": {
+                                    "description": "The per-replay delay multiplier (e.g. 2 doubles the delay each replay).",
                                     "type": "number"
                                 },
                                 "initial_delay_milliseconds": {
+                                    "description": "The delay before the first re-run, in milliseconds.",
                                     "type": "number"
                                 },
                                 "max_attempts": {
+                                    "description": "The total run budget, not a retry count: the @max_attempts@-th `interrupted` re-raises instead of re-running.",
                                     "type": "number"
                                 }
                             },
@@ -26284,7 +26753,8 @@
                             "additionalProperties": true,
                             "properties": {
                                 "failure": {
-                                    "$generic": 2
+                                    "$generic": 2,
+                                    "description": "The failure the run's `interrupted` carried."
                                 }
                             },
                             "required": [
@@ -26733,6 +27203,7 @@
                             "properties": {
                                 "continuation": {
                                     "additionalProperties": true,
+                                    "description": "The rest of the block, run once with `interrupted` served.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -26988,15 +27459,42 @@
             }
         },
         "entries": {
-            "prelude.replay.exponential": 33,
-            "prelude.replay.forever": 22,
-            "prelude.replay.give_up": 31,
-            "prelude.replay.immediate": 15,
-            "prelude.replay.interrupted": 0,
-            "prelude.replay.ran": 2,
-            "prelude.replay.replay_after": 29,
-            "prelude.replay.run_once": 6,
-            "prelude.replay.signalled": 4
+            "prelude.replay.exponential": {
+                "block": 33,
+                "private": false
+            },
+            "prelude.replay.forever": {
+                "block": 22,
+                "private": false
+            },
+            "prelude.replay.give_up": {
+                "block": 31,
+                "private": false
+            },
+            "prelude.replay.immediate": {
+                "block": 15,
+                "private": false
+            },
+            "prelude.replay.interrupted": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.replay.ran": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.replay.replay_after": {
+                "block": 29,
+                "private": false
+            },
+            "prelude.replay.run_once": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.replay.signalled": {
+                "block": 4,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -27680,21 +28178,66 @@
             }
         },
         "entries": {
-            "prelude.string.contains": 8,
-            "prelude.string.ends_with": 12,
-            "prelude.string.index_of": 14,
-            "prelude.string.join": 4,
-            "prelude.string.length": 0,
-            "prelude.string.replace": 16,
-            "prelude.string.slice": 6,
-            "prelude.string.split": 2,
-            "prelude.string.starts_with": 10,
-            "prelude.string.to_integer": 26,
-            "prelude.string.to_lower": 22,
-            "prelude.string.to_number": 28,
-            "prelude.string.to_string": 24,
-            "prelude.string.to_upper": 20,
-            "prelude.string.trim": 18
+            "prelude.string.contains": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.string.ends_with": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.string.index_of": {
+                "block": 14,
+                "private": false
+            },
+            "prelude.string.join": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.string.length": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.string.replace": {
+                "block": 16,
+                "private": false
+            },
+            "prelude.string.slice": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.string.split": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.string.starts_with": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.string.to_integer": {
+                "block": 26,
+                "private": false
+            },
+            "prelude.string.to_lower": {
+                "block": 22,
+                "private": false
+            },
+            "prelude.string.to_number": {
+                "block": 28,
+                "private": false
+            },
+            "prelude.string.to_string": {
+                "block": 24,
+                "private": false
+            },
+            "prelude.string.to_upper": {
+                "block": 20,
+                "private": false
+            },
+            "prelude.string.trim": {
+                "block": 18,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -27782,6 +28325,7 @@
                             "properties": {
                                 "deliver_to": {
                                     "additionalProperties": true,
+                                    "description": "Called once per occurrence; its @time@ is the occurrence's scheduled epoch millisecond, not the delivery instant.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -27846,7 +28390,8 @@
                                             ],
                                             "type": "object"
                                         }
-                                    ]
+                                    ],
+                                    "description": "When occurrences fire: an `interval(...)` or a `cron(...)` value."
                                 }
                             },
                             "required": [
@@ -27891,6 +28436,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "milliseconds": {
+                                    "description": "The delay, in milliseconds; zero or negative resolves at once.",
                                     "type": "number"
                                 }
                             },
@@ -27930,6 +28476,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "time": {
+                                    "description": "The absolute wake instant, in epoch milliseconds; a past instant resolves at once.",
                                     "type": "number"
                                 }
                             },
@@ -27969,6 +28516,7 @@
                             "additionalProperties": true,
                             "properties": {
                                 "milliseconds": {
+                                    "description": "The gap between occurrences, in milliseconds; a non-positive gap panics the watch.",
                                     "type": "number"
                                 }
                             },
@@ -28029,9 +28577,11 @@
                             "additionalProperties": true,
                             "properties": {
                                 "expression": {
+                                    "description": "5 fields, or 6 with a leading seconds field; a malformed expression panics the watch.",
                                     "type": "string"
                                 },
                                 "timezone": {
+                                    "description": "An IANA zone name; an unknown zone panics the watch.",
                                     "type": "string"
                                 }
                             },
@@ -28087,12 +28637,30 @@
             }
         },
         "entries": {
-            "prelude.time.cron": 8,
-            "prelude.time.interval": 6,
-            "prelude.time.now": 0,
-            "prelude.time.sleep": 2,
-            "prelude.time.sleep_until": 4,
-            "prelude.time.watch": 10
+            "prelude.time.cron": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.time.interval": {
+                "block": 6,
+                "private": false
+            },
+            "prelude.time.now": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.time.sleep": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.time.sleep_until": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.time.watch": {
+                "block": 10,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -28130,6 +28698,7 @@
                             "properties": {
                                 "callback": {
                                     "additionalProperties": true,
+                                    "description": "Called once per POST. A body failing its input schema is rejected 400 before it runs; its unhandled failure cancels the endpoint.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -28140,6 +28709,7 @@
                                 },
                                 "subscriber": {
                                     "additionalProperties": true,
+                                    "description": "The URL's owner: receives the minted public URL, and the endpoint serves exactly while it runs.",
                                     "properties": {
                                         "$agent": {}
                                     },
@@ -28181,7 +28751,10 @@
             }
         },
         "entries": {
-            "prelude.webhook.inbound": 0
+            "prelude.webhook.inbound": {
+                "block": 0,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3
@@ -32722,17 +33295,50 @@
             }
         },
         "entries": {
-            "replay_probe.attended_main": 60,
-            "replay_probe.crashed": 15,
-            "replay_probe.exponential_exhaust_main": 40,
-            "replay_probe.exponential_recover_main": 29,
-            "replay_probe.forever_main": 17,
-            "replay_probe.intercepted_main": 71,
-            "replay_probe.needs_reauth": 58,
-            "replay_probe.probe": 4,
-            "replay_probe.probe_failed": 0,
-            "replay_probe.probe_source": 2,
-            "replay_probe.threw": 13
+            "replay_probe.attended_main": {
+                "block": 60,
+                "private": false
+            },
+            "replay_probe.crashed": {
+                "block": 15,
+                "private": false
+            },
+            "replay_probe.exponential_exhaust_main": {
+                "block": 40,
+                "private": false
+            },
+            "replay_probe.exponential_recover_main": {
+                "block": 29,
+                "private": false
+            },
+            "replay_probe.forever_main": {
+                "block": 17,
+                "private": false
+            },
+            "replay_probe.intercepted_main": {
+                "block": 71,
+                "private": false
+            },
+            "replay_probe.needs_reauth": {
+                "block": 58,
+                "private": false
+            },
+            "replay_probe.probe": {
+                "block": 4,
+                "private": false
+            },
+            "replay_probe.probe_failed": {
+                "block": 0,
+                "private": false
+            },
+            "replay_probe.probe_source": {
+                "block": 2,
+                "private": false
+            },
+            "replay_probe.threw": {
+                "block": 13,
+                "private": false
+            }
         },
         "metadata": {
             "schemaVersion": 3

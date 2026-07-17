@@ -39,6 +39,19 @@ spec = describe "lowerModule (via compile)" $ do
           agent.schema.output `shouldBe` SchemaInteger
         other -> expectationFailure ("expected a BlockAgent entry, got " <> show other)
 
+  describe "entry privacy (the run-start boundary reads it)" $ do
+    it "marks a `private agent`'s entry private while keeping it resolvable as an entry" $ do
+      let irModule = loweredTestModule "private agent hidden() -> integer { 1 }"
+      entryPrivacy irModule "hidden" `shouldBe` Just True
+
+    it "leaves a plain agent's entry public" $ do
+      let irModule = loweredTestModule "agent shown() -> integer { 1 }"
+      entryPrivacy irModule "shown" `shouldBe` Just False
+
+    it "keeps a signature-determined callable (a `data` constructor) public" $ do
+      let irModule = loweredTestModule "data Pair(left: integer, right: integer)"
+      entryPrivacy irModule "Pair" `shouldBe` Just False
+
   describe "data constructors" $
     it "lowers a `data` declaration to a `BlockConstruct` leaf under its agent wrapper" $ do
       let irModule = loweredTestModule "data Pair(left: integer, right: integer)"
@@ -416,9 +429,13 @@ shouldLowerWithNode source nodeKind =
 
 entryBlock :: IRModule -> Text -> Maybe Block
 entryBlock irModule name = do
-  blockId <- Map.lookup (testName name) irModule.entries
-  information <- Map.lookup blockId irModule.blocks
+  entry <- Map.lookup (testName name) irModule.entries
+  information <- Map.lookup entry.block irModule.blocks
   pure information.block
+
+-- | The privacy flag the module's entry carries for a top-level callable ('Nothing' when absent).
+entryPrivacy :: IRModule -> Text -> Maybe Bool
+entryPrivacy irModule name = (.private) <$> Map.lookup (testName name) irModule.entries
 
 blockKind :: IRModule -> BlockId -> Maybe Text
 blockKind irModule blockId = blockKindOf . (.block) <$> Map.lookup blockId irModule.blocks
@@ -679,8 +696,8 @@ danglingReferences irModule =
 nonAgentEntries :: IRModule -> List QualifiedName
 nonAgentEntries irModule =
   [ name
-    | (name, blockId) <- Map.toList irModule.entries,
-      maybe True (not . isAgentBlock . (.block)) (Map.lookup blockId irModule.blocks)
+    | (name, entry) <- Map.toList irModule.entries,
+      maybe True (not . isAgentBlock . (.block)) (Map.lookup entry.block irModule.blocks)
   ]
   where
     isAgentBlock = \case
@@ -690,7 +707,7 @@ nonAgentEntries irModule =
 -- | Every block id mentioned by an entry or reachable through a block's structure / operations.
 referencedBlockIds :: IRModule -> List BlockId
 referencedBlockIds irModule =
-  Map.elems irModule.entries <> concatMap (blockReferences . (.block)) (Map.elems irModule.blocks)
+  map (.block) (Map.elems irModule.entries) <> concatMap (blockReferences . (.block)) (Map.elems irModule.blocks)
 
 blockReferences :: Block -> List BlockId
 blockReferences = \case

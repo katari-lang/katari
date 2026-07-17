@@ -167,10 +167,10 @@ const OAUTH_PROVIDE_IR: IRModule = {
     },
   },
   entries: {
-    [createAgentName("main")]: 0,
-    [createAgentName("prelude.mcp.provide")]: 2,
-    [createAgentName("prelude.mcp.oauth")]: 4,
-    [createAgentName("continuation")]: 6,
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("prelude.mcp.provide")]: { block: 2, private: false },
+    [createAgentName("prelude.mcp.oauth")]: { block: 4, private: false },
+    [createAgentName("continuation")]: { block: 6, private: false },
   },
   names: {},
 };

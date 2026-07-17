@@ -162,9 +162,9 @@ describe("recovery", () => {
         9: { block: { kind: "external", key: "step2", input: 10, reactor: "ffi" }, parameters: { parameter: 10 } },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("step1")]: 6,
-        [createAgentName("step2")]: 8,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("step1")]: { block: 6, private: false },
+        [createAgentName("step2")]: { block: 8, private: false },
       },
       names: {},
     };
@@ -233,8 +233,8 @@ describe("recovery", () => {
         7: { block: { kind: "external", key: "step1", input: 8, reactor: "ffi" }, parameters: { parameter: 8 } },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("step1")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("step1")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -297,8 +297,8 @@ describe("recovery", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -377,8 +377,8 @@ describe("recovery", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -471,8 +471,8 @@ describe("recovery", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -509,7 +509,7 @@ describe("recovery", () => {
           parameters: { parameter: 11 },
         },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     };
   }
@@ -653,8 +653,8 @@ describe("recovery", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("compute")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("compute")]: { block: 6, private: false },
       },
       names: {},
     };

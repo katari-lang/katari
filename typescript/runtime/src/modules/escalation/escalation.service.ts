@@ -1,10 +1,15 @@
-import type { AgentBlock, JSONSchema, Json } from "@katari-lang/types";
+import type { JSONSchema, Json } from "@katari-lang/types";
 import { db } from "../../db/client.js";
 import { BadRequestError, NotFoundError } from "../../lib/errors.js";
 import { decodeClientJson, facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
 import { conformValue, renderConformFailures } from "../../runtime/value/validation.js";
-import { collectEntries, deriveAnswerSchema, loadSnapshotModules } from "../agent/agent.reader.js";
+import {
+  type CallableEntry,
+  collectEntries,
+  deriveAnswerSchema,
+  loadSnapshotModules,
+} from "../agent/agent.reader.js";
 import { type EscalationPresentation, presentEscalation } from "./escalation.presentation.js";
 import { escalationRepository, type OpenEscalationView } from "./escalation.repository.js";
 
@@ -32,7 +37,7 @@ export const escalationService = {
    *  escalation). */
   async listOpen(projectId: string) {
     const views = await escalationRepository.listOpen(db, projectId);
-    const entriesBySnapshot = new Map<string | null, Map<string, AgentBlock>>();
+    const entriesBySnapshot = new Map<string | null, Map<string, CallableEntry>>();
     const responses = [];
     for (const view of views) {
       let entries = entriesBySnapshot.get(view.snapshotId);

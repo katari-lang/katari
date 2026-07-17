@@ -115,8 +115,8 @@ describe("in-memory core", () => {
         ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -163,8 +163,8 @@ describe("in-memory core", () => {
         ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -205,7 +205,7 @@ describe("in-memory core", () => {
           parameters: {},
         },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -271,8 +271,8 @@ describe("in-memory core", () => {
         ...primitiveWrapper(6, 7, 8, "prelude.multiply"),
       },
       entries: {
-        [createAgentName("triple")]: 0,
-        [createAgentName("prelude.multiply")]: 6,
+        [createAgentName("triple")]: { block: 0, private: false },
+        [createAgentName("prelude.multiply")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -360,7 +360,7 @@ describe("in-memory core", () => {
           parameters: {},
         },
       },
-      entries: { [createAgentName("echo")]: 0 },
+      entries: { [createAgentName("echo")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -474,7 +474,7 @@ describe("in-memory core", () => {
           parameters: { result: 70 },
         },
       },
-      entries: { [createAgentName("pick")]: 0 },
+      entries: { [createAgentName("pick")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -545,7 +545,7 @@ describe("in-memory core", () => {
           parameters: {},
         },
       },
-      entries: { [createAgentName("classify")]: 0 },
+      entries: { [createAgentName("classify")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -640,7 +640,7 @@ describe("in-memory core", () => {
           parameters: {},
         },
       },
-      entries: { [createAgentName("count_up")]: 0 },
+      entries: { [createAgentName("count_up")]: { block: 0, private: false } },
       names: {},
     };
 
@@ -680,8 +680,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("greet")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("greet")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -758,8 +758,8 @@ describe("in-memory core", () => {
         7: { block: { kind: "external", key: "greet", input: 8, reactor: "ffi" }, parameters: { parameter: 8 } },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("greet")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("greet")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -844,8 +844,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("makeConst")]: 2,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("makeConst")]: { block: 2, private: false },
       },
       names: {},
     };
@@ -921,8 +921,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -995,8 +995,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -1069,8 +1069,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -1114,8 +1114,8 @@ describe("in-memory core", () => {
         ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -1152,7 +1152,7 @@ describe("in-memory core", () => {
           parameters: { parameter: 1 },
         },
       },
-      entries: { [createAgentName("main")]: 0 }, // only `main` exists — `missing.sub` does not
+      entries: { [createAgentName("main")]: { block: 0, private: false } }, // only `main` exists — `missing.sub` does not
       names: {},
     };
 
@@ -1227,8 +1227,8 @@ describe("in-memory core", () => {
         ...primitiveWrapper(6, 7, 8, "prelude.add"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -1267,8 +1267,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -1326,8 +1326,8 @@ describe("in-memory core", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("signal")]: 5,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("signal")]: { block: 5, private: false },
       },
       names: {},
     };
@@ -1363,7 +1363,7 @@ describe("in-memory core", () => {
           parameters: { parameter: 1 },
         },
       },
-      entries: { [createAgentName("answer")]: 0 },
+      entries: { [createAgentName("answer")]: { block: 0, private: false } },
       names: {},
     };
 

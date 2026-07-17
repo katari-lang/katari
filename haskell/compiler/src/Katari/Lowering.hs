@@ -102,7 +102,7 @@ data LowerState = LowerState
   { nextBlockId :: Word32,
     nextVariableId :: Word32,
     blockTable :: Map BlockId BlockInformation,
-    entryTable :: Map QualifiedName BlockId,
+    entryTable :: Map QualifiedName EntryInformation,
     nameTable :: Map BlockId Text,
     -- | The operations of the block currently being built, accumulated in reverse for O(1) prepend and
     -- reversed once at the block boundary ('withFreshOperations').
@@ -177,9 +177,13 @@ recordBlock blockId block parameters name =
         nameTable = maybe state.nameTable (\debugName -> Map.insert blockId debugName state.nameTable) name
       }
 
-registerEntry :: QualifiedName -> BlockId -> Lower ()
-registerEntry qualifiedName blockId =
-  modify (\state -> state {entryTable = Map.insert qualifiedName blockId state.entryTable})
+-- | Register a top-level callable as a module entry. 'private' is the source declaration's handle
+-- privacy (an 'AgentDeclaration''s @private@; always 'False' for a signature-determined callable) — it
+-- rides on the entry so the runtime can refuse to start a private agent at its run-start boundary,
+-- while first-class / delegate resolution keeps resolving the entry unchanged.
+registerEntry :: QualifiedName -> BlockId -> Bool -> Lower ()
+registerEntry qualifiedName blockId private =
+  modify (\state -> state {entryTable = Map.insert qualifiedName EntryInformation {block = blockId, private = private} state.entryTable})
 
 ---------------------------------------------------------------------------------------------------
 -- Scope / jump-target helpers
@@ -484,7 +488,7 @@ lowerDeclaration = \case
   AST.DeclarationAgent declaration -> do
     let qualifiedName = resolvedQualifiedName declaration.variableReference
     agentBlock <- freshBlockId
-    registerEntry qualifiedName agentBlock
+    registerEntry qualifiedName agentBlock declaration.private
     buildAgent
       True
       agentBlock
@@ -540,7 +544,9 @@ lowerSignatureCallable ::
 lowerSignatureCallable reference name annotation parameters makeLeaf = do
   let qualifiedName = resolvedQualifiedName reference
   agentBlock <- freshBlockId
-  registerEntry qualifiedName agentBlock
+  -- A signature-determined callable (data constructor / request / external / primitive) has no
+  -- @private@ syntax, so its entry is always public.
+  registerEntry qualifiedName agentBlock False
   inputVariable <- freshVariableId
   let defaults =
         Map.fromList

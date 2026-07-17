@@ -97,9 +97,9 @@ function fixture(): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("greeter")]: 2,
-      [createAgentName("prelude.reflection.call_agent")]: 4,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("greeter")]: { block: 2, private: false },
+      [createAgentName("prelude.reflection.call_agent")]: { block: 4, private: false },
     },
     names: {},
   };
@@ -249,8 +249,8 @@ describe("call-site generics on the delegate operation", () => {
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("pick")]: 2,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("pick")]: { block: 2, private: false },
       },
       names: {},
     };
@@ -362,9 +362,9 @@ describe("call_agent generic resolution — the target's own generics validate i
         },
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("transform")]: 2,
-        [createAgentName("prelude.reflection.call_agent")]: 4,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("transform")]: { block: 2, private: false },
+        [createAgentName("prelude.reflection.call_agent")]: { block: 4, private: false },
       },
       names: {},
     };
@@ -502,7 +502,7 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
           parameters: { parameter: 10 },
         },
       },
-      entries: { [createAgentName("main")]: 0 },
+      entries: { [createAgentName("main")]: { block: 0, private: false } },
       names: {},
     } as IRModule;
   }
@@ -597,6 +597,25 @@ describe("delegate argument validation", () => {
         fields: { name: { kind: "integer", value: 7 } },
       }),
     ).resolves.toMatch(/name: expected a value of type string/);
+  });
+
+  test("the run-start API refuses to start a private agent (400), even with a conforming argument", async () => {
+    // A private agent is handle-private: startable only from within a private world, never from the
+    // runtime's operator boundary. `conformRunArgument` refuses it up front (a self-contained rejection
+    // the facade turns into a 400) — before argument validation, so even a conforming argument is
+    // rejected — while a public entry in the same module still passes (null).
+    const ir = fixture();
+    ir.entries[createAgentName("greeter")] = { block: 2, private: true };
+    const actor = actorFor(ir);
+    await expect(
+      actor.conformRunArgument(createAgentName("greeter"), SNAPSHOT, {
+        kind: "record",
+        fields: { name: { kind: "string", value: "bob" } },
+      }),
+    ).resolves.toMatch(/private and cannot be started from the runtime boundary/);
+    await expect(
+      actor.conformRunArgument(createAgentName("main"), SNAPSHOT, null),
+    ).resolves.toBeNull();
   });
 
   test("a malformed argument on a static sub-call panics at the acceptance surface (last-line defence)", async () => {

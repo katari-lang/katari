@@ -62,16 +62,26 @@ async function resolveHeadSnapshotId(projectId: string): Promise<string> {
   return project.headSnapshotId;
 }
 
-/** Every callable's agent block across a snapshot's modules, keyed by qualified name. Entries always
- *  point at agent blocks (the sole schema-carrying wrapper); anything else is skipped defensively. The
- *  whole block is returned so callers see both its schema and its `@"..."` description. */
-export function collectEntries(modules: Map<string, IRModule>): Map<string, AgentBlock> {
-  const entries = new Map<string, AgentBlock>();
+/** One resolved callable entry: its agent block plus the entry's handle privacy. Privacy travels with
+ *  the block so a presentation surface (the agents listing) can hide a private agent, while the schema
+ *  reader below still resolves it (an escalation's answer schema comes from a public request entry, but
+ *  the reader stays privacy-agnostic — it never filters). */
+export interface CallableEntry {
+  block: AgentBlock;
+  private: boolean;
+}
+
+/** Every callable's entry across a snapshot's modules, keyed by qualified name. Entries always point at
+ *  agent blocks (the sole schema-carrying wrapper); anything else is skipped defensively. The whole
+ *  block is returned so callers see both its schema and its `@"..."` description, alongside the entry's
+ *  `private` flag. */
+export function collectEntries(modules: Map<string, IRModule>): Map<string, CallableEntry> {
+  const entries = new Map<string, CallableEntry>();
   for (const ir of modules.values()) {
-    for (const [qualifiedName, blockId] of Object.entries(ir.entries)) {
-      const information = ir.blocks[blockId];
+    for (const [qualifiedName, entry] of Object.entries(ir.entries)) {
+      const information = ir.blocks[entry.block];
       if (information === undefined || information.block.kind !== "agent") continue;
-      entries.set(qualifiedName, information.block);
+      entries.set(qualifiedName, { block: information.block, private: entry.private });
     }
   }
   return entries;
@@ -80,8 +90,8 @@ export function collectEntries(modules: Map<string, IRModule>): Map<string, Agen
 /** The schema an answer to `request` must satisfy: the request callable's output schema. `null` when
  *  the snapshot has no such entry (the caller falls back to unvalidated input). */
 export function deriveAnswerSchema(
-  entries: Map<string, AgentBlock>,
+  entries: Map<string, CallableEntry>,
   request: string,
 ): JSONSchema | null {
-  return entries.get(request)?.schema.output ?? null;
+  return entries.get(request)?.block.schema.output ?? null;
 }

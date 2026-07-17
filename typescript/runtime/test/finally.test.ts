@@ -244,9 +244,9 @@ describe("finally (defer)", () => {
         ...externalFfiAgent(6, 7, 600, "finalize_b"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("finalize_a")]: 4,
-        [createAgentName("finalize_b")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("finalize_a")]: { block: 4, private: false },
+        [createAgentName("finalize_b")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -294,9 +294,9 @@ describe("finally (defer)", () => {
         ...requestAgent(6, 7, 600, "ask_value"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("finalize_a")]: 4,
-        [createAgentName("ask_value")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("finalize_a")]: { block: 4, private: false },
+        [createAgentName("ask_value")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -338,8 +338,8 @@ describe("finally (defer)", () => {
         ...externalFfiAgent(4, 5, 400, "finalize_slow"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("finalize_slow")]: 4,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("finalize_slow")]: { block: 4, private: false },
       },
       names: {},
     };
@@ -401,9 +401,9 @@ describe("finally (defer)", () => {
         ...primitiveWrapper(6, 7, 600, "prelude.add"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("finalize_a")]: 4,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("finalize_a")]: { block: 4, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -442,9 +442,9 @@ describe("finally (defer)", () => {
         ...primitiveWrapper(6, 7, 600, "prelude.add"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("finalize_a")]: 4,
-        [createAgentName("prelude.add")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("finalize_a")]: { block: 4, private: false },
+        [createAgentName("prelude.add")]: { block: 6, private: false },
       },
       names: {},
     };
@@ -480,8 +480,8 @@ describe("finally (defer)", () => {
         ...externalFfiAgent(4, 5, 400, "finalize_slow"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("finalize_slow")]: 4,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("finalize_slow")]: { block: 4, private: false },
       },
       names: {},
     };
@@ -558,8 +558,8 @@ describe("finally (defer)", () => {
         ...requestAgent(6, 7, 600, "ask_value"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [createAgentName("ask_value")]: 6,
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("ask_value")]: { block: 6, private: false },
       },
       names: {},
     };
