@@ -6,6 +6,6 @@ description = "A new Katari project."
 url = "http://localhost:3000"
 
 [dependencies]
-registry = "https://raw.githubusercontent.com/yukikurage/katari-registry/main"
+registry = "https://raw.githubusercontent.com/katari-lang/katari-registry/main"
 snapshot = "staging"
 packages = []

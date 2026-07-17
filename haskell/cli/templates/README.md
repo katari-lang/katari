@@ -14,8 +14,13 @@ questions to their operator, and the runtime keeps every run durable.
    docker compose up -d
    ```
 
-   The web console is now at <http://localhost:3000> (it prompts for the `KATARI_API_KEY`); the CLI
-   reads the key from `.env`.
+   The web console is now at <http://localhost:3000> (it prompts for the `KATARI_API_KEY`). The CLI
+   reads `KATARI_API_KEY` from its environment — not from `.env` — so export it in the shell you run
+   `katari` from:
+
+   ```sh
+   export $(grep '^KATARI_API_KEY=' .env)
+   ```
 
 2. Deploy this project:
 
