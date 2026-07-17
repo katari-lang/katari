@@ -1,2 +1,0 @@
-ALTER TABLE "threads" DROP CONSTRAINT "threads_kind_check";--> statement-breakpoint
-ALTER TABLE "threads" ADD CONSTRAINT "threads_kind_check" CHECK ("threads"."kind" in ('agent', 'sequence', 'primitive', 'construct', 'request', 'match', 'for', 'forever', 'handle', 'parallel', 'delegate', 'external'));

@@ -5,113 +5,15 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1783346286513,
+      "when": 1784273374921,
       "tag": "0000_initial_runtime_schema",
       "breakpoints": true
     },
     {
       "idx": 1,
       "version": "7",
-      "when": 1783409334595,
-      "tag": "0001_strong_gladiator",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1783492847875,
-      "tag": "0002_polite_the_spike",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1783659669833,
-      "tag": "0003_deferrable_delegation_instance_fks",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "7",
-      "when": 1783660894920,
-      "tag": "0004_mcp_serve_instances",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "7",
-      "when": 1783681546136,
-      "tag": "0005_vengeful_big_bertha",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "7",
-      "when": 1783767600000,
-      "tag": "0006_mcp_provide_instances",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "7",
-      "when": 1783845357251,
-      "tag": "0007_time_instances",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "7",
-      "when": 1783868393878,
-      "tag": "0008_forever_thread_kind",
-      "breakpoints": true
-    },
-    {
-      "idx": 10,
-      "version": "7",
-      "when": 1783948036118,
-      "tag": "0010_mcp_parked_instances",
-      "breakpoints": true
-    },
-    {
-      "idx": 11,
-      "version": "7",
-      "when": 1783950154538,
-      "tag": "0011_useful_shatterstar",
-      "breakpoints": true
-    },
-    {
-      "idx": 12,
-      "version": "7",
-      "when": 1783983023383,
-      "tag": "0012_external_call_spine",
-      "breakpoints": true
-    },
-    {
-      "idx": 13,
-      "version": "7",
-      "when": 1784069423383,
-      "tag": "0013_credentials",
-      "breakpoints": true
-    },
-    {
-      "idx": 14,
-      "version": "7",
-      "when": 1784184896660,
-      "tag": "0014_oauth_clients",
-      "breakpoints": true
-    },
-    {
-      "idx": 15,
-      "version": "7",
-      "when": 1784198834287,
-      "tag": "0015_oauth_client_authorization_parameters",
-      "breakpoints": true
-    },
-    {
-      "idx": 16,
-      "version": "7",
-      "when": 1784200338667,
-      "tag": "0016_credential_profile",
+      "when": 1784273434601,
+      "tag": "0001_deferrable_delegation_instance_fks",
       "breakpoints": true
     }
   ]
