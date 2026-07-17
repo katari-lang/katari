@@ -729,6 +729,31 @@ spec = do
           (_, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
        in hasErrorCode "K3014" diagnostics `shouldBe` True
 
+  describe "parallel for with `var` state (K3024)" $ do
+    it "rejects a `parallel for` declaring `var` state (concurrent iterations cannot fold an accumulator)" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  parallel for (let value in [1, 2, 3], var total: integer = 0) {\n"
+            <> "    next with { total = total + value }\n"
+            <> "  } then (_elements) { total }\n"
+            <> "}"
+        )
+        `shouldBe` ["K3024"]
+
+    it "accepts the same accumulator on a sequential `for` (iterations run in order, so the state folds)" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  for (let value in [1, 2, 3], var total: integer = 0) {\n"
+            <> "    next with { total = total + value }\n"
+            <> "  } then (_elements) { total }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts a `parallel for` without `var` state (a pure concurrent map)" $
+      compiledCodes "agent main() -> array[integer] { parallel for (let value in [1, 2, 3]) { next value * value } }"
+        `shouldBe` []
+
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
       let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))

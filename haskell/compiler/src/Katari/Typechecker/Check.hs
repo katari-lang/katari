@@ -40,6 +40,7 @@ import Katari.Error
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
     PanicHandlerParameterErrorInfo (..),
+    ParallelForVarBindingErrorInfo (..),
     ReservedReactorErrorInfo (..),
     TypeError (..),
     UnknownHoleLabelErrorInfo (..),
@@ -1881,6 +1882,17 @@ processObserved sourceSpan observedAttribute walk = do
 
 synthForExpression :: ForExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthForExpression expression = do
+  -- A parallel `for` runs its iterations concurrently, each advancing the `var` state from the same
+  -- initial value, so an accumulator can never fold across them — the join would keep one iteration's
+  -- final write and silently drop the rest. A program defect, so it is rejected at the entrance
+  -- (K3024, like K3022 / K3023); the loop is still checked as written so its other diagnostics surface.
+  case expression.varBindings of
+    firstBinding : _
+      | expression.parallel ->
+          reportType
+            firstBinding.sourceSpan
+            (TypeErrorParallelForVarBinding ParallelForVarBindingErrorInfo {variableNames = (.name) <$> expression.varBindings})
+    _ -> pure ()
   (typedSource, sourceType) <- synthExpression expression.inBinding.source
   -- A `for` is a control construct: like `if` / `match`, it observes its source, so the source's
   -- attribute carries into the result ('observeResult' over the loop's residual effect enforces that —

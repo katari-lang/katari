@@ -150,6 +150,15 @@ renderTypeError typeError =
         <> " named `"
         <> info.actualName
         <> "`. Write `request panic(msg: string) { ... }`."
+    TypeErrorParallelForVarBinding info ->
+      "A `parallel for` cannot declare `var` state ("
+        <> Text.intercalate ", " (renderBackticked <$> info.variableNames)
+        <> "): its iterations run concurrently, so each one would advance the state from the same"
+        <> " initial value and only one iteration's final write could survive the join — a silent"
+        <> " last-write-wins, never a fold. Drop the `var`: have each iteration `next` its"
+        <> " contribution, and fold the collected array after the join (e.g. in the `then` clause)."
+  where
+    renderBackticked name = "`" <> name <> "`"
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -215,6 +224,12 @@ data TypeError where
   -- would otherwise fail as a cryptic object-subtype mismatch (K3001). Reported specifically so the fix
   -- ("name it @msg@") is obvious.
   TypeErrorPanicHandlerParameter :: PanicHandlerParameterErrorInfo -> TypeError
+  -- | A @parallel for@ declares @var@ state. The loop's iterations run concurrently, each advancing
+  -- the state from its initial value, so a shared accumulator cannot exist — the joined state would
+  -- keep only one iteration's final write (a silent last-write-wins), never a fold. Rejected at the
+  -- entrance rather than letting the defect run; the composable shape is to collect each iteration's
+  -- value and fold after the join.
+  TypeErrorParallelForVarBinding :: ParallelForVarBindingErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -239,6 +254,7 @@ typeErrorCode = \case
   TypeErrorFinallyEffect _ -> "K3021"
   TypeErrorReservedReactor _ -> "K3022"
   TypeErrorPanicHandlerParameter _ -> "K3023"
+  TypeErrorParallelForVarBinding _ -> "K3024"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -264,6 +280,7 @@ typeErrorSeverity = \case
   TypeErrorFinallyEffect _ -> SeverityError
   TypeErrorReservedReactor _ -> SeverityError
   TypeErrorPanicHandlerParameter _ -> SeverityError
+  TypeErrorParallelForVarBinding _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -414,6 +431,13 @@ newtype FinallyEffectErrorInfo = FinallyEffectErrorInfo
 -- | The actual (wrong) name of a bare @panic@ handler's parameter — it must be @msg@.
 newtype PanicHandlerParameterErrorInfo = PanicHandlerParameterErrorInfo
   { actualName :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @variableNames@ are the @var@ names the @parallel for@ declared, in declaration order, so the
+-- message can name the state that cannot fold across concurrent iterations.
+newtype ParallelForVarBindingErrorInfo = ParallelForVarBindingErrorInfo
+  { variableNames :: List Text
   }
   deriving (Eq, Ord, Show)
 
