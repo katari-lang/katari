@@ -30,15 +30,15 @@ its @headers@ (names lowercased; repeated headers joined with \", \") and its @b
 never completes throws `fetch_error` (catchable with `use handler { request throw(error: http.fetch_error)
 -> never { ... } }`)."
 external agent fetch(
-  url: string,
-  method: string,
-  headers: record[string of private],
-  body: string of private,
+  @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
+  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
+  @"The raw request body, sent verbatim (an explicit \"\" sends an empty body; dropped for GET / HEAD); may be a secret." body: string of private,
 ) -> { status: integer, headers: record[string], body: string } with prelude.throw[fetch_error] from "http"
 
 @"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
 arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
-data status_error(status: integer, body: string)
+data status_error(@"The response's non-2xx status code." status: integer, @"The response body text." body: string)
 
 @"POST @body@ to @url@ as application/json with the given @headers@. The @body@ AND each header value may
 be a secret (an auth token — an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\"
@@ -49,9 +49,9 @@ headers — on a shared name the caller's value wins. Returns the response body 
 throws `status_error`, a transport failure `fetch_error`. The canonical one-call shape of a JSON API
 integration — build the body as `json` in Katari, post it, parse the reply as `json` in Katari."
 agent post_json(
-  url: string,
-  body: string of private,
-  headers: record[string of private],
+  @"The absolute URL to POST to; public by type." url: string,
+  @"The JSON document text to send (already serialized, e.g. `json.stringify`'s output); may be a secret." body: string of private,
+  @"Extra headers by name, merged over the Content-Type default (the caller wins on a shared name); values may be secrets." headers: record[string of private],
 ) -> string with io | prelude.throw[status_error | fetch_error] {
   // The caller's headers merge as `record.merge`'s right side, so on a shared name (a caller that
   // sets its own Content-Type) the caller's value overrides the default.

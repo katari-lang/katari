@@ -45,4 +45,6 @@ a `prelude.oauth.authorize` escalation and resumes once the credential is establ
 browser flow, or a proactive login) — it does not fail. A transient resolution failure throws
 `server_error` (catchable with `use handler { request throw(error: oauth.server_error) -> never { ... } }`);
 uncaught, it fails the run."
-external agent token(name: string) -> string of private with io | prelude.throw[server_error] from "oauth"
+external agent token(
+  @"The registered name of a stored credential (e.g. \"github\"); the name itself is not a secret." name: string,
+) -> string of private with io | prelude.throw[server_error] from "oauth"

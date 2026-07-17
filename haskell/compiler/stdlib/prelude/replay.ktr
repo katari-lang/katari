@@ -39,17 +39,17 @@ chose to represent as @failure@ (of the converter's own type @F@). `-> never`: p
 control to the provider (which applies its delay policy and re-runs) and does not return. This is the whole
 seam between policy and mechanism — a provider reasons only about `interrupted`, never about `throw` or
 `panic`."
-request interrupted[F](failure: F) -> never
+request interrupted[F](@"The converter-chosen value standing for the underlying failure (re-raised as `throw[F]` when a bounded provider exhausts)." failure: F) -> never
 
 // INTERNAL LOOP MACHINERY (below): `run_once` and the `ran` / `signalled` / `replay_after` / `give_up` sums.
 // A user never performs or handles any of them — `run_once` is called only by the providers, and the sums
 // are data the loop bodies `match` on. They are module members only because Katari has no module-private.
 
 @"One run of the continuation that completed with a value @value@ (it did not signal a replay)."
-data ran[R](value: R)
+data ran[R](@"The completed run's result." value: R)
 
 @"One run of the continuation that performed `interrupted`, carrying the @failure@ it signalled."
-data signalled[F](failure: F)
+data signalled[F](@"The failure the run's `interrupted` carried." failure: F)
 
 @"Run the continuation once and reify which happened: `ran` with its value, or `signalled` with the failure
 it performed `interrupted` on. This is the single boundary where `interrupted` is caught and turned into a
@@ -58,7 +58,7 @@ catching only the replay signal — never `throw` / `panic`, which the converter
 `interrupted[F]` sits in the continuation's OVERWRITE row because this handler DISCHARGES it (the discord-
 provider shape); @F@ is inferred from the continuation and preserved into `signalled`."
 agent run_once[R, F, effect E](
-  continuation: agent (value: null) -> R with {...E, interrupted[F]},
+  @"The rest of the block, run once with `interrupted` served." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> ran[R] | signalled[F] with E {
   use handler {
     request interrupted(failure: F) -> never { break signalled(failure = failure) }
@@ -79,7 +79,7 @@ converter that performs a human-in-the-loop escalation and parks before signalli
 re-auth loop, human-paced with no polling. Never re-raises and never returns on its own; a converter that
 rethrows instead of signalling is how a failure leaves this loop. Written `use replay.immediate()`."
 agent immediate[R, F, effect E](
-  continuation: agent (value: null) -> R with {...E, interrupted[F]},
+  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E {
   forever {
     match (run_once(continuation = continuation)) {
@@ -96,10 +96,10 @@ own @delay@ var and grows by @factor@ per replay up to the cap (`math.min`), so 
 across any number of replays. Written
 `use replay.forever(initial_delay_milliseconds = ..., factor = ..., max_delay_milliseconds = ...)`."
 agent forever[R, F, effect E](
-  initial_delay_milliseconds: number,
-  factor: number,
-  max_delay_milliseconds: number,
-  continuation: agent (value: null) -> R with {...E, interrupted[F]},
+  @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
+  @"The per-replay delay multiplier (e.g. 2 doubles the delay each replay)." factor: number,
+  @"The backoff ceiling, in milliseconds; the delay never grows past it." max_delay_milliseconds: number,
+  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io {
   forever (var delay = initial_delay_milliseconds) {
     match (run_once(continuation = continuation)) {
@@ -127,10 +127,10 @@ error typed end to end and never needs to re-panic. The attempt count and delay 
 the budget mints a `replay_after | give_up`, and the `signalled` arm `match`es it once — no code re-tests the
 counter. Written `use replay.exponential(initial_delay_milliseconds = ..., factor = ..., max_attempts = ...)`."
 agent exponential[R, F, effect E](
-  initial_delay_milliseconds: number,
-  factor: number,
-  max_attempts: number,
-  continuation: agent (value: null) -> R with {...E, interrupted[F]},
+  @"The delay before the first re-run, in milliseconds." initial_delay_milliseconds: number,
+  @"The per-replay delay multiplier (e.g. 2 doubles the delay each replay)." factor: number,
+  @"The total run budget, not a retry count: the @max_attempts@-th `interrupted` re-raises instead of re-running." max_attempts: number,
+  @"The rest of the block (bound by `use`)." continuation: agent (value: null) -> R with {...E, interrupted[F]},
 ) -> R with E | io | prelude.throw[F] {
   forever (var attempt = 0, var delay = initial_delay_milliseconds) {
     match (run_once(continuation = continuation)) {

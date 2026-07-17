@@ -71,13 +71,13 @@ data decode_error(message: string)
 
 @"Parse a JSON document from text into the `json` tree (traverse it with `match`). A malformed
 document throws `parse_error`. A number without a fractional part parses as `json_integer`."
-primitive agent parse(text: string) -> json with prelude.throw[parse_error]
+primitive agent parse(@"The text of one complete JSON document." text: string) -> json with prelude.throw[parse_error]
 
 @"Parse a JSON document from text directly as a T, validated against T's schema — the typed text
 boundary, with no intermediate `json` tree. Instantiate T explicitly (it appears only in the result,
 so it cannot be inferred). A malformed document throws `parse_error`; a schema mismatch throws
 `decode_error` naming the offending path."
-primitive agent parse_as[T](text: string) -> T with prelude.throw[parse_error | decode_error]
+primitive agent parse_as[T](@"The text of one complete JSON document." text: string) -> T with prelude.throw[parse_error | decode_error]
 
 @"Render a `json` tree as its (compact) document text; inverts `parse`. For an arbitrary value,
 compose with the embedding: `stringify(value = encode(value = x))`."

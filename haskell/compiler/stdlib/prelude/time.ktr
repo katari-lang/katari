@@ -26,22 +26,25 @@ external agent now() -> number from "time"
 @"Sleep for @milliseconds@ before resolving with `null`. The wake deadline (now + @milliseconds@) is
 persisted: a runtime restart re-arms the timer, and a deadline that already passed while the runtime was
 down resolves immediately on recovery. A @milliseconds@ that is zero or negative resolves at once."
-external agent sleep(milliseconds: number) -> null from "time"
+external agent sleep(@"The delay, in milliseconds; zero or negative resolves at once." milliseconds: number) -> null from "time"
 
 @"Sleep until the absolute epoch-millisecond instant @time@, then resolve with `null`. The same durable
 deadline as `sleep`, but pinned to an absolute wall-clock instant rather than a relative delay — an
 instant already in the past resolves immediately."
-external agent sleep_until(time: number) -> null from "time"
+external agent sleep_until(@"The absolute wake instant, in epoch milliseconds; a past instant resolves at once." time: number) -> null from "time"
 
 @"A fixed interval: an occurrence every @milliseconds@ after the watch starts (the first occurrence is
 one interval in, not at the start). @milliseconds@ must be positive."
-data interval(milliseconds: number)
+data interval(@"The gap between occurrences, in milliseconds; a non-positive gap panics the watch." milliseconds: number)
 
 @"A cron schedule: the occurrences of the standard cron @expression@ (the 5-field form, or the 6-field
 form whose leading field is seconds) read in the IANA @timezone@ (e.g. \"Asia/Tokyo\", \"UTC\"). The
 timezone is required and explicit — there is no ambient default, because \"every day at 09:00\" means a
 different instant in each zone and the runtime must not guess which one."
-data cron(expression: string, timezone: string)
+data cron(
+  @"5 fields, or 6 with a leading seconds field; a malformed expression panics the watch." expression: string,
+  @"An IANA zone name; an unknown zone panics the watch." timezone: string,
+)
 
 // When each occurrence fires. (Type synonyms take no docs.)
 type schedule = interval | cron
@@ -61,6 +64,6 @@ No built-in retry. A @deliver_to@ that throws or panics is NOT retried — the f
 the watch, exactly as an uncaught failure in any callee does. Resilience is composed at the call site (a
 `replay` provider plus a converter around @deliver_to@), never baked into `watch`."
 external agent watch[effect E](
-  schedule: schedule,
-  deliver_to: agent (time: number) -> null with E,
+  @"When occurrences fire: an `interval(...)` or a `cron(...)` value." schedule: schedule,
+  @"Called once per occurrence; its @time@ is the occurrence's scheduled epoch millisecond, not the delivery instant." deliver_to: agent (time: number) -> null with E,
 ) -> never with E | io from "time"

@@ -73,13 +73,13 @@ data auth_error(message: string)
 
 @"Header-based access: @values@ ride on every request to the server (each value may be a secret,
 such as a bearer key). Anonymous access is `headers(values = record.empty())`."
-data headers(values: record[string of private])
+data headers(@"The headers sent on every request, by name; a value may be a secret." values: record[string of private])
 
 @"A named OAuth credential, stored server-side. The runtime injects and refreshes its tokens itself;
 the name is not a secret. While the name has no usable credential, any use pauses the run on a
 `prelude.oauth.authorize` escalation — answering it (the runtime-hosted browser flow) establishes the
 credential and resumes the run."
-data oauth(name: string)
+data oauth(@"The stored credential's registered name; not a secret." name: string)
 
 // How `provide` authenticates with the server: explicit headers, or a named OAuth credential.
 type auth = headers | oauth
@@ -109,9 +109,9 @@ when @continuation@ returns (or the run is cancelled), and a stray later call is
 `server_error`. A literal @url@ binds `URL` to that string's singleton (per-URL scoping); a dynamic @url@
 degrades `URL` to `string` (the widest scope — see the module header)."
 external agent provide[literal URL, R, effect E](
-  url: URL,
-  auth: auth,
-  continuation: agent (value: toolbox[URL]) -> R with E | scope[URL],
+  @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: URL,
+  @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
+  @"The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs." continuation: agent (value: toolbox[URL]) -> R with E | scope[URL],
 ) -> R with E from "mcp"
 
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
@@ -131,7 +131,12 @@ validates @arguments@ before the server does (unlike a minted tool) — a reject
 binding it per-URL): a generated binding calls this only inside a `provide` scope over the same
 descriptor, and the runtime rejects a call with no live scope for that descriptor as a typed
 `server_error`."
-external agent call[literal URL, T](url: URL, auth: auth, tool: string, arguments: json.json) -> T with scope[URL] | prelude.throw[server_error | auth_error | json.decode_error] from "mcp"
+external agent call[literal URL, T](
+  @"The MCP server's endpoint URL (the same descriptor the surrounding `provide` scope was opened with)." url: URL,
+  @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
+  @"The server-declared tool name." tool: string,
+  @"The tool's arguments object, as a literal `json` tree; only the server validates it." arguments: json.json,
+) -> T with scope[URL] | prelude.throw[server_error | auth_error | json.decode_error] from "mcp"
 
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is
@@ -146,6 +151,6 @@ own effects are handled. A served tool that throws or panics with no handler of 
 whole endpoint (its failure proxies up and fails the run unless caught above @subscriber@) — wrap a
 tool's body in a handler for per-request resilience."
 external agent serve[R, effect E](
-  tools: toolbox[string],
-  subscriber: agent (url: string) -> R with E,
+  @"The agents to publish, keyed by the tool name each is published under." tools: toolbox[string],
+  @"The endpoint's owner: receives the capability URL, and the server serves exactly while it runs." subscriber: agent (url: string) -> R with E,
 ) -> R with E from "mcp"

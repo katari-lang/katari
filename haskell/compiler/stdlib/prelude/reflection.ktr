@@ -26,25 +26,28 @@
 Schemas of its input, output and requests — each schema a `json` value, ready to embed in an AI tool
 list. A local (closure) callable has an empty name."
 data agent_metadata(
-  name: string,
-  description: string,
-  input: json.json,
-  output: json.json,
-  requests: json.json,
+  @"The qualified name; empty for a local closure." name: string,
+  @"The `@\"...\"` documentation text; empty when undocumented." description: string,
+  @"The input record's JSON Schema." input: json.json,
+  @"The output's JSON Schema." output: json.json,
+  @"The requests' schemas: one { name, input, output } object per request the callable may perform." requests: json.json,
 )
 
 @"Derive `agent_metadata` from a callable value (a top-level agent, a data constructor, a request, an
 external, a local closure, or a runtime-minted tool such as an MCP server's). A generic callable
 instantiated with `[T]` yields schemas specialised to the instantiation; a runtime-minted tool yields
 the name / description / input schema its provider declared."
-primitive agent get_metadata(value: agent never -> unknown with all) -> agent_metadata
+primitive agent get_metadata(@"The callable value to inspect." value: agent never -> unknown with all) -> agent_metadata
 
 @"A dynamic dispatch failed before the target ran: the target is not a callable, or `args` does not
 conform to its input schema (`message` names the offending path). Thrown by `call_agent`."
-data call_error(message: string)
+data call_error(@"The non-callable kind, or the offending path of the schema mismatch." message: string)
 
 @"Invoke a callable VALUE with a runtime-built argument record — dynamic dispatch for a target an AI
 picked out of a tool list. `args` is validated against the target's input schema at the delegation
 boundary; a mismatch throws `call_error` at this call site (catch it to let the model retry). The
 target's effects flow through unchanged."
-primitive agent call_agent[R, effect E](target: agent never -> R with E, args: unknown) -> R with E | prelude.throw[call_error]
+primitive agent call_agent[R, effect E](
+  @"The callable value to dispatch (e.g. the tool an AI picked)." target: agent never -> R with E,
+  @"The target's whole argument record, keyed by its parameter names." args: unknown,
+) -> R with E | prelude.throw[call_error]

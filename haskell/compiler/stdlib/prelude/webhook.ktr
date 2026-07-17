@@ -34,6 +34,6 @@ deliveries should come from, and stays alive while they flow; when it returns, t
 deactivated and its result becomes `inbound`'s result. Both callables' effects flow to the caller's
 handlers unchanged."
 external agent inbound[R, effect E](
-  callback: agent never -> unknown with E,
-  subscriber: agent (url: string) -> R with E,
+  @"Called once per POST. A body failing its input schema is rejected 400 before it runs; its unhandled failure cancels the endpoint." callback: agent never -> unknown with E,
+  @"The URL's owner: receives the minted public URL, and the endpoint serves exactly while it runs." subscriber: agent (url: string) -> R with E,
 ) -> R with E from "webhook"
