@@ -28,15 +28,20 @@ describe("bundleSidecar", () => {
       join(portDir, "package.json"),
       JSON.stringify({ name: "@katari-lang/port", type: "module", main: "index.js" }),
     );
-    // A minimal stand-in for the real port: `katari.agent` records `<module>.<name>` on a global the test
-    // can read, reading the ambient package name the bundle set. `__startSidecar` is a no-op here.
+    // A minimal stand-in for the real port, faithful on the one point the bundler must respect: the
+    // registry is MODULE-level state, surfaced only by `__startSidecar`. A bundle that inlines a second
+    // copy of the port (each vendored package carries its own) splits the registry, and only the served
+    // copy's registrations reach the test's global — exactly how the real port loses handlers.
     await writeFile(
       join(portDir, "index.js"),
       [
+        `const registered = [];`,
         `const katari = { agent: (name) => {`,
-        `  (globalThis.__katariRegistered ??= []).push(globalThis.__katariModule + "." + name);`,
+        `  registered.push(globalThis.__katariModule + "." + name);`,
         `} };`,
-        `export const __startSidecar = () => {};`,
+        `export const __startSidecar = () => {`,
+        `  globalThis.__katariServed = (globalThis.__katariServed ?? []).concat(registered);`,
+        `};`,
         `export default katari;`,
       ].join("\n"),
     );
@@ -50,16 +55,17 @@ describe("bundleSidecar", () => {
     return src;
   }
 
-  /** Write the bundle to a temp `.mjs` and import it, returning the names its registrations recorded. The
-   *  port stub is inlined, so the module is fully self-contained. */
+  /** Write the bundle to a temp `.mjs` and import it, returning the names `__startSidecar()` SERVED — the
+   *  registrations that actually reached the started sidecar, not merely ran somewhere. The port stub is
+   *  inlined, so the module is fully self-contained. */
   async function runBundle(entry: string): Promise<string[]> {
     const dir = await mkdtemp(join(tmpdir(), "katari-bundle-run-"));
     temporaryDirs.push(dir);
     const path = join(dir, "sidecar.mjs");
     await writeFile(path, entry);
-    (globalThis as Record<string, unknown>).__katariRegistered = [];
+    (globalThis as Record<string, unknown>).__katariServed = [];
     await import(pathToFileURL(path).href);
-    return (globalThis as Record<string, unknown>).__katariRegistered as string[];
+    return (globalThis as Record<string, unknown>).__katariServed as string[];
   }
 
   test("imports every file equally and registers under each file's module path", async () => {
@@ -85,6 +91,9 @@ describe("bundleSidecar", () => {
     expect(new Set(registered)).toEqual(new Set(["main.greet_world", "sub.extra.ping"]));
   });
 
+  // Each fixture carries its OWN copy of the port stub (like a vendored package's `node_modules`), so this
+  // also pins the port-singleton invariant: without it, the second package registers into an unserved copy
+  // and its agent vanishes from the served set.
   test("namespaces by module path across several packages", async () => {
     const a = await fixture({
       "alpha.ts": `import katari from "@katari-lang/port";\nkatari.agent("ping", () => 1);`,
