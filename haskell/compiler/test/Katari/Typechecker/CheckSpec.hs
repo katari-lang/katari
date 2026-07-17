@@ -754,6 +754,43 @@ spec = do
       compiledCodes "agent main() -> array[integer] { parallel for (let value in [1, 2, 3]) { next value * value } }"
         `shouldBe` []
 
+  describe "parallel handler with `var` state (K3025)" $ do
+    it "rejects a `parallel handler` declaring `var` state (concurrent request dispatches cannot fold an accumulator)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use parallel handler (var counter: integer = 0) {\n"
+            <> "    request tick() { next counter with { counter = counter + 1 } }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` ["K3025"]
+
+    it "accepts the same accumulator on a sequential handler (requests dispatch in FIFO order, so the state folds)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use handler (var counter: integer = 0) {\n"
+            <> "    request tick() { next counter with { counter = counter + 1 } }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts a `parallel handler` without `var` state (stateless bodies are safe to dispatch concurrently)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use parallel handler {\n"
+            <> "    request tick() { next 1 }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
       let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))

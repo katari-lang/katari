@@ -41,6 +41,7 @@ import Katari.Error
     MissingAnnotationErrorInfo (..),
     PanicHandlerParameterErrorInfo (..),
     ParallelForVarBindingErrorInfo (..),
+    ParallelHandlerVarBindingErrorInfo (..),
     ReservedReactorErrorInfo (..),
     TypeError (..),
     UnknownHoleLabelErrorInfo (..),
@@ -2102,6 +2103,18 @@ data HandlerComponents = HandlerComponents
 -- continuation's return and @E@ from its effect (the handled requests dropped).
 checkHandlerScheme :: HandlerExpression Identified -> Checker (HandlerComponents, Scheme)
 checkHandlerScheme expression = do
+  -- A parallel handler dispatches its request bodies concurrently, so two overlapping bodies would
+  -- each advance the `var` state from the same value and the later write would silently drop the
+  -- earlier one — a lost update; the FIFO dispatch of a sequential handler is exactly what makes
+  -- such state sound. A program defect, so it is rejected at the entrance (K3025, the handler
+  -- sibling of K3024); the handler is still checked as written so its other diagnostics surface.
+  case expression.stateVariables of
+    firstBinding : _
+      | expression.parallel ->
+          reportType
+            firstBinding.sourceSpan
+            (TypeErrorParallelHandlerVarBinding ParallelHandlerVarBindingErrorInfo {variableNames = (.name) <$> expression.stateVariables})
+    _ -> pure ()
   resultId <- freshGenericId
   effectId <- freshGenericId
   let resultVariable = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton resultId, attribute = bottomAttribute}

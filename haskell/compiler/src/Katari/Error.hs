@@ -157,6 +157,13 @@ renderTypeError typeError =
         <> " initial value and only one iteration's final write could survive the join — a silent"
         <> " last-write-wins, never a fold. Drop the `var`: have each iteration `next` its"
         <> " contribution, and fold the collected array after the join (e.g. in the `then` clause)."
+    TypeErrorParallelHandlerVarBinding info ->
+      "A `parallel handler` cannot declare `var` state ("
+        <> Text.intercalate ", " (renderBackticked <$> info.variableNames)
+        <> "): it dispatches its request bodies concurrently, so overlapping bodies would each"
+        <> " advance the state from the same value and the later write would silently drop the"
+        <> " earlier one — a lost update, never a fold. Drop `parallel` so the requests serialize"
+        <> " through the state, or drop the `var` if the bodies need no shared state."
   where
     renderBackticked name = "`" <> name <> "`"
 
@@ -230,6 +237,12 @@ data TypeError where
   -- entrance rather than letting the defect run; the composable shape is to collect each iteration's
   -- value and fold after the join.
   TypeErrorParallelForVarBinding :: ParallelForVarBindingErrorInfo -> TypeError
+  -- | A @parallel handler@ declares @var@ state. A parallel handler dispatches its request bodies
+  -- concurrently, so two overlapping bodies would read the same state, each advance it, and the
+  -- later write would silently drop the earlier one — a lost update; the FIFO dispatch of a
+  -- sequential handler is exactly what makes such state sound. Rejected at the entrance like
+  -- K3024: drop @parallel@ to serialize the requests through the state, or drop the @var@.
+  TypeErrorParallelHandlerVarBinding :: ParallelHandlerVarBindingErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -255,6 +268,7 @@ typeErrorCode = \case
   TypeErrorReservedReactor _ -> "K3022"
   TypeErrorPanicHandlerParameter _ -> "K3023"
   TypeErrorParallelForVarBinding _ -> "K3024"
+  TypeErrorParallelHandlerVarBinding _ -> "K3025"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -281,6 +295,7 @@ typeErrorSeverity = \case
   TypeErrorReservedReactor _ -> SeverityError
   TypeErrorPanicHandlerParameter _ -> SeverityError
   TypeErrorParallelForVarBinding _ -> SeverityError
+  TypeErrorParallelHandlerVarBinding _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -437,6 +452,13 @@ newtype PanicHandlerParameterErrorInfo = PanicHandlerParameterErrorInfo
 -- | @variableNames@ are the @var@ names the @parallel for@ declared, in declaration order, so the
 -- message can name the state that cannot fold across concurrent iterations.
 newtype ParallelForVarBindingErrorInfo = ParallelForVarBindingErrorInfo
+  { variableNames :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @variableNames@ are the @var@ names the @parallel handler@ declared, in declaration order, so
+-- the message can name the state whose updates would race across concurrent request dispatches.
+newtype ParallelHandlerVarBindingErrorInfo = ParallelHandlerVarBindingErrorInfo
   { variableNames :: List Text
   }
   deriving (Eq, Ord, Show)
