@@ -417,4 +417,7 @@ export type JSONSchema = {
   anyOf?: JSONSchema[];
   not?: JSONSchema;
   $generic?: GenericId;
+  /** A parameter's `@"..."` annotation, overlaid on its property schema by the compiler. Annotates,
+   *  never constrains — validation ignores it; `get_metadata` and the listings pass it through. */
+  description?: string;
 };

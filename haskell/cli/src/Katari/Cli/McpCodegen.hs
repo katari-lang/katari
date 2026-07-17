@@ -59,7 +59,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
-import Katari.Data.JSONSchema (AdditionalProperties (..), JSONSchema (..), ObjectSchema (..))
+import Katari.Data.JSONSchema (AdditionalProperties (..), DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Parser.Lexer (reservedWords)
 import System.FilePath qualified as FilePath
 
@@ -147,6 +147,9 @@ mapSchema schema = case schema of
       pure (Text.intercalate " | " memberTypes)
   -- A generic placeholder never appears in a server listing; decoding drift stays a fallback.
   SchemaGeneric _ -> Nothing
+  -- A description annotates, never constrains; the surface type comes from the inner shape (Katari
+  -- has no doc position inside a type expression yet, so the text is not carried into the binding).
+  SchemaDescribed described -> mapSchema described.schema
 
 -- | An object with properties becomes an object type (a non-required property becomes a @?@
 -- field); an object with ONLY schema-valued @additionalProperties@ becomes @record[T]@. A property
@@ -335,6 +338,8 @@ resolveInput inputSchema = case inputSchema of
                     }
                     : walk usedNext rest
        in InputFields (walk (parameterNameSeed (length properties)) properties)
+  -- Servers routinely describe their top-level input object; the plan reads the shape underneath.
+  SchemaDescribed described -> resolveInput described.schema
   _ -> InputPassthrough
 
 -- | The names a parameter identifier must not take: the @credentials@ request the body reads for

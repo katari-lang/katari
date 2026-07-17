@@ -29,6 +29,7 @@ import Data.Text (Text)
 import Katari.Data.Id (GenericId)
 import Katari.Data.JSONSchema
   ( AdditionalProperties (..),
+    DescribedSchema (..),
     JSONSchema (..),
     ObjectSchema (..),
   )
@@ -225,6 +226,7 @@ fillGenericSchema substitution = fill
                 allowed -> allowed
             }
       SchemaAnyOf branches -> SchemaAnyOf (fill <$> branches)
+      SchemaDescribed described -> SchemaDescribed DescribedSchema {description = described.description, schema = fill described.schema}
       other -> other
 
 -- | Whether a schema still mentions a @$generic@ placeholder anywhere. (A schema is /proper/ once this
@@ -240,4 +242,5 @@ mentionsGeneric schema = case schema of
         AdditionalPropertiesSchema valueSchema -> mentionsGeneric valueSchema
         AdditionalPropertiesBoolean _ -> False
   SchemaAnyOf branches -> any mentionsGeneric branches
+  SchemaDescribed described -> mentionsGeneric described.schema
   _ -> False

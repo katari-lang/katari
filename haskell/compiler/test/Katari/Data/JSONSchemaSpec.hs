@@ -5,6 +5,7 @@ import GHC.List (List)
 import Katari.Data.Id (GenericId (..), wireModuleName)
 import Katari.Data.JSONSchema
   ( AdditionalProperties (..),
+    DescribedSchema (..),
     JSONSchema (..),
     ObjectSchema (..),
   )
@@ -40,7 +41,16 @@ fixtures =
     SchemaAnyOf [SchemaConst (toJSON ("a" :: String)), SchemaConst (toJSON ("b" :: String))],
     -- The wire drops a generic's declaring module; only an id already carrying the wire-side sentinel
     -- module can round-trip exactly.
-    SchemaGeneric (GenericId wireModuleName 3)
+    SchemaGeneric (GenericId wireModuleName 3),
+    SchemaDescribed DescribedSchema {description = "The city name.", schema = SchemaString},
+    -- A described any-schema is the bare @{"description": ...}@ document.
+    SchemaDescribed DescribedSchema {description = "Anything goes.", schema = SchemaAny},
+    SchemaObject
+      ObjectSchema
+        { properties = [("city", SchemaDescribed DescribedSchema {description = "The city name.", schema = SchemaString})],
+          required = ["city"],
+          additionalProperties = AdditionalPropertiesBoolean False
+        }
   ]
 
 spec :: Spec
@@ -65,3 +75,7 @@ spec = describe "JSONSchema FromJSON" $ do
   it "rejects a type it does not model" $
     (decode (encode (object ["type" .= ("integerish" :: String)])) :: Maybe JSONSchema)
       `shouldBe` Nothing
+
+  it "merges a description into the inner schema's encoding" $
+    toJSON (SchemaDescribed DescribedSchema {description = "The city name.", schema = SchemaString})
+      `shouldBe` object ["type" .= ("string" :: String), "description" .= ("The city name." :: String)]

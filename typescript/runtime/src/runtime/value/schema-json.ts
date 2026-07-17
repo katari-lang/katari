@@ -52,6 +52,7 @@ export function schemaToJson(schema: JSONSchema): Json {
   if (schema.anyOf !== undefined) out.anyOf = schema.anyOf.map(schemaToJson);
   if (schema.not !== undefined) out.not = schemaToJson(schema.not);
   if (schema.$generic !== undefined) out.$generic = schema.$generic;
+  if (schema.description !== undefined) out.description = schema.description;
   return out;
 }
 
@@ -96,6 +97,7 @@ export function jsonToSchema(json: Json): JSONSchema {
   if (not !== undefined) schema.not = jsonToSchema(not);
   // `GenericId` is a plain number, so the wire number is the id.
   if (typeof json.$generic === "number") schema.$generic = json.$generic;
+  if (typeof json.description === "string") schema.description = json.description;
   return schema;
 }
 

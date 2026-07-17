@@ -15,7 +15,7 @@ import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.AST (LiteralValue (..))
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.IR (SchemaInformation (..))
-import Katari.Data.JSONSchema (JSONSchema (..))
+import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Diagnostics (hasErrors, renderDiagnostics)
@@ -60,6 +60,17 @@ spec = describe "Katari.Docs" $ do
       ((.rendered) <$> declaration.returnType) `shouldBe` Just "string"
       declaration.checkedType `shouldSatisfy` isJust
       ((.output) <$> declaration.schema) `shouldBe` Just SchemaString
+
+    it "carries a parameter annotation into the wire schema's property description" $ do
+      declarations <- documentedDeclarations "agent greet(@\"The user's name.\" name: string) -> string { name }"
+      declaration <- declarationNamed "greet" declarations
+      case declaration.schema of
+        Just schemaInformation -> case schemaInformation.input of
+          SchemaObject objectSchema ->
+            lookup "name" objectSchema.properties
+              `shouldBe` Just (SchemaDescribed DescribedSchema {description = "The user's name.", schema = SchemaString})
+          other -> expectationFailure ("expected an object input schema, got " <> show other)
+        Nothing -> expectationFailure "expected a wire schema on the agent"
 
     it "documents the effect row and resolves its request reference" $ do
       declarations <-

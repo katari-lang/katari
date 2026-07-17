@@ -9,7 +9,7 @@ import Data.Text (Text)
 import GHC.List (List)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.IR
-import Katari.Data.JSONSchema (JSONSchema (..), ObjectSchema (..))
+import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..))
@@ -44,6 +44,25 @@ spec = describe "lowerModule (via compile)" $ do
       let irModule = loweredTestModule "data Pair(left: integer, right: integer)"
       case entryBlock irModule "Pair" of
         Just (BlockAgent agent) -> blockKind irModule agent.body `shouldBe` Just "construct"
+        other -> expectationFailure ("expected a BlockAgent entry, got " <> show other)
+
+  describe "parameter annotations" $ do
+    it "overlays an agent parameter's @\"...\" annotation as the property's description" $ do
+      let irModule = loweredTestModule "agent greet(@\"The user's name.\" name: string, shout: boolean) -> string { name }"
+      case entryBlock irModule "greet" of
+        Just (BlockAgent agent) ->
+          objectProperties agent.schema.input
+            `shouldBe` [ ("name", SchemaDescribed DescribedSchema {description = "The user's name.", schema = SchemaString}),
+                         ("shout", SchemaBoolean)
+                       ]
+        other -> expectationFailure ("expected a BlockAgent entry, got " <> show other)
+
+    it "overlays a request parameter's annotation on its callable input schema" $ do
+      let irModule = loweredTestModule "request ask(@\"The question to pose.\" question: string) -> string"
+      case entryBlock irModule "ask" of
+        Just (BlockAgent agent) ->
+          objectProperties agent.schema.input
+            `shouldBe` [("question", SchemaDescribed DescribedSchema {description = "The question to pose.", schema = SchemaString})]
         other -> expectationFailure ("expected a BlockAgent entry, got " <> show other)
 
   describe "calls and references" $ do
@@ -643,6 +662,12 @@ patternVariables = \case
 objectFieldNames :: JSONSchema -> List Text
 objectFieldNames = \case
   SchemaObject objectSchema -> map fst objectSchema.properties
+  _ -> []
+
+-- | An object schema's labelled properties, for asserting the description overlay per label.
+objectProperties :: JSONSchema -> List (Text, JSONSchema)
+objectProperties = \case
+  SchemaObject objectSchema -> objectSchema.properties
   _ -> []
 
 -- | Every block id referenced anywhere in the module that has no corresponding block.

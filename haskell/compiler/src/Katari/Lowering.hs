@@ -40,7 +40,7 @@ import Katari.Data.Environment
   )
 import Katari.Data.IR
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
-import Katari.Data.JSONSchema (JSONSchema (..))
+import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.NormalizedType (bottomAttribute)
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
@@ -350,6 +350,37 @@ callableSchema context qualifiedName = case Map.lookup qualifiedName context.val
       (runDenormalize context.normalizerEnvironment (denormalize scheme.valueType))
   Nothing -> openSchema
 
+-- | Overlay a declaration's parameter @\@"..."@ annotations onto its input schema: each annotated
+-- label's property is wrapped in 'SchemaDescribed'. The schema is type-derived and the annotations are
+-- surface syntax, so the overlay runs after conversion rather than through the type environment. A
+-- non-object input (an inference fallback) has no properties to annotate and passes through.
+describeProperties :: List (Text, Maybe Text) -> JSONSchema -> JSONSchema
+describeProperties annotations schema = case schema of
+  SchemaObject objectSchema ->
+    SchemaObject
+      ObjectSchema
+        { properties = describeProperty <$> objectSchema.properties,
+          required = objectSchema.required,
+          additionalProperties = objectSchema.additionalProperties
+        }
+  _ -> schema
+  where
+    annotationByLabel = Map.fromList [(label, annotation) | (label, Just annotation) <- annotations]
+    describeProperty (label, propertySchema) = case Map.lookup label annotationByLabel of
+      Just annotation -> (label, SchemaDescribed DescribedSchema {description = annotation, schema = propertySchema})
+      Nothing -> (label, propertySchema)
+
+-- | 'describeProperties' lifted over a callable's 'SchemaInformation' (only the input carries
+-- parameter properties; the output and requests are untouched).
+describeInput :: List (Text, Maybe Text) -> SchemaInformation -> SchemaInformation
+describeInput annotations schemaInformation =
+  SchemaInformation
+    { input = describeProperties annotations schemaInformation.input,
+      output = schemaInformation.output,
+      requests = schemaInformation.requests,
+      genericBindings = schemaInformation.genericBindings
+    }
+
 -- | Turn an effect into its requests schema: each concrete request becomes a descriptor (its parameter /
 -- return type specialised by the request's arguments), each effect-generic a reference. @all@ cannot be
 -- enumerated, so it contributes no concrete requests; a marker effect is type-level only and vanishes.
@@ -517,7 +548,8 @@ lowerSignatureCallable reference name annotation parameters makeLeaf = do
   leafBlock <- freshBlockId
   recordBlock leafBlock (makeLeaf inputVariable) (Map.singleton "parameter" inputVariable) (Just (name <> ".leaf"))
   context <- asks (.context)
-  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = callableSchema context qualifiedName, description = descriptionOf annotation, defaults = defaults}) mempty (Just name)
+  let schema = describeInput [(parameter.name, parameter.annotation) | parameter <- parameters] (callableSchema context qualifiedName)
+  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = schema, description = descriptionOf annotation, defaults = defaults}) mempty (Just name)
 
 ---------------------------------------------------------------------------------------------------
 -- Agents
@@ -555,7 +587,8 @@ buildAgent catchesReturn agentBlock name description genericBindings functionTyp
   let defaults =
         Map.fromList
           [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, AST.BindVariable _ _ (Just parameterDefault) <- [parameter.binder]]
-  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context genericBindings functionType, description = description, defaults = defaults}) mempty (Just name)
+      schema = describeInput [(parameter.name, parameter.annotation) | parameter <- parameters] (buildSchemaInformation context genericBindings functionType)
+  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = schema, description = description, defaults = defaults}) mempty (Just name)
 
 -- | Read one declared parameter out of the incoming argument record and bind it, returning the locals
 -- it introduces. A plain variable parameter binds the field variable directly; a destructuring

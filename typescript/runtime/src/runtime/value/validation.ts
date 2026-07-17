@@ -51,7 +51,11 @@ export function fillGenericSchema(
 ): JSONSchema {
   if (substitution.size === 0) return schema;
   if (schema.$generic !== undefined) {
-    return substitution.get(schema.$generic) ?? schema;
+    const bound = substitution.get(schema.$generic);
+    if (bound === undefined) return schema;
+    // An annotated generic parameter carries its description on the sentinel; the annotation site's
+    // text survives the fill (and wins over any description the argument schema brought along).
+    return schema.description === undefined ? bound : { ...bound, description: schema.description };
   }
   const filled: JSONSchema = { ...schema };
   if (schema.items !== undefined) filled.items = fillGenericSchema(substitution, schema.items);

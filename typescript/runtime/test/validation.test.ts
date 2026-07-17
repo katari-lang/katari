@@ -219,4 +219,19 @@ describe("generic instantiation", () => {
     expect(conformValue(record({ x: int(1) }), filled).ok).toBe(true);
     expect(conformValue(record({ x: str("s") }), filled).ok).toBe(false);
   });
+
+  test("an annotated generic parameter keeps its description through the fill", () => {
+    const schema: JSONSchema = {
+      type: "object",
+      properties: { x: { $generic: 7, description: "The value to pick." } },
+      required: ["x"],
+      additionalProperties: true,
+    };
+    const substitution = typeSubstitutionOf(
+      { T: 7 },
+      { T: { kind: "type", schema: { type: "integer" } } },
+    );
+    const filled = fillGenericSchema(substitution, schema);
+    expect(filled.properties?.x).toEqual({ type: "integer", description: "The value to pick." });
+  });
 });

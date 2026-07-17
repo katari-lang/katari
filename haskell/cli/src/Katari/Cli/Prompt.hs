@@ -49,7 +49,7 @@ import Data.Text.IO qualified as TextIO
 import Data.Vector qualified as Vector
 import GHC.List (List)
 import Katari.Cli.Output (OutputContext (..), styled)
-import Katari.Data.JSONSchema (AdditionalProperties (..), JSONSchema (..), ObjectSchema (..))
+import Katari.Data.JSONSchema (AdditionalProperties (..), DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import System.Console.ANSI
   ( Color (..),
     ColorIntensity (..),
@@ -313,6 +313,8 @@ promptFromSchema context path schema = case schema of
   SchemaTuple elements -> promptTuple context path elements
   SchemaObject objectSchema -> promptObject context path objectSchema
   SchemaAnyOf branches -> promptAnyOf context path branches
+  -- A description annotates, never constrains: the interview asks for the inner shape.
+  SchemaDescribed described -> promptFromSchema context path described.schema
   where
     autoFill value = do
       TextIO.hPutStrLn stderr (dim context (pathLabel path <> " = " <> compactJson value <> " (fixed)"))
@@ -457,6 +459,7 @@ constLabels = traverse constLabel
   where
     constLabel = \case
       SchemaConst value -> Just (compactJson value, value)
+      SchemaDescribed described -> constLabel described.schema
       _ -> Nothing
 
 -- | A one-line description of a schema, for menu labels.
@@ -477,6 +480,7 @@ renderSchemaBrief = \case
     Nothing -> "record {" <> Text.intercalate ", " [name | (name, _) <- objectSchema.properties] <> "}"
   SchemaAnyOf branches -> Text.intercalate " | " (map renderSchemaBrief branches)
   SchemaGeneric _ -> "any json (generic)"
+  SchemaDescribed described -> renderSchemaBrief described.schema
 
 -- | If an object schema is a @data@ value's wire schema — a @$constructor@ const over fields nested
 -- under @value@ (see "Katari.Schema") — a brief naming the constructor and its fields, so a union
