@@ -1,6 +1,5 @@
 -- | The compile driver: wires every phase over a set of source modules and collects the artifacts
--- and diagnostics. The leaf phases are stubbed; this module fixes the orchestration and the I/O
--- between phases so it need not be reshuffled once the internals land.
+-- and diagnostics; this module owns the orchestration and the I/O between phases.
 --
 -- No import-graph topological sort is needed: 'scanExports' is import-independent, so every module's
 -- interface is available before any module is identified, and parse / scanExports / identify / lower
@@ -59,7 +58,7 @@ data CompileResult = CompileResult
 -- and shares them across every 'compile' call: the stdlib sources are a build-time constant, so
 -- re-parsing them per compile would be pure waste. (Later phases — identify / check / lower — still
 -- run per call, since they fold the stdlib together with the user's modules; they can be memoized the
--- same way once they are no longer stubs and the cost matters.)
+-- same way once the cost matters.)
 stdlibParsed :: Map ModuleName (Module Parsed, Diagnostics)
 stdlibParsed = Map.mapWithKey parseModule Stdlib.stdlibSources
 

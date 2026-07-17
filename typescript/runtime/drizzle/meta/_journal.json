@@ -8,13 +8,6 @@
       "when": 1784273374921,
       "tag": "0000_initial_runtime_schema",
       "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1784273434601,
-      "tag": "0001_deferrable_delegation_instance_fks",
-      "breakpoints": true
     }
   ]
 }
