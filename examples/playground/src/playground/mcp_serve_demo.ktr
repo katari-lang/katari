@@ -20,13 +20,13 @@ tools are gated by. Returning ends the serving and makes this summary the run's 
 agent self_subscriber(url: string) -> string {
   use handler {
     request prelude.throw(error: mcp.server_error | mcp.auth_error | reflection.call_error) -> never {
-      break f"mcp failed: ${json.to_text(value = error)}"
+      break f"mcp failed: ${json.stringify(value = error)}"
     }
   }
   let tools : mcp.toolbox[mcp.scope] = use mcp.provide[mcp.scope](url = url, auth = mcp.headers(values = record.empty()))
   let doubled = match (record.get(target = tools, key = "double")) {
     case null -> "(no double tool)"
-    case tool -> json.to_text(value = reflection.call_agent(target = tool, args = { value = 21 }))
+    case tool -> json.stringify(value = reflection.call_agent(target = tool, args = { value = 21 }))
   }
   f"double(21) = ${doubled}"
 }

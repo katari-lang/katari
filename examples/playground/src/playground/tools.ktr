@@ -48,8 +48,8 @@ agent dispatch(tools: array[agent never -> unknown with all], picked: string, ar
   for (tool in tools) {
     let m = reflection.get_metadata(value = tool)
     if (m.name == picked) {
-      // The tool's result is an arbitrary value; `to_text` renders its wire form as JSON text.
-      return json.to_text(value = reflection.call_agent(target = tool, args = args))
+      // The tool's result is an arbitrary value; `stringify` renders it as canonical JSON text (total).
+      return json.stringify(value = reflection.call_agent(target = tool, args = args))
     } else {
       null
     }

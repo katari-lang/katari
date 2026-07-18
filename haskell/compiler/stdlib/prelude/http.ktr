@@ -58,7 +58,7 @@ data multipart(parts: array[multipart_part])
 document where every `file` leaf — and only a `file` leaf — becomes the base64 of its bytes, in place. This
 is the REST convention (a GitHub content upload, an AI provider's inline image), NOT an HTTP standard. To
 transmit a file's HANDLE instead of its bytes (almost never what an API wants), stringify it yourself first
-(e.g. embed `json.to_text(value = a_file)` as a string). Everything but a file goes on the wire as the tree
+(e.g. embed `json.stringify(value = a_file)` as a string). Everything but a file goes on the wire as the tree
 you built. The tree may carry secrets (its type is private-capable), revealed only to the destination."
 data json(value: unknown of private)
 

@@ -223,14 +223,14 @@ callerModule =
       "agent main() -> string {",
       "  use handler {",
       "    request prelude.throw(error: mcp.server_error | mcp.auth_error | json.decode_error) -> never {",
-      "      break f\"mcp failed: ${json.to_text(value = error)}\"",
+      "      break f\"mcp failed: ${json.stringify(value = error)}\"",
       "    }",
       "  }",
       "  use github.connect(auth = mcp.oauth(name = \"github\"))",
       "  let issue = github.get_issue(owner = \"katari-lang\", repo = \"katari\")",
       "  let pong = github.ping(arguments = record.empty())",
       "  let names = describe_tools(tools = [github.get_issue])",
-      "  f\"issue=${issue.title} pong=${json.to_text(value = pong)} names=${string.join(parts = names, separator = \",\")}\"",
+      "  f\"issue=${issue.title} pong=${json.stringify(value = pong)} names=${string.join(parts = names, separator = \",\")}\"",
       "}"
     ]
 
@@ -263,14 +263,14 @@ twoServerCaller =
       "agent two_server() -> string {",
       "  use handler {",
       "    request prelude.throw(error: mcp.server_error | mcp.auth_error | json.decode_error) -> never {",
-      "      break f\"mcp failed: ${json.to_text(value = error)}\"",
+      "      break f\"mcp failed: ${json.stringify(value = error)}\"",
       "    }",
       "  }",
       "  use alpha.connect(auth = mcp.oauth(name = \"alpha\"))",
       "  use bravo.connect(auth = mcp.oauth(name = \"bravo\"))",
       "  let a = alpha.search(q = \"x\")",
       "  let b = bravo.search(q = \"y\")",
-      "  f\"${json.to_text(value = a)} ${json.to_text(value = b)}\"",
+      "  f\"${json.stringify(value = a)} ${json.stringify(value = b)}\"",
       "}"
     ]
 

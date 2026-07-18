@@ -1,8 +1,9 @@
 // The stdlib sub-module prims (`prelude.json.*`, `prelude.record.*`, `prelude.array.*`,
 // `prelude.string.*`) and `prelude.get_metadata`, exercised directly through the registry (no actor).
-// The json prims are all LITERAL (parse / parse_as / stringify keep keys verbatim, `$` uninterpreted),
-// except `to_text`, which renders a value's wire form (nested `$constructor`, `$agent` / `$closure`
-// references carrying their snapshot, `$ref` handles).
+// The json prims all keep keys VERBATIM (parse / parse_as / stringify, `$` uninterpreted). `stringify` is
+// TOTAL: a document round-trips key-for-key (`stringify(parse(s)) == s`), and a non-document value renders
+// its canonical wire form (nested `$constructor`, `$agent` / `$closure` references carrying their snapshot,
+// `$ref` file handles).
 
 import {
   createAgentName,
@@ -134,23 +135,20 @@ describe("prelude.json", () => {
     expect(text).toEqual(str('{"a":[1,2],"b":"x","$ref":"y"}'));
   });
 
-  test("stringify throws `stringify_error` for a non-document value (a data value, a file)", async () => {
+  test("stringify is TOTAL: a data value nests under `value`, a file becomes its `$ref` handle", async () => {
     const data: Value = {
       kind: "record",
       fields: { n: int(3) },
       ctor: createAgentName("main.box"),
     };
-    await expectThrows(
-      run("prelude.json.stringify", { value: data }),
-      "prelude.json.stringify_error",
-      /json\.stringify: .*data value/,
-    );
+    const dataText = await run("prelude.json.stringify", { value: data });
+    if (dataText.kind !== "string") throw new Error("expected a string");
+    expect(JSON.parse(dataText.value)).toEqual({ $constructor: "main.box", value: { n: 3 } });
+
     const file: Value = { kind: "ref", semanticKind: "file", blobId: "blob-x" as BlobId };
-    await expectThrows(
-      run("prelude.json.stringify", { value: file }),
-      "prelude.json.stringify_error",
-      /json\.stringify: .*file value/,
-    );
+    const fileText = await run("prelude.json.stringify", { value: file });
+    if (fileText.kind !== "string") throw new Error("expected a string");
+    expect(JSON.parse(fileText.value)).toEqual({ $ref: "blob-x", semanticKind: "file" });
   });
 
   const POINT: JSONSchema = {
@@ -188,7 +186,7 @@ describe("prelude.json", () => {
     });
   });
 
-  test("to_text renders a value's WIRE form as text (data nests, file becomes $ref, keys verbatim)", async () => {
+  test("stringify renders a MIXED tree's canonical form (data nests, file becomes $ref, keys verbatim)", async () => {
     const mixed: Value = {
       kind: "record",
       fields: {
@@ -198,11 +196,11 @@ describe("prelude.json", () => {
         handle: { kind: "ref", semanticKind: "file", blobId: "blob-x" as BlobId },
       },
     };
-    const text = await run("prelude.json.to_text", { value: mixed });
+    const text = await run("prelude.json.stringify", { value: mixed });
     if (text.kind !== "string") throw new Error("expected a string");
     // A `data` value nests under `value`; a `file` becomes its `$ref` handle. Keys read VERBATIM — the
     // `$$` escape is un-done, so a value-plane `$ref` key shows as `$ref` (accepted ambiguity with a real
-    // handle: to_text is display, not round-trip).
+    // handle: stringify is the canonical render, and the read channel a model sees).
     expect(JSON.parse(text.value)).toEqual({
       a: 1,
       box: { $constructor: "main.box", value: { value: 3 } },

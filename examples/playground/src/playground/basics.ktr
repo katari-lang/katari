@@ -76,10 +76,10 @@ agent main() -> string {
   let areas = for (let s in shapes) { next area(value = s) }
   let total = sum(values = squares(count = 4))
   let parts = [
-    f"areas=${json.to_text(value = areas)}",
-    f"ticks=${json.to_text(value = count_three())}",
+    f"areas=${json.stringify(value = areas)}",
+    f"ticks=${json.stringify(value = count_three())}",
     f"sum(squares(4))=${string.to_string(value = total)}",
-    f"doubles=${json.to_text(value = doubles(values = [1.5, 21.0]))}",
+    f"doubles=${json.stringify(value = doubles(values = [1.5, 21.0]))}",
     f"decorated=${decorated()}",
     f"shout=${string.to_upper(value = "hello, katari")}",
   ]

@@ -4,19 +4,27 @@
 // `case array(a)` / `case string(s)`) and the total readers below, and builds one with ordinary record /
 // array literals. Referenced by the default-import qualifier: `json.parse(...)`, `json.field(...)`.
 //
-// The naming law is the spine of this module: EVERY VERB IS LITERAL, save one. `parse`, `parse_as` and
-// `stringify` move a document exactly as written — every object key is kept verbatim, and a `$`-prefixed
-// key (`$ref`, `$constructor`) is an ordinary key, never a wire discriminator. The one exception is
-// `to_text`, which renders a value's WIRE form as text (for display / a prompt / a handle embed): only it
-// speaks the wire conventions (`$`-key escaping, `$constructor` / `$ref` tagging).
+// The naming law is the spine of this module: EVERY VERB KEEPS KEYS VERBATIM. `parse`, `parse_as` and
+// `stringify` all move object keys exactly as written — a `$`-prefixed key (`$ref`, `$constructor`) is an
+// ordinary key, never a wire discriminator, and no key is ever escaped. There is no separate "wire word":
+// `stringify` is the single text writer, and it is TOTAL over every value.
 //
 //   - `parse : string -> unknown`      text -> the document value (traverse it with shape filters)
 //   - `parse_as[T] : string -> T`      literal parse + validation against T's schema (the typed text boundary)
-//   - `stringify : unknown -> string`  a document value -> its document text (inverts `parse`)
-//   - `to_text[T] : T -> string`       any value -> the JSON text of its wire form
+//   - `stringify[T] : T -> string`     ANY value -> its (compact) JSON text, keys verbatim
 //
-// Laws: `stringify(parse(t)) == t` (document text, modulo number normalisation) and `parse(stringify(d)) == d`
-// (a document value d).
+// `stringify` is total and CANONICAL — one value has exactly one text:
+//   - a document (record / array / scalar) is written key-for-key, so `stringify(parse(s)) == s` (an
+//     IDENTITY, modulo whitespace / number normalisation) and `parse(stringify(d)) == d` for a document d;
+//   - a `file` becomes its `{ "$ref": id, "semanticKind": … }` handle object;
+//   - a `data` value nests its fields under `value`: `{ "$constructor": name, "value": { …fields } }`;
+//   - an agent / closure / tool becomes its `$agent` / `$closure` / `$tool` handle object.
+// Keys are shown VERBATIM either way (no `$$` escaping — that device lives only inside the persistence
+// codec's bytes, never at this surface), so a record with a literal `$ref` key is indistinguishable in the
+// text from a `file` handle. That ambiguity is ACCEPTED, because `stringify` is also the READ CHANNEL that
+// lets an AI SEE a handle / data value (an error render, a handle embed, a tool result shown back to a
+// model). Whether an external API understands the `$`-tagged form of a handle is the CALLER's concern:
+// `stringify` emits the canonical form, it does not promise the far side reads it back.
 //
 // There is no `decode` and no `encode`. A document is ALREADY a value, so reading one needs no wire step:
 // a plain value (record / array / scalar / file) drops straight into a document tree, and a document read
@@ -25,20 +33,8 @@
 // `reflection.call_agent` validates the argument against the callee's schema, and revives a `$ref` into a
 // real `file` exactly where the schema expects one (schema-directed, never a blind lift).
 //
-// The `stringify` / `to_text` split is the sharpest edge of the literal / wire law:
-//
-//   - `stringify` is DOCUMENT-ONLY and its law is an IDENTITY: `stringify(parse(s)) == s` (modulo
-//     whitespace / number normalisation), and `parse(stringify(d)) == d` for a document value d. A value
-//     that is NOT a document — a `file`, a callable, or a `data` value — has no literal text form, so it
-//     is rejected as a TYPED `stringify_error` (catchable), not silently coerced.
-//   - `to_text` is TOTAL and its purpose is DISPLAY, not round-trip: it renders ANY value's wire form as
-//     text (`$constructor` / `$ref` / `$$`-escaping and all). No identity law is promised — a document
-//     with a literal `$ref` key comes back doubled — because the output is for a human / a prompt / a
-//     handle embed, where seeing the wire form is the point.
-//
-// Errors: malformed text throws `parse_error`; a document that does not conform to the requested type's
-// schema throws `decode_error` (from `parse_as`); a non-document value reaching `stringify` throws
-// `stringify_error`.
+// Errors: malformed text throws `parse_error` (`parse` / `parse_as`); a document that does not conform to
+// the requested type's schema throws `decode_error` (`parse_as`). `stringify` is TOTAL — it never throws.
 
 @"A JSON document failed to parse: the text is not JSON. Thrown by `parse` / `parse_as`."
 data parse_error(message: string)
@@ -46,11 +42,6 @@ data parse_error(message: string)
 @"A document does not conform to the requested type's schema. Thrown by `parse_as`; `message` names the
 offending path."
 data decode_error(message: string)
-
-@"A value with no JSON document form — a `file`, a callable, or a `data` value — reached `stringify`.
-Such a value has no literal text (only a wire form, which `to_text` renders); `message` names the
-offending kind. Thrown by `stringify`."
-data stringify_error(message: string)
 
 @"Parse JSON text into its document value — a record / array / string / integer / number / boolean / null,
 keys kept exactly as written (`$` is not interpreted). Traverse it with shape filters (`case record(r)`)
@@ -65,22 +56,17 @@ result, so it cannot be inferred). Malformed text throws `parse_error`; a schema
 that happens at the delegation boundary, where the target's schema says a `file` is expected."
 primitive agent parse_as[T](@"The text of one complete JSON document." text: string) -> T with prelude.throw[parse_error | decode_error]
 
-@"Render a document value as its (compact) JSON text; the exact inverse of `parse` (keys verbatim, `$`
-uninterpreted), so `stringify(parse(s))` is `s` up to whitespace. The value must be a document shape
-(record / array / string / integer / number / boolean / null); a `file`, a callable or a `data` value has
-no document text, so it throws `stringify_error`. To render an arbitrary value (wire form and all) as
-text — where no round-trip is needed — use `to_text`."
-primitive agent stringify(value: unknown) -> string with prelude.throw[stringify_error]
-
-@"Render any value as the (compact) JSON text of its WIRE form, for DISPLAY (an error message, a handle
-embed, a tool result rendered back to a model): a `data` value nests its fields under `value` (`{
-$constructor: name, value: { ...fields } }`), a `file` becomes its `$ref` handle object, and an agent /
-closure its `$agent` / `$closure` reference object. Total over every value. Keys read exactly as written —
-a `$`-prefixed record key shows as itself, never doubled. No round-trip law is promised (unlike
-`stringify`): because keys are shown verbatim, a record with a literal `$ref` key is indistinguishable in
-the text from a `file` handle — an accepted ambiguity, since the point is to SEE the wire form, not to read
-it back. A secret operand taints the whole result (the monotonic information-flow rule)."
-primitive agent to_text[T](value: T) -> string
+@"Render ANY value as its (compact) JSON text, keys kept exactly as written — TOTAL and CANONICAL (one
+value, one text). A document value (record / array / string / integer / number / boolean / null)
+round-trips verbatim, so `stringify(parse(s))` is `s` up to whitespace; a `file` becomes its `$ref` handle
+object, a `data` value nests its fields under `value` (`{ $constructor: name, value: { ...fields } }`), and
+an agent / closure / tool its handle object. Nothing is escaped — a `$`-prefixed record key shows as itself,
+so a literal `$ref` key reads the same as a real handle. That ambiguity is ACCEPTED, because `stringify` is
+also the READ CHANNEL for showing an AI a handle / data value (an error render, a handle embed, a tool
+result rendered back to a model). Whether an external API understands the `$`-tagged form is the CALLER's
+concern — `stringify` emits the canonical form, it does not promise the far side reads it. A secret operand
+taints the whole result (the monotonic information-flow rule)."
+primitive agent stringify[T](value: T) -> string
 
 // The total readers — plain Katari over `unknown`, for picking values out of a document of unknown or
 // irregular shape (an AI reply, a third-party API response) without a shape filter at every step. The

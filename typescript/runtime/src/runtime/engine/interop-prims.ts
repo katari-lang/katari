@@ -46,10 +46,10 @@ import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js
 import { errorData, KatariThrow } from "./throw-signal.js";
 import type { BlobEntry } from "./types.js";
 
-// The domain error ctors the json prims throw (`prelude/json.ktr` declares them).
+// The domain error ctors the json prims throw (`prelude/json.ktr` declares them). `stringify` is total,
+// so it declares none.
 const PARSE_ERROR = "prelude.json.parse_error";
 const DECODE_ERROR = "prelude.json.decode_error";
-const STRINGIFY_ERROR = "prelude.json.stringify_error";
 
 // The largest array `range` will materialise. `range` allocates the whole array synchronously on the
 // actor's serial turn, so an unbounded (possibly AI-supplied) bound would stall the event loop or exhaust
@@ -107,28 +107,12 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return literalLift(json);
   },
   "prelude.json.stringify": async (argument, context) => {
-    // A document value -> its document text, keys kept verbatim. A non-document value (a file, a callable,
-    // a data value) has no document form, so `literalWrite` throws — surface it as the declared, catchable
-    // `stringify_error` (to render such a value, `to_text` gives its wire form).
-    let json: Json;
-    try {
-      json = await literalWrite(field(argument, "value"), stringReaderOf(context));
-    } catch (error) {
-      throw new KatariThrow(
-        errorData(
-          STRINGIFY_ERROR,
-          `json.stringify: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-    }
-    return { kind: "string", value: JSON.stringify(json) };
-  },
-  "prelude.json.to_text": async (argument, context) => {
-    // The one wire word: a value -> the text of its WIRE form. `encodeValue` turns any value into a
-    // document (a data value nests, a file becomes its `$ref` object), then it flattens to text — total
-    // for every value. The `$$` escape `encodeValue` put on a value-plane `$`-key is un-escaped back out
-    // (`unescapeWireKeys`): to_text is DISPLAY, so a `$special` key shows as `$special`, never `$$special`
-    // — the escape stays a pure codec-internal device, invisible at every surface.
+    // TOTAL: render ANY value as the text of its canonical JSON form. `encodeValue` turns the value into a
+    // document first — a document is written key-for-key (so `stringify(parse(s)) == s`), a data value nests
+    // under `value`, and a file / agent / closure / tool becomes its handle object — then it flattens to text,
+    // total for every value. The `$$` escape `encodeValue` put on a value-plane `$`-key is un-escaped back out
+    // (`unescapeWireKeys`): the surface shows keys VERBATIM, so a `$ref` key displays as `$ref`, never
+    // `$$ref` — the escape stays a pure codec-internal device, invisible at every surface.
     const reader = stringReaderOf(context);
     const wire = await encodeValue(field(argument, "value"), reader);
     const document = unescapeWireKeys(await literalWrite(wire, reader));

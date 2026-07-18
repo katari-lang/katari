@@ -4,23 +4,24 @@
 // encoder they compose with the value codec (`value/codec.ts`):
 //
 //   - `literalLift`:  bare `Json`  ->  document `Value`   (`parse`; lifting a schema document)
-//   - `literalWrite`: document `Value`  ->  bare `Json`   (`stringify`; the flatten `decode` reads through)
-//   - `encodeValue`:  any `Value`  ->  its WIRE form as a document `Value`   (`json.encode`)
+//   - `literalWrite`: document `Value`  ->  bare `Json`   (the flatten inside `stringify`)
+//   - `encodeValue`:  any `Value`  ->  its WIRE form as a document `Value`   (the wire step inside `stringify`)
 //
 // LITERAL vs WIRE is the whole split. `literalLift` / `literalWrite` keep every object key exactly as
-// written — `$constructor` / `$ref` are ordinary keys, never interpreted — so `parse` / `stringify` are a
-// faithful document round-trip. `encode` instead applies the value wire conventions (a `data` value nests
-// under `value`, a file / agent / closure becomes its reference object, a record escapes `$`-keys), and
-// `decode` inverts it by flattening the document (`literalWrite`) and reading the result through the value
-// codec's `jsonToValue` — so `decode(encode(x)) == x` for every `x`. integer vs number is preserved (the
-// document value distinguishes them; bare JSON splits on `Number.isInteger` at the text boundary).
+// written — `$constructor` / `$ref` are ordinary keys, never interpreted — so `parse` and a `stringify` over
+// a document are a faithful round-trip. `encodeValue` applies the value wire conventions (a `data` value
+// nests under `value`, a file / agent / closure becomes its reference object, a record escapes `$`-keys);
+// `json.stringify` composes it with `literalWrite` (then un-escapes the keys) so it is TOTAL over every
+// value — a document round-trips, a non-document renders its canonical handle form. integer vs number is
+// preserved (the document value distinguishes them; bare JSON splits on `Number.isInteger` at the text
+// boundary).
 //
-// A blob-backed string is materialised to text by `encode` / `literalWrite` (a JSON document's string is
-// text). `literalWrite` PANICS on a value that has no document form — a `file`, a callable, or a `data`
-// value — the logic defect `json.stringify`'s contract names (`encode` turns any of those into a document
-// first, so the composed `to_text` is total). Privacy: these walks keep private subtree content (nothing
-// here crosses a user boundary), and the prim layer's monotonic taint rule marks the whole result private
-// whenever any input part is.
+// A blob-backed string is materialised to text by `encodeValue` / `literalWrite` (a JSON document's string
+// is text). `literalWrite` PANICS on a value that has no document form — a `file`, a callable, or a `data`
+// value — an internal invariant, NOT a surface error: `json.stringify` runs `encodeValue` first, which turns
+// any of those into a document, so the composed `stringify` is TOTAL and never reaches these throws. Privacy:
+// these walks keep private subtree content (nothing here crosses a user boundary), and the prim layer's
+// monotonic taint rule marks the whole result private whenever any input part is.
 
 import type { Json } from "@katari-lang/types";
 import type { ProjectId } from "../ids.js";
@@ -77,7 +78,7 @@ function requireFinite(value: number): number {
 const textValue = (value: string): Value => ({ kind: "string", value });
 
 /** Un-escape the `$$`-doubled object keys of a wire document back to their single-`$` originals — what
- *  `to_text` applies to `encodeValue`'s output so the `$$` escape NEVER surfaces (a value-plane `$x` key
+ *  `stringify` applies to `encodeValue`'s output so the `$$` escape NEVER surfaces (a value-plane `$x` key
  *  displays as `$x`). A single-`$` key — a real wire discriminator (`$constructor` / `$ref` / `$agent`)
  *  or an external literal — is left as-is (`unescapeRecordKey` strips only a doubled `$`), so the wire
  *  tags still read. The escape thus lives ONLY inside the codec's persisted bytes, never at any surface.
@@ -121,9 +122,9 @@ export function literalLift(json: Json): Value {
 // ─── document Value -> bare Json (`stringify`, literal write) ────────────────────────────────────────
 
 /** Flatten a document `Value` back to bare JSON, keys unchanged. A value that is NOT a document shape —
- *  a `file`, a callable, or a `data` value (a ctor-tagged record) — has no document text, so it throws;
- *  the prim layer turns that into the panic `json.stringify`'s contract names. A blob-backed string
- *  materialises to its text (a JSON document's string is text). */
+ *  a `file`, a callable, or a `data` value (a ctor-tagged record) — has no document text, so it throws (an
+ *  internal invariant: `json.stringify` runs `encodeValue` first, so it only ever hands this a document). A
+ *  blob-backed string materialises to its text (a JSON document's string is text). */
 export async function literalWrite(value: Value, readString: StringReader): Promise<Json> {
   switch (value.kind) {
     case "null":
@@ -172,7 +173,8 @@ export async function literalWrite(value: Value, readString: StringReader): Prom
  * Turn any runtime value into its WIRE form, as a document `Value` (`value/codec.ts` conventions): a
  * `data` value nests its fields under `value`, a record escapes `$`-keys, a file / agent / closure / tool
  * becomes its reference object, a blob-backed string is materialised to text. A closure's captured scope
- * ids ride along so it reconstructs. `json.decode` (`literalWrite` then `jsonToValue`) inverts this.
+ * ids ride along so it reconstructs. The value codec's `jsonToValue` (after `literalWrite` flattens) inverts
+ * this.
  */
 export async function encodeValue(value: Value, readString: StringReader): Promise<Value> {
   switch (value.kind) {

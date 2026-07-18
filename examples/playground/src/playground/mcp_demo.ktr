@@ -17,7 +17,7 @@ tools are gated by."
 agent main(url: string) -> string {
   use handler {
     request prelude.throw(error: mcp.server_error | mcp.auth_error | reflection.call_error) -> never {
-      break f"mcp failed: ${json.to_text(value = error)}"
+      break f"mcp failed: ${json.stringify(value = error)}"
     }
   }
   let tools : mcp.toolbox[mcp.scope] = use mcp.provide[mcp.scope](url = url, auth = mcp.headers(values = record.empty()))
@@ -26,7 +26,7 @@ agent main(url: string) -> string {
   }
   let added = match (record.get(target = tools, key = "add")) {
     case null -> "(no add tool)"
-    case tool -> json.to_text(value = reflection.call_agent(target = tool, args = { x = 19, y = 23 }))
+    case tool -> json.stringify(value = reflection.call_agent(target = tool, args = { x = 19, y = 23 }))
   }
   f"tools=${string.join(parts = names, separator = ",")}; add=${added}"
 }
