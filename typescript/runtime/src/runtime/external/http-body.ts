@@ -16,6 +16,7 @@ import {
   FILE_KEY,
   type Json,
   SEMANTIC_KIND_KEY,
+  unescapeRecordKey,
   VALUE_KEY,
 } from "@katari-lang/types";
 import type { BlobId } from "../ids.js";
@@ -147,7 +148,13 @@ async function materializeMultipart(
 /** Walk the `json` body's value tree (its `valueToJson` wire form), replacing every `file` leaf with the
  *  base64 of its bytes — the ONE place the tree's shape changes. A blob-backed STRING leaf materialises to
  *  its text (a JSON document's string is text); every other node passes through unchanged, so the tree the
- *  caller built is the tree that goes on the wire, files aside. */
+ *  caller built is the tree that goes on the wire, files aside.
+ *
+ *  Object keys are UN-escaped back to what the program wrote (`unescapeRecordKey`): the value codec doubles
+ *  a record key's leading `$` on the way out (`valueToJson`), so a program that put a literal `$ref` / `$defs`
+ *  / `$schema` key in the tree — a JSON-Schema keyword an AI provider's tool schema carries — arrives here as
+ *  `$$ref` / …, and must go on the wire as the ORIGINAL `$ref`. A single-`$` object (a real `$ref` file
+ *  handle) is caught by `fileHandleOf` above before this branch, so the two never collide. */
 async function materializeJsonTree(
   node: Json | undefined,
   resolve: HttpBlobResolver | null,
@@ -169,7 +176,7 @@ async function materializeJsonTree(
     }
     const out: { [key: string]: Json } = {};
     for (const [key, value] of Object.entries(node)) {
-      out[key] = await materializeJsonTree(value, resolve);
+      out[unescapeRecordKey(key)] = await materializeJsonTree(value, resolve);
     }
     return out;
   }
