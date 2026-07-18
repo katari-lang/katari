@@ -11,7 +11,7 @@
 // may prompt. The CLI is resolved separately from the server (see `resolveCliPath`) since the VSIX
 // bundles no CLI.
 
-import { chmodSync, existsSync, statSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import * as vscode from "vscode";
 import {
@@ -344,16 +344,61 @@ async function promptForMcpServerUrl(): Promise<string | undefined> {
 }
 
 async function promptForBindingsOutputPath(projectRoot: string): Promise<string | undefined> {
-  // Default into src/ when the project has one — that is where katari.toml projects keep sources —
-  // but never invent the directory from a save dialog.
+  // A Katari module's name is its path under src/ with separators as dots (src/foo/bar.ktr -> foo.bar),
+  // and the compiler requires every module of a package to be `<package-name>` or a `<package-name>.`
+  // descendant, each segment a valid identifier ([A-Za-z_][A-Za-z0-9_]*). So a bare src/mcp-tools.ktr is
+  // rejected twice over — the hyphen is not an identifier character, and the module sits outside the
+  // package namespace. Default instead into src/<package-name>/mcp_tools.ktr, which the CLI's `mcp pull`
+  // will create (it makes the parent directory on write).
+  const packageName = readPackageName(projectRoot);
   const sourceDirectory = join(projectRoot, "src");
-  const defaultDirectory = existsSync(sourceDirectory) ? sourceDirectory : projectRoot;
+  const sourceRoot = existsSync(sourceDirectory) ? sourceDirectory : projectRoot;
+  // Without a readable package name there is no namespace to nest under, so fall back to the source root
+  // with the corrected (underscore) stem — still just a default the user can redirect in the dialog.
+  const defaultDirectory = packageName !== undefined ? join(sourceRoot, packageName) : sourceRoot;
   const chosen = await vscode.window.showSaveDialog({
     title: "Generated bindings file",
-    defaultUri: vscode.Uri.file(join(defaultDirectory, "mcp-tools.ktr")),
+    defaultUri: vscode.Uri.file(join(defaultDirectory, "mcp_tools.ktr")),
     filters: { "Katari source": ["ktr"] },
   });
   return chosen?.fsPath;
+}
+
+/**
+ * Read `[package].name` from the project's katari.toml, or `undefined` when the file is unreadable, the
+ * key is absent, or its value is not a valid package identifier. This is a deliberately small reader —
+ * only the one scalar under one table is needed, so it avoids pulling in a TOML dependency — and it
+ * mirrors the compiler's package-name rule so a name that could not form a valid module namespace is
+ * treated as absent rather than seeding a broken default path.
+ */
+function readPackageName(projectRoot: string): string | undefined {
+  let contents: string;
+  try {
+    contents = readFileSync(join(projectRoot, "katari.toml"), "utf8");
+  } catch {
+    return undefined;
+  }
+  let insidePackageTable = false;
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+    const tableMatch = /^\[([^\]]*)\]/.exec(line);
+    if (tableMatch !== null) {
+      insidePackageTable = tableMatch[1].trim() === "package";
+      continue;
+    }
+    if (!insidePackageTable) {
+      continue;
+    }
+    const nameMatch = /^name\s*=\s*["']([^"']*)["']/.exec(line);
+    if (nameMatch !== null) {
+      const candidate = nameMatch[1];
+      return /^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate) ? candidate : undefined;
+    }
+  }
+  return undefined;
 }
 
 /**
