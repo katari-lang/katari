@@ -124,10 +124,13 @@ golden =
       "// All-or-nothing on the PARAMETER side is the wire-form asymmetry: `json.encode` speaks the value",
       "// WIRE form, so a `json.json` nested inside a typed parameter would embed as its `$constructor` tree,",
       "// not the raw fragment the server expects — a fallback parameter is therefore inserted into the",
-      "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call[url,",
-      "// T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema instantiates `T`",
-      "// to its type (decoded, `json.decode_error` on a mismatch) and any other tool instantiates `T` to",
-      "// `json.json` (the raw reply as a tree).",
+      "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call",
+      "// [connection, T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema",
+      "// instantiates `T` to its type (decoded, `json.decode_error` on a mismatch) and any other tool",
+      "// instantiates `T` to `json.json` (the raw reply as a tree).",
+      "",
+      "@\"This server's scope marker: every tool rides it, and `connect`'s `mcp.provide` discharges it, so a tool cannot escape the connection.\"",
+      "effect connection",
       "",
       "@\"The connection's credentials — provided by `connect` for the scope's duration, read by every tool as `auth`.\"",
       "request credentials() -> mcp.auth",
@@ -135,9 +138,9 @@ golden =
       "@\"Open the pulled MCP server's connection for the extent of @continuation@ — as a bare `use github.connect(auth = ...)`, after which the tools are called directly (`github.get_issue(...)`). Establishes a `provide` scope over `https://mcp.example.test/mcp`, serves the connection's `credentials` to every tool, and discharges both on return. `auth` is `mcp.headers(values = ...)` for header or anonymous access, or `mcp.oauth(name = \\\"...\\\")` for a server-stored credential (a missing one pauses the run on an OAuth authorization escalation; answer it from the admin console or `katari answer`).\"",
       "agent connect[R, effect E](",
       "  auth: mcp.auth,",
-      "  continuation: agent (value: null) -> R with {...(E | mcp.scope[\"https://mcp.example.test/mcp\"]), credentials},",
+      "  continuation: agent (value: null) -> R with {...(E | connection), credentials},",
       ") -> R with io | E {",
-      "  let _ : mcp.toolbox[\"https://mcp.example.test/mcp\"] = use mcp.provide(url = \"https://mcp.example.test/mcp\", auth = auth)",
+      "  let _ : mcp.toolbox[connection] = use mcp.provide[connection, R, E](url = \"https://mcp.example.test/mcp\", auth = auth)",
       "  use handler {",
       "    request credentials() { next auth }",
       "  }",
@@ -148,7 +151,7 @@ golden =
       "type get_issue_output = {assignee?: string | null, number: integer, title: string}",
       "",
       "@\"Fetch one issue.\\nSlow on \\\"cold\\\" repos.\"",
-      "agent get_issue(filter: json.json | null ?= null, labels: array[string] | null ?= null, owner: string, repo: string) -> get_issue_output with io | mcp.scope[\"https://mcp.example.test/mcp\"] | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
+      "agent get_issue(filter: json.json | null ?= null, labels: array[string] | null ?= null, owner: string, repo: string) -> get_issue_output with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
       "  let arguments_0 = record.empty()",
       "  let arguments_1 = match (filter) {",
       "    case null -> arguments_0",
@@ -160,11 +163,11 @@ golden =
       "  }",
       "  let arguments_3 = record.set(target = arguments_2, key = \"owner\", value = json.encode(value = owner))",
       "  let arguments_4 = record.set(target = arguments_3, key = \"repo\", value = json.encode(value = repo))",
-      "  mcp.call[\"https://mcp.example.test/mcp\", get_issue_output](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"get-issue\", arguments = json.json_object(entries = arguments_4))",
+      "  mcp.call[connection, get_issue_output](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"get-issue\", arguments = json.json_object(entries = arguments_4))",
       "}",
       "",
-      "agent ping(arguments: json.json) -> json.json with io | mcp.scope[\"https://mcp.example.test/mcp\"] | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
-      "  mcp.call[\"https://mcp.example.test/mcp\", json.json](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"ping\", arguments = arguments)",
+      "agent ping(arguments: json.json) -> json.json with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
+      "  mcp.call[connection, json.json](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"ping\", arguments = arguments)",
       "}"
     ]
 
@@ -248,9 +251,10 @@ bravoContext :: PullContext
 bravoContext = PullContext {url = "https://bravo.example.test/mcp", outPath = "src/bravo.ktr"}
 
 -- | Two generated modules composed in ONE block: two bare `use ...connect(...)` statements nest, each
--- discharging its own per-URL scope and its own module-namespaced `credentials` request. The scopes
--- merge by arg-union (`scope["alpha" | "bravo"]`), which the mixed continuation row's UNION side
--- allows; the two `credentials` requests never collide because each is namespaced by its module.
+-- discharging its own module-local scope marker (`alpha.connection`, `bravo.connection`) and its own
+-- module-namespaced `credentials` request. The two markers are DISTINCT names that simply co-exist in
+-- the row — no arg-union, no covariance — and the two `credentials` requests never collide because each
+-- is namespaced by its module.
 twoServerCaller :: Text
 twoServerCaller =
   Text.unlines
@@ -302,11 +306,11 @@ spec = describe "katari mcp pull codegen" $ do
       -- (b) `typed` maps everywhere (nested array/object/record) — its `T` is the mapped type, so the
       -- runtime decodes the reply against it (no trailing `json.decode` anywhere anymore).
       rendered `shouldSatisfy` Text.isInfixOf "type typed_output = {hits: array[{id: integer}], scores?: record[number]}"
-      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[\"https://mcp.example.test/mcp\", typed_output](url ="
+      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[connection, typed_output](url ="
       rendered `shouldSatisfy` (not . Text.isInfixOf "json.decode[")
       -- (b) `partly-typed` has ONE untyped field — the whole output stays `json.json` (the `T` argument).
       rendered `shouldSatisfy` (not . Text.isInfixOf "partly_typed_output")
-      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[\"https://mcp.example.test/mcp\", json.json](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"partly-typed\""
+      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[connection, json.json](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"partly-typed\""
       -- (b) a field named by a reserved word cannot label an object type — also raw.
       rendered `shouldSatisfy` (not . Text.isInfixOf "reserved_field_output")
       shouldCompile rendered

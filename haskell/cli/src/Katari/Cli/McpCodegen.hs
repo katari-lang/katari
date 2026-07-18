@@ -8,12 +8,15 @@
 -- The caller writes @use github.connect(auth = ...)@ as a bare statement and then calls the tools
 -- directly (@github.get_issue(...)@).
 --
--- @connect@ opens the scope with @mcp.provide@ and serves @credentials@ with a @use handler@. The
--- continuation row uses a MIXED effect spelling: @{...(E | mcp.scope[\"<url>\"]), credentials}@ — the
--- scope marker rides the UNION side (so two @connect@s over two servers nest, their per-URL scopes
--- merging by arg-union), while the handled @credentials@ request rides the OVERWRITE side (a handled
--- request must be pinned out of the shared @E@ for the handler to discharge it; a pure @| credentials@
--- union leaves it in @E@ and the handler discharge fails, K3001). The two servers' @credentials@
+-- Each module declares its OWN nullary scope marker @effect connection@; being module-namespaced
+-- (@github.connection@), two servers' scopes are distinct names that never merge or widen, so there is no
+-- URL keying and no covariance. @connect@ opens the scope with @mcp.provide@ (whose @Scope@ generic it
+-- infers from the @mcp.toolbox[connection]@ binder annotation) and serves @credentials@ with a
+-- @use handler@. The continuation row uses a MIXED effect spelling: @{...(E | connection), credentials}@ —
+-- @connection@ rides the UNION side (so two @connect@s over two servers nest, their distinct markers
+-- co-existing), while the handled @credentials@ request rides the OVERWRITE side (a handled request must
+-- be pinned out of the shared @E@ for the handler to discharge it; a pure @| credentials@ union leaves it
+-- in @E@ and the handler discharge fails, K3001). The two servers' @connection@ markers and @credentials@
 -- requests never collide because each is namespaced by its own generated module.
 --
 -- NOTE: @connect@ still performs @mcp.provide@'s listing round-trip to open the scope, even though
@@ -27,7 +30,7 @@
 -- fragment an MCP server expects. A parameter whose schema maps completely is embedded with
 -- @json.encode@; a parameter with any unmapped part falls back to @json.json@ as a whole and is inserted
 -- into the arguments tree AS-IS (it already is a tree). The OUTPUT side has no such asymmetry:
--- @mcp.call[url, T]@ decodes the reply against @T@ in the RUNTIME. A tool whose @outputSchema@ maps
+-- @mcp.call[connection, T]@ decodes the reply against @T@ in the RUNTIME. A tool whose @outputSchema@ maps
 -- completely instantiates @T@ to that type (decoded, @json.decode_error@ on a mismatch); any other tool
 -- instantiates @T@ to @json.json@ (the raw reply as a tree — today's behaviour), so the wrapper is one
 -- @mcp.call[...]@ call either way, with no trailing @json.decode@.
@@ -105,8 +108,9 @@ instance FromJSON McpListing where
 ---------------------------------------------------------------------------------------------------
 
 data PullContext = PullContext
-  { -- | The server url — baked as the literal everywhere in the binding (the @provide@ url, the
-    -- @scope@ \/ @toolbox@ key, and every @mcp.call@ url), and part of the regenerate hint.
+  { -- | The server url — baked as the plain routing literal everywhere in the binding (the @provide@ url
+    -- and every @mcp.call@ url), and part of the regenerate hint. It is a routing value only; the scope
+    -- identity lives in the module-local @connection@ marker, not the url.
     url :: Text,
     -- | The @--out@ path, for the regenerate hint only.
     outPath :: Text
@@ -275,21 +279,39 @@ renderBindingModule context listing =
    in Text.intercalate
         "\n"
         ( headerLines context
+            <> markerEffectLines
             <> credentialsRequestLines
             <> connectLines context
             <> concatMap (toolLines context) resolvedTools
         )
         <> "\n"
 
+-- | The module-local scope marker every tool rides and `connect`'s `mcp.provide` discharges. A nullary
+-- phantom marker, module-namespaced (`github.connection` from `src/github.ktr`), so two servers' scopes
+-- are distinct names that never merge or widen — there is no URL keying and no covariance to reason about.
+markerEffectLines :: List Text
+markerEffectLines =
+  [ "",
+    "@\"This server's scope marker: every tool rides it, and `connect`'s `mcp.provide` discharges it, so a tool cannot escape the connection.\"",
+    "effect " <> scopeMarker
+  ]
+
+-- | The name of the generated scope marker. Referenced unqualified (it is declared in this module) in
+-- every tool's row, in `connect`'s continuation row, and as `mcp.call`'s and `mcp.provide`'s scope
+-- generic argument.
+scopeMarker :: Text
+scopeMarker = "connection"
+
 -- | The names a TOP-LEVEL tool agent must not take: Katari reserved words are handled inside
 -- 'assignIdentifier'; these are the module's own top-level names a tool agent would collide with or
--- shadow — the @connect@ provider agent and the @credentials@ request (a tool of either name would
--- redeclare it), and the default-import qualifiers (@mcp@ \/ @json@ \/ @record@ \/ @prelude@) that the
--- tool bodies, @connect@, and the signatures reference in value or type position (a top-level agent
--- of that name would shadow the qualifier). @connect@'s own parameters (@auth@ \/ @continuation@) are
--- local to @connect@, so a top-level tool of that name cannot shadow them and needs no seed.
+-- shadow — the @connect@ provider agent, the @credentials@ request, and the @connection@ scope marker
+-- (a tool of any of those names would redeclare it), and the default-import qualifiers
+-- (@mcp@ \/ @json@ \/ @record@ \/ @prelude@) that the tool bodies, @connect@, and the signatures
+-- reference in value or type position (a top-level agent of that name would shadow the qualifier).
+-- @connect@'s own parameters (@auth@ \/ @continuation@) are local to @connect@, so a top-level tool of
+-- that name cannot shadow them and needs no seed.
 toolNameSeed :: Set Text
-toolNameSeed = Set.fromList ["connect", "credentials", "mcp", "json", "record", "prelude"]
+toolNameSeed = Set.fromList ["connect", "credentials", "connection", "mcp", "json", "record", "prelude"]
 
 resolveTools :: List ToolListing -> List ResolvedTool
 resolveTools = walk toolNameSeed
@@ -380,10 +402,10 @@ headerLines context =
     "// All-or-nothing on the PARAMETER side is the wire-form asymmetry: `json.encode` speaks the value",
     "// WIRE form, so a `json.json` nested inside a typed parameter would embed as its `$constructor` tree,",
     "// not the raw fragment the server expects — a fallback parameter is therefore inserted into the",
-    "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call[url,",
-    "// T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema instantiates `T`",
-    "// to its type (decoded, `json.decode_error` on a mismatch) and any other tool instantiates `T` to",
-    "// `json.json` (the raw reply as a tree)."
+    "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call",
+    "// [connection, T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema",
+    "// instantiates `T` to its type (decoded, `json.decode_error` on a mismatch) and any other tool",
+    "// instantiates `T` to `json.json` (the raw reply as a tree)."
   ]
 
 -- | The ambient @credentials@ request: @connect@ serves it (returning the connection's @auth@) and
@@ -396,45 +418,37 @@ credentialsRequestLines =
     "request credentials() -> mcp.auth"
   ]
 
--- | The @connect@ scoped provider. It takes NO @url@ parameter — the pulled url is baked as a literal
--- everywhere (which is what per-URL scoping needs), so it appears in @provide@'s @url@, the @toolbox@
--- \/ @scope@ keys, and every @mcp.call@. The body opens the scope with @mcp.provide@ (the @use@ form,
+-- | The @connect@ scoped provider. It takes NO @url@ parameter — the pulled url is baked as a plain
+-- string routing value in @provide@'s @url@ and every @mcp.call@'s @url@, while the scope identity lives
+-- in the module-local @connection@ marker. The body opens the scope with @mcp.provide@ (the @use@ form,
 -- since Katari has no anonymous agent expressions — a provider is entered by capturing the rest of
 -- the block as its continuation) and serves @credentials@ with a @use handler@. The @use@ binder on
--- the provide is REQUIRED (it carries the type annotation that supplies the continuation's
--- @toolbox[url]@ value type) but is discarded to @_@, because the tools call through the static
--- @mcp.call@ path rather than the minted toolbox. @provide@ discharges @scope[url]@ and the handler
--- discharges @credentials@, so only @io@ (the implicit effect of every external call, which a rigid
--- @E@ cannot absorb) remains on @connect@'s own row. The continuation row's MIXED spelling
--- @{...(E | scope[url]), credentials}@ is load-bearing: @scope[url]@ rides the UNION side so nested
--- @connect@s compose (a merged @scope[a | b]@ still covers each inner @provide@'s @scope[url]@, which
--- an overwrite-pinned entry cannot), while the handled @credentials@ rides the OVERWRITE side so it
--- is pinned out of the shared @E@ for the handler to discharge (a @| credentials@ union leaves it in
--- @E@ and the discharge fails, K3001). Inference solves @provide@'s own @E@ by cancelling the shared
--- @scope[url]@ entry, so the generated @use mcp.provide(...)@ needs no explicit @[url, R, E]@.
+-- the provide is REQUIRED (its @mcp.toolbox[connection]@ annotation is what infers @provide@'s @Scope@
+-- generic — @provide@ takes no explicit @[...]@) but is discarded to @_@, because the tools call through
+-- the static @mcp.call@ path rather than the minted toolbox. @provide@ discharges @connection@ and the
+-- handler discharges @credentials@, so only @io@ (the implicit effect of every external call, which a
+-- rigid @E@ cannot absorb) remains on @connect@'s own row. The continuation row's MIXED spelling
+-- @{...(E | connection), credentials}@ keeps the handled @credentials@ on the OVERWRITE side so it is
+-- pinned out of the shared @E@ for the handler to discharge (a @| credentials@ union leaves it in @E@
+-- and the discharge fails, K3001); @connection@ rides the UNION side, and — being a distinct nullary
+-- marker — two servers' scopes are unrelated names that simply co-exist, with none of the arg-union
+-- covariance the old URL-keyed scope needed.
 connectLines :: PullContext -> List Text
 connectLines context =
-  let scopeRow = scopeEffect context.url
-      urlLiteral = "\"" <> escapeDocText context.url <> "\""
+  let urlLiteral = "\"" <> escapeDocText context.url <> "\""
    in [ "",
         "@\"" <> escapeDocText (connectDoc context) <> "\"",
         "agent connect[R, effect E](",
         indent 1 "auth: mcp.auth,",
-        indent 1 ("continuation: agent (value: null) -> R with {...(E | " <> scopeRow <> "), credentials},"),
+        indent 1 ("continuation: agent (value: null) -> R with {...(E | " <> scopeMarker <> "), credentials},"),
         ") -> R with io | E {",
-        indent 1 ("let _ : mcp.toolbox[" <> urlLiteral <> "] = use mcp.provide(url = " <> urlLiteral <> ", auth = auth)"),
+        indent 1 ("let _ : mcp.toolbox[" <> scopeMarker <> "] = use mcp.provide[" <> scopeMarker <> ", R, E](url = " <> urlLiteral <> ", auth = auth)"),
         indent 1 "use handler {",
         indent 2 "request credentials() { next auth }",
         indent 1 "}",
         indent 1 "continuation(value = null)",
         "}"
       ]
-
--- | The scope effect a tool call carries, keyed by the pulled url literal: it rides every tool's
--- effect row and @connect@'s continuation row, and @mcp.provide@ discharges it. Module-qualified
--- (@mcp.scope@) since the binding module imports the prelude by default.
-scopeEffect :: Text -> Text
-scopeEffect url = "mcp.scope[\"" <> escapeDocText url <> "\"]"
 
 -- | The module qualifier a caller writes, from the out path's base name (a Katari module is named
 -- after its file): @"github."@ for @src/github.ktr@, or empty for a degenerate path with no base name
@@ -487,7 +501,7 @@ toolLines context tool =
 -- @credentials@ request, and `mcp.call`'s throws.
 toolAgentLines :: PullContext -> ResolvedTool -> List Text
 toolAgentLines context tool =
-  [ "agent " <> tool.identifier <> "(" <> parameterList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow (scopeEffect context.url) <> " {"
+  [ "agent " <> tool.identifier <> "(" <> parameterList tool <> ") -> " <> outputTypeText tool.output <> " with " <> effectRow <> " {"
   ]
     <> argumentLines
     <> [ indent 1 (call argumentsExpression),
@@ -495,16 +509,16 @@ toolAgentLines context tool =
        ]
   where
     urlLiteral = "\"" <> escapeDocText context.url <> "\""
-    -- The url is the pulled literal (there is no `url` parameter) — this binds `mcp.call`'s `[literal
-    -- URL]` generic to the singleton (satisfying the `scope[url]` gate); `T` is the second, explicit
-    -- generic (the mapped output type, or `json.json`), against which the runtime decodes the reply. Both
-    -- generics MUST be written — a `literal` generic is inferred but still counts toward the explicit
-    -- `[...]` arity — so the url literal appears in the instantiation and again as the `url` argument. The
-    -- `auth` is the ambient `credentials()` (not a closed-over value). The call is the tool's tail
-    -- expression: no trailing `json.decode`, since `mcp.call` decodes itself.
+    -- The scope generic is the module-local `connection` marker (satisfying the `connection` gate on the
+    -- tool's row); `T` is the second, explicit generic (the mapped output type, or `json.json`), against
+    -- which the runtime decodes the reply. Both generics MUST be written — the scope marker is a phantom
+    -- the row never infers, and `T` appears only in the result. The url is the pulled literal, now a plain
+    -- `url =` routing argument (no longer a scope key). The `auth` is the ambient `credentials()` (not a
+    -- closed-over value). The call is the tool's tail expression: no trailing `json.decode`, since
+    -- `mcp.call` decodes itself.
     call argumentsText =
       "mcp.call["
-        <> urlLiteral
+        <> scopeMarker
         <> ", "
         <> outputTypeText tool.output
         <> "](url = "
@@ -565,16 +579,17 @@ outputTypeText output = case output of
   OutputTyped synonymName _ -> synonymName
   OutputRaw -> "json.json"
 
--- | The tool's effect row: @io@ (an external call), the provide @scope@ the call is gated by, the
--- ambient @credentials@ request the tool reads for its auth, and the three typed throws `mcp.call`
--- itself declares — @server_error@ / @auth_error@ and @json.decode_error@ (the runtime raises the last
--- when a reply does not conform to the decode target). It is UNIFORM across both output plans: even
--- the @json.json@ plan calls the same @mcp.call[...]@, whose row carries @decode_error@, so the tool
--- must carry it too (it is never actually raised for @json.json@, which keeps the raw tree). The scope
--- ties the call to the enclosing @provide@; @credentials@ ties it to @connect@'s handler.
-effectRow :: Text -> Text
-effectRow scopeRow =
-  "io | " <> scopeRow <> " | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
+-- | The tool's effect row: @io@ (an external call), the module-local @connection@ scope marker the call
+-- is gated by, the ambient @credentials@ request the tool reads for its auth, and the three typed throws
+-- `mcp.call` itself declares — @server_error@ / @auth_error@ and @json.decode_error@ (the runtime raises
+-- the last when a reply does not conform to the decode target). It is UNIFORM across both output plans:
+-- even the @json.json@ plan calls the same @mcp.call[...]@, whose row carries @decode_error@, so the tool
+-- must carry it too (it is never actually raised for @json.json@, which keeps the raw tree). The
+-- @connection@ marker ties the call to the enclosing @provide@; @credentials@ ties it to @connect@'s
+-- handler.
+effectRow :: Text
+effectRow =
+  "io | " <> scopeMarker <> " | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
 
 -- | Escape text into a Katari string \/ doc-annotation literal: backslash and double quote escape,
 -- newlines become the @\\n@ escape so every generated literal stays on one line, and the other

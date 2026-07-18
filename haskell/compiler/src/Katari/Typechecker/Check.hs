@@ -625,6 +625,48 @@ synthApplicationCallee = \case
     (components, scheme) <- checkHandlerScheme expression
     node <- assembleHandlerNode components (ownHandlerInstantiation scheme) scheme.valueType
     pure (node, scheme)
+  -- An explicit @callee[A, ...]@ in application position may bind a PREFIX of the callee's generic
+  -- parameters, leaving the trailing ones for the surrounding call to infer — the residual scheme keeps
+  -- them quantified. This is what lets a marker-scoped provider be steered by its (uninferrable) scope
+  -- marker while its result / effect generics stay inferred: @mcp.provide[mcp.scope](...)@ pins the scope
+  -- and infers @R@ / @E@ from the continuation. A FULL list (arity equal) leaves an empty residual — the
+  -- monomorphic callee an all-explicit @foo[A, B](...)@ has always produced. Only a call callee reads a
+  -- prefix; a standalone @foo[A]@ value still demands the full arity ('synthTypeApplicationExpression').
+  ExpressionTypeApplication expression -> do
+    (typedInnerCallee, innerScheme) <- synthApplicationCallee expression.callee
+    let allNames = innerScheme.genericParameters.parameterNames
+        information = innerScheme.genericParameters.parameterInformation
+        givenCount = length expression.typeArguments
+    if givenCount > length allNames
+      then do
+        reportApplicationArity expression.sourceSpan "value" (length allNames) givenCount
+        pure (typedInnerCallee, monoScheme bottomType)
+      else do
+        let (prefixNames, residualNames) = splitAt givenCount allNames
+            prefixParameters = GenericParameters {parameterNames = prefixNames, parameterInformation = Map.restrictKeys information (Set.fromList prefixNames)}
+        substitution <- buildGenericSubstitution expression.sourceSpan "value" prefixParameters expression.typeArguments
+        residualValueType <- runNormalizer expression.sourceSpan (substituteType substitution innerScheme.valueType)
+        -- The residual generics stay quantified; a bound that named a now-bound prefix generic is
+        -- rewritten so it refers to the supplied argument, not a vanished parameter.
+        let substituteBound :: GenericParameterInformation -> Normalizer GenericParameterInformation
+            substituteBound info = do
+              rewrittenBound <- traverse (substituteGenericArgument substitution) info.upperBound
+              pure info {upperBound = rewrittenBound}
+        residualInformation <-
+          runNormalizer expression.sourceSpan $
+            traverse substituteBound (Map.restrictKeys information (Set.fromList residualNames))
+        instantiation <- instantiationOf expression.sourceSpan prefixParameters substitution
+        semantic <- denormalizeAt expression.sourceSpan residualValueType
+        let node =
+              ExpressionTypeApplication
+                TypeApplicationExpression
+                  { callee = typedInnerCallee,
+                    typeArguments = retagSyntacticTypeExpression <$> expression.typeArguments,
+                    instantiation = instantiation,
+                    sourceSpan = expression.sourceSpan,
+                    typeOf = semantic
+                  }
+        pure (node, Scheme {genericParameters = GenericParameters {parameterNames = residualNames, parameterInformation = residualInformation}, valueType = residualValueType})
   other -> do
     (typedCallee, calleeType) <- synthExpression other
     pure (typedCallee, monoScheme calleeType)

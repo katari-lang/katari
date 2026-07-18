@@ -8,7 +8,8 @@
 // server descriptor and the runtime (re)connects lazily, closing on scope exit.
 //
 // Deterministic given a server: the e2e suite starts a local MCP server exposing one `add` tool and
-// passes its URL as the argument (a dynamic url, so the scope is `mcp.scope[string]`).
+// passes its URL as the argument. The dynamic path uses the built-in `mcp.scope` marker, so the toolbox
+// is `mcp.toolbox[mcp.scope]`; the url is a plain routing value.
 
 @"List the MCP server at @url@, report its tool names (from each minted agent's metadata), and call
 its `add` tool through the same dynamic dispatch an AI loop uses — all inside the `provide` scope the
@@ -19,7 +20,7 @@ agent main(url: string) -> string {
       break f"mcp failed: ${json.to_text(value = error)}"
     }
   }
-  let tools : mcp.toolbox[string] = use mcp.provide(url = url, auth = mcp.headers(values = record.empty()))
+  let tools : mcp.toolbox[mcp.scope] = use mcp.provide[mcp.scope](url = url, auth = mcp.headers(values = record.empty()))
   let names = for (let tool in record.values(target = tools)) {
     next reflection.get_metadata(value = tool).name
   }

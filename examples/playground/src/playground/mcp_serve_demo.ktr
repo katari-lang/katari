@@ -23,7 +23,7 @@ agent self_subscriber(url: string) -> string {
       break f"mcp failed: ${json.to_text(value = error)}"
     }
   }
-  let tools : mcp.toolbox[string] = use mcp.provide(url = url, auth = mcp.headers(values = record.empty()))
+  let tools : mcp.toolbox[mcp.scope] = use mcp.provide[mcp.scope](url = url, auth = mcp.headers(values = record.empty()))
   let doubled = match (record.get(target = tools, key = "double")) {
     case null -> "(no double tool)"
     case tool -> json.to_text(value = reflection.call_agent(target = tool, args = { value = 21 }))

@@ -253,6 +253,11 @@ topLevelCalleeName :: AST.Expression AST.Typed -> Maybe QualifiedName
 topLevelCalleeName = \case
   AST.ExpressionVariable expression -> topLevelResolution expression.variableReference
   AST.ExpressionQualifiedReference expression -> topLevelResolution expression.variableReference
+  -- An explicit @name[A, ...](...)@ call keeps delegating BY NAME: the type arguments ride the delegate's
+  -- own generics ('delegateCall' merges them), exactly as an inferred instantiation does, so an external
+  -- steered by an explicit generic (e.g. @mcp.provide[mcp.scope](...)@) routes to its name like a bare
+  -- call. A standalone (uncalled) @name[A]@ value still lowers through 'lowerTypeApplication'.
+  AST.ExpressionTypeApplication expression -> topLevelCalleeName expression.callee
   _ -> Nothing
 
 topLevelResolution :: AST.Reference AST.Typed AST.VariableReference -> Maybe QualifiedName
@@ -803,13 +808,28 @@ delegateCall callExpression extraEntries = do
   target <- calleeReference callExpression.callee
   argumentVariable <- buildArgumentRecord callExpression.arguments extraEntries
   context <- asks (.context)
-  let generics =
-        mapMaybe
-          (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
-          (Map.toList callExpression.instantiation)
+  let generics = delegateGenerics context callExpression
   output <- freshVariableId
   emit (OperationDelegate DelegateOperation {target = target, argument = argumentVariable, output = Just output, generics = generics})
   pure output
+
+-- | The runtime generic schemas stamped on a call's delegate: the call's own inferred instantiation,
+-- joined with any explicit @callee[A, ...]@ arguments the callee type-application recorded (so an
+-- explicit prefix — a marker scope, a decode target — reaches the delegate exactly as an inferred
+-- argument would, and a name-routed explicit call needs no separate 'OperationApplyGenerics'). A
+-- schema-free argument (a marker effect) drops out through 'genericArgumentSchema'.
+delegateGenerics :: LowerContext -> AST.CallExpression AST.Typed -> List (Text, GenericArgumentSchema)
+delegateGenerics context callExpression =
+  mapMaybe
+    (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
+    (Map.toList (calleeExplicitInstantiation callExpression.callee <> callExpression.instantiation))
+
+-- | The explicit generic arguments a call callee's type-application carries (empty for any other
+-- callee shape) — merged onto the delegate by 'delegateGenerics' since the callee routes by name.
+calleeExplicitInstantiation :: AST.Expression AST.Typed -> Map Text SemanticGenericArgument
+calleeExplicitInstantiation = \case
+  AST.ExpressionTypeApplication expression -> expression.instantiation <> calleeExplicitInstantiation expression.callee
+  _ -> Map.empty
 
 calleeReference :: AST.Expression AST.Typed -> Lower CalleeReference
 calleeReference callee = case topLevelCalleeName callee of
@@ -849,10 +869,7 @@ lowerPartialApplication callExpression = do
   suppliedRecord <- freshVariableId
   emit (OperationMakeRecord MakeRecordOperation {entries = suppliedEntries, output = suppliedRecord})
   context <- asks (.context)
-  let generics =
-        mapMaybe
-          (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
-          (Map.toList callExpression.instantiation)
+  let generics = delegateGenerics context callExpression
   argumentVariable <- freshVariableId
   (resultVariable, operations) <- withFreshOperations $ do
     mergeArgument <- freshVariableId

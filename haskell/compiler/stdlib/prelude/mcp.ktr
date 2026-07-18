@@ -20,31 +20,34 @@
 //
 // THE SCOPE STORY. A tool is a live capability, not a value that may outlive its connection: it exists
 // only WHILE its `provide` is running. `provide` is a scoped provider (the ST-monad `runST` shape) — it
-// lists the server, hands the continuation a `toolbox[URL]`, and DISCHARGES the `scope[URL]` marker from
-// its own result row. A tool carries `scope[URL]` in its effect row (`tool[URL]` below), so a call to it
-// is only well-typed inside a row that still carries that scope — which only `provide`'s continuation
-// does. The tools therefore cannot escape their `provide`: return one and the `scope[URL]` it drags along
-// has nowhere to be discharged, a type error. `scope[URL]` is a phantom marker (it names no operation, is
-// never performed and never handled, and vanishes at lowering); its URL parameter is phantom too, so it
-// is COVARIANT in a row — `scope["x"]` fits a `scope[string]` context but never `scope["y"]`.
+// lists the server, hands the continuation a `toolbox[Scope]`, and DISCHARGES the caller-chosen `Scope`
+// marker from its own result row. A tool carries `Scope` in its effect row (`tool[Scope]` below), so a
+// call to it is only well-typed inside a row that still carries that scope — which only `provide`'s
+// continuation does. The tools therefore cannot escape their `provide`: return one and the `Scope` it
+// drags along has nowhere to be discharged, a type error. A scope marker is a phantom (it names no
+// operation, is never performed and never handled, and vanishes at lowering).
 //
-// THE COVARIANCE CONSEQUENCE. A literal `url` gives per-URL scoping: `provide(url = "https://a")` mints
-// `scope["https://a"]`, and a tool tagged `scope["https://a"]` fits only a context carrying that exact
-// scope. A dynamic (non-literal) `url` degrades to `scope[string]` — the widest scope — and by covariance
-// a `scope[string]` context can run a tool of ANY concrete URL. That hole (a `string`-scoped continuation
-// that smuggles in a foreign-URL tool) is the one thing the type system cannot rule out, so the runtime
-// backstops it: every scope is a runtime identity, and a tool call carrying a scope its `provide` has
-// already closed is rejected with a typed `server_error` naming the closed scope. The type system prevents
-// everything else; this catches only the dynamic-URL covariance case.
+// The scope's IDENTITY lives in a marker NAME, not in the URL. `provide` is generic over the marker it
+// discharges — DISCHARGE IS PROVIDE'S ALONE, because only `provide` actually opens the connection, so a
+// context that runs the tools cannot be forged without one. `katari mcp pull` declares a module-local
+// nullary marker (`github.connection`) and passes it to `provide`, giving each pulled server its own
+// distinct, module-namespaced scope; the dynamic path here reuses the built-in nullary `scope` marker.
+// Distinct nullary markers never merge and never widen into one another (`github.connection` is unrelated
+// to `slack.connection`), so two servers' tools compose as a plain union of two scopes with no covariance
+// to reason about. The URL is now a plain runtime value (`provide`/`call` take a bare `string`): it is the
+// routing descriptor the runtime connects and caches under, nothing more. The runtime still backstops a
+// stray call: every `provide` activation is a runtime identity, and a tool call reaching the runtime after
+// its `provide` has returned is rejected with a typed `server_error` — but this is now the plain
+// requires-a-live-provide boundary, not a patch over a type hole.
 //
 // A tool IS an agent: the runtime mints one agent value per server tool, carrying the server-declared
 // name / description / input schema (and output schema when the server declares one) —
 // `reflection.get_metadata` reads them (that is what an AI loop advertises), and a call is validated
 // against that schema before anything runs (a bad argument throws `reflection.call_error` without the
 // server ever being contacted). Each minted tool carries its server DESCRIPTOR (the url + auth it was
-// listed with) and its scope identity; the runtime (re)connects lazily per descriptor — reusing a live
-// connection across calls, reconnecting transparently after a failure or a runtime restart, and closing it
-// when the last `provide` on that descriptor returns. A header value may be a secret (`string of private`);
+// listed with) and its runtime scope identity; the runtime (re)connects lazily per descriptor — reusing a
+// live connection across calls, reconnecting transparently after a failure or a runtime restart, and
+// closing it when the last `provide` on that descriptor returns. A header value may be a secret (`string of private`);
 // it stays private inside the tool value (sealed at rest, redacted at user-facing boundaries) and is
 // revealed only to the server itself. An `oauth` credential's NAME is not a secret — the tokens it names
 // never enter the program.
@@ -84,34 +87,47 @@ data oauth(@"The stored credential's registered name; not a secret." name: strin
 // How `provide` authenticates with the server: explicit headers, or a named OAuth credential.
 type auth = headers | oauth
 
-@"A pure scope capability, keyed by its server URL: carried in a tool's effect row, never performable,
-never handleable. `provide` mints it for its continuation's row and discharges it from its own, so a
-tool tagged `scope[URL]` cannot outlive the `provide` that introduced it. Its URL is phantom (covariant):
-`scope[\"x\"]` fits a `scope[string]` row, never a `scope[\"y\"]` one."
-effect scope[URL]
+@"The built-in scope capability for the dynamic `provide` path: a nullary phantom marker, carried in a
+tool's effect row, never performable, never handleable. `provide` mints it for its continuation's row and
+discharges it from its own, so a tool tagged `scope` cannot outlive the `provide` that introduced it. A
+generated `katari mcp pull` binding declares its own module-local marker instead; distinct nullary markers
+never merge and never widen, so there is no covariance to reason about."
+effect scope
 
-// One server tool, as an ordinary agent value, gated by its provide scope. (Type synonyms take no docs.)
-type tool[URL] = agent never -> unknown with io | scope[URL] | prelude.throw[server_error | auth_error]
+// One server tool, as an ordinary agent value, gated by the `Scope` marker `provide` mints. (Type
+// synonyms take no docs.)
+type tool[effect Scope] = agent never -> unknown with io | Scope | prelude.throw[server_error | auth_error]
 
 // A server's tools, keyed by tool name — call one by key, or hand `record.values(target = ...)` (the
-// flat array of tools) to an AI loop wholesale. `URL` is the scope the tools are gated by.
-type toolbox[URL] = record[tool[URL]]
+// flat array of tools) to an AI loop wholesale. `Scope` is the marker the tools are gated by.
+type toolbox[effect Scope] = record[tool[Scope]]
 
 @"Plug an MCP server's tools into a program for the extent of @continuation@, as a scoped provider —
 the `use mcp.provide(url = ..., auth = ...)` form. The runtime lists the server (a missing or dead
 `oauth` credential pauses on an authorization escalation and retries once answered; rejected `headers`
 material throws `auth_error`; a rejected listing throws `server_error`), hands @continuation@
-a `toolbox[URL]` of one runtime-minted agent per tool (each carrying the server signature — for
+a `toolbox[Scope]` of one runtime-minted agent per tool (each carrying the server signature — for
 `reflection.get_metadata` and call-site validation — and the descriptor it was listed with), and settles
-with the continuation's result. `scope[URL]` rides the continuation's row (that is what a tool call
-raises) and is DISCHARGED from `provide`'s own row, so a tool cannot escape the block: the scope closes
-when @continuation@ returns (or the run is cancelled), and a stray later call is rejected as a typed
-`server_error`. A literal @url@ binds `URL` to that string's singleton (per-URL scoping); a dynamic @url@
-degrades `URL` to `string` (the widest scope — see the module header)."
-external agent provide[literal URL, R, effect E](
-  @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: URL,
+with the continuation's result. `Scope` rides the continuation's row (that is what a tool call raises) and
+is DISCHARGED from `provide`'s own row, so a tool cannot escape the block: the scope closes when
+@continuation@ returns (or the run is cancelled), and a stray later call is rejected as a typed
+`server_error`. `Scope` is the marker the tools are gated by — the built-in `mcp.scope` for the dynamic
+path, or a generated binding's module-local marker; pass it explicitly as the first `[...]` argument
+(`mcp.provide[mcp.scope](...)`), and the toolbox binder's annotation must agree. Discharging `Scope` is
+`provide`'s alone (only it opens the connection), so a live tool context cannot be forged. @url@ is a plain
+routing value: the runtime connects and caches under the `{url, auth}` descriptor.
+DECLARE ONE MARKER PER LOGICAL CONNECTION. When you call `provide` directly you choose `Scope` yourself:
+share ONE marker across two connections and their scopes MERGE at the type level (the two servers' tools
+become mutually substitutable in a row that carries the marker) — the same widening the old dynamic-URL
+`toolbox[string]` had, no worse. It is only a TYPE distinction: routing and the live-`provide` backstop are
+always enforced by each tool value's own `{url, auth}` descriptor, so a call never reaches the wrong
+server — at worst a tool whose `provide` has closed fails with a typed `server_error`. A `katari mcp pull`
+binding needs no such discipline: its module namespace mints a distinct marker (`github.connection`) per
+connection automatically, so pulled servers never share a scope."
+external agent provide[effect Scope, R, effect E](
+  @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: string,
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
-  @"The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs." continuation: agent (value: toolbox[URL]) -> R with E | scope[URL],
+  @"The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs." continuation: agent (value: toolbox[Scope]) -> R with E | Scope,
 ) -> R with E from "mcp"
 
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
@@ -124,19 +140,18 @@ values), a plain-text reply decodes only into a string-shaped @T@, and a schema 
 `decode_error`. Instantiate @T@ with `json.json` to keep the reply as a raw `json` tree instead (the
 codegen's choice when no `outputSchema` maps): a `$ref` then stays an inert object inside the tree, which
 `json.decode` with a `file`-typed shape can still reconstruct later. @T@ appears only in the result, so it
-is never inferable — instantiate it explicitly; the literal @url@ generic is inferred from the argument,
-so a caller writes both arguments to `[...]`, `mcp.call[url_literal, T](url = url_literal, ...)`. Nothing
-validates @arguments@ before the server does (unlike a minted tool) — a rejected call throws
-`server_error`. Scope-gated the same way as a minted tool (`scope[URL]` on its row, a literal @url@
-binding it per-URL): a generated binding calls this only inside a `provide` scope over the same
-descriptor, and the runtime rejects a call with no live scope for that descriptor as a typed
-`server_error`."
-external agent call[literal URL, T](
-  @"The MCP server's endpoint URL (the same descriptor the surrounding `provide` scope was opened with)." url: URL,
+is never inferable — instantiate it explicitly; the @Scope@ marker is a phantom the row never infers, so
+a caller writes both to `[...]`, `mcp.call[Scope, T](url = ..., ...)` — a generated binding passes its own
+module-local marker. Nothing validates @arguments@ before the server does (unlike a minted tool) — a
+rejected call throws `server_error`. Scope-gated the same way as a minted tool (`Scope` on its row): a
+generated binding calls this only inside a `provide` scope over the same marker and descriptor, and the
+runtime rejects a call with no live scope for that descriptor as a typed `server_error`."
+external agent call[effect Scope, T](
+  @"The MCP server's endpoint URL (the same descriptor the surrounding `provide` scope was opened with)." url: string,
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The server-declared tool name." tool: string,
   @"The tool's arguments object, as a literal `json` tree; only the server validates it." arguments: json.json,
-) -> T with scope[URL] | prelude.throw[server_error | auth_error | json.decode_error] from "mcp"
+) -> T with Scope | prelude.throw[server_error | auth_error | json.decode_error] from "mcp"
 
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is
@@ -151,6 +166,6 @@ own effects are handled. A served tool that throws or panics with no handler of 
 whole endpoint (its failure proxies up and fails the run unless caught above @subscriber@) — wrap a
 tool's body in a handler for per-request resilience."
 external agent serve[R, effect E](
-  @"The agents to publish, keyed by the tool name each is published under." tools: toolbox[string],
+  @"The agents to publish, keyed by the tool name each is published under." tools: toolbox[scope],
   @"The endpoint's owner: receives the capability URL, and the server serves exactly while it runs." subscriber: agent (url: string) -> R with E,
 ) -> R with E from "mcp"
