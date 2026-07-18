@@ -25,9 +25,9 @@ export type McpDispatchCall =
        *  one), which the transport rejects as the typed descriptor error. */
       descriptor: Value | null;
       /** The provide scope this tool was minted under — re-checked live before every dispatch attempt,
-       *  so a tool outliving its `provide` (the covariance hole) is rejected as a typed `server_error`.
-       *  `null` for a tool with no scope in its context (a legacy / hand-built target), which skips the
-       *  check. */
+       *  so a tool outliving its `provide` is rejected as a typed `server_error` (the requires-a-live-provide
+       *  boundary; scope identity is a compiler marker, never seen here). `null` for a tool with no scope
+       *  in its context (a legacy / hand-built target), which skips the check. */
       scope: string | null;
       argument: Value | null;
     }

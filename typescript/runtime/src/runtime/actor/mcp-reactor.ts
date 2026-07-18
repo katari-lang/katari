@@ -12,8 +12,8 @@
 //     the provide is live the scope is registered; a tool call carrying it proceeds on the same transport
 //     path a listing-minted tool always did; when the provide settles or cancels the scope closes — the
 //     descriptor's cached client is evicted and any later call carrying that scope is rejected as a typed
-//     `server_error` (the runtime backstop for the dynamic-URL covariance hole; the type system rules out
-//     the rest).
+//     `server_error` (the requires-a-live-provide boundary — the scope's identity is a compiler-only marker,
+//     so the runtime never inspects it; it routes and gates purely by the tool's own descriptor).
 //   - `callTool` (a minted tool's call, an `external` target carrying `{ descriptor, scope }` as `context`):
 //     the caller's argument passes to the transport verbatim; the descriptor rides out-of-band; the scope is
 //     checked live first (a closed scope is the typed `server_error` backstop).
@@ -551,8 +551,8 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     call: Extract<TransportCall, { kind: "callTool" }>,
   ): void {
     if (call.scope !== null && !this.scopes.has(call.scope)) {
-      // The provide scope that minted this tool has closed — the covariance backstop. Reject with a
-      // typed `server_error` naming the closed scope's server, so a tool called after its `provide`
+      // The provide scope that minted this tool has closed — the requires-a-live-provide boundary. Reject
+      // with a typed `server_error` naming the closed scope's server, so a tool called after its `provide`
       // returned fails catchably (never silently, never a panic).
       const url = descriptorUrl(call.descriptor);
       this.schedule(() =>
