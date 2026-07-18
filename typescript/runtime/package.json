@@ -35,12 +35,12 @@
   "bugs": "https://github.com/katari-lang/katari/issues",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",
-    "@hono/node-server": "^2.0.4",
+    "@hono/node-server": "^2.0.10",
     "@hono/zod-validator": "^0.8.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "cron-parser": "^5.6.1",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.12.24",
+    "hono": "^4.12.30",
     "postgres": "^3.4.9",
     "zod": "^4.4.3"
   },

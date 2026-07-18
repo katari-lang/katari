@@ -33,7 +33,7 @@
   "bugs": "https://github.com/katari-lang/katari/issues",
   "dependencies": {
     "@katari-lang/types": "workspace:*",
-    "esbuild": "^0.28.0"
+    "esbuild": "^0.28.1"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",
