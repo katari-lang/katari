@@ -22,14 +22,15 @@
 //     the call's own argument, and the call's own instantiation (`mcp.call[url, T]`) rides as the delegate's
 //     `generics`. It is scope-gated too, but carries no scope id: it must belong to a LIVE provide of the
 //     same descriptor (a generated binding sits inside `with_tools`'s provide), else the typed `server_error`
-//     names the missing provide. `arguments` is a `json` TREE; it lowers to the literal Json document at
-//     dispatch (the same `jsonValueToJson` walk behind `json.stringify`, so a blob-backed string leaf
-//     materialises). The transport's reply is DECODED against `T` (`decodeDirectReply`): a typed `T` gives a
-//     real value — a produced blob's `$ref` reconstructs a REAL `file`, so the ordinary release / reown walk
-//     bounds its lifetime by value-reachability — a plain-text reply lands as the string value a string-shaped
-//     `T` wants, and a reply that does not conform is the typed `json.decode_error` throw the row declares;
-//     `T = json.json` (the codegen's no-`outputSchema` choice) keeps the raw `json` tree with its inert `$ref`
-//     objects, exactly as before (a later `json.decode` with a `file`-typed shape then lifts one into a handle).
+//     names the missing provide. `arguments` is now a plain value tree (`unknown`); it lowers to the literal
+//     Json document at dispatch through the SAME `http.json` slot contract — `valueToJson` then the http-body
+//     materialiser — so a `$`-key un-escapes back to literal, a `file` leaf base64s in place, and a
+//     blob-backed string materialises. The transport's reply is DECODED against `T` (`decodeDirectReply`): a
+//     typed `T` gives a real value — a produced blob's `$ref` reconstructs a REAL `file`, so the ordinary
+//     release / reown walk bounds its lifetime by value-reachability — a plain-text reply lands as the string
+//     value a string-shaped `T` wants, and a reply that does not conform is the typed `json.decode_error`
+//     throw the row declares; `T = unknown` (the codegen's no-`outputSchema` choice) keeps the raw document
+//     value with its inert `$ref` records (a later dynamic call into a `file`-typed position revives one).
 //   - `serve` (the `prelude.mcp.serve` external): the INBOUND direction, mirroring the webhook reactor —
 //     no transport at all. It mints an unguessable token (the public URL's capability), dispatches the
 //     SUBSCRIBER once as an inner delegation carrying that URL, and converts every MCP `tools/call` to
@@ -74,10 +75,11 @@
 import { randomBytes } from "node:crypto";
 import type { JSONSchema, Json, QualifiedName } from "@katari-lang/types";
 import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
-import { jsonValueFromJson, jsonValueToJson, type StringReader } from "../engine/json-value.js";
+import { literalLift, type StringReader } from "../engine/json-value.js";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import { OAUTH_AUTHORIZE_REQUEST } from "../external/credentials.js";
+import { type HttpBlobResolver, materializeJsonTree } from "../external/http-body.js";
 import {
   descriptorKeyOf,
   type McpCompletion,
@@ -89,7 +91,7 @@ import type { McpDispatchCall } from "../mcp-dispatch.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import { jsonToSchema } from "../value/schema-json.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { conformValue, renderConformFailures } from "../value/validation.js";
+import { conformValue, isUnconstrained, renderConformFailures } from "../value/validation.js";
 import {
   asJson,
   documentOf,
@@ -165,8 +167,8 @@ type McpPayload =
       kind: "transport";
       call: TransportCall;
       /** The ONE ack-shaping seam (`AckDecodingPayload`, applied by the base at the wire-decode boundary):
-       *  a `directCall` lifts the raw reply literally into a `json` tree; `callTool` / `recovered` omit it,
-       *  so the base wire decoder runs. */
+       *  a `directCall` decodes the raw reply against its `T` (literal document for `unknown`, wire form for
+       *  a typed `T`); `callTool` / `recovered` omit it, so the base wire decoder runs. */
       decodeAck?: (raw: Json) => Value;
     };
 
@@ -325,8 +327,11 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
      *  transactional loop. */
     private readonly schedule: (work: () => void) => void,
     /** Reads a string leaf's content (inline, or a semantic-string blob through the store) — what a
-     *  `directCall`'s json-tree lowering needs at dispatch. */
+     *  `directCall`'s tool-name lowering needs at dispatch. */
     private readonly readString: StringReader,
+    /** Reads a blob's bytes + content type — what a `directCall`'s argument tree needs at dispatch to
+     *  base64 a `file` leaf in place (the same slot contract as an `http.json` body). */
+    private readonly resolveBlob: HttpBlobResolver,
     pool: ResourcePool,
   ) {
     super(pool);
@@ -683,12 +688,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (payload === undefined || payload.kind !== "provide") return; // resolved / cancelled meanwhile
     const continuation = payload.continuation;
     if (continuation === null) return; // already dispatched (a duplicate listing) — nothing to do
-    const toolbox = mintToolbox(
-      jsonToValue(listingJson),
-      payload.descriptor,
-      payload.scope,
-      payload.snapshot,
-    );
+    const toolbox = mintToolbox(listingJson, payload.descriptor, payload.scope, payload.snapshot);
     // `{ value: toolbox }` conforms to the continuation's declared input BY CONSTRUCTION: `mcp.provide`'s
     // signature types the continuation as `agent (value: toolbox[URL]) -> ...`, and `mintToolbox` produces
     // exactly a `toolbox[URL]` (a record of the minted tools) for this same provide's URL. So this internal
@@ -761,10 +761,14 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     try {
       if (call.tool === null) throw new Error("mcp.call: the tool name is missing");
       tool = await this.readString(call.tool);
+      // Lower the argument value tree to its literal JSON document: `valueToJson` renders the wire form
+      // (escaping `$`-keys, a `file` becoming a `$ref` handle), which the http-body materialiser then
+      // turns into the SEND-boundary document — `$`-keys un-escaped back to literal, a `file` leaf base64
+      // in place, a blob-backed string materialised. The one shared slot contract with `http.json`.
       argumentDocument =
         call.argumentsTree === null
           ? null
-          : await jsonValueToJson(call.argumentsTree, this.readString);
+          : await materializeJsonTree(valueToJson(call.argumentsTree, "reveal"), this.resolveBlob);
     } catch (cause) {
       this.schedule(() =>
         this.complete({
@@ -1056,8 +1060,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
 /** The domain error ctor every anticipated mcp transport failure throws (`prelude/mcp.ktr` declares it). */
 const SERVER_ERROR = "prelude.mcp.server_error";
 
-/** The domain error ctor a reply that does not conform to `T` throws — the same `prelude.json.decode_error`
- *  `json.decode` raises, which `prelude/mcp.ktr`'s `call` row carries so a wrapper propagates it. */
+/** The domain error ctor a reply that does not conform to `T` throws — `prelude.json.decode_error` (the
+ *  same "document does not fit T" error `json.parse_as` raises), which `prelude/mcp.ktr`'s `call` row
+ *  carries so a wrapper propagates it. */
 const DECODE_ERROR = "prelude.json.decode_error";
 
 /** The wire form of a `prelude.json.decode_error` throw (decoded back into the data value at the reactor
@@ -1068,7 +1073,7 @@ function decodeError(message: string): Json {
 
 /** The result generic `T`'s schema, from a direct call's own instantiation (`mcp.call[url, T]` — `T` is
  *  the result generic, so its argument is a type schema). Absent — an un-instantiated call, or IR from a
- *  compiler predating instantiation stamping — decodes the reply to the raw `json` tree. */
+ *  compiler predating instantiation stamping — keeps the reply as the raw document value. */
 function directCallOutputSchema(generics: GenericSubstitution | undefined): JSONSchema | undefined {
   const bound = generics?.T;
   return bound !== undefined && bound.kind === "type" ? bound.schema : undefined;
@@ -1093,22 +1098,23 @@ function transportPayloadOf(call: McpDispatchCall): Extract<McpPayload, { kind: 
   };
 }
 
-/** Decode a direct call's transport reply against its instantiated `T`, conform-tree-first. The reply
- *  lifted as a LITERAL `json` tree already conforms to a `json`-shaped `T` (`json.json` — the codegen's
- *  no-`outputSchema` choice — and `unknown`), so that inert tree is handed over unchanged: a `$ref` stays
- *  an object inside the tree, exactly today's behaviour and what a later `json.decode` reconstructs.
- *  Otherwise the value WIRE form is reconstructed — a `$ref` becomes a REAL `file`, a `$constructor`
- *  object a data value, records / arrays / scalars ordinary values (so a plain-text reply lands as the
- *  string value a string-shaped `T` wants) — and validated against `T`. `mismatch` names the offending
- *  path when the wire form does not conform (or cannot reconstruct); the caller turns a non-`null`
- *  `mismatch` into the typed `decode_error` throw, since the settle-time seam that reads `value` cannot
- *  itself throw. */
+/** Decode a direct call's transport reply against its instantiated `T`. For an UNCONSTRAINED `T` (`unknown`
+ *  — the codegen's no-`outputSchema` choice) the reply is lifted LITERALLY and handed over as-is: a `$ref`
+ *  stays an inert record inside the document, which a later dynamic call into a `file`-typed position
+ *  revives. For a TYPED `T` the value WIRE form is reconstructed — a `$ref` becomes a REAL `file`, a
+ *  `$constructor` object a data value, records / arrays / scalars ordinary values (so a plain-text reply
+ *  lands as the string value a string-shaped `T` wants) — and validated against `T`. The `unknown` split is
+ *  by the schema itself, not by a conform-first probe: a literal `{ $ref }` record now DOES conform to a
+ *  `file` schema (unlike the old tagged tree), so a conform-first shortcut would wrongly keep it inert for a
+ *  typed file `T`. `mismatch` names the offending path when the wire form does not conform (or cannot
+ *  reconstruct); the caller turns a non-`null` `mismatch` into the typed `decode_error` throw, since the
+ *  settle-time seam that reads `value` cannot itself throw. */
 function decodeDirectReply(
   raw: Json,
   schema: JSONSchema | undefined,
 ): { value: Value; mismatch: string | null } {
-  const tree = jsonValueFromJson(raw);
-  if (schema === undefined || conformValue(tree, schema).ok) {
+  const tree = literalLift(raw);
+  if (schema === undefined || isUnconstrained(schema)) {
     return { value: tree, mismatch: null };
   }
   let wire: Value;
@@ -1163,12 +1169,7 @@ function descriptorUrl(descriptor: Value | null): string {
  *  server-declared signature and — as its context — a record of the DESCRIPTOR (`{url, auth}` with privacy
  *  markers intact; the transport's revealed copy is never minted) and this provide's SCOPE identity, which
  *  each tool call checks live. */
-function mintToolbox(
-  listing: Value,
-  descriptor: Value,
-  scope: string,
-  snapshot: SnapshotId,
-): Value {
+function mintToolbox(listing: Json, descriptor: Value, scope: string, snapshot: SnapshotId): Value {
   const context: Value = {
     kind: "record",
     fields: { descriptor, scope: { kind: "string", value: scope } },
@@ -1189,28 +1190,28 @@ function mintToolbox(
   return { kind: "record", fields };
 }
 
-/** The transport's `{ tools: [...] }` listing, decoded back out of the completion value. A malformed
- *  shape is transport drift, not a program error — fail loudly (the substrate surfaces it). */
-function listingsOf(value: Value): McpToolListing[] {
-  if (value.kind !== "record" || value.fields.tools?.kind !== "array") {
+/** The transport's `{ tools: [...] }` listing, read straight from the completion's bare Json — the server
+ *  schemas ride to `jsonToSchema` LITERALLY (no `jsonToValue` -> `valueToJson` round-trip, which would
+ *  double a single-`$` keyword like `$defs` into `$$defs`). A malformed shape is transport drift, not a
+ *  program error — fail loudly (the substrate surfaces it). */
+function listingsOf(listing: Json): McpToolListing[] {
+  if (listing === null || typeof listing !== "object" || Array.isArray(listing)) {
+    throw new Error("mcp: the tools completion did not carry a { tools: [...] } listing");
+  }
+  const tools = listing.tools;
+  if (!Array.isArray(tools)) {
     throw new Error("mcp: the tools completion did not carry a { tools: [...] } listing");
   }
   const listings: McpToolListing[] = [];
-  for (const entry of value.fields.tools.elements) {
-    if (entry.kind !== "record") continue;
-    const name = entry.fields.name;
-    const description = entry.fields.description;
-    if (name?.kind !== "string") continue;
+  for (const entry of tools) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const name = entry.name;
+    if (typeof name !== "string") continue;
     listings.push({
-      name: name.value,
-      description: description?.kind === "string" ? description.value : "",
-      inputSchema:
-        entry.fields.inputSchema === undefined
-          ? {}
-          : valueToJson(entry.fields.inputSchema, "reveal"),
-      ...(entry.fields.outputSchema !== undefined
-        ? { outputSchema: valueToJson(entry.fields.outputSchema, "reveal") }
-        : {}),
+      name,
+      description: typeof entry.description === "string" ? entry.description : "",
+      inputSchema: entry.inputSchema ?? {},
+      ...(entry.outputSchema !== undefined ? { outputSchema: entry.outputSchema } : {}),
     });
   }
   return listings;

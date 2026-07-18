@@ -26,6 +26,10 @@
 // request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
 // control retry.
 
+// `post_json` parses its reply back to a value. The `json` module qualifier is shadowed HERE by this
+// module's own `json` body variant (below), so import `parse` / `parse_error` by name to reach them.
+import { parse, type parse_error } from prelude.json
+
 @"An HTTP request never completed: DNS failure, refused connection, timeout, or a mid-flight runtime
 restart. Thrown by `fetch`. (A response that did arrive is never an error — branch on its `status`.)"
 data fetch_error(message: string)
@@ -39,7 +43,7 @@ data fetch_error(message: string)
 // header and `fetch`'s label.
 
 @"A text body: the @content@ string, sent verbatim (Content-Type is the caller's to set). The @content@
-may be a secret (an OAuth `refresh_token` in a form-encoded body). `post_json`'s sugar builds this variant."
+may be a secret (an OAuth `refresh_token` in a form-encoded body)."
 data text(content: string of private)
 
 @"A raw-bytes body: the file @content@'s bytes, sent as-is — the shape an upload API (an S3 PUT) takes. The
@@ -89,32 +93,33 @@ external agent fetch(
 arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
 data status_error(@"The response's non-2xx status code." status: integer, @"The response body text." body: string)
 
-@"POST @body@ to @url@ as application/json with the given @headers@. The @body@ AND each header value may
-be a secret (an auth token — an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\"
-for Gemini, built with `record.set(target = record.empty(), key = ..., value = ...)` — or a
-`refresh_token` carried in the body of an OAuth token exchange): both are submitted only to @url@'s
-server, which stays public. A @Content-Type: application/json@ default is merged beneath the caller's
-headers — on a shared name the caller's value wins. Returns the response body text; a non-2xx status
-throws `status_error`, a transport failure `fetch_error`. The canonical one-call shape of a JSON API
-integration — build the body as `json` in Katari, post it, parse the reply as `json` in Katari. (A body
-that is already serialized JSON text — this signature. To send a value tree with `file` leaves as base64,
-call `fetch` with an `http.json` body directly.)"
+@"POST @body@ — a JSON value tree — to @url@ as application/json with the given @headers@, and return the
+reply PARSED into its document value. This is the canonical one-call shape of a JSON API integration: build
+the body as an ordinary record / array / scalar tree, post it, and read the reply as a value — no manual
+`json.stringify` / `json.parse` around the call. @body@ AND each header value may be a secret (an auth token
+— an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\" for Gemini — or a `refresh_token`
+in the body of an OAuth exchange): both are submitted only to @url@'s server, which stays public. A `file`
+placed anywhere in @body@ rides as base64 (the `http.json` slot contract). The Content-Type defaults to
+application/json unless a header overrides it. A non-2xx status throws `status_error` (its body text
+attached); a transport failure throws `fetch_error`; a 2xx body that is not JSON throws `json.parse_error`
+(a JSON API that broke its promise) — an empty 2xx body is `null`. To send already-serialized text, or to
+keep the raw reply text, call `fetch` directly."
 agent post_json(
   @"The absolute URL to POST to; public by type." url: string,
-  @"The JSON document text to send (already serialized, e.g. `json.stringify`'s output); may be a secret." body: string of private,
-  @"Extra headers by name, merged over the Content-Type default (the caller wins on a shared name); values may be secrets." headers: record[string of private],
-) -> string with io | prelude.throw[status_error | fetch_error] {
-  // The caller's headers merge as `record.merge`'s right side, so on a shared name (a caller that
-  // sets its own Content-Type) the caller's value overrides the default.
-  let effective_headers = record.merge(
-    left = record.set(target = record.empty(), key = "Content-Type", value = "application/json"),
-    right = headers,
-  )
-  // Wrap the already-serialized JSON text in the `text` body variant — this keeps `post_json`'s
-  // `body: string` signature while `fetch`'s body is the sum.
-  let response = fetch(url = url, method = "POST", headers = effective_headers, body = text(content = body))
+  @"The JSON body as a value tree (records / arrays / scalars / files, mixed); may carry secrets." body: unknown of private,
+  @"Extra headers by name (the caller wins over the application/json default on a shared name); values may be secrets." headers: record[string of private],
+) -> unknown with io | prelude.throw[status_error | fetch_error | parse_error] {
+  // Post the value tree as an `http.json` body: it serialises the tree (files -> base64 in place) and
+  // sets the application/json Content-Type as a default the caller's headers can override.
+  let response = fetch(url = url, method = "POST", headers = headers, body = json(value = body))
   if (response.status >= 200 && response.status < 300) {
-    response.body
+    // A JSON API's 2xx reply is a JSON document; parse it back to a value. An empty body (a 204-style
+    // reply) has no document, so it reads as `null`.
+    if (response.body == "") {
+      null
+    } else {
+      parse(text = response.body)
+    }
   } else {
     prelude.throw(error = status_error(status = response.status, body = response.body))
   }

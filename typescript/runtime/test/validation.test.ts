@@ -8,7 +8,12 @@ import { describe, expect, test } from "vitest";
 import { jsonToValue } from "../src/runtime/value/codec.js";
 import type { BlobId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
 import type { Value } from "../src/runtime/value/types.js";
-import { conformValue, fillGenericSchema, typeSubstitutionOf } from "../src/runtime/value/validation.js";
+import {
+  conformValue,
+  fillGenericSchema,
+  reviveArgument,
+  typeSubstitutionOf,
+} from "../src/runtime/value/validation.js";
 
 const SNAPSHOT = "snapshot-validation" as SnapshotId;
 
@@ -233,5 +238,82 @@ describe("generic instantiation", () => {
     );
     const filled = fillGenericSchema(substitution, schema);
     expect(filled.properties?.x).toEqual({ type: "integer", description: "The value to pick." });
+  });
+});
+
+// The schema-directed revive the delegation boundary applies to a dynamic (`call_agent`) argument BEFORE
+// validating it: an AI can only replay a `file` it saw as a literal `{ "$ref": ... }` record, so the
+// boundary reconstructs the real handle exactly where the schema expects a file — and NOWHERE else (no
+// blind lift). Everything else passes through verbatim.
+describe("reviveArgument (schema-directed $ref -> file revive)", () => {
+  const FILE_SCHEMA: JSONSchema = {
+    type: "object",
+    properties: { $ref: { type: "string" }, semanticKind: { type: "string" } },
+    required: ["$ref"],
+    additionalProperties: true,
+  };
+  const refRecord = (blobId: string): Value => record({ $ref: str(blobId) });
+  const file = (blobId: string): Value => ({
+    kind: "ref",
+    semanticKind: "file",
+    blobId: blobId as BlobId,
+  });
+
+  test("revives a { $ref } record into a real file where the schema expects a file", () => {
+    expect(reviveArgument(refRecord("blob-1"), FILE_SCHEMA)).toEqual(file("blob-1"));
+  });
+
+  test("does NOT revive at a non-file position (no blind lift)", () => {
+    // `unknown` (`{}`): a `$ref` record stays a literal record.
+    expect(reviveArgument(refRecord("blob-1"), {})).toEqual(refRecord("blob-1"));
+    // `record[unknown]`: a nested `$ref` under an open-value tail stays literal too.
+    const document = record({ image: refRecord("blob-1") });
+    expect(reviveArgument(document, { type: "object", additionalProperties: {} })).toEqual(document);
+  });
+
+  test("revives a file nested in an object / array / data / union", () => {
+    const objectSchema: JSONSchema = {
+      type: "object",
+      properties: { image: FILE_SCHEMA },
+      required: ["image"],
+    };
+    expect(reviveArgument(record({ image: refRecord("b") }), objectSchema)).toEqual(
+      record({ image: file("b") }),
+    );
+
+    const arraySchema: JSONSchema = { type: "array", items: FILE_SCHEMA };
+    expect(
+      reviveArgument({ kind: "array", elements: [refRecord("b1"), refRecord("b2")] }, arraySchema),
+    ).toEqual({ kind: "array", elements: [file("b1"), file("b2")] });
+
+    // `file | null`: a `$ref` revives to a file, a null stays null.
+    const unionSchema: JSONSchema = { anyOf: [FILE_SCHEMA, { type: "null" }] };
+    expect(reviveArgument(refRecord("b"), unionSchema)).toEqual(file("b"));
+    expect(reviveArgument({ kind: "null" }, unionSchema)).toEqual({ kind: "null" });
+
+    // A `data` value carrying a file field: revive the flat fields, keep the constructor.
+    const dataSchema: JSONSchema = {
+      type: "object",
+      properties: {
+        $constructor: { const: "main.msg" },
+        value: { type: "object", properties: { doc: FILE_SCHEMA }, required: ["doc"] },
+      },
+      required: ["$constructor", "value"],
+      additionalProperties: false,
+    };
+    expect(reviveArgument(record({ doc: refRecord("b") }, "main.msg"), dataSchema)).toEqual(
+      record({ doc: file("b") }, "main.msg"),
+    );
+  });
+
+  test("leaves a non-{ $ref } value at a file position unchanged (validation then rejects it)", () => {
+    expect(reviveArgument(str("not a handle"), FILE_SCHEMA)).toEqual(str("not a handle"));
+    expect(reviveArgument(record({ nope: int(1) }), FILE_SCHEMA)).toEqual(record({ nope: int(1) }));
+  });
+
+  test("a semanticKind:string ref record revives to a string ref, not a file", () => {
+    expect(
+      reviveArgument(record({ $ref: str("blob-s"), semanticKind: str("string") }), FILE_SCHEMA),
+    ).toEqual({ kind: "ref", semanticKind: "string", blobId: "blob-s" as BlobId });
   });
 });

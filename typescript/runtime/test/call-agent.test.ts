@@ -105,6 +105,46 @@ function fixture(): IRModule {
   };
 }
 
+// A file parameter's `$ref` reference schema (`Katari.Schema.fileReferenceSchema`).
+const FILE_SCHEMA: JSONSchema = {
+  type: "object",
+  properties: { $ref: { type: "string" }, semanticKind: { type: "string" } },
+  required: ["$ref"],
+  additionalProperties: true,
+};
+
+// The callee `use_file(image: file) -> file { image }` — its input schema expects a FILE at `image`.
+const USE_FILE_SCHEMA: SchemaInfo = {
+  input: {
+    type: "object",
+    properties: { image: FILE_SCHEMA },
+    required: ["image"],
+    additionalProperties: true,
+  },
+  output: {},
+  requests: [],
+  genericBindings: {},
+};
+
+/** The `fixture()` scaffold with the callee retargeted to `use_file(image: file) -> image` — so a dynamic
+ *  argument's `image` position expects a real file, the one place the boundary revives a `$ref`. */
+function fileFixture(): IRModule {
+  const ir = fixture();
+  ir.blocks[2] = {
+    block: { kind: "agent", body: 3, schema: USE_FILE_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[3] = {
+    block: {
+      kind: "sequence",
+      result: 21,
+      operations: [{ kind: "getField", source: 20, field: "image", output: 21 }],
+    },
+    parameters: { parameter: 20 },
+  };
+  return ir;
+}
+
 function actorFor(ir: IRModule, mcp?: McpTransport): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(ir.entries)) {
@@ -149,6 +189,18 @@ describe("call_agent dispatch", () => {
     await expect(runMain(fixture(), argsOf({ name: { kind: "integer", value: 3 } }))).rejects.toThrow(
       /\$\.name/,
     );
+  });
+
+  test("revives an AI-replayed { $ref } into a REAL file where the target's schema expects a file", async () => {
+    // The model can only replay a `file` it saw as a literal `{ "$ref": ... }` RECORD. The delegation
+    // boundary reconstructs the real handle, schema-directed — so `use_file` receives (and returns) an
+    // actual `file` value, not the inert record. A record would have surfaced as `{ kind: "record", ... }`.
+    const replayed: Value = { kind: "record", fields: { $ref: { kind: "string", value: "blob-img" } } };
+    await expect(runMain(fileFixture(), argsOf({ image: replayed }))).resolves.toEqual({
+      kind: "ref",
+      semanticKind: "file",
+      blobId: "blob-img",
+    });
   });
 
   test("throws a typed `reflection.call_error` when the target is not a callable value", async () => {

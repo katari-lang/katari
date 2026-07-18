@@ -24,21 +24,19 @@
 -- listing-free @mcp.open@ primitive could remove that one-time overhead (unimplemented — recorded in
 -- the pull design doc).
 --
--- The type mapping is ALL-OR-NOTHING per parameter and per tool output. On the PARAMETER side this is
--- forced by the wire-form asymmetry of the @json@ boundary: @json.encode@ speaks the value WIRE form, so
--- a @json.json@ nested INSIDE a typed parameter would embed as its @$constructor@ tree — not the raw
--- fragment an MCP server expects. A parameter whose schema maps completely is embedded with
--- @json.encode@; a parameter with any unmapped part falls back to @json.json@ as a whole and is inserted
--- into the arguments tree AS-IS (it already is a tree). The OUTPUT side has no such asymmetry:
--- @mcp.call[connection, T]@ decodes the reply against @T@ in the RUNTIME. A tool whose @outputSchema@ maps
--- completely instantiates @T@ to that type (decoded, @json.decode_error@ on a mismatch); any other tool
--- instantiates @T@ to @json.json@ (the raw reply as a tree — today's behaviour), so the wrapper is one
--- @mcp.call[...]@ call either way, with no trailing @json.decode@.
+-- The type mapping is ALL-OR-NOTHING per parameter and per tool output, but it now only chooses the
+-- surface TYPE — the argument value is inserted into the arguments tree AS-IS either way, because a value
+-- IS already a document (there is no @json.encode@ wire step). A parameter whose schema maps completely
+-- gets that precise type; a parameter with any unmapped part gets @unknown@ (partial mapping unlock is a
+-- later wave). The OUTPUT side is symmetric: @mcp.call[connection, T]@ decodes the reply against @T@ in the
+-- RUNTIME. A tool whose @outputSchema@ maps completely instantiates @T@ to that type (decoded,
+-- @json.decode_error@ on a mismatch); any other tool instantiates @T@ to @unknown@ (the raw reply as a
+-- document value), so the wrapper is one @mcp.call[...]@ call either way.
 --
 -- The body uses ONE uniform construction shape: the arguments object is folded field by field over
 -- @record.set@ (@arguments_0@ .. @arguments_n@), an optional parameter folding through a @match@
 -- whose @null@ arm skips the key — so an omitted argument and an explicit JSON null are never
--- conflated (@null@ is the Katari absence marker; a JSON null is @json.json_null()@).
+-- conflated (@null@ is the Katari absence marker; a JSON null is a literal @null@ inside the tree).
 --
 -- Tool and parameter names are mangled to valid Katari identifiers deterministically (snake_case,
 -- invalid characters to @_@, a leading digit prefixed, a reserved word suffixed, collisions bumped
@@ -72,7 +70,7 @@ import System.FilePath qualified as FilePath
 
 -- | One listed tool: the server-declared name \/ description and the schemas, decoded through
 -- 'JSONSchema''s 'FromJSON' — the single authority on which JSON Schema subset the compiler models
--- (anything outside it decodes to an over-approximation and thus falls back to @json.json@ here).
+-- (anything outside it decodes to an over-approximation and thus falls back to @unknown@ here).
 data ToolListing = ToolListing
   { name :: Text,
     description :: Text,
@@ -122,8 +120,8 @@ data PullContext = PullContext
 ---------------------------------------------------------------------------------------------------
 
 -- | Map a JSON Schema to Katari surface type text. @Just@ carries a type with NO fallback anywhere
--- inside it; @Nothing@ means some part is outside the mapped subset and the caller must use
--- @json.json@ for the WHOLE schema (see the module comment for why partial mapping is unsound).
+-- inside it; @Nothing@ means some part is outside the mapped subset and the caller uses @unknown@ for
+-- the WHOLE schema (all-or-nothing; partial mapping unlock is a later wave — see the module comment).
 mapSchema :: JSONSchema -> Maybe Text
 mapSchema schema = case schema of
   SchemaAny -> Nothing
@@ -259,14 +257,14 @@ data ResolvedInput
 data ResolvedParameter = ResolvedParameter
   { originalName :: Text,
     identifier :: Text,
-    -- | @Just@ the mapped Katari type (embed with @json.encode@); @Nothing@ = the @json.json@
-    -- fallback (insert into the tree as-is).
+    -- | @Just@ the mapped Katari type; @Nothing@ = the @unknown@ fallback. Either way the value is
+    -- inserted into the arguments tree as-is (a value is already a document — no @json.encode@).
     mappedType :: Maybe Text,
     optional :: Bool
   }
 
 -- | Whether the wrapper decodes its reply: only when the whole @outputSchema@ mapped ('OutputTyped'
--- carries the synonym name and its right-hand side); otherwise the raw @json.json@ tree returns.
+-- carries the synonym name and its right-hand side); otherwise the raw @unknown@ document value returns.
 data ResolvedOutput
   = OutputTyped Text Text
   | OutputRaw
@@ -398,14 +396,12 @@ headerLines context =
     "//   - an object with only schema-valued additionalProperties -> record[T];",
     "//   - an anyOf whose members all map -> a union;",
     "//   - everything else (enum / const, allOf / oneOf, tuples, open or",
-    "//     unmodelled schemas) falls back to `json.json`.",
-    "// All-or-nothing on the PARAMETER side is the wire-form asymmetry: `json.encode` speaks the value",
-    "// WIRE form, so a `json.json` nested inside a typed parameter would embed as its `$constructor` tree,",
-    "// not the raw fragment the server expects — a fallback parameter is therefore inserted into the",
-    "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call",
-    "// [connection, T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema",
-    "// instantiates `T` to its type (decoded, `json.decode_error` on a mismatch) and any other tool",
-    "// instantiates `T` to `json.json` (the raw reply as a tree)."
+    "//     unmodelled schemas) falls back to `unknown`.",
+    "// The mapping only chooses the surface TYPE — the argument value is inserted into the arguments tree",
+    "// as-is either way, since a value is already a document (no `json.encode` wire step). The output side",
+    "// is symmetric: `mcp.call[connection, T]` decodes the reply against `T` in the runtime, so a",
+    "// fully-mapped outputSchema instantiates `T` to its type (decoded, `json.decode_error` on a mismatch)",
+    "// and any other tool instantiates `T` to `unknown` (the raw reply as a document value)."
   ]
 
 -- | The ambient @credentials@ request: @connect@ serves it (returning the connection's @auth@) and
@@ -510,11 +506,11 @@ toolAgentLines context tool =
   where
     urlLiteral = "\"" <> escapeDocText context.url <> "\""
     -- The scope generic is the module-local `connection` marker (satisfying the `connection` gate on the
-    -- tool's row); `T` is the second, explicit generic (the mapped output type, or `json.json`), against
+    -- tool's row); `T` is the second, explicit generic (the mapped output type, or `unknown`), against
     -- which the runtime decodes the reply. Both generics MUST be written — the scope marker is a phantom
     -- the row never infers, and `T` appears only in the result. The url is the pulled literal, now a plain
     -- `url =` routing argument (no longer a scope key). The `auth` is the ambient `credentials()` (not a
-    -- closed-over value). The call is the tool's tail expression: no trailing `json.decode`, since
+    -- closed-over value). The call is the tool's tail expression: no trailing decode step, since
     -- `mcp.call` decodes itself.
     call argumentsText =
       "mcp.call["
@@ -528,10 +524,10 @@ toolAgentLines context tool =
         <> "\", arguments = "
         <> argumentsText
         <> ")"
-    -- The arguments object the call sends: the caller's pass-through tree as-is, or the folded object.
+    -- The arguments object the call sends: the caller's pass-through tree as-is, or the folded record.
     argumentsExpression = case tool.input of
       InputPassthrough -> "arguments"
-      InputFields parameters -> "json.json_object(entries = arguments_" <> Text.pack (show (length parameters)) <> ")"
+      InputFields parameters -> "arguments_" <> Text.pack (show (length parameters))
     argumentLines = case tool.input of
       -- The pass-through plan: the caller's tree IS the arguments object, nothing to fold.
       InputPassthrough -> []
@@ -541,16 +537,13 @@ toolAgentLines context tool =
 
 -- | One parameter's fold step: @arguments_i@ -> @arguments_(i+1)@. A required parameter folds
 -- unconditionally; an optional one matches @null@ (absent — the key is omitted) against @present@.
--- A mapped parameter embeds through @json.encode@; a fallback parameter IS a tree already and is
--- inserted as-is (the wire-form asymmetry — see the module comment).
+-- The value is inserted AS-IS — a value is already a document, so no @json.encode@ wire step is needed
+-- for a mapped or a fallback parameter alike.
 parameterFoldLines :: Int -> ResolvedParameter -> List Text
 parameterFoldLines slot parameter =
   let source = "arguments_" <> Text.pack (show slot)
       target = "arguments_" <> Text.pack (show (slot + 1))
-      embed subject = case parameter.mappedType of
-        Just _ -> "json.encode(value = " <> subject <> ")"
-        Nothing -> subject
-      insert subject = "record.set(target = " <> source <> ", key = \"" <> escapeDocText parameter.originalName <> "\", value = " <> embed subject <> ")"
+      insert subject = "record.set(target = " <> source <> ", key = \"" <> escapeDocText parameter.originalName <> "\", value = " <> subject <> ")"
    in if parameter.optional
         then
           [ indent 1 ("let " <> target <> " = match (" <> parameter.identifier <> ") {"),
@@ -565,11 +558,11 @@ parameterFoldLines slot parameter =
 -- conflate).
 parameterList :: ResolvedTool -> Text
 parameterList tool = case tool.input of
-  InputPassthrough -> "arguments: json.json"
+  InputPassthrough -> "arguments: unknown"
   InputFields parameters -> Text.intercalate ", " (parameterSignatureText <$> parameters)
   where
     parameterSignatureText parameter =
-      let baseType = fromMaybe "json.json" parameter.mappedType
+      let baseType = fromMaybe "unknown" parameter.mappedType
        in if parameter.optional
             then parameter.identifier <> ": " <> baseType <> " | null ?= null"
             else parameter.identifier <> ": " <> baseType
@@ -577,14 +570,14 @@ parameterList tool = case tool.input of
 outputTypeText :: ResolvedOutput -> Text
 outputTypeText output = case output of
   OutputTyped synonymName _ -> synonymName
-  OutputRaw -> "json.json"
+  OutputRaw -> "unknown"
 
 -- | The tool's effect row: @io@ (an external call), the module-local @connection@ scope marker the call
 -- is gated by, the ambient @credentials@ request the tool reads for its auth, and the three typed throws
 -- `mcp.call` itself declares — @server_error@ / @auth_error@ and @json.decode_error@ (the runtime raises
 -- the last when a reply does not conform to the decode target). It is UNIFORM across both output plans:
--- even the @json.json@ plan calls the same @mcp.call[...]@, whose row carries @decode_error@, so the tool
--- must carry it too (it is never actually raised for @json.json@, which keeps the raw tree). The
+-- even the @unknown@ plan calls the same @mcp.call[...]@, whose row carries @decode_error@, so the tool
+-- must carry it too (it is never actually raised for @unknown@, which keeps the raw document). The
 -- @connection@ marker ties the call to the enclosing @provide@; @credentials@ ties it to @connect@'s
 -- handler.
 effectRow :: Text

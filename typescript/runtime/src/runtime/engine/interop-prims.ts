@@ -1,7 +1,7 @@
 // The stdlib sub-module primitives beyond arithmetic: `prelude.json.*` (the JSON boundary),
 // `prelude.record.*` / `prelude.array.*` / `prelude.string.*` (collection and text access —
 // what a program needs to traverse a parsed AI reply), and `prelude.get_metadata` (a callable
-// value's name / description / schemas, as `json` values ready for an AI tool list). Preloaded into
+// value's name / description / schemas, as document values ready for an AI tool list). Preloaded into
 // every `PrimRegistry` next to the arithmetic built-ins.
 //
 // `prelude.call_agent` deliberately has NO runnable implementation: a delegate to it is unwrapped
@@ -23,7 +23,7 @@ import {
   type SchemaInfo,
 } from "@katari-lang/types";
 import type { IrSource } from "../ir.js";
-import { jsonToValue, valueEquals } from "../value/codec.js";
+import { valueEquals } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
 import type { BlobRefValue, GenericSubstitution, Value } from "../value/types.js";
 import {
@@ -37,10 +37,10 @@ import type { PrimContext, PrimImplementation } from "./context.js";
 import {
   blobStoreStringReader,
   encodeValue,
-  jsonValueFromJson,
-  jsonValueToJson,
+  literalLift,
+  literalWrite,
   type StringReader,
-  treeToValue,
+  unescapeWireKeys,
 } from "./json-value.js";
 import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
 import { errorData, KatariThrow } from "./throw-signal.js";
@@ -49,6 +49,7 @@ import type { BlobEntry } from "./types.js";
 // The domain error ctors the json prims throw (`prelude/json.ktr` declares them).
 const PARSE_ERROR = "prelude.json.parse_error";
 const DECODE_ERROR = "prelude.json.decode_error";
+const STRINGIFY_ERROR = "prelude.json.stringify_error";
 
 // The largest array `range` will materialise. `range` allocates the whole array synchronously on the
 // actor's serial turn, so an unbounded (possibly AI-supplied) bound would stall the event loop or exhaust
@@ -103,43 +104,40 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
         ),
       );
     }
-    return jsonValueFromJson(json);
+    return literalLift(json);
   },
   "prelude.json.stringify": async (argument, context) => {
-    // json -> its document text (`json` is the argument's declared type; the tree flattens to the
-    // document it stands for). The generic value-to-text pipe is `stringify(encode(x))` in source.
-    const json = await jsonValueToJson(field(argument, "value"), stringReaderOf(context));
-    return { kind: "string", value: JSON.stringify(json) };
-  },
-  "prelude.json.encode": (argument, context) =>
-    encodeValue(field(argument, "value"), stringReaderOf(context)),
-  "prelude.json.to_text": async (argument, context) => {
-    // The fused value -> text pipe: `stringify(encode(x))`, one composition of the two codecs.
-    const reader = stringReaderOf(context);
-    const tree = await encodeValue(field(argument, "value"), reader);
-    return { kind: "string", value: JSON.stringify(await jsonValueToJson(tree, reader)) };
-  },
-  "prelude.json.decode": async (argument, context) => {
-    // The call site's [T] instantiation carried T's schema here. Decode the tree to a value (the blind
-    // codec), then check it against T as a *separate* pass. Reconstruction CAN reject — a malformed
-    // wire object (an AI replaying a partial `$ref` file handle is the common case) — and that is the
-    // declared, catchable decode_error, not a panic: an AI loop feeds it back and the model corrects.
-    const schema = instantiatedSchema(context, "json.decode");
-    let value: Value;
+    // A document value -> its document text, keys kept verbatim. A non-document value (a file, a callable,
+    // a data value) has no document form, so `literalWrite` throws — surface it as the declared, catchable
+    // `stringify_error` (to render such a value, `to_text` gives its wire form).
+    let json: Json;
     try {
-      value = await treeToValue(field(argument, "value"), stringReaderOf(context));
+      json = await literalWrite(field(argument, "value"), stringReaderOf(context));
     } catch (error) {
       throw new KatariThrow(
         errorData(
-          DECODE_ERROR,
-          `json.decode: ${error instanceof Error ? error.message : String(error)}`,
+          STRINGIFY_ERROR,
+          `json.stringify: ${error instanceof Error ? error.message : String(error)}`,
         ),
       );
     }
-    return conformedOrThrow(value, schema, "json.decode");
+    return { kind: "string", value: JSON.stringify(json) };
+  },
+  "prelude.json.to_text": async (argument, context) => {
+    // The one wire word: a value -> the text of its WIRE form. `encodeValue` turns any value into a
+    // document (a data value nests, a file becomes its `$ref` object), then it flattens to text — total
+    // for every value. The `$$` escape `encodeValue` put on a value-plane `$`-key is un-escaped back out
+    // (`unescapeWireKeys`): to_text is DISPLAY, so a `$special` key shows as `$special`, never `$$special`
+    // — the escape stays a pure codec-internal device, invisible at every surface.
+    const reader = stringReaderOf(context);
+    const wire = await encodeValue(field(argument, "value"), reader);
+    const document = unescapeWireKeys(await literalWrite(wire, reader));
+    return { kind: "string", value: JSON.stringify(document) };
   },
   "prelude.json.parse_as": async (argument, context) => {
-    // The fused typed text boundary: `decode[T](parse(text))` — JSON.parse -> value lift -> check.
+    // The typed text boundary, LITERAL: parse the text, lift it verbatim into a document value (no `$`
+    // interpretation), then check it against T as a separate pass. A malformed document is `parse_error`;
+    // a shape mismatch is the declared, catchable `decode_error`.
     const schema = instantiatedSchema(context, "json.parse_as");
     const text = await readStringField(argument, "text", context);
     let parsed: Json;
@@ -153,20 +151,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
         ),
       );
     }
-    let lifted: Value;
-    try {
-      // The lift can reject like `decode`'s reconstruction (a malformed wire object, e.g. a partial
-      // `$ref` handle) — same declared decode_error, same catchability.
-      lifted = jsonToValue(parsed);
-    } catch (error) {
-      throw new KatariThrow(
-        errorData(
-          DECODE_ERROR,
-          `json.parse_as: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-    }
-    return conformedOrThrow(lifted, schema, "json.parse_as");
+    return conformedOrThrow(literalLift(parsed), schema, "json.parse_as");
   },
 
   // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //
@@ -417,9 +402,9 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       fields: {
         name: { kind: "string", value: metadata.name },
         description: { kind: "string", value: metadata.description },
-        input: jsonValueFromJson(schemaToJson(metadata.input)),
-        output: jsonValueFromJson(schemaToJson(metadata.output)),
-        requests: jsonValueFromJson(metadata.requests),
+        input: literalLift(schemaToJson(metadata.input)),
+        output: literalLift(schemaToJson(metadata.output)),
+        requests: literalLift(metadata.requests),
       },
     };
   },
@@ -537,6 +522,20 @@ export function conformCallableArgumentSync(
   irSource: IrSource,
 ): ConformFailure[] | null {
   if (value.kind !== "agent" && value.kind !== "closure") return null;
+  const inputSchema = dynamicInputSchemaOf(value, irSource);
+  if (inputSchema === null) return null; // an unloaded / foreign snapshot or non-agent — the acceptance surface guards it
+  const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
+  return check.ok ? null : check.failures;
+}
+
+/** The DECLARED input schema of a callable value, resolved synchronously the way `conformCallableArgumentSync`
+ *  does — for an agent / closure from its already-loaded snapshot block (generics filled from the callee's own
+ *  carried substitution), for a `tool` from its attached `inputSchema`, and `null` for a non-callable, an
+ *  unloaded / foreign snapshot, or a non-agent block. The delegation boundary reads it to REVIVE a dynamic
+ *  (`call_agent`) argument's `$ref` records into real files at their schema positions before validating. */
+export function dynamicInputSchemaOf(value: Value, irSource: IrSource): JSONSchema | null {
+  if (value.kind === "tool") return value.inputSchema;
+  if (value.kind !== "agent" && value.kind !== "closure") return null;
   let block: Block;
   try {
     if (value.kind === "agent") {
@@ -550,9 +549,7 @@ export function conformCallableArgumentSync(
   }
   if (block.kind !== "agent") return null; // not an agent body — the acceptance surface guards it
   const substitution = typeSubstitutionOf(block.schema.genericBindings, value.generics);
-  const inputSchema = fillGenericSchema(substitution, block.schema.input);
-  const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
-  return check.ok ? null : check.failures;
+  return fillGenericSchema(substitution, block.schema.input);
 }
 
 /** Resolve a callable value to its agent block's schema / description (following the value's own

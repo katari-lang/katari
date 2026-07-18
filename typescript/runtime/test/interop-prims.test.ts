@@ -1,7 +1,8 @@
 // The stdlib sub-module prims (`prelude.json.*`, `prelude.record.*`, `prelude.array.*`,
-// `prelude.string.*`) and `prelude.get_metadata`, exercised directly through the registry (no
-// actor). JSON round-trips cover the wire conventions (nested `$constructor`, `$agent` / `$closure`
-// references carrying their snapshot, `$ref` handles) and the total encode/decode bijection.
+// `prelude.string.*`) and `prelude.get_metadata`, exercised directly through the registry (no actor).
+// The json prims are all LITERAL (parse / parse_as / stringify keep keys verbatim, `$` uninterpreted),
+// except `to_text`, which renders a value's wire form (nested `$constructor`, `$agent` / `$closure`
+// references carrying their snapshot, `$ref` handles).
 
 import {
   createAgentName,
@@ -12,10 +13,10 @@ import {
 } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import type { PrimContext } from "../src/runtime/engine/context.js";
-import { jsonValueFromJson, jsonValueToJson } from "../src/runtime/engine/json-value.js";
+import { literalWrite } from "../src/runtime/engine/json-value.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
-import type { BlobId, ProjectId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -34,7 +35,7 @@ function contextWith(ir: SnapshotRegistry = new SnapshotRegistry()): PrimContext
   };
 }
 
-/** A context whose delegate carried a `[T]` instantiation (what a call site stamps for `decode[T]`). */
+/** A context whose delegate carried a `[T]` instantiation (what a call site stamps for `parse_as[T]`). */
 function contextWithT(schema: JSONSchema): PrimContext {
   return { ...contextWith(), generics: { T: { kind: "type", schema } } };
 }
@@ -64,9 +65,9 @@ async function expectThrows(promise: Promise<Value>, ctor: string, pattern: RegE
   }
 }
 
-/** Round-trip helper: the prim result (a tagged `json` value) flattened back to bare JSON. */
+/** Round-trip helper: a document value flattened back to bare JSON (the literal write behind `stringify`). */
 async function asJson(value: Value): Promise<Json> {
-  return jsonValueToJson(value, async (inner) => {
+  return literalWrite(value, async (inner) => {
     if (inner.kind !== "string") throw new Error(`expected an inline string, got ${inner.kind}`);
     return inner.value;
   });
@@ -80,45 +81,43 @@ function int(value: number): Value {
   return { kind: "integer", value };
 }
 
-/** The `$constructor` tag of one entry of a parsed `json_object` tree. */
-function constructorOfEntry(parsed: Value, key: string): string | undefined {
-  if (parsed.kind !== "record") throw new Error(`expected a record, got ${parsed.kind}`);
-  const entries = parsed.fields.entries;
-  if (entries === undefined || entries.kind !== "record") {
-    throw new Error("expected a json_object with an entries record");
-  }
-  const entry = entries.fields[key];
-  if (entry === undefined || entry.kind !== "record") {
-    throw new Error(`expected a tagged entry at "${key}"`);
-  }
-  return entry.ctor === undefined ? undefined : String(entry.ctor);
-}
-
 describe("prelude.json", () => {
-  test("parse lifts a document into tagged json values (integers split from numbers)", async () => {
+  test("parse lifts a document into PLAIN values (records, arrays, scalars; keys verbatim)", async () => {
     const parsed = await run("prelude.json.parse", {
       text: str('{"name":"alice","age":30,"score":1.5,"tags":["x"],"ok":true,"nothing":null}'),
     });
-    expect(parsed.kind).toBe("record");
-    if (parsed.kind === "record") expect(parsed.ctor).toBe("prelude.json.json_object");
-    await expect(asJson(parsed)).resolves.toEqual({
-      name: "alice",
-      age: 30,
-      score: 1.5,
-      tags: ["x"],
-      ok: true,
-      nothing: null,
+    // No tagged tree: a document is an ordinary record, its scalars ordinary scalars.
+    expect(parsed).toEqual({
+      kind: "record",
+      fields: {
+        name: str("alice"),
+        age: int(30),
+        score: { kind: "number", value: 1.5 },
+        tags: { kind: "array", elements: [str("x")] },
+        ok: { kind: "boolean", value: true },
+        nothing: { kind: "null" },
+      },
     });
   });
 
-  test("parse tags a fraction-less number json_integer, a fractional one json_number", async () => {
+  test("parse splits a fraction-less number to integer, a fractional one to number", async () => {
+    // `1.0` collapses to integer by design: JSON has one number type, so integer-ness is all the
+    // boundary can split on.
     const parsed = await run("prelude.json.parse", { text: str('{"a":30,"b":1.5,"c":1.0}') });
-    // Assert the tags themselves (a round-trip comparison would pass even without the split).
-    // `1.0` collapses to json_integer by design: JSON has one number type, so integer-ness of the
-    // parsed value is all the boundary can split on.
-    expect(constructorOfEntry(parsed, "a")).toBe("prelude.json.json_integer");
-    expect(constructorOfEntry(parsed, "b")).toBe("prelude.json.json_number");
-    expect(constructorOfEntry(parsed, "c")).toBe("prelude.json.json_integer");
+    if (parsed.kind !== "record") throw new Error("expected a record");
+    expect(parsed.fields.a).toEqual(int(30));
+    expect(parsed.fields.b).toEqual({ kind: "number", value: 1.5 });
+    expect(parsed.fields.c).toEqual(int(1));
+  });
+
+  test("parse is LITERAL: a `$ref` / `$constructor` key stays an ordinary field, never interpreted", async () => {
+    const parsed = await run("prelude.json.parse", {
+      text: str('{"$ref":"#/defs/x","$constructor":"main.box"}'),
+    });
+    expect(parsed).toEqual({
+      kind: "record",
+      fields: { $ref: str("#/defs/x"), $constructor: str("main.box") },
+    });
   });
 
   test("parse throws a typed `parse_error` on malformed JSON", async () => {
@@ -129,80 +128,29 @@ describe("prelude.json", () => {
     );
   });
 
-  test("stringify inverts parse", async () => {
-    const parsed = await run("prelude.json.parse", { text: str('{"a":[1,2],"b":"x"}') });
+  test("stringify inverts parse (keys verbatim, `$` uninterpreted)", async () => {
+    const parsed = await run("prelude.json.parse", { text: str('{"a":[1,2],"b":"x","$ref":"y"}') });
     const text = await run("prelude.json.stringify", { value: parsed });
-    expect(text).toEqual(str('{"a":[1,2],"b":"x"}'));
+    expect(text).toEqual(str('{"a":[1,2],"b":"x","$ref":"y"}'));
   });
 
-  test("encode embeds a plain record by its wire form", async () => {
-    const encoded = await run("prelude.json.encode", {
-      value: { kind: "record", fields: { name: str("tool"), n: int(1) } },
-    });
-    await expect(asJson(encoded)).resolves.toEqual({ name: "tool", n: 1 });
-  });
-
-  test("encode treats a json value like any data value (no special case) and decode inverts it", async () => {
-    // `json` is an ordinary data type: encoding a json value yields its nested tagged wire form, and
-    // decode[T] re-tags it back — the total round-trip law decode(encode(x)) == x, uniform in T.
-    const original = jsonValueFromJson("hi");
-    const encoded = await run("prelude.json.encode", { value: original });
-    await expect(asJson(encoded)).resolves.toEqual({
-      $constructor: "prelude.json.json_string",
-      value: { value: "hi" },
-    });
-    await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(
-      original,
-    );
-  });
-
-  test("encode nests a data value's fields under `value` and decode re-tags it", async () => {
+  test("stringify throws `stringify_error` for a non-document value (a data value, a file)", async () => {
     const data: Value = {
       kind: "record",
       fields: { n: int(3) },
       ctor: createAgentName("main.box"),
     };
-    const encoded = await run("prelude.json.encode", { value: data });
-    await expect(asJson(encoded)).resolves.toEqual({ $constructor: "main.box", value: { n: 3 } });
-    const decoded = await run("prelude.json.decode", { value: encoded }, contextWithT({}));
-    expect(decoded).toEqual(data);
-  });
-
-  test("encode renders an agent as its $agent reference (with snapshot) and decode reconstructs it", async () => {
-    const agent: Value = { kind: "agent", name: createAgentName("main.tool"), snapshot: SNAPSHOT };
-    const encoded = await run("prelude.json.encode", { value: agent });
-    await expect(asJson(encoded)).resolves.toEqual({ $agent: "main.tool", snapshot: SNAPSHOT });
-    await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(agent);
-  });
-
-  test("encode renders a closure as its $closure reference and decode reconstructs it", async () => {
-    const closure: Value = {
-      kind: "closure",
-      blockId: 1,
-      scopeId: 0 as ScopeId,
-      snapshot: SNAPSHOT,
-      module: "main",
-    };
-    const encoded = await run("prelude.json.encode", { value: closure });
-    await expect(asJson(encoded)).resolves.toEqual({
-      $closure: 1,
-      scopeId: 0,
-      snapshot: SNAPSHOT,
-      module: "main",
-    });
-    await expect(run("prelude.json.decode", { value: encoded }, contextWithT({}))).resolves.toEqual(closure);
-  });
-
-  test("decode flattens nested json values into plain values", async () => {
-    const parsed = await run("prelude.json.parse", { text: str('{"xs":[1,"two"],"n":null}') });
-    const decoded = await run("prelude.json.decode", { value: parsed }, contextWithT({}));
-    expect(decoded).toEqual({
-      kind: "record",
-      fields: {
-        xs: { kind: "array", elements: [int(1), str("two")] },
-        n: { kind: "null" },
-      },
-    });
+    await expectThrows(
+      run("prelude.json.stringify", { value: data }),
+      "prelude.json.stringify_error",
+      /json\.stringify: .*data value/,
+    );
+    const file: Value = { kind: "ref", semanticKind: "file", blobId: "blob-x" as BlobId };
+    await expectThrows(
+      run("prelude.json.stringify", { value: file }),
+      "prelude.json.stringify_error",
+      /json\.stringify: .*file value/,
+    );
   });
 
   const POINT: JSONSchema = {
@@ -212,28 +160,7 @@ describe("prelude.json", () => {
     additionalProperties: true,
   };
 
-  test("decode[T] validates against T's schema and throws a typed `decode_error` on a mismatch", async () => {
-    const parsed = await run("prelude.json.parse", { text: str('{"x":1,"y":2}') });
-    await expect(run("prelude.json.decode", { value: parsed }, contextWithT(POINT))).resolves.toEqual({
-      kind: "record",
-      fields: { x: int(1), y: int(2) },
-    });
-    const bad = await run("prelude.json.parse", { text: str('{"x":"one"}') });
-    await expectThrows(
-      run("prelude.json.decode", { value: bad }, contextWithT(POINT)),
-      "prelude.json.decode_error",
-      /json\.decode: .*\$\.x/,
-    );
-  });
-
-  test("decode without a carried [T] fails loud instead of skipping validation", async () => {
-    const parsed = await run("prelude.json.parse", { text: str("1") });
-    await expect(run("prelude.json.decode", { value: parsed })).rejects.toThrow(
-      /json\.decode: .*instantiation/,
-    );
-  });
-
-  test("parse_as[T] fuses parse + typed decode (no intermediate json tree)", async () => {
+  test("parse_as[T] is LITERAL parse + validation; a mismatch throws `decode_error`", async () => {
     await expect(
       run("prelude.json.parse_as", { text: str('{"x":1,"y":2}') }, contextWithT(POINT)),
     ).resolves.toEqual({ kind: "record", fields: { x: int(1), y: int(2) } });
@@ -249,39 +176,46 @@ describe("prelude.json", () => {
     );
   });
 
-  test("to_text fuses stringify(encode(x)) and inverts parse_as", async () => {
+  test("parse_as[unknown] keeps a `$ref` key LITERAL (no file revive here — that is the boundary's job)", async () => {
+    const parsed = await run(
+      "prelude.json.parse_as",
+      { text: str('{"image":{"$ref":"blob-abc"}}') },
+      contextWithT({}),
+    );
+    expect(parsed).toEqual({
+      kind: "record",
+      fields: { image: { kind: "record", fields: { $ref: str("blob-abc") } } },
+    });
+  });
+
+  test("to_text renders a value's WIRE form as text (data nests, file becomes $ref, keys verbatim)", async () => {
     const mixed: Value = {
       kind: "record",
       fields: {
         a: int(1),
         box: { kind: "record", ctor: createAgentName("main.box"), fields: { value: int(3) } },
-        j: jsonValueFromJson("hi"),
+        special: { kind: "record", fields: { $ref: str("literal") } },
+        handle: { kind: "ref", semanticKind: "file", blobId: "blob-x" as BlobId },
       },
     };
-    const fused = await run("prelude.json.to_text", { value: mixed });
-    const composed = await run("prelude.json.stringify", {
-      value: await run("prelude.json.encode", { value: mixed }),
+    const text = await run("prelude.json.to_text", { value: mixed });
+    if (text.kind !== "string") throw new Error("expected a string");
+    // A `data` value nests under `value`; a `file` becomes its `$ref` handle. Keys read VERBATIM — the
+    // `$$` escape is un-done, so a value-plane `$ref` key shows as `$ref` (accepted ambiguity with a real
+    // handle: to_text is display, not round-trip).
+    expect(JSON.parse(text.value)).toEqual({
+      a: 1,
+      box: { $constructor: "main.box", value: { value: 3 } },
+      special: { $ref: "literal" },
+      handle: { $ref: "blob-x", semanticKind: "file" },
     });
-    expect(fused).toEqual(composed);
-    if (fused.kind !== "string") throw new Error("expected a string");
-    // parse_as[unknown] of to_text(x) round-trips x (the nested $constructor entries re-tag).
-    await expect(
-      run("prelude.json.parse_as", { text: fused }, contextWithT({})),
-    ).resolves.toEqual(mixed);
   });
 
-  test("stringify takes json only; the generic pipe is stringify(encode(x))", async () => {
-    await expect(
-      run("prelude.json.stringify", {
-        value: { kind: "record", fields: { a: int(1) } },
-      }),
-    ).rejects.toThrow(/expected a json value/);
-    const embedded = await run("prelude.json.encode", {
-      value: { kind: "record", fields: { a: int(1), b: str("x") } },
-    });
-    await expect(run("prelude.json.stringify", { value: embedded })).resolves.toEqual(
-      str('{"a":1,"b":"x"}'),
-    );
+  test("stringify(parse(s)) == s (the document identity law, whitespace aside)", async () => {
+    const source = '{"a":[1,2.5],"b":{"$ref":"x"},"c":null}';
+    const parsed = await run("prelude.json.parse", { text: str(source) });
+    const text = await run("prelude.json.stringify", { value: parsed });
+    expect(text).toEqual(str(source));
   });
 });
 
@@ -718,18 +652,6 @@ describe("prelude.file", () => {
     await expect(run("prelude.file.size", { value: dangling }, context)).rejects.toThrow(
       /blob-made-up does not exist/,
     );
-  });
-
-  test("a bare { $ref } handle decodes to a file value (what an AI replays suffices)", async () => {
-    const handle = jsonValueFromJson({ image: { $ref: "blob-someone-elses" } });
-    await expect(
-      run("prelude.json.decode", { value: handle }, contextWithT({})),
-    ).resolves.toEqual({
-      kind: "record",
-      fields: {
-        image: { kind: "ref", semanticKind: "file", blobId: "blob-someone-elses" },
-      },
-    });
   });
 
   test("a non-file argument is rejected (a blob-backed string is not a file)", async () => {

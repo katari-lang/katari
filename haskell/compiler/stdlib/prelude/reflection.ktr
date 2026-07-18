@@ -9,12 +9,11 @@
 // participate in both exactly like compiled agents: a tool IS an agent.
 //
 // `get_metadata` derives a callable value's public signature — its qualified name, its `@"..."`
-// description, and the JSON Schemas of its input / output / requests, each schema already a `json`
-// value. To assemble a tool list, build the surrounding document explicitly with the `json`
-// constructors, embedding each schema as a subtree — e.g.
-// `json.json_object(entries = { name = json.json_string(value = m.name), input_schema = m.input })`.
-// (Do NOT wrap it with `json.encode`: `encode` embeds a `json` value as its tagged wire form like any
-// other `data` value, so it would double-tag the schema rather than pass it through.)
+// description, and the JSON Schemas of its input / output / requests, each schema a plain document
+// value (a record / array tree). To assemble a tool list, build the surrounding document with ordinary
+// record / array literals, embedding each schema by plain assignment — e.g.
+// `{ name = m.name, input_schema = m.input }`. Each schema is already a document value, so it drops
+// straight into the surrounding record; there is no wire step to apply.
 //
 // `call_agent` dispatches a callable VALUE with a runtime-built argument record — the
 // dynamic-dispatch counterpart of a static call, for a target an AI picked out of a tool list. The
@@ -23,14 +22,14 @@
 // catch it and let the model retry with corrected arguments.
 
 @"The public metadata of one callable: its (qualified) name, its `@\"...\"` description, and the JSON
-Schemas of its input, output and requests — each schema a `json` value, ready to embed in an AI tool
-list. A local (closure) callable has an empty name."
+Schemas of its input, output and requests — each schema a plain document value, ready to embed in an AI
+tool list. A local (closure) callable has an empty name."
 data agent_metadata(
   @"The qualified name; empty for a local closure." name: string,
   @"The `@\"...\"` documentation text; empty when undocumented." description: string,
-  @"The input record's JSON Schema." input: json.json,
-  @"The output's JSON Schema." output: json.json,
-  @"The requests' schemas: one { name, input, output } object per request the callable may perform." requests: json.json,
+  @"The input record's JSON Schema, as a document value." input: unknown,
+  @"The output's JSON Schema, as a document value." output: unknown,
+  @"The requests' schemas: one { name, input, output } object per request the callable may perform." requests: unknown,
 )
 
 @"Derive `agent_metadata` from a callable value (a top-level agent, a data constructor, a request, an

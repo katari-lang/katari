@@ -3,7 +3,7 @@
 // discriminator namespace is disjoint from record keys (escaping), `__proto__` is inert, and non-finite
 // numbers and a redacted subtree are handled at the boundary.
 
-import { createAgentName } from "@katari-lang/types";
+import { createAgentName, escapeRecordKey, unescapeRecordKey } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import type { BlobId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
 import { jsonToValue, valueToJson } from "../src/runtime/value/codec.js";
@@ -141,5 +141,52 @@ describe("privacy policy", () => {
 
   test("a redacted document cannot be decoded back", () => {
     expect(() => jsonToValue({ $redacted: true })).toThrow();
+  });
+});
+
+// The `$`-key escape is what keeps the value plane's `$`-keys from colliding with the wire discriminators.
+// `escapeRecordKey` (value -> wire) must be INJECTIVE so a value key round-trips; `unescapeRecordKey`
+// (wire -> value) is its left inverse for every value key, but is DELIBERATELY non-injective the other way
+// — a single-`$` wire key (an external literal) and a doubled one both land on the same value key, the
+// documented asymmetry that lets an outside document keep its literal `$defs` / `$schema` key.
+describe("$-key escape injectivity (value <-> wire discriminator namespace)", () => {
+  const keys = ["x", "plain", "$", "$x", "$$x", "$$$x", "$ref", "$constructor", "$$ref", ""];
+
+  test("escapeRecordKey doubles a leading `$` and is injective", () => {
+    expect(escapeRecordKey("$x")).toBe("$$x");
+    expect(escapeRecordKey("$$x")).toBe("$$$x");
+    expect(escapeRecordKey("plain")).toBe("plain");
+    expect(escapeRecordKey("$")).toBe("$$");
+    // Injective: distinct inputs map to distinct outputs.
+    const images = keys.map(escapeRecordKey);
+    expect(new Set(images).size).toBe(new Set(keys).size);
+  });
+
+  test("unescape ∘ escape is the identity for EVERY value key (the value round-trip)", () => {
+    for (const key of keys) {
+      expect(unescapeRecordKey(escapeRecordKey(key))).toBe(key);
+    }
+  });
+
+  test("unescape strips ONE `$` from a doubled key and preserves a single-`$` external literal", () => {
+    expect(unescapeRecordKey("$$x")).toBe("$x");
+    expect(unescapeRecordKey("$$$x")).toBe("$$x");
+    // A single-`$` key is an outside literal (`$defs`, `$schema`) — preserved, NOT stripped.
+    expect(unescapeRecordKey("$ref")).toBe("$ref");
+    expect(unescapeRecordKey("plain")).toBe("plain");
+    // The documented non-injectivity: a single- and a doubled- key collapse onto the same value key.
+    expect(unescapeRecordKey("$x")).toBe(unescapeRecordKey("$$x"));
+  });
+
+  test("a value-plane `$`-key round-trips through valueToJson/jsonToValue as itself", () => {
+    const record: Value = {
+      kind: "record",
+      fields: { $ref: { kind: "string", value: "literal" }, $$deep: { kind: "integer", value: 1 } },
+    };
+    const wire = valueToJson(record, "reveal");
+    // On the wire each `$`-key gains one `$` (so it can never forge a discriminator).
+    expect(wire).toEqual({ $$ref: "literal", $$$deep: 1 });
+    // And back exactly — a consumer that reads the value never sees the doubled form.
+    expect(jsonToValue(wire)).toEqual(record);
   });
 });

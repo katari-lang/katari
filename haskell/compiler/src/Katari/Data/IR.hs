@@ -331,7 +331,7 @@ data DelegateOperation = DelegateOperation
     -- runtime schemas keyed by the callee's declared parameter names (the encoding of
     -- 'ApplyGenericsOperation.generics'). The runtime merges it with the substitution the callee VALUE
     -- itself carries and uses the result to fill the callee's @$generic@ schema placeholders (argument
-    -- validation, @get_metadata@, typed @json.decode@). Empty for a non-generic callee.
+    -- validation, @get_metadata@, typed @json.parse_as@). Empty for a non-generic callee.
     generics :: List (Text, GenericArgumentSchema)
   }
   deriving stock (Eq, Show)

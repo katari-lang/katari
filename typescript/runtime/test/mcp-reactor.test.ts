@@ -560,42 +560,11 @@ describe("mcp reactor", () => {
   });
 });
 
-// One shape of the `json` union's emitted schema (`Katari.Schema`): a `data` value nests its fields under
-// `value`, keyed by a `$constructor` const. `json.json` itself is the seven-shape anyOf below.
-function jsonShape(constructorName: string, valueProperties: Record<string, JSONSchema>): JSONSchema {
-  return {
-    type: "object",
-    properties: {
-      $constructor: { const: constructorName },
-      value: {
-        type: "object",
-        properties: valueProperties,
-        required: Object.keys(valueProperties),
-        additionalProperties: true,
-      },
-    },
-    required: ["$constructor", "value"],
-    additionalProperties: false,
-  };
-}
-
-// The `json.json` output schema the codegen stamps on `mcp.call[..., json.json]`: the seven-shape anyOf
-// of the `json` union, mirroring what the compiler emits for `json.json`. A reply lifted as a LITERAL
-// `json` tree conforms to it, so the direct call keeps the raw tree (with its inert `$ref` objects) — the
-// no-`outputSchema` behaviour. A NON-tree value (a bare record, a scalar) does NOT conform, so a typed
-// `T` instead reconstructs the value wire form. (A nested `json` position expands to `{}` here — enough
-// for the decode's "is this a json tree?" question; the real schema breaks its own recursion the same way.)
-const JSON_TREE_SCHEMA: JSONSchema = {
-  anyOf: [
-    jsonShape("prelude.json.json_null", {}),
-    jsonShape("prelude.json.json_boolean", { value: { type: "boolean" } }),
-    jsonShape("prelude.json.json_integer", { value: { type: "integer" } }),
-    jsonShape("prelude.json.json_number", { value: { type: "number" } }),
-    jsonShape("prelude.json.json_string", { value: { type: "string" } }),
-    jsonShape("prelude.json.json_array", { items: { type: "array", items: {} } }),
-    jsonShape("prelude.json.json_object", { entries: { type: "object", additionalProperties: {} } }),
-  ],
-};
+// The `unknown` output schema the codegen stamps on `mcp.call[..., unknown]` (its no-`outputSchema`
+// choice): an UNCONSTRAINED `{}`. The reply is lifted LITERALLY and kept as the raw document value, with
+// its inert `$ref` objects left as plain records — a later dynamic call into a `file`-typed position
+// revives one. A TYPED `T` instead reconstructs the value wire form and validates against it.
+const UNKNOWN_SCHEMA: JSONSchema = {};
 
 // A `file` value's `$ref` handle schema (`Katari.Schema.fileReferenceSchema`): a typed `T` that carries a
 // file reconstructs a REAL handle from the reply's `$ref` object, so its lifetime rides the value walk.
@@ -741,36 +710,17 @@ const CALL_IR: IRModule = {
             argument: 103,
             output: 104,
           },
+          // The arguments are an ordinary value tree now (`mcp.call`'s `arguments: unknown`): a plain
+          // record `{ x = 19, note = "hi" }`, no `json.json_*` wrappers.
           { kind: "loadLiteral", output: 105, value: { kind: "integer", value: 19 } },
-          { kind: "makeRecord", entries: [["value", 105]], output: 106 },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.json.json_integer") },
-            argument: 106,
-            output: 107,
-          },
           { kind: "loadLiteral", output: 108, value: { kind: "string", value: "hi" } },
-          { kind: "makeRecord", entries: [["value", 108]], output: 109 },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.json.json_string") },
-            argument: 109,
-            output: 110,
-          },
           {
             kind: "makeRecord",
             entries: [
-              ["x", 107],
-              ["note", 110],
+              ["x", 105],
+              ["note", 108],
             ],
             output: 111,
-          },
-          { kind: "makeRecord", entries: [["entries", 111]], output: 112 },
-          {
-            kind: "delegate",
-            target: { kind: "name", name: createAgentName("prelude.json.json_object") },
-            argument: 112,
-            output: 113,
           },
           { kind: "loadLiteral", output: 114, value: { kind: "string", value: "add" } },
           {
@@ -779,7 +729,7 @@ const CALL_IR: IRModule = {
               ["url", 101],
               ["auth", 104],
               ["tool", 114],
-              ["arguments", 113],
+              ["arguments", 111],
             ],
             output: 115,
           },
@@ -788,10 +738,10 @@ const CALL_IR: IRModule = {
             target: { kind: "name", name: createAgentName("prelude.mcp.call") },
             argument: 115,
             output: 116,
-            // `mcp.call[url, json.json]` — the codegen's no-`outputSchema` instantiation. The engine
-            // forwards this to the mcp reactor as the external agent's ambient, so the reply is decoded
-            // against `json.json` (kept as the raw tree).
-            generics: directCallGenerics(JSON_TREE_SCHEMA),
+            // `mcp.call[url, unknown]` — the codegen's no-`outputSchema` instantiation. The engine
+            // forwards this to the mcp reactor as the external agent's ambient, so the reply is kept as
+            // the raw document value.
+            generics: directCallGenerics(UNKNOWN_SCHEMA),
           },
           { kind: "exit", target: 24, value: 116 },
         ],
@@ -886,18 +836,12 @@ const UNSCOPED_CALL_IR: IRModule = {
   names: {},
 };
 
-/** The `json` tree Value a scalar / object test asserts against — mirrors `engine/json-value.ts`. */
-function jsonTree(ctor: string, fields: Record<string, Value>): Value {
-  return { kind: "record", ctor: createAgentName(ctor), fields };
-}
-const treeString = (value: string): Value =>
-  jsonTree("prelude.json.json_string", { value: { kind: "string", value } });
-const treeInteger = (value: number): Value =>
-  jsonTree("prelude.json.json_integer", { value: { kind: "integer", value } });
-const treeObject = (entries: Record<string, Value>): Value =>
-  jsonTree("prelude.json.json_object", { entries: { kind: "record", fields: entries } });
-const treeArray = (elements: Value[]): Value =>
-  jsonTree("prelude.json.json_array", { items: { kind: "array", elements } });
+// The PLAIN document Value a raw-reply test asserts against — a literal lift of the reply (no tagged
+// `json` tree anymore: a document is an ordinary record / array / scalar).
+const treeString = (value: string): Value => ({ kind: "string", value });
+const treeInteger = (value: number): Value => ({ kind: "integer", value });
+const treeObject = (fields: Record<string, Value>): Value => ({ kind: "record", fields });
+const treeArray = (elements: Value[]): Value => ({ kind: "array", elements });
 
 /** `CALL_IR` with the direct call's `T` re-stamped: the typed-decode variants reuse the whole provide +
  *  call_runner scaffold and only change what the reply is decoded against. */
@@ -959,7 +903,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     await expect(result).resolves.toEqual(treeObject({ sum: treeInteger(42) }));
   });
 
-  test("T = json.json: a plain-text reply becomes a json_string tree", async () => {
+  test("T = unknown: a plain-text reply becomes a string value", async () => {
     const transport = new ControlledMcpTransport();
     const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -969,7 +913,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     await expect(result).resolves.toEqual(treeString("just text"));
   });
 
-  test("T = json.json: a blob-bearing reply keeps the `$ref` handle as a LITERAL object inside the tree", async () => {
+  test("T = unknown: a blob-bearing reply keeps the `$ref` handle as a LITERAL record inside the tree", async () => {
     const transport = new ControlledMcpTransport();
     const actor = makeActor(CALL_IR, transport);
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
@@ -994,7 +938,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     );
   });
 
-  test("T = json.json: a produced blob left inert in the tree run-adopts (the narrowed backstop)", async () => {
+  test("T = unknown: a produced blob left inert in the tree run-adopts (the narrowed backstop)", async () => {
     const transport = new ControlledMcpTransport();
     const blobs = new InMemoryBlobStore();
     const blob = "blob-mcp-direct" as BlobId;

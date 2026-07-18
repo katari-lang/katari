@@ -24,11 +24,11 @@ import { newDelegationId, type ScopeId, type SnapshotId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { liftPrivacy } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { renderConformFailures } from "../value/validation.js";
+import { renderConformFailures, reviveArgument } from "../value/validation.js";
 import { CALL_AGENT_NAME, completeThread, constructValue, raiseThrow } from "./common.js";
 import type { StepContext } from "./context.js";
 import { CALL_ERROR, type DispatchResult, dispatchCallable } from "./dynamic-dispatch.js";
-import { conformCallableArgumentSync } from "./interop-prims.js";
+import { conformCallableArgumentSync, dynamicInputSchemaOf } from "./interop-prims.js";
 import { matchPattern } from "./pattern.js";
 import { dropVariable, readVariable, writeVariable } from "./scope.js";
 import { getBlock, spawnThread } from "./spawn.js";
@@ -432,11 +432,18 @@ function resolveCallee(
     callable = peeled.callable;
     args = peeled.args;
   }
-  // A `call_agent` target's argument is DYNAMIC — the AI / caller built it, unchecked by the type system —
-  // so pre-validate it against the target's declared input schema here. A mismatch becomes the catchable
-  // `reflection.call_error` the `call_agent` row declares; letting it reach the callee's acceptance surface
-  // (whose mismatch is a defensive PANIC) would strand it. A `tool` target is validated by `dispatchCallable`
-  // already, and a direct (non-`call_agent`) call site is type-checked — so neither pays this runtime check.
+  // A `call_agent` target's argument is DYNAMIC — the AI / caller built it, unchecked by the type system.
+  // First REVIVE it: an AI can only replay a `file` it saw as a literal `{ "$ref": ... }` record, so
+  // reconstruct the real file exactly where the target's schema expects one (schema-directed — a `$ref`
+  // record at a non-file position stays data). Then validate the revived argument against that schema; a
+  // mismatch becomes the catchable `reflection.call_error` the `call_agent` row declares (reaching the
+  // callee's acceptance surface — whose mismatch is a defensive PANIC — would strand it). A `tool` target
+  // is validated by `dispatchCallable` below; a direct (non-`call_agent`) call site is type-checked — so
+  // neither pays this runtime check, but BOTH need the revive so a file argument arrives as a real handle.
+  if (viaCallAgent && args !== null) {
+    const inputSchema = dynamicInputSchemaOf(callable, ctx.irSource);
+    if (inputSchema !== null) args = reviveArgument(args, inputSchema);
+  }
   if (viaCallAgent && (callable.kind === "agent" || callable.kind === "closure")) {
     const failure = conformCallAgentArgument(ctx, callable, args);
     if (failure !== null) return { throwPayload: errorData(CALL_ERROR, failure) };

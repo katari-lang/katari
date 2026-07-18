@@ -41,7 +41,7 @@ primitive agent to_upper(value: string) -> string
 primitive agent to_lower(value: string) -> string
 
 @"Render a scalar as its string form (an integer prints without a decimal point). For a composite
-value use `json.stringify(value = json.encode(value = ...))` instead."
+value use `json.to_text(value = ...)` instead."
 primitive agent to_string(value: null | boolean | number | string) -> string
 
 @"Read the string as a base-10 integer (an optional sign and digits, nothing else), or `null` when

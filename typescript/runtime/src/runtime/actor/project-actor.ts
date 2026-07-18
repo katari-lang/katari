@@ -18,6 +18,7 @@ import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
 import { type Clock, SystemClock } from "../external/clock.js";
 import type { CredentialStore } from "../external/credentials.js";
+import type { HttpBlobResolver } from "../external/http-body.js";
 import type { HttpTransport } from "../external/http-transport.js";
 import { type McpTransport, StubMcpTransport } from "../external/mcp-transport.js";
 import type { FfiTransport } from "../external/runner.js";
@@ -181,11 +182,12 @@ export class ProjectActor {
     // durable call record, and the trace; only the handle ever rides those. A `file` body without this wiring
     // (a bare transport) fails loudly. The content type is read first (a synchronous catalog snapshot), then
     // the immutable, content-addressed bytes are fetched.
-    dependencies.http.useBlobResolver(async (blobId) => {
+    const blobResolver: HttpBlobResolver = async (blobId) => {
       const contentType = store.blobs[blobId]?.contentType ?? "";
       const bytes = await dependencies.blobs.get(this.projectId, blobId);
       return { bytes, contentType };
-    });
+    };
+    dependencies.http.useBlobResolver(blobResolver);
     // The one public base both dynamically generated endpoint kinds mint their capability URLs under.
     const publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
     // The mcp reactor performs built-in `prelude.mcp.*` calls through the injected transport (the SDK
@@ -197,9 +199,10 @@ export class ProjectActor {
       this.mcpTransport,
       publicBaseUrl,
       (work) => this.substrate.submit(this.mcp, work),
-      // A direct call's json-tree arguments may hold blob-backed string leaves; the reactor lowers
-      // them through the same reader the json prims use.
+      // A direct call's argument tree may hold blob-backed string leaves (lowered through the json prims'
+      // reader) and `file` leaves (base64'd through the same blob resolver the http body materialiser uses).
       blobStoreStringReader(this.projectId, dependencies.blobs),
+      blobResolver,
       pool,
     );
     // The webhook reactor serves `webhook.inbound` calls: it mints tokens and re-enters the serial loop for

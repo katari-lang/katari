@@ -148,12 +148,12 @@ spec = describe "lowerModule (via compile)" $ do
       handledRequestNames irModule `shouldContain` [preludeName "panic"]
 
     it "checks a stdlib throw effect end to end: an unhandled `json.parse` propagates its throw" $
-      compileErrorCodes "agent f(t: string) -> json.json { json.parse(text = t) }" `shouldBe` []
+      compileErrorCodes "agent f(t: string) -> unknown { json.parse(text = t) }" `shouldBe` []
 
     it "discharges a stdlib throw with a handler at the domain error type" $
       compileErrorCodes
-        ( "agent f(t: string) -> json.json {\n"
-            <> "  use handler { request prelude.throw(error: json.parse_error) -> never { break json.json_null() } }\n"
+        ( "agent f(t: string) -> unknown {\n"
+            <> "  use handler { request prelude.throw(error: json.parse_error) -> never { break null } }\n"
             <> "  json.parse(text = t)\n"
             <> "}"
         )

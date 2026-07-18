@@ -17,7 +17,15 @@
 // (a value may be private). Kinds are shape, not data.
 
 import type { GenericId, JSONSchema, Json, SchemaInfo } from "@katari-lang/types";
-import { AGENT_KEY, CONSTRUCTOR_KEY, FILE_KEY, VALUE_KEY, valueEquals } from "./codec.js";
+import type { BlobId } from "../ids.js";
+import {
+  AGENT_KEY,
+  CONSTRUCTOR_KEY,
+  FILE_KEY,
+  SEMANTIC_KIND_KEY,
+  VALUE_KEY,
+  valueEquals,
+} from "./codec.js";
 import type { GenericSubstitution, Value } from "./types.js";
 
 /** One mismatch: where in the argument (a `$`-rooted path) and what was expected. */
@@ -36,6 +44,96 @@ export function conformValue(value: Value, schema: JSONSchema): ConformResult {
 /** Render conform failures as one panic-ready message (one line per mismatch). */
 export function renderConformFailures(failures: ConformFailure[]): string {
   return failures.map((failure) => `${failure.path}: ${failure.message}`).join("; ");
+}
+
+// ─── schema-directed revive ────────────────────────────────────────────────────────────────────
+//
+// The one transform the delegation boundary applies to a DYNAMIC (`call_agent`) argument before validating
+// it. A document has no dedicated wire step (there is no `json.decode`), so a value drops into a call
+// verbatim — EXCEPT one shape an AI cannot produce as a real value: a `file`. When a model replays a
+// `{ "$ref": id }` handle it saw earlier, it arrives as a literal RECORD, and the callee that declared a
+// `file` parameter needs the real handle. `reviveArgument` reconstructs it — SCHEMA-DIRECTED: a `$ref`
+// record becomes a `file` value only where the schema expects a `file`, never a blind lift (a literal
+// `$ref` record kept as data stays data). It recurses through objects / arrays / data / unions so a file
+// nested anywhere revives at its schema position, and leaves every other value untouched.
+
+/** Revive the wire references an AI replayed as literal records, guided by `schema`: a `{ $ref }` record
+ *  at a `file` position becomes a real `file` value. Every other value passes through unchanged. */
+export function reviveArgument(value: Value, schema: JSONSchema): Value {
+  if (schema.$generic !== undefined) return value;
+
+  if (schema.anyOf !== undefined) {
+    // Revive against the first branch that ACCEPTS the revived value — so `file | null` revives a `$ref`
+    // record into a file (the file branch conforms) while leaving a null or a plain record alone.
+    for (const branch of schema.anyOf) {
+      const revived = reviveArgument(value, branch);
+      if (conformValue(revived, branch).ok) return revived;
+    }
+    return value;
+  }
+
+  // A file position: a literal `{ $ref, semanticKind? }` record (what an AI replays) becomes a real file.
+  if (referenceKeyOf(schema) === FILE_KEY) {
+    return fileFromRefRecord(value) ?? value;
+  }
+
+  // A `data` schema: revive the flat fields against the `value` sub-schema, keeping the constructor.
+  const dataConstructor = dataConstructorOf(schema);
+  if (dataConstructor !== undefined) {
+    if (value.kind !== "record" || value.ctor === undefined) return value;
+    const valueSchema = schema.properties?.[VALUE_KEY];
+    if (valueSchema === undefined) return value;
+    const revived = reviveArgument({ kind: "record", fields: value.fields }, valueSchema);
+    if (revived.kind !== "record") return value;
+    return { kind: "record", ctor: value.ctor, fields: revived.fields };
+  }
+
+  if (
+    value.kind === "array" &&
+    (schema.type === "array" || schema.items !== undefined || schema.prefixItems !== undefined)
+  ) {
+    return {
+      kind: "array",
+      elements: value.elements.map((element, index) => {
+        const elementSchema = schema.prefixItems?.[index] ?? schema.items;
+        return elementSchema === undefined ? element : reviveArgument(element, elementSchema);
+      }),
+    };
+  }
+
+  if (
+    value.kind === "record" &&
+    value.ctor === undefined &&
+    (schema.type === "object" ||
+      schema.properties !== undefined ||
+      schema.additionalProperties !== undefined)
+  ) {
+    const tail =
+      typeof schema.additionalProperties === "object" ? schema.additionalProperties : undefined;
+    const fields: Record<string, Value> = Object.create(null);
+    for (const [key, child] of Object.entries(value.fields)) {
+      const propertySchema = schema.properties?.[key] ?? tail;
+      fields[key] = propertySchema === undefined ? child : reviveArgument(child, propertySchema);
+    }
+    return { kind: "record", fields };
+  }
+
+  return value;
+}
+
+/** A plain `{ "$ref": id, semanticKind? }` record -> the file value it stands for, or `null` if it is not
+ *  that shape (so a non-file value at a file position stays as-is for validation to reject). A `data`
+ *  value is never a file handle (its `$ref` key would be escaped), so only a plain record qualifies. */
+function fileFromRefRecord(value: Value): Value | null {
+  if (value.kind !== "record" || value.ctor !== undefined) return null;
+  const reference = value.fields[FILE_KEY];
+  if (reference === undefined || reference.kind !== "string") return null;
+  const semanticKindValue = value.fields[SEMANTIC_KIND_KEY];
+  const semanticKind =
+    semanticKindValue?.kind === "string" && semanticKindValue.value === "string"
+      ? "string"
+      : "file";
+  return { kind: "ref", semanticKind, blobId: reference.value as BlobId };
 }
 
 // ─── generic instantiation ────────────────────────────────────────────────────────────────────
@@ -102,7 +200,7 @@ export function typeSubstitutionOf(
 // ─── the conformance walk ─────────────────────────────────────────────────────────────────────
 
 /** Whether a schema constrains anything at all (`{}` — and a bare `$generic` — accept every value). */
-function isUnconstrained(schema: JSONSchema): boolean {
+export function isUnconstrained(schema: JSONSchema): boolean {
   return (
     schema.type === undefined &&
     schema.const === undefined &&

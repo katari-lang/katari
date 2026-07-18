@@ -120,14 +120,12 @@ golden =
       "//   - an object with only schema-valued additionalProperties -> record[T];",
       "//   - an anyOf whose members all map -> a union;",
       "//   - everything else (enum / const, allOf / oneOf, tuples, open or",
-      "//     unmodelled schemas) falls back to `json.json`.",
-      "// All-or-nothing on the PARAMETER side is the wire-form asymmetry: `json.encode` speaks the value",
-      "// WIRE form, so a `json.json` nested inside a typed parameter would embed as its `$constructor` tree,",
-      "// not the raw fragment the server expects — a fallback parameter is therefore inserted into the",
-      "// arguments tree as-is (it already is a tree). The output side has no such asymmetry: `mcp.call",
-      "// [connection, T]` decodes the reply against `T` in the runtime, so a fully-mapped outputSchema",
-      "// instantiates `T` to its type (decoded, `json.decode_error` on a mismatch) and any other tool",
-      "// instantiates `T` to `json.json` (the raw reply as a tree).",
+      "//     unmodelled schemas) falls back to `unknown`.",
+      "// The mapping only chooses the surface TYPE — the argument value is inserted into the arguments tree",
+      "// as-is either way, since a value is already a document (no `json.encode` wire step). The output side",
+      "// is symmetric: `mcp.call[connection, T]` decodes the reply against `T` in the runtime, so a",
+      "// fully-mapped outputSchema instantiates `T` to its type (decoded, `json.decode_error` on a mismatch)",
+      "// and any other tool instantiates `T` to `unknown` (the raw reply as a document value).",
       "",
       "@\"This server's scope marker: every tool rides it, and `connect`'s `mcp.provide` discharges it, so a tool cannot escape the connection.\"",
       "effect connection",
@@ -151,7 +149,7 @@ golden =
       "type get_issue_output = {assignee?: string | null, number: integer, title: string}",
       "",
       "@\"Fetch one issue.\\nSlow on \\\"cold\\\" repos.\"",
-      "agent get_issue(filter: json.json | null ?= null, labels: array[string] | null ?= null, owner: string, repo: string) -> get_issue_output with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
+      "agent get_issue(filter: unknown | null ?= null, labels: array[string] | null ?= null, owner: string, repo: string) -> get_issue_output with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
       "  let arguments_0 = record.empty()",
       "  let arguments_1 = match (filter) {",
       "    case null -> arguments_0",
@@ -159,15 +157,15 @@ golden =
       "  }",
       "  let arguments_2 = match (labels) {",
       "    case null -> arguments_1",
-      "    case present -> record.set(target = arguments_1, key = \"labels\", value = json.encode(value = present))",
+      "    case present -> record.set(target = arguments_1, key = \"labels\", value = present)",
       "  }",
-      "  let arguments_3 = record.set(target = arguments_2, key = \"owner\", value = json.encode(value = owner))",
-      "  let arguments_4 = record.set(target = arguments_3, key = \"repo\", value = json.encode(value = repo))",
-      "  mcp.call[connection, get_issue_output](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"get-issue\", arguments = json.json_object(entries = arguments_4))",
+      "  let arguments_3 = record.set(target = arguments_2, key = \"owner\", value = owner)",
+      "  let arguments_4 = record.set(target = arguments_3, key = \"repo\", value = repo)",
+      "  mcp.call[connection, get_issue_output](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"get-issue\", arguments = arguments_4)",
       "}",
       "",
-      "agent ping(arguments: json.json) -> json.json with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
-      "  mcp.call[connection, json.json](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"ping\", arguments = arguments)",
+      "agent ping(arguments: unknown) -> unknown with io | connection | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error] {",
+      "  mcp.call[connection, unknown](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"ping\", arguments = arguments)",
       "}"
     ]
 
@@ -230,7 +228,7 @@ callerModule =
       "  }",
       "  use github.connect(auth = mcp.oauth(name = \"github\"))",
       "  let issue = github.get_issue(owner = \"katari-lang\", repo = \"katari\")",
-      "  let pong = github.ping(arguments = json.json_object(entries = record.empty()))",
+      "  let pong = github.ping(arguments = record.empty())",
       "  let names = describe_tools(tools = [github.get_issue])",
       "  f\"issue=${issue.title} pong=${json.to_text(value = pong)} names=${string.join(parts = names, separator = \",\")}\"",
       "}"
@@ -291,15 +289,15 @@ spec = describe "katari mcp pull codegen" $ do
       rendered <- render goldenFixture
       shouldCompile rendered
 
-  describe "wire-form asymmetry" $ do
-    it "embeds a fully-mapped parameter through json.encode and a fallback parameter as-is" $ do
+  describe "argument insertion (values are documents — no json.encode)" $ do
+    it "inserts both a mapped and a fallback parameter as-is (no wire step)" $ do
       rendered <- render goldenFixture
-      -- (a) `labels` maps (array[string]) — it must go through the wire-form embedding.
-      rendered `shouldSatisfy` Text.isInfixOf "key = \"labels\", value = json.encode(value = present)"
-      -- (a) `filter` is an enum — a fallback — so it must be inserted AS-IS (already a tree); an
-      -- encode here would ship the `$constructor` wire tree instead of the raw fragment.
+      -- (a) `labels` maps (array[string]) and `filter` is an enum fallback — both insert the value AS-IS,
+      -- because a value is already a document (there is no `json.encode` wire step for either).
+      rendered `shouldSatisfy` Text.isInfixOf "key = \"labels\", value = present"
       rendered `shouldSatisfy` Text.isInfixOf "key = \"filter\", value = present"
-      rendered `shouldSatisfy` (not . Text.isInfixOf "key = \"filter\", value = json.encode")
+      -- No `json.encode` embedding anywhere in the generated CODE (the header comment may mention it).
+      rendered `shouldSatisfy` (not . Text.isInfixOf "value = json.encode")
 
     it "decodes only a fully-mapped outputSchema; any fallback inside keeps the raw reply" $ do
       rendered <- render outputShapesFixture
@@ -308,9 +306,9 @@ spec = describe "katari mcp pull codegen" $ do
       rendered `shouldSatisfy` Text.isInfixOf "type typed_output = {hits: array[{id: integer}], scores?: record[number]}"
       rendered `shouldSatisfy` Text.isInfixOf "mcp.call[connection, typed_output](url ="
       rendered `shouldSatisfy` (not . Text.isInfixOf "json.decode[")
-      -- (b) `partly-typed` has ONE untyped field — the whole output stays `json.json` (the `T` argument).
+      -- (b) `partly-typed` has ONE untyped field — the whole output stays `unknown` (the `T` argument).
       rendered `shouldSatisfy` (not . Text.isInfixOf "partly_typed_output")
-      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[connection, json.json](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"partly-typed\""
+      rendered `shouldSatisfy` Text.isInfixOf "mcp.call[connection, unknown](url = \"https://mcp.example.test/mcp\", auth = credentials(), tool = \"partly-typed\""
       -- (b) a field named by a reserved word cannot label an object type — also raw.
       rendered `shouldSatisfy` (not . Text.isInfixOf "reserved_field_output")
       shouldCompile rendered
@@ -335,14 +333,14 @@ spec = describe "katari mcp pull codegen" $ do
       rendered `shouldSatisfy` Text.isInfixOf "tool = \"connect\""
       -- A parameter named by a reserved word mangles, but its record.set key stays original.
       rendered `shouldSatisfy` Text.isInfixOf "type_: string"
-      rendered `shouldSatisfy` Text.isInfixOf "key = \"type\", value = json.encode(value = type_)"
+      rendered `shouldSatisfy` Text.isInfixOf "key = \"type\", value = type_"
       -- camelCase lowers to snake_case, key stays original.
       rendered `shouldSatisfy` Text.isInfixOf "max_results: integer | null ?= null"
       rendered `shouldSatisfy` Text.isInfixOf "key = \"maxResults\""
       -- A parameter named `credentials` would shadow the ambient request every tool body calls for
       -- its auth (`auth = credentials()`) — bumped; its record.set key stays original.
       rendered `shouldSatisfy` Text.isInfixOf "credentials_2: string"
-      rendered `shouldSatisfy` Text.isInfixOf "key = \"credentials\", value = json.encode(value = credentials_2)"
+      rendered `shouldSatisfy` Text.isInfixOf "key = \"credentials\", value = credentials_2"
 
     it "the mangling module compiles against the real stdlib" $ do
       rendered <- render manglingFixture

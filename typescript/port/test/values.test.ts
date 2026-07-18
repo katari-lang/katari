@@ -125,6 +125,17 @@ describe("encodeWireValue", () => {
     });
   });
 
+  test("a value-plane `$x` key never surfaces as `$$x` to the handler and round-trips back", () => {
+    const { binding } = makeBinding();
+    // Inbound: the engine escaped a value-plane `$special` key to `$$special` on the wire; the handler
+    // must receive the ORIGINAL `$special` (the exit surface unescapes — the handler never sees `$$`).
+    const handlerArgument = decodeWireValue({ $$special: "v", plain: 1 }, binding);
+    expect(handlerArgument).toEqual({ $special: "v", plain: 1 });
+    // Outbound: the handler returns that same `$special`-keyed object, which re-escapes to `$$special`
+    // on the wire, so the value plane reconstructs `$special` — a lossless round-trip.
+    expect(encodeWireValue(handlerArgument)).toEqual({ $$special: "v", plain: 1 });
+  });
+
   test("undefined becomes null at the top and is dropped inside records", () => {
     expect(encodeWireValue(undefined)).toBe(null);
     expect(encodeWireValue({ kept: 1, dropped: undefined })).toEqual({ kept: 1 });

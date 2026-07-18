@@ -155,7 +155,7 @@ async function materializeMultipart(
  *  / `$schema` key in the tree — a JSON-Schema keyword an AI provider's tool schema carries — arrives here as
  *  `$$ref` / …, and must go on the wire as the ORIGINAL `$ref`. A single-`$` object (a real `$ref` file
  *  handle) is caught by `fileHandleOf` above before this branch, so the two never collide. */
-async function materializeJsonTree(
+export async function materializeJsonTree(
   node: Json | undefined,
   resolve: HttpBlobResolver | null,
 ): Promise<Json> {
