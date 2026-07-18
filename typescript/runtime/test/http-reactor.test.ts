@@ -21,9 +21,10 @@ import {
   type HttpTransport,
 } from "../src/runtime/external/http-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
-import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
-import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
+import { type BlobStore, InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
+import type { Value } from "../src/runtime/value/types.js";
 
 const PROJECT = "project-http" as ProjectId;
 const SNAPSHOT = "snapshot-http" as SnapshotId;
@@ -324,6 +325,9 @@ class ControlledHttpTransport implements HttpTransport {
     this.sink = sink;
   }
 
+  // This double records the handle-carrying argument and never materialises a body, so it needs no resolver.
+  useBlobResolver(): void {}
+
   dispatch(call: HttpCall): void {
     this.dispatched.push(call);
   }
@@ -364,6 +368,7 @@ function makeActor(
   http: HttpTransport,
   persistence: Persistence = new InMemoryPersistence(),
   ir: IRModule = FETCH_IR,
+  blobs: BlobStore = new InMemoryBlobStore(),
 ): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(ir.entries)) {
@@ -375,7 +380,7 @@ function makeActor(
     projectId: PROJECT,
     ir: registry,
     prims,
-    blobs: new InMemoryBlobStore(),
+    blobs,
     external: new StubFfiTransport(),
     http,
     persistence,
@@ -611,5 +616,211 @@ describe("http reactor — private body sink (real transport over loopback)", ()
     } finally {
       await loopback.close();
     }
+  });
+});
+
+// The file body slots end-to-end: a `file` in a request body rides to the reactor as its HANDLE, and the
+// transport reads the bytes from the blob store only at the send boundary. These tests drive the whole
+// ProjectActor with a program that forwards its request argument to `http.fetch`, so the request body — a
+// real body-sum value built here with a file ref — is exactly what reaches the wire (a loopback server that
+// records the raw bytes it received). The last test proves the other half: the external-call envelope the
+// reactor hands the transport carries only the handle, never the base64.
+describe("http reactor — file request bodies (real transport over loopback)", () => {
+  const FILE_BLOB = "blob-http-body" as BlobId;
+  // Arbitrary non-UTF-8 bytes (a 0xff), so a base64 / raw comparison is meaningful and text framing is exact.
+  const FILE_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+  const FILE_CONTENT_TYPE = "image/png";
+  const FILE_BASE64 = Buffer.from(FILE_BYTES).toString("base64");
+
+  // agent main(request) { return http.fetch(request) } — forwards the whole request, so the test controls
+  // the body sum precisely (built as a runtime value and passed as the run argument).
+  const FORWARD_FETCH_IR: IRModule = {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch") },
+              argument: 1,
+              output: 2,
+            },
+            { kind: "exit", target: 0, value: 2 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+
+  const fileRef: Value = { kind: "ref", semanticKind: "file", blobId: FILE_BLOB };
+  const string = (value: string): Value => ({ kind: "string", value });
+  const dataValue = (ctor: string, fields: Record<string, Value>): Value => ({
+    kind: "record",
+    ctor: createAgentName(ctor),
+    fields,
+  });
+
+  /** The `{ url, method: POST, headers: {}, body }` request value the forwarding program sends. */
+  function request(url: string, body: Value): Value {
+    return {
+      kind: "record",
+      fields: {
+        url: string(url),
+        method: string("POST"),
+        headers: { kind: "record", fields: {} },
+        body,
+      },
+    };
+  }
+
+  interface RawLoopback {
+    url: string;
+    /** The raw request bytes + Content-Type the server received, read after the run resolves. */
+    received: { body: Buffer; contentType: string | null };
+    close: () => Promise<void>;
+  }
+
+  /** A loopback server that records the RAW request bytes (not decoded to text) + the Content-Type, so a
+   *  binary / multipart body's exact bytes are the assertion. Bound to 127.0.0.1 on an ephemeral port. */
+  async function startRawLoopback(): Promise<RawLoopback> {
+    const received: RawLoopback["received"] = { body: Buffer.alloc(0), contentType: null };
+    const server = createServer((incoming, response) => {
+      const chunks: Buffer[] = [];
+      incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+      incoming.on("end", () => {
+        received.body = Buffer.concat(chunks);
+        received.contentType = incoming.headers["content-type"] ?? null;
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ok");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback server did not bind a port");
+    }
+    return {
+      url: `http://127.0.0.1:${address.port}/upload`,
+      received,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  /** An actor with the file already uploaded (bytes in the store, its row in the warm catalog), driving the
+   *  forwarding program through the real `FetchHttpTransport`. */
+  async function actorWithFile(http: HttpTransport): Promise<ProjectActor> {
+    const blobs = new InMemoryBlobStore();
+    await blobs.put(PROJECT, FILE_BLOB, FILE_BYTES);
+    const actor = makeActor(http, new InMemoryPersistence(), FORWARD_FETCH_IR, blobs);
+    await actor.uploadBlob(FILE_BLOB, {
+      hash: "hash-http-body",
+      size: FILE_BYTES.byteLength,
+      contentType: FILE_CONTENT_TYPE,
+      semanticKind: "file",
+    });
+    return actor;
+  }
+
+  test("json body: a file leaf becomes base64 in place, the rest of the tree unchanged", async () => {
+    const loopback = await startRawLoopback();
+    try {
+      const actor = await actorWithFile(new FetchHttpTransport());
+      // { name: "avatar", data: <file> } — only `data` should become base64 on the wire.
+      const tree: Value = { kind: "record", fields: { name: string("avatar"), data: fileRef } };
+      const body = dataValue("prelude.http.json", { value: tree });
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
+      await result;
+
+      expect(loopback.received.contentType).toBe("application/json");
+      const document: unknown = JSON.parse(loopback.received.body.toString("utf8"));
+      expect(document).toEqual({ name: "avatar", data: FILE_BASE64 });
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("binary body: the file's raw bytes, its content type the Content-Type", async () => {
+    const loopback = await startRawLoopback();
+    try {
+      const actor = await actorWithFile(new FetchHttpTransport());
+      const body = dataValue("prelude.http.binary", { content: fileRef });
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
+      await result;
+
+      expect(new Uint8Array(loopback.received.body)).toEqual(FILE_BYTES);
+      expect(loopback.received.contentType).toBe(FILE_CONTENT_TYPE);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("multipart body: RFC 7578 parts, the file part carrying the raw bytes", async () => {
+    const loopback = await startRawLoopback();
+    try {
+      const actor = await actorWithFile(new FetchHttpTransport());
+      const parts: Value = {
+        kind: "array",
+        elements: [
+          dataValue("prelude.http.multipart_text", { name: string("caption"), content: string("hello") }),
+          dataValue("prelude.http.multipart_file", {
+            name: string("upload"),
+            filename: string("logo.png"),
+            content: fileRef,
+          }),
+        ],
+      };
+      const body = dataValue("prelude.http.multipart", { parts });
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
+      await result;
+
+      expect(loopback.received.contentType).toMatch(/^multipart\/form-data; boundary=----katari[0-9a-f]+$/);
+      // Read the framing as latin1 so raw file bytes survive the round-trip for the structural assertions.
+      const framed = loopback.received.body.toString("latin1");
+      expect(framed).toContain('Content-Disposition: form-data; name="caption"');
+      expect(framed).toContain("hello");
+      expect(framed).toContain('Content-Disposition: form-data; name="upload"; filename="logo.png"');
+      expect(framed).toContain(`Content-Type: ${FILE_CONTENT_TYPE}`);
+      // The file part carries the exact raw bytes (not base64, not decoded).
+      expect(loopback.received.body.includes(Buffer.from(FILE_BYTES))).toBe(true);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("the envelope handed to the transport carries the file HANDLE, never the base64 bytes", async () => {
+    const transport = new ControlledHttpTransport();
+    const actor = await actorWithFile(transport);
+    const tree: Value = { kind: "record", fields: { data: fileRef } };
+    const body = dataValue("prelude.http.json", { value: tree });
+    actor.startRun(createAgentName("main"), SNAPSHOT, request("https://example.test/x", body));
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    // The body rides as the slim `$ref` handle, exactly as the value plane / DB / trace hold it.
+    expect(call.argument).toMatchObject({
+      body: {
+        $constructor: "prelude.http.json",
+        value: { value: { data: { $ref: FILE_BLOB, semanticKind: "file" } } },
+      },
+    });
+    // The base64 of the bytes is nowhere in the envelope — it is born only inside the transport's send.
+    expect(JSON.stringify(call.argument)).not.toContain(FILE_BASE64);
   });
 });

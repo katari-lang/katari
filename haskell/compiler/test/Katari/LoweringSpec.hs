@@ -225,20 +225,28 @@ spec = describe "lowerModule (via compile)" $ do
 
   describe "the http stdlib (primitive.http)" $ do
     it "types `http.fetch` as an effect returning { status: integer, body: string }" $
-      compileErrorCodes "agent f() -> string {\n  http.fetch(url = \"https://x\", method = \"GET\", headers = {}, body = \"\").body\n}\n" `shouldBe` []
+      compileErrorCodes "agent f() -> string {\n  http.fetch(url = \"https://x\", method = \"GET\", headers = {}, body = http.text(content = \"\")).body\n}\n" `shouldBe` []
 
     it "allows a secret header and declassifies the response (the call is impure, so no result lift)" $
-      compileErrorCodes "agent f(key: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = { Authorization = key }, body = \"\").status\n}\n" `shouldBe` []
+      compileErrorCodes "agent f(key: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = { Authorization = key }, body = http.text(content = \"\")).status\n}\n" `shouldBe` []
 
     it "accepts a secret in the body (a private submission surface toward the destination server)" $
-      -- The rule change: the `body` is a `string of private` sink, so a secret may be submitted in a form
-      -- body (e.g. an OAuth `refresh_token`), exactly like a secret header value.
-      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = s).status\n}\n" `shouldBe` []
+      -- The `body` is a sum; its `text` variant's content is `string of private`, so a secret may be
+      -- submitted in a form body (e.g. an OAuth `refresh_token`), exactly like a secret header value.
+      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = http.text(content = s)).status\n}\n" `shouldBe` []
 
     it "rejects a secret in the url (the url stays public: it leaks into logs, caches, and referrers)" $
       -- The honest negative that keeps the rule from decaying: the `url` is a public sink even though the
       -- body one argument over is private-capable, so a private value reaching it is still a type error.
-      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = s, method = \"GET\", headers = {}, body = \"\").status\n}\n" `shouldNotBe` []
+      compileErrorCodes "agent f(s: string of private) -> integer {\n  http.fetch(url = s, method = \"GET\", headers = {}, body = http.text(content = \"\")).status\n}\n" `shouldNotBe` []
+
+    it "accepts a `json` body of a value tree (the base64 slot: `unknown` takes records / scalars / files)" $
+      -- The `json` variant's `value: unknown of private` takes any value tree; a `file` in it becomes base64
+      -- at the send boundary (a runtime concern), and here just a plain record tree confirms the constructor.
+      compileErrorCodes "agent f() -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = http.json(value = { note = \"hi\" })).status\n}\n" `shouldBe` []
+
+    it "accepts a `multipart` body of RFC 7578 parts (a named text field)" $
+      compileErrorCodes "agent f() -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = http.multipart(parts = [http.multipart_text(name = \"a\", content = \"b\")])).status\n}\n" `shouldBe` []
 
   -- The post-lowering liveness pass (Katari.Lowering.Drop): a temporary written and last mentioned
   -- within one sequence is released by a `drop` right after that mention; anything a nested block (a

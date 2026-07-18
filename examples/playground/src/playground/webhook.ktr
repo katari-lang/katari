@@ -27,7 +27,7 @@ agent deliver(url: string, value: integer) -> string {
     url = url,
     method = "POST",
     headers = record.empty(),
-    body = json.to_text(value = { value = value }),
+    body = http.text(content = json.to_text(value = { value = value })),
   )
   response.body
 }

@@ -175,6 +175,17 @@ export class ProjectActor {
     // The http reactor performs built-in `http.fetch` calls through the injected transport (an in-runtime
     // fetch); an http call reaches it as a `delegate` from core's external proxy, exactly like ffi.
     this.http = new HttpReactor(dependencies.http, pool);
+    // Wire how the http transport materialises a `file` request body: at SEND time it reads the blob's bytes
+    // from the store and its content type from the warm catalog (the metadata a slim ref does not carry).
+    // Doing it here — from the actor's own blob store + catalog — keeps the bytes off the value plane, the
+    // durable call record, and the trace; only the handle ever rides those. A `file` body without this wiring
+    // (a bare transport) fails loudly. The content type is read first (a synchronous catalog snapshot), then
+    // the immutable, content-addressed bytes are fetched.
+    dependencies.http.useBlobResolver(async (blobId) => {
+      const contentType = store.blobs[blobId]?.contentType ?? "";
+      const bytes = await dependencies.blobs.get(this.projectId, blobId);
+      return { bytes, contentType };
+    });
     // The one public base both dynamically generated endpoint kinds mint their capability URLs under.
     const publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
     // The mcp reactor performs built-in `prelude.mcp.*` calls through the injected transport (the SDK

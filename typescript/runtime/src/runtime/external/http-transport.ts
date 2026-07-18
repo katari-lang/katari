@@ -12,6 +12,7 @@
 
 import type { Json } from "@katari-lang/types";
 import type { DelegationId } from "../ids.js";
+import { type HttpBlobResolver, materializeBody } from "./http-body.js";
 
 /** One http request to perform. `argument` is the call's argument as plain Json — `{ url, method, headers,
  *  body }`, with any secret header value or secret body already revealed at the reactor boundary (the
@@ -36,6 +37,11 @@ export interface HttpCompletion {
 export interface HttpTransport {
   /** Register the sink the reactor consumes completions through (called once at wiring). */
   onComplete(sink: (completion: HttpCompletion) => void): void;
+  /** Wire the resolver the transport materialises a `file` request body through — it reads a blob's bytes +
+   *  content type from the project's blob store at SEND time (so the value plane / DB / trace only ever hold
+   *  the handle). Called once at wiring, like `onComplete`; a transport that never sends a real request (the
+   *  stub) or records handles without materialising (a test double) ignores it. */
+  useBlobResolver(resolve: HttpBlobResolver): void;
   /** Perform one request — always means "send it" (fire-and-forget; the outcome arrives via the sink). */
   dispatch(call: HttpCall): void;
   /** Reconcile a reloaded in-flight call (at-most-once; never re-sends): a request this transport still has
@@ -53,6 +59,7 @@ export interface HttpTransport {
  *  stub — so a test that does http by accident is caught rather than hitting the real network). */
 export class StubHttpTransport implements HttpTransport {
   onComplete(): void {}
+  useBlobResolver(): void {}
   dispatch(call: HttpCall): void {
     throw new Error(`http transport not configured (call ${call.delegation})`);
   }
@@ -71,9 +78,21 @@ const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 export class FetchHttpTransport implements HttpTransport {
   private sink: ((completion: HttpCompletion) => void) | null = null;
   private readonly controllers = new Map<DelegationId, AbortController>();
+  /** The blob resolver a `file` body materialises through, wired by the actor. `null` until wired — a bare
+   *  transport (a test that sends no file body) never needs it; a file body then fails loudly. It may also
+   *  be supplied at construction, for a standalone transport. */
+  private resolve: HttpBlobResolver | null;
+
+  constructor(resolve: HttpBlobResolver | null = null) {
+    this.resolve = resolve;
+  }
 
   onComplete(sink: (completion: HttpCompletion) => void): void {
     this.sink = sink;
+  }
+
+  useBlobResolver(resolve: HttpBlobResolver): void {
+    this.resolve = resolve;
   }
 
   dispatch(call: HttpCall): void {
@@ -127,11 +146,22 @@ export class FetchHttpTransport implements HttpTransport {
       const request = parseRequest(call.argument);
       const headers = new Headers(request.headers);
       const init: RequestInit = { method: request.method, headers, signal };
-      // A body-less method (GET / HEAD) must not carry a body; every other method sends exactly the `body`
-      // string the program supplied — including an explicit empty body (Content-Length: 0), which some APIs
-      // distinguish from a bodyless request.
+      // A body-less method (GET / HEAD) must not carry a body; every other method materialises the request
+      // body sum HERE, at the send boundary — a `file` leaf's bytes are read from the blob store now, never
+      // earlier, so the value plane / DB / trace only ever held the handle. An explicit empty text body
+      // (Content-Length: 0) still goes out, which some APIs distinguish from a bodyless request.
       if (!BODYLESS_METHODS.has(request.method.toUpperCase())) {
-        init.body = request.body;
+        const materialised = await materializeBody(request.body, this.resolve);
+        if (materialised.body !== undefined) init.body = materialised.body;
+        const contentType = materialised.contentType;
+        // The body's implied Content-Type: multipart's (with its boundary) overrides a caller header;
+        // binary / json apply only as a default, so a caller's own Content-Type wins.
+        if (
+          contentType !== undefined &&
+          (contentType.authoritative || !headers.has("content-type"))
+        ) {
+          headers.set("content-type", contentType.value);
+        }
       }
       const response = await fetch(request.url, init);
       const body = await response.text();
@@ -158,17 +188,20 @@ interface ParsedRequest {
   url: string;
   method: string;
   headers: Record<string, string>;
-  body: string;
+  /** The raw `body` argument — a body sum (a `{ $constructor, value }` data value) or a bare string; the
+   *  transport materialises it at send time (`materializeBody`). Metadata (a file's bytes) is NOT here. */
+  body: Json | undefined;
 }
 
-/** Read the `{ url, method, headers, body }` shape `http.fetch` lowers its argument to out of plain Json. */
+/** Read the `{ url, method, headers, body }` shape `http.fetch` lowers its argument to out of plain Json.
+ *  `body` is kept as raw Json (the request-body sum) — materialised at the send boundary, not here. */
 function parseRequest(argument: Json | null): ParsedRequest {
   if (argument === null || typeof argument !== "object" || Array.isArray(argument)) {
     throw new Error("http.fetch: argument is not a request object");
   }
   const url = stringField(argument, "url");
   const method = stringField(argument, "method");
-  const body = stringField(argument, "body");
+  const body = argument.body ?? undefined;
   const headers: Record<string, string> = {};
   const rawHeaders = argument.headers;
   if (
