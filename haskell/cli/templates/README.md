@@ -34,7 +34,7 @@ questions to their operator, and the runtime keeps every run durable.
    katari run
    ```
 
-   Pick `main.main`. It asks for your name — that question is an escalation leaving the
+   Pick `{{name}}.main`. It asks for your name — that question is an escalation leaving the
    run, and `katari run` lets you answer it right in the terminal (or from the console).
 
 ## Everyday commands

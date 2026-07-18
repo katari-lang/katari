@@ -70,7 +70,7 @@ agent main() -> string {
   // 2. What the AI replies, read through the typed text boundary: `parse_as[T]` validates the
   //    document against T's schema and throws `json.decode_error` (naming the offending path) if
   //    it does not fit (malformed text is `json.parse_error`).
-  let reply = "{\"tool\":\"tools.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
+  let reply = "{\"tool\":\"playground.tools.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
   let picked = json.parse_as[{ tool: string, arguments: record[unknown] }](text = reply)
 
   // 3. Dispatch the pick; the result goes back to the AI as JSON text.

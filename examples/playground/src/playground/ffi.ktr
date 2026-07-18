@@ -1,5 +1,5 @@
 // The FFI in one module: an external agent is declared here and implemented in `ffi.ts` (the same
-// module path, so `greet` registers under the key `ffi.greet`). `katari apply` bundles the sidecar;
+// module path, so `greet` registers under the key `playground.ffi.greet`). `katari apply` bundles the sidecar;
 // the runtime spawns it per snapshot and dispatches calls to it. Four boundary shapes:
 //
 //   greet         — plain values across the boundary.

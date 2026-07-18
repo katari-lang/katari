@@ -1,5 +1,5 @@
-// The sidecar half of `ffi.ktr` — every handler registers under this file's module path (`ffi.*`),
-// exactly the keys the compiler lowers the external agents to.
+// The sidecar half of `ffi.ktr` — every handler registers under this file's module path
+// (`playground.ffi.*`), exactly the keys the compiler lowers the external agents to.
 
 import { katari, KatariData, type KatariFile } from "@katari-lang/port";
 
@@ -15,14 +15,14 @@ katari.agent<{ content: KatariFile }>(
 );
 
 katari.agent<{ x: number }>("compute", async ({ x }, context) => {
-  const doubled = await context.call<number>("ffi.double", { x });
+  const doubled = await context.call<number>("playground.ffi.double", { x });
   return doubled + 1;
 });
 
 katari.agent<{ text: string }>("parse_port", ({ text }) => {
   const port = Number.parseInt(text, 10);
   if (Number.isNaN(port)) {
-    katari.throw(new KatariData("ffi.parse_error", { message: `not a number: ${text}` }));
+    katari.throw(new KatariData("playground.ffi.parse_error", { message: `not a number: ${text}` }));
   }
   return port;
 });

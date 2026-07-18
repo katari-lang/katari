@@ -195,8 +195,8 @@ test("apply compiles, bundles, and deploys the playground", async () => {
   expect(stderr).toContain("Applied snapshot");
 });
 
-test("basics.main: data/match, for, parallel for, handlers, prelude", async () => {
-  const { stdout, stderr } = await katari(["run", "basics.main", "--project", "playground"]);
+test("playground.basics.main: data/match, for, parallel for, handlers, prelude", async () => {
+  const { stdout, stderr } = await katari(["run", "playground.basics.main", "--project", "playground"]);
   expect(stdout).toContain("ticks=[0,1,2]");
   expect(stdout).toContain("sum(squares(4))=30");
   // Partial application, value-checked end to end: doubles is a residual of scale, and decorated
@@ -205,23 +205,23 @@ test("basics.main: data/match, for, parallel for, handlers, prelude", async () =
   expect(stdout).toContain("decorated=>> hello!");
   // The wait loop tails the run's execution trace to stderr: the launch delegate and the final ack
   // must have printed as summary lines while stdout stayed result-only.
-  expect(stderr).toContain("delegate api→core basics.main");
+  expect(stderr).toContain("delegate api→core playground.basics.main");
   expect(stderr).toContain("delegateAck core→api");
 });
 
-test("tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
-  const { stdout } = await katari(["run", "tools.main", "--project", "playground"]);
+test("playground.tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
+  const { stdout } = await katari(["run", "playground.tools.main", "--project", "playground"]);
   expect(stdout).toContain("result=5");
 });
 
-test("webhook.main: a minted inbound URL serves validated deliveries, then deactivates", async () => {
-  const { stdout } = await katari(["run", "webhook.main", "--project", "playground"]);
+test("playground.webhook.main: a minted inbound URL serves validated deliveries, then deactivates", async () => {
+  const { stdout } = await katari(["run", "playground.webhook.main", "--project", "playground"]);
   // The subscriber POSTed {value:21} and {value:4} to its own minted URL; each delivery ran the
   // callback (doubling) and the response body came back as the result text.
   expect(stdout).toContain("delivered: 42 and 8");
 });
 
-test("mcp_demo.main: the built-in MCP client mints the server's tools as agents", async () => {
+test("playground.mcp_demo.main: the built-in MCP client mints the server's tools as agents", async () => {
   // A real MCP server on a loopback port (stateless streamable HTTP: a fresh server + transport per
   // request), exposing one `add` tool. The playground program opens it with `use mcp.provide(url = ...)`,
   // reads each minted agent's metadata, and dispatches `add` through `reflection.call_agent` — all
@@ -268,7 +268,7 @@ test("mcp_demo.main: the built-in MCP client mints the server's tools as agents"
     const port = address.port;
     const { stdout } = await katari([
       "run",
-      "mcp_demo.main",
+      "playground.mcp_demo.main",
       "--project",
       "playground",
       "--arg",
@@ -285,41 +285,41 @@ test("mcp_demo.main: the built-in MCP client mints the server's tools as agents"
   }
 });
 
-test("errors.main: typed throw caught, panic caught, missing-secret fallback", async () => {
-  const { stdout } = await katari(["run", "errors.main", "--project", "playground"]);
+test("playground.errors.main: typed throw caught, panic caught, missing-secret fallback", async () => {
+  const { stdout } = await katari(["run", "playground.errors.main", "--project", "playground"]);
   expect(stdout).toContain("7 is odd — no half");
   expect(stdout).toContain("half=6");
   expect(stdout).toContain("panic caught: division by zero");
   expect(stdout).toContain("no secret under playground.no_such_key");
 });
 
-test("time.main: durable now + sleep resolve through the built-in time reactor", async () => {
+test("playground.time.main: durable now + sleep resolve through the built-in time reactor", async () => {
   // A ~1s durable sleep bracketed by two `time.now` readings — the result text is deterministic in its
   // prefix (the elapsed span is at least the sleep, but not asserted exactly).
-  const { stdout } = await katari(["run", "time.main", "--project", "playground"]);
+  const { stdout } = await katari(["run", "playground.time.main", "--project", "playground"]);
   expect(stdout).toContain("slept for");
 }, 20_000);
 
-test("replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
+test("playground.replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
   // A `replay` provider re-runs the block on `replay.interrupted`; a user converter decides which failures
   // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);
   // `exhausting` spends a 2-attempt budget and the exhaustion re-raises the TYPED `warming_up`; `rejected`
   // shows selective retry — the fatal `unauthorized` is rethrown, not replayed, so it leaves at once; and
   // `reauth_intercepted` composes `immediate` + an intercepted `replay.attention` to re-run in place.
-  const success = await katari(["run", "replay_demo.main", "--project", "playground"]);
+  const success = await katari(["run", "playground.replay_demo.main", "--project", "playground"]);
   expect(success.stdout).toContain("result: connected on attempt 3");
-  const exhausted = await katari(["run", "replay_demo.exhausting", "--project", "playground"]);
+  const exhausted = await katari(["run", "playground.replay_demo.exhausting", "--project", "playground"]);
   expect(exhausted.stdout).toContain("gave up while warming up (attempt 2)");
-  const rejected = await katari(["run", "replay_demo.rejected", "--project", "playground"]);
+  const rejected = await katari(["run", "playground.replay_demo.rejected", "--project", "playground"]);
   expect(rejected.stdout).toContain("unauthorized: revoked credential");
-  const reauth = await katari(["run", "replay_demo.reauth_intercepted", "--project", "playground"]);
+  const reauth = await katari(["run", "playground.replay_demo.reauth_intercepted", "--project", "playground"]);
   expect(reauth.stdout).toContain("session: calendar loaded on attempt 2");
 }, 20_000);
 
-test("ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
+test("playground.ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
   const { stdout } = await katari([
     "run",
-    "ffi.main",
+    "playground.ffi.main",
     "--project",
     "playground",
     "--arg",
@@ -336,7 +336,7 @@ test("a suspended run survives a server restart (boot reactivation), then comple
 
   // Detach a run that suspends on two escalations (the parallel `consult` children). `--detach` prints
   // the bare run id to stdout (progress goes to stderr).
-  const { stdout } = await katari(["run", "interactive.main", "--project", "playground", "--detach"]);
+  const { stdout } = await katari(["run", "playground.interactive.main", "--project", "playground", "--detach"]);
   const runId = stdout.trim();
   expect(runId).toMatch(UUID);
   await waitFor("both escalations to open", async () => {
@@ -431,7 +431,7 @@ test("rollback moves the head; new runs follow it", async () => {
   expect(headAfterRollback.id).toBe(firstSnapshot);
 
   // A new run follows the rolled-back head.
-  const { stdout: runOut } = await katari(["run", "basics.main", "--project", "playground"]);
+  const { stdout: runOut } = await katari(["run", "playground.basics.main", "--project", "playground"]);
   expect(runOut).toContain("sum(squares(4))=30");
 });
 
