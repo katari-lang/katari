@@ -1,6 +1,7 @@
 // Hierarchical agent listing: qualified names become a real folder tree (`shop.tools.fetch` nests
 // under shop › tools), each folder collapsible, each leaf a two-line row showing the agent's `@"..."`
-// description. The stdlib (`prelude.*`) is filtered by the page, not here.
+// description. Which entries reach this tree (the project's own vs. its dependencies) is decided by
+// the page, not here.
 
 import { ChevronDown, ChevronRight, FileCode, Folder, FolderOpen } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -194,9 +195,4 @@ function TreeRow({
       </Link>
     </li>
   );
-}
-
-/** Whether an entry belongs to the wired-in stdlib rather than the user's program. */
-export function isStdlibAgent(agent: AgentEntry): boolean {
-  return agent.qualifiedName === "prelude" || agent.qualifiedName.startsWith("prelude.");
 }
