@@ -11,7 +11,7 @@ import {
   type HttpCall,
   type HttpCompletion,
 } from "../src/runtime/external/http-transport.js";
-import type { DelegationId } from "../src/runtime/ids.js";
+import type { BlobId, DelegationId } from "../src/runtime/ids.js";
 
 const DELEGATION = "http-delegation-1" as DelegationId;
 
@@ -29,7 +29,13 @@ function dispatchOnce(transport: FetchHttpTransport, call: HttpCall): Promise<Ht
 }
 
 function requestCall(argument: HttpCall["argument"]): HttpCall {
-  return { delegation: DELEGATION, argument };
+  return { delegation: DELEGATION, argument, responseKind: "text" };
+}
+
+/** A `fetch_file` call: the response body is captured to a blob (through the wired producer) rather than
+ *  read as text. */
+function fileRequestCall(argument: HttpCall["argument"]): HttpCall {
+  return { delegation: DELEGATION, argument, responseKind: "file" };
 }
 
 afterEach(() => {
@@ -189,5 +195,96 @@ describe("FetchHttpTransport", () => {
       transport.abort(DELEGATION);
     });
     expect(completion).toEqual({ delegation: DELEGATION, outcome: { kind: "cancelled" } });
+  });
+
+  test("a fetch_file captures the response bytes into a file handle through the wired producer", async () => {
+    // Arbitrary non-UTF-8 bytes, so a text read would corrupt them — the whole reason to capture to a blob.
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    vi.stubGlobal(
+      "fetch",
+      fetchStub(() =>
+        Promise.resolve(new Response(bytes, { status: 200, headers: { "content-type": "image/png" } })),
+      ),
+    );
+    const produced: { delegation: DelegationId; bytes: Uint8Array; contentType: string }[] = [];
+    const transport = new FetchHttpTransport();
+    transport.useBlobProducer(async (delegation, given, contentType) => {
+      produced.push({ delegation, bytes: given, contentType });
+      return "produced-blob-1" as BlobId;
+    });
+
+    const completion = await dispatchOnce(
+      transport,
+      fileRequestCall({ url: "https://example.test/logo.png", method: "GET", headers: {}, body: "" }),
+    );
+
+    // The producer received the raw response bytes and the response's Content-Type.
+    expect(produced).toHaveLength(1);
+    expect(produced[0]?.delegation).toBe(DELEGATION);
+    expect(produced[0]?.bytes).toEqual(bytes);
+    expect(produced[0]?.contentType).toBe("image/png");
+    // The result carries the slim `$katari_ref` handle (the reactor's decode lifts it into a `file`), never
+    // the bytes — the status / headers ride alongside so a caller branches on them like a `fetch`.
+    expect(completion.outcome).toEqual({
+      kind: "result",
+      value: {
+        status: 200,
+        headers: { "content-type": "image/png" },
+        file: { $katari_ref: "produced-blob-1", $katari_semantic_kind: "file" },
+      },
+    });
+  });
+
+  test("a fetch_file with no response Content-Type stores the octet-stream fallback", async () => {
+    // A Response built from raw bytes carries no Content-Type, so the transport supplies the RFC 2046 default.
+    vi.stubGlobal(
+      "fetch",
+      fetchStub(() => Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 }))),
+    );
+    let seenContentType: string | undefined;
+    const transport = new FetchHttpTransport();
+    transport.useBlobProducer(async (_delegation, _bytes, contentType) => {
+      seenContentType = contentType;
+      return "produced-blob-2" as BlobId;
+    });
+
+    await dispatchOnce(
+      transport,
+      fileRequestCall({ url: "https://example.test/blob", method: "GET", headers: {}, body: "" }),
+    );
+    expect(seenContentType).toBe("application/octet-stream");
+  });
+
+  test("a fetch_file whose call already vanished is an error (the producer dropped the bytes)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      fetchStub(() => Promise.resolve(new Response(new Uint8Array([1]), { status: 200 }))),
+    );
+    const transport = new FetchHttpTransport();
+    // A `null` producer result models the owning call having resolved / been cancelled before the download.
+    transport.useBlobProducer(async () => null);
+
+    const completion = await dispatchOnce(
+      transport,
+      fileRequestCall({ url: "https://example.test/gone", method: "GET", headers: {}, body: "" }),
+    );
+    expect(completion.outcome.kind).toBe("error");
+  });
+
+  test("a fetch_file with no wired producer fails loudly (an error, not a silent empty result)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      fetchStub(() => Promise.resolve(new Response(new Uint8Array([1]), { status: 200 }))),
+    );
+    const transport = new FetchHttpTransport(); // no producer wired
+
+    const completion = await dispatchOnce(
+      transport,
+      fileRequestCall({ url: "https://example.test/x", method: "GET", headers: {}, body: "" }),
+    );
+    expect(completion.outcome.kind).toBe("error");
+    if (completion.outcome.kind === "error") {
+      expect(completion.outcome.message).toMatch(/blob producer/);
+    }
   });
 });

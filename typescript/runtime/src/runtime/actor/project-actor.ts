@@ -6,6 +6,7 @@
 // (in-process api commands, FFI completions) onto the serial bus. Everything is serial; concurrency is the
 // ack model (a parent that fanned out several delegates resumes each branch as its delegateAck lands).
 
+import { createHash } from "node:crypto";
 import type { JSONSchema, QualifiedName } from "@katari-lang/types";
 import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
@@ -19,7 +20,7 @@ import type { ReactorName } from "../event/types.js";
 import { type Clock, SystemClock } from "../external/clock.js";
 import type { CredentialStore } from "../external/credentials.js";
 import type { HttpBlobResolver } from "../external/http-body.js";
-import type { HttpTransport } from "../external/http-transport.js";
+import type { HttpBlobProducer, HttpTransport } from "../external/http-transport.js";
 import { type McpTransport, StubMcpTransport } from "../external/mcp-transport.js";
 import type { FfiTransport } from "../external/runner.js";
 import {
@@ -28,6 +29,7 @@ import {
   type DelegationId,
   type EscalationId,
   type InstanceId,
+  newBlobId,
   type ProjectId,
   type SnapshotId,
 } from "../ids.js";
@@ -188,6 +190,32 @@ export class ProjectActor {
       return { bytes, contentType };
     };
     dependencies.http.useBlobResolver(blobResolver);
+    // Wire how a `fetch_file` RESPONSE becomes a project blob — the receive-side twin of the resolver above.
+    // The transport reads the response bytes at the receive boundary; here we store them under a fresh id,
+    // hash them (content-addressed, like every produced blob), and register the blob as owned by the http
+    // call's instance so the reply's `delegateAck` hoists it to the caller, exactly like an FFI / MCP
+    // produced blob. Registering through the serial command turn (`registerProducedBlobOn`) commits the
+    // ownership row BEFORE the transport's completion (which carries only the handle) is processed. A
+    // vanished call reclaims the orphaned bytes and returns `null`, so the transport drops the download.
+    const blobProducer: HttpBlobProducer = async (delegation, bytes, contentType) => {
+      const blobId = newBlobId();
+      const entry: Omit<BlobEntry, "owner"> = {
+        hash: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength,
+        contentType,
+        semanticKind: "file",
+      };
+      await dependencies.blobs.put(this.projectId, blobId, bytes);
+      const registered = await this.registerProducedBlobOn(this.http, delegation, blobId, entry);
+      if (!registered) {
+        // The owning call vanished (cancelled / completed) before its download landed; no row references
+        // these bytes, so drop them rather than orphan them — the same fix `mintAndStoreBlob` applies.
+        await dependencies.blobs.delete(this.projectId, blobId).catch(() => {});
+        return null;
+      }
+      return blobId;
+    };
+    dependencies.http.useBlobProducer(blobProducer);
     // The one public base both dynamically generated endpoint kinds mint their capability URLs under.
     const publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
     // The mcp reactor performs built-in `prelude.mcp.*` calls through the injected transport (the SDK
@@ -383,13 +411,14 @@ export class ProjectActor {
     return this.registerProducedBlobOn(this.mcp, delegation, blobId, entry);
   }
 
-  /** The shared contract behind the two produced-blob entry points (they differ only in which call reactor
-   *  owns the delegation): run as a serial command turn so the ownership row commits durably before the
-   *  transport's completion (which carries the blob's handle in its result) is processed. Resolves to
+  /** The shared contract behind the produced-blob entry points — the FFI handler's mid-call upload, the MCP
+   *  tool result's image, and the `http.fetch_file` download's blob producer (they differ only in which call
+   *  reactor owns the delegation): run as a serial command turn so the ownership row commits durably before
+   *  the transport's completion (which carries the blob's handle in its result) is processed. Resolves to
    *  whether the blob was registered — `false` when the call already vanished, so the caller can delete
    *  the orphaned bytes. */
   private registerProducedBlobOn(
-    reactor: FfiReactor | McpReactor,
+    reactor: FfiReactor | McpReactor | HttpReactor,
     delegation: DelegationId,
     blobId: BlobId,
     entry: Omit<BlobEntry, "owner">,

@@ -31,9 +31,12 @@ import {
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The transport data an http call holds. The argument is kept only to dispatch the request; recovery never
- *  re-sends (at-most-once), so it is not persisted — a reloaded call carries `null`. */
+ *  re-sends (at-most-once), so it is not persisted — a reloaded call carries `null`. `responseKind` (decided
+ *  once from the external's dispatch key: `fetch` → text, `fetch_file` → file) selects how the response body
+ *  is captured; it too is moot on reload (a reloaded call never re-dispatches). */
 interface HttpPayload {
   argument: Value | null;
+  responseKind: "text" | "file";
 }
 
 export class HttpReactor extends ExternalCallReactor<HttpPayload> {
@@ -46,13 +49,16 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     super(pool);
   }
 
-  protected openPayload(_target: ExternalTarget, argument: Value | null): HttpPayload {
-    return { argument };
+  protected openPayload(target: ExternalTarget, argument: Value | null): HttpPayload {
+    // The dispatch key tells `fetch` (text response) from `fetch_file` (the body captured to a blob) —
+    // decided ONCE here, at the payload boundary, then carried as the payload's `responseKind`.
+    return { argument, responseKind: target.key === FETCH_FILE_KEY ? "file" : "text" };
   }
 
   protected dispatch(delegation: DelegationId, payload: HttpPayload): void {
     this.transport.dispatch({
       delegation,
+      responseKind: payload.responseKind,
       // Lower the engine's Value to plain Json for the request. This is THE single transport boundary the
       // stdlib rule names: a secret submission surface — a header value OR the body — is revealed here (http
       // is an allowed sink toward the destination server: an API key flows to its auth header, an OAuth
@@ -91,10 +97,16 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
   }
 
   protected decodeCallExtension(_extension: Json): DecodedCallExtension<HttpPayload> {
-    // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
-    return { payload: { argument: null }, relays: [], innerCalls: [] };
+    // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none;
+    // `responseKind` is moot for the same reason (a reloaded call never re-dispatches) — default to text.
+    return { payload: { argument: null, responseKind: "text" }, relays: [], innerCalls: [] };
   }
 }
 
 /** The domain error ctor an http no-response throws (`prelude/http.ktr` declares it). */
 const FETCH_ERROR = "prelude.http.fetch_error";
+
+/** The dispatch key `http.fetch_file` arrives under — the compiled external's rendered qualified name.
+ *  Compared exactly at `openPayload` to pick the file-capturing response shape; every other http call
+ *  (`http.fetch`) captures the body as text. */
+const FETCH_FILE_KEY = "prelude.http.fetch_file";

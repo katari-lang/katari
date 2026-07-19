@@ -325,8 +325,10 @@ class ControlledHttpTransport implements HttpTransport {
     this.sink = sink;
   }
 
-  // This double records the handle-carrying argument and never materialises a body, so it needs no resolver.
+  // This double records the handle-carrying argument and never materialises a body, so it needs no resolver;
+  // it is hand-driven (completions are fed directly), so it never produces a response file either.
   useBlobResolver(): void {}
+  useBlobProducer(): void {}
 
   dispatch(call: HttpCall): void {
     this.dispatched.push(call);
@@ -824,5 +826,167 @@ describe("http reactor — file request bodies (real transport over loopback)", 
     });
     // The base64 of the bytes is nowhere in the envelope — it is born only inside the transport's send.
     expect(JSON.stringify(call.argument)).not.toContain(FILE_BASE64);
+  });
+});
+
+// The receive-side twin of the file-request-body tests: `http.fetch_file` captures a RESPONSE body into a
+// blob and returns its `file` HANDLE, so a downloaded payload's bytes (and their base64) never touch the
+// value plane. These drive the whole ProjectActor with a program that forwards its request argument to
+// `http.fetch_file`, through the REAL `FetchHttpTransport` against a loopback that serves bytes — so what
+// the run actually gets back (a `file` value whose blob holds the served bytes + Content-Type) is the
+// assertion. A `StoringPersistence` lets the blob row (its recorded content type) be read after the run.
+describe("http reactor — fetch_file response (real transport over loopback)", () => {
+  // agent main(request) { return http.fetch_file(request) } — forwards the whole request so the test
+  // controls the URL / method precisely (built as a runtime value and passed as the run argument). The
+  // external's dispatch key is the compiled qualified name, which is what the reactor keys the file-capture
+  // shape off of.
+  const FETCH_FILE_IR: IRModule = {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch_file") },
+              argument: 1,
+              output: 2,
+            },
+            { kind: "exit", target: 0, value: 2 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "prelude.http.fetch_file", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.http.fetch_file")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+
+  /** The `{ url, method: GET, headers: {}, body: "" }` request the forwarding program downloads. */
+  function downloadRequest(url: string): Value {
+    return {
+      kind: "record",
+      fields: {
+        url: { kind: "string", value: url },
+        method: { kind: "string", value: "GET" },
+        headers: { kind: "record", fields: {} },
+        body: { kind: "string", value: "" },
+      },
+    };
+  }
+
+  interface DownloadLoopback {
+    url: string;
+    close: () => Promise<void>;
+  }
+
+  /** A loopback server that serves fixed @bytes@ with @status@ and (optionally) a Content-Type, so a
+   *  download's exact bytes + recorded type are the assertion. Bound to 127.0.0.1 on an ephemeral port. */
+  async function startDownloadLoopback(options: {
+    bytes: Uint8Array;
+    status?: number;
+    contentType?: string;
+  }): Promise<DownloadLoopback> {
+    const server = createServer((_incoming, response) => {
+      const headers: Record<string, string> = {};
+      if (options.contentType !== undefined) headers["content-type"] = options.contentType;
+      response.writeHead(options.status ?? 200, headers);
+      response.end(Buffer.from(options.bytes));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback server did not bind a port");
+    }
+    return {
+      url: `http://127.0.0.1:${address.port}/download`,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  /** The downloaded `file` ref out of a resolved `fetch_file` result — asserting its record shape en route. */
+  function fileRefOf(value: Value, expectedStatus: number): Extract<Value, { kind: "ref" }> {
+    expect(value.kind).toBe("record");
+    if (value.kind !== "record") throw new Error("expected a record result");
+    expect(value.fields.status).toEqual({ kind: "integer", value: expectedStatus });
+    const file = value.fields.file;
+    expect(file?.kind).toBe("ref");
+    if (file?.kind !== "ref") throw new Error("expected a file ref");
+    expect(file.semanticKind).toBe("file");
+    return file;
+  }
+
+  test("downloads a 2xx response body into a file; its bytes and content type land in the blob store", async () => {
+    // Non-UTF-8 bytes, so a text capture would have corrupted them — the point of `fetch_file`.
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+    const contentType = "image/png";
+    const loopback = await startDownloadLoopback({ bytes, contentType });
+    try {
+      const persistence = new StoringPersistence();
+      const blobs = new InMemoryBlobStore();
+      const actor = makeActor(new FetchHttpTransport(), persistence, FETCH_FILE_IR, blobs);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
+
+      const file = fileRefOf(await result, 200);
+      // The served bytes landed in the blob store under the returned handle — never on the value plane.
+      expect(new Uint8Array(await blobs.get(PROJECT, file.blobId))).toEqual(bytes);
+      // The response's Content-Type was recorded on the blob's row (the durable metadata a handle omits).
+      expect(persistence.peekBlob(file.blobId)?.contentType).toBe(contentType);
+      // The download hoisted onto a live owner (the run's result holder), not orphaned.
+      expect(persistence.peekBlob(file.blobId)?.ownerInstanceId).not.toBeNull();
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("a non-2xx response is still captured to a file (branch on status, like fetch)", async () => {
+    // A 404 body is captured too — the caller inspects `status` before trusting the download, exactly the
+    // `fetch` contract where an arrived response is a result, never an error.
+    const errorBody = new TextEncoder().encode("not found");
+    const loopback = await startDownloadLoopback({
+      bytes: errorBody,
+      status: 404,
+      contentType: "text/plain",
+    });
+    try {
+      const blobs = new InMemoryBlobStore();
+      const actor = makeActor(new FetchHttpTransport(), new InMemoryPersistence(), FETCH_FILE_IR, blobs);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
+
+      const file = fileRefOf(await result, 404);
+      expect(new Uint8Array(await blobs.get(PROJECT, file.blobId))).toEqual(errorBody);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("a response with no Content-Type records the octet-stream fallback on the blob row", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const loopback = await startDownloadLoopback({ bytes }); // no Content-Type served
+    try {
+      const persistence = new StoringPersistence();
+      const blobs = new InMemoryBlobStore();
+      const actor = makeActor(new FetchHttpTransport(), persistence, FETCH_FILE_IR, blobs);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
+
+      const file = fileRefOf(await result, 200);
+      expect(persistence.peekBlob(file.blobId)?.contentType).toBe("application/octet-stream");
+    } finally {
+      await loopback.close();
+    }
   });
 });

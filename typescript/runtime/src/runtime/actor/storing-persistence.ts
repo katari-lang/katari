@@ -410,6 +410,12 @@ export class StoringPersistence implements Persistence {
     return undefined;
   }
 
+  /** Test helper: the stored blob row (its owner + recorded content type), for asserting a produced blob —
+   *  an FFI upload, an MCP image, an `http.fetch_file` download — landed with its metadata and a live owner. */
+  peekBlob(blobId: BlobId): PersistedBlob | undefined {
+    return this.store.blobRows.get(blobId);
+  }
+
   /** Test helper: the stored `runs` metadata sidecar (+ cancel reason) for a run, its result unsealed. */
   peekRun(run: InstanceId): StoredRun | undefined {
     const stored = this.store.runs.get(run);

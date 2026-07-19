@@ -89,6 +89,29 @@ external agent fetch(
   @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
 ) -> { status: integer, headers: record[string], body: string } with prelude.throw[fetch_error] from "http"
 
+@"Perform an HTTP request to @url@ with @method@, the given @headers@ and @body@ — EXACTLY `fetch`'s
+request — but capture the RESPONSE body as a downloaded `file` rather than as text. The bytes land in the
+blob store and the reply carries only the slim @file@ HANDLE; the raw bytes (and their base64) never touch
+the value plane, the durable call record, or the trace. This is the receive-side twin of a `binary`
+REQUEST body, and it exists for the same reason: to keep a payload's bytes OFF the value plane. A plain
+`fetch` of a megabyte image would read it into the response `body` STRING, dragging that text (and its
+base64, once re-encoded) through every value, event, and trace it flows into — whereas `fetch_file` streams
+it straight to a blob and hands back a handle. Reach for it to download a file by URL: an image, a PDF, a
+CSV export, a release artifact. It is NOT for a base64 field buried inside a JSON reply (a data-URI in an
+API's JSON document) — `fetch_file` only ever captures the WHOLE response body; decode an embedded base64
+string with `file.from_base64` after an ordinary `fetch`. The downloaded @file@'s recorded content type is
+the response's `Content-Type` (falling back to `application/octet-stream` when the server sent none).
+Returns the response @status@ code (branch on it exactly like `fetch` — a non-2xx reply's body is still
+captured to a @file@, so a caller inspects @status@ before trusting the download), its @headers@ (names
+lowercased; repeated headers joined with \", \"), and the downloaded @file@. A request that never completes
+throws `fetch_error`, exactly like `fetch`."
+external agent fetch_file(
+  @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
+  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
+  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
+) -> { status: integer, headers: record[string], file: file } with prelude.throw[fetch_error] from "http"
+
 @"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
 arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
 data status_error(@"The response's non-2xx status code." status: integer, @"The response body text." body: string)

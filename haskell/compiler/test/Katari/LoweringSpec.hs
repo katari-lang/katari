@@ -248,6 +248,11 @@ spec = describe "lowerModule (via compile)" $ do
     it "accepts a `multipart` body of RFC 7578 parts (a named text field)" $
       compileErrorCodes "agent f() -> integer {\n  http.fetch(url = \"https://x\", method = \"POST\", headers = {}, body = http.multipart(parts = [http.multipart_text(name = \"a\", content = \"b\")])).status\n}\n" `shouldBe` []
 
+    it "types `http.fetch_file` as an effect whose result carries a `file` (the downloaded body)" $
+      -- The receive-side twin of a `binary` request body: it takes `fetch`'s request unchanged but captures
+      -- the response body as a `file`, so its result's `file` field flows where a `file` is expected.
+      compileErrorCodes "agent f() -> file {\n  http.fetch_file(url = \"https://x\", method = \"GET\", headers = {}, body = http.text(content = \"\")).file\n}\n" `shouldBe` []
+
   -- The post-lowering liveness pass (Katari.Lowering.Drop): a temporary written and last mentioned
   -- within one sequence is released by a `drop` right after that mention; anything a nested block (a
   -- match arm, a local agent's body) still reads must stay bound for the scope-level GC instead.

@@ -10,20 +10,38 @@
 // restart is a failure), which the reactor turns into a `panic` the caller can handle locally. This
 // at-most-once guarantee is why http is a reactor, not a core-inline prim.
 
-import type { Json } from "@katari-lang/types";
-import type { DelegationId } from "../ids.js";
+import { FILE_KEY, type Json, SEMANTIC_KIND_KEY } from "@katari-lang/types";
+import type { BlobId, DelegationId } from "../ids.js";
 import { type HttpBlobResolver, materializeBody } from "./http-body.js";
 
 /** One http request to perform. `argument` is the call's argument as plain Json — `{ url, method, headers,
  *  body }`, with any secret header value or secret body already revealed at the reactor boundary (the
- *  submission surfaces toward the destination server; the `url` is public by type). */
+ *  submission surfaces toward the destination server; the `url` is public by type). `responseKind` selects
+ *  how the RESPONSE body is captured: `text` (`http.fetch`, the body as a `{ …, body }` string) or `file`
+ *  (`http.fetch_file`, the body stored as a blob through the wired producer and returned as a `{ …, file }`
+ *  handle). The reactor decides it once from the external's dispatch key. */
 export interface HttpCall {
   delegation: DelegationId;
   argument: Json | null;
+  responseKind: "text" | "file";
 }
 
-/** The outcome of one dispatched http call, fed back to the reactor: a `result` (any HTTP response —
- *  `{ status, headers, body }`, 2xx or not — → a delegateAck), an `error` (the request produced no response: DNS /
+/** The receive-side twin of `HttpBlobResolver`: stores a `fetch_file` response's bytes as a project blob
+ *  owned by the call's instance (so the reply's `delegateAck` hoists it to the caller, exactly like a
+ *  produced ffi / mcp blob) under @contentType@, and returns the new blob's id — or `null` when the call
+ *  already vanished (cancelled / completed), so the transport drops the download rather than orphaning it.
+ *  The ONE place a response's bytes leave the transport onto durable storage, symmetric to the resolver
+ *  being the one place a request's file bytes enter it: the value plane / DB / trace only ever hold the
+ *  resulting handle. */
+export type HttpBlobProducer = (
+  delegation: DelegationId,
+  bytes: Uint8Array,
+  contentType: string,
+) => Promise<BlobId | null>;
+
+/** The outcome of one dispatched http call, fed back to the reactor: a `result` (any HTTP response, 2xx or
+ *  not — `{ status, headers, body }` for a `fetch`, `{ status, headers, file }` (the downloaded blob's
+ *  handle) for a `fetch_file` — → a delegateAck), an `error` (the request produced no response: DNS /
  *  connection / timeout / a refused recovery → a panic the reactor escalates), or a `cancelled`
  *  confirmation (→ terminateAck, after an `abort`). A late completion for an aborted call is harmless. */
 export interface HttpCompletion {
@@ -42,6 +60,10 @@ export interface HttpTransport {
    *  the handle). Called once at wiring, like `onComplete`; a transport that never sends a real request (the
    *  stub) or records handles without materialising (a test double) ignores it. */
   useBlobResolver(resolve: HttpBlobResolver): void;
+  /** Wire the producer a `fetch_file` response's bytes are stored through — the receive-side twin of
+   *  `useBlobResolver`. Called once at wiring, like `onComplete`; a transport that never captures a
+   *  response to a file (the stub, a text-only test double) ignores it, and a `fetch_file` then fails loudly. */
+  useBlobProducer(produce: HttpBlobProducer): void;
   /** Perform one request — always means "send it" (fire-and-forget; the outcome arrives via the sink). */
   dispatch(call: HttpCall): void;
   /** Reconcile a reloaded in-flight call (at-most-once; never re-sends): a request this transport still has
@@ -60,6 +82,7 @@ export interface HttpTransport {
 export class StubHttpTransport implements HttpTransport {
   onComplete(): void {}
   useBlobResolver(): void {}
+  useBlobProducer(): void {}
   dispatch(call: HttpCall): void {
     throw new Error(`http transport not configured (call ${call.delegation})`);
   }
@@ -73,6 +96,11 @@ export class StubHttpTransport implements HttpTransport {
 /** The methods that carry no request body — sending one to `fetch` for them throws. */
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 
+/** The content type a `fetch_file` download falls back to when the response carried no `Content-Type`
+ *  (RFC 2046's catch-all — the same default the send-side `binary` body applies when a file's type is
+ *  unrecorded, so a downloaded-then-reuploaded file round-trips with a definite type). */
+const RESPONSE_FALLBACK_CONTENT_TYPE = "application/octet-stream";
+
 /** The production transport: an in-runtime `fetch`. The result (any HTTP response) or an error (no response)
  *  is delivered to the sink off the dispatching turn. */
 export class FetchHttpTransport implements HttpTransport {
@@ -82,9 +110,14 @@ export class FetchHttpTransport implements HttpTransport {
    *  transport (a test that sends no file body) never needs it; a file body then fails loudly. It may also
    *  be supplied at construction, for a standalone transport. */
   private resolve: HttpBlobResolver | null;
+  /** The producer a `fetch_file` response's bytes are stored through, wired by the actor. `null` until
+   *  wired — a bare transport (a test that captures no file response) never needs it; a `fetch_file` then
+   *  fails loudly. May also be supplied at construction, for a standalone transport. */
+  private produce: HttpBlobProducer | null;
 
-  constructor(resolve: HttpBlobResolver | null = null) {
+  constructor(resolve: HttpBlobResolver | null = null, produce: HttpBlobProducer | null = null) {
     this.resolve = resolve;
+    this.produce = produce;
   }
 
   onComplete(sink: (completion: HttpCompletion) => void): void {
@@ -93,6 +126,10 @@ export class FetchHttpTransport implements HttpTransport {
 
   useBlobResolver(resolve: HttpBlobResolver): void {
     this.resolve = resolve;
+  }
+
+  useBlobProducer(produce: HttpBlobProducer): void {
+    this.produce = produce;
   }
 
   dispatch(call: HttpCall): void {
@@ -164,13 +201,20 @@ export class FetchHttpTransport implements HttpTransport {
         }
       }
       const response = await fetch(request.url, init);
-      const body = await response.text();
       // Response headers ride along (names lowercased by the platform; repeated headers arrive joined
       // with ", ") — how a program reads a session token, a rate-limit hint, a redirect location.
       const responseHeaders: { [name: string]: Json } = {};
       response.headers.forEach((value, name) => {
         responseHeaders[name] = value;
       });
+      // `fetch_file` captures the whole body as a downloaded blob (returning its handle); `fetch` reads it
+      // as text. Both hold the response in memory, so neither caps the body size — same policy. `await` so a
+      // capture failure (an unwired producer, a body-read error) is caught below, not left an unhandled
+      // rejection (a bare `return promise` would escape this try).
+      if (call.responseKind === "file") {
+        return await this.captureResponseFile(call.delegation, response, responseHeaders);
+      }
+      const body = await response.text();
       return {
         kind: "result",
         value: { status: response.status, headers: responseHeaders, body },
@@ -181,6 +225,35 @@ export class FetchHttpTransport implements HttpTransport {
       }
       return { kind: "error", message: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /** Capture a `fetch_file` response body as a project blob: read the whole body, store it through the
+   *  wired producer under the response's `Content-Type` (or the octet-stream fallback when the server sent
+   *  none), and return the result carrying the slim `file` HANDLE — the reactor's decode lifts it into a
+   *  real `file`, and the bytes were never on the value plane. The status / headers ride alongside, so a
+   *  caller branches on a non-2xx exactly as with `fetch`. A producer that returns `null` means the call
+   *  vanished (cancelled / completed) and already dropped the bytes; this yields an `error`, which the
+   *  reactor discards for a gone call. Runs inside `perform`'s try, so an unwired producer or a body-read
+   *  failure surfaces as an `error` outcome rather than an unhandled rejection. */
+  private async captureResponseFile(
+    delegation: DelegationId,
+    response: Response,
+    headers: { [name: string]: Json },
+  ): Promise<HttpCompletion["outcome"]> {
+    if (this.produce === null) {
+      throw new Error("http.fetch_file: a file response needs a blob producer, but none was wired");
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type") ?? RESPONSE_FALLBACK_CONTENT_TYPE;
+    const blobId = await this.produce(delegation, bytes, contentType);
+    if (blobId === null) {
+      return {
+        kind: "error",
+        message: "http.fetch_file: the call is no longer in flight to receive its downloaded file",
+      };
+    }
+    const file: Json = { [FILE_KEY]: blobId, [SEMANTIC_KIND_KEY]: "file" };
+    return { kind: "result", value: { status: response.status, headers, file } };
   }
 }
 
