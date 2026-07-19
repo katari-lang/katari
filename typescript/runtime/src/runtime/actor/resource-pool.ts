@@ -61,6 +61,13 @@ export class ResourcePool {
   constructor(
     private readonly projectId: ProjectId,
     private readonly store: ProjectStore,
+    /** Resolve the run an arbitrary blob OWNER belongs to — for `file.free`'s run-scoped reclaim (below). A
+     *  `core` engine instance carries its run in the store; a NON-core owner (a long-lived webhook / mcp
+     *  serve endpoint call instance a delivery's residual blob hoisted onto) is not in the store, so the actor
+     *  wires a resolver spanning every reactor's received edge. The default — a bare pool (a unit test) — sees
+     *  only the store's core instances, which is exactly the pre-existing behaviour. */
+    private readonly runOfOwner: (owner: InstanceId) => InstanceId | undefined = (owner) =>
+      store.instances[owner]?.runId,
   ) {}
 
   /** Register a freshly produced blob (a file upload, or a future engine string-promotion) — its ownership +
@@ -101,18 +108,22 @@ export class ResourcePool {
     return true;
   }
 
-  /** Free a blob a program explicitly released via `file.free`, but only when `runId`'s run owns it — the
-   *  run-scoped counterpart of `deleteBlobOwnedBy`. A produced blob HOISTS up its call chain (it may be owned
-   *  by any ancestor instance in the run by the time `free` runs, not just the current one), so ownership is
-   *  checked at the RUN, not one instance: the blob's owner must be a core instance whose `runId` matches. The
-   *  engine store holds only core instances, so an api-root-owned upload (owner not in `instances`) and an
-   *  in-transit blob (`owner = null`) both miss — a program cannot free a user-uploaded file (the file API's
-   *  domain) or another run's blob. SILENT and IDEMPOTENT (no return, no throw): a missing / freed / foreign
-   *  blob is a no-op, so a retried block that frees the same handle across attempts behaves identically. */
+  /** Free a blob a program explicitly released via `file.free`, but only when it belongs to `runId`'s run —
+   *  the run-scoped counterpart of `deleteBlobOwnedBy`. A produced blob HOISTS up its call chain, so by the
+   *  time `free` runs it may be owned by ANY ancestor instance of the run — a core sub-call, or a long-lived
+   *  webhook / mcp serve endpoint call instance a delivery's residual blob climbed onto — not just the
+   *  current one. So ownership is checked at the RUN, via `runOfOwner` (which resolves both a core instance's
+   *  run from the store AND a non-core endpoint call instance's run from its owning reactor), not by a
+   *  store-only `core`-instance lookup that would refuse a blob owned by an endpoint call. An api-root-owned
+   *  upload is naturally refused: the api root is a sentinel, summoned by no delegation, so it belongs to no
+   *  run — `runOfOwner` returns `undefined` for it (a program cannot free a user-uploaded file — the file
+   *  API's domain). An in-transit blob (`owner = null`) and another run's blob miss the same way. SILENT and
+   *  IDEMPOTENT (no return, no throw): a missing / freed / foreign blob is a no-op, so a retried block that
+   *  frees the same handle across attempts behaves identically. */
   deleteBlobOwnedInRun(blobId: BlobId, runId: InstanceId): void {
     const entry = this.store.blobs[blobId];
     if (entry === undefined || entry.owner === null) return;
-    if (this.store.instances[entry.owner]?.runId !== runId) return;
+    if (this.runOfOwner(entry.owner) !== runId) return;
     this.freeBlob(blobId);
   }
 

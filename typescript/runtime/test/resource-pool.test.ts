@@ -319,6 +319,36 @@ describe("ResourcePool blob reclaim", () => {
       expect(() => pool.deleteBlobOwnedInRun(MINE, RUN)).not.toThrow();
       expect(store.blobs[MINE]).toBeUndefined();
     });
+
+    const ENDPOINT_CALL = "instance-endpoint-call" as InstanceId; // a webhook/mcp serve endpoint — NOT a core instance
+
+    test("frees a blob owned by a NON-core endpoint call instance of the run (the resolver spans reactor edges)", () => {
+      // A webhook / mcp serve endpoint call instance is not a `core` engine instance, so it is absent from the
+      // store; the actor's run resolver finds its run from the owning reactor's received edge. A delivery's
+      // residual blob that HOISTED onto such an endpoint call must still be reclaimable by `file.free`.
+      const store = storeWithBlobs({ [MINE]: ENDPOINT_CALL });
+      const pool = new ResourcePool(PROJECT, store, (owner) =>
+        owner === ENDPOINT_CALL ? RUN : undefined,
+      );
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      expect(store.blobs[MINE]).toBeUndefined();
+    });
+
+    test("with the resolver, an api-root upload (no run) and another run's endpoint call are still refused", () => {
+      const ENDPOINT_OTHER = "instance-endpoint-other" as InstanceId;
+      const store = storeWithBlobs({ [MINE]: API_ROOT, [THEIRS]: ENDPOINT_OTHER });
+      // The api root belongs to no run (it resolves to `undefined`); the other endpoint call belongs to a
+      // DIFFERENT run — both must be refused, so a program frees only its own run's blobs.
+      const pool = new ResourcePool(PROJECT, store, (owner) =>
+        owner === ENDPOINT_OTHER ? OTHER_RUN : undefined,
+      );
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      pool.deleteBlobOwnedInRun(THEIRS, RUN);
+      expect(store.blobs[MINE]).toBeDefined();
+      expect(store.blobs[THEIRS]).toBeDefined();
+    });
   });
 
   test("deleteBlobOwnedBy frees only the named owner's blob (the file API's explicit delete)", async () => {

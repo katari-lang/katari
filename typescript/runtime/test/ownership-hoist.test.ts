@@ -137,6 +137,20 @@ describe("ownership hoist", () => {
     expect(store.blobs[BLOB]?.owner).toBe(caller);
   });
 
+  test("runOfInstance reverse-resolves a handled instance's run — the reactor edge the file.free run resolver reads", () => {
+    // A blob that hoisted onto a long-lived webhook / mcp serve endpoint call instance is owned by an instance
+    // absent from the engine store; `file.free`'s run resolver finds its run through this reverse of the
+    // received edge, so a delivery's residual blob stays reclaimable within its run.
+    const { pool } = setup();
+    const reactor = new HoistTestReactor("webhook", pool);
+    const endpoint = "i-endpoint" as InstanceId;
+    reactor.accept("d-endpoint" as DelegationId, endpoint, "core", undefined);
+    expect(reactor.runOfInstance(endpoint)).toBe(RUN);
+    // An instance this reactor does not handle resolves to `undefined` (so the actor's composed resolver
+    // falls through to the next reactor).
+    expect(reactor.runOfInstance("i-unhandled" as InstanceId)).toBeUndefined();
+  });
+
   test("the run→api boundary does not hoist: a non-carried blob stays on the run root, reclaimed at teardown", () => {
     // A run result's ascent stays purely value-driven (the run instance is permanent). A blob the run root
     // owns that the result did not carry must NOT hoist onto the run instance — it stays on the mortal run

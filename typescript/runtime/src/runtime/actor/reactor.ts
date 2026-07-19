@@ -607,6 +607,20 @@ export abstract class Reactor {
     return this.handled.get(delegation)?.run;
   }
 
+  /** The run an INSTANCE this reactor handles as callee belongs to, by the instance's own id (a reverse of
+   *  the received edge). The pool's run-scoped blob reclaim (`file.free`) uses it to place a blob's OWNER in
+   *  a run even when the owner is not a `core` engine instance — a long-lived webhook / mcp serve endpoint
+   *  call instance a delivery's residual blob hoisted onto. Public so the actor can compose one resolver over
+   *  every reactor; a reactor that does not handle `instance` returns `undefined`. The scan is over this
+   *  reactor's OWN received edges only — a small set for a call reactor (its in-flight / serving calls) — and
+   *  `file.free` is a rare, explicit program action, so no reverse index is warranted. */
+  runOfInstance(instance: InstanceId): InstanceId | undefined {
+    for (const edge of this.handled.values()) {
+      if (edge.instance === instance) return edge.run;
+    }
+    return undefined;
+  }
+
   // ─── base-managed persist / load (the generic half, in one place) ──────────────────────────────
 
   /** Stage an instance-envelope upsert for the next `persistBase` — the concrete calls this when it creates or
