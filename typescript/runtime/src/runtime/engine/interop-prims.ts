@@ -13,6 +13,7 @@
 // materialises through the context's blob store. Privacy is the prim layer's monotonic rule: any
 // private part of the argument marks the whole result private, so these walks keep content.
 
+import { createHash } from "node:crypto";
 import {
   type Block,
   createAgentName,
@@ -22,6 +23,7 @@ import {
   type RequestSchema,
   type SchemaInfo,
 } from "@katari-lang/types";
+import { newBlobId } from "../ids.js";
 import type { IrSource } from "../ir.js";
 import { jsonToValue, valueEquals, valueToJson } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
@@ -43,6 +45,11 @@ import type { BlobEntry } from "./types.js";
 // so it declares none.
 const PARSE_ERROR = "prelude.json.parse_error";
 const VALIDATION_ERROR = "prelude.json.validation_error";
+
+// The domain error ctors the file prims throw (`prelude/file.ktr` declares them): a reader meeting a handle
+// whose blob is gone (freed, or a made-up id), and `from_base64` meeting content that is not base64.
+const FILE_GONE = "prelude.file.gone";
+const MALFORMED_BASE64 = "prelude.file.malformed_base64";
 
 // The largest array `range` will materialise. `range` allocates the whole array synchronously on the
 // actor's serial turn, so an unbounded (possibly AI-supplied) bound would stall the event loop or exhaust
@@ -69,17 +76,50 @@ function fileArgument(argument: Value, name: string): BlobRefValue {
   throw new Error(`expected a file, got ${value.kind}`);
 }
 
-/** The blob row behind a file value. A missing row is a dangling handle — the blob was deleted, or
- *  the id was made up (an AI hallucinating a `$katari_ref`); fail loudly with the id, so an AI loop's guard
- *  feeds a correctable message back to the model. */
+/** The blob row behind a file value. A missing row means the handle is gone — the blob was `free`d / deleted,
+ *  or the id was made up (an AI hallucinating a `$katari_ref`). The two are indistinguishable from a slim
+ *  handle and a program reacts to both the same way, so this is ONE catchable `file.gone` (not a panic):
+ *  naming both causes, it lets an AI loop's guard feed a correctable message back to the model, or a converter
+ *  select the failure for replay. */
 function blobRowOf(context: PrimContext, file: BlobRefValue): BlobEntry {
   const entry = context.blobEntryOf(file.blobId);
   if (entry === undefined) {
-    throw new Error(
-      `file ${file.blobId} does not exist in this project (deleted, or a made-up id)`,
+    throw new KatariThrow(
+      errorData(
+        FILE_GONE,
+        `file ${file.blobId} is gone (freed, or an id that never named a blob in this project)`,
+      ),
     );
   }
   return entry;
+}
+
+/** The turn-scoped blob write capability, or an engine error if it is absent — the two effectful file prims
+ *  (`from_base64` / `free`) only ever run inside an instance turn (where the reactor supplies it), so its
+ *  absence is a wiring bug, not a program-anticipatable failure. */
+function blobEffectsOf(
+  context: PrimContext,
+  label: string,
+): NonNullable<PrimContext["blobEffects"]> {
+  if (context.blobEffects === undefined) {
+    throw new Error(
+      `${label}: blob write capability is unavailable outside an instance turn (engine bug)`,
+    );
+  }
+  return context.blobEffects;
+}
+
+/** Decode a strict, canonical base64 string to bytes, or raise the catchable `malformed_base64`. `Buffer.from`
+ *  is lax — it silently skips invalid characters and stops at bad padding, so a corrupt payload would decode
+ *  to truncated bytes; validating the standard alphabet + padding first makes bad input a typed error rather
+ *  than a silently wrong file. */
+function decodeBase64OrThrow(content: string): Buffer {
+  if (content.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(content)) {
+    throw new KatariThrow(
+      errorData(MALFORMED_BASE64, "from_base64: the content is not valid base64"),
+    );
+  }
+  return Buffer.from(content, "base64");
 }
 
 export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
@@ -346,6 +386,10 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   // the prim layer's monotonic rule, like every reader here: a private file taints the result.
   "prelude.file.read_base64": async (argument, context) => {
     const file = fileArgument(argument, "value");
+    // Check the catalog row FIRST: a `free`d blob's row is gone the instant it is freed, but its bytes are
+    // deleted only after the commit — so `blobs.get` might still find them. Reading the row makes a freed
+    // handle report `gone` this turn, not stale bytes.
+    blobRowOf(context, file);
     const bytes = await context.blobs.get(context.projectId, file.blobId);
     return { kind: "string", value: Buffer.from(bytes).toString("base64") };
   },
@@ -357,6 +401,34 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     kind: "integer",
     value: blobRowOf(context, fileArgument(argument, "value")).size,
   }),
+  "prelude.file.from_base64": async (argument, context) => {
+    const content = await readStringField(argument, "content", context);
+    const contentType = await readStringField(argument, "content_type", context);
+    const bytes = decodeBase64OrThrow(content);
+    // A fresh UUID id, NOT a content hash: a `file` is a resource, not a literal, so two `from_base64`s of
+    // the same bytes must be different files (distinct `==`, distinct custody chains — one's `free` must not
+    // kill the other's ref). A retry re-running this mints a new file each attempt, which is the same "two
+    // productions are two files" rule; Katari's replay is plain re-execution, so no id needs to be stable.
+    const blobId = newBlobId();
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    // Bytes first, then register the (small) row — mirrors the FFI / upload producer (`mintAndStoreBlob`).
+    await context.blobs.put(context.projectId, blobId, bytes);
+    blobEffectsOf(context, "from_base64").produce(blobId, {
+      hash,
+      size: bytes.byteLength,
+      semanticKind: "file",
+      // "" records no MIME type (the read side degrades a missing type to ""), matching the upload path.
+      ...(contentType !== "" ? { contentType } : {}),
+    });
+    return { kind: "ref", semanticKind: "file", blobId };
+  },
+  "prelude.file.free": (argument, context) => {
+    // Idempotent and silent: the pool frees the blob only when the current run owns it, else a no-op (an
+    // uploaded file or another run's blob is untouched). Returns null regardless — a program cannot observe
+    // whether anything was freed, so a retried block frees the same handle twice with identical behaviour.
+    blobEffectsOf(context, "free").freeInRun(fileArgument(argument, "value").blobId);
+    return NULL_VALUE;
+  },
 
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────
   "prelude.reflection.get_metadata": async (argument, context) => {

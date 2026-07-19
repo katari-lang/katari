@@ -1,16 +1,42 @@
-// The `prelude.file` sub-module: read a `file` value's content and metadata in-runtime. A `file` is a
-// slim handle into the project's blob store — the value carries only the reference (identity); the
-// bytes AND the metadata stay runtime-side, so programs pass files around for free and nothing on the
-// handle can go stale or be forged. These primitives are the bridge for the moments content or
-// metadata must be read, e.g. base64 for a multimodal model's `inline_data` part.
+// The `prelude.file` sub-module: read a `file` value's content and metadata in-runtime, and produce /
+// release blobs from a program. A `file` is a slim handle into the project's blob store — the value carries
+// only the reference (identity); the bytes AND the metadata stay runtime-side, so programs pass files around
+// for free and nothing on the handle can go stale or be forged. These primitives are the bridge for the
+// moments content or metadata must be read (e.g. base64 for a multimodal model's `inline_data` part), or a
+// value-plane base64 blob must become a real `file` and later be reclaimed.
+
+@"The `file` a handle names is gone — it was `free`d, or the id never named a blob in this project (a
+model hallucinating a `$katari_ref`). One error covers both: a slim handle cannot tell which, and a program
+that catches this reacts the same way (re-fetch, skip). Thrown by every reader below; catch it to recover."
+data gone(message: string)
+
+@"The @content@ passed to `from_base64` is not valid base64 (bad alphabet, length, or padding). Thrown by
+`from_base64` — catch it to fall back when a model or upstream API hands back a corrupt base64 payload."
+data malformed_base64(message: string)
 
 @"The file's bytes, base64-encoded — the inline shape multimodal model APIs take. The whole content
-materialises as one string, so mind the size (a large file makes a large request body)."
-primitive agent read_base64(value: file) -> string
+materialises as one string, so mind the size (a large file makes a large request body). Throws `gone` if the
+handle no longer names a live blob (`free`d, or a made-up id)."
+primitive agent read_base64(value: file) -> string with prelude.throw[gone]
 
 @"The file's recorded MIME type (e.g. \"image/png\"), read from the project's file catalog; \"\" when
-none was recorded at upload."
-primitive agent content_type(value: file) -> string
+none was recorded. Throws `gone` if the handle no longer names a live blob."
+primitive agent content_type(value: file) -> string with prelude.throw[gone]
 
-@"The file's size in bytes, read from the project's file catalog (no content download)."
-primitive agent size(value: file) -> integer
+@"The file's size in bytes, read from the project's file catalog (no content download). Throws `gone` if the
+handle no longer names a live blob."
+primitive agent size(value: file) -> integer with prelude.throw[gone]
+
+@"Make a `file` from a base64 string — the engine's blob producer, for lifting a model's / API's embedded
+base64 (a gemini `inline_data` image) OFF the value plane and INTO a real blob handle, so the heavy bytes
+travel runtime-side like any other file. The new file is owned by the current run and reclaimed with it (or
+explicitly, via `free`). Two calls with the SAME bytes are DIFFERENT files (a file is a resource, not a
+literal). Throws `malformed_base64` if @content@ is not valid base64."
+primitive agent from_base64(@"The file's bytes, base64-encoded." content: string, @"The MIME type to record (e.g. \"image/png\"); \"\" to record none." content_type: string) -> file with prelude.throw[malformed_base64]
+
+@"Release a file the current run owns, freeing its bytes now rather than at run teardown — for a large,
+short-lived intermediate (a decoded image already handed to a model). Idempotent and silent: freeing an
+already-gone file, or one the run does NOT own (a user-uploaded file, whose lifetime is the file API's), is a
+no-op — so a retried block that frees the same handle twice behaves identically each attempt. A later read of
+a freed handle throws `gone`."
+primitive agent free(value: file) -> null

@@ -15,11 +15,20 @@ import {
   type SchemaInfo,
 } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
+import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import type { PrimContext } from "../src/runtime/engine/context.js";
-import { valueToJson } from "../src/runtime/value/codec.js";
+import type { CoreInstance, ProjectStore } from "../src/runtime/engine/types.js";
+import { valueEquals, valueToJson } from "../src/runtime/value/codec.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
-import type { BlobId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import {
+  type BlobId,
+  type DelegationId,
+  type InstanceId,
+  type ProjectId,
+  type SnapshotId,
+  toThreadId,
+} from "../src/runtime/ids.js";
 import { SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -643,11 +652,14 @@ describe("prelude.file", () => {
     });
   });
 
-  test("a dangling handle (deleted, or a made-up id) fails loudly with the id", async () => {
+  test("a dangling handle (freed, or a made-up id) throws the catchable `file.gone`", async () => {
     const { context } = await fileContext();
     const dangling: Value = { kind: "ref", semanticKind: "file", blobId: "blob-made-up" as BlobId };
-    await expect(run("prelude.file.size", { value: dangling }, context)).rejects.toThrow(
-      /blob-made-up does not exist/,
+    // A catchable typed throw now, not a panic: a program can recover, and a `replay` converter can select it.
+    await expectThrows(
+      run("prelude.file.size", { value: dangling }, context),
+      "prelude.file.gone",
+      /blob-made-up is gone/,
     );
   });
 
@@ -657,5 +669,150 @@ describe("prelude.file", () => {
     await expect(run("prelude.file.read_base64", { value: stringRef }, context)).rejects.toThrow(
       /expected a file/,
     );
+  });
+});
+
+describe("prelude.file producers (from_base64 / free)", () => {
+  const PROJECT_ID = "project-file-producer" as ProjectId;
+  const RUN = "run-file-producer" as InstanceId;
+  const INSTANCE = "instance-file-producer" as InstanceId;
+  // "AQID" is the base64 of the bytes [1, 2, 3].
+  const BYTES = new Uint8Array([1, 2, 3]);
+  const BASE64 = Buffer.from(BYTES).toString("base64");
+
+  /** A minimal core instance carrying the `runId` the run-ownership check reads. */
+  function instanceInRun(id: InstanceId, runId: InstanceId): CoreInstance {
+    return {
+      kind: "core",
+      id,
+      delegationId: "d" as DelegationId,
+      callerReactor: "core",
+      runId,
+      target: { kind: "named", name: "demo.main" as never, snapshot: "snap" as SnapshotId },
+      argument: null,
+      status: "running",
+      rootThreadId: toThreadId(0),
+      threads: {},
+      cancelExits: {},
+      finalizers: [],
+      phase: { kind: "running" },
+      nextThreadId: 0,
+      nextCallId: 0,
+      nextAskId: 0,
+    };
+  }
+
+  /** A turn context whose blob write seams are backed by a real `ResourcePool` over a store holding one
+   *  running instance of `RUN` — so `from_base64` registers a blob owned by that instance and `free`'s
+   *  run-ownership check resolves against it, exactly as the core reactor wires them. */
+  function turnContext(): { context: PrimContext; pool: ResourcePool; blobs: InMemoryBlobStore } {
+    const store: ProjectStore = {
+      instances: { [INSTANCE]: instanceInRun(INSTANCE, RUN) },
+      scopes: {},
+      scopesByOwner: new Map(),
+      nextScopeId: 0,
+      blobs: {},
+      blobsByOwner: new Map(),
+    };
+    const pool = new ResourcePool(PROJECT_ID, store);
+    const blobs = new InMemoryBlobStore();
+    const context: PrimContext = {
+      projectId: PROJECT_ID,
+      ir: new SnapshotRegistry(),
+      blobs,
+      blobEntryOf: (blobId) => store.blobs[blobId],
+      blobEffects: {
+        produce: (blobId, entry) => pool.registerBlob(blobId, { owner: INSTANCE, ...entry }),
+        freeInRun: (blobId) => pool.deleteBlobOwnedInRun(blobId, RUN),
+      },
+    };
+    return { context, pool, blobs };
+  }
+
+  function refOf(value: Value): BlobId {
+    if (value.kind !== "ref") throw new Error("expected a file ref");
+    return value.blobId;
+  }
+
+  test("from_base64 mints a file whose bytes / type read back, owned by the running instance", async () => {
+    const { context } = turnContext();
+    const file = await run(
+      "prelude.file.from_base64",
+      { content: str(BASE64), content_type: str("image/png") },
+      context,
+    );
+    expect(file.kind).toBe("ref");
+    if (file.kind === "ref") expect(file.semanticKind).toBe("file");
+
+    // The produced file reads back through the ordinary readers (same context / catalog / byte store).
+    await expect(run("prelude.file.read_base64", { value: file }, context)).resolves.toEqual({
+      kind: "string",
+      value: BASE64,
+    });
+    await expect(run("prelude.file.content_type", { value: file }, context)).resolves.toEqual({
+      kind: "string",
+      value: "image/png",
+    });
+    await expect(run("prelude.file.size", { value: file }, context)).resolves.toEqual({
+      kind: "integer",
+      value: BYTES.length,
+    });
+  });
+
+  test("two from_base64 of the SAME bytes are DIFFERENT files (a file is a resource, not a literal)", async () => {
+    const { context } = turnContext();
+    const first = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    const second = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    // Distinct blob identities → not `==`: freeing one must never dangle the other's ref.
+    expect(refOf(first)).not.toBe(refOf(second));
+    expect(valueEquals(first, second)).toBe(false);
+  });
+
+  test("malformed base64 throws the catchable `malformed_base64`", async () => {
+    const { context } = turnContext();
+    await expectThrows(
+      run("prelude.file.from_base64", { content: str("not valid base64!!"), content_type: str("") }, context),
+      "prelude.file.malformed_base64",
+      /not valid base64/,
+    );
+  });
+
+  test("free reclaims a run-owned file; a later read throws `file.gone`", async () => {
+    const { context } = turnContext();
+    const file = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
+
+    await expect(run("prelude.file.free", { value: file }, context)).resolves.toEqual({ kind: "null" });
+    // The catalog row is gone the instant it is freed, so the reader reports `gone` (not stale bytes).
+    await expectThrows(
+      run("prelude.file.read_base64", { value: file }, context),
+      "prelude.file.gone",
+      /is gone/,
+    );
+  });
+
+  test("free is idempotent: freeing an already-freed handle is a silent no-op", async () => {
+    const { context } = turnContext();
+    const file = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    await run("prelude.file.free", { value: file }, context);
+    // A retried block that frees the same handle again must not throw or diverge.
+    await expect(run("prelude.file.free", { value: file }, context)).resolves.toEqual({ kind: "null" });
+  });
+
+  test("free cannot reclaim a file the run does not own (an uploaded file stays readable)", async () => {
+    const { context, pool, blobs } = turnContext();
+    // A user-uploaded file: bytes in the store, its row owned by the api root (an id absent from `instances`),
+    // the way an upload registers it — outside any run.
+    const uploaded = "blob-uploaded" as BlobId;
+    const apiRoot = "instance-api-root" as InstanceId;
+    await blobs.put(PROJECT_ID, uploaded, BYTES);
+    pool.registerBlob(uploaded, { owner: apiRoot, hash: "h", size: BYTES.length, semanticKind: "file" });
+    const file: Value = { kind: "ref", semanticKind: "file", blobId: uploaded };
+
+    await run("prelude.file.free", { value: file }, context);
+    // Untouched — freeing another owner's file is a no-op, so it still reads back.
+    await expect(run("prelude.file.read_base64", { value: file }, context)).resolves.toEqual({
+      kind: "string",
+      value: BASE64,
+    });
   });
 });

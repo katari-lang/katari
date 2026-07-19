@@ -101,6 +101,21 @@ export class ResourcePool {
     return true;
   }
 
+  /** Free a blob a program explicitly released via `file.free`, but only when `runId`'s run owns it — the
+   *  run-scoped counterpart of `deleteBlobOwnedBy`. A produced blob HOISTS up its call chain (it may be owned
+   *  by any ancestor instance in the run by the time `free` runs, not just the current one), so ownership is
+   *  checked at the RUN, not one instance: the blob's owner must be a core instance whose `runId` matches. The
+   *  engine store holds only core instances, so an api-root-owned upload (owner not in `instances`) and an
+   *  in-transit blob (`owner = null`) both miss — a program cannot free a user-uploaded file (the file API's
+   *  domain) or another run's blob. SILENT and IDEMPOTENT (no return, no throw): a missing / freed / foreign
+   *  blob is a no-op, so a retried block that frees the same handle across attempts behaves identically. */
+  deleteBlobOwnedInRun(blobId: BlobId, runId: InstanceId): void {
+    const entry = this.store.blobs[blobId];
+    if (entry === undefined || entry.owner === null) return;
+    if (this.store.instances[entry.owner]?.runId !== runId) return;
+    this.freeBlob(blobId);
+  }
+
   /** Reclaim a single blob found dead by an intra-instance GC: drop it from the warm store, stage its durable
    *  row deletion, and stage its bytes for post-commit deletion. (The teardown path uses `reclaimBlobsOwnedBy`,
    *  which leaves the row to the instance's drop cascade.) */

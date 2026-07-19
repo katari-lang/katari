@@ -48,6 +48,17 @@ export interface PrimContext {
    *  truth a slim ref deliberately does not carry; `undefined` means no such blob in this project
    *  (deleted, or a made-up id). */
   readonly blobEntryOf: (blobId: BlobId) => BlobEntry | undefined;
+  /** The turn-scoped blob write capability — how the two effectful file prims (`from_base64` / `free`)
+   *  reach the pool without the engine depending on the actor layer. Present only for a prim running inside
+   *  an instance turn (every real prim run); a bare `PrimContext` built for a pure prim (or a unit test)
+   *  omits it, so the two prims guard its presence. `produce` registers a fresh blob owned by the RUNNING
+   *  instance (it ascends with that instance's next upward event, exactly like an FFI-produced blob);
+   *  `freeInRun` reclaims a blob only when the current run owns it (a no-op otherwise — an uploaded file or
+   *  another run's blob is left alone). */
+  readonly blobEffects?: {
+    produce: (blobId: BlobId, entry: Omit<BlobEntry, "owner">) => void;
+    freeInRun: (blobId: BlobId) => void;
+  };
   /** The running instance's ambient generic substitution (the call site stamped it on the delegate) —
    *  how a schema-directed prim (`json.validate[T]`) sees its own instantiation. */
   readonly generics?: GenericSubstitution;
@@ -97,6 +108,14 @@ export interface StepContext {
   readonly prims: PrimRunner;
   readonly blobs: BlobStore;
   readonly buffers: StepBuffers;
+  /** Register a blob a prim produced this turn as owned by this instance, staging it for persist — the
+   *  engine-side seam onto the actor's `ResourcePool` (the reactor supplies the closure so the engine does
+   *  not depend on the pool). A produced blob ascends with this instance's next upward event, like any
+   *  FFI-produced blob. */
+  produceBlob(blobId: BlobId, entry: Omit<BlobEntry, "owner">): void;
+  /** Free a blob a prim asked to release, but only when this instance's run owns it (a no-op otherwise) —
+   *  the pool decides ownership; the engine only forwards the request with this turn's run. */
+  freeBlobInRun(blobId: BlobId): void;
   /** Push an internal event onto this turn's queue (processed before the turn ends). */
   enqueue(event: InternalEvent): void;
   /** Buffer an outbound external event: the emitting thread / instance knows the destination reactor (`to`),
@@ -119,6 +138,11 @@ export function makeStepContext(args: {
   prims: PrimRunner;
   blobs: BlobStore;
   reactorName: ReactorName;
+  /** The pool-backed blob write seams (see `StepContext.produceBlob` / `freeBlobInRun`) — the reactor closes
+   *  them over its `ResourcePool` and this turn's instance / run, so the engine forwards blob effects without
+   *  importing the actor layer. */
+  produceBlob: (blobId: BlobId, entry: Omit<BlobEntry, "owner">) => void;
+  freeBlobInRun: (blobId: BlobId) => void;
 }): StepContext {
   const buffers: StepBuffers = { internalQueue: [], outbound: [], logs: [] };
   return {
@@ -130,6 +154,8 @@ export function makeStepContext(args: {
     prims: args.prims,
     blobs: args.blobs,
     buffers,
+    produceBlob: args.produceBlob,
+    freeBlobInRun: args.freeBlobInRun,
     enqueue(event) {
       buffers.internalQueue.push(event);
     },

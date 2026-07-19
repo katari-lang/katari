@@ -424,6 +424,13 @@ export class CoreReactor extends Reactor {
       // Stamped as `from` on every event the engine emits; each emit site supplies its own `to` from edge
       // knowledge (the callee's reactor, or the summoner), so the harvest below only buffers routed events.
       reactorName: this.name,
+      // The blob write seams the effectful file prims (`from_base64` / `free`) reach through: a produced blob
+      // is owned by the running instance (so its next upward event hoists it up, like an FFI-produced blob),
+      // and a free reclaims a blob only when this instance's run owns it. Closing over `this.pool` + the
+      // instance keeps the pool an actor-layer concept the engine never imports.
+      produceBlob: (blobId, entry) =>
+        this.pool.registerBlob(blobId, { owner: instance.id, ...entry }),
+      freeBlobInRun: (blobId) => this.pool.deleteBlobOwnedInRun(blobId, instance.runId),
     });
     seed(ctx);
     await drive(ctx);
