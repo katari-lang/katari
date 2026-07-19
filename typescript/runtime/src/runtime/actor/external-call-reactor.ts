@@ -951,7 +951,11 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     this.parkRetries = [];
   }
 
-  private innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
+  /** The live inner-delegation bridges of one parent call, as its persistable rows — read by `persist`, and by
+   *  a concrete reactor whose reload must rebuild in-memory routing over its still-running inner delegations
+   *  (the region reactor repopulates a reloaded nursery's running-fiber set from the `fiber:`-token bridges).
+   *  `protected` for exactly that reload rebuild; the base's own use is unchanged. */
+  protected innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
     const rows: InnerCallRow[] = [];
     const children = this.innerCallsByParent.get(parent);
     if (children === undefined) return rows;
