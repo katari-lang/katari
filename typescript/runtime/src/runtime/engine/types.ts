@@ -473,6 +473,12 @@ export type ProjectStore = {
    *  and the descriptor a `ref` value / download needs. The warm SoT for blob ownership; persisted to the
    *  `blobs` table as a snapshot (like scopes) by the `ResourcePool`. */
   blobs: Record<BlobId, BlobEntry>;
+  /** A derived index over `blobs[].owner`, symmetric to `scopesByOwner`: the blobs each instance currently
+   *  owns. Maintained on every owner change (register / re-own / free / the ownership hoist) through the
+   *  `blob.ts` helpers, so the per-owner sweeps (an instance teardown's reclaim, the hoist) iterate only that
+   *  instance's blobs instead of scanning the whole ledger. An in-transit blob (`owner = null`) sits in no
+   *  bucket. */
+  blobsByOwner: Map<InstanceId, Set<BlobId>>;
 };
 
 /** A blob's warm-store entry: who owns its bytes, plus the content descriptor (the bytes themselves are in

@@ -99,6 +99,14 @@ export type ExternalEventBody =
       /** The callee value's resolved generic substitution (`foo[args]`), recorded as the new
        *  instance's ambient substitution. Absent for a non-generic call. */
       generics?: GenericSubstitution;
+      /** The instance that ISSUES this delegation — the caller-side owner of the row, stamped by the base
+       *  `Reactor.send` from the emitting instance (never by the emit site, which need not know it). It rides
+       *  DOWN so the callee can record it in its received edge (`acceptDelegation`) and, when it later sends an
+       *  upward event, hoist its blobs one step onto exactly this instance. Cross-reactor by nature (the callee
+       *  reactor cannot otherwise know the caller *instance* — only the caller reactor owns the delegation
+       *  row), so the id has to travel on the event. Optional so a hand-built delegate (a reactor unit test)
+       *  may omit it — a delegate with no `caller` simply hoists nothing. */
+      caller?: InstanceId;
     }
   | { kind: "delegateAck"; delegation: DelegationId; value: Value }
   | { kind: "terminate"; delegation: DelegationId }

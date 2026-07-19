@@ -22,12 +22,15 @@ import {
 const PROJECT = "project-ffi-blob" as ProjectId;
 const DELEGATION = "delegation-1" as DelegationId;
 const RUN = "run-1" as InstanceId;
+const CORE_CALLER = "instance-core-caller" as InstanceId;
 const SNAPSHOT = "snapshot-1" as SnapshotId;
 const BLOB = "blob-produced" as BlobId;
 
 /** Open one in-flight ffi call (an external delegate routed from core), returning the reactor + its pool +
- *  store. */
-function openCall(): {
+ *  store. `caller` is the core instance that issued the call — the delegate carries it (as the base `send`
+ *  would stamp), so a produced blob the result does not carry by value hoists onto it; omit it for the older
+ *  cases that predate the hoist. */
+function openCall(caller?: InstanceId): {
   ffi: FfiReactor;
   pool: ResourcePool;
   store: ReturnType<typeof createProjectStore>;
@@ -43,6 +46,7 @@ function openCall(): {
     from: "core",
     to: "ffi",
     run: RUN,
+    ...(caller !== undefined ? { caller } : {}),
   };
   ffi.react(delegate);
   return { ffi, pool, store };
@@ -80,6 +84,26 @@ describe("FFI mid-call blob production", () => {
     expect(sends[0]?.kind).toBe("delegateAck");
   });
 
+  test("a produced blob the result carries only by id hoists onto the core caller, surviving the call's drop", () => {
+    // The handler produced a blob but its result does NOT carry it as a ref (a direct mcp call decoded to a
+    // raw `json` tree, where the `$katari_ref` is an inert string). The value-driven release frees nothing, so the
+    // call's completion — an upward event — hoists the blob one step onto the core caller that issued the call.
+    // It must not be reclaimed by the ephemeral call instance's drop.
+    const { ffi, store } = openCall(CORE_CALLER);
+    ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
+
+    ffi.complete({
+      delegation: DELEGATION,
+      // A scalar result: it captures no resource, so only the hoist moves the produced blob.
+      outcome: { kind: "result", value: 42 },
+    });
+
+    expect(ffi.drainSends()[0]?.kind).toBe("delegateAck");
+    // Hoisted onto the core caller (not released to in-transit, not reclaimed): the caller can still read it.
+    expect(store.blobs[BLOB]?.owner).toBe(CORE_CALLER);
+    expect([...(store.blobsByOwner.get(CORE_CALLER) ?? [])]).toEqual([BLOB]);
+  });
+
   test("registerProducedBlob is a no-op for an unknown delegation (the call already gone)", () => {
     const { ffi, store } = openCall();
     const registered = ffi.registerProducedBlob("delegation-gone" as DelegationId, BLOB, {
@@ -89,6 +113,26 @@ describe("FFI mid-call blob production", () => {
     });
     expect(registered).toBe(false);
     expect(store.blobs[BLOB]).toBeUndefined();
+  });
+
+  test("a call cancelled before it ever sent an upward event has its produced blob reclaimed (never hoisted)", async () => {
+    // The hoist only fires on an upward event. A call cancelled before it acked / escalated sent none, so its
+    // produced blob never climbed — even with a known caller — and is reclaimed at the call's drop. This is
+    // the one implicit reclaim: a cut prunes exactly what is still below it.
+    const { ffi, pool, store } = openCall(CORE_CALLER);
+    ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
+    ffi.react({ kind: "terminate", delegation: DELEGATION, from: "core", to: "ffi", run: RUN });
+    ffi.complete({ delegation: DELEGATION, outcome: { kind: "cancelled" } });
+    expect(ffi.drainSends()[0]?.kind).toBe("terminateAck");
+    // Not hoisted onto the caller — no upward event carried it up (it is still the ephemeral call's).
+    expect(store.blobs[BLOB]?.owner).not.toBe(CORE_CALLER);
+    expect(store.blobs[BLOB]?.owner).toBeDefined();
+
+    await ffi.persist(NO_OP_TX);
+    const reclaimedBytes = await pool.persist(NO_OP_TX);
+    expect(reclaimedBytes).toContain(BLOB);
+    expect(store.blobs[BLOB]).toBeUndefined();
+    expect(store.blobsByOwner.get(CORE_CALLER)).toBeUndefined();
   });
 
   test("a produced blob the cancelled call never returned has its bytes reclaimed at the call's drop", async () => {

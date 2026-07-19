@@ -13,6 +13,7 @@
 // its api-side run instance — a run-root core instance records `callerReactor = api` (the summoning delegate's
 // `from`), so a reply it emits routes to `api` without core inferring it.
 
+import { rebuildBlobOwnerIndex } from "../engine/blob.js";
 import {
   delegateProxyOf,
   PANIC_REQUEST,
@@ -115,6 +116,7 @@ export class CoreReactor extends Reactor {
     this.store.scopesByOwner = new Map();
     this.store.nextScopeId = 0;
     this.store.blobs = {};
+    this.store.blobsByOwner = new Map();
     this.touchedInstances.clear();
   }
 
@@ -131,11 +133,20 @@ export class CoreReactor extends Reactor {
     this.store.scopes = engine.scopes;
     this.store.blobs = engine.blobs;
     this.store.nextScopeId = engine.nextScopeId;
-    // The loaded scopes replaced the map wholesale; rebuild the owner index over them before any sweep reads it.
+    // The loaded scopes / blobs replaced their maps wholesale; rebuild the owner indexes over them before any
+    // sweep (or the ownership hoist) reads them.
     rebuildScopeOwnerIndex(this.store);
+    rebuildBlobOwnerIndex(this.store);
+    // The delegations core issued and the escalations it raised reload through the base, uniformly. Do this
+    // first so the handled-index rebuild below can read each child's caller INSTANCE off the reloaded
+    // caller-side row (`callerInstanceOf`).
+    await this.loadBase(loader.base);
     // Re-seed the handled-delegation index (delegation → child instance) from each instance's own summoning
     // delegation — the instance (its payload) is the source of truth. The caller side (the proxy to resume on
-    // an ack) needs no rebuild here: it reads the issued delegations reloaded just below (`callerInstanceOf`).
+    // an ack) needs no rebuild here: it reads the issued delegations reloaded just above (`callerInstanceOf`).
+    // The child's caller instance (the hoist target) is re-derived from that same caller-side row — present
+    // for a core sub-call (core owns the row), `undefined` for a run root (the api owns it, and the run→api
+    // boundary hoists nothing anyway).
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) {
         this.acceptDelegation(
@@ -143,11 +154,10 @@ export class CoreReactor extends Reactor {
           instance.id,
           instance.callerReactor,
           instance.runId,
+          this.callerInstanceOf(instance.delegationId),
         );
       }
     }
-    // The delegations core issued and the escalations it raised reload through the base, uniformly.
-    await this.loadBase(loader.base);
   }
 
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
@@ -230,8 +240,9 @@ export class CoreReactor extends Reactor {
     // Record the handled delegation (the callee-side index → this child instance + its summoner), so an inbound
     // terminate / escalateAck for it finds the child and its replies route back. The caller-side delegation row
     // was already opened by its caller (core's issuing turn, or the api root's startRun); this turn only summons
-    // the child and runs it.
-    this.acceptDelegation(event.delegation, instance.id, event.from, event.run);
+    // the child and runs it. `event.caller` is the issuing instance (the hoist target for this child's upward
+    // events) — stamped by the base `send`.
+    this.acceptDelegation(event.delegation, instance.id, event.from, event.run, event.caller);
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
   }
 

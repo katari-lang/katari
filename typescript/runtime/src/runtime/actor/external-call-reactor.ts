@@ -531,7 +531,9 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
   protected onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): void {
     if (event.target.kind !== "external") return; // only external targets route here
     const instance = newInstanceId();
-    this.acceptDelegation(event.delegation, instance, event.from, event.run);
+    // `event.caller` is the core instance that issued this external call — the target its produced blobs
+    // hoist onto when the call acks (stamped by the base `send`).
+    this.acceptDelegation(event.delegation, instance, event.from, event.run, event.caller);
     this.callByInstance.set(instance, event.delegation);
     this.put(event.delegation, {
       status: "running",
@@ -696,10 +698,14 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
           },
           instance,
         );
-        // A produced blob the result did NOT ascend by value (the narrow backstop: a direct mcp call
-        // decoded to a raw `json` tree, whose `$katari_ref` is an inert string, not a real ref) would otherwise be
-        // reclaimed by this drop; adopt it onto the run so it survives to the caller — uniform with the
-        // value-carried case (a typed decode's REAL ref), which `send` already released to in-transit.
+        // A produced blob the result did NOT ascend by value (a direct mcp call decoded to a raw `json` tree,
+        // whose `$katari_ref` is an inert string, not a real ref) has ALREADY hoisted onto the core caller —
+        // the `send` above, being an upward event, reassigned every blob this call still owned one step up.
+        // This adoption is now the reload backstop only: a call recovered after a crash has an `undefined`
+        // hoist target (its in-memory caller instance is gone), so the hoist no-op'd; here it still moves any
+        // blob the call owns onto the run, so a warm-reset completion loses nothing. On the live path the
+        // hoist already emptied the call, so this is a no-op (kept this wave; removed with the produced-blob
+        // bookkeeping in the next).
         this.adoptDetachedProducedBlobs(delegation, instance, run);
         this.drop(delegation);
         return;
@@ -877,7 +883,9 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     for (const row of await loader.external.instances(this.name)) {
       const decoded = this.decodeCallExtension(row.extension);
       // Re-seed the base received edge (instance + summoner + run) and the local transport status + payload.
-      this.acceptDelegation(row.delegation, row.instance, row.caller, row.run);
+      // The caller INSTANCE (the hoist target) is not persisted for a call: a reloaded call's produced blobs
+      // were in-memory and are gone (at-most-once recovery fails it), so it will never hoist — `undefined`.
+      this.acceptDelegation(row.delegation, row.instance, row.caller, row.run, undefined);
       this.callByInstance.set(row.instance, row.delegation);
       this.calls.set(row.delegation, {
         status: row.status,
@@ -942,13 +950,14 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     if (set.size === 0) this.innerCallsByParent.delete(parent);
   }
 
-  /** Adopt onto the run every blob this call produced that its result did not ascend by value. `send`'s
-   *  delegateAck release has already moved the value-carried resources to in-transit (owner = null) for the
-   *  caller to reown; a produced blob still owned by the ephemeral `call` instance is one the result carried
-   *  only as an inert handle (a direct mcp call decoded to a raw `json` tree — `T = json.json` — where the
-   *  `$katari_ref` is a string, not a real ref) — so it moves onto the long-lived `run`, readable until the run's
-   *  teardown reclaims it. Uniform across call shapes: a callTool / ffi result, and a TYPED direct call
-   *  whose `$katari_ref` reconstructs a real ref, carry all their produced blobs by value, so this is a no-op there. */
+  /** The reload backstop for produced blobs, subsumed by the ownership hoist on the live path. `send`'s
+   *  delegateAck is an upward event, so it already hoisted every blob this `call` still owned onto the core
+   *  caller (and released the value-carried scopes to in-transit) — this then finds nothing to adopt. It still
+   *  matters after a crash: a recovered call's hoist target is `undefined` (its in-memory caller instance is
+   *  gone), so the hoist no-op'd and its reloaded produced blobs are still owned by the ephemeral `call`; this
+   *  moves them onto the long-lived `run` so a warm-reset completion loses nothing rather than reclaiming them
+   *  at the call's drop. Scoped to the tracked produced set, matching this wave's behaviour; removed with the
+   *  produced-blob bookkeeping in the next wave. */
   private adoptDetachedProducedBlobs(
     delegation: DelegationId,
     call: InstanceId,

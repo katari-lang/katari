@@ -76,13 +76,18 @@ type InstanceEnvelopeChange =
   | { kind: "drop" };
 
 /** A received (callee-side) delegation edge: the local instance handling it, the reactor that summoned it
- *  (the reply-to), and the run it belongs to (the summoning event's trace context). All three are the
- *  summoned instance's ambient — rebuilt on load from its envelope (`delegationId` + `callerReactor` +
- *  `runId`), so this is a derived index, not an independent source of truth. */
+ *  (the reply-to), the run it belongs to (the summoning event's trace context), and the caller INSTANCE that
+ *  issued it (the hoist target — where this instance's blobs climb on an upward event). The first three are
+ *  the summoned instance's ambient — rebuilt on load from its envelope (`delegationId` + `callerReactor` +
+ *  `runId`). The caller instance rides on the summoning `delegate` (not persisted here): after a restart it
+ *  is `undefined` for a callee whose reactor cannot re-derive it, which only suppresses the hoist for a
+ *  reloaded external call — whose produced blobs were in-memory and are gone anyway (at-most-once recovery
+ *  fails such a call). The core reactor re-derives it from the delegation row it owns (see its `load`). */
 interface HandledDelegation {
   instance: InstanceId;
   caller: ReactorName;
   run: InstanceId;
+  callerInstance: InstanceId | undefined;
 }
 
 /** The caller-side context the base resolves for a reply event before dispatching to the concrete hook: the
@@ -232,23 +237,27 @@ export abstract class Reactor {
    *  already-gone delegation, an `escalateAck`, a plain `terminate`). */
   protected send(event: ExternalEvent, issuer?: InstanceId): void {
     switch (event.kind) {
-      case "delegate":
-        this.openDelegation(event.delegation, {
-          caller: this.requireIssuer(issuer, event),
-          peer: event.to,
-        });
+      case "delegate": {
+        const caller = this.requireIssuer(issuer, event);
+        this.openDelegation(event.delegation, { caller, peer: event.to });
+        // Stamp the issuing instance onto the event so the callee can record it as the hoist target for the
+        // upward events it later emits. Only the base knows this authoritatively (it owns the caller-side
+        // row), so it stamps here rather than trusting each emit site to.
+        event.caller = caller;
         break;
+      }
       case "terminate":
         this.toCancelling(event.delegation);
         break;
       case "escalate": {
+        const raiser = this.requireIssuer(issuer, event);
         // Every escalate opens a durable raiser-owned row — a failure (panic / throw), a control escape, and
         // a user-facing request all flow this one uniform path; the base draws no distinction (that lives at
         // the leaf that raises and the handler that resolves — the api read filter). The row's `request`
         // column stores the ask's qualified name (or a control ask's bare kind), so a reader can classify
         // from the row without the base ever having.
         this.openEscalation(event.escalation, {
-          raiser: this.requireIssuer(issuer, event),
+          raiser,
           peer: event.to,
           delegation: event.delegation,
           run: event.run,
@@ -256,14 +265,47 @@ export abstract class Reactor {
           argument: escalateValue(event.ask),
         });
         const carried = escalateValue(event.ask);
-        if (carried !== null) this.pool.release(carried, this.requireIssuer(issuer, event));
+        // The carried ask's captured SCOPES ascend value-driven (release → the receiver reowns). An escalate
+        // is an observable upward event, so it also HOISTS the raiser's remaining blobs one step up — a
+        // relayed child ask, a user-facing request the raiser waits on: whatever id its text carries survives
+        // even if the raiser is later cancelled (test: the hoisted blob is not pruned by the cancel).
+        if (carried !== null) this.pool.release(carried, raiser);
+        this.hoistOwnedBlobs(event.delegation, raiser);
         break;
       }
-      case "delegateAck":
-        this.pool.release(event.value, this.requireIssuer(issuer, event));
+      case "delegateAck": {
+        const issuerInstance = this.requireIssuer(issuer, event);
+        // The result's captured scopes ascend value-driven (release → the caller reowns); the returning
+        // instance's remaining blobs — the ones the result carried only as an id in some text plane, not as a
+        // ref — hoist onto the caller, since the completing instance's teardown would otherwise reclaim them
+        // in this same commit.
+        this.pool.release(event.value, issuerInstance);
+        this.hoistOwnedBlobs(event.delegation, issuerInstance);
         break;
+      }
     }
     this.sendBuffer.push(event);
+  }
+
+  /** Hoist every blob `issuer` still owns one delegation step up, onto the caller instance that summoned it —
+   *  the ownership half of an observable upward event (a `delegateAck` result, an `escalate`'s carried ask).
+   *  Runs on the SEND side, in the sending instance's own commit: a blob row cascade-deletes with its owner
+   *  instance (`blobs.owner_instance_id ON DELETE CASCADE`), so a completing instance's teardown would drop
+   *  its still-owned blobs in the very commit that emits its final `delegateAck` — before the caller ever
+   *  reacts. Reassigning here, before teardown, is the only point where the blobs still exist AND their target
+   *  is knowable; a receive-side reassign would always observe an already-cascaded blob. The value-carried
+   *  ones the `release` just moved to in-transit are no longer owned by `issuer`, so this catches exactly the
+   *  ones text carried but the value did not.
+   *
+   *  Skipped at the run→api boundary (`caller = api`): the run instance is permanent, so hoisting every blob
+   *  onto it would pin them for the run's whole life — that boundary stays purely value-driven (the carried
+   *  ones reown onto the run, the rest reclaim at the run root's teardown). Also skipped when the caller
+   *  instance is unknown (a reloaded external call, whose in-memory produced blobs are gone regardless). */
+  private hoistOwnedBlobs(delegation: DelegationId, issuer: InstanceId): void {
+    if (this.handledCallerOf(delegation) === "api") return;
+    const caller = this.handledCallerInstanceOf(delegation);
+    if (caller === undefined) return;
+    this.pool.reassignOwnedBlobs(issuer, caller);
   }
 
   /** The issuer for a send that needs one (it opens a row or releases a value). A missing issuer there is an
@@ -525,15 +567,17 @@ export abstract class Reactor {
 
   /** Record a delegation this reactor accepted as callee — a fresh delegate it is about to run, or one
    *  re-seeded on load from its surviving envelope — mapping it to the local `instance` handling it, the
-   *  `caller` reactor that summoned it (the reply-to), and the `run` it belongs to (the trace context the
-   *  replies this reactor emits for it are stamped with). */
+   *  `caller` reactor that summoned it (the reply-to), the `run` it belongs to (the trace context the replies
+   *  this reactor emits for it are stamped with), and the caller `callerInstance` (the hoist target — the
+   *  `delegate.caller` for a fresh accept; `undefined` when a reload cannot re-derive it). */
   protected acceptDelegation(
     delegation: DelegationId,
     instance: InstanceId,
     caller: ReactorName,
     run: InstanceId,
+    callerInstance: InstanceId | undefined,
   ): void {
-    this.handled.set(delegation, { instance, caller, run });
+    this.handled.set(delegation, { instance, caller, run, callerInstance });
   }
 
   /** Forget a handled delegation once its payload retired, so it is not consulted after teardown. */
@@ -551,6 +595,14 @@ export abstract class Reactor {
    *  routes the replies it emits (`delegateAck` / `terminateAck`) back to the summoner without a parallel map. */
   protected handledCallerOf(delegation: DelegationId): ReactorName | undefined {
     return this.handled.get(delegation)?.caller;
+  }
+
+  /** The caller INSTANCE that summoned a delegation this reactor handles as callee — the hoist target for an
+   *  upward event this reactor emits under that delegation (`send` reassigns the sending instance's blobs onto
+   *  it). `undefined` when unknown (a reload that could not re-derive it, or a hand-built delegate carrying no
+   *  `caller`), which the hoist reads as "nothing to climb onto". */
+  protected handledCallerInstanceOf(delegation: DelegationId): InstanceId | undefined {
+    return this.handled.get(delegation)?.callerInstance;
   }
 
   /** The run of a delegation this reactor handles as callee — the trace context the events it emits under

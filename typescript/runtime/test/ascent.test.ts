@@ -21,6 +21,7 @@ describe("reachableResources", () => {
       scopesByOwner: new Map(),
       nextScopeId: 3,
       blobs: {},
+      blobsByOwner: new Map(),
     };
     const value: Value = {
       kind: "record",
@@ -58,6 +59,7 @@ describe("reachableResources", () => {
       scopesByOwner: new Map(),
       nextScopeId: 0,
       blobs: {},
+      blobsByOwner: new Map(),
     };
     const { scopes, blobs } = reachableResources(store, { kind: "integer", value: 42 });
     expect(scopes.size).toBe(0);

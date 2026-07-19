@@ -92,6 +92,7 @@ describe("unreachableOwnedScopes", () => {
       scopesByOwner: new Map(),
       nextScopeId: 4,
       blobs: {},
+      blobsByOwner: new Map(),
     };
     const instance = instanceWith({ 0: agentThread(0, 1) });
     expect(ownedIds(store, instance)).toEqual([2]);
@@ -111,6 +112,7 @@ describe("unreachableOwnedScopes", () => {
       scopesByOwner: new Map(),
       nextScopeId: 6,
       blobs: {},
+      blobsByOwner: new Map(),
     };
     const forThread: Thread = {
       id: toThreadId(1),
@@ -147,6 +149,7 @@ describe("unreachableOwnedScopes", () => {
       scopesByOwner: new Map(),
       nextScopeId: 11,
       blobs: {},
+      blobsByOwner: new Map(),
     };
     const instance = instanceWith({ 0: agentThread(0, 0) });
     expect(ownedIds(store, instance)).toEqual([10]);

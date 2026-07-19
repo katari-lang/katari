@@ -8,6 +8,7 @@ import { describe, expect, test } from "vitest";
 import type { PersistedScope } from "../src/runtime/actor/persistence-codec.js";
 import { NO_OP_TX, type PersistenceTx } from "../src/runtime/actor/persistence.js";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
+import { rebuildBlobOwnerIndex } from "../src/runtime/engine/blob.js";
 import { rebuildScopeOwnerIndex } from "../src/runtime/engine/scope.js";
 import type { BlobEntry, ProjectStore } from "../src/runtime/engine/types.js";
 import {
@@ -35,6 +36,7 @@ function storeOwnedBy(owner: InstanceId): ProjectStore {
     scopesByOwner: new Map(),
     nextScopeId: 3,
     blobs: {},
+    blobsByOwner: new Map(),
   };
   rebuildScopeOwnerIndex(store);
   return store;
@@ -139,17 +141,22 @@ describe("ResourcePool blob reclaim", () => {
     semanticKind: "file",
   });
 
-  /** A store seeded with blobs only (no scopes); `owners` maps each blob id to its owner. */
+  /** A store seeded with blobs only (no scopes); `owners` maps each blob id to its owner. The
+   *  `blobsByOwner` index is rebuilt from the seeded ledger, as a real load would (the per-owner reclaim
+   *  reads it). */
   function storeWithBlobs(owners: Record<string, InstanceId | null>): ProjectStore {
     const blobs: Record<string, BlobEntry> = {};
     for (const [blobId, owner] of Object.entries(owners)) blobs[blobId] = blobEntry(owner);
-    return {
+    const store: ProjectStore = {
       instances: {},
       scopes: {},
       scopesByOwner: new Map(),
       nextScopeId: 0,
       blobs,
+      blobsByOwner: new Map(),
     };
+    rebuildBlobOwnerIndex(store);
+    return store;
   }
 
   /** A PersistenceTx whose `pool` port records the blob rows written / dropped. */
@@ -204,6 +211,29 @@ describe("ResourcePool blob reclaim", () => {
     const reclaimed = await pool.persist(tx);
     expect(reclaimed).toEqual([MINE]);
     expect(dropped).toEqual([MINE]);
+  });
+
+  test("reassignOwnedBlobs with no id list hoists an owner's WHOLE holding, keeping the index in step", async () => {
+    const SECOND = "blob-second" as BlobId;
+    const store = storeWithBlobs({ [MINE]: OWNER, [SECOND]: OWNER, [THEIRS]: OTHER, [TRANSIT]: null });
+    const pool = new ResourcePool(PROJECT, store);
+
+    // The whole-holding form moves every blob the owner holds — not just a named subset — onto `OTHER`.
+    pool.reassignOwnedBlobs(OWNER, OTHER);
+    expect(store.blobs[MINE]?.owner).toBe(OTHER);
+    expect(store.blobs[SECOND]?.owner).toBe(OTHER);
+    // The other owner's blob (already OTHER's) and the in-transit one are untouched.
+    expect(store.blobs[THEIRS]?.owner).toBe(OTHER);
+    expect(store.blobs[TRANSIT]?.owner).toBeNull();
+
+    // The derived index followed the move: the source bucket is gone, the target holds all three now.
+    expect(store.blobsByOwner.get(OWNER)).toBeUndefined();
+    expect([...(store.blobsByOwner.get(OTHER) ?? [])].sort()).toEqual([MINE, SECOND, THEIRS].sort());
+
+    // Both moved rows are staged for re-persist (their owner changed this turn).
+    const { tx, put } = recordingBlobTx();
+    await pool.persist(tx);
+    expect(put.sort()).toEqual([MINE, SECOND].sort());
   });
 
   test("deleteBlobOwnedBy frees only the named owner's blob (the file API's explicit delete)", async () => {
