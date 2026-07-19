@@ -153,6 +153,13 @@ export abstract class Reactor {
    *  Runs only after the turn is durably committed, so recovery is always possible from durable state alone. */
   afterCommit(_event: ExternalEvent): void {}
 
+  /** GLOBAL QUIESCENCE: the substrate's mailbox has drained and every run is blocked. The one point a reactor
+   *  can act on "nothing more is coming" without racing in-flight work — the region nursery flushes a
+   *  watch-less scope's held fiber escalations up here (a watch that was going to register already has). May
+   *  `schedule` follow-on work; the substrate re-pumps and re-fires quiescence until it is a true fixpoint, so
+   *  an override MUST only act when it has real work to do (never schedule unconditionally). Default no-op. */
+  onQuiesce(): void {}
+
   // ─── react (final): resolve the edge, retire the owned row, dispatch to the concrete hook ────────
 
   /** React to one inbound external event. The base resolves the edge endpoint and applies the owned-edge

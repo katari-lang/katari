@@ -37,7 +37,7 @@
 import type { Json, QualifiedName } from "@katari-lang/types";
 import type { ExternalCallStatus } from "../../db/tables/execution.js";
 import type { BlobEntry } from "../engine/types.js";
-import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
+import type { AskKind, DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import {
   type BlobId,
   type DelegationId,
@@ -489,31 +489,55 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     const parent =
       context.caller === undefined ? undefined : this.callByInstance.get(context.caller);
     if (parent === undefined) return; // the raiser's call is gone; the child is being torn down independently
+    // Re-raise the child's ask under the very call that parents it (the default proxy path). A reactor that
+    // RE-ROUTES a child's ask to a DIFFERENT call — the region nursery's `watch` — calls `relayAskUnder`
+    // directly with that destination as the parent instead of overriding here.
+    this.relayAskUnder(parent, event.delegation, event.escalation, event.ask);
+  }
+
+  /** Proxy one child ask UP under `parent`'s own delegation with a fresh escalation id, bridged in `parent`'s
+   *  `relays` so the answer descends the same path back to `child` (see `onEscalateAck`); the transport never
+   *  sees it (the effect-handler ideal: intercept nothing, proxy all). `onEscalate` calls this with the call
+   *  that PARENTS the escalating child; a reactor re-routing a child's ask to another call (the region
+   *  nursery re-emitting a fiber's escalation at its `watch`, not at the `provide` that spawned the fiber)
+   *  calls it with that destination call as `parent`. Returns false — dropping the ask — when `parent` is
+   *  winding its children down (`cancelling`, or a completion already `pendingOutcome`): the child is being
+   *  torn down, so its escalate is moot, and forwarding it would relay an ask the call orphans when it drops.
+   *  Symmetric to `openInnerDelegation`, which refuses new work in exactly these two states. */
+  protected relayAskUnder(
+    parent: DelegationId,
+    child: DelegationId,
+    childEscalation: EscalationId,
+    ask: AskKind,
+  ): boolean {
     const call = this.calls.get(parent);
-    // Drop the ask when the call is winding its children down — `cancelling` (a terminate from above), or a
-    // completion already `pendingOutcome` (the transport finished and `complete` terminated the children):
-    // the child is being torn down, so its escalate is moot, and forwarding it would relay an ask the call
-    // will orphan when it resolves and drops. Symmetric to `openInnerDelegation`, which refuses new work in
-    // exactly these two states.
     if (call === undefined || call.status === "cancelling" || call.pendingOutcome !== undefined) {
-      return;
+      return false;
     }
     const { instance, caller, run } = this.routeOf(parent);
     const outer = newEscalationId();
-    call.relays.set(outer, { child: event.delegation, escalation: event.escalation });
+    call.relays.set(outer, { child, escalation: childEscalation });
     this.dirty.add(parent);
     this.send(
       {
         kind: "escalate",
         delegation: parent,
         escalation: outer,
-        ask: event.ask,
+        ask,
         from: this.name,
         to: caller,
         run,
       },
       instance,
     );
+    return true;
+  }
+
+  /** Whether `delegation` is currently RELAYING any escalation upward (a `relays` bridge entry) — the region
+   *  `watch` reads it to serialise its re-emissions: a held-open watch call carries at most one outstanding
+   *  relay at a time, so a non-empty relay set means "busy, awaiting the handler's answer". */
+  protected hasOpenRelay(delegation: DelegationId): boolean {
+    return (this.calls.get(delegation)?.relays.size ?? 0) > 0;
   }
 
   // ─── the shared callee lifecycle ─────────────────────────────────────────────────────────────────

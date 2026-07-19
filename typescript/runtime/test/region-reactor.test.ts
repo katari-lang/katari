@@ -445,6 +445,184 @@ async function peekRegionProvides(
   return provides;
 }
 
+// The WATCH IR — the white-hole shape. `main` opens a nursery; the `continuation` binds the nursery (variable
+// 61) and enters a `handle` (block 14) that catches `on_message`. The handle's protected BODY (block 15) forks
+// a worker fiber and then calls `region.watch(r)` — so a worker's `on_message` escalation, which would relay UP
+// through the provide in a watch-less region, is INTERCEPTED and re-emitted at the watch, where the handle
+// catches it. The worker body, the handle body, and the handler body are the axes the tests vary.
+//
+//   agent main()                  { region.provide(continuation) }
+//   agent continuation(value)     { r = value.value; handle { <handle body> } with on_message(m) { <handler> } }
+//   agent worker(input)           { <worker ops> }                 // a fiber the handle body forks
+//   agent on_message(input)       { request on_message }           // the fiber's escalation, re-emitted at watch
+//   region.provide / fork / watch wrappers + external leaves
+function watchIr(bodies?: {
+  worker?: Operation[];
+  handleBody?: Operation[];
+  handler?: Operation[];
+}): IRModule {
+  // Default worker: escalate `on_message` with its own argument, and return the answer (so a watch's handler
+  // answer round-trips back and the fiber's outcome — the answer — buffers on the provide).
+  const worker: Operation[] = bodies?.worker ?? [
+    { kind: "getField", source: 110, field: "input", output: 111 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("on_message") },
+      argument: 111,
+      output: 112,
+    },
+    { kind: "exit", target: 10, value: 112 },
+  ];
+  // Default handle body: fork one worker with a fixed argument, then watch the nursery forever. `r` is the
+  // continuation's variable 61, visible here through the lexical scope chain (handle body → handle → continuation).
+  const handleBody: Operation[] = bodies?.handleBody ?? [
+    { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+    { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["nursery", 61],
+        ["task", 150],
+        ["argument", 151],
+      ],
+      output: 152,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.fork") },
+      argument: 152,
+      output: 153,
+    },
+    { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.watch") },
+      argument: 154,
+      output: 155,
+    },
+    { kind: "exit", target: 14, value: 155 },
+  ];
+  // Default handler: answer the re-emitted request with a fixed value (a `next`, resuming the fiber).
+  const handler: Operation[] = bodies?.handler ?? [
+    { kind: "loadLiteral", output: 161, value: { kind: "string", value: "answered" } },
+    { kind: "continue", target: 14, value: 161, modifiers: [] },
+  ];
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: {
+        block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+            { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.provide") },
+              argument: 102,
+              output: 103,
+            },
+            { kind: "exit", target: 0, value: 103 },
+          ],
+        },
+        parameters: { parameter: 100 },
+      },
+      2: {
+        block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      3: {
+        block: { kind: "external", key: "prelude.region.provide", input: 30, reactor: "region" },
+        parameters: { parameter: 30 },
+      },
+      4: {
+        block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      5: {
+        block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
+        parameters: { parameter: 50 },
+      },
+      6: {
+        block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      // continuation: bind the nursery (61), then enter the handle scope (its result is the continuation's).
+      7: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "getField", source: 60, field: "value", output: 61 },
+            { kind: "call", target: 14, output: 62 },
+            { kind: "exit", target: 6, value: 62 },
+          ],
+        },
+        parameters: { parameter: 60 },
+      },
+      8: {
+        block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      9: {
+        block: { kind: "request", name: createAgentName("on_message"), input: 90 },
+        parameters: { parameter: 90 },
+      },
+      10: {
+        block: { kind: "agent", body: 11, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      11: {
+        block: { kind: "sequence", result: null, operations: worker },
+        parameters: { parameter: 110 },
+      },
+      12: {
+        block: { kind: "agent", body: 13, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      13: {
+        block: { kind: "external", key: "prelude.region.watch", input: 130, reactor: "region" },
+        parameters: { parameter: 130 },
+      },
+      // The handle: run the fork+watch body, catch on_message, no then-clause.
+      14: {
+        block: {
+          kind: "handle",
+          parallel: false,
+          initialStates: [],
+          body: 15,
+          handlers: [{ request: createAgentName("on_message"), body: 16 }],
+          thenClause: null,
+        },
+        parameters: {},
+      },
+      15: {
+        block: { kind: "sequence", result: null, operations: handleBody },
+        parameters: {},
+      },
+      16: {
+        block: { kind: "sequence", result: null, operations: handler },
+        parameters: { parameter: 160 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.region.provide")]: { block: 2, private: false },
+      [createAgentName("prelude.region.fork")]: { block: 4, private: false },
+      [createAgentName("prelude.region.watch")]: { block: 12, private: false },
+      [createAgentName("continuation")]: { block: 6, private: false },
+      [createAgentName("on_message")]: { block: 8, private: false },
+      [createAgentName("worker")]: { block: 10, private: false },
+    },
+    names: {},
+  };
+}
+
 describe("region reactor", () => {
   test("provide hands its continuation a nursery token carrying the scope identity, and settles with the continuation's result", async () => {
     // The continuation returns the nursery handle it received, so the run resolves with it — proving both
@@ -1429,5 +1607,264 @@ describe("region reactor", () => {
     const actor = makeActor(forkIr({ continuation: cancelForged, task: returningTask }));
     const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
     await expect(result).rejects.toThrow(/region\.cancel.*not cancellable/);
+  });
+
+  test("watch re-emits a fiber's escalation at the handler installed around it, whose answer returns to the fiber", async () => {
+    // The white hole, end to end: the handle body forks a worker that escalates `on_message`, then watches. The
+    // worker's escalation does NOT relay up through the provide (the handle wraps only the WATCH, not the
+    // sibling worker) — `watch` intercepts it and re-emits it AT the watch, where the handle catches it. The
+    // handler answers "answered", which descends back to the worker; the worker returns it, and its outcome
+    // buffers on the provide. So a buffered "answered" proves the whole fiber → watch → handler → fiber round
+    // trip: without the interception the handle would never have seen `on_message` at all.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(watchIr(), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered).toHaveLength(1);
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "answered" },
+    });
+  });
+
+  test("a fiber that escalates before watch is called accumulates in the mailbox and is re-emitted", async () => {
+    // The mailbox's "溜まっていた" requirement: the handle body forks the worker (which escalates `on_message`)
+    // BEFORE calling watch, so the escalation reaches the reactor before the watch registers. It is held in the
+    // nursery mailbox (not flushed up), and re-emitted once the watch — registered later in the same batch —
+    // claims it. Observed the same way as the round trip: the answer reaching the worker proves the escalation
+    // was held for the watch rather than escaping. (The default IR already forks-then-watches; this test names
+    // the guarantee explicitly, and asserts the mailbox drains to empty once serviced.)
+    const persistence = new StoringPersistence();
+    const actor = makeActor(watchIr(), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    // The one escalation was serviced, so the mailbox is drained back to empty.
+    const provide = (await peekRegionProvides(persistence)).find(
+      (extension) => extension.fiberBuffer.length > 0,
+    );
+    expect(provide?.mailbox).toEqual([]);
+  });
+
+  test("multiple fibers' escalations are re-emitted one at a time (FIFO, serial) and all serviced", async () => {
+    // Two workers with distinct arguments both escalate `on_message`; the sequential handle services them one
+    // at a time, answering each with its own message ("re:" + arg) so each worker returns a distinct value. Both
+    // outcomes buffer on the provide — proving every fiber's request wells up at the one watch and is serviced.
+    const persistence = new StoringPersistence();
+    const twoForks: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "alpha" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "beta" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 156],
+        ],
+        output: 157,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 157,
+        output: 158,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    // A worker escalates `on_message` (which wells up at the watch), and AFTER it is answered returns its own
+    // fork argument — so the two buffered outcomes are the two distinct arguments, proving BOTH fibers'
+    // requests were serviced (each fiber unblocks only once the handler answers its `on_message`).
+    const returningWorker: Operation[] = [
+      { kind: "getField", source: 110, field: "input", output: 111 },
+      { kind: "makeRecord", entries: [], output: 113 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 113,
+        output: 112,
+      },
+      { kind: "exit", target: 10, value: 111 },
+    ];
+    // The sequential handle services one request at a time; the handler answers each (with a constant, which
+    // the worker discards) and frees the handle for the next.
+    const handler: Operation[] = [
+      { kind: "loadLiteral", output: 161, value: { kind: "null" } },
+      { kind: "continue", target: 14, value: 161, modifiers: [] },
+    ];
+    const actor = makeActor(
+      watchIr({ handleBody: twoForks, handler, worker: returningWorker }),
+      persistence,
+    );
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const outcomes = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length >= 2,
+      );
+      return provide?.fiberBuffer;
+    });
+    const values = outcomes.map((buffered) =>
+      buffered.outcome.kind === "result" && buffered.outcome.value.kind === "string"
+        ? buffered.outcome.value.value
+        : null,
+    );
+    expect(new Set(values)).toEqual(new Set(["alpha", "beta"]));
+  });
+
+  test("a handler installed around watch can fork a NEW fiber into the same nursery", async () => {
+    // The white hole gives the handler the nursery: on the worker's `on_message`, the handler forks a SECOND
+    // worker (a `child` agent returning a constant) into the same nursery `r` (variable 61, in lexical scope),
+    // then answers the first. Both the first worker's answer and the forked child's constant buffer on the
+    // provide — proving the handler's position holds the nursery, the composition `watch` exists to enable.
+    const persistence = new StoringPersistence();
+    // The handler: fork `child` into `r`, then answer the original `on_message` with "answered".
+    const forkingHandler: Operation[] = [
+      { kind: "loadAgent", output: 162, name: createAgentName("child") },
+      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "childarg" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 162],
+          ["argument", 163],
+        ],
+        output: 164,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 164,
+        output: 165,
+      },
+      { kind: "loadLiteral", output: 166, value: { kind: "string", value: "answered" } },
+      { kind: "continue", target: 14, value: 166, modifiers: [] },
+    ];
+    const ir = watchIr({ handler: forkingHandler });
+    // Add the `child` agent (a fiber the handler forks) — returns a constant, so it buffers a distinct outcome.
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadLiteral", output: 181, value: { kind: "string", value: "child-ran" } },
+          { kind: "exit", target: 17, value: 181 },
+        ],
+      },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("child")] = { block: 17, private: false };
+
+    const actor = makeActor(ir, persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const values = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length >= 2,
+      );
+      if (provide === undefined) return undefined;
+      return provide.fiberBuffer.map((buffered) =>
+        buffered.outcome.kind === "result" && buffered.outcome.value.kind === "string"
+          ? buffered.outcome.value.value
+          : null,
+      );
+    });
+    expect(new Set(values)).toEqual(new Set(["answered", "child-ran"]));
+  });
+
+  test("a watch and its mailboxed escalation survive a restart, and the answer still returns to the fiber", async () => {
+    // Durability: a worker escalates `on_message`, the watch re-emits it, and it lands at the handle — which
+    // holds it (a handler that never answers, so the escalation is outstanding at restart). A fresh actor over
+    // the same rows re-registers the watch (its outstanding relay reloaded from the durable row) and reloads the
+    // provide's fiber buffer / mailbox. The reloaded handle re-catches the outstanding request and answers it,
+    // so the worker settles with the answer AFTER the restart — the whole white hole surviving the crash.
+    const persistence = new StoringPersistence();
+    // A handler that HOLDS on a second, unhandled request (`gate`) before answering — so at the restart point
+    // the worker's `on_message` is outstanding (re-emitted, caught, not yet answered).
+    const holdingHandler: Operation[] = [
+      { kind: "makeRecord", entries: [], output: 161 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 161,
+        output: 162,
+      },
+      { kind: "continue", target: 14, value: 162, modifiers: [] },
+    ];
+    const ir = watchIr({ handler: holdingHandler });
+    // Add the `gate` request agent the handler holds on.
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("gate"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("gate")] = { block: 17, private: false };
+
+    const actorOne = makeActor(ir, persistence);
+    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    // Drive to the suspend point: the handler is holding on `gate` (so the worker's on_message is outstanding at
+    // the watch), and the watch call is durable.
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+
+    // Restart: a fresh actor re-registers the watch and reloads the mailbox / outstanding relay.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const gate = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    // Answering the gate lets the handler answer the original on_message; the worker settles with that answer.
+    await actorTwo.answerEscalation(gate.escalation, { kind: "string", value: "post-restart" });
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "post-restart" },
+    });
   });
 });

@@ -205,6 +205,11 @@ export class Substrate {
           interruption = outcome;
           break;
         }
+        // The mailbox drained — GLOBAL QUIESCENCE. Offer every reactor the chance to flush work it defers to
+        // this point (the region nursery flushes a watch-less scope's held fiber escalations up). A reactor
+        // that schedules follow-on here re-fills the mailbox, so the loop runs it and re-quiesces; each hook
+        // acts only when it has real work, so this converges to a true fixpoint rather than spinning.
+        if (this.mailbox.length === 0) this.fireQuiesce();
       }
     } catch (loadError) {
       // `ensureLoaded` (reactivate) failed: reject anything queued so callers do not hang; the cleared
@@ -227,6 +232,13 @@ export class Substrate {
     } else if (interruption.kind === "reload") {
       void this.pump(interruption.nextBatchLimit);
     }
+  }
+
+  /** Fire the global-quiescence hook on every reactor (the mailbox has drained). A reactor may `schedule`
+   *  follow-on work, which re-fills the mailbox for the surrounding `pump` loop; the hook contract is that it
+   *  acts only when it has real deferred work, so this cannot spin. */
+  private fireQuiesce(): void {
+    for (const reactor of Object.values(this.registry)) reactor.onQuiesce();
   }
 
   /** Run one batch through its three phases — the react loop / one commit / the afterCommits — each with
