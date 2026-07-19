@@ -974,7 +974,7 @@ spec = do
       let rejected reactor =
             let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just reactor))
              in hasErrorCode "K3022" diagnostics
-       in all rejected ["http", "webhook", "mcp", "time", "oauth"] `shouldBe` True
+       in all rejected ["http", "webhook", "mcp", "time", "oauth", "region"] `shouldBe` True
     it "accepts a built-in reactor from an embedded stdlib module (its compiled externals ARE the reactor's keys)" $
       let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (ModuleName "prelude.time") (Just "time"))
        in toList diagnostics `shouldBe` []
@@ -1367,6 +1367,110 @@ spec = do
               )
       message `shouldSatisfy` Text.isInfixOf "additionally excludes"
       message `shouldSatisfy` Text.isInfixOf "scoped"
+
+  -- The `prelude.region` stdlib module: structured concurrency as a nursery, built on the same scoped
+  -- marker discipline as `mcp.provide`. `provide` opens the nursery and discharges its scope marker;
+  -- `fork` spawns a child bounded by the ceiling `E`; `join` / `cancel` operate on a fiber; `watch`
+  -- re-emits the fibers' escalations as `E`. Two soundness properties are checked end to end: a fiber is
+  -- joinable only in the region that spawned it (the nursery pins its scope marker INVARIANTLY, so two
+  -- distinct markers do not merge into a union), and a child's effect may not exceed the ceiling.
+  describe "region (structured concurrency nursery)" $ do
+    let botEvents =
+          "request on_message(source: string, msg: string) -> null\n"
+            <> "request needs_approval(x: string) -> boolean\n"
+            <> "type bot_events = on_message | needs_approval\n"
+        discordWatch =
+          "agent discord_watch(input: null) -> never with bot_events {\n"
+            <> "  let a = on_message(source = \"s\", msg = \"m\")\n"
+            <> "  let b = needs_approval(x = \"y\")\n"
+            <> "  forever { }\n"
+            <> "}\n"
+        tickWorker =
+          "request tick() -> null\n"
+            <> "type ev = tick\n"
+            <> "agent worker(input: null) -> integer with ev {\n  let a = tick()\n  42\n}\n"
+
+    it "the nursery usage example type-checks: provide opens it, fork spawns a child under the ceiling, watch re-emits, a handler discharges" $
+      compiledCodes
+        ( botEvents
+            <> discordWatch
+            <> "agent bot() -> null with io {\n"
+            <> "  let r : region.nursery[region.scope, bot_events] = use region.provide[region.scope, bot_events]\n"
+            <> "  use handler {\n"
+            <> "    request on_message(source: string, msg: string) -> null { null }\n"
+            <> "    request needs_approval(x: string) -> boolean { true }\n"
+            <> "  }\n"
+            <> "  let f = region.fork(nursery = r, task = discord_watch, argument = null)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "fork, join, cancel and watch compose in one nursery: join returns the child's value" $
+      compiledCodes
+        ( tickWorker
+            <> "agent bot() -> integer with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  use handler { request tick() -> null { null } }\n"
+            <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "  let result : integer = region.join(nursery = r, handle = f)\n"
+            <> "  let g = region.cancel(nursery = r, handle = f)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "rejects joining a fiber from a DIFFERENT region: distinct scope markers do not merge (K3001)" $
+      -- Two nurseries under distinct markers `scope_a` / `scope_b`; a fiber forked in the first is passed
+      -- to the second's `join`. The nursery pins its marker invariantly, so `join` cannot infer the mere
+      -- UNION of the two scopes — the fiber's `scope_a` is rejected against the nursery's `scope_b`.
+      compiledCodes
+        ( tickWorker
+            <> "effect scope_a\n"
+            <> "effect scope_b\n"
+            <> "agent bot() -> integer with io {\n"
+            <> "  let ra : region.nursery[scope_a, ev] = use region.provide[scope_a, ev]\n"
+            <> "  let rb : region.nursery[scope_b, ev] = use region.provide[scope_b, ev]\n"
+            <> "  let fa = region.fork(nursery = ra, task = worker, argument = null)\n"
+            <> "  region.join(nursery = rb, handle = fa)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "rejects forking a child whose effect exceeds the nursery's ceiling E (K3001)" $
+      -- The nursery ceiling is `on_message` only; `rogue_watch` also raises `rogue`, which does not fit.
+      compiledCodes
+        ( "request on_message(source: string, msg: string) -> null\n"
+            <> "request rogue(x: string) -> null\n"
+            <> "type ceiling = on_message\n"
+            <> "agent rogue_watch(input: null) -> never with rogue {\n  let a = rogue(x = \"y\")\n  forever { }\n}\n"
+            <> "agent bot() -> null with io | on_message {\n"
+            <> "  let r : region.nursery[region.scope, ceiling] = use region.provide[region.scope, ceiling]\n"
+            <> "  let f = region.fork(nursery = r, task = rogue_watch, argument = null)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "rejects joining a fiber that escaped its provide, in a foreign region: the marker has nowhere to be discharged (K3001)" $
+      -- A fiber value may leave its `provide` (it is an opaque handle), but it can only be joined back in
+      -- a nursery carrying its own scope marker. `leak` returns a `region.scope` fiber; `consume` opens a
+      -- nursery under the distinct `other` marker and cannot join it.
+      compiledCodes
+        ( tickWorker
+            <> "effect other\n"
+            <> "agent leak() -> region.fiber[region.scope, integer] with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "}\n"
+            <> "agent consume() -> null with io {\n"
+            <> "  let leaked = leak()\n"
+            <> "  let r2 : region.nursery[other, ev] = use region.provide[other, ev]\n"
+            <> "  let bad = region.join(nursery = r2, handle = leaked)\n"
+            <> "  null\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
 
 ------------------------------------------------------------------------------------------------
 -- Runners
