@@ -215,7 +215,7 @@ describe("ResourcePool blob reclaim", () => {
     expect(dropped).toEqual([MINE]);
   });
 
-  test("reassignOwnedBlobs with no id list hoists an owner's WHOLE holding, keeping the index in step", async () => {
+  test("reassignOwnedBlobs hoists an owner's WHOLE holding, keeping the index in step", async () => {
     const SECOND = "blob-second" as BlobId;
     const store = storeWithBlobs({ [MINE]: OWNER, [SECOND]: OWNER, [THEIRS]: OTHER, [TRANSIT]: null });
     const pool = new ResourcePool(PROJECT, store);

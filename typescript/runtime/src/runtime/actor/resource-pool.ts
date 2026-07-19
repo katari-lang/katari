@@ -165,20 +165,15 @@ export class ResourcePool {
     }
   }
 
-  /** Re-own from `from` to `to` — the primitive the ownership hoist reassigns blobs with, and the external
-   *  call's produced-blob adoption. With no `blobIds` it moves `from`'s ENTIRE holding (the hoist: every blob
-   *  a completing / escalating instance still owns climbs one delegation step onto its caller, whether or not
-   *  the crossing value reached it); with an explicit `blobIds` it moves only those still owned by `from` (the
-   *  narrow external-call adoption, kept while the hoist subsumes it). Reads the `blobsByOwner` index for the
-   *  whole-holding form, so it never scans the ledger. A blob already released to in-transit (owner = null, a
-   *  value-carried one the receiver will reown) is not owned by `from`, so it is left alone either way. */
-  reassignOwnedBlobs(from: InstanceId, to: InstanceId, blobIds?: Iterable<BlobId>): void {
-    const ids = blobIds ?? blobsOwnedBy(this.store, from);
-    for (const blobId of ids) {
-      if (this.store.blobs[blobId]?.owner === from) {
-        setBlobOwner(this.store, blobId, to);
-        this.dirtyBlobs.add(blobId);
-      }
+  /** Re-own every blob `from` still holds onto `to` — the primitive the ownership hoist reassigns blobs with:
+   *  every blob a completing / escalating instance still owns climbs one delegation step onto its caller,
+   *  whether or not the crossing value reached it. Reads the `blobsByOwner` index (a copied bucket, safe to
+   *  mutate while iterating), so it never scans the whole ledger. A blob already released to in-transit
+   *  (owner = null, a value-carried one the receiver will reown) sits in no bucket, so it is left alone. */
+  reassignOwnedBlobs(from: InstanceId, to: InstanceId): void {
+    for (const blobId of blobsOwnedBy(this.store, from)) {
+      setBlobOwner(this.store, blobId, to);
+      this.dirtyBlobs.add(blobId);
     }
   }
 
