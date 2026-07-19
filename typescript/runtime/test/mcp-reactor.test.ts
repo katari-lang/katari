@@ -7,9 +7,11 @@
 // descriptor + scope riding the tool's context — a closed scope is rejected typed, the covariance
 // backstop), and `prelude.mcp.call` (the static direct call: `{url, auth, tool, arguments}` all in the
 // argument, gated on a LIVE provide scope of the same descriptor, the `arguments` json TREE lowered to
-// the literal document for the transport, and the reply DECODED against the call's `T` generic — a typed
-// `T` reconstructs the value wire form, `json.json` keeps the raw tree). Failures are typed
-// `throw[mcp.server_error]` (a reply that does not conform to `T` is `throw[json.validation_error]`);
+// the literal document for the transport, and the reply DECODED UNCONDITIONALLY — the wire's own
+// `$katari_*` markers reconstruct the value at ANY `T` (a `$katari_ref` is always a real `file`), and the
+// declared `T` only VALIDATES the result). Failures are typed
+// `throw[mcp.server_error]` (a reply that does not conform to `T`, or one carrying a marker the wire
+// cannot reconstruct, is `throw[json.validation_error]`);
 // recovery of an in-flight tool call is at-most-once (an interrupted call fails typed — a katari retry
 // reconnects through the transport's descriptor cache), while the provide endpoint itself survives a
 // restart.
@@ -564,9 +566,10 @@ describe("mcp reactor", () => {
 });
 
 // The `unknown` output schema the codegen stamps on `mcp.call[..., unknown]` (its no-`outputSchema`
-// choice): an UNCONSTRAINED `{}`. The reply is lifted LITERALLY and kept as the raw document value, with
-// its inert `$katari_ref` objects left as plain records — a later dynamic call into a `file`-typed position
-// reconstructs one. A TYPED `T` instead reconstructs the value wire form and validates against it.
+// choice): an UNCONSTRAINED `{}`. The reply is decoded UNCONDITIONALLY — the wire's own `$katari_*` markers
+// reconstruct the value regardless of `T`, so a reply's `$katari_ref` is a real `file` here exactly as it is
+// under a typed `T`. `unknown` differs only in the VALIDATION pass: it accepts whatever the decode produced,
+// where a constrained `T` conforms it.
 const UNKNOWN_SCHEMA: JSONSchema = {};
 
 // A `file` value's `$katari_ref` handle schema (`Katari.Schema.fileReferenceSchema`): a typed `T` that carries a
@@ -590,10 +593,9 @@ function directCallGenerics(outputSchema: JSONSchema): Array<[string, GenericArg
 //               continuation = call_runner)
 // }
 // agent call_runner(value) {   // the direct call must run INSIDE a provide of the same descriptor
-//   let arguments = json.json_object(entries = { x = json.json_integer(value = 19),
-//                                                note = json.json_string(value = "hi") })
-//   // T = json.json: the reply comes back as a raw `json` tree (the codegen's no-outputSchema choice).
-//   return mcp.call["https://mcp.example.test/mcp", json.json](url = "https://mcp.example.test/mcp",
+//   let arguments = { x = 19, note = "hi" }   // a plain value tree (`arguments: unknown`)
+//   // T = unknown: the reply is decoded unconditionally (markers reconstructed) with no validation pass.
+//   return mcp.call["https://mcp.example.test/mcp", unknown](url = "https://mcp.example.test/mcp",
 //                   auth = mcp.headers(values = {}), tool = "add", arguments = arguments)
 // }
 const CALL_IR: IRModule = {
@@ -742,8 +744,8 @@ const CALL_IR: IRModule = {
             argument: 115,
             output: 116,
             // `mcp.call[url, unknown]` — the codegen's no-`outputSchema` instantiation. The engine
-            // forwards this to the mcp reactor as the external agent's ambient, so the reply is kept as
-            // the raw document value.
+            // forwards this to the mcp reactor as the external agent's ambient, so the reply is decoded
+            // unconditionally (the wire's markers reconstructed) with no validation pass.
             generics: directCallGenerics(UNKNOWN_SCHEMA),
           },
           { kind: "exit", target: 24, value: 116 },
@@ -896,8 +898,8 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
       auth: { $katari_constructor: "prelude.mcp.headers", $katari_value: { values: {} } },
     });
 
-    // `T = json.json` (CALL_IR's instantiation): the structured reply lifts LITERALLY into the `json`
-    // tree the caller receives, since that tree conforms to the seven-shape `json` union.
+    // `T = unknown` (CALL_IR's instantiation): a marker-free reply decodes to the ordinary record / scalar
+    // value it denotes (the unconditional decode leaves a plain object a record), with no validation pass.
     transport.feed({
       delegation: call.delegation,
       outcome: { kind: "result", value: { sum: 42 } },
@@ -931,10 +933,9 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
         },
       },
     });
-    // `T = json.json` lifts the reply LITERALLY at the direct call's own boundary, so the handle rides
-    // out as an inert `$katari_ref` document. `$katari_ref` is a wire marker now (there is no escape to
-    // keep it a plain key), so it reconstructs into a real `file` value the moment the result crosses a
-    // wire boundary — here the provide's completion — and the caller receives the real handle.
+    // The decode is UNCONDITIONAL even at `T = unknown`: the reply's `$katari_ref` is a wire marker, so it
+    // reconstructs into a REAL `file` value right at the direct call's own boundary (no schema needed), and
+    // the caller receives the real handle — the same value a typed `T` would produce.
     await expect(result).resolves.toEqual({
       kind: "record",
       fields: {
@@ -947,7 +948,48 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     });
   });
 
-  test("T = unknown: a produced blob left inert in the tree run-adopts (the narrowed backstop)", async () => {
+  test("T = unknown: a `$katari_constructor` object decodes to a data value", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(CALL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await callToolAfterProvide(transport);
+    // The reply carries the data-value wire marker. The decode is unconditional, so it reconstructs a tagged
+    // `data` value (a record with a `ctor`) even at `T = unknown` — the marker, not a schema, drives it.
+    transport.feed({
+      delegation: call.delegation,
+      outcome: {
+        kind: "result",
+        value: {
+          $katari_constructor: "app.render_result",
+          $katari_value: { ok: true, count: 3 },
+        },
+      },
+    });
+    await expect(result).resolves.toEqual({
+      kind: "record",
+      fields: { ok: { kind: "boolean", value: true }, count: { kind: "integer", value: 3 } },
+      ctor: createAgentName("app.render_result"),
+    });
+  });
+
+  test("T = unknown: a malformed marker throws json.validation_error (decode is unconditional)", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(CALL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const call = await callToolAfterProvide(transport);
+    // A `$katari_ref` whose id is not a string is a marker the wire cannot reconstruct. Because the decode is
+    // unconditional (not gated on a schema), the failure IS the validation_error even at `T = unknown` — the
+    // reactor turns it into the typed throw its row declares, never a panic and never a silent inert record.
+    transport.feed({
+      delegation: call.delegation,
+      outcome: { kind: "result", value: { $katari_ref: 123 } },
+    });
+    await expect(result).rejects.toThrow(/prelude\.json\.validation_error.*\$katari_ref/);
+  });
+
+  test("T = unknown: a produced blob whose id rides only in the raw reply survives to the caller (hoist)", async () => {
     const transport = new ControlledMcpTransport();
     const blobs = new InMemoryBlobStore();
     const blob = "blob-mcp-direct" as BlobId;
@@ -967,11 +1009,12 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     });
     expect(registered).toBe(true);
 
-    // `T = json.json` lifts the reply LITERALLY at the direct call's own boundary, so the produced blob
-    // does NOT ascend by value there — it rides only as an inert `$katari_ref` document leaf. This is the
-    // ONE case the run-adoption backstop still exists for: the call adopts the blob onto the run so it
-    // outlives the ephemeral call, and the handle reconstructs into a real `file` value as the result
-    // crosses the provide's wire boundary (markers are interpreted now — no escape keeps it a plain key).
+    // Even at `T = unknown` the decode is UNCONDITIONAL, so the reply's `$katari_ref` reconstructs a REAL
+    // `file` value at the direct call's own boundary — the produced blob ascends by value, no
+    // schema-directed backstop involved. And regardless of the value walk, the direct call's `delegateAck`
+    // is an upward event: the ownership HOIST reassigns every blob the call still owns onto its core caller,
+    // so the blob would reach the caller even if the id rode only in the raw (never-decoded) reply text. The
+    // two together — unconditional decode + hoist — are what retired the old per-call run-adoption backstop.
     transport.feed({
       delegation: call.delegation,
       outcome: {
@@ -990,9 +1033,8 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
       },
     });
 
-    // Still readable after the call settles: the produced blob was ADOPTED onto the (permanent) run
-    // instance rather than reclaimed with the ephemeral call — the narrowed backstop for a blob the
-    // direct call's own inert document carried only as a `$katari_ref` string.
+    // Still readable after the whole run settles: the produced blob climbed to the permanent run instance
+    // (value walk + hoist) rather than being reclaimed with the ephemeral call.
     await expect(blobs.get(PROJECT, blob)).resolves.toEqual(bytes);
   });
 
@@ -1017,7 +1059,7 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     });
   });
 
-  test("a typed T carrying a file reconstructs a REAL handle that ascends by value (not run-adopted)", async () => {
+  test("a typed T carrying a file reconstructs a REAL handle that ascends by value", async () => {
     const transport = new ControlledMcpTransport();
     const blobs = new InMemoryBlobStore();
     const blob = "blob-mcp-typed" as BlobId;
@@ -1047,10 +1089,10 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
         value: { text: "rendered", files: [{ $katari_ref: blob, $katari_semantic_kind: "file" }] },
       },
     });
-    // The `$katari_ref` reconstructs a REAL `ref` value — not the inert tree object of the `json.json` case — so
-    // the file rides the ordinary release / reown walk. Its lifetime is now value-reachability: the
-    // run-adoption backstop is a no-op here (the blob was released to in-transit by value, not left owned
-    // by the ephemeral call), which is exactly "value-owned rather than run-adopted".
+    // The `$katari_ref` reconstructs a REAL `ref` value (the decode is unconditional; the typed `T` here only
+    // adds a validation pass the value passes), so the file rides the ordinary release / reown walk and its
+    // lifetime is value-reachability. The `T = unknown` case above reaches the identical value — the two
+    // differ only in whether the result is conformed — which is why the old run-adoption backstop is gone.
     await expect(result).resolves.toEqual({
       kind: "record",
       fields: {

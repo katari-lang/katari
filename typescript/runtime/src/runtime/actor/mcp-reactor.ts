@@ -25,12 +25,13 @@
 //     names the missing provide. `arguments` is now a plain value tree (`unknown`); it lowers to the literal
 //     Json document at dispatch through the SAME `http.json` slot contract — `valueToJson` then the http-body
 //     materialiser — so keys travel verbatim, a `file` leaf base64s in place, and a blob-backed string
-//     materialises. The transport's reply is DECODED against `T` (`decodeDirectReply`): a typed `T` gives a
-//     real value — a produced blob's `$katari_ref` reconstructs a REAL `file`, so the ordinary release / reown
-//     walk bounds its lifetime by value-reachability — a plain-text reply lands as the string value a
-//     string-shaped `T` wants, and a reply that does not conform is the typed `json.validation_error` throw
-//     the row declares; `T = unknown` (the codegen's no-`outputSchema` choice) keeps the raw external document
-//     (a coincidental `$katari_ref` in it stays an ordinary field).
+//     materialises. The transport's reply is DECODED UNCONDITIONALLY (`decodeDirectReply`): the wire's own
+//     `$katari_*` markers drive reconstruction REGARDLESS of `T` — a produced blob's `$katari_ref` becomes a
+//     REAL `file` (whose lifetime the ownership hoist on the ack, and the ordinary reown walk, then bound), a
+//     `$katari_constructor` object a data value, a plain-text reply the string value a string-shaped `T`
+//     wants. `T` only VALIDATES: a constrained `T` conforms the decoded value (a mismatch — or a marker the
+//     wire cannot reconstruct — is the typed `json.validation_error` throw the row declares), while
+//     `T = unknown` (the codegen's no-`outputSchema` choice) accepts the decode as-is.
 //   - `serve` (the `prelude.mcp.serve` external): the INBOUND direction, mirroring the webhook reactor —
 //     no transport at all. It mints an unguessable token (the public URL's capability), dispatches the
 //     SUBSCRIBER once as an inner delegation carrying that URL, and converts every MCP `tools/call` to
@@ -75,7 +76,7 @@
 import { randomBytes } from "node:crypto";
 import type { JSONSchema, Json, QualifiedName } from "@katari-lang/types";
 import { CALL_ERROR, dispatchCallable } from "../engine/dynamic-dispatch.js";
-import { literalLift, type StringReader } from "../engine/json-value.js";
+import type { StringReader } from "../engine/json-value.js";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import { OAUTH_AUTHORIZE_REQUEST } from "../external/credentials.js";
@@ -1081,11 +1082,11 @@ function directCallOutputSchema(generics: GenericSubstitution | undefined): JSON
 
 /** The transport payload one dispatch-shaped call rides as — shared by a fresh `openPayload` and a parked
  *  call's reload, so the ack-decoding seam cannot drift between the two. A `directCall` decodes its raw
- *  transport reply against its instantiated `T` (see `decodeDirectReply`): a typed `T` yields a real
- *  value — a `$katari_ref` reconstructs a REAL `file`, whose lifetime the ordinary release / reown walk then
- *  bounds by value-reachability — while `json.json` keeps the raw tree with its inert refs. The seam only
- *  BUILDS the value; a reply that does not conform is re-shaped into the typed `validation_error` throw in
- *  `complete`, so it never throws here. A `callTool` carries no `T` and runs the base wire decoder. */
+ *  transport reply UNCONDITIONALLY (see `decodeDirectReply`): the wire's own `$katari_*` markers drive
+ *  reconstruction — a `$katari_ref` becomes a REAL `file`, a `$katari_constructor` a data value — never the
+ *  declared `T`, which only VALIDATES the result. The seam only BUILDS the value; a reply that does not
+ *  conform (or carries a marker the wire cannot reconstruct) is re-shaped into the typed `validation_error`
+ *  throw in `complete`, so it never throws here. A `callTool` carries no `T` and runs the base wire decoder. */
 function transportPayloadOf(call: McpDispatchCall): Extract<McpPayload, { kind: "transport" }> {
   if (call.kind === "callTool") {
     return { kind: "transport", call };
@@ -1098,31 +1099,33 @@ function transportPayloadOf(call: McpDispatchCall): Extract<McpPayload, { kind: 
   };
 }
 
-/** Decode a direct call's transport reply against its instantiated `T`. For an UNCONSTRAINED `T` (`unknown`
- *  — the codegen's no-`outputSchema` choice) the reply is a RAW external document: it is lifted literally
- *  (every object a record, no marker interpreted), so a coincidental `$ref` / `$defs` key an external server
- *  emits stays an ordinary field. For a TYPED `T` the reply is read through the value codec — a `$katari_ref`
- *  becomes a REAL `file`, a `$katari_constructor` object a data value, records / arrays / scalars ordinary
- *  values (so a plain-text reply lands as the string value a string-shaped `T` wants) — and validated against
- *  `T`. `mismatch` names the offending path when the value does not conform (or cannot be read); the caller
- *  turns a non-`null` `mismatch` into the typed `validation_error` throw, since the settle-time seam that
- *  reads `value` cannot itself throw. */
+/** Decode a direct call's transport reply. The wire-to-value conversion is UNCONDITIONAL — never
+ *  schema-directed: the reply is always read through the value codec, so the wire's own `$katari_*` markers
+ *  drive reconstruction (a `$katari_ref` becomes a REAL `file`, a `$katari_constructor` object a data value,
+ *  records / arrays / scalars ordinary values, a plain-text reply the string value a string-shaped `T` wants).
+ *  This is the same principle `json`'s codec obeys: interpretation is the wire's business, validation a
+ *  separate pass — the declared `T` never changes what a value MEANS, only whether it is accepted. `T` is thus
+ *  a pure VALIDATION gate: an UNCONSTRAINED `T` (`unknown` — the codegen's no-`outputSchema` choice) accepts
+ *  the decode as-is; a constrained `T` conforms it. `mismatch` names the offending path when the value does
+ *  not conform — or when a marker cannot be reconstructed at all (a `$katari_ref` whose id is not a string, a
+ *  withheld `$katari_redacted` marker), which is a validation failure at ANY `T`, `unknown` included. The
+ *  caller turns a non-`null` `mismatch` into the typed `validation_error` throw, since the settle-time seam
+ *  that reads `value` cannot itself throw. */
 function decodeDirectReply(
   raw: Json,
   schema: JSONSchema | undefined,
 ): { value: Value; mismatch: string | null } {
-  const tree = literalLift(raw);
-  if (schema === undefined || isUnconstrained(schema)) {
-    return { value: tree, mismatch: null };
-  }
   let wire: Value;
   try {
     wire = jsonToValue(raw);
   } catch (cause) {
-    // A malformed wire object (a `$katari_ref` whose id is not a string, a `$katari_redacted` marker) cannot
-    // reconstruct — that failure IS the validation_error. Keep the tree as the (never-delivered) fallback so
-    // the seam stays total, and report the reconstruction message.
-    return { value: tree, mismatch: messageOf(cause) };
+    // A marker the wire cannot reconstruct (a `$katari_ref` whose id is not a string, a `$katari_redacted`
+    // marker) IS the validation_error — at any `T`, since the decode is unconditional. The value slot is
+    // never delivered (the caller throws on a non-null mismatch), so an empty record keeps the seam total.
+    return { value: { kind: "record", fields: {} }, mismatch: messageOf(cause) };
+  }
+  if (schema === undefined || isUnconstrained(schema)) {
+    return { value: wire, mismatch: null };
   }
   const result = conformValue(wire, schema);
   return { value: wire, mismatch: result.ok ? null : renderConformFailures(result.failures) };
