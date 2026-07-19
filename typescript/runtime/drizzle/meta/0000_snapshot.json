@@ -980,7 +980,7 @@
         },
         "instances_kind_check": {
           "name": "instances_kind_check",
-          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth')"
+          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region')"
         }
       },
       "isRLSEnabled": false

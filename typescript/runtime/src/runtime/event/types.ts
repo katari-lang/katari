@@ -86,8 +86,19 @@ export type DelegateTarget =
  *  (`prelude.mcp.*` — connect / list / call against an MCP server), `time` durable wall-clock time
  *  (`prelude.time.*` — a clock reading and the durable timers `sleep` / `watch` wait on), and `oauth`
  *  on-demand OAuth token resolution (`prelude.oauth.token` — a bearer token for a stored credential, its
- *  authorization escalated when the credential needs a human). */
-export type ReactorName = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth";
+ *  authorization escalated when the credential needs a human), and `region` the built-in structured-concurrency
+ *  nursery (`prelude.region.*` — `provide` opens a scope, and later `fork` / `join` / `watch` / `cancel` run
+ *  fibers inside it), an in-runtime scheduler with no external process, like `time`. */
+export type ReactorName =
+  | "core"
+  | "api"
+  | "ffi"
+  | "http"
+  | "webhook"
+  | "mcp"
+  | "time"
+  | "oauth"
+  | "region";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =

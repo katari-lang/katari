@@ -162,7 +162,7 @@ export type RequestBlock = {
  *  (K3018) and lowering stamps `"ffi"` when the clause is absent, so IR can only ever carry these — which
  *  is why the runtime copies the marker without a fallback. Adding a reactor is one edit here plus one in
  *  the compiler's list. */
-export type ExternalReactorName = "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth";
+export type ExternalReactorName = "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth" | "region";
 
 /** Leaf body — an external agent dispatched by the external handler via `key`, with `input` as the argument.
  *  `reactor` names the reactor the call routes to (`"ffi"` — the sidecar — by default, or e.g. `"http"` for

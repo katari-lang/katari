@@ -103,7 +103,7 @@ CREATE TABLE "instances" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "instances_status_check" CHECK ("instances"."status" in ('running', 'cancelling')),
-	CONSTRAINT "instances_kind_check" CHECK ("instances"."kind" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth'))
+	CONSTRAINT "instances_kind_check" CHECK ("instances"."kind" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region'))
 );
 --> statement-breakpoint
 CREATE TABLE "outbox" (

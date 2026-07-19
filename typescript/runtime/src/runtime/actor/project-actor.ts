@@ -46,6 +46,7 @@ import { McpReactor, type McpServeCallOutcome, type McpServeToolsOutcome } from 
 import { OauthReactor } from "./oauth-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
+import { RegionReactor } from "./region-reactor.js";
 import { ResourcePool } from "./resource-pool.js";
 import { Substrate } from "./substrate.js";
 import { TimeReactor } from "./time-reactor.js";
@@ -142,6 +143,9 @@ export class ProjectActor {
   /** The oauth reactor: built-in `prelude.oauth.token` calls — on-demand bearer-token resolution, with an
    *  authorization escalation when the named credential needs a human. */
   private readonly oauth: OauthReactor;
+  /** The region reactor: built-in `prelude.region.*` calls — the structured-concurrency nursery (`provide`
+   *  opens a scope, later waves' `fork` / `join` / `watch` / `cancel` run fibers inside it). */
+  private readonly region: RegionReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -173,7 +177,15 @@ export class ProjectActor {
     this.pool = new ResourcePool(this.projectId, store, (owner) => {
       const coreRun = store.instances[owner]?.runId;
       if (coreRun !== undefined) return coreRun;
-      for (const reactor of [this.ffi, this.http, this.webhook, this.mcp, this.time, this.oauth]) {
+      for (const reactor of [
+        this.ffi,
+        this.http,
+        this.webhook,
+        this.mcp,
+        this.time,
+        this.oauth,
+        this.region,
+      ]) {
         const run = reactor.runOfInstance(owner);
         if (run !== undefined) return run;
       }
@@ -270,6 +282,10 @@ export class ProjectActor {
       (work) => this.substrate.submit(this.oauth, work),
       pool,
     );
+    // The region reactor serves `prelude.region.*` calls: an in-runtime nursery scheduler with no external
+    // process, re-entering the serial loop for a provide's post-commit work (the continuation dispatch, a
+    // synthesised completion) through the scheduler closure the same way.
+    this.region = new RegionReactor((work) => this.substrate.submit(this.region, work), pool);
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
@@ -286,6 +302,7 @@ export class ProjectActor {
       mcp: this.mcp,
       time: this.time,
       oauth: this.oauth,
+      region: this.region,
     };
     this.substrate = new Substrate(
       this.projectId,
@@ -597,6 +614,7 @@ export class ProjectActor {
     this.mcp.reset();
     this.time.reset();
     this.oauth.reset();
+    this.region.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
@@ -611,6 +629,9 @@ export class ProjectActor {
       // there is no external process to reconcile, so a time call survives a restart completely.
       // The oauth load, like time, has no external process to reconcile: a reloaded resolution re-resolves
       // (at-most-once-safe), and a parked call reconstructs from its open authorize escalation row.
+      // The region load, like time / webhook, has no external process to reconcile: a reloaded provide
+      // re-registers its scope and resumes (or re-dispatches) its continuation, surviving the restart
+      // completely.
       await Promise.all([
         this.ffi.load(loader),
         this.http.load(loader),
@@ -618,6 +639,7 @@ export class ProjectActor {
         this.mcp.load(loader),
         this.time.load(loader),
         this.oauth.load(loader),
+        this.region.load(loader),
       ]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {
