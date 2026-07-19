@@ -79,10 +79,13 @@ type InstanceEnvelopeChange =
  *  (the reply-to), the run it belongs to (the summoning event's trace context), and the caller INSTANCE that
  *  issued it (the hoist target — where this instance's blobs climb on an upward event). The first three are
  *  the summoned instance's ambient — rebuilt on load from its envelope (`delegationId` + `callerReactor` +
- *  `runId`). The caller instance rides on the summoning `delegate` (not persisted here): after a restart it
- *  is `undefined` for a callee whose reactor cannot re-derive it, which only suppresses the hoist for a
- *  reloaded external call — whose produced blobs were in-memory and are gone anyway (at-most-once recovery
- *  fails such a call). The core reactor re-derives it from the delegation row it owns (see its `load`). */
+ *  `runId`). The caller instance rides on the summoning `delegate` and is not on the envelope, so a reactor
+ *  re-derives it on load from the durable `delegations.caller_instance_id` — the SoT recorded for EVERY
+ *  delegation: the core reactor does so for EVERY instance it reloads, INCLUDING one a webhook / mcp / ffi
+ *  reactor summoned (whose caller-side row core does not own), so an upward event still hoists after a
+ *  restart (see its `load`). It is `undefined` only for a reloaded EXTERNAL CALL, which deliberately does
+ *  not re-derive it: such a call's produced blobs were in-memory and are gone anyway (at-most-once recovery
+ *  fails it), so it never hoists. */
 interface HandledDelegation {
   instance: InstanceId;
   caller: ReactorName;

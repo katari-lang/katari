@@ -704,3 +704,62 @@ describe("recovery", () => {
     await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
   });
 });
+
+describe("recovery — the caller-instance (blob-hoist target) re-derivation on reload", () => {
+  test("core reads the caller INSTANCE of an instance a NON-core reactor summoned, from the shared delegations SoT", async () => {
+    // A core instance summoned by a webhook subscriber / mcp.serve continuation / ffi inner delegation has its
+    // caller-side delegation row owned by THAT reactor, not core. Core must still re-derive its caller
+    // INSTANCE (the blob-hoist target) on reload, or every later upward event silently skips the hoist and
+    // the completion teardown reclaims the produced blob (a dangling ref). The SoT is
+    // `delegations.caller_instance_id` for EVERY delegation; core reads the ones addressed to it (`to = core`)
+    // — whoever issued them — through `loader.core.summoningDelegations()`.
+    const persistence = new StoringPersistence();
+    const endpointCallInstance = newInstanceId(); // a long-lived webhook / mcp serve endpoint call
+    const coreParent = newInstanceId(); // an ordinary core sub-call's parent
+    const webhookToCore = newDelegationId(); // the cross-reactor summon — core does NOT own the caller row
+    const coreToCore = newDelegationId(); // an ordinary core sub-call — core owns this one
+    const coreToFfi = newDelegationId(); // a delegation addressed elsewhere — must not leak into core's read
+
+    await persistence.transaction(PROJECT, async (tx) => {
+      await tx.base.putDelegation({
+        delegation: webhookToCore,
+        caller: endpointCallInstance,
+        fromReactor: "webhook",
+        toReactor: "core",
+        state: "running",
+      });
+      await tx.base.putDelegation({
+        delegation: coreToCore,
+        caller: coreParent,
+        fromReactor: "core",
+        toReactor: "core",
+        state: "running",
+      });
+      await tx.base.putDelegation({
+        delegation: coreToFfi,
+        caller: coreParent,
+        fromReactor: "core",
+        toReactor: "ffi",
+        state: "running",
+      });
+    });
+
+    await persistence.load(PROJECT, async (loader) => {
+      const summoning = await loader.core.summoningDelegations();
+      const callerOf = new Map(summoning.map((row) => [row.delegation, row.caller]));
+      // The webhook→core summon: core reads its caller INSTANCE even though the caller-side row is webhook's.
+      expect(callerOf.get(webhookToCore)).toBe(endpointCallInstance);
+      // Its own sub-call, too — one uniform read covers both.
+      expect(callerOf.get(coreToCore)).toBe(coreParent);
+      // A delegation addressed to another reactor never leaks in.
+      expect(callerOf.has(coreToFfi)).toBe(false);
+      expect(summoning.every((row) => row.toReactor === "core")).toBe(true);
+
+      // The regression's shape: the OLD re-derivation (`callerInstanceOf`) read only core's OWN issued rows
+      // (`from = core`), which by construction cannot hold the webhook→core summon — so its caller instance
+      // reloaded as `undefined`, and the hoist was silently lost across the restart.
+      const ownIssued = await loader.base.delegations("core");
+      expect(ownIssued.some((row) => row.delegation === webhookToCore)).toBe(false);
+    });
+  });
+});

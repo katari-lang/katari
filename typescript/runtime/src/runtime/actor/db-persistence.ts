@@ -281,6 +281,21 @@ class DrizzleRowStore implements RowStore {
   async delegationsFrom(
     from: Parameters<RowStore["delegationsFrom"]>[0],
   ): ReturnType<RowStore["delegationsFrom"]> {
+    return this.selectDelegations(eq(delegations.fromReactor, from));
+  }
+
+  async delegationsTo(
+    to: Parameters<RowStore["delegationsTo"]>[0],
+  ): ReturnType<RowStore["delegationsTo"]> {
+    return this.selectDelegations(eq(delegations.toReactor, to));
+  }
+
+  /** The live delegations of this project matching `match` (a from- or to-reactor filter), mapped to the
+   *  loadable shape. The caller column is nullable only for the FK's sake; a row whose caller was nulled has
+   *  no owner left to reload it, so it is not a loadable delegation. */
+  private async selectDelegations(
+    match: ReturnType<typeof eq>,
+  ): ReturnType<RowStore["delegationsFrom"]> {
     const rows = await this.executor
       .select({
         id: delegations.id,
@@ -290,9 +305,7 @@ class DrizzleRowStore implements RowStore {
         state: delegations.state,
       })
       .from(delegations)
-      .where(and(eq(delegations.projectId, this.projectId), eq(delegations.fromReactor, from)));
-    // The caller column is nullable only for the FK's sake; a row whose caller was nulled has no owner
-    // left to reload it, so it is not a loadable delegation.
+      .where(and(eq(delegations.projectId, this.projectId), match));
     return rows.flatMap((row) =>
       row.callerInstanceId === null
         ? []

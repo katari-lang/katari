@@ -266,6 +266,11 @@ export interface BaseLoader {
 export interface CoreLoader {
   /** The core engine graph (instances + their threads + the shared scopes / blobs). */
   engine(): Promise<DeserializedEngine>;
+  /** The delegations that summoned this reactor's instances (`to = core`) — the caller-side rows core does
+   *  NOT own when a webhook / mcp / ffi reactor issued the delegate. Core reads them on load to re-derive
+   *  each reloaded instance's caller INSTANCE (the blob-hoist target) from the durable
+   *  `delegations.caller_instance_id`, so an upward event still hoists after a restart. */
+  summoningDelegations(): Promise<PersistedDelegation[]>;
 }
 
 /** The `api` reactor's own-data read surface: the escalations *addressed to* it (`to = api`) — its answerable
@@ -380,6 +385,9 @@ const EMPTY_LOADER: Loader = {
   core: {
     async engine() {
       return { instances: {}, scopes: {}, blobs: {}, nextScopeId: 0 };
+    },
+    async summoningDelegations() {
+      return [];
     },
   },
   api: {

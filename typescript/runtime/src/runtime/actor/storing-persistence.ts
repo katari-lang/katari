@@ -235,6 +235,10 @@ class MapRowStore implements RowStore {
     return [...this.delegations.values()].filter((row) => row.fromReactor === from);
   }
 
+  async delegationsTo(to: ReactorName): Promise<PersistedDelegation[]> {
+    return [...this.delegations.values()].filter((row) => row.toReactor === to);
+  }
+
   async openEscalations(filter: {
     from?: ReactorName;
     to?: ReactorName;

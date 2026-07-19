@@ -36,6 +36,7 @@ import {
   type ReactorName,
 } from "../event/types.js";
 import {
+  type DelegationId,
   type InstanceId,
   newEscalationId,
   type ProjectId,
@@ -137,16 +138,23 @@ export class CoreReactor extends Reactor {
     // sweep (or the ownership hoist) reads them.
     rebuildScopeOwnerIndex(this.store);
     rebuildBlobOwnerIndex(this.store);
-    // The delegations core issued and the escalations it raised reload through the base, uniformly. Do this
-    // first so the handled-index rebuild below can read each child's caller INSTANCE off the reloaded
-    // caller-side row (`callerInstanceOf`).
+    // The delegations core issued and the escalations it raised reload through the base, uniformly.
     await this.loadBase(loader.base);
+    // The caller INSTANCE (the blob-hoist target) of each reloaded instance is re-derived from the durable
+    // `delegations.caller_instance_id` — the SoT recorded for EVERY delegation — keyed by delegation id, NOT
+    // from `callerInstanceOf`, which reads only the caller-side rows core ITSELF owns (its sub-calls). An
+    // instance a webhook subscriber / mcp.serve continuation / ffi inner delegation summoned has its
+    // caller-side row owned by THAT reactor, so its hoist target would otherwise reload as `undefined` and
+    // every later upward event would silently skip the hoist — reclaiming the produced blob at completion
+    // teardown. A run root's row (`caller = api`) is absent here, which is correct: the run→api boundary
+    // hoists nothing anyway.
+    const callerInstances = new Map<DelegationId, InstanceId>();
+    for (const row of await loader.core.summoningDelegations()) {
+      callerInstances.set(row.delegation, row.caller);
+    }
     // Re-seed the handled-delegation index (delegation → child instance) from each instance's own summoning
     // delegation — the instance (its payload) is the source of truth. The caller side (the proxy to resume on
     // an ack) needs no rebuild here: it reads the issued delegations reloaded just above (`callerInstanceOf`).
-    // The child's caller instance (the hoist target) is re-derived from that same caller-side row — present
-    // for a core sub-call (core owns the row), `undefined` for a run root (the api owns it, and the run→api
-    // boundary hoists nothing anyway).
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) {
         this.acceptDelegation(
@@ -154,7 +162,7 @@ export class CoreReactor extends Reactor {
           instance.id,
           instance.callerReactor,
           instance.runId,
-          this.callerInstanceOf(instance.delegationId),
+          callerInstances.get(instance.delegationId),
         );
       }
     }

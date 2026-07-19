@@ -132,6 +132,11 @@ export interface RowStore {
 
   /** The live delegations issued by `from` (every stored row is live — a terminal one is deleted). */
   delegationsFrom(from: ReactorName): Promise<PersistedDelegation[]>;
+  /** The live delegations addressed TO `to` (the callee's reactor) — the summoning edges of the instances
+   *  that reactor handles, regardless of which reactor issued them. Core reads its own (`to = core`) to
+   *  re-derive each reloaded instance's caller INSTANCE (the blob-hoist target), including instances a
+   *  webhook / mcp / ffi reactor summoned, whose caller-side row core does not own. */
+  delegationsTo(to: ReactorName): Promise<PersistedDelegation[]>;
   /** The open escalations matching the filter (every stored row is open — answering deletes it). */
   openEscalations(filter: { from?: ReactorName; to?: ReactorName }): Promise<PersistedEscalation[]>;
   /** The `core` envelopes joined to their extension rows. */
@@ -269,6 +274,7 @@ export function storeLoader(store: RowStore): Loader {
           blobRows,
         );
       },
+      summoningDelegations: () => store.delegationsTo("core"),
     },
     api: {
       // The api root's answerable set: rows addressed to it (`to = api`) whose `request` is user-facing. The
