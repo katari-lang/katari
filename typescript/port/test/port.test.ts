@@ -66,13 +66,15 @@ describe("Sidecar dispatch", () => {
     ]);
   });
 
-  test("unescapes wire record keys on the way in and re-escapes them on the way out", async () => {
+  test("passes wire record keys through verbatim in both directions", async () => {
     const sidecar = new Sidecar();
+    // `$weird` is not a reserved `$katari_` marker, so it is an ordinary record key — the handler receives
+    // it verbatim and its echoed result travels back unchanged (no escaping on either edge).
     sidecar.register<{ $weird: string }>("ext.echo", (argument) => ({ $weird: argument.$weird }));
     const { messages, send } = collector();
-    sidecar.handle(dispatch("d1", "ext.echo", { $$weird: "kept" }), send);
+    sidecar.handle(dispatch("d1", "ext.echo", { $weird: "kept" }), send);
     await tick();
-    expect(messages).toEqual([{ kind: "result", delegation: "d1", value: { $$weird: "kept" } }]);
+    expect(messages).toEqual([{ kind: "result", delegation: "d1", value: { $weird: "kept" } }]);
   });
 
   test("aborts an in-flight handler and confirms cancelled once it settles", async () => {
@@ -220,8 +222,8 @@ describe("context.call (the inner agent-call channel)", () => {
 
   test("KatariAgent.call dispatches the received callable as a `value` callee (no call_agent name)", async () => {
     const sidecar = new Sidecar();
-    // A callable the handler received as its argument (an `$agent` reference decodes to a KatariAgent).
-    const callable: Json = { $agent: "main.greeter", snapshot: "s1" };
+    // A callable the handler received as its argument (a `$katari_agent` reference decodes to a KatariAgent).
+    const callable: Json = { $katari_agent: "main.greeter", $katari_snapshot: "s1" };
     sidecar.register<{ target: KatariAgent }>("ext.caller", async ({ target }) => {
       const reply = await target.call<string>({ name: "world" });
       return `got: ${reply}`;
@@ -379,7 +381,7 @@ describe("typed throw (katari.throw)", () => {
       {
         kind: "throw",
         delegation: "d1",
-        error: { $constructor: "main.my_error", value: { message: "ffi boom" } },
+        error: { $katari_constructor: "main.my_error", $katari_value: { message: "ffi boom" } },
       },
     ]);
   });

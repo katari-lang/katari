@@ -123,7 +123,7 @@ export class ResourcePool {
   }
 
   /** Re-own to `to` each listed blob still owned by `from` — the produced blobs a completing external call
-   *  did NOT ascend by value (a direct mcp call's literal `json` tree carries a produced blob as a `$ref`
+   *  did NOT ascend by value (a direct mcp call's literal `json` tree carries a produced blob as a `$katari_ref`
    *  string, not a real ref, so the value-driven release never freed it from the ephemeral call instance).
    *  Adopting them onto the long-lived run keeps them readable past the call's drop; the run's teardown
    *  reclaims them. A blob already released to in-transit (owner = null, a value-carried one the caller will

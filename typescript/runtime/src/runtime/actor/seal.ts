@@ -11,7 +11,7 @@
 import { decryptSecret, encryptSecret } from "../../lib/crypto.js";
 
 /** The reserved key an encrypted private subtree collapses to at rest (a `$`-prefixed sentinel, like the
- *  codec's `$ref` / `$agent`, so it never collides with engine payload structure). */
+ *  codec's `$katari_ref` / `$katari_agent`, so it never collides with engine payload structure). */
 const SEALED_KEY = "$sealed";
 
 function isObject(node: unknown): node is Record<string, unknown> {

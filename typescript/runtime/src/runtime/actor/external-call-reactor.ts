@@ -148,10 +148,10 @@ export interface DecodedCallExtension<Payload> {
  *  the transport's RAW wire Json. A plain-data payload omits it and the base wire decoder (`jsonToValue`)
  *  runs; a payload whose result is assembled FROM the call attaches it where its variant is decided
  *  (`openPayload`) — the mcp direct call decodes the raw reply against its result generic `T`: a typed `T`
- *  reconstructs the value wire form (a `$ref` becomes a REAL `file`), while `json.json` keeps the raw
+ *  reconstructs the value wire form (a `$katari_ref` becomes a REAL `file`), while `json.json` keeps the raw
  *  reply as a literal `json` tree. Shaping at the WIRE boundary (raw Json in, Value out) keeps hostile /
  *  quirky server Json away from the generic decoder, which is total only for wire-shaped documents. A
- *  reply the direct call cannot decode against `T` is turned into a typed `decode_error` throw in the
+ *  reply the direct call cannot decode against `T` is turned into a typed `validation_error` throw in the
  *  reactor's own `complete`, BEFORE this seam runs — the seam that builds the value cannot itself throw. */
 export interface AckDecodingPayload {
   decodeAck?: (raw: Json) => Value;
@@ -185,7 +185,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
   /** The blobs each in-flight call produced mid-call (via `registerProducedBlob`), owned by the call's
    *  instance. At a successful completion the base adopts onto the run any of these the result did NOT
    *  ascend by value — the NARROW backstop for a direct mcp call decoded to a raw `json` tree (`T =
-   *  json.json`), where a produced blob's `$ref` rides as an inert STRING leaf, not a real ref, so the
+   *  json.json`), where a produced blob's `$katari_ref` rides as an inert STRING leaf, not a real ref, so the
    *  value-driven release never freed it and this call's drop would otherwise reclaim it in the same
    *  commit that delivered the result. A typed decode reconstructs a REAL ref, which ascends by value and
    *  needs no adoption. In-memory only: recovery is at-most-once, so an interrupted call fails and its
@@ -697,7 +697,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
           instance,
         );
         // A produced blob the result did NOT ascend by value (the narrow backstop: a direct mcp call
-        // decoded to a raw `json` tree, whose `$ref` is an inert string, not a real ref) would otherwise be
+        // decoded to a raw `json` tree, whose `$katari_ref` is an inert string, not a real ref) would otherwise be
         // reclaimed by this drop; adopt it onto the run so it survives to the caller — uniform with the
         // value-carried case (a typed decode's REAL ref), which `send` already released to in-transit.
         this.adoptDetachedProducedBlobs(delegation, instance, run);
@@ -741,7 +741,7 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
    *  re-tagging the payload as a nominal `data` in Katari). PROPOSED FIX: add a `decodeThrow?: (raw: Json) =>
    *  Value` seam to the call payload, exactly mirroring `AckDecodingPayload.decodeAck` — populated by the ffi
    *  reactor's `openPayload` from the external agent's declared throw generic — so this site coerces the raw
-   *  payload against `T` (reconstructing / tagging it) or raises a loud typed `decode_error` when its
+   *  payload against `T` (reconstructing / tagging it) or raises a loud typed `validation_error` when its
    *  constructor does not match, instead of `jsonToValue`. Deferred here to avoid an FFI-typing overhaul. */
   private escalateThrow(
     delegation: DelegationId,
@@ -946,9 +946,9 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
    *  delegateAck release has already moved the value-carried resources to in-transit (owner = null) for the
    *  caller to reown; a produced blob still owned by the ephemeral `call` instance is one the result carried
    *  only as an inert handle (a direct mcp call decoded to a raw `json` tree — `T = json.json` — where the
-   *  `$ref` is a string, not a real ref) — so it moves onto the long-lived `run`, readable until the run's
+   *  `$katari_ref` is a string, not a real ref) — so it moves onto the long-lived `run`, readable until the run's
    *  teardown reclaims it. Uniform across call shapes: a callTool / ffi result, and a TYPED direct call
-   *  whose `$ref` reconstructs a real ref, carry all their produced blobs by value, so this is a no-op there. */
+   *  whose `$katari_ref` reconstructs a real ref, carry all their produced blobs by value, so this is a no-op there. */
   private adoptDetachedProducedBlobs(
     delegation: DelegationId,
     call: InstanceId,

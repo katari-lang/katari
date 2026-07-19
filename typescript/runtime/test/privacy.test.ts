@@ -53,8 +53,8 @@ describe("isTainted", () => {
 describe("valueToJson redact policy", () => {
   test("redact is the default (fail-closed); reveal is the explicit opt-in for the real value", () => {
     // A caller that forgets to choose a policy must not leak a secret.
-    expect(valueToJson(secretString)).toEqual({ $redacted: true });
-    expect(valueToJson(secretString, "redact")).toEqual({ $redacted: true });
+    expect(valueToJson(secretString)).toEqual({ $katari_redacted: true });
+    expect(valueToJson(secretString, "redact")).toEqual({ $katari_redacted: true });
     expect(valueToJson(secretString, "reveal")).toBe("sk-123");
     // A public value is identical under either policy.
     expect(valueToJson(publicString)).toBe("hello");
@@ -67,7 +67,7 @@ describe("valueToJson redact policy", () => {
     };
     expect(valueToJson(record, "redact")).toEqual({
       name: "hello",
-      apiKey: { $redacted: true },
+      apiKey: { $katari_redacted: true },
     });
   });
 
@@ -76,6 +76,6 @@ describe("valueToJson redact policy", () => {
       kind: "array",
       elements: [publicString, { kind: "record", fields: { token: secretString } }],
     };
-    expect(valueToJson(value, "redact")).toEqual(["hello", { token: { $redacted: true } }]);
+    expect(valueToJson(value, "redact")).toEqual(["hello", { token: { $katari_redacted: true } }]);
   });
 });

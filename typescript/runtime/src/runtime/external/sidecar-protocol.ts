@@ -82,7 +82,7 @@ export function decodeSidecarMessage(line: string): SidecarMessage | null {
   switch (kind) {
     case "result":
       // Coerce a missing / `undefined` value to `null`: a sidecar that returned nothing must still decode to a
-      // valid `Value` downstream — `jsonToValue(undefined)` runs `"$ref" in undefined` and throws — rather
+      // valid `Value` downstream — `jsonToValue(undefined)` inspects the reserved keys of `undefined` and throws — rather
       // than poisoning the reactor on a dropped field.
       return { kind, delegation: id, value: (parsed.value ?? null) as Json };
     case "throw":

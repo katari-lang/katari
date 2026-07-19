@@ -5,7 +5,7 @@
 // tool's server-declared name):
 //   - `provide` (the `prelude.mcp.provide` external): a SCOPED provider (the `runST` shape). It lists the
 //     server ONCE (an internal transport `listTools`, keyed by a side `listing` delegation so its completion
-//     never settles the provide call), MINTS one agent value per tool — a `$tool` carrying the server
+//     never settles the provide call), MINTS one agent value per tool — a `$katari_tool` carrying the server
 //     signature and, as its context, the server DESCRIPTOR plus this provide's runtime SCOPE identity — and
 //     dispatches the CONTINUATION as an inner delegation receiving `{ value: toolbox }`. The whole call
 //     settles with the continuation's outcome (the serve/webhook `innerOutcomeAsCompletion` template). While
@@ -24,13 +24,13 @@
 //     same descriptor (a generated binding sits inside `with_tools`'s provide), else the typed `server_error`
 //     names the missing provide. `arguments` is now a plain value tree (`unknown`); it lowers to the literal
 //     Json document at dispatch through the SAME `http.json` slot contract — `valueToJson` then the http-body
-//     materialiser — so a `$`-key un-escapes back to literal, a `file` leaf base64s in place, and a
-//     blob-backed string materialises. The transport's reply is DECODED against `T` (`decodeDirectReply`): a
-//     typed `T` gives a real value — a produced blob's `$ref` reconstructs a REAL `file`, so the ordinary
-//     release / reown walk bounds its lifetime by value-reachability — a plain-text reply lands as the string
-//     value a string-shaped `T` wants, and a reply that does not conform is the typed `json.decode_error`
-//     throw the row declares; `T = unknown` (the codegen's no-`outputSchema` choice) keeps the raw document
-//     value with its inert `$ref` records (a later dynamic call into a `file`-typed position revives one).
+//     materialiser — so keys travel verbatim, a `file` leaf base64s in place, and a blob-backed string
+//     materialises. The transport's reply is DECODED against `T` (`decodeDirectReply`): a typed `T` gives a
+//     real value — a produced blob's `$katari_ref` reconstructs a REAL `file`, so the ordinary release / reown
+//     walk bounds its lifetime by value-reachability — a plain-text reply lands as the string value a
+//     string-shaped `T` wants, and a reply that does not conform is the typed `json.validation_error` throw
+//     the row declares; `T = unknown` (the codegen's no-`outputSchema` choice) keeps the raw external document
+//     (a coincidental `$katari_ref` in it stays an ordinary field).
 //   - `serve` (the `prelude.mcp.serve` external): the INBOUND direction, mirroring the webhook reactor —
 //     no transport at all. It mints an unguessable token (the public URL's capability), dispatches the
 //     SUBSCRIBER once as an inner delegation carrying that URL, and converts every MCP `tools/call` to
@@ -634,7 +634,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   }
 
   /** A direct call's transport completion, with a reply that does not conform to its `T` re-shaped into
-   *  the typed `json.decode_error` throw the `call` row declares. The `decodeAck` seam that BUILDS the
+   *  the typed `json.validation_error` throw the `call` row declares. The `decodeAck` seam that BUILDS the
    *  reply value cannot itself throw (it runs at the settle / resource-ascent boundary), so the mismatch
    *  is decided here — before the base settles — and turned into a throw completion. A callTool /
    *  recovered completion has no `T` to decode, and a non-`result` outcome (a throw / cancel) is already
@@ -655,7 +655,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       delegation: completion.delegation,
       outcome: {
         kind: "throw",
-        error: decodeError(`mcp.call: the reply does not conform to T — ${mismatch}`),
+        error: validationError(`mcp.call: the reply does not conform to T — ${mismatch}`),
       },
     };
   }
@@ -762,9 +762,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       if (call.tool === null) throw new Error("mcp.call: the tool name is missing");
       tool = await this.readString(call.tool);
       // Lower the argument value tree to its literal JSON document: `valueToJson` renders the wire form
-      // (escaping `$`-keys, a `file` becoming a `$ref` handle), which the http-body materialiser then
-      // turns into the SEND-boundary document — `$`-keys un-escaped back to literal, a `file` leaf base64
-      // in place, a blob-backed string materialised. The one shared slot contract with `http.json`.
+      // (a `file` becoming a `$katari_ref` handle), which the http-body materialiser then turns into the
+      // SEND-boundary document — a `file` leaf base64 in place, a blob-backed string materialised, keys
+      // verbatim. The one shared slot contract with `http.json`.
       argumentDocument =
         call.argumentsTree === null
           ? null
@@ -1060,15 +1060,15 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
 /** The domain error ctor every anticipated mcp transport failure throws (`prelude/mcp.ktr` declares it). */
 const SERVER_ERROR = "prelude.mcp.server_error";
 
-/** The domain error ctor a reply that does not conform to `T` throws — `prelude.json.decode_error` (the
- *  same "document does not fit T" error `json.parse_as` raises), which `prelude/mcp.ktr`'s `call` row
- *  carries so a wrapper propagates it. */
-const DECODE_ERROR = "prelude.json.decode_error";
+/** The domain error ctor a reply that does not conform to `T` throws — `prelude.json.validation_error` (the
+ *  same "value does not fit T" error `json.validate` raises), which `prelude/mcp.ktr`'s `call` row carries so
+ *  a wrapper propagates it. */
+const VALIDATION_ERROR = "prelude.json.validation_error";
 
-/** The wire form of a `prelude.json.decode_error` throw (decoded back into the data value at the reactor
+/** The wire form of a `prelude.json.validation_error` throw (decoded back into the data value at the reactor
  *  base's throw path), matching the transport's `server_error` / `auth_error` shaping. */
-function decodeError(message: string): Json {
-  return { $constructor: DECODE_ERROR, value: { message } };
+function validationError(message: string): Json {
+  return valueToJson(errorData(VALIDATION_ERROR, message), "reveal");
 }
 
 /** The result generic `T`'s schema, from a direct call's own instantiation (`mcp.call[url, T]` — `T` is
@@ -1082,9 +1082,9 @@ function directCallOutputSchema(generics: GenericSubstitution | undefined): JSON
 /** The transport payload one dispatch-shaped call rides as — shared by a fresh `openPayload` and a parked
  *  call's reload, so the ack-decoding seam cannot drift between the two. A `directCall` decodes its raw
  *  transport reply against its instantiated `T` (see `decodeDirectReply`): a typed `T` yields a real
- *  value — a `$ref` reconstructs a REAL `file`, whose lifetime the ordinary release / reown walk then
+ *  value — a `$katari_ref` reconstructs a REAL `file`, whose lifetime the ordinary release / reown walk then
  *  bounds by value-reachability — while `json.json` keeps the raw tree with its inert refs. The seam only
- *  BUILDS the value; a reply that does not conform is re-shaped into the typed `decode_error` throw in
+ *  BUILDS the value; a reply that does not conform is re-shaped into the typed `validation_error` throw in
  *  `complete`, so it never throws here. A `callTool` carries no `T` and runs the base wire decoder. */
 function transportPayloadOf(call: McpDispatchCall): Extract<McpPayload, { kind: "transport" }> {
   if (call.kind === "callTool") {
@@ -1099,16 +1099,14 @@ function transportPayloadOf(call: McpDispatchCall): Extract<McpPayload, { kind: 
 }
 
 /** Decode a direct call's transport reply against its instantiated `T`. For an UNCONSTRAINED `T` (`unknown`
- *  — the codegen's no-`outputSchema` choice) the reply is lifted LITERALLY and handed over as-is: a `$ref`
- *  stays an inert record inside the document, which a later dynamic call into a `file`-typed position
- *  revives. For a TYPED `T` the value WIRE form is reconstructed — a `$ref` becomes a REAL `file`, a
- *  `$constructor` object a data value, records / arrays / scalars ordinary values (so a plain-text reply
- *  lands as the string value a string-shaped `T` wants) — and validated against `T`. The `unknown` split is
- *  by the schema itself, not by a conform-first probe: a literal `{ $ref }` record now DOES conform to a
- *  `file` schema (unlike the old tagged tree), so a conform-first shortcut would wrongly keep it inert for a
- *  typed file `T`. `mismatch` names the offending path when the wire form does not conform (or cannot
- *  reconstruct); the caller turns a non-`null` `mismatch` into the typed `decode_error` throw, since the
- *  settle-time seam that reads `value` cannot itself throw. */
+ *  — the codegen's no-`outputSchema` choice) the reply is a RAW external document: it is lifted literally
+ *  (every object a record, no marker interpreted), so a coincidental `$ref` / `$defs` key an external server
+ *  emits stays an ordinary field. For a TYPED `T` the reply is read through the value codec — a `$katari_ref`
+ *  becomes a REAL `file`, a `$katari_constructor` object a data value, records / arrays / scalars ordinary
+ *  values (so a plain-text reply lands as the string value a string-shaped `T` wants) — and validated against
+ *  `T`. `mismatch` names the offending path when the value does not conform (or cannot be read); the caller
+ *  turns a non-`null` `mismatch` into the typed `validation_error` throw, since the settle-time seam that
+ *  reads `value` cannot itself throw. */
 function decodeDirectReply(
   raw: Json,
   schema: JSONSchema | undefined,
@@ -1121,8 +1119,8 @@ function decodeDirectReply(
   try {
     wire = jsonToValue(raw);
   } catch (cause) {
-    // A malformed wire object (a `$ref` whose id is not a string, a `$redacted` marker) cannot
-    // reconstruct — that failure IS the decode_error. Keep the tree as the (never-delivered) fallback so
+    // A malformed wire object (a `$katari_ref` whose id is not a string, a `$katari_redacted` marker) cannot
+    // reconstruct — that failure IS the validation_error. Keep the tree as the (never-delivered) fallback so
     // the seam stays total, and report the reconstruction message.
     return { value: tree, mismatch: messageOf(cause) };
   }
@@ -1191,9 +1189,9 @@ function mintToolbox(listing: Json, descriptor: Value, scope: string, snapshot: 
 }
 
 /** The transport's `{ tools: [...] }` listing, read straight from the completion's bare Json — the server
- *  schemas ride to `jsonToSchema` LITERALLY (no `jsonToValue` -> `valueToJson` round-trip, which would
- *  double a single-`$` keyword like `$defs` into `$$defs`). A malformed shape is transport drift, not a
- *  program error — fail loudly (the substrate surfaces it). */
+ *  schemas ride to `jsonToSchema` LITERALLY (a JSON-Schema keyword like `$defs` is part of the schema, not a
+ *  value to route through the value codec). A malformed shape is transport drift, not a program error — fail
+ *  loudly (the substrate surfaces it). */
 function listingsOf(listing: Json): McpToolListing[] {
   if (listing === null || typeof listing !== "object" || Array.isArray(listing)) {
     throw new Error("mcp: the tools completion did not carry a { tools: [...] } listing");

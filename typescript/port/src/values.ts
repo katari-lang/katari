@@ -1,28 +1,25 @@
 // The value layer a handler sees: the ergonomic decoding of Katari's wire JSON, and its exact inverse for
 // handler results. A handler's argument is decoded ONCE at dispatch — blob-backed contents become
-// `KatariFile` / `KatariString` (downloadable handles, so no user code ever touches a raw `$ref`), data
-// values become `KatariData`, callable references become `KatariAgent` (callable back through the runtime),
-// record keys are unescaped — and the handler's declared TypeScript type is *assumed* to match, exactly like
-// the katari-side call site was checked to. No runtime validation happens here.
+// `KatariFile` / `KatariString` (downloadable handles, so no user code ever touches a raw `$katari_ref`),
+// data values become `KatariData`, callable references become `KatariAgent` (callable back through the
+// runtime) — and the handler's declared TypeScript type is *assumed* to match, exactly like the katari-side
+// call site was checked to. No runtime validation happens here.
 //
-// The wire conventions — the reserved `$` discriminator keys, each variant's exact shape, and `$`-key
-// escaping — are defined once in `@katari-lang/types` (`wire.ts`, imported below) and shared with the
-// runtime codec, so this layer cannot drift from what the runtime emits. The port-specific notes on top:
-// a bare record's own `$`-keys travel escaped (leading `$` doubled) — this layer unescapes on decode and
-// re-escapes on encode, so handler code sees natural keys — and a file handle is identity only, so
-// `KatariFile`'s metadata accessors download on demand instead of reading wire fields.
+// The wire conventions — the reserved `$katari_` discriminator keys and each variant's exact shape — are
+// defined once in `@katari-lang/types` (`wire.ts`, imported below) and shared with the runtime codec, so
+// this layer cannot drift from what the runtime emits. A program never authors a `$katari_`-prefixed key, so
+// a bare record's keys travel verbatim; a file handle is identity only, so `KatariFile`'s metadata accessors
+// download on demand instead of reading wire fields.
 
 import {
   AGENT_KEY,
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
-  escapeRecordKey,
   FILE_KEY,
   type Json,
   REDACTED_KEY,
   SEMANTIC_KIND_KEY,
   TOOL_KEY,
-  unescapeRecordKey,
   VALUE_KEY,
 } from "@katari-lang/types";
 import type { BlobDownload, FileHandle } from "./blob.js";
@@ -41,7 +38,7 @@ export type KatariValue =
   | KatariData<unknown>
   | KatariAgent;
 
-/** A decoded bare record (keys already unescaped). */
+/** A decoded bare record (keys verbatim — a program never authors a `$katari_` key). */
 export interface KatariRecord {
   [key: string]: KatariValue;
 }
@@ -59,7 +56,7 @@ export function text(value: KatariText): Promise<string> {
  *  signal) and the inner agent-call channel (for `KatariAgent.call`). */
 export interface ValueBinding {
   download(ref: string): Promise<BlobDownload>;
-  /** Call a callable wire value (`$agent` / `$closure`, passed through verbatim) with an argument. */
+  /** Call a callable wire value (`$katari_agent` / `$katari_closure`, passed through verbatim) with an argument. */
   callCallable(target: Json, argument: unknown): Promise<KatariValue>;
 }
 
@@ -104,7 +101,7 @@ export class KatariFile {
   }
 
   private async download(): Promise<BlobDownload> {
-    this.downloaded ??= await this.binding.download(this.fileHandle.$ref);
+    this.downloaded ??= await this.binding.download(this.fileHandle.$katari_ref);
     return this.downloaded;
   }
 }
@@ -122,7 +119,7 @@ export class KatariString {
   /** The string's content, downloaded from the runtime on first use (cached for the call's lifetime). */
   async text(): Promise<string> {
     this.cached ??= new TextDecoder().decode(
-      (await this.binding.download(this.fileHandle.$ref)).bytes,
+      (await this.binding.download(this.fileHandle.$katari_ref)).bytes,
     );
     return this.cached;
   }
@@ -220,7 +217,7 @@ export function decodeWireValue(json: Json, binding: ValueBinding): KatariValue 
 function decodeRecord(json: { [key: string]: Json }, binding: ValueBinding): KatariRecord {
   const record: KatariRecord = {};
   for (const [key, child] of Object.entries(json)) {
-    record[unescapeRecordKey(key)] = decodeWireValue(child, binding);
+    record[key] = decodeWireValue(child, binding);
   }
   return record;
 }
@@ -275,7 +272,7 @@ function encode(value: unknown, seen: Set<object>): Json {
     const out: { [key: string]: Json } = {};
     for (const [key, child] of Object.entries(value)) {
       if (child === undefined) continue; // dropped, like JSON.stringify
-      out[escapeRecordKey(key)] = encode(child, seen);
+      out[key] = encode(child, seen);
     }
     return out;
   } finally {

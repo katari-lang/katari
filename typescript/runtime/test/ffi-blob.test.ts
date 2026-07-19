@@ -69,7 +69,7 @@ describe("FFI mid-call blob production", () => {
       delegation: DELEGATION,
       outcome: {
         kind: "result",
-        value: { $ref: BLOB, semanticKind: "file", size: 3, hash: "hash" },
+        value: { $katari_ref: BLOB, $katari_semantic_kind: "file", size: 3, hash: "hash" },
       },
     });
     expect(store.blobs[BLOB]?.owner).toBeNull();

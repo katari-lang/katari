@@ -4,68 +4,61 @@
 // `case array(a)` / `case string(s)`) and the total readers below, and builds one with ordinary record /
 // array literals. Referenced by the default-import qualifier: `json.parse(...)`, `json.field(...)`.
 //
-// The naming law is the spine of this module: EVERY VERB KEEPS KEYS VERBATIM. `parse`, `parse_as` and
-// `stringify` all move object keys exactly as written — a `$`-prefixed key (`$ref`, `$constructor`) is an
-// ordinary key, never a wire discriminator, and no key is ever escaped. There is no separate "wire word":
-// `stringify` is the single text writer, and it is TOTAL over every value.
+// A value renders to / from bare JSON through ONE codec, shared with the FFI boundary. Every reserved wire
+// key lives in the `$katari_` namespace (a `file` is `{ $katari_ref: id }`, a `data` value is
+// `{ $katari_constructor: name, $katari_value: { ...fields } }`, an agent / closure / tool its own handle
+// object), which a program never authors — so a bare record needs no escaping, and the reserved keys are
+// disjoint from any document a program writes.
 //
-//   - `parse : string -> unknown`      text -> the document value (traverse it with shape filters)
-//   - `parse_as[T] : string -> T`      literal parse + validation against T's schema (the typed text boundary)
-//   - `stringify[T] : T -> string`     ANY value -> its (compact) JSON text, keys verbatim
+//   - `parse : string -> unknown`      text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
+//   - `validate[T] : unknown -> T`     check a value against T's schema (returns it unchanged, or throws)
+//   - `parse_as[T] : string -> T`      `parse` then `validate[T]` (the typed text boundary)
+//   - `stringify[T] : T -> string`     ANY value -> its (compact, canonical) JSON text
 //
-// `stringify` is total and CANONICAL — one value has exactly one text:
-//   - a document (record / array / scalar) is written key-for-key, so `stringify(parse(s)) == s` (an
-//     IDENTITY, modulo whitespace / number normalisation) and `parse(stringify(d)) == d` for a document d;
-//   - a `file` becomes its `{ "$ref": id, "semanticKind": … }` handle object;
-//   - a `data` value nests its fields under `value`: `{ "$constructor": name, "value": { …fields } }`;
-//   - an agent / closure / tool becomes its `$agent` / `$closure` / `$tool` handle object.
-// Keys are shown VERBATIM either way (no `$$` escaping — that device lives only inside the persistence
-// codec's bytes, never at this surface), so a record with a literal `$ref` key is indistinguishable in the
-// text from a `file` handle. That ambiguity is ACCEPTED, because `stringify` is also the READ CHANNEL that
-// lets an AI SEE a handle / data value (an error render, a handle embed, a tool result shown back to a
-// model). Whether an external API understands the `$`-tagged form of a handle is the CALLER's concern:
-// `stringify` emits the canonical form, it does not promise the far side reads it back.
+// `parse` and `stringify` are inverses through that codec: a document (record / array / scalar) round-trips
+// verbatim, so `stringify(parse(s)) == s` (modulo whitespace / number normalisation). `parse` interprets the
+// `$katari_` markers — external JSON never carries such a key, so a real document is unaffected — and a
+// `file` / `data` / callable value likewise stringifies to its handle object. `stringify` is TOTAL and
+// CANONICAL (one value, one text); it is also the READ CHANNEL that lets an AI SEE a handle / data value (an
+// error render, a handle embed, a tool result shown back to a model). A secret operand taints the whole
+// result (the monotonic information-flow rule).
 //
-// There is no `decode` and no `encode`. A document is ALREADY a value, so reading one needs no wire step:
-// a plain value (record / array / scalar / file) drops straight into a document tree, and a document read
-// from the outside becomes a value verbatim. The one place a wire form must be REVIVED — an AI replaying a
-// `{ "$ref": ... }` handle into a tool argument that expects a `file` — is the delegation boundary's job:
-// `reflection.call_agent` validates the argument against the callee's schema, and revives a `$ref` into a
-// real `file` exactly where the schema expects one (schema-directed, never a blind lift).
-//
-// Errors: malformed text throws `parse_error` (`parse` / `parse_as`); a document that does not conform to
-// the requested type's schema throws `decode_error` (`parse_as`). `stringify` is TOTAL — it never throws.
+// Errors: malformed text throws `parse_error` (`parse` / `parse_as`); a value that does not conform to the
+// requested type's schema throws `validation_error` (`validate` / `parse_as`), naming the offending path.
+// `stringify` is TOTAL — it never throws.
 
 @"A JSON document failed to parse: the text is not JSON. Thrown by `parse` / `parse_as`."
 data parse_error(message: string)
 
-@"A document does not conform to the requested type's schema. Thrown by `parse_as`; `message` names the
-offending path."
-data decode_error(message: string)
+@"A value does not conform to the requested type's schema. Thrown by `validate` / `parse_as`; `message`
+names the offending path."
+data validation_error(message: string)
 
-@"Parse JSON text into its document value — a record / array / string / integer / number / boolean / null,
-keys kept exactly as written (`$` is not interpreted). Traverse it with shape filters (`case record(r)`)
-and the readers below, or pin its shape with `parse_as[T]`. A number without a fractional part parses as
-`integer`. Malformed text throws `parse_error`."
+@"Parse JSON text into the value it denotes — a record / array / string / integer / number / boolean / null,
+or a `file` where the text carries a `$katari_ref` handle. Traverse a document with shape filters
+(`case record(r)`) and the readers below, or pin its shape with `parse_as[T]`. A number without a fractional
+part parses as `integer`. Malformed text throws `parse_error`."
 primitive agent parse(@"The text of one complete JSON document." text: string) -> unknown with prelude.throw[parse_error]
 
-@"Parse JSON text directly as a T, validated against T's schema — the typed text boundary, LITERAL like
-`parse` (keys kept as written, `$` not interpreted). Instantiate T explicitly (it appears only in the
-result, so it cannot be inferred). Malformed text throws `parse_error`; a schema mismatch throws
-`decode_error` naming the offending path. A `$ref` an AI replayed is not revived here (this is literal) —
-that happens at the delegation boundary, where the target's schema says a `file` is expected."
-primitive agent parse_as[T](@"The text of one complete JSON document." text: string) -> T with prelude.throw[parse_error | decode_error]
+@"Check @value@ against T's schema and return it unchanged, or throw `validation_error` naming the offending
+path. A pure check — it never rewrites the value. Instantiate T explicitly (it appears only in the result,
+so it cannot be inferred)."
+primitive agent validate[T](@"The value to check against T." value: unknown) -> T with prelude.throw[validation_error]
 
-@"Render ANY value as its (compact) JSON text, keys kept exactly as written — TOTAL and CANONICAL (one
-value, one text). A document value (record / array / string / integer / number / boolean / null)
-round-trips verbatim, so `stringify(parse(s))` is `s` up to whitespace; a `file` becomes its `$ref` handle
-object, a `data` value nests its fields under `value` (`{ $constructor: name, value: { ...fields } }`), and
-an agent / closure / tool its handle object. Nothing is escaped — a `$`-prefixed record key shows as itself,
-so a literal `$ref` key reads the same as a real handle. That ambiguity is ACCEPTED, because `stringify` is
-also the READ CHANNEL for showing an AI a handle / data value (an error render, a handle embed, a tool
-result rendered back to a model). Whether an external API understands the `$`-tagged form is the CALLER's
-concern — `stringify` emits the canonical form, it does not promise the far side reads it. A secret operand
-taints the whole result (the monotonic information-flow rule)."
+@"Parse JSON text directly as a T — `parse` then `validate[T]`, the typed text boundary. Instantiate T
+explicitly (it appears only in the result, so it cannot be inferred). Malformed text throws `parse_error`;
+a value that does not conform to T's schema throws `validation_error` naming the offending path."
+agent parse_as[T](@"The text of one complete JSON document." text: string) -> T with prelude.throw[parse_error | validation_error] {
+  validate[T](value = parse(text = text))
+}
+
+@"Render ANY value as its (compact) JSON text — TOTAL and CANONICAL (one value, one text). A document value
+(record / array / string / integer / number / boolean / null) round-trips verbatim, so `stringify(parse(s))`
+is `s` up to whitespace; a `file` becomes its `$katari_ref` handle object, a `data` value nests its fields
+under `$katari_value` (`{ $katari_constructor: name, $katari_value: { ...fields } }`), and an agent / closure
+/ tool its handle object. `stringify` is the READ CHANNEL for showing an AI a handle / data value (an error
+render, a handle embed, a tool result rendered back to a model). A secret operand taints the whole result
+(the monotonic information-flow rule)."
 primitive agent stringify[T](value: T) -> string
 
 // The total readers — plain Katari over `unknown`, for picking values out of a document of unknown or

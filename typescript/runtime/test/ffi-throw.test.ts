@@ -186,7 +186,10 @@ describe("typed throw across the FFI boundary", () => {
   test("a handler's FfiThrow is caught by a katari-side `prelude.throw` handler", async () => {
     const result = run("main", {
       compute: () => {
-        throw new FfiThrow({ $constructor: "main.my_error", value: { message: "ffi boom" } });
+        throw new FfiThrow({
+          $katari_constructor: "main.my_error",
+          $katari_value: { message: "ffi boom" },
+        });
       },
     });
     await expect(result).resolves.toEqual({ kind: "integer", value: -1 });
@@ -195,7 +198,10 @@ describe("typed throw across the FFI boundary", () => {
   test("an uncaught FfiThrow fails the run with the serialized payload (not a panic)", async () => {
     const failure = run("plain", {
       compute: () => {
-        throw new FfiThrow({ $constructor: "main.my_error", value: { message: "ffi boom" } });
+        throw new FfiThrow({
+          $katari_constructor: "main.my_error",
+          $katari_value: { message: "ffi boom" },
+        });
       },
     });
     await expect(failure).rejects.toThrow(/throw: .*ffi boom/);

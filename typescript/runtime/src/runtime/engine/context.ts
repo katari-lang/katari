@@ -49,7 +49,7 @@ export interface PrimContext {
    *  (deleted, or a made-up id). */
   readonly blobEntryOf: (blobId: BlobId) => BlobEntry | undefined;
   /** The running instance's ambient generic substitution (the call site stamped it on the delegate) —
-   *  how a schema-directed prim (`json.decode[T]` / `json.parse_as[T]`) sees its own instantiation. */
+   *  how a schema-directed prim (`json.validate[T]`) sees its own instantiation. */
   readonly generics?: GenericSubstitution;
 }
 

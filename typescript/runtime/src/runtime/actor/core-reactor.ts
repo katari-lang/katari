@@ -161,7 +161,7 @@ export class CoreReactor extends Reactor {
     const argument = event.argument;
     const generics = event.generics;
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
-    // agent — a stale `$agent` reference in a sub-call) is a program failure, so fail it to the caller as a
+    // agent — a stale `$katari_agent` reference in a sub-call) is a program failure, so fail it to the caller as a
     // panic. A *transient* infra failure (a `TransientError` — an IR DB read blip) is NOT a program failure:
     // rethrow it so the substrate retries the delegate from durable state (failing it would wrongly fail the
     // run forever). The panic is an escalation like any other, so it opens a durable raiser-owned row — but

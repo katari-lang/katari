@@ -572,7 +572,7 @@ describe("the mcp serve wire contract (real SDK client, stateless streamable htt
       // A secret in a result redacts at this user-facing boundary — the material never crosses.
       const secret = await client.callTool({ name: "secret_reply", arguments: {} });
       expect(JSON.stringify(secret)).not.toContain("sk-123");
-      expect(secret.structuredContent).toEqual({ $redacted: true });
+      expect(secret.structuredContent).toEqual({ $katari_redacted: true });
     } finally {
       await client.close();
     }

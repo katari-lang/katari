@@ -50,6 +50,7 @@ import Data.Vector qualified as Vector
 import GHC.List (List)
 import Katari.Cli.Output (OutputContext (..), styled)
 import Katari.Data.JSONSchema (AdditionalProperties (..), DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
+import Katari.Schema (constructorDiscriminatorKey, valueNestingKey)
 import System.Console.ANSI
   ( Color (..),
     ColorIntensity (..),
@@ -482,13 +483,13 @@ renderSchemaBrief = \case
   SchemaGeneric _ -> "any json (generic)"
   SchemaDescribed described -> renderSchemaBrief described.schema
 
--- | If an object schema is a @data@ value's wire schema — a @$constructor@ const over fields nested
--- under @value@ (see "Katari.Schema") — a brief naming the constructor and its fields, so a union
--- picker distinguishes the variants (otherwise every @data@ arm reads @record {$constructor, value}@).
+-- | If an object schema is a @data@ value's wire schema — a @$katari_constructor@ const over fields nested
+-- under @$katari_value@ (see "Katari.Schema") — a brief naming the constructor and its fields, so a union
+-- picker distinguishes the variants (otherwise every @data@ arm reads @record {…}@).
 dataConstructorBrief :: ObjectSchema -> Maybe Text
-dataConstructorBrief objectSchema = case lookup "$constructor" objectSchema.properties of
+dataConstructorBrief objectSchema = case lookup constructorDiscriminatorKey objectSchema.properties of
   Just (SchemaConst (String name)) ->
-    let fields = case lookup "value" objectSchema.properties of
+    let fields = case lookup valueNestingKey objectSchema.properties of
           Just (SchemaObject valueObject) -> [fieldName | (fieldName, _) <- valueObject.properties]
           _ -> []
      in Just (if null fields then name else name <> " {" <> Text.intercalate ", " fields <> "}")

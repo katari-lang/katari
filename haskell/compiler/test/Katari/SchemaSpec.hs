@@ -73,21 +73,21 @@ spec = do
       toJSONSchema noData (SemanticTypeAttribute SemanticTypeString SemanticAttributePrivate)
         `shouldBe` SchemaString
 
-    it "maps a file to a slim $ref handle (identity only — a bare $ref is complete)" $
+    it "maps a file to a slim $katari_ref handle (identity only — a bare $katari_ref is complete)" $
       toJSONSchema noData SemanticTypeFile
         `shouldBe` SchemaObject
           ObjectSchema
-            { properties = [("$ref", SchemaString), ("semanticKind", SchemaString)],
-              required = ["$ref"],
+            { properties = [("$katari_ref", SchemaString), ("$katari_semantic_kind", SchemaString)],
+              required = ["$katari_ref"],
               additionalProperties = AdditionalPropertiesBoolean True
             }
 
-    it "maps an agent to a $agent reference object" $
+    it "maps an agent to a $katari_agent reference object" $
       toJSONSchema noData (SemanticTypeAgent SemanticTypeString SemanticTypeString SemanticEffectPure)
         `shouldBe` SchemaObject
           ObjectSchema
-            { properties = [("$agent", SchemaAny)],
-              required = ["$agent"],
+            { properties = [("$katari_agent", SchemaAny)],
+              required = ["$katari_agent"],
               additionalProperties = AdditionalPropertiesBoolean True
             }
 
@@ -96,9 +96,9 @@ spec = do
         `shouldBe` SchemaGeneric genericT
 
   describe "toJSONSchema with data definitions" $ do
-    it "inline-expands a data type as a $constructor tag over its fields nested under `value`" $
+    it "inline-expands a data type as a $katari_constructor tag over its fields nested under `$katari_value`" $
       -- The @box@'s one field is itself named @value@, so the nesting reads
-      -- @{ $constructor: "test.box", value: { value: <integer> } }@.
+      -- @{ $katari_constructor: "test.box", $katari_value: { value: <integer> } }@.
       toJSONSchema boxDefinitions (SemanticTypeData boxName (Map.singleton "T" (SemanticGenericArgumentType SemanticTypeInteger)))
         `shouldBe` dataSchema "test.box" [("value", SchemaInteger)] ["value"]
 
@@ -139,15 +139,15 @@ spec = do
             "additionalProperties" .= object ["type" .= ("string" :: Text)]
           ]
 
--- | The nested wire schema of a @data@ value: a @$constructor@ const over the fields nested (as an open
--- object) under @value@, with the outer wrapper closed to exactly those two keys.
+-- | The nested wire schema of a @data@ value: a @$katari_constructor@ const over the fields nested (as an open
+-- object) under @$katari_value@, with the outer wrapper closed to exactly those two keys.
 dataSchema :: Text -> List (Text, JSONSchema) -> List Text -> JSONSchema
 dataSchema constructorName fields requiredFields =
   SchemaObject
     ObjectSchema
       { properties =
-          [ ("$constructor", SchemaConst (toJSON constructorName)),
-            ( "value",
+          [ ("$katari_constructor", SchemaConst (toJSON constructorName)),
+            ( "$katari_value",
               SchemaObject
                 ObjectSchema
                   { properties = fields,
@@ -156,7 +156,7 @@ dataSchema constructorName fields requiredFields =
                   }
             )
           ],
-        required = ["$constructor", "value"],
+        required = ["$katari_constructor", "$katari_value"],
         additionalProperties = AdditionalPropertiesBoolean False
       }
 

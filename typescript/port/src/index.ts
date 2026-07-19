@@ -8,7 +8,7 @@
 // A handler is written against its *declared* types, PureScript-style: the katari compiler already checked
 // the call site against the external agent's schema, so the argument is assumed to match `Argument` — no
 // defensive re-validation. The argument arrives decoded (`values.ts`): blob-backed contents are
-// `KatariFile` / `KatariString` (no raw `$ref` handling), data values are `KatariData`, received callables
+// `KatariFile` / `KatariString` (no raw `$katari_ref` handling), data values are `KatariData`, received callables
 // are `KatariAgent`. The context is the way back into the runtime: `context.call(...)` runs another agent
 // (core by default, or another reactor), `context.file(...)` produces a file value.
 

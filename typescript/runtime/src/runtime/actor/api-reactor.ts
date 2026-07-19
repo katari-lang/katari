@@ -488,7 +488,7 @@ function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate"
     if (payload === undefined) return "throw: (no payload)";
     // The run's error message is neither sealed at rest nor redacted at the wire, so serialize through
     // the redacting codec: a tainted payload (itself, or through its container record) degrades to
-    // `$redacted` subtrees rather than leaking — the same fail-closed boundary as run results.
+    // `$katari_redacted` subtrees rather than leaking — the same fail-closed boundary as run results.
     const effective = argument?.private === true ? markPrivate(payload) : payload;
     return `throw: ${JSON.stringify(valueToJson(effective, "redact"))}`;
   }

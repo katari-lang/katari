@@ -30,7 +30,7 @@
 -- gets that precise type; a parameter with any unmapped part gets @unknown@ (partial mapping unlock is a
 -- later wave). The OUTPUT side is symmetric: @mcp.call[connection, T]@ decodes the reply against @T@ in the
 -- RUNTIME. A tool whose @outputSchema@ maps completely instantiates @T@ to that type (decoded,
--- @json.decode_error@ on a mismatch); any other tool instantiates @T@ to @unknown@ (the raw reply as a
+-- @json.validation_error@ on a mismatch); any other tool instantiates @T@ to @unknown@ (the raw reply as a
 -- document value), so the wrapper is one @mcp.call[...]@ call either way.
 --
 -- The body uses ONE uniform construction shape: the arguments object is folded field by field over
@@ -400,7 +400,7 @@ headerLines context =
     "// The mapping only chooses the surface TYPE — the argument value is inserted into the arguments tree",
     "// as-is either way, since a value is already a document (no `json.encode` wire step). The output side",
     "// is symmetric: `mcp.call[connection, T]` decodes the reply against `T` in the runtime, so a",
-    "// fully-mapped outputSchema instantiates `T` to its type (decoded, `json.decode_error` on a mismatch)",
+    "// fully-mapped outputSchema instantiates `T` to its type (decoded, `json.validation_error` on a mismatch)",
     "// and any other tool instantiates `T` to `unknown` (the raw reply as a document value)."
   ]
 
@@ -574,15 +574,15 @@ outputTypeText output = case output of
 
 -- | The tool's effect row: @io@ (an external call), the module-local @connection@ scope marker the call
 -- is gated by, the ambient @credentials@ request the tool reads for its auth, and the three typed throws
--- `mcp.call` itself declares — @server_error@ / @auth_error@ and @json.decode_error@ (the runtime raises
+-- `mcp.call` itself declares — @server_error@ / @auth_error@ and @json.validation_error@ (the runtime raises
 -- the last when a reply does not conform to the decode target). It is UNIFORM across both output plans:
--- even the @unknown@ plan calls the same @mcp.call[...]@, whose row carries @decode_error@, so the tool
+-- even the @unknown@ plan calls the same @mcp.call[...]@, whose row carries @json.validation_error@, so the tool
 -- must carry it too (it is never actually raised for @unknown@, which keeps the raw document). The
 -- @connection@ marker ties the call to the enclosing @provide@; @credentials@ ties it to @connect@'s
 -- handler.
 effectRow :: Text
 effectRow =
-  "io | " <> scopeMarker <> " | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.decode_error]"
+  "io | " <> scopeMarker <> " | credentials | prelude.throw[mcp.server_error | mcp.auth_error | json.validation_error]"
 
 -- | Escape text into a Katari string \/ doc-annotation literal: backslash and double quote escape,
 -- newlines become the @\\n@ escape so every generated literal stays on one line, and the other

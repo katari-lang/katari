@@ -58,7 +58,7 @@ import { jsonToValue, valueToJson } from "./value/codec.js";
 import type { Value } from "./value/types.js";
 
 /** Decode client-supplied `Json` (a run argument, an escalation answer) into an engine `Value`, mapping a
- *  malformed-input decode failure — a reserved `$`-key, a non-string `$constructor` tag, an undecodable
+ *  malformed-input decode failure — a reserved `$katari_` key, a non-string `$katari_constructor` tag, an undecodable
  *  file / agent / closure handle — to a 400 rather than letting `jsonToValue`'s plain `Error` surface as a
  *  500. These acceptance surfaces are the only unchecked entries for client `Json`, so the decode guard
  *  lives here, once. */

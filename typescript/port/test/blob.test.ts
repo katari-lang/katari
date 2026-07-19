@@ -29,7 +29,7 @@ describe("downloadBlob (blob side channel)", () => {
       return Promise.resolve(new Response(bytes));
     });
 
-    const fromHandle = await downloadBlob({ $ref: "blob-1" });
+    const fromHandle = await downloadBlob({ $katari_ref: "blob-1" });
     const fromId = await downloadBlob("blob-2");
 
     expect(Array.from(fromHandle.bytes)).toEqual([1, 2, 3]);
@@ -118,7 +118,7 @@ describe("uploadBlob (blob side channel)", () => {
     const handle = await uploadBlob("deleg-1", bytes, { contentType: "image/png" });
 
     // The slim handle: identity only (the metadata just registered lives on the blob's runtime row).
-    expect(handle).toEqual({ $ref: "blob-9", semanticKind: "file" });
+    expect(handle).toEqual({ $katari_ref: "blob-9", $katari_semantic_kind: "file" });
     expect(seen).toHaveLength(1);
     expect(seen[0]?.url).toBe("http://127.0.0.1:9999/projects/proj-1/ffi/deleg-1/blobs");
     expect(seen[0]?.method).toBe("POST");

@@ -143,7 +143,7 @@ export class FfiThrow extends Error {
 export interface FfiHandlerContext {
   /** Call an agent by NAME; `reactor` defaults to `core` (`ffi` / `http` for a call reactor). */
   call(agent: string, argument?: Json | null, options?: { reactor?: string }): Promise<Json>;
-  /** Call a first-class callable VALUE the handler received (its `$agent` / `$closure` / `$tool` wire
+  /** Call a first-class callable VALUE the handler received (its `$katari_agent` / `$katari_closure` / `$katari_tool` wire
    *  JSON) — the in-process analogue of the port's `KatariAgent.call`. The runtime resolves it to a
    *  target and dispatches on `core`. */
   callValue(callable: Json, argument?: Json | null): Promise<Json>;

@@ -1,9 +1,11 @@
 // The stdlib sub-module prims (`prelude.json.*`, `prelude.record.*`, `prelude.array.*`,
 // `prelude.string.*`) and `prelude.get_metadata`, exercised directly through the registry (no actor).
-// The json prims all keep keys VERBATIM (parse / parse_as / stringify, `$` uninterpreted). `stringify` is
-// TOTAL: a document round-trips key-for-key (`stringify(parse(s)) == s`), and a non-document value renders
-// its canonical wire form (nested `$constructor`, `$agent` / `$closure` references carrying their snapshot,
-// `$ref` file handles).
+// `parse` reads text through the value codec (a `$katari_ref` becomes a file; a document with no reserved
+// key round-trips verbatim). `stringify` is TOTAL: a document round-trips key-for-key
+// (`stringify(parse(s)) == s`), and a non-document value renders its canonical wire form (a data value nests
+// under `$katari_value`, an agent / closure reference carries its snapshot, a file is a `$katari_ref`
+// handle). `validate[T]` checks a value against T's schema and returns it unchanged, or throws
+// `validation_error`.
 
 import {
   createAgentName,
@@ -14,7 +16,7 @@ import {
 } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import type { PrimContext } from "../src/runtime/engine/context.js";
-import { literalWrite } from "../src/runtime/engine/json-value.js";
+import { valueToJson } from "../src/runtime/value/codec.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
 import type { BlobId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
@@ -36,7 +38,7 @@ function contextWith(ir: SnapshotRegistry = new SnapshotRegistry()): PrimContext
   };
 }
 
-/** A context whose delegate carried a `[T]` instantiation (what a call site stamps for `parse_as[T]`). */
+/** A context whose delegate carried a `[T]` instantiation (what a call site stamps for `validate[T]`). */
 function contextWithT(schema: JSONSchema): PrimContext {
   return { ...contextWith(), generics: { T: { kind: "type", schema } } };
 }
@@ -66,12 +68,9 @@ async function expectThrows(promise: Promise<Value>, ctor: string, pattern: RegE
   }
 }
 
-/** Round-trip helper: a document value flattened back to bare JSON (the literal write behind `stringify`). */
+/** Flatten a schema / requests metadata value (a plain document value) back to bare JSON for comparison. */
 async function asJson(value: Value): Promise<Json> {
-  return literalWrite(value, async (inner) => {
-    if (inner.kind !== "string") throw new Error(`expected an inline string, got ${inner.kind}`);
-    return inner.value;
-  });
+  return valueToJson(value, "reveal");
 }
 
 function str(value: string): Value {
@@ -111,11 +110,20 @@ describe("prelude.json", () => {
     expect(parsed.fields.c).toEqual(int(1));
   });
 
-  test("parse is LITERAL: a `$ref` / `$constructor` key stays an ordinary field, never interpreted", async () => {
-    const parsed = await run("prelude.json.parse", {
+  test("parse interprets a `$katari_ref` marker into a file; a non-reserved `$` key stays a field", async () => {
+    const withMarker = await run("prelude.json.parse", {
+      text: str('{"doc":{"$katari_ref":"blob-abc"}}'),
+    });
+    expect(withMarker).toEqual({
+      kind: "record",
+      fields: { doc: { kind: "ref", semanticKind: "file", blobId: "blob-abc" } },
+    });
+    // A `$`-prefixed key outside the reserved `$katari_` namespace is an ordinary field (external JSON's
+    // `$ref` / `$constructor` never carry katari meaning).
+    const literal = await run("prelude.json.parse", {
       text: str('{"$ref":"#/defs/x","$constructor":"main.box"}'),
     });
-    expect(parsed).toEqual({
+    expect(literal).toEqual({
       kind: "record",
       fields: { $ref: str("#/defs/x"), $constructor: str("main.box") },
     });
@@ -135,7 +143,7 @@ describe("prelude.json", () => {
     expect(text).toEqual(str('{"a":[1,2],"b":"x","$ref":"y"}'));
   });
 
-  test("stringify is TOTAL: a data value nests under `value`, a file becomes its `$ref` handle", async () => {
+  test("stringify is TOTAL: a data value nests under `$katari_value`, a file becomes its `$katari_ref` handle", async () => {
     const data: Value = {
       kind: "record",
       fields: { n: int(3) },
@@ -143,12 +151,12 @@ describe("prelude.json", () => {
     };
     const dataText = await run("prelude.json.stringify", { value: data });
     if (dataText.kind !== "string") throw new Error("expected a string");
-    expect(JSON.parse(dataText.value)).toEqual({ $constructor: "main.box", value: { n: 3 } });
+    expect(JSON.parse(dataText.value)).toEqual({ $katari_constructor: "main.box", $katari_value: { n: 3 } });
 
     const file: Value = { kind: "ref", semanticKind: "file", blobId: "blob-x" as BlobId };
     const fileText = await run("prelude.json.stringify", { value: file });
     if (fileText.kind !== "string") throw new Error("expected a string");
-    expect(JSON.parse(fileText.value)).toEqual({ $ref: "blob-x", semanticKind: "file" });
+    expect(JSON.parse(fileText.value)).toEqual({ $katari_ref: "blob-x", $katari_semantic_kind: "file" });
   });
 
   const POINT: JSONSchema = {
@@ -158,35 +166,27 @@ describe("prelude.json", () => {
     additionalProperties: true,
   };
 
-  test("parse_as[T] is LITERAL parse + validation; a mismatch throws `decode_error`", async () => {
+  test("validate[T] returns a conforming value unchanged and throws `validation_error` on a mismatch", async () => {
+    const point: Value = { kind: "record", fields: { x: int(1), y: int(2) } };
     await expect(
-      run("prelude.json.parse_as", { text: str('{"x":1,"y":2}') }, contextWithT(POINT)),
-    ).resolves.toEqual({ kind: "record", fields: { x: int(1), y: int(2) } });
+      run("prelude.json.validate", { value: point }, contextWithT(POINT)),
+    ).resolves.toEqual(point);
     await expectThrows(
-      run("prelude.json.parse_as", { text: str('{"y":2}') }, contextWithT(POINT)),
-      "prelude.json.decode_error",
-      /json\.parse_as: .*missing required field "x"/,
-    );
-    await expectThrows(
-      run("prelude.json.parse_as", { text: str("{oops") }, contextWithT(POINT)),
-      "prelude.json.parse_error",
-      /json\.parse_as: malformed JSON/,
+      run("prelude.json.validate", { value: { kind: "record", fields: { y: int(2) } } }, contextWithT(POINT)),
+      "prelude.json.validation_error",
+      /json\.validate: .*missing required field "x"/,
     );
   });
 
-  test("parse_as[unknown] keeps a `$ref` key LITERAL (no file revive here — that is the boundary's job)", async () => {
-    const parsed = await run(
-      "prelude.json.parse_as",
-      { text: str('{"image":{"$ref":"blob-abc"}}') },
-      contextWithT({}),
-    );
-    expect(parsed).toEqual({
+  test("validate[unknown] accepts and returns any value unchanged (a pure check, no rewrite)", async () => {
+    const value: Value = {
       kind: "record",
       fields: { image: { kind: "record", fields: { $ref: str("blob-abc") } } },
-    });
+    };
+    await expect(run("prelude.json.validate", { value }, contextWithT({}))).resolves.toEqual(value);
   });
 
-  test("stringify renders a MIXED tree's canonical form (data nests, file becomes $ref, keys verbatim)", async () => {
+  test("stringify renders a MIXED tree's canonical form (data nests, file becomes $katari_ref, keys verbatim)", async () => {
     const mixed: Value = {
       kind: "record",
       fields: {
@@ -198,14 +198,13 @@ describe("prelude.json", () => {
     };
     const text = await run("prelude.json.stringify", { value: mixed });
     if (text.kind !== "string") throw new Error("expected a string");
-    // A `data` value nests under `value`; a `file` becomes its `$ref` handle. Keys read VERBATIM — the
-    // `$$` escape is un-done, so a value-plane `$ref` key shows as `$ref` (accepted ambiguity with a real
-    // handle: stringify is the canonical render, and the read channel a model sees).
+    // A `data` value nests under `$katari_value`; a `file` becomes its `$katari_ref` handle. A record's own
+    // keys read VERBATIM — a value-plane `$ref` key (outside the reserved namespace) shows as `$ref`.
     expect(JSON.parse(text.value)).toEqual({
       a: 1,
-      box: { $constructor: "main.box", value: { value: 3 } },
+      box: { $katari_constructor: "main.box", $katari_value: { value: 3 } },
       special: { $ref: "literal" },
-      handle: { $ref: "blob-x", semanticKind: "file" },
+      handle: { $katari_ref: "blob-x", $katari_semantic_kind: "file" },
     });
   });
 
@@ -554,7 +553,7 @@ describe("prelude.reflection.get_metadata", () => {
       properties: { city: { type: "string" } },
       required: ["city"],
     };
-    // The shape `prelude.mcp.provide` mints: a $tool value carrying its reactor context (opaque to
+    // The shape `prelude.mcp.provide` mints: a $katari_tool value carrying its reactor context (opaque to
     // metadata) and the server-declared signature (output schema optional — `{}`/unknown when undeclared).
     const tool: Value = {
       kind: "tool",

@@ -1,5 +1,5 @@
 // The blob side channel: how an FFI handler moves a blob's BYTES to / from the runtime. A blob crosses the FFI
-// boundary as a small handle (`{ $ref, size, hash, ... }`) — never its bytes — so reading a received file (or,
+// boundary as a small handle (`{ $katari_ref, ... }`) — never its bytes — so reading a received file (or,
 // in a later step, producing a new one) goes over HTTP to the runtime, out of band from the one-shot stdio
 // reply channel that carries only the handler's JSON result. The runtime hands the sidecar its own URL, the
 // project id, and the API bearer token as env (`KATARI_RUNTIME_URL` / `KATARI_PROJECT_ID` / `KATARI_API_KEY`);
@@ -13,8 +13,8 @@
  *  `Json` object — a handler can `return context.file(...)` (or a record containing the handle) directly,
  *  and the runtime lifts it into a `File` value. */
 export type FileHandle = {
-  $ref: string;
-  semanticKind?: string;
+  $katari_ref: string;
+  $katari_semantic_kind?: string;
 };
 
 /** One downloaded blob: the bytes plus the metadata the runtime served them with (the blob row's
@@ -52,7 +52,7 @@ function authHeader(apiKey: string): Record<string, string> {
 
 /** The blob id a handle (or a bare id string) names. */
 function blobIdOf(handle: FileHandle | string): string {
-  return typeof handle === "string" ? handle : handle.$ref;
+  return typeof handle === "string" ? handle : handle.$katari_ref;
 }
 
 /** Download a blob from the runtime by its handle (or bare blob id): the bytes plus the served
@@ -144,5 +144,5 @@ export async function uploadBlob(
   }
   const produced = parseProducedBlob(await readJsonBody(response));
   // The slim handle: identity only — the metadata just registered lives on the blob's runtime row.
-  return { $ref: produced.id, semanticKind: "file" };
+  return { $katari_ref: produced.id, $katari_semantic_kind: "file" };
 }

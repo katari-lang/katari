@@ -191,11 +191,11 @@ describe("FFI inner delegation", () => {
   test("a handler dispatches a received callable VALUE (an agent reference) directly on core", async () => {
     const result = run({
       // `context.callValue` is the in-process analogue of the port's `KatariAgent.call`: the handler holds
-      // a callable value (here an `$agent` reference — the port would have decoded it from an argument) and
-      // dispatches it. The runtime resolves the value to its target itself; no `call_agent` name is used.
+      // a callable value (here a `$katari_agent` reference — the port would have decoded it from an argument)
+      // and dispatches it. The runtime resolves the value to its target itself; no `call_agent` name is used.
       compute: async (_argument, context) => {
         const sum = await context.callValue(
-          { $agent: "prelude.add", snapshot: SNAPSHOT },
+          { $katari_agent: "prelude.add", $katari_snapshot: SNAPSHOT },
           { left: 1, right: 2 },
         );
         return sum;

@@ -1,5 +1,5 @@
 // The schema-conformance walk (`conformValue`): the delegate boundary's argument check, now a *pure,
-// strict* pass separate from the codec — it only checks, never rewrites (no `$constructor` repair). Covers
+// strict* pass separate from the codec — it only checks, never rewrites (no `$katari_constructor` repair). Covers
 // the value-model foldbacks (integer-as-number subtyping, blob-string / file / callable reference schemas),
 // nested `data` schemas, unions, tuples (including over-length rejection), closed records, and generics.
 
@@ -11,7 +11,6 @@ import type { Value } from "../src/runtime/value/types.js";
 import {
   conformValue,
   fillGenericSchema,
-  reviveArgument,
   typeSubstitutionOf,
 } from "../src/runtime/value/validation.js";
 
@@ -72,7 +71,7 @@ describe("conformValue", () => {
     expect(conformValue(ref, { type: "string" }).ok).toBe(true);
   });
 
-  test("a file ref satisfies the $ref reference schema and nothing narrower", () => {
+  test("a file ref satisfies the $katari_ref reference schema and nothing narrower", () => {
     const file: Value = {
       kind: "ref",
       semanticKind: "file",
@@ -80,20 +79,20 @@ describe("conformValue", () => {
     };
     const fileSchema: JSONSchema = {
       type: "object",
-      properties: { $ref: {} },
-      required: ["$ref"],
+      properties: { $katari_ref: {} },
+      required: ["$katari_ref"],
       additionalProperties: true,
     };
     expect(conformValue(file, fileSchema).ok).toBe(true);
     expect(conformValue(file, { type: "string" }).ok).toBe(false);
   });
 
-  test("an agent value satisfies the $agent reference schema and an unconstrained one", () => {
+  test("an agent value satisfies the $katari_agent reference schema and an unconstrained one", () => {
     const agent: Value = { kind: "agent", name: createAgentName("main.tool"), snapshot: SNAPSHOT };
     const agentSchema: JSONSchema = {
       type: "object",
-      properties: { $agent: {} },
-      required: ["$agent"],
+      properties: { $katari_agent: {} },
+      required: ["$katari_agent"],
       additionalProperties: true,
     };
     expect(conformValue(agent, agentSchema).ok).toBe(true);
@@ -101,7 +100,7 @@ describe("conformValue", () => {
     expect(conformValue(agent, { type: "object", properties: {} }).ok).toBe(false);
   });
 
-  test("a closure value satisfies the $agent reference schema", () => {
+  test("a closure value satisfies the $katari_agent reference schema", () => {
     const closure: Value = {
       kind: "closure",
       blockId: 4,
@@ -111,21 +110,21 @@ describe("conformValue", () => {
     };
     const agentSchema: JSONSchema = {
       type: "object",
-      properties: { $agent: {} },
-      required: ["$agent"],
+      properties: { $katari_agent: {} },
+      required: ["$katari_agent"],
       additionalProperties: true,
     };
     expect(conformValue(closure, agentSchema).ok).toBe(true);
   });
 
-  // A `data` schema is nested: `{ $constructor: {const}, value: {object of fields} }` (the wire form).
+  // A `data` schema is nested: `{ $katari_constructor: {const}, $katari_value: {object of fields} }` (the wire form).
   const BOX_SCHEMA: JSONSchema = {
     type: "object",
     properties: {
-      $constructor: { const: "main.box" },
-      value: { type: "object", properties: { n: { type: "integer" } }, required: ["n"] },
+      $katari_constructor: { const: "main.box" },
+      $katari_value: { type: "object", properties: { n: { type: "integer" } }, required: ["n"] },
     },
-    required: ["$constructor", "value"],
+    required: ["$katari_constructor", "$katari_value"],
     additionalProperties: false,
   };
 
@@ -153,8 +152,8 @@ describe("conformValue", () => {
         BOX_SCHEMA,
         {
           type: "object",
-          properties: { $constructor: { const: "main.empty" }, value: { type: "object" } },
-          required: ["$constructor", "value"],
+          properties: { $katari_constructor: { const: "main.empty" }, $katari_value: { type: "object" } },
+          required: ["$katari_constructor", "$katari_value"],
           additionalProperties: false,
         },
       ],
@@ -238,82 +237,5 @@ describe("generic instantiation", () => {
     );
     const filled = fillGenericSchema(substitution, schema);
     expect(filled.properties?.x).toEqual({ type: "integer", description: "The value to pick." });
-  });
-});
-
-// The schema-directed revive the delegation boundary applies to a dynamic (`call_agent`) argument BEFORE
-// validating it: an AI can only replay a `file` it saw as a literal `{ "$ref": ... }` record, so the
-// boundary reconstructs the real handle exactly where the schema expects a file — and NOWHERE else (no
-// blind lift). Everything else passes through verbatim.
-describe("reviveArgument (schema-directed $ref -> file revive)", () => {
-  const FILE_SCHEMA: JSONSchema = {
-    type: "object",
-    properties: { $ref: { type: "string" }, semanticKind: { type: "string" } },
-    required: ["$ref"],
-    additionalProperties: true,
-  };
-  const refRecord = (blobId: string): Value => record({ $ref: str(blobId) });
-  const file = (blobId: string): Value => ({
-    kind: "ref",
-    semanticKind: "file",
-    blobId: blobId as BlobId,
-  });
-
-  test("revives a { $ref } record into a real file where the schema expects a file", () => {
-    expect(reviveArgument(refRecord("blob-1"), FILE_SCHEMA)).toEqual(file("blob-1"));
-  });
-
-  test("does NOT revive at a non-file position (no blind lift)", () => {
-    // `unknown` (`{}`): a `$ref` record stays a literal record.
-    expect(reviveArgument(refRecord("blob-1"), {})).toEqual(refRecord("blob-1"));
-    // `record[unknown]`: a nested `$ref` under an open-value tail stays literal too.
-    const document = record({ image: refRecord("blob-1") });
-    expect(reviveArgument(document, { type: "object", additionalProperties: {} })).toEqual(document);
-  });
-
-  test("revives a file nested in an object / array / data / union", () => {
-    const objectSchema: JSONSchema = {
-      type: "object",
-      properties: { image: FILE_SCHEMA },
-      required: ["image"],
-    };
-    expect(reviveArgument(record({ image: refRecord("b") }), objectSchema)).toEqual(
-      record({ image: file("b") }),
-    );
-
-    const arraySchema: JSONSchema = { type: "array", items: FILE_SCHEMA };
-    expect(
-      reviveArgument({ kind: "array", elements: [refRecord("b1"), refRecord("b2")] }, arraySchema),
-    ).toEqual({ kind: "array", elements: [file("b1"), file("b2")] });
-
-    // `file | null`: a `$ref` revives to a file, a null stays null.
-    const unionSchema: JSONSchema = { anyOf: [FILE_SCHEMA, { type: "null" }] };
-    expect(reviveArgument(refRecord("b"), unionSchema)).toEqual(file("b"));
-    expect(reviveArgument({ kind: "null" }, unionSchema)).toEqual({ kind: "null" });
-
-    // A `data` value carrying a file field: revive the flat fields, keep the constructor.
-    const dataSchema: JSONSchema = {
-      type: "object",
-      properties: {
-        $constructor: { const: "main.msg" },
-        value: { type: "object", properties: { doc: FILE_SCHEMA }, required: ["doc"] },
-      },
-      required: ["$constructor", "value"],
-      additionalProperties: false,
-    };
-    expect(reviveArgument(record({ doc: refRecord("b") }, "main.msg"), dataSchema)).toEqual(
-      record({ doc: file("b") }, "main.msg"),
-    );
-  });
-
-  test("leaves a non-{ $ref } value at a file position unchanged (validation then rejects it)", () => {
-    expect(reviveArgument(str("not a handle"), FILE_SCHEMA)).toEqual(str("not a handle"));
-    expect(reviveArgument(record({ nope: int(1) }), FILE_SCHEMA)).toEqual(record({ nope: int(1) }));
-  });
-
-  test("a semanticKind:string ref record revives to a string ref, not a file", () => {
-    expect(
-      reviveArgument(record({ $ref: str("blob-s"), semanticKind: str("string") }), FILE_SCHEMA),
-    ).toEqual({ kind: "ref", semanticKind: "string", blobId: "blob-s" as BlobId });
   });
 });

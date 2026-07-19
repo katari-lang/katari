@@ -1,15 +1,16 @@
 // The `http.json` body materialiser, driven through the exact production pipeline: a program's value
 // tree (the `http.json` data value) is serialised by the http reactor with `valueToJson(…, "reveal")`
-// — which ESCAPES every record key beginning with `$` (a literal `$ref` rides as `$$ref`) — and the
-// transport materialises that wire form at the send boundary (`materializeBody`). The tests pin the
-// two halves of the tree's wire contract:
+// — which carries every record key VERBATIM (a literal `$ref` stays `$ref`; the reserved wire vocabulary
+// lives in the disjoint `$katari_` namespace, so no escaping is needed) — and the transport materialises
+// that wire form at the send boundary (`materializeBody`). The tests pin the two halves of the tree's
+// wire contract:
 //   (a) a record's literal `$`-keys (a JSON Schema's `$ref` / `$defs` / `$schema` — what an external
-//       MCP tool schema legitimately carries) reach the SERVER under their original single-`$` names,
-//       so the materialiser must UN-escape what the value codec escaped;
+//       MCP tool schema legitimately carries) reach the SERVER under their original names, unchanged,
+//       because the codec never rewrites them;
 //   (b) a `file` leaf — and only a `file` leaf — becomes the base64 of its bytes, resolved from the
 //       blob store only here;
-//   (c) both in one tree: the escaped-literal-key record and the real `$ref` file handle are the same
-//       object shape on the wire, and the materialiser must keep telling them apart.
+//   (c) both in one tree: the literal-`$ref`-key record and the real `$katari_ref` file handle are
+//       distinct object shapes on the wire, and the materialiser tells them apart by the reserved key.
 
 import { createAgentName, type Json } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
@@ -58,7 +59,7 @@ const resolveImage: HttpBlobResolver = async (blobId) => {
 describe("http.json body materialisation", () => {
   test("a record's literal $-keys reach the wire under their original names", async () => {
     // A tool schema as an AI provider request embeds it: literal `$schema` / `$defs` / `$ref` keys.
-    // The value codec escapes them to `$$…` on the reactor wire; the server must see the originals.
+    // The value codec carries them verbatim on the reactor wire; the server sees the same originals.
     const tree = record({
       name: str("lookup"),
       input_schema: record({
@@ -67,12 +68,17 @@ describe("http.json body materialisation", () => {
         $ref: str("#/$defs/item"),
       }),
     });
-    // The wire form escapes: pin the intermediate too, so a future escaping change re-derives this
-    // test. (The `http.json` data value nests its one `value` field under the wire's `value` wrapper.)
+    // The wire form carries keys verbatim: pin the intermediate too, so a future wire change re-derives
+    // this test. (The `http.json` data value nests its one `value` field under the wire's `$katari_value`
+    // wrapper, and the literal schema keys ride under their own single-`$` names.)
     const wire = wireFormOf(jsonBody(tree)) as {
-      value: { value: { input_schema: { [key: string]: Json } } };
+      $katari_value: { value: { input_schema: { [key: string]: Json } } };
     };
-    expect(Object.keys(wire.value.value.input_schema).sort()).toEqual(["$$defs", "$$ref", "$$schema"]);
+    expect(Object.keys(wire.$katari_value.value.input_schema).sort()).toEqual([
+      "$defs",
+      "$ref",
+      "$schema",
+    ]);
 
     const document = await materializedDocument(jsonBody(tree), null);
     expect(document).toEqual({
@@ -102,10 +108,11 @@ describe("http.json body materialisation", () => {
   });
 
   test("literal $-keys and a real file handle coexist in one tree", async () => {
-    // The provider request that motivated the un-escape: a tools list whose schema carries literal
-    // `$ref` / `$defs` keys AND an image block whose `data` slot is a real file value. On the wire
-    // both are objects with `$`-keys ($$-escaped literal vs the handle's single-$ `$ref`); the
-    // materialiser must base64 exactly the handle and un-escape exactly the record.
+    // The provider request that motivated the reserved namespace: a tools list whose schema carries
+    // literal `$ref` / `$defs` keys AND an image block whose `data` slot is a real file value. On the
+    // wire the two are distinct object shapes (the literal keys stay `$ref` / `$defs`, the handle keys
+    // by `$katari_ref` / `$katari_semantic_kind`); the materialiser must base64 exactly the handle and
+    // leave the literal-key record untouched.
     const tree = record({
       tools: {
         kind: "array",

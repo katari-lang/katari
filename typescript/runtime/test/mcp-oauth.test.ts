@@ -119,10 +119,10 @@ function typedThrowMessage(completion: McpCompletion, ctor: string): string {
   }
   const error = completion.outcome.error;
   if (error === null || typeof error !== "object" || Array.isArray(error)) {
-    throw new Error("expected a $constructor-tagged error payload");
+    throw new Error("expected a $katari_constructor-tagged error payload");
   }
-  expect(error.$constructor).toBe(ctor);
-  const value = error.value;
+  expect(error.$katari_constructor).toBe(ctor);
+  const value = error.$katari_value;
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("expected the error payload to carry its fields");
   }
@@ -145,12 +145,12 @@ function delegation(): DelegationId {
 
 /** The `headers` variant's wire form (what `mcp.headers(values = ...)` lowers to, revealed). */
 function headersAuth(values: Record<string, string>): Json {
-  return { $constructor: "prelude.mcp.headers", value: { values } };
+  return { $katari_constructor: "prelude.mcp.headers", $katari_value: { values } };
 }
 
 /** The `oauth` variant's wire form (what `mcp.oauth(name = ...)` lowers to). */
 function oauthAuth(name: string): Json {
-  return { $constructor: "prelude.mcp.oauth", value: { name } };
+  return { $katari_constructor: "prelude.mcp.oauth", $katari_value: { name } };
 }
 
 describe("decodeStoredCredential", () => {
@@ -641,11 +641,17 @@ describe("SdkMcpTransport descriptor decoding", () => {
     ["a descriptor with no auth", { url: "http://127.0.0.1:1/mcp" }],
     [
       "an auth value of an unknown constructor",
-      { url: "http://127.0.0.1:1/mcp", auth: { $constructor: "prelude.mcp.unknown", value: {} } },
+      {
+        url: "http://127.0.0.1:1/mcp",
+        auth: { $katari_constructor: "prelude.mcp.unknown", $katari_value: {} },
+      },
     ],
     [
       "an oauth value with no credential name",
-      { url: "http://127.0.0.1:1/mcp", auth: { $constructor: "prelude.mcp.oauth", value: {} } },
+      {
+        url: "http://127.0.0.1:1/mcp",
+        auth: { $katari_constructor: "prelude.mcp.oauth", $katari_value: {} },
+      },
     ],
   ])("%s fails as the typed server_error (wire drift, still catchable)", async (_label, bad) => {
     const transport = new SdkMcpTransport({ credentials: memoryStore() });

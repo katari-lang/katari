@@ -813,11 +813,13 @@ describe("http reactor — file request bodies (real transport over loopback)", 
     actor.startRun(createAgentName("main"), SNAPSHOT, request("https://example.test/x", body));
 
     const call = await waitUntil(() => transport.dispatched[0]);
-    // The body rides as the slim `$ref` handle, exactly as the value plane / DB / trace hold it.
+    // The body rides as the slim `$katari_ref` handle, exactly as the value plane / DB / trace hold it.
     expect(call.argument).toMatchObject({
       body: {
-        $constructor: "prelude.http.json",
-        value: { value: { data: { $ref: FILE_BLOB, semanticKind: "file" } } },
+        $katari_constructor: "prelude.http.json",
+        $katari_value: {
+          value: { data: { $katari_ref: FILE_BLOB, $katari_semantic_kind: "file" } },
+        },
       },
     });
     // The base64 of the bytes is nowhere in the envelope — it is born only inside the transport's send.

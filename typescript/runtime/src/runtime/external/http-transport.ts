@@ -188,7 +188,7 @@ interface ParsedRequest {
   url: string;
   method: string;
   headers: Record<string, string>;
-  /** The raw `body` argument — a body sum (a `{ $constructor, value }` data value) or a bare string; the
+  /** The raw `body` argument — a body sum (a `{ $katari_constructor, $katari_value }` data value) or a bare string; the
    *  transport materialises it at send time (`materializeBody`). Metadata (a file's bytes) is NOT here. */
   body: Json | undefined;
 }

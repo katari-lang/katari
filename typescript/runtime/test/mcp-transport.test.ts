@@ -21,7 +21,7 @@ function recordingProducer(): {
   const producer: McpBlobProducer = async (_delegation, bytes, contentType) => {
     calls.push({ bytes, contentType });
     // The slim handle the real producer returns: identity only (metadata went to the blob's row).
-    return { $ref: `blob-${calls.length}`, semanticKind: "file" };
+    return { $katari_ref: `blob-${calls.length}`, $katari_semantic_kind: "file" };
   };
   return { producer, calls };
 }
@@ -63,7 +63,7 @@ describe("resolveToolResult", () => {
     expect(calls[0]?.contentType).toBe("image/png");
     expect(value).toEqual({
       text: "your screenshot",
-      files: [{ $ref: "blob-1", semanticKind: "file" }],
+      files: [{ $katari_ref: "blob-1", $katari_semantic_kind: "file" }],
     });
   });
 

@@ -28,7 +28,7 @@ export type Value = (
   /**
    * A record value. A bare object literal carries no `ctor`; a `data` value carries its constructor's
    * qualified name there (a tagged value). At the JSON boundary the tag rides under the reserved
-   * `$constructor` discriminator key (compiler `Katari.Schema.constructorDiscriminatorKey`); internally
+   * `$katari_constructor` discriminator key (compiler `Katari.Schema.constructorDiscriminatorKey`); internally
    * it is kept out-of-band so `obj.field` and width subtyping (`data <: object`) ignore it.
    */
   | { kind: "record"; fields: Record<string, Value>; ctor?: QualifiedName }

@@ -11,7 +11,7 @@ import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import type { McpCall, McpCompletion, McpTransport } from "../src/runtime/external/mcp-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
-import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
@@ -105,11 +105,11 @@ function fixture(): IRModule {
   };
 }
 
-// A file parameter's `$ref` reference schema (`Katari.Schema.fileReferenceSchema`).
+// A file parameter's `$katari_ref` reference schema (`Katari.Schema.fileReferenceSchema`).
 const FILE_SCHEMA: JSONSchema = {
   type: "object",
-  properties: { $ref: { type: "string" }, semanticKind: { type: "string" } },
-  required: ["$ref"],
+  properties: { $katari_ref: { type: "string" }, $katari_semantic_kind: { type: "string" } },
+  required: ["$katari_ref"],
   additionalProperties: true,
 };
 
@@ -127,7 +127,7 @@ const USE_FILE_SCHEMA: SchemaInfo = {
 };
 
 /** The `fixture()` scaffold with the callee retargeted to `use_file(image: file) -> image` — so a dynamic
- *  argument's `image` position expects a real file, the one place the boundary revives a `$ref`. */
+ *  argument's `image` position expects a real file. */
 function fileFixture(): IRModule {
   const ir = fixture();
   ir.blocks[2] = {
@@ -191,12 +191,13 @@ describe("call_agent dispatch", () => {
     );
   });
 
-  test("revives an AI-replayed { $ref } into a REAL file where the target's schema expects a file", async () => {
-    // The model can only replay a `file` it saw as a literal `{ "$ref": ... }` RECORD. The delegation
-    // boundary reconstructs the real handle, schema-directed — so `use_file` receives (and returns) an
-    // actual `file` value, not the inert record. A record would have surfaced as `{ kind: "record", ... }`.
-    const replayed: Value = { kind: "record", fields: { $ref: { kind: "string", value: "blob-img" } } };
-    await expect(runMain(fileFixture(), argsOf({ image: replayed }))).resolves.toEqual({
+  test("a real file argument flows through call_agent to a target whose schema expects a file", async () => {
+    // call_agent no longer revives: the wire codec already reads a `$katari_ref` into a real `file` at the
+    // boundary (`jsonToValue`), so by the time an argument reaches the dispatch it IS a `file` value — not an
+    // inert `{ $katari_ref }` record. `use_file` receives (and returns) that actual `file`, conforming to its
+    // `file`-typed `image` parameter.
+    const image: Value = { kind: "ref", semanticKind: "file", blobId: "blob-img" as BlobId };
+    await expect(runMain(fileFixture(), argsOf({ image }))).resolves.toEqual({
       kind: "ref",
       semanticKind: "file",
       blobId: "blob-img",
@@ -591,8 +592,8 @@ describe("tool dispatch (reactor-backed tool agents)", () => {
     expect(call.descriptor).toEqual({
       url: "https://mcp.example.test/mcp",
       auth: {
-        $constructor: "prelude.mcp.headers",
-        value: { values: { authorization: "sk-mcp" } },
+        $katari_constructor: "prelude.mcp.headers",
+        $katari_value: { values: { authorization: "sk-mcp" } },
       },
     });
     transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "hi alice" } });

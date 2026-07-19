@@ -2,7 +2,7 @@
 // runs at the SEND boundary (inside the transport's `perform`), never on the value plane. `http.fetch`'s
 // `body` is a four-way sum (`stdlib/prelude/http.ktr`): `text` (a string, sent verbatim), `binary` (one
 // file's raw bytes), `multipart` (RFC 7578 form-data), and `json` (a value tree whose `file` leaves become
-// base64 strings — the REST convention). A file rides the whole way here as its slim `$ref` HANDLE (the
+// base64 strings — the REST convention). A file rides the whole way here as its slim `$katari_ref` HANDLE (the
 // value codec's wire form); only at this point does the transport read the bytes from the blob store and
 // splice them in. So nothing durable — the external-call envelope, the DB, the trace — ever carries the
 // bytes, only the handle (docs/2026-07-18-http-file-body.md).
@@ -16,12 +16,11 @@ import {
   FILE_KEY,
   type Json,
   SEMANTIC_KIND_KEY,
-  unescapeRecordKey,
   VALUE_KEY,
 } from "@katari-lang/types";
 import type { BlobId } from "../ids.js";
 
-/** Reads a blob's bytes plus its recorded content type (the `blobs` row / warm catalog datum a slim `$ref`
+/** Reads a blob's bytes plus its recorded content type (the `blobs` row / warm catalog datum a slim `$katari_ref`
  *  deliberately does not carry), for materialising a `file` into a request body. The content type is `""`
  *  when none was recorded — the caller then falls back to a generic type. */
 export type HttpBlobResolver = (
@@ -148,13 +147,10 @@ async function materializeMultipart(
 /** Walk the `json` body's value tree (its `valueToJson` wire form), replacing every `file` leaf with the
  *  base64 of its bytes — the ONE place the tree's shape changes. A blob-backed STRING leaf materialises to
  *  its text (a JSON document's string is text); every other node passes through unchanged, so the tree the
- *  caller built is the tree that goes on the wire, files aside.
- *
- *  Object keys are UN-escaped back to what the program wrote (`unescapeRecordKey`): the value codec doubles
- *  a record key's leading `$` on the way out (`valueToJson`), so a program that put a literal `$ref` / `$defs`
- *  / `$schema` key in the tree — a JSON-Schema keyword an AI provider's tool schema carries — arrives here as
- *  `$$ref` / …, and must go on the wire as the ORIGINAL `$ref`. A single-`$` object (a real `$ref` file
- *  handle) is caught by `fileHandleOf` above before this branch, so the two never collide. */
+ *  caller built is the tree that goes on the wire, files aside. Keys travel verbatim — a program that put a
+ *  literal `$ref` / `$defs` / `$schema` key in the tree (a JSON-Schema keyword an AI provider's tool schema
+ *  carries) goes on the wire as itself; a real file handle (keyed by `$katari_ref`) is caught by
+ *  `fileHandleOf` above before this branch, so the two never collide. */
 export async function materializeJsonTree(
   node: Json | undefined,
   resolve: HttpBlobResolver | null,
@@ -176,14 +172,14 @@ export async function materializeJsonTree(
     }
     const out: { [key: string]: Json } = {};
     for (const [key, value] of Object.entries(node)) {
-      out[unescapeRecordKey(key)] = await materializeJsonTree(value, resolve);
+      out[key] = await materializeJsonTree(value, resolve);
     }
     return out;
   }
   return node;
 }
 
-/** Read a wire node that must be a string: an inline string directly, a promoted-string blob (`$ref`,
+/** Read a wire node that must be a string: an inline string directly, a promoted-string blob (`$katari_ref`,
  *  `semanticKind: "string"`) through the store. A file (`semanticKind: "file"`) is a type error here — a
  *  text surface (a `text` body, a text part) takes a string, not a file. */
 async function readWireString(
@@ -199,7 +195,7 @@ async function readWireString(
   throw new Error("http.fetch: expected a string body / part content");
 }
 
-/** A `{ $constructor, value }` data value's tag + its fields, or `null` for any other Json. */
+/** A `{ $katari_constructor, $katari_value }` data value's tag + its fields, or `null` for any other Json. */
 function dataValueOf(
   node: Json,
 ): { ctor: string; fields: { [key: string]: Json | undefined } } | null {
@@ -211,7 +207,7 @@ function dataValueOf(
   return { ctor, fields };
 }
 
-/** A `{ $ref, semanticKind }` file / blob handle's parts, or `null` for any other Json. */
+/** A `{ $katari_ref, $katari_semantic_kind }` file / blob handle's parts, or `null` for any other Json. */
 function fileHandleOf(
   node: Json | undefined,
 ): { blobId: BlobId; semanticKind: "string" | "file" } | null {

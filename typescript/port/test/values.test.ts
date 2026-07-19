@@ -1,6 +1,7 @@
 // The handler value layer: wire JSON decodes into the ergonomic wrappers (files / strings / data /
-// callables, unescaped record keys) and encodes back to the exact wire form, so a handler never touches a
-// raw `$ref` or an escaped key.
+// callables, verbatim record keys) and encodes back to the exact wire form, so a handler never touches a
+// raw `$katari_` marker. A program never authors a `$katari_` key, so a bare record's keys travel verbatim
+// in both directions (no escaping).
 
 import type { Json } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
@@ -33,17 +34,19 @@ function makeBinding(bytesByRef: Record<string, string> = {}) {
   return { binding, calls };
 }
 
-const fileHandle: Json = { $ref: "blob-1", semanticKind: "file" };
+const fileHandle: Json = { $katari_ref: "blob-1", $katari_semantic_kind: "file" };
 
 describe("decodeWireValue", () => {
-  test("scalars and arrays pass through; record keys are unescaped", () => {
+  test("scalars and arrays pass through; record keys travel verbatim", () => {
     const { binding } = makeBinding();
-    expect(decodeWireValue({ $$ref: [1, "two", null, true] }, binding)).toEqual({
+    // `$ref` is an ordinary record key now — the reserved discriminator is `$katari_ref` — so it is not a
+    // file handle and survives verbatim (no escaping happens on either side of the boundary).
+    expect(decodeWireValue({ $ref: [1, "two", null, true] }, binding)).toEqual({
       $ref: [1, "two", null, true],
     });
   });
 
-  test("a file handle becomes a downloadable KatariFile (no raw $ref exposed)", async () => {
+  test("a file handle becomes a downloadable KatariFile (no raw $katari_ref exposed)", async () => {
     const { binding } = makeBinding({ "blob-1": "hello" });
     const decoded = decodeWireValue({ content: fileHandle }, binding);
     if (
@@ -68,7 +71,7 @@ describe("decodeWireValue", () => {
 
   test("a blob-backed string becomes a KatariString, read uniformly via text()", async () => {
     const { binding } = makeBinding({ "blob-2": "big text" });
-    const decoded = decodeWireValue({ $ref: "blob-2", semanticKind: "string" }, binding);
+    const decoded = decodeWireValue({ $katari_ref: "blob-2", $katari_semantic_kind: "string" }, binding);
     expect(decoded).toBeInstanceOf(KatariString);
     if (!(decoded instanceof KatariString)) throw new Error("unreachable");
     await expect(text(decoded)).resolves.toBe("big text");
@@ -78,7 +81,7 @@ describe("decodeWireValue", () => {
   test("a data value becomes KatariData with decoded fields", () => {
     const { binding } = makeBinding();
     const decoded = decodeWireValue(
-      { $constructor: "adt.Some", value: { value: 42 } },
+      { $katari_constructor: "adt.Some", $katari_value: { value: 42 } },
       binding,
     );
     expect(decoded).toBeInstanceOf(KatariData);
@@ -89,7 +92,7 @@ describe("decodeWireValue", () => {
 
   test("an agent reference becomes a KatariAgent whose call rides the raw reference verbatim", async () => {
     const { binding, calls } = makeBinding();
-    const raw: Json = { $agent: "main.helper", snapshot: "snap-1" };
+    const raw: Json = { $katari_agent: "main.helper", $katari_snapshot: "snap-1" };
     const decoded = decodeWireValue(raw, binding);
     expect(decoded).toBeInstanceOf(KatariAgent);
     if (!(decoded instanceof KatariAgent)) throw new Error("unreachable");
@@ -100,40 +103,38 @@ describe("decodeWireValue", () => {
 
   test("a redacted marker fails loudly (it cannot appear in well-formed revealed input)", () => {
     const { binding } = makeBinding();
-    expect(() => decodeWireValue({ $redacted: true }, binding)).toThrow(/redacted/);
+    expect(() => decodeWireValue({ $katari_redacted: true }, binding)).toThrow(/redacted/);
   });
 });
 
 describe("encodeWireValue", () => {
-  test("wrappers collapse to their wire forms and record keys re-escape", () => {
+  test("wrappers collapse to their wire forms and record keys travel verbatim", () => {
     const { binding } = makeBinding();
     const file = decodeWireValue(fileHandle, binding);
-    const agentRaw: Json = { $agent: "main.helper", snapshot: "snap-1" };
+    const agentRaw: Json = { $katari_agent: "main.helper", $katari_snapshot: "snap-1" };
     const agent = decodeWireValue(agentRaw, binding);
     expect(
       encodeWireValue({
-        $key: "escaped",
+        $key: "verbatim",
         file,
         callable: agent,
         data: new KatariData("adt.Ok", { value: 1 }),
       }),
     ).toEqual({
-      $$key: "escaped",
+      $key: "verbatim",
       file: fileHandle,
       callable: agentRaw,
-      data: { $constructor: "adt.Ok", value: { value: 1 } },
+      data: { $katari_constructor: "adt.Ok", $katari_value: { value: 1 } },
     });
   });
 
-  test("a value-plane `$x` key never surfaces as `$$x` to the handler and round-trips back", () => {
+  test("a value-plane `$x` key travels verbatim to the handler and round-trips back", () => {
     const { binding } = makeBinding();
-    // Inbound: the engine escaped a value-plane `$special` key to `$$special` on the wire; the handler
-    // must receive the ORIGINAL `$special` (the exit surface unescapes — the handler never sees `$$`).
-    const handlerArgument = decodeWireValue({ $$special: "v", plain: 1 }, binding);
+    // A `$`-prefixed key that is NOT a reserved `$katari_` marker is an ordinary record key: it reaches the
+    // handler as itself (no escaping) and re-encodes unchanged — a lossless verbatim round-trip.
+    const handlerArgument = decodeWireValue({ $special: "v", plain: 1 }, binding);
     expect(handlerArgument).toEqual({ $special: "v", plain: 1 });
-    // Outbound: the handler returns that same `$special`-keyed object, which re-escapes to `$$special`
-    // on the wire, so the value plane reconstructs `$special` — a lossless round-trip.
-    expect(encodeWireValue(handlerArgument)).toEqual({ $$special: "v", plain: 1 });
+    expect(encodeWireValue(handlerArgument)).toEqual({ $special: "v", plain: 1 });
   });
 
   test("undefined becomes null at the top and is dropped inside records", () => {

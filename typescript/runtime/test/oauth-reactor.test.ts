@@ -204,7 +204,7 @@ describe("oauth reactor: token resolution", () => {
     // The resolved token is the credential's access token, and it is PRIVATE — it redacts at every
     // user-facing boundary (a run result, the trace), exactly like `env.get_secret`.
     expect(result).toEqual({ kind: "string", value: "bearer-abc", private: true });
-    expect(valueToJson(result, "redact")).toEqual({ $redacted: true });
+    expect(valueToJson(result, "redact")).toEqual({ $katari_redacted: true });
     // Revealed toward a submission sink (an http Authorization header), the real token is present.
     expect(valueToJson(result, "reveal")).toBe("bearer-abc");
   });

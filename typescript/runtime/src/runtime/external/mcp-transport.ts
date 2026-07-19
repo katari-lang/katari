@@ -10,7 +10,7 @@
 // tool values that survived in scopes reconnect transparently on their next call.
 //
 // Auth is a SUM riding inside the descriptor (the `prelude.mcp.auth` data union, arriving as its
-// `$constructor` wire tag): `headers` sends the given headers on every request (anonymous access is
+// `$katari_constructor` wire tag): `headers` sends the given headers on every request (anonymous access is
 // the empty map), `oauth` names a stored credential — the transport resolves it to a bearer token through
 // the credentials core (`resolveToken`, which refreshes on demand off the stored token endpoint) and
 // injects `Authorization: Bearer <token>` exactly the way the `headers` variant injects its values. No SDK
@@ -130,7 +130,7 @@ export class StubMcpTransport implements McpTransport {
 }
 
 /** The blob-producer seam: store `bytes` as a project blob owned by `delegation`'s call instance and
- *  return its `$ref` handle Json (the wire form the reactor's decode lifts back into a `file` value),
+ *  return its `$katari_ref` handle Json (the wire form the reactor's decode lifts back into a `file` value),
  *  or `null` when the call is already gone (the block then degrades to its text placeholder). Wired by
  *  the host (see the facade); absent — tests, a stub deployment — every binary block degrades. */
 export type McpBlobProducer = (
@@ -225,7 +225,7 @@ function classifyContentBlock(block: unknown): ClassifiedContentBlock {
 /** The wire form of a typed `prelude.mcp.server_error` throw (decoded back into the data value at the
  *  reactor base). */
 function serverError(message: string): Json {
-  return { $constructor: "prelude.mcp.server_error", value: { message } };
+  return { $katari_constructor: "prelude.mcp.server_error", $katari_value: { message } };
 }
 
 /** The wire form of the typed `prelude.mcp.auth_error` throw — the `headers` path's rejected key
@@ -233,7 +233,7 @@ function serverError(message: string): Json {
  *  to the given headers, so retrying with the same material will not help. The oauth path never throws
  *  this — it parks and asks instead (`authorizationRequired`). */
 function authError(message: string): Json {
-  return { $constructor: "prelude.mcp.auth_error", value: { message } };
+  return { $katari_constructor: "prelude.mcp.auth_error", $katari_value: { message } };
 }
 
 /** Classify one failed operation by the descriptor's auth variant — the ONE place the auth sum decides
@@ -284,7 +284,7 @@ function messageOfError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The descriptor's auth sum, decoded from its `$constructor` wire tag: explicit request headers, or
+/** The descriptor's auth sum, decoded from its `$katari_constructor` wire tag: explicit request headers, or
  *  a named stored OAuth credential (the name is identity, not secret material). */
 type DescriptorAuth =
   | { kind: "headers"; headers: Record<string, string> }
@@ -619,7 +619,7 @@ function readDescriptor(source: Json | null): Descriptor {
   return { url, auth: readDescriptorAuth(source.auth) };
 }
 
-/** Decode the descriptor's auth sum from its wire form — the `$constructor`-tagged `data` value the
+/** Decode the descriptor's auth sum from its wire form — the `$katari_constructor`-tagged `data` value the
  *  program built (`mcp.headers(...)` / `mcp.oauth(...)`). This is the ONE place the tag is dispatched
  *  on; past here the variants are distinct union members. A malformed shape is wire drift, reported as
  *  the typed descriptor error (the catch in `perform` makes it a `server_error` throw). */
@@ -634,12 +634,12 @@ function readDescriptorAuth(source: Json | undefined): DescriptorAuth {
       'mcp: the descriptor\'s "auth" must be an mcp.headers(...) or mcp.oauth(...) value',
     );
   }
-  const fieldsSource = source.value;
+  const fieldsSource = source.$katari_value;
   const fields =
     fieldsSource !== null && typeof fieldsSource === "object" && !Array.isArray(fieldsSource)
       ? fieldsSource
       : {};
-  switch (source.$constructor) {
+  switch (source.$katari_constructor) {
     case "prelude.mcp.headers": {
       const headers: Record<string, string> = {};
       const rawValues = fields.values;

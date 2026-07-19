@@ -113,7 +113,7 @@ describe("secret information flow", () => {
     const result = await run(ir, "main", null);
     expect(result).toEqual({ kind: "string", value: "sk-123 world", private: true });
     // The user-facing API would redact it; the FFI sidecar would see the real value.
-    expect(valueToJson(result, "redact")).toEqual({ $redacted: true });
+    expect(valueToJson(result, "redact")).toEqual({ $katari_redacted: true });
     expect(valueToJson(result, "reveal")).toBe("sk-123 world");
   });
 

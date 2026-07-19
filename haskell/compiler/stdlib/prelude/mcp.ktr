@@ -136,7 +136,7 @@ server-declared tool name, @arguments@ its arguments object as a plain value tre
 scalars, and a `file` becomes base64 in place — the same slot contract as `http.json`). The result is
 DECODED against @T@ inside the runtime: a tool's `structuredContent` is read as @T@'s wire form (so a
 `$ref` handle object reconstructs a REAL `file` value, and records / arrays / scalars land as values), a
-plain-text reply decodes only into a string-shaped @T@, and a schema mismatch throws `decode_error`.
+plain-text reply decodes only into a string-shaped @T@, and a schema mismatch throws `validation_error`.
 Instantiate @T@ with `unknown` to keep the reply as a raw document value instead (the codegen's choice
 when no `outputSchema` maps): a `$ref` then stays an inert record inside the tree, which a later dynamic
 call (`reflection.call_agent`) into a `file`-typed position still revives into a real handle. @T@
@@ -151,7 +151,7 @@ external agent call[effect Scope, T](
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The server-declared tool name." tool: string,
   @"The tool's arguments object, as a plain value tree; only the server validates it." arguments: unknown,
-) -> T with Scope | prelude.throw[server_error | auth_error | json.decode_error] from "mcp"
+) -> T with Scope | prelude.throw[server_error | auth_error | json.validation_error] from "mcp"
 
 @"Publish @tools@ as a live MCP server for the extent of @subscriber@. The runtime mints a fresh,
 unguessable capability URL and serves the record's agents as MCP tools there — each record key is

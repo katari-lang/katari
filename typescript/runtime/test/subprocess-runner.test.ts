@@ -122,7 +122,7 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
     channel.reply({
       kind: "throw",
       delegation,
-      error: { $constructor: "main.my_error", value: { message: "typed!" } },
+      error: { $katari_constructor: "main.my_error", $katari_value: { message: "typed!" } },
     });
 
     expect(completions).toEqual([
@@ -130,7 +130,7 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
         delegation,
         outcome: {
           kind: "throw",
-          error: { $constructor: "main.my_error", value: { message: "typed!" } },
+          error: { $katari_constructor: "main.my_error", $katari_value: { message: "typed!" } },
         },
       },
     ]);

@@ -278,8 +278,8 @@ class AuthGatedMcpTransport implements McpTransport {
       outcome: {
         kind: "throw",
         error: {
-          $constructor: "prelude.mcp.server_error",
-          value: { message: "mcp call interrupted by a runtime restart" },
+          $katari_constructor: "prelude.mcp.server_error",
+          $katari_value: { message: "mcp call interrupted by a runtime restart" },
         },
       },
     });

@@ -23,7 +23,7 @@ import {
   type SchemaInfo,
 } from "@katari-lang/types";
 import type { IrSource } from "../ir.js";
-import { valueEquals } from "../value/codec.js";
+import { jsonToValue, valueEquals, valueToJson } from "../value/codec.js";
 import { schemaToJson } from "../value/schema-json.js";
 import type { BlobRefValue, GenericSubstitution, Value } from "../value/types.js";
 import {
@@ -34,14 +34,7 @@ import {
   typeSubstitutionOf,
 } from "../value/validation.js";
 import type { PrimContext, PrimImplementation } from "./context.js";
-import {
-  blobStoreStringReader,
-  encodeValue,
-  literalLift,
-  literalWrite,
-  type StringReader,
-  unescapeWireKeys,
-} from "./json-value.js";
+import { blobStoreStringReader, literalLift, type StringReader } from "./json-value.js";
 import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
 import { errorData, KatariThrow } from "./throw-signal.js";
 import type { BlobEntry } from "./types.js";
@@ -49,7 +42,7 @@ import type { BlobEntry } from "./types.js";
 // The domain error ctors the json prims throw (`prelude/json.ktr` declares them). `stringify` is total,
 // so it declares none.
 const PARSE_ERROR = "prelude.json.parse_error";
-const DECODE_ERROR = "prelude.json.decode_error";
+const VALIDATION_ERROR = "prelude.json.validation_error";
 
 // The largest array `range` will materialise. `range` allocates the whole array synchronously on the
 // actor's serial turn, so an unbounded (possibly AI-supplied) bound would stall the event loop or exhaust
@@ -77,7 +70,7 @@ function fileArgument(argument: Value, name: string): BlobRefValue {
 }
 
 /** The blob row behind a file value. A missing row is a dangling handle — the blob was deleted, or
- *  the id was made up (an AI hallucinating a `$ref`); fail loudly with the id, so an AI loop's guard
+ *  the id was made up (an AI hallucinating a `$katari_ref`); fail loudly with the id, so an AI loop's guard
  *  feeds a correctable message back to the model. */
 function blobRowOf(context: PrimContext, file: BlobRefValue): BlobEntry {
   const entry = context.blobEntryOf(file.blobId);
@@ -92,6 +85,9 @@ function blobRowOf(context: PrimContext, file: BlobRefValue): BlobEntry {
 export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
   // ─── prelude.json ─────────────────────────────────────────────────────────────────────────
   "prelude.json.parse": async (argument, context) => {
+    // Parse the text, then read it through the value codec (`jsonToValue`): a `$katari_` marker is
+    // interpreted (a `$katari_ref` becomes a real `file`), records / arrays / scalars become ordinary
+    // values. External JSON never carries a `$katari_` key, so a document round-trips faithfully.
     const text = await readStringField(argument, "text", context);
     let json: Json;
     try {
@@ -104,38 +100,23 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
         ),
       );
     }
-    return literalLift(json);
+    return jsonToValue(json);
   },
-  "prelude.json.stringify": async (argument, context) => {
-    // TOTAL: render ANY value as the text of its canonical JSON form. `encodeValue` turns the value into a
-    // document first — a document is written key-for-key (so `stringify(parse(s)) == s`), a data value nests
-    // under `value`, and a file / agent / closure / tool becomes its handle object — then it flattens to text,
-    // total for every value. The `$$` escape `encodeValue` put on a value-plane `$`-key is un-escaped back out
-    // (`unescapeWireKeys`): the surface shows keys VERBATIM, so a `$ref` key displays as `$ref`, never
-    // `$$ref` — the escape stays a pure codec-internal device, invisible at every surface.
-    const reader = stringReaderOf(context);
-    const wire = await encodeValue(field(argument, "value"), reader);
-    const document = unescapeWireKeys(await literalWrite(wire, reader));
-    return { kind: "string", value: JSON.stringify(document) };
+  "prelude.json.stringify": (argument) => {
+    // TOTAL and CANONICAL: render ANY value as the text of its wire form (`valueToJson`) — a document
+    // records key-for-key (so `stringify(parse(s)) == s`), a data value nests under `$katari_value`, and a
+    // file / agent / closure / tool becomes its handle object. `reveal` keeps content; the prim layer's
+    // monotonic taint marks the whole result private whenever any input part is.
+    return {
+      kind: "string",
+      value: JSON.stringify(valueToJson(field(argument, "value"), "reveal")),
+    };
   },
-  "prelude.json.parse_as": async (argument, context) => {
-    // The typed text boundary, LITERAL: parse the text, lift it verbatim into a document value (no `$`
-    // interpretation), then check it against T as a separate pass. A malformed document is `parse_error`;
-    // a shape mismatch is the declared, catchable `decode_error`.
-    const schema = instantiatedSchema(context, "json.parse_as");
-    const text = await readStringField(argument, "text", context);
-    let parsed: Json;
-    try {
-      parsed = JSON.parse(text) as Json;
-    } catch (error) {
-      throw new KatariThrow(
-        errorData(
-          PARSE_ERROR,
-          `json.parse_as: malformed JSON — ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-    }
-    return conformedOrThrow(literalLift(parsed), schema, "json.parse_as");
+  "prelude.json.validate": (argument, context) => {
+    // The value-plane typed boundary: check `value` against T's schema and return it unchanged, or raise
+    // the declared, catchable `validation_error` naming the offending path. Never rewrites the value.
+    const schema = instantiatedSchema(context, "json.validate");
+    return conformedOrThrow(field(argument, "value"), schema, "json.validate");
   },
 
   // ─── prelude.record ─────────────────────────────────────────────────────────────────────── //
@@ -419,15 +400,15 @@ function instantiatedSchema(context: PrimContext, label: string): JSONSchema {
   return bound.schema;
 }
 
-/** Check a decoded value against T, turning a mismatch into the panic the typed readers promise. The
- *  value itself is returned unchanged (the codec already produced it; validation only checks). */
+/** Check a value against T, returning it unchanged when it conforms, or raising the catchable
+ *  `validation_error` naming the offending path. Validation only checks — it never rewrites the value. */
 function conformedOrThrow(value: Value, schema: JSONSchema, label: string): Value {
   const result = conformValue(value, schema);
   if (!result.ok) {
     throw new KatariThrow(
       errorData(
-        DECODE_ERROR,
-        `${label}: the document does not conform to T — ${renderConformFailures(result.failures)}`,
+        VALIDATION_ERROR,
+        `${label}: the value does not conform to T — ${renderConformFailures(result.failures)}`,
       ),
     );
   }
@@ -515,9 +496,9 @@ export function conformCallableArgumentSync(
 /** The DECLARED input schema of a callable value, resolved synchronously the way `conformCallableArgumentSync`
  *  does — for an agent / closure from its already-loaded snapshot block (generics filled from the callee's own
  *  carried substitution), for a `tool` from its attached `inputSchema`, and `null` for a non-callable, an
- *  unloaded / foreign snapshot, or a non-agent block. The delegation boundary reads it to REVIVE a dynamic
- *  (`call_agent`) argument's `$ref` records into real files at their schema positions before validating. */
-export function dynamicInputSchemaOf(value: Value, irSource: IrSource): JSONSchema | null {
+ *  unloaded / foreign snapshot, or a non-agent block. The sync `call_agent` pre-validation reads it to check a
+ *  dynamic argument against the target's declared input before dispatching. */
+function dynamicInputSchemaOf(value: Value, irSource: IrSource): JSONSchema | null {
   if (value.kind === "tool") return value.inputSchema;
   if (value.kind !== "agent" && value.kind !== "closure") return null;
   let block: Block;

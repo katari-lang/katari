@@ -242,7 +242,7 @@ describe("the typed error model (prelude.throw)", () => {
 
   test("a tainted payload is redacted in the run's error message (fail-closed boundary)", async () => {
     // main: throw({ message: secret() }) — the payload's field is private, so the failure message must
-    // carry `$redacted`, never the plaintext.
+    // carry `$katari_redacted`, never the plaintext.
     const prims = new PrimRegistry();
     prims.register("test.secret", () => markPrivate({ kind: "string", value: "hunter2" }));
     const ir: IRModule = {
@@ -281,7 +281,7 @@ describe("the typed error model (prelude.throw)", () => {
     };
 
     const failure = run(ir, null, prims);
-    await expect(failure).rejects.toThrow(/throw: .*\$redacted/);
+    await expect(failure).rejects.toThrow(/throw: .*\$katari_redacted/);
     await expect(failure).rejects.not.toThrow(/hunter2/);
   });
 
