@@ -158,7 +158,14 @@ function forkIr(bodies: {
   continuation: Operation[];
   task: Operation[];
   main?: Operation[];
+  canceller?: Operation[];
 }): IRModule {
+  // A `canceller` fiber body (wave 5): defaults to a no-op fiber. The cancel tests override it with a body that
+  // gates on a request then cancels a handle it was forked with (to panic a join parked concurrently).
+  const canceller: Operation[] = bodies.canceller ?? [
+    { kind: "loadLiteral", output: 221, value: { kind: "null" } },
+    { kind: "exit", target: 22, value: 221 },
+  ];
   const main: Operation[] = bodies.main ?? [
     { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
     { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
@@ -251,16 +258,48 @@ function forkIr(bodies: {
         },
         parameters: { parameter: 170 },
       },
+      // prelude.region.cancel (wave 5): tears one fiber down early, routed by its handle.
+      18: {
+        block: { kind: "agent", body: 19, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      19: {
+        block: { kind: "external", key: "prelude.region.cancel", input: 180, reactor: "region" },
+        parameters: { parameter: 180 },
+      },
+      // hold2: a second holding request (distinct from ask_value), so a continuation can hold AFTER a cancel to
+      // keep its nursery alive while a test observes the cancelled fiber's instance is gone.
+      20: {
+        block: { kind: "agent", body: 21, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      21: {
+        block: { kind: "request", name: createAgentName("hold2"), input: 200 },
+        parameters: { parameter: 200 },
+      },
+      // canceller: a fiber body a continuation forks alongside a worker — the parked-join-cancel test overrides
+      // it to gate then cancel the worker's handle (its `{ input }` argument carries `{ nursery, handle }`).
+      22: {
+        block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      23: {
+        block: { kind: "sequence", result: null, operations: canceller },
+        parameters: { parameter: 220 },
+      },
     },
     entries: {
       [createAgentName("main")]: { block: 0, private: false },
       [createAgentName("prelude.region.provide")]: { block: 2, private: false },
       [createAgentName("prelude.region.fork")]: { block: 4, private: false },
       [createAgentName("prelude.region.join")]: { block: 14, private: false },
+      [createAgentName("prelude.region.cancel")]: { block: 18, private: false },
       [createAgentName("continuation")]: { block: 6, private: false },
       [createAgentName("ask_value")]: { block: 8, private: false },
       [createAgentName("fiber_ask")]: { block: 10, private: false },
       [createAgentName("task")]: { block: 12, private: false },
+      [createAgentName("hold2")]: { block: 20, private: false },
+      [createAgentName("canceller")]: { block: 22, private: false },
     },
     names: {},
   };
@@ -965,5 +1004,430 @@ describe("region reactor", () => {
     expect(persistence.scopeCount()).toBe(0);
     expect(persistence.envelopeCount("region")).toBe(0);
     expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("cancel tears a running fiber's instance down while the nursery stays alive", async () => {
+    // The continuation forks a fiber that BLOCKS on `fiber_ask`, holds on gate1 (so the fiber is provably
+    // running), cancels the fiber, then holds on gate2 (so the provide is still ALIVE while we observe). The
+    // cancelled fiber's core instance is torn down — its live-instance count drops — even though the nursery
+    // did not return: proof the cancel itself (not the provide's teardown) stopped the fiber's execution.
+    const persistence = new StoringPersistence();
+    const forkGate1CancelGate2: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "worker" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      // gate1: hold while the worker fiber is running, so the test can sample the live-instance count WITH it.
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      // Cancel the still-running worker fiber.
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 68,
+        output: 69,
+      },
+      // gate2: hold AFTER the cancel, so the provide is still alive while the test samples the count WITHOUT it.
+      { kind: "makeRecord", entries: [], output: 70 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("hold2") },
+        argument: 70,
+        output: 71,
+      },
+      { kind: "exit", target: 6, value: 71 },
+    ];
+    const actor = makeActor(
+      forkIr({ continuation: forkGate1CancelGate2, task: askingTask }),
+      persistence,
+    );
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The worker fiber is running (its `fiber_ask` is up) and the continuation holds on gate1 (`ask_value`).
+    const gate1 = await waitUntil(() => {
+      const fiber = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_ask"));
+      const hold = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("ask_value"));
+      return fiber !== undefined && hold !== undefined ? hold : undefined;
+    });
+    const withFiber = persistence.instanceCount();
+
+    // Release gate1: the continuation cancels the worker, then holds on gate2. The cancel settles `null` only
+    // after the fiber's teardown confirms, so by the time gate2 is up the fiber's instance is gone.
+    await actor.answerEscalation(gate1.escalation, { kind: "null" });
+    await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("hold2")),
+    );
+    const withoutFiber = await waitUntil(() =>
+      persistence.instanceCount() < withFiber ? persistence.instanceCount() : undefined,
+    );
+    expect(withoutFiber).toBeLessThan(withFiber);
+
+    // Releasing gate2 lets the whole run finish; nothing leaks behind the cancelled fiber.
+    const gate2 = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("hold2")),
+    );
+    await actor.answerEscalation(gate2.escalation, { kind: "string", value: "done" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "done" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
+  });
+
+  test("cancelling a fiber a join is parked on panics that join (cancel and join are exclusive)", async () => {
+    // The continuation forks a WORKER fiber (blocks on `fiber_ask`) and a CANCELLER fiber (gates on `ask_value`,
+    // then cancels the worker), then JOINS the worker — which parks (the worker is running). Answering the
+    // canceller's gate makes it cancel the worker, which panics the parked join: "await its result" (join) and
+    // "stop, I don't want it" (cancel) are contradictory intents, so their coexistence fails the run.
+    const cancellerBody: Operation[] = [
+      { kind: "getField", source: 220, field: "input", output: 221 },
+      { kind: "makeRecord", entries: [], output: 222 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 222,
+        output: 223,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 221,
+        output: 224,
+      },
+      { kind: "exit", target: 22, value: 224 },
+    ];
+    const forkJoinWithCanceller: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "worker" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      // Fork the canceller, handing it `{ nursery, handle }` so it can cancel the worker after it gates.
+      { kind: "loadAgent", output: 66, name: createAgentName("canceller") },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 66],
+          ["argument", 67],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 68,
+        output: 69,
+      },
+      // Join the worker — parks a waiter (the worker is still running).
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 70,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 70,
+        output: 71,
+      },
+      { kind: "exit", target: 6, value: 71 },
+    ];
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      forkIr({ continuation: forkJoinWithCanceller, task: askingTask, canceller: cancellerBody }),
+      persistence,
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Drive to the parked point: the worker is running (its `fiber_ask` is up), the canceller is holding on its
+    // gate (`ask_value`), and the continuation's join is durably parked.
+    const gate = await waitUntil(() => {
+      const fiber = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_ask"));
+      const canceller = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("ask_value"));
+      return fiber !== undefined && canceller !== undefined ? canceller : undefined;
+    });
+    await eventually(async () => {
+      const joins = await peekRegionJoins(persistence);
+      return joins.length > 0 ? joins : undefined;
+    });
+
+    // Release the canceller's gate: it cancels the worker, panicking the join parked on it — failing the run.
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
+    await expect(result).rejects.toThrow(/region\.join.*cancelled/);
+  });
+
+  test("cancelling an already-settled fiber is an idempotent no-op that still succeeds", async () => {
+    // The continuation forks a fiber that settles AT ONCE (its outcome buffered), holds until the buffer lands,
+    // then cancels the now-settled fiber. The cancel finds nothing running — an idempotent no-op — yet still
+    // succeeds with `null`, and the continuation returns a constant the run resolves with.
+    const persistence = new StoringPersistence();
+    const forkHoldCancelReturn: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "loadLiteral", output: 70, value: { kind: "string", value: "cancel-noop" } },
+      { kind: "exit", target: 6, value: 70 },
+    ];
+    const actor = makeActor(
+      forkIr({ continuation: forkHoldCancelReturn, task: returningTask }),
+      persistence,
+    );
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Wait until the fiber has buffered its outcome AND the continuation is holding, then release the hold.
+    const hold = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    await actor.answerEscalation(hold.escalation, { kind: "null" });
+
+    await expect(result).resolves.toEqual({ kind: "string", value: "cancel-noop" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "cancel-noop" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("joining a fiber after it was cancelled panics (a cancelled fiber is unknown)", async () => {
+    // The continuation forks a blocking fiber, cancels it, then joins the SAME handle. The cancel dropped the
+    // fiber from the running set (and it was never buffered — a cancelled fiber has no joinable outcome), so the
+    // join finds it unknown and panics — symmetric to a double-join, closing the cancel/join loop.
+    const forkCancelThenJoin: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 66,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "exit", target: 6, value: 69 },
+    ];
+    const actor = makeActor(forkIr({ continuation: forkCancelThenJoin, task: askingTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.join.*not joinable/);
+  });
+
+  test("joining a forged fiber handle (an unknown scope) panics", async () => {
+    // A continuation builds a FORGED fiber handle — a record carrying random `$katari_region_*` marker fields
+    // (exactly the shape a hostile mcp / http result could return) whose scope names no live nursery — and joins
+    // it. The scope is unguessable (18 random bytes), so a forged handle matches no live scope and the join
+    // panics: the engine-invariant backstop automatically rejects a hostile-wire handle, no decode gate needed.
+    const joinForged: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadLiteral", output: 62, value: { kind: "string", value: "regionscope:forged" } },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "fiber:forged" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["$katari_region_scope", 62],
+          ["$katari_region_fiber", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 64],
+        ],
+        output: 65,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 65,
+        output: 66,
+      },
+      { kind: "exit", target: 6, value: 66 },
+    ];
+    const actor = makeActor(forkIr({ continuation: joinForged, task: returningTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.join.*not joinable/);
+  });
+
+  test("cancelling a forged fiber handle (an unknown scope) panics", async () => {
+    // The `cancel` twin of the forged-join case: a forged handle whose scope names no live nursery is refused
+    // as a panic, automatically rejecting the hostile-wire handle.
+    const cancelForged: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadLiteral", output: 62, value: { kind: "string", value: "regionscope:forged" } },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "fiber:forged" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["$katari_region_scope", 62],
+          ["$katari_region_fiber", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 64],
+        ],
+        output: 65,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 65,
+        output: 66,
+      },
+      { kind: "exit", target: 6, value: 66 },
+    ];
+    const actor = makeActor(forkIr({ continuation: cancelForged, task: returningTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.cancel.*not cancellable/);
   });
 });
