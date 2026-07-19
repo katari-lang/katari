@@ -15,6 +15,10 @@ import {
 import { describe, expect, test } from "vitest";
 import { InMemoryPersistence, type Persistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
+import {
+  decodeRegionExtension,
+  type RegionExtension,
+} from "../src/runtime/actor/region-reactor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
@@ -127,6 +131,182 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
   throw new Error("waitUntil: predicate never held");
 }
 
+/** `waitUntil` for an async probe — the durable-buffer reads below poll the persistence, which is async. */
+async function eventually<T>(probe: () => Promise<T | undefined>): Promise<T> {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("eventually: the probe never held");
+}
+
+// A richer IR than `provideIr`: it wires `prelude.region.fork` alongside `provide`, two request-agents
+// (`ask_value` to HOLD an agent open on an unanswered escalation, `fiber_ask` for a fiber's own escalation),
+// and a `task` agent a `fork` runs. The continuation's body, the task's body, and — for the escaped-nursery
+// case — `main`'s body are the axes the tests vary.
+//
+//   agent main()                         { region.provide(continuation) }     // or: provide then fork (escaped)
+//   agent continuation(value)            { <continuation ops> }               // dispatched with { value: nursery }
+//   agent task(input)                    { <task ops> }                       // the fiber body a fork runs
+//   agent ask_value(input) / fiber_ask(input) { <request> }                   // unhandled holds / fiber escalations
+function forkIr(bodies: {
+  continuation: Operation[];
+  task: Operation[];
+  main?: Operation[];
+}): IRModule {
+  const main: Operation[] = bodies.main ?? [
+    { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+    { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.provide") },
+      argument: 102,
+      output: 103,
+    },
+    { kind: "exit", target: 0, value: 103 },
+  ];
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: {
+        block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      1: {
+        block: { kind: "sequence", result: null, operations: main },
+        parameters: { parameter: 100 },
+      },
+      2: {
+        block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      3: {
+        block: { kind: "external", key: "prelude.region.provide", input: 30, reactor: "region" },
+        parameters: { parameter: 30 },
+      },
+      4: {
+        block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      5: {
+        block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
+        parameters: { parameter: 50 },
+      },
+      6: {
+        block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      7: {
+        block: { kind: "sequence", result: null, operations: bodies.continuation },
+        parameters: { parameter: 60 },
+      },
+      8: {
+        block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      9: {
+        block: { kind: "request", name: createAgentName("ask_value"), input: 90 },
+        parameters: { parameter: 90 },
+      },
+      10: {
+        block: { kind: "agent", body: 11, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      11: {
+        block: { kind: "request", name: createAgentName("fiber_ask"), input: 110 },
+        parameters: { parameter: 110 },
+      },
+      12: {
+        block: { kind: "agent", body: 13, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      13: {
+        block: { kind: "sequence", result: null, operations: bodies.task },
+        parameters: { parameter: 120 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.region.provide")]: { block: 2, private: false },
+      [createAgentName("prelude.region.fork")]: { block: 4, private: false },
+      [createAgentName("continuation")]: { block: 6, private: false },
+      [createAgentName("ask_value")]: { block: 8, private: false },
+      [createAgentName("fiber_ask")]: { block: 10, private: false },
+      [createAgentName("task")]: { block: 12, private: false },
+    },
+    names: {},
+  };
+}
+
+/** A continuation body: fork `task` with `argument`, then HOLD on an unanswered `ask_value` so the provide
+ *  stays alive while the fiber runs; the provide settles with the hold's eventual answer. */
+function forkThenHold(argument: string): Operation[] {
+  return [
+    { kind: "getField", source: 60, field: "value", output: 61 },
+    { kind: "loadAgent", output: 62, name: createAgentName("task") },
+    { kind: "loadLiteral", output: 63, value: { kind: "string", value: argument } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["nursery", 61],
+        ["task", 62],
+        ["argument", 63],
+      ],
+      output: 64,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.fork") },
+      argument: 64,
+      output: 65,
+    },
+    { kind: "makeRecord", entries: [], output: 66 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("ask_value") },
+      argument: 66,
+      output: 67,
+    },
+    { kind: "exit", target: 6, value: 67 },
+  ];
+}
+
+/** A task body that surfaces its argument: escalate its whole `{ input }` argument record as `fiber_ask`
+ *  (which relays up through the provide to the run root), returning the answer. A fiber blocked here stays
+ *  running. The argument is forwarded as the record it arrives in (a `fork` hands `task` `{ input: <arg> }`),
+ *  so it crosses the agent boundary unchanged. */
+const askingTask: Operation[] = [
+  {
+    kind: "delegate",
+    target: { kind: "name", name: createAgentName("fiber_ask") },
+    argument: 120,
+    output: 122,
+  },
+  { kind: "exit", target: 12, value: 122 },
+];
+
+/** A task body that settles at once with a constant — a fiber whose outcome the provide buffers. */
+const returningTask: Operation[] = [
+  { kind: "loadLiteral", output: 121, value: { kind: "string", value: "fiber-done" } },
+  { kind: "exit", target: 12, value: 121 },
+];
+
+/** The persisted `provide` extension rows, decoded — how a test reads a nursery's durable fiber buffer the
+ *  way a restart would reload it (unsealed through the loader). */
+async function peekRegionProvides(
+  persistence: StoringPersistence,
+): Promise<Array<Extract<RegionExtension, { kind: "provide" }>>> {
+  const provides: Array<Extract<RegionExtension, { kind: "provide" }>> = [];
+  await persistence.load(PROJECT, async (loader) => {
+    for (const row of await loader.external.instances("region")) {
+      const extension = decodeRegionExtension(row.extension);
+      if (extension.kind === "provide") provides.push(extension);
+    }
+  });
+  return provides;
+}
+
 describe("region reactor", () => {
   test("provide hands its continuation a nursery token carrying the scope identity, and settles with the continuation's result", async () => {
     // The continuation returns the nursery handle it received, so the run resolves with it — proving both
@@ -207,5 +387,241 @@ describe("region reactor", () => {
     });
     expect(done.result).toEqual({ kind: "string", value: "answered" });
     expect(actorTwo.listOpenEscalations()).toHaveLength(0);
+  });
+
+  test("fork spawns the task as a separate fiber and delivers its argument", async () => {
+    // The continuation forks `task` (which re-escalates its `.input` as `fiber_ask`) then holds. The fiber
+    // runs as its OWN instance under the provide, so its escalation wells up at the run root carrying the
+    // exact argument the fork passed — proving both that a separate fiber ran and that the argument reached it.
+    const actor = makeActor(forkIr({ continuation: forkThenHold("delivered"), task: askingTask }));
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const fiberAsk = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    expect(fiberAsk.argument).toEqual({
+      kind: "record",
+      fields: { input: { kind: "string", value: "delivered" } },
+    });
+  });
+
+  test("independent forks each spawn their own fiber", async () => {
+    // The continuation forks `task` twice with distinct arguments, then holds. Both fibers run independently,
+    // so two distinct `fiber_ask` escalations surface at the root — one per forked argument.
+    const twoForks: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "alpha" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "loadLiteral", output: 66, value: { kind: "string", value: "beta" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 66],
+        ],
+        output: 67,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 67,
+        output: 68,
+      },
+      { kind: "makeRecord", entries: [], output: 69 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 69,
+        output: 70,
+      },
+      { kind: "exit", target: 6, value: 70 },
+    ];
+    const actor = makeActor(forkIr({ continuation: twoForks, task: askingTask }));
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const asks = await waitUntil(() => {
+      const found = actor
+        .listOpenEscalations()
+        .filter((open) => open.request === createAgentName("fiber_ask"));
+      return found.length >= 2 ? found : undefined;
+    });
+    const arguments_ = asks.map((ask) => {
+      const input = ask.argument?.kind === "record" ? ask.argument.fields.input : undefined;
+      return input?.kind === "string" ? input.value : null;
+    });
+    expect(new Set(arguments_)).toEqual(new Set(["alpha", "beta"]));
+  });
+
+  test("a fiber's escalation relays through the provide to the run root, and its answer returns to the fiber", async () => {
+    // The fiber escalates `fiber_ask` and returns the answer. The escalation relays up through the provide
+    // (the base's relay bridge) to the run root; answering it descends the same path back DOWN to the fiber,
+    // which then settles — and its outcome is buffered on the provide (nothing has joined it), carrying the
+    // answer that made the full round trip.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      forkIr({ continuation: forkThenHold("q"), task: askingTask }),
+      persistence,
+    );
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const fiberAsk = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    await actor.answerEscalation(fiberAsk.escalation, { kind: "string", value: "the-answer" });
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered).toHaveLength(1);
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "the-answer" },
+    });
+  });
+
+  test("a settled fiber's outcome is buffered durably on the provide and survives a restart", async () => {
+    // The fiber settles at once with a constant while the continuation holds. Its outcome is buffered on the
+    // provide's durable extension — a restart restores it, and the provide, resumed as durable core work,
+    // still settles with the CONTINUATION's answer (not the buffered fiber's), proving the buffer neither
+    // settled the call early nor was lost.
+    const persistence = new StoringPersistence();
+    const ir = forkIr({ continuation: forkThenHold("held"), task: returningTask });
+    const actorOne = makeActor(ir, persistence);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const beforeRestart = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(beforeRestart[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "fiber-done" },
+    });
+
+    // Restart: a fresh actor over the same rows re-registers the scope, resumes the held continuation, and
+    // reloads the fiber buffer intact from the provide extension.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const afterRestart = await peekRegionProvides(persistence);
+    expect(afterRestart[0]?.fiberBuffer[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "fiber-done" },
+    });
+
+    // Answering the continuation's hold settles the provide with the CONTINUATION's value; the fiber's
+    // buffered outcome is discarded as the provide drops (no join took it this wave).
+    const hold = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    await actorTwo.answerEscalation(hold.escalation, { kind: "string", value: "continuation-value" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "continuation-value" });
+  });
+
+  test("forking into a scope whose provide has already returned is refused", async () => {
+    // `main` keeps the nursery the provide returned and forks it AFTER the block closed — a dead-scope fork
+    // the type checker prevents (it discharges `Scope` at the provide), so the runtime backstop is a panic:
+    // `fork`'s row declares no throw, and region has no error sum. The run fails with the closed-scope panic.
+    const escapedMain: Operation[] = [
+      { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+      { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.provide") },
+        argument: 102,
+        output: 103,
+      },
+      { kind: "loadAgent", output: 104, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 105, value: { kind: "string", value: "late" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 103],
+          ["task", 104],
+          ["argument", 105],
+        ],
+        output: 106,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 106,
+        output: 107,
+      },
+      { kind: "exit", target: 0, value: 107 },
+    ];
+    // The continuation returns the nursery it was handed, so the provide settles (and closes the scope)
+    // before `main` reaches the fork.
+    const returnNursery: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "exit", target: 6, value: 61 },
+    ];
+    const actor = makeActor(
+      forkIr({ main: escapedMain, continuation: returnNursery, task: returningTask }),
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.fork.*has closed/);
+  });
+
+  test("a fiber still running when the provide returns leaks no resources", async () => {
+    // The continuation forks a fiber that blocks on `fiber_ask`, then returns a constant AT ONCE. The provide
+    // settles with that constant, and its cancel cascade tears the still-running fiber down (the structured-
+    // concurrency teardown the base supplies) — so the run finishes with the continuation's value and leaves
+    // no live instance, scope, or region call behind.
+    const persistence = new StoringPersistence();
+    const forkThenReturn: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "orphan" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "loadLiteral", output: 66, value: { kind: "string", value: "closed-clean" } },
+      { kind: "exit", target: 6, value: 66 },
+    ];
+    const actor = makeActor(forkIr({ continuation: forkThenReturn, task: askingTask }), persistence);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await expect(result).resolves.toEqual({ kind: "string", value: "closed-clean" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
   });
 });
