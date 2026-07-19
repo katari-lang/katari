@@ -55,7 +55,7 @@ mcp_provide_instances / mcp_parked_instances / time_instances` →
 - reactor の自己選択は封筒(`instances.kind`)との join で行う — ext 側に reactor 列は持たない
   (SoT は封筒)。
 - **seal が一様になる**: extension 文書を既存の `sealForStorage` / `unsealFromStorage` に通す
-  (今日と同じく private ノードだけが `$sealed` になる node-level 封印 — 文書全体の暗号化ではない)。
+  (今日と同じく private ノードだけが `$katari_sealed` になる node-level 封印 — 文書全体の暗号化ではない)。
   「webhook の callback は seal、mcp の descriptor は seal、…」という kind 別の列挙が
   「Ext は seal される」という 1 規則になる。
 - migration: 新テーブルを作り、既存 5+3 テーブルの生存行を kind ごとに `json_build_object` で
@@ -84,7 +84,7 @@ pre-flight で判明: 裸 token での DB 検索は**存在する**(facade の `
 `run-tree.repository.ts` は ffi/http の型付き列(key / status / snapshotId)を直接 SELECT していた。
 改訂後: `status` は `external_call_instances` の実列のまま読み、kind 固有の表示欄(ffi の key /
 snapshotId)は **reactor が輸出する純関数 `decodeExtension`** で Ext 文書から取る(1 run 分の木で
-行数は小さく、対象 field は private でないので unseal 不要 — `$sealed` ノードは触らない)。SQL で
+行数は小さく、対象 field は private でないので unseal 不要 — `$katari_sealed` ノードは触らない)。SQL で
 `extension->>'key'` を掘るのは codec の schema を暗黙複製するので**やらない** — 型は codec が守る。
 
 ## 4. Db / Storing の二重実装は「行 CRUD の差」だけに縮む

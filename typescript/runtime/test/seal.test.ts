@@ -39,7 +39,7 @@ describe("sealForStorage / unsealFromStorage", () => {
   test("seals a private value (no plaintext at rest) and round-trips it back", () => {
     const sealed = sealForStorage(secret);
     expect(JSON.stringify(sealed)).not.toContain("sk-123");
-    expect(JSON.stringify(sealed)).toContain("$sealed");
+    expect(JSON.stringify(sealed)).toContain("$katari_sealed");
     expect(unsealFromStorage(sealed)).toEqual(secret);
   });
 

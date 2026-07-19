@@ -144,7 +144,7 @@ export const coreInstances = pgTable("core_instances", {
 // reconstruct the call on reload. The reactor self-selects its rows by joining the envelope's `kind` (the
 // SoT for which reactor owns a call), so no reactor column is repeated here; the extension's TypeScript
 // shape lives in the owning reactor's pure codec (`encode…Extension` / `decode…Extension`), never in SQL.
-// The whole document seals uniformly (private Value nodes anywhere in it become `$sealed` — one rule,
+// The whole document seals uniformly (private Value nodes anywhere in it become `$katari_sealed` — one rule,
 // not a per-kind column enumeration). Cascades with its envelope.
 export const externalCallInstances = pgTable("external_call_instances", {
   instanceId: uuid("instance_id")

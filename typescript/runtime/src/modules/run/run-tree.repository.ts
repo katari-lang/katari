@@ -242,7 +242,7 @@ export const runTreeRepository = {
         // The ffi display fields (dispatch key, snapshot pin) live inside the extension document, so they
         // decode through the reactor's exported pure codec — never SQL `->>` digging, which would
         // silently duplicate the schema the codec owns. The volume is one run's live rows, and the
-        // decoded fields are not private (any `$sealed` node elsewhere in a document stays untouched).
+        // decoded fields are not private (any `$katari_sealed` node elsewhere in a document stays untouched).
         const ffi =
           row.kind === "ffi" && row.extension !== null ? decodeFfiExtension(row.extension) : null;
         return {

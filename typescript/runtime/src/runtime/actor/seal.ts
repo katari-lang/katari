@@ -1,7 +1,7 @@
 // Encrypt-at-rest for secret values, applied at the persistence boundary. A persisted payload (a delegation
 // argument, a scope's variables, a whole thread, an outbox event) is JSON whose leaves may be `Value` nodes;
 // a private one carries `private: true`. Before a payload is written, every private node — anywhere in the
-// tree — is replaced by an encrypted `{ $sealed }` sentinel; on read it is decrypted back. Public structure
+// tree — is replaced by an encrypted `{ $katari_sealed }` sentinel; on read it is decrypted back. Public structure
 // stays plain JSON, so the column keeps its readable shape and only the secrets are ciphertext.
 //
 // Sealing a private node encrypts the whole subtree at once (nested private values ride along), and a sealed
@@ -10,9 +10,9 @@
 
 import { decryptSecret, encryptSecret } from "../../lib/crypto.js";
 
-/** The reserved key an encrypted private subtree collapses to at rest (a `$`-prefixed sentinel, like the
- *  codec's `$katari_ref` / `$katari_agent`, so it never collides with engine payload structure). */
-const SEALED_KEY = "$sealed";
+/** The reserved key an encrypted private subtree collapses to at rest (a sentinel in the codec's other
+ *  `$katari_` reserved-key namespace, so it never collides with engine payload structure). */
+const SEALED_KEY = "$katari_sealed";
 
 function isObject(node: unknown): node is Record<string, unknown> {
   return typeof node === "object" && node !== null && !Array.isArray(node);
@@ -62,14 +62,14 @@ function unsealNode(node: unknown): unknown {
   });
 }
 
-/** Seal a payload for storage: every private Value node within becomes an encrypted `{ $sealed }` sentinel,
+/** Seal a payload for storage: every private Value node within becomes an encrypted `{ $katari_sealed }` sentinel,
  *  the rest stays plain JSON. A structural no-op when nothing is private. The shape is otherwise preserved, so
  *  the cast back to the column's declared type describes exactly what `unsealFromStorage` reconstructs. */
 export function sealForStorage<T>(value: T): T {
   return sealNode(value) as T;
 }
 
-/** The inverse of `sealForStorage`: decrypt every `{ $sealed }` sentinel back into its private Value subtree. */
+/** The inverse of `sealForStorage`: decrypt every `{ $katari_sealed }` sentinel back into its private Value subtree. */
 export function unsealFromStorage<T>(value: T): T {
   return unsealNode(value) as T;
 }
