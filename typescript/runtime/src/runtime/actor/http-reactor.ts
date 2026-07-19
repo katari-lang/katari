@@ -28,6 +28,7 @@ import {
   ExternalCallReactor,
   type ExternalTarget,
 } from "./external-call-reactor.js";
+import { messageOf } from "./failure.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The transport data an http call holds. The argument is kept only to dispatch the request; recovery never
@@ -83,6 +84,27 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     raiser: InstanceId,
   ): void {
     this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller, run, raiser);
+  }
+
+  /** An undecodable http response (a hostile server whose body / header names mimic a `$katari_*` marker, so
+   *  the wire decoder cannot reconstruct the `{ status, headers, body | file }` value) is program-
+   *  anticipatable exactly like a no-response: fold it into the same `throw[http.fetch_error]` — for both
+   *  `fetch` and `fetch_file`, which share this base seam — so a caller's handler still controls retry and a
+   *  hostile server can never poison the actor. */
+  protected override escalateResultDecodeFailure(
+    delegation: DelegationId,
+    cause: unknown,
+    caller: ReactorName,
+    run: InstanceId,
+    raiser: InstanceId,
+  ): void {
+    this.escalateError(
+      delegation,
+      `the response could not be decoded: ${messageOf(cause)}`,
+      caller,
+      run,
+      raiser,
+    );
   }
 
   protected abort(delegation: DelegationId): void {

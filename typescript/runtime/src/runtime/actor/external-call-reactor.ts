@@ -153,7 +153,9 @@ export interface DecodedCallExtension<Payload> {
  *  in, Value out) keeps hostile / quirky server Json away from the generic decoder, which is total only for
  *  wire-shaped documents. A reply the direct call cannot decode (a marker that will not reconstruct) or that
  *  does not conform to `T` is turned into a typed `validation_error` throw in the reactor's own `complete`,
- *  BEFORE this seam runs — the seam that builds the value cannot itself throw. */
+ *  BEFORE this seam runs — the seam that builds the value is not SUPPOSED to throw. Should any decoder here
+ *  throw regardless (the base wire decoder on a reactor that does not pre-fold, or a bug), the base settle
+ *  seam catches it and folds it into `escalateResultDecodeFailure` — so the seam is total either way. */
 export interface AckDecodingPayload {
   decodeAck?: (raw: Json) => Value;
 }
@@ -679,12 +681,29 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
         // onto the core caller (and releases the value-carried resources to in-transit for the caller's
         // reown): a produced blob reaches the caller whether or not the decoded value happened to carry its
         // ref, so no per-call adoption backstop is needed.
-        const decode = ackDecoderOf(call.payload) ?? jsonToValue;
+        let value: Value;
+        try {
+          const decode = ackDecoderOf(call.payload) ?? jsonToValue;
+          value = decode(outcome.value);
+        } catch (cause) {
+          // The settle seam is TOTAL: a transport whose result Json cannot be reconstructed into a Value —
+          // a hostile / malformed `$katari_*` marker (a `$katari_redacted` header, a non-string `$katari_ref`),
+          // an over-deep tree (a RangeError) — must NOT throw out of the actor turn, or an uncaught decode
+          // poisons the substrate and drops every warm run of the whole project. Fold the failure into the
+          // reactor's declared escalation and wait like an errored call, exactly as the `throw` / `error`
+          // outcomes do. This is the general form of what an mcp direct call already does in its `complete`
+          // (re-shaping an undecodable reply into a typed throw BEFORE this seam) — now every reactor's raw
+          // wire is caught here, in one place, rather than each hardening its own completion path.
+          this.escalateResultDecodeFailure(delegation, cause, caller, run, instance);
+          call.status = "awaitingAnswer";
+          this.dirty.add(delegation);
+          return;
+        }
         this.send(
           {
             kind: "delegateAck",
             delegation,
-            value: decode(outcome.value),
+            value,
             from: this.name,
             to: caller,
             run,
@@ -767,6 +786,31 @@ export abstract class ExternalCallReactor<Payload extends object> extends Reacto
     raiser: InstanceId,
   ): void {
     this.raisePanic(delegation, message, caller, run, raiser);
+  }
+
+  /** Escalate a settle-seam decode failure — the transport's `result` Json could not be reconstructed into a
+   *  Value (a hostile / malformed `$katari_*` marker, an over-deep tree). Keeps the settle seam TOTAL: the
+   *  base wraps its decode in a try/catch and folds a failure here rather than letting it throw out of the
+   *  actor turn. It mirrors `escalateError` (a no-result error — the same "the call cannot produce a value"
+   *  shape), so the DEFAULT is a panic: an undecodable result on a TRUSTED boundary — an ffi sidecar's own
+   *  reply, a webhook subscriber's engine value, an oauth token from the credential store — is an
+   *  engine-invariant break, not a program-anticipatable error. A reactor whose result crosses an UNTRUSTED
+   *  boundary overrides it with its typed throw (http → `fetch_error`, mcp `callTool` → `server_error`),
+   *  exactly as it overrides `escalateError`. */
+  protected escalateResultDecodeFailure(
+    delegation: DelegationId,
+    cause: unknown,
+    caller: ReactorName,
+    run: InstanceId,
+    raiser: InstanceId,
+  ): void {
+    this.raisePanic(
+      delegation,
+      `the call's result could not be decoded: ${messageOf(cause)}`,
+      caller,
+      run,
+      raiser,
+    );
   }
 
   /** Bridge a settled inner delegation to its transport token and stage the post-commit delivery. A missing

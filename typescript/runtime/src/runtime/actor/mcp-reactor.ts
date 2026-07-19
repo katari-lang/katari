@@ -87,7 +87,7 @@ import {
   type McpToolListing,
   type McpTransport,
 } from "../external/mcp-transport.js";
-import { type DelegationId, newDelegationId, type SnapshotId } from "../ids.js";
+import { type DelegationId, type InstanceId, newDelegationId, type SnapshotId } from "../ids.js";
 import type { McpDispatchCall } from "../mcp-dispatch.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import { jsonToSchema } from "../value/schema-json.js";
@@ -659,6 +659,28 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         error: validationError(`mcp.call: the reply does not conform to T — ${mismatch}`),
       },
     };
+  }
+
+  /** An undecodable tool reply — a hostile MCP server whose `structuredContent` mimics a `$katari_*` marker
+   *  the wire cannot reconstruct — is a program-anticipatable transport failure like every other: fold it
+   *  into `throw[mcp.server_error]` so the settle seam stays total (a hostile server cannot poison the
+   *  actor). This fires only for a `callTool`: a `directCall`'s undecodable reply is already re-shaped into a
+   *  `validation_error` throw in `directCallCompletion`, BEFORE the seam, and a `listing` never settles a
+   *  call. */
+  protected override escalateResultDecodeFailure(
+    delegation: DelegationId,
+    cause: unknown,
+    caller: ReactorName,
+    run: InstanceId,
+    raiser: InstanceId,
+  ): void {
+    this.raiseThrow(
+      delegation,
+      errorData(SERVER_ERROR, `mcp: the tool reply could not be decoded — ${messageOf(cause)}`),
+      caller,
+      run,
+      raiser,
+    );
   }
 
   /** A provide's listing settled. A `result` hands the block its minted toolbox on a fresh turn; a

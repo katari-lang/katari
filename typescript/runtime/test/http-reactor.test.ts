@@ -7,27 +7,47 @@
 // recovery contract (an interrupted request is never re-sent — it fails on restart).
 
 import { createServer } from "node:http";
-import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
+import {
+  createAgentName,
+  type IRModule,
+  type Json,
+  type QualifiedName,
+  type SchemaInfo,
+} from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
+import { HttpReactor } from "../src/runtime/actor/http-reactor.js";
 import { InMemoryPersistence, type Persistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
+import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { type EnvReader, registerHostPrims } from "../src/runtime/engine/host-prims.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import { createProjectStore } from "../src/runtime/engine/store.js";
+import { THROW_REQUEST } from "../src/runtime/engine/throw-signal.js";
 import {
   FetchHttpTransport,
   type HttpCall,
   type HttpCompletion,
   type HttpTransport,
+  StubHttpTransport,
 } from "../src/runtime/external/http-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
-import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, DelegationId, InstanceId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
 import { type BlobStore, InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const PROJECT = "project-http" as ProjectId;
 const SNAPSHOT = "snapshot-http" as SnapshotId;
+const RUN = "run-http" as InstanceId;
+
+/** A JSON tree nested `depth` deep — deep enough to overflow the wire decoder's recursion (a `RangeError`,
+ *  the one non-marker way a hostile response's decode can throw at the settle seam). */
+function deepTree(depth: number): Json {
+  let tree: Json = 0;
+  for (let level = 0; level < depth; level += 1) tree = [tree];
+  return tree;
+}
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
 // agent main() {
@@ -452,6 +472,68 @@ describe("http reactor", () => {
     await expect(result).rejects.toThrow(
       /throw: .*prelude\.http\.fetch_error.*connection refused/,
     );
+  });
+
+  // A hostile / malformed response the wire decoder cannot reconstruct: a header named like a reserved
+  // `$katari_*` marker, a non-string `$katari_ref`, an over-deep tree. Fed directly (the real transport only
+  // ever emits string headers), each stands for a value a hostile server could get onto the settle seam.
+  const HOSTILE_RESPONSES: Array<{ name: string; value: Json }> = [
+    { name: "a `$katari_redacted` header", value: { status: 200, headers: { $katari_redacted: "1" }, body: "x" } },
+    { name: "a non-string `$katari_ref` header", value: { status: 200, headers: { $katari_ref: 7 }, body: "x" } },
+    { name: "an over-deep tree", value: deepTree(100000) },
+  ];
+
+  test.each(HOSTILE_RESPONSES)(
+    "does not poison the actor when the response carries $name — the run fails with throw[http.fetch_error]",
+    async ({ value }) => {
+      // Without the total settle seam the wire decoder would throw out of the actor turn (dropping every warm
+      // run of the project); with it, the undecodable response is folded into the same catchable fetch_error.
+      const transport = new ControlledHttpTransport();
+      const actor = makeActor(transport);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+      const call = await waitUntil(() => transport.dispatched[0]);
+      transport.feed({ delegation: call.delegation, outcome: { kind: "result", value } });
+
+      await expect(result).rejects.toThrow(
+        /throw: .*prelude\.http\.fetch_error.*could not be decoded/,
+      );
+    },
+  );
+
+  test("a fetch_file response the wire cannot decode escalates throw[http.fetch_error] too (the shared base seam)", () => {
+    // fetch_file settles through the SAME base seam as fetch, so a hostile `{ status, headers, file }` a
+    // program cannot decode folds into the same typed throw. Driven straight through the reactor: open a
+    // `fetch_file`-keyed call, feed a hostile completion, and read the escalate it raises.
+    const store = createProjectStore();
+    const pool = new ResourcePool(PROJECT, store);
+    const reactor = new HttpReactor(new StubHttpTransport(), pool);
+    const delegation = "d-fetch-file" as DelegationId;
+    const caller = "i-http-caller" as InstanceId;
+    reactor.react({
+      kind: "delegate",
+      delegation,
+      target: { kind: "external", key: "prelude.http.fetch_file", snapshot: SNAPSHOT },
+      argument: null,
+      from: "core",
+      to: "http",
+      run: RUN,
+      caller,
+    });
+    reactor.complete({
+      delegation,
+      outcome: { kind: "result", value: { status: 200, headers: { $katari_redacted: "1" } } },
+    });
+
+    const escalate = reactor.drainSends().find((event) => event.kind === "escalate");
+    if (escalate === undefined || escalate.kind !== "escalate") {
+      throw new Error("expected a fetch_error escalate");
+    }
+    expect(escalate.ask).toMatchObject({
+      kind: "request",
+      request: THROW_REQUEST,
+      argument: { fields: { error: { ctor: "prelude.http.fetch_error" } } },
+    });
   });
 
   test("never re-sends an interrupted request on recovery — it fails at-most-once", async () => {

@@ -20,6 +20,7 @@ import {
   createAgentName,
   type GenericArgumentSchema,
   type IRModule,
+  type Json,
   type JSONSchema,
   type QualifiedName,
   type SchemaInfo,
@@ -410,6 +411,14 @@ async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
   throw new Error("waitUntil: predicate never held");
 }
 
+/** A JSON tree nested `depth` deep — deep enough to overflow the wire decoder's recursion (a `RangeError`,
+ *  the one non-marker way a hostile tool reply's decode can throw at the settle seam). */
+function deepTree(depth: number): Json {
+  let tree: Json = 0;
+  for (let level = 0; level < depth; level += 1) tree = [tree];
+  return tree;
+}
+
 describe("mcp reactor", () => {
   test("provide lists the server, mints the toolbox for its continuation, and a minted tool's call goes straight back to the reactor", async () => {
     const transport = new ControlledMcpTransport();
@@ -482,6 +491,35 @@ describe("mcp reactor", () => {
       },
     });
   });
+
+  // A hostile MCP server's tool reply whose `structuredContent` the wire decoder cannot reconstruct — a
+  // reserved `$katari_*` marker, a non-string `$katari_ref`, an over-deep tree. Without the total settle seam
+  // any of these would throw out of the actor turn (poisoning every warm run of the project); with it, the
+  // undecodable reply is folded into the catchable `throw[mcp.server_error]` the transport channel declares.
+  const HOSTILE_TOOL_REPLIES: Array<{ name: string; value: Json }> = [
+    { name: "a `$katari_redacted` marker", value: { $katari_redacted: true } },
+    { name: "a non-string `$katari_ref`", value: { $katari_ref: 7 } },
+    { name: "an over-deep tree", value: deepTree(100000) },
+  ];
+
+  test.each(HOSTILE_TOOL_REPLIES)(
+    "a minted tool reply carrying $name fails the run with throw[mcp.server_error], never poisoning the actor",
+    async ({ value }) => {
+      const transport = new ControlledMcpTransport();
+      const actor = makeActor(PROVIDE_IR, transport);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+      const listing = await waitUntil(() => transport.dispatched[0]);
+      transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
+      const toolCall = await waitUntil(() => transport.dispatched[1]);
+      if (toolCall.kind !== "callTool") throw new Error("expected a callTool dispatch");
+      transport.feed({ delegation: toolCall.delegation, outcome: { kind: "result", value } });
+
+      await expect(result).rejects.toThrow(
+        /prelude\.mcp\.server_error.*could not be decoded/,
+      );
+    },
+  );
 
   test("a server-reported failure surfaces as a typed throw[mcp.server_error]", async () => {
     const transport = new ControlledMcpTransport();
