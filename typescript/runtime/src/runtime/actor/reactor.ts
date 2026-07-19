@@ -326,10 +326,13 @@ export abstract class Reactor {
   /** Fail a delegation with a `panic` escalation addressed to its caller (`to`), raised by `raiser` — the
    *  delegate's issuer instance (a pre-instance failure has no callee yet, so the issuer OWNS the row). A
    *  panic is the deterministic failure channel — an unhandled one fails the run (no recovery, no retry) —
-   *  but it is an escalation like any other, so it opens a durable raiser-owned row on the uniform path. It
-   *  bypasses `send` only because it is synthesised here (no engine outbound to route), not because it is
-   *  special: the row + the buffered event are exactly what `send` would do, minus the resource release (a
-   *  `{ msg }` captures none). `run` is the failing delegation's trace context, taken from the event failed. */
+   *  but it is an escalation like any other, so it flows through the ONE `send` path: the same durable
+   *  raiser-owned row, the same value release, and the same blob hoist onto the caller every other escalate
+   *  gets. It is synthesised here only because there is no engine outbound to route; it is NOT a `send`
+   *  variant with the release / hoist cut out (that ad-hoc left a hoisted blob behind — see `raiseThrow`).
+   *  A panic's `{ message }` captures no resources, so the release is a no-op; the hoist is skipped naturally
+   *  for a pre-instance failure (the failed delegation has no received edge yet) and at the run→api boundary.
+   *  `run` is the failing delegation's trace context, taken from the event failed. */
   protected raisePanic(
     delegation: DelegationId,
     message: string,
@@ -337,33 +340,29 @@ export abstract class Reactor {
     run: InstanceId,
     raiser: InstanceId,
   ): void {
-    const escalation = newEscalationId();
-    const argument = panicArgument(message);
-    this.openEscalation(escalation, {
+    this.send(
+      {
+        kind: "escalate",
+        delegation,
+        escalation: newEscalationId(),
+        ask: { kind: "request", request: PANIC_REQUEST, argument: panicArgument(message) },
+        from: this.name,
+        to,
+        run,
+      },
       raiser,
-      peer: to,
-      delegation,
-      run,
-      request: PANIC_REQUEST,
-      argument,
-    });
-    this.sendBuffer.push({
-      kind: "escalate",
-      delegation,
-      escalation,
-      ask: { kind: "request", request: PANIC_REQUEST, argument },
-      from: this.name,
-      to,
-      run,
-    });
+    );
   }
 
   /** Fail a delegation with a typed `prelude.throw` escalation addressed to its caller (`to`), raised by
    *  `raiser` (the callee's external-call instance) — the reactor-level twin of a prim's `KatariThrow`, for
-   *  failures a program anticipates and may handle (an http no-response, a sidecar's typed throw). Like a
-   *  panic it opens a durable raiser-owned row on the uniform path and its runtime-built payload captures no
-   *  resources; a caught throw's row is retired on its `escalateAck`, an uncaught one's on the raiser's
-   *  teardown. */
+   *  failures a program anticipates and may handle (an http no-response, a sidecar's typed throw). It flows
+   *  through the ONE `send` path like a panic, which is LOAD-BEARING here: a typed throw's payload can carry
+   *  a REAL blob ref (the callee's unconditional wire decode reconstructs one), so the `send` releases that
+   *  ref to in-transit for a catching handler to reown AND hoists the raiser's remaining blobs onto the
+   *  caller — without which the payload's blob would stay owned by the (soon torn-down) call instance and the
+   *  catcher's ref would dangle (`file.gone`). A caught throw's row is retired on its `escalateAck`, an
+   *  uncaught one's on the raiser's teardown. */
   protected raiseThrow(
     delegation: DelegationId,
     payload: Value,
@@ -371,25 +370,18 @@ export abstract class Reactor {
     run: InstanceId,
     raiser: InstanceId,
   ): void {
-    const escalation = newEscalationId();
-    const argument = throwArgument(payload);
-    this.openEscalation(escalation, {
+    this.send(
+      {
+        kind: "escalate",
+        delegation,
+        escalation: newEscalationId(),
+        ask: { kind: "request", request: THROW_REQUEST, argument: throwArgument(payload) },
+        from: this.name,
+        to,
+        run,
+      },
       raiser,
-      peer: to,
-      delegation,
-      run,
-      request: THROW_REQUEST,
-      argument,
-    });
-    this.sendBuffer.push({
-      kind: "escalate",
-      delegation,
-      escalation,
-      ask: { kind: "request", request: THROW_REQUEST, argument },
-      from: this.name,
-      to,
-      run,
-    });
+    );
   }
 
   /** Take and clear this turn's buffered sends (the substrate produces them into the outbox). */
@@ -520,8 +512,9 @@ export abstract class Reactor {
     return this.delegations.get(delegation)?.peer;
   }
 
-  /** Open an escalation this reactor raised — from `send` on any `escalate`, or from `raisePanic` /
-   *  `raiseThrow` for a synthesised failure (idempotent). */
+  /** Open an escalation this reactor raised — from `send` on any `escalate` (a user-facing request, a
+   *  control escape, or a synthesised panic / throw, which all reach `send` uniformly). Idempotent: a fresh
+   *  id opens once, a repeat is a no-op. */
   private openEscalation(
     escalation: EscalationId,
     row: {

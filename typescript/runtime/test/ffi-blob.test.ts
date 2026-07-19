@@ -152,4 +152,50 @@ describe("FFI mid-call blob production", () => {
     expect(reclaimedBytes).toContain(BLOB);
     expect(store.blobs[BLOB]).toBeUndefined();
   });
+
+  test("a typed throw carrying a REAL blob ref releases it for the catcher, not reclaiming it with the failing call", async () => {
+    // The handler produced a blob and throws a typed error whose payload carries it as a REAL `$katari_ref`
+    // (the callee's unconditional wire decode reconstructs one). The reactor-level throw flows through the
+    // base `send`, so the ref is RELEASED to in-transit (owner = null) for a catching handler to reown —
+    // rather than left owned by the failing call instance, whose teardown would reclaim the bytes and dangle
+    // the catcher's ref.
+    const { ffi, pool, store } = openCall(CORE_CALLER);
+    ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
+
+    ffi.complete({
+      delegation: DELEGATION,
+      outcome: { kind: "throw", error: { $katari_ref: BLOB, $katari_semantic_kind: "file" } },
+    });
+
+    // The throw escalates (the call now awaits a caught answer), and the payload's ref rode UP with it.
+    expect(ffi.drainSends()[0]?.kind).toBe("escalate");
+    expect(store.blobs[BLOB]?.owner).toBeNull();
+
+    // The throw resolves by the run failing: the call is terminated and dropped. Persisting that drop must NOT
+    // reclaim the in-transit blob — before the fix it stayed owned by the call instance and its teardown freed
+    // the bytes out from under the catcher's ref.
+    ffi.react({ kind: "terminate", delegation: DELEGATION, from: "core", to: "ffi", run: RUN });
+    await ffi.persist(NO_OP_TX);
+    const reclaimedBytes = await pool.persist(NO_OP_TX);
+    expect(reclaimedBytes).not.toContain(BLOB);
+    expect(store.blobs[BLOB]?.owner).toBeNull();
+  });
+
+  test("a typed throw whose payload carries the blob's id only as text HOISTS it onto the caller, surviving teardown", async () => {
+    // The blob's id rode only in some text plane the handler will read (the throw payload captures no
+    // resource by value), so the hoist — not a value release — is what carries the blob up onto the caller.
+    const { ffi, pool, store } = openCall(CORE_CALLER);
+    ffi.registerProducedBlob(DELEGATION, BLOB, { hash: "hash", size: 3, semanticKind: "file" });
+
+    ffi.complete({ delegation: DELEGATION, outcome: { kind: "throw", error: "boom" } });
+    expect(ffi.drainSends()[0]?.kind).toBe("escalate");
+    // Hoisted onto the core caller (not reclaimed, not left on the failing call instance).
+    expect(store.blobs[BLOB]?.owner).toBe(CORE_CALLER);
+
+    ffi.react({ kind: "terminate", delegation: DELEGATION, from: "core", to: "ffi", run: RUN });
+    await ffi.persist(NO_OP_TX);
+    const reclaimedBytes = await pool.persist(NO_OP_TX);
+    expect(reclaimedBytes).not.toContain(BLOB);
+    expect(store.blobs[BLOB]?.owner).toBe(CORE_CALLER);
+  });
 });
