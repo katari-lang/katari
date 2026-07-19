@@ -134,12 +134,11 @@ external agent provide[effect Scope, R, effect E](
 minted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the
 server-declared tool name, @arguments@ its arguments object as a plain value tree (records / arrays /
 scalars, and a `file` becomes base64 in place — the same slot contract as `http.json`). The result is
-DECODED against @T@ inside the runtime: a tool's `structuredContent` is read as @T@'s wire form (so a
-`$ref` handle object reconstructs a REAL `file` value, and records / arrays / scalars land as values), a
-plain-text reply decodes only into a string-shaped @T@, and a schema mismatch throws `validation_error`.
-Instantiate @T@ with `unknown` to keep the reply as a raw document value instead (the codegen's choice
-when no `outputSchema` maps): a `$ref` then stays an inert record inside the tree, which a later dynamic
-call (`reflection.call_agent`) into a `file`-typed position still revives into a real handle. @T@
+read as a value and checked against @T@ inside the runtime: a `$katari_ref` handle object becomes a REAL
+`file` value, records / arrays / scalars land as themselves, a plain-text reply reads only into a
+string-shaped @T@, and a mismatch throws `validation_error`. Instantiate @T@ with `unknown` to keep the
+reply as a raw document value (the codegen's choice when no `outputSchema` maps); a `$katari_ref` in it
+is still a real `file` — the wire-to-value conversion is unconditional, never schema-directed. @T@
 appears only in the result, so it is never inferable — instantiate it explicitly; the @Scope@ marker is a
 phantom the row never infers, so a caller writes both to `[...]`, `mcp.call[Scope, T](url = ..., ...)` — a
 generated binding passes its own module-local marker. Nothing validates @arguments@ before the server does
