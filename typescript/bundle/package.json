@@ -32,6 +32,7 @@
   "homepage": "https://katari-lang.dev",
   "bugs": "https://github.com/katari-lang/katari/issues",
   "dependencies": {
+    "@katari-lang/port": "workspace:*",
     "@katari-lang/types": "workspace:*",
     "esbuild": "^0.28.1"
   },

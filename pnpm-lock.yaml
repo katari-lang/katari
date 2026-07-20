@@ -97,6 +97,9 @@ importers:
 
   typescript/bundle:
     dependencies:
+      '@katari-lang/port':
+        specifier: workspace:*
+        version: link:../port
       '@katari-lang/types':
         specifier: workspace:*
         version: link:../types

@@ -11,13 +11,17 @@
 // external agents, and `src/X.ts` (the same module path) implements them. A plain prepended assignment (not
 // a function wrapper) runs before the file body yet keeps its own imports and exports legal at the top level.
 //
-// One invariant the bundler enforces on top of esbuild's resolution: `@katari-lang/port` is a singleton
-// (see `portSingletonPlugin`). Vendored packages each carry their own copy under their own `node_modules`;
-// left alone, esbuild would inline one registry per package and `__startSidecar()` would serve only one.
+// Two things the bundler enforces on top of esbuild's resolution, both in `portSingletonPlugin`:
+// `@katari-lang/port` is a singleton (it holds process-wide state, so the bundle must contain exactly one
+// copy), and that one copy is the bundler's OWN port — the toolchain's, the wire codec that matches the
+// runtime this `katari` deploys to — never a package's declared version. The port is the sidecar↔runtime
+// wire ABI, so the toolchain owns it: a package pinning an older port can no longer drift its sidecar off
+// the runtime's wire format.
 
 import type { Stats } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { SidecarBundle } from "@katari-lang/types";
 import { build, type Plugin, type ResolveResult } from "esbuild";
 
@@ -40,6 +44,10 @@ export interface BundlePackage {
 export interface BundleOptions {
   /** One entry per katari package whose sidecar (if any) should be bundled. */
   packages: BundlePackage[];
+  /** Directory the single `@katari-lang/port` resolves from. Defaults to the bundler's own — the
+   *  toolchain port that matches the runtime, so a package's declared port never reaches the sidecar.
+   *  Only tests set it, inlining a stub port to observe what `__startSidecar()` serves. */
+  portResolveDir?: string;
 }
 
 /**
@@ -49,7 +57,10 @@ export interface BundleOptions {
 export async function bundleSidecar(options: BundleOptions): Promise<SidecarBundle | null> {
   const sources = await resolveSources(options.packages);
   if (sources.length === 0) return null;
-  return { entry: await runEsbuild(sources), runtime: "node" };
+  return {
+    entry: await runEsbuild(sources, options.portResolveDir ?? bundlerDir),
+    runtime: "node",
+  };
 }
 
 // ─── Source discovery ──────────────────────────────────────────────────────
@@ -122,7 +133,7 @@ function isSourceFile(name: string): boolean {
 
 // ─── esbuild ─────────────────────────────────────────────────────────────
 
-async function runEsbuild(sources: PackageSource[]): Promise<string> {
+async function runEsbuild(sources: PackageSource[], portResolveDir: string): Promise<string> {
   // The caller only reaches here with at least one package; resolve the synthetic entry's relative imports
   // against the first package's directory.
   const [first] = sources;
@@ -147,7 +158,7 @@ async function runEsbuild(sources: PackageSource[]): Promise<string> {
       banner: {
         js: "import { createRequire as __katariRequire } from 'node:module'; const require = __katariRequire(import.meta.url);",
       },
-      plugins: [portSingletonPlugin(first.root), moduleNamePlugin(sources)],
+      plugins: [portSingletonPlugin(portResolveDir), moduleNamePlugin(sources)],
     });
   } catch (error) {
     throw new BundleError(
@@ -177,14 +188,20 @@ const portSpecifier = "@katari-lang/port";
  *  re-entering the hook (which would recurse forever). */
 const portCanonicalResolution = "katari-port-canonical";
 
-/** Pin every import of `@katari-lang/port` to one module. The port holds process-wide state — the handler
- *  registry `katari.agent(...)` writes into and `__startSidecar()` serves, and ownership of stdio — so the
- *  bundle must contain exactly one copy. Without this, each vendored package's sidecar resolves the port
- *  from its own `node_modules`, esbuild inlines one copy (and one registry) per package, and only the
- *  entry's copy is ever served: every other package's handlers register into a registry nothing reads.
- *  The canonical copy is the one the synthetic entry resolves (from `entryResolveDir`), so serving and
- *  registration agree by construction. */
-function portSingletonPlugin(entryResolveDir: string): Plugin {
+/** The bundler's own directory. Every sidecar resolves the port from here, so the copy that lands in the
+ *  bundle is the toolchain's — the one `@katari-lang/bundle` depends on — not one a package carries. */
+const bundlerDir = dirname(fileURLToPath(import.meta.url));
+
+/** Pin every import of `@katari-lang/port` to one module: the bundler's own. The port holds process-wide
+ *  state — the handler registry `katari.agent(...)` writes into and `__startSidecar()` serves, and
+ *  ownership of stdio — so the bundle must contain exactly one copy. Resolving it from the bundler rather
+ *  than the importing package serves two ends at once. It is a singleton: without pinning, each vendored
+ *  package resolves the port from its own `node_modules`, esbuild inlines one registry per package, and
+ *  only the entry's copy is served — every other package's handlers register into a registry nothing
+ *  reads. And it is the *toolchain's* port: the wire codec that matches the runtime this `katari` deploys
+ *  to. The port is the sidecar↔runtime ABI, so the toolchain owns it — a package declaring an older port
+ *  can no longer drift its sidecar off the runtime's wire format. */
+function portSingletonPlugin(portResolveDir: string): Plugin {
   return {
     name: "katari-port-singleton",
     setup(build) {
@@ -192,9 +209,9 @@ function portSingletonPlugin(entryResolveDir: string): Plugin {
       build.onResolve({ filter: /^@katari-lang\/port$/ }, (args) => {
         if (args.pluginData === portCanonicalResolution) return null; // our own probe — resolve normally
         canonical ??= build.resolve(portSpecifier, {
-          // Always the entry's resolution, not the current importer's — deterministic no matter which
-          // import esbuild happens to resolve first.
-          resolveDir: entryResolveDir,
+          // One resolution for every importer — the toolchain's port (`portResolveDir` defaults to the
+          // bundler's own), never the importing package's, so the sidecar always speaks the runtime's wire.
+          resolveDir: portResolveDir,
           kind: "import-statement",
           pluginData: portCanonicalResolution,
         });
