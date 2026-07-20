@@ -1877,7 +1877,7 @@ describe("region reactor", () => {
       parameters: {},
     };
     ir.blocks[33] = {
-      block: { kind: "primitive", name: "prelude.file.from_base64", input: 320 },
+      block: { kind: "primitive", name: "prelude.files.from_base64", input: 320 },
       parameters: { parameter: 320 },
     };
     ir.blocks[34] = {
@@ -1885,19 +1885,19 @@ describe("region reactor", () => {
       parameters: {},
     };
     ir.blocks[35] = {
-      block: { kind: "primitive", name: "prelude.file.read_base64", input: 340 },
+      block: { kind: "primitive", name: "prelude.files.read_base64", input: 340 },
       parameters: { parameter: 340 },
     };
-    ir.entries[createAgentName("prelude.file.from_base64")] = { block: 32, private: false };
-    ir.entries[createAgentName("prelude.file.read_base64")] = { block: 34, private: false };
+    ir.entries[createAgentName("prelude.files.from_base64")] = { block: 32, private: false };
+    ir.entries[createAgentName("prelude.files.read_base64")] = { block: 34, private: false };
     return ir;
   }
 
   test("watch: a handler's answer carrying a blob is readable by the fiber it descends to", async () => {
     // The white hole in the ANSWER direction. The fiber escalates `on_message`; the handler — which runs in the
-    // long-lived continuation instance the whole handle+watch lives in — mints a blob with `file.from_base64`
+    // long-lived continuation instance the whole handle+watch lives in — mints a blob with `files.from_base64`
     // and answers WITH it. The answer descends the watch bridge back to the fiber, which reads the blob's
-    // content (`file.read_base64`) and returns it, so the read-back buffers on the provide. A gone / dangling
+    // content (`files.read_base64`) and returns it, so the read-back buffers on the provide. A gone / dangling
     // answer blob would panic `read_base64` and never buffer, so a buffered "aGVsbG8=" proves the fiber read the
     // handler's blob. The blob is owned by the continuation instance — an ancestor of every fiber, kept alive by
     // the held-open `watch` — so it always outlives the reader without any answer-direction owner lift.
@@ -1914,7 +1914,7 @@ describe("region reactor", () => {
       { kind: "makeRecord", entries: [["value", 112]], output: 113 },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.file.read_base64") },
+        target: { kind: "name", name: createAgentName("prelude.files.read_base64") },
         argument: 113,
         output: 114,
       },
@@ -1933,7 +1933,7 @@ describe("region reactor", () => {
       },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.file.from_base64") },
+        target: { kind: "name", name: createAgentName("prelude.files.from_base64") },
         argument: 163,
         output: 164,
       },
@@ -1959,7 +1959,7 @@ describe("region reactor", () => {
     // it under `on_message`; the sequential watch re-emits the first (the handler HOLDS it on `gate`), so the
     // second's escalation — carrying its blob — sits in the nursery's DURABLE mailbox. A restart reloads the
     // provide's mailbox with the blob ref intact and its bytes survive in the byte store; after recovery the
-    // watch re-emits the held escalation and the handler reads its blob (`file.read_base64`) to answer. Both
+    // watch re-emits the held escalation and the handler reads its blob (`files.read_base64`) to answer. Both
     // workers buffer their own read-back content, so a buffered "d29ybGQ=" (the mailboxed fiber's) proves the
     // carried blob's owner (the provide instance) and bytes were restored intact — a gone blob would panic the
     // post-restart read.
@@ -2025,7 +2025,7 @@ describe("region reactor", () => {
       },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.file.from_base64") },
+        target: { kind: "name", name: createAgentName("prelude.files.from_base64") },
         argument: 113,
         output: 114,
       },
@@ -2052,7 +2052,7 @@ describe("region reactor", () => {
       { kind: "makeRecord", entries: [["value", 165]], output: 168 },
       {
         kind: "delegate",
-        target: { kind: "name", name: createAgentName("prelude.file.read_base64") },
+        target: { kind: "name", name: createAgentName("prelude.files.read_base64") },
         argument: 168,
         output: 169,
       },

@@ -564,7 +564,7 @@ async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promi
       projectId: ctx.projectId,
       ir: ctx.irSource,
       blobs: ctx.blobs,
-      // The warm blob catalog: a metadata prim (`file.size`) reads the row a slim ref points at.
+      // The warm blob catalog: a metadata prim (`files.size`) reads the row a slim ref points at.
       blobEntryOf: (blobId) => ctx.store.blobs[blobId],
       // The turn-scoped blob write seams, for the two effectful file prims (`from_base64` / `free`). The
       // engine only forwards to the reactor's pool-backed closures; ownership / run scoping live there.

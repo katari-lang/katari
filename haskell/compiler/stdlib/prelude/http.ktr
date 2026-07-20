@@ -99,7 +99,7 @@ base64, once re-encoded) through every value, event, and trace it flows into —
 it straight to a blob and hands back a handle. Reach for it to download a file by URL: an image, a PDF, a
 CSV export, a release artifact. It is NOT for a base64 field buried inside a JSON reply (a data-URI in an
 API's JSON document) — `fetch_file` only ever captures the WHOLE response body; decode an embedded base64
-string with `file.from_base64` after an ordinary `fetch`. The downloaded @file@'s recorded content type is
+string with `files.from_base64` after an ordinary `fetch`. The downloaded @file@'s recorded content type is
 the response's `Content-Type` (falling back to `application/octet-stream` when the server sent none).
 Returns the response @status@ code (branch on it exactly like `fetch` — a non-2xx reply's body is still
 captured to a @file@, so a caller inspects @status@ before trusting the download), its @headers@ (names

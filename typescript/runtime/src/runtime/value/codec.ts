@@ -340,7 +340,7 @@ export function valueToJson(value: Value, policy: PrivatePolicy = "redact"): Jso
     }
     case "ref": {
       // A file / blob handle: identity only. Metadata (size / hash / contentType) lives on the blob's
-      // row — a wire reader that needs it asks the files API; a program asks the `prelude.file` prims.
+      // row — a wire reader that needs it asks the files API; a program asks the `prelude.files` prims.
       const out: { [key: string]: Json } = Object.create(null);
       out[FILE_KEY] = value.blobId;
       out[SEMANTIC_KIND_KEY] = value.semanticKind;

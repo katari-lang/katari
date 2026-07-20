@@ -598,7 +598,7 @@ describe("prelude.reflection.get_metadata", () => {
   });
 });
 
-describe("prelude.file", () => {
+describe("prelude.files", () => {
   const BLOB = "blob-file-prim" as BlobId;
   // The PNG magic bytes — a recognisable fixture whose base64 is stable.
   const BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
@@ -629,36 +629,36 @@ describe("prelude.file", () => {
 
   test("read_base64 returns the blob's bytes base64-encoded", async () => {
     const { context, file } = await fileContext("image/png");
-    const result = await run("prelude.file.read_base64", { value: file }, context);
+    const result = await run("prelude.files.read_base64", { value: file }, context);
     expect(result).toEqual({ kind: "string", value: Buffer.from(BYTES).toString("base64") });
   });
 
   test("content_type reads the CATALOG row's MIME type, degrading to \"\" when unrecorded", async () => {
     const withType = await fileContext("image/png");
     await expect(
-      run("prelude.file.content_type", { value: withType.file }, withType.context),
+      run("prelude.files.content_type", { value: withType.file }, withType.context),
     ).resolves.toEqual({ kind: "string", value: "image/png" });
     const without = await fileContext();
     await expect(
-      run("prelude.file.content_type", { value: without.file }, without.context),
+      run("prelude.files.content_type", { value: without.file }, without.context),
     ).resolves.toEqual({ kind: "string", value: "" });
   });
 
   test("size reads the catalog row (the slim handle carries no metadata)", async () => {
     const { context, file } = await fileContext();
-    await expect(run("prelude.file.size", { value: file }, context)).resolves.toEqual({
+    await expect(run("prelude.files.size", { value: file }, context)).resolves.toEqual({
       kind: "integer",
       value: BYTES.length,
     });
   });
 
-  test("a dangling handle (freed, or a made-up id) throws the catchable `file.gone`", async () => {
+  test("a dangling handle (freed, or a made-up id) throws the catchable `files.gone`", async () => {
     const { context } = await fileContext();
     const dangling: Value = { kind: "ref", semanticKind: "file", blobId: "blob-made-up" as BlobId };
     // A catchable typed throw now, not a panic: a program can recover, and a `replay` converter can select it.
     await expectThrows(
-      run("prelude.file.size", { value: dangling }, context),
-      "prelude.file.gone",
+      run("prelude.files.size", { value: dangling }, context),
+      "prelude.files.gone",
       /blob-made-up is gone/,
     );
   });
@@ -666,13 +666,13 @@ describe("prelude.file", () => {
   test("a non-file argument is rejected (a blob-backed string is not a file)", async () => {
     const { context } = await fileContext();
     const stringRef: Value = { kind: "ref", semanticKind: "string", blobId: BLOB };
-    await expect(run("prelude.file.read_base64", { value: stringRef }, context)).rejects.toThrow(
+    await expect(run("prelude.files.read_base64", { value: stringRef }, context)).rejects.toThrow(
       /expected a file/,
     );
   });
 });
 
-describe("prelude.file producers (from_base64 / free)", () => {
+describe("prelude.files producers (from_base64 / free)", () => {
   const PROJECT_ID = "project-file-producer" as ProjectId;
   const RUN = "run-file-producer" as InstanceId;
   const INSTANCE = "instance-file-producer" as InstanceId;
@@ -737,7 +737,7 @@ describe("prelude.file producers (from_base64 / free)", () => {
   test("from_base64 mints a file whose bytes / type read back, owned by the running instance", async () => {
     const { context } = turnContext();
     const file = await run(
-      "prelude.file.from_base64",
+      "prelude.files.from_base64",
       { content: str(BASE64), content_type: str("image/png") },
       context,
     );
@@ -745,15 +745,15 @@ describe("prelude.file producers (from_base64 / free)", () => {
     if (file.kind === "ref") expect(file.semanticKind).toBe("file");
 
     // The produced file reads back through the ordinary readers (same context / catalog / byte store).
-    await expect(run("prelude.file.read_base64", { value: file }, context)).resolves.toEqual({
+    await expect(run("prelude.files.read_base64", { value: file }, context)).resolves.toEqual({
       kind: "string",
       value: BASE64,
     });
-    await expect(run("prelude.file.content_type", { value: file }, context)).resolves.toEqual({
+    await expect(run("prelude.files.content_type", { value: file }, context)).resolves.toEqual({
       kind: "string",
       value: "image/png",
     });
-    await expect(run("prelude.file.size", { value: file }, context)).resolves.toEqual({
+    await expect(run("prelude.files.size", { value: file }, context)).resolves.toEqual({
       kind: "integer",
       value: BYTES.length,
     });
@@ -761,8 +761,8 @@ describe("prelude.file producers (from_base64 / free)", () => {
 
   test("two from_base64 of the SAME bytes are DIFFERENT files (a file is a resource, not a literal)", async () => {
     const { context } = turnContext();
-    const first = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
-    const second = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    const first = await run("prelude.files.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    const second = await run("prelude.files.from_base64", { content: str(BASE64), content_type: str("") }, context);
     // Distinct blob identities → not `==`: freeing one must never dangle the other's ref.
     expect(refOf(first)).not.toBe(refOf(second));
     expect(valueEquals(first, second)).toBe(false);
@@ -771,31 +771,31 @@ describe("prelude.file producers (from_base64 / free)", () => {
   test("malformed base64 throws the catchable `malformed_base64`", async () => {
     const { context } = turnContext();
     await expectThrows(
-      run("prelude.file.from_base64", { content: str("not valid base64!!"), content_type: str("") }, context),
-      "prelude.file.malformed_base64",
+      run("prelude.files.from_base64", { content: str("not valid base64!!"), content_type: str("") }, context),
+      "prelude.files.malformed_base64",
       /not valid base64/,
     );
   });
 
-  test("free reclaims a run-owned file; a later read throws `file.gone`", async () => {
+  test("free reclaims a run-owned file; a later read throws `files.gone`", async () => {
     const { context } = turnContext();
-    const file = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    const file = await run("prelude.files.from_base64", { content: str(BASE64), content_type: str("") }, context);
 
-    await expect(run("prelude.file.free", { value: file }, context)).resolves.toEqual({ kind: "null" });
+    await expect(run("prelude.files.free", { value: file }, context)).resolves.toEqual({ kind: "null" });
     // The catalog row is gone the instant it is freed, so the reader reports `gone` (not stale bytes).
     await expectThrows(
-      run("prelude.file.read_base64", { value: file }, context),
-      "prelude.file.gone",
+      run("prelude.files.read_base64", { value: file }, context),
+      "prelude.files.gone",
       /is gone/,
     );
   });
 
   test("free is idempotent: freeing an already-freed handle is a silent no-op", async () => {
     const { context } = turnContext();
-    const file = await run("prelude.file.from_base64", { content: str(BASE64), content_type: str("") }, context);
-    await run("prelude.file.free", { value: file }, context);
+    const file = await run("prelude.files.from_base64", { content: str(BASE64), content_type: str("") }, context);
+    await run("prelude.files.free", { value: file }, context);
     // A retried block that frees the same handle again must not throw or diverge.
-    await expect(run("prelude.file.free", { value: file }, context)).resolves.toEqual({ kind: "null" });
+    await expect(run("prelude.files.free", { value: file }, context)).resolves.toEqual({ kind: "null" });
   });
 
   test("free cannot reclaim a file the run does not own (an uploaded file stays readable)", async () => {
@@ -808,9 +808,9 @@ describe("prelude.file producers (from_base64 / free)", () => {
     pool.registerBlob(uploaded, { owner: apiRoot, hash: "h", size: BYTES.length, semanticKind: "file" });
     const file: Value = { kind: "ref", semanticKind: "file", blobId: uploaded };
 
-    await run("prelude.file.free", { value: file }, context);
+    await run("prelude.files.free", { value: file }, context);
     // Untouched — freeing another owner's file is a no-op, so it still reads back.
-    await expect(run("prelude.file.read_base64", { value: file }, context)).resolves.toEqual({
+    await expect(run("prelude.files.read_base64", { value: file }, context)).resolves.toEqual({
       kind: "string",
       value: BASE64,
     });

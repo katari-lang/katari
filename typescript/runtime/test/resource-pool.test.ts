@@ -260,7 +260,7 @@ describe("ResourcePool blob reclaim", () => {
     };
   }
 
-  describe("deleteBlobOwnedInRun (the `file.free` run-scoped reclaim)", () => {
+  describe("deleteBlobOwnedInRun (the `files.free` run-scoped reclaim)", () => {
     const RUN = "run-a" as InstanceId;
     const OTHER_RUN = "run-b" as InstanceId;
     const IN_RUN = "instance-in-run" as InstanceId; // a live core instance of RUN (an ancestor after a hoist)
@@ -325,7 +325,7 @@ describe("ResourcePool blob reclaim", () => {
     test("frees a blob owned by a NON-core endpoint call instance of the run (the resolver spans reactor edges)", () => {
       // A webhook / mcp serve endpoint call instance is not a `core` engine instance, so it is absent from the
       // store; the actor's run resolver finds its run from the owning reactor's received edge. A delivery's
-      // residual blob that HOISTED onto such an endpoint call must still be reclaimable by `file.free`.
+      // residual blob that HOISTED onto such an endpoint call must still be reclaimable by `files.free`.
       const store = storeWithBlobs({ [MINE]: ENDPOINT_CALL });
       const pool = new ResourcePool(PROJECT, store, (owner) =>
         owner === ENDPOINT_CALL ? RUN : undefined,

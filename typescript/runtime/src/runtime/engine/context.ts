@@ -44,7 +44,7 @@ export interface PrimContext {
   readonly ir: IrSource;
   readonly blobs: BlobStore;
   /** The project's warm blob catalog (the `blobs` rows mirrored in the ProjectStore) — how a metadata
-   *  prim (`file.size` / `file.content_type`) reads a blob's row. The row is the single source of
+   *  prim (`files.size` / `files.content_type`) reads a blob's row. The row is the single source of
    *  truth a slim ref deliberately does not carry; `undefined` means no such blob in this project
    *  (deleted, or a made-up id). */
   readonly blobEntryOf: (blobId: BlobId) => BlobEntry | undefined;

@@ -1690,42 +1690,52 @@
             "5": "get_all.leaf"
         }
     },
-    "prelude.file": {
+    "prelude.files": {
         "blocks": {
             "0": {
                 "block": {
                     "body": 1,
                     "defaults": {},
-                    "description": "The file's bytes, base64-encoded — the inline shape multimodal model APIs take. The whole content\nmaterialises as one string, so mind the size (a large file makes a large request body).",
+                    "description": "The `file` a handle names is gone — it was `free`d, or the id never named a blob in this project (a\nmodel hallucinating a `$katari_ref`). One error covers both: a slim handle cannot tell which, and a program\nthat catches this reacts the same way (re-fetch, skip). Thrown by every reader below; catch it to recover.",
                     "kind": "agent",
                     "schema": {
                         "genericBindings": {},
                         "input": {
                             "additionalProperties": true,
                             "properties": {
-                                "value": {
+                                "message": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "message"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "$katari_constructor": {
+                                    "const": "prelude.files.gone"
+                                },
+                                "$katari_value": {
                                     "additionalProperties": true,
                                     "properties": {
-                                        "$katari_ref": {
-                                            "type": "string"
-                                        },
-                                        "$katari_semantic_kind": {
+                                        "message": {
                                             "type": "string"
                                         }
                                     },
                                     "required": [
-                                        "$katari_ref"
+                                        "message"
                                     ],
                                     "type": "object"
                                 }
                             },
                             "required": [
-                                "value"
+                                "$katari_constructor",
+                                "$katari_value"
                             ],
                             "type": "object"
-                        },
-                        "output": {
-                            "type": "string"
                         },
                         "requests": []
                     }
@@ -1735,18 +1745,228 @@
             "1": {
                 "block": {
                     "input": 0,
-                    "kind": "primitive",
-                    "name": "prelude.file.read_base64"
+                    "kind": "construct",
+                    "name": "prelude.files.gone"
                 },
                 "parameters": {
                     "parameter": 0
+                }
+            },
+            "10": {
+                "block": {
+                    "body": 11,
+                    "defaults": {},
+                    "description": "Make a `file` from a base64 string — the engine's blob producer, for lifting a model's / API's embedded\nbase64 (a gemini `inline_data` image) OFF the value plane and INTO a real blob handle, so the heavy bytes\ntravel runtime-side like any other file. The new file is owned by the current run and reclaimed with it (or\nexplicitly, via `free`). Two calls with the SAME bytes are DIFFERENT files (a file is a resource, not a\nliteral). Throws `malformed_base64` if @content@ is not valid base64.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "content": {
+                                    "description": "The file's bytes, base64-encoded.",
+                                    "type": "string"
+                                },
+                                "content_type": {
+                                    "description": "The MIME type to record (e.g. \"image/png\"); \"\" to record none.",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "content",
+                                "content_type"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "$katari_ref": {
+                                    "type": "string"
+                                },
+                                "$katari_semantic_kind": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "$katari_ref"
+                            ],
+                            "type": "object"
+                        },
+                        "requests": [
+                            {
+                                "descriptor": {
+                                    "input": {
+                                        "additionalProperties": true,
+                                        "properties": {
+                                            "error": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "$katari_constructor": {
+                                                        "const": "prelude.files.malformed_base64"
+                                                    },
+                                                    "$katari_value": {
+                                                        "additionalProperties": true,
+                                                        "properties": {
+                                                            "message": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "message"
+                                                        ],
+                                                        "type": "object"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "$katari_constructor",
+                                                    "$katari_value"
+                                                ],
+                                                "type": "object"
+                                            }
+                                        },
+                                        "required": [
+                                            "error"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "name": "prelude.throw",
+                                    "output": {
+                                        "not": {}
+                                    }
+                                },
+                                "kind": "concrete"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "11": {
+                "block": {
+                    "input": 5,
+                    "kind": "primitive",
+                    "name": "prelude.files.from_base64"
+                },
+                "parameters": {
+                    "parameter": 5
+                }
+            },
+            "12": {
+                "block": {
+                    "body": 13,
+                    "defaults": {},
+                    "description": "Release a file the current run owns, freeing its bytes now rather than at run teardown — for a large,\nshort-lived intermediate (a decoded image already handed to a model). Idempotent and silent: freeing an\nalready-gone file, or one the run does NOT own (a user-uploaded file, whose lifetime is the file API's), is a\nno-op — so a retried block that frees the same handle twice behaves identically each attempt. A later read of\na freed handle throws `gone`.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "value": {
+                                    "additionalProperties": true,
+                                    "properties": {
+                                        "$katari_ref": {
+                                            "type": "string"
+                                        },
+                                        "$katari_semantic_kind": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "$katari_ref"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "value"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "type": "null"
+                        },
+                        "requests": []
+                    }
+                },
+                "parameters": {}
+            },
+            "13": {
+                "block": {
+                    "input": 6,
+                    "kind": "primitive",
+                    "name": "prelude.files.free"
+                },
+                "parameters": {
+                    "parameter": 6
                 }
             },
             "2": {
                 "block": {
                     "body": 3,
                     "defaults": {},
-                    "description": "The file's recorded MIME type (e.g. \"image/png\"), read from the project's file catalog; \"\" when\nnone was recorded at upload.",
+                    "description": "The @content@ passed to `from_base64` is not valid base64 (bad alphabet, length, or padding). Thrown by\n`from_base64` — catch it to fall back when a model or upstream API hands back a corrupt base64 payload.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "message": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "message"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "$katari_constructor": {
+                                    "const": "prelude.files.malformed_base64"
+                                },
+                                "$katari_value": {
+                                    "additionalProperties": true,
+                                    "properties": {
+                                        "message": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "message"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "$katari_constructor",
+                                "$katari_value"
+                            ],
+                            "type": "object"
+                        },
+                        "requests": []
+                    }
+                },
+                "parameters": {}
+            },
+            "3": {
+                "block": {
+                    "input": 1,
+                    "kind": "construct",
+                    "name": "prelude.files.malformed_base64"
+                },
+                "parameters": {
+                    "parameter": 1
+                }
+            },
+            "4": {
+                "block": {
+                    "body": 5,
+                    "defaults": {},
+                    "description": "The file's bytes, base64-encoded — the inline shape multimodal model APIs take. The whole content\nmaterialises as one string, so mind the size (a large file makes a large request body). Throws `gone` if the\nhandle no longer names a live blob (`free`d, or a made-up id).",
                     "kind": "agent",
                     "schema": {
                         "genericBindings": {},
@@ -1777,26 +1997,164 @@
                         "output": {
                             "type": "string"
                         },
-                        "requests": []
+                        "requests": [
+                            {
+                                "descriptor": {
+                                    "input": {
+                                        "additionalProperties": true,
+                                        "properties": {
+                                            "error": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "$katari_constructor": {
+                                                        "const": "prelude.files.gone"
+                                                    },
+                                                    "$katari_value": {
+                                                        "additionalProperties": true,
+                                                        "properties": {
+                                                            "message": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "message"
+                                                        ],
+                                                        "type": "object"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "$katari_constructor",
+                                                    "$katari_value"
+                                                ],
+                                                "type": "object"
+                                            }
+                                        },
+                                        "required": [
+                                            "error"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "name": "prelude.throw",
+                                    "output": {
+                                        "not": {}
+                                    }
+                                },
+                                "kind": "concrete"
+                            }
+                        ]
                     }
                 },
                 "parameters": {}
             },
-            "3": {
+            "5": {
                 "block": {
-                    "input": 1,
+                    "input": 2,
                     "kind": "primitive",
-                    "name": "prelude.file.content_type"
+                    "name": "prelude.files.read_base64"
                 },
                 "parameters": {
-                    "parameter": 1
+                    "parameter": 2
                 }
             },
-            "4": {
+            "6": {
                 "block": {
-                    "body": 5,
+                    "body": 7,
                     "defaults": {},
-                    "description": "The file's size in bytes, read from the project's file catalog (no content download).",
+                    "description": "The file's recorded MIME type (e.g. \"image/png\"), read from the project's file catalog; \"\" when\nnone was recorded. Throws `gone` if the handle no longer names a live blob.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "value": {
+                                    "additionalProperties": true,
+                                    "properties": {
+                                        "$katari_ref": {
+                                            "type": "string"
+                                        },
+                                        "$katari_semantic_kind": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "$katari_ref"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "value"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "type": "string"
+                        },
+                        "requests": [
+                            {
+                                "descriptor": {
+                                    "input": {
+                                        "additionalProperties": true,
+                                        "properties": {
+                                            "error": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "$katari_constructor": {
+                                                        "const": "prelude.files.gone"
+                                                    },
+                                                    "$katari_value": {
+                                                        "additionalProperties": true,
+                                                        "properties": {
+                                                            "message": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "message"
+                                                        ],
+                                                        "type": "object"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "$katari_constructor",
+                                                    "$katari_value"
+                                                ],
+                                                "type": "object"
+                                            }
+                                        },
+                                        "required": [
+                                            "error"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "name": "prelude.throw",
+                                    "output": {
+                                        "not": {}
+                                    }
+                                },
+                                "kind": "concrete"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "7": {
+                "block": {
+                    "input": 3,
+                    "kind": "primitive",
+                    "name": "prelude.files.content_type"
+                },
+                "parameters": {
+                    "parameter": 3
+                }
+            },
+            "8": {
+                "block": {
+                    "body": 9,
+                    "defaults": {},
+                    "description": "The file's size in bytes, read from the project's file catalog (no content download). Throws `gone` if the\nhandle no longer names a live blob.",
                     "kind": "agent",
                     "schema": {
                         "genericBindings": {},
@@ -1827,33 +2185,93 @@
                         "output": {
                             "type": "integer"
                         },
-                        "requests": []
+                        "requests": [
+                            {
+                                "descriptor": {
+                                    "input": {
+                                        "additionalProperties": true,
+                                        "properties": {
+                                            "error": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "$katari_constructor": {
+                                                        "const": "prelude.files.gone"
+                                                    },
+                                                    "$katari_value": {
+                                                        "additionalProperties": true,
+                                                        "properties": {
+                                                            "message": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "message"
+                                                        ],
+                                                        "type": "object"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "$katari_constructor",
+                                                    "$katari_value"
+                                                ],
+                                                "type": "object"
+                                            }
+                                        },
+                                        "required": [
+                                            "error"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "name": "prelude.throw",
+                                    "output": {
+                                        "not": {}
+                                    }
+                                },
+                                "kind": "concrete"
+                            }
+                        ]
                     }
                 },
                 "parameters": {}
             },
-            "5": {
+            "9": {
                 "block": {
-                    "input": 2,
+                    "input": 4,
                     "kind": "primitive",
-                    "name": "prelude.file.size"
+                    "name": "prelude.files.size"
                 },
                 "parameters": {
-                    "parameter": 2
+                    "parameter": 4
                 }
             }
         },
         "entries": {
-            "prelude.file.content_type": {
-                "block": 2,
+            "prelude.files.content_type": {
+                "block": 6,
                 "private": false
             },
-            "prelude.file.read_base64": {
+            "prelude.files.free": {
+                "block": 12,
+                "private": false
+            },
+            "prelude.files.from_base64": {
+                "block": 10,
+                "private": false
+            },
+            "prelude.files.gone": {
                 "block": 0,
                 "private": false
             },
-            "prelude.file.size": {
+            "prelude.files.malformed_base64": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.files.read_base64": {
                 "block": 4,
+                "private": false
+            },
+            "prelude.files.size": {
+                "block": 8,
                 "private": false
             }
         },
@@ -1861,12 +2279,20 @@
             "schemaVersion": 3
         },
         "names": {
-            "0": "read_base64",
-            "1": "read_base64.leaf",
-            "2": "content_type",
-            "3": "content_type.leaf",
-            "4": "size",
-            "5": "size.leaf"
+            "0": "gone",
+            "1": "gone.leaf",
+            "10": "from_base64",
+            "11": "from_base64.leaf",
+            "12": "free",
+            "13": "free.leaf",
+            "2": "malformed_base64",
+            "3": "malformed_base64.leaf",
+            "4": "read_base64",
+            "5": "read_base64.leaf",
+            "6": "content_type",
+            "7": "content_type.leaf",
+            "8": "size",
+            "9": "size.leaf"
         }
     },
     "prelude.http": {
@@ -2418,6 +2844,333 @@
                 "block": {
                     "body": 17,
                     "defaults": {},
+                    "description": "Perform an HTTP request to @url@ with @method@, the given @headers@ and @body@ — EXACTLY `fetch`'s\nrequest — but capture the RESPONSE body as a downloaded `file` rather than as text. The bytes land in the\nblob store and the reply carries only the slim @file@ HANDLE; the raw bytes (and their base64) never touch\nthe value plane, the durable call record, or the trace. This is the receive-side twin of a `binary`\nREQUEST body, and it exists for the same reason: to keep a payload's bytes OFF the value plane. A plain\n`fetch` of a megabyte image would read it into the response `body` STRING, dragging that text (and its\nbase64, once re-encoded) through every value, event, and trace it flows into — whereas `fetch_file` streams\nit straight to a blob and hands back a handle. Reach for it to download a file by URL: an image, a PDF, a\nCSV export, a release artifact. It is NOT for a base64 field buried inside a JSON reply (a data-URI in an\nAPI's JSON document) — `fetch_file` only ever captures the WHOLE response body; decode an embedded base64\nstring with `files.from_base64` after an ordinary `fetch`. The downloaded @file@'s recorded content type is\nthe response's `Content-Type` (falling back to `application/octet-stream` when the server sent none).\nReturns the response @status@ code (branch on it exactly like `fetch` — a non-2xx reply's body is still\ncaptured to a @file@, so a caller inspects @status@ before trusting the download), its @headers@ (names\nlowercased; repeated headers joined with \", \"), and the downloaded @file@. A request that never completes\nthrows `fetch_error`, exactly like `fetch`.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "body": {
+                                    "anyOf": [
+                                        {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "$katari_constructor": {
+                                                    "const": "prelude.http.binary"
+                                                },
+                                                "$katari_value": {
+                                                    "additionalProperties": true,
+                                                    "properties": {
+                                                        "content": {
+                                                            "additionalProperties": true,
+                                                            "properties": {
+                                                                "$katari_ref": {
+                                                                    "type": "string"
+                                                                },
+                                                                "$katari_semantic_kind": {
+                                                                    "type": "string"
+                                                                }
+                                                            },
+                                                            "required": [
+                                                                "$katari_ref"
+                                                            ],
+                                                            "type": "object"
+                                                        }
+                                                    },
+                                                    "required": [
+                                                        "content"
+                                                    ],
+                                                    "type": "object"
+                                                }
+                                            },
+                                            "required": [
+                                                "$katari_constructor",
+                                                "$katari_value"
+                                            ],
+                                            "type": "object"
+                                        },
+                                        {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "$katari_constructor": {
+                                                    "const": "prelude.http.json"
+                                                },
+                                                "$katari_value": {
+                                                    "additionalProperties": true,
+                                                    "properties": {
+                                                        "value": {}
+                                                    },
+                                                    "required": [
+                                                        "value"
+                                                    ],
+                                                    "type": "object"
+                                                }
+                                            },
+                                            "required": [
+                                                "$katari_constructor",
+                                                "$katari_value"
+                                            ],
+                                            "type": "object"
+                                        },
+                                        {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "$katari_constructor": {
+                                                    "const": "prelude.http.multipart"
+                                                },
+                                                "$katari_value": {
+                                                    "additionalProperties": true,
+                                                    "properties": {
+                                                        "parts": {
+                                                            "items": {
+                                                                "anyOf": [
+                                                                    {
+                                                                        "additionalProperties": false,
+                                                                        "properties": {
+                                                                            "$katari_constructor": {
+                                                                                "const": "prelude.http.multipart_file"
+                                                                            },
+                                                                            "$katari_value": {
+                                                                                "additionalProperties": true,
+                                                                                "properties": {
+                                                                                    "content": {
+                                                                                        "additionalProperties": true,
+                                                                                        "properties": {
+                                                                                            "$katari_ref": {
+                                                                                                "type": "string"
+                                                                                            },
+                                                                                            "$katari_semantic_kind": {
+                                                                                                "type": "string"
+                                                                                            }
+                                                                                        },
+                                                                                        "required": [
+                                                                                            "$katari_ref"
+                                                                                        ],
+                                                                                        "type": "object"
+                                                                                    },
+                                                                                    "filename": {
+                                                                                        "type": "string"
+                                                                                    },
+                                                                                    "name": {
+                                                                                        "type": "string"
+                                                                                    }
+                                                                                },
+                                                                                "required": [
+                                                                                    "content",
+                                                                                    "filename",
+                                                                                    "name"
+                                                                                ],
+                                                                                "type": "object"
+                                                                            }
+                                                                        },
+                                                                        "required": [
+                                                                            "$katari_constructor",
+                                                                            "$katari_value"
+                                                                        ],
+                                                                        "type": "object"
+                                                                    },
+                                                                    {
+                                                                        "additionalProperties": false,
+                                                                        "properties": {
+                                                                            "$katari_constructor": {
+                                                                                "const": "prelude.http.multipart_text"
+                                                                            },
+                                                                            "$katari_value": {
+                                                                                "additionalProperties": true,
+                                                                                "properties": {
+                                                                                    "content": {
+                                                                                        "type": "string"
+                                                                                    },
+                                                                                    "name": {
+                                                                                        "type": "string"
+                                                                                    }
+                                                                                },
+                                                                                "required": [
+                                                                                    "content",
+                                                                                    "name"
+                                                                                ],
+                                                                                "type": "object"
+                                                                            }
+                                                                        },
+                                                                        "required": [
+                                                                            "$katari_constructor",
+                                                                            "$katari_value"
+                                                                        ],
+                                                                        "type": "object"
+                                                                    }
+                                                                ]
+                                                            },
+                                                            "type": "array"
+                                                        }
+                                                    },
+                                                    "required": [
+                                                        "parts"
+                                                    ],
+                                                    "type": "object"
+                                                }
+                                            },
+                                            "required": [
+                                                "$katari_constructor",
+                                                "$katari_value"
+                                            ],
+                                            "type": "object"
+                                        },
+                                        {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                                "$katari_constructor": {
+                                                    "const": "prelude.http.text"
+                                                },
+                                                "$katari_value": {
+                                                    "additionalProperties": true,
+                                                    "properties": {
+                                                        "content": {
+                                                            "type": "string"
+                                                        }
+                                                    },
+                                                    "required": [
+                                                        "content"
+                                                    ],
+                                                    "type": "object"
+                                                }
+                                            },
+                                            "required": [
+                                                "$katari_constructor",
+                                                "$katari_value"
+                                            ],
+                                            "type": "object"
+                                        }
+                                    ],
+                                    "description": "The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD."
+                                },
+                                "headers": {
+                                    "additionalProperties": {
+                                        "type": "string"
+                                    },
+                                    "description": "Request headers by name; each value may be a secret, revealed only to @url@'s server.",
+                                    "properties": {},
+                                    "required": [],
+                                    "type": "object"
+                                },
+                                "method": {
+                                    "description": "The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent.",
+                                    "type": "string"
+                                },
+                                "url": {
+                                    "description": "The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error).",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "body",
+                                "headers",
+                                "method",
+                                "url"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "file": {
+                                    "additionalProperties": true,
+                                    "properties": {
+                                        "$katari_ref": {
+                                            "type": "string"
+                                        },
+                                        "$katari_semantic_kind": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "$katari_ref"
+                                    ],
+                                    "type": "object"
+                                },
+                                "headers": {
+                                    "additionalProperties": {
+                                        "type": "string"
+                                    },
+                                    "properties": {},
+                                    "required": [],
+                                    "type": "object"
+                                },
+                                "status": {
+                                    "type": "integer"
+                                }
+                            },
+                            "required": [
+                                "file",
+                                "headers",
+                                "status"
+                            ],
+                            "type": "object"
+                        },
+                        "requests": [
+                            {
+                                "descriptor": {
+                                    "input": {
+                                        "additionalProperties": true,
+                                        "properties": {
+                                            "error": {
+                                                "additionalProperties": false,
+                                                "properties": {
+                                                    "$katari_constructor": {
+                                                        "const": "prelude.http.fetch_error"
+                                                    },
+                                                    "$katari_value": {
+                                                        "additionalProperties": true,
+                                                        "properties": {
+                                                            "message": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "required": [
+                                                            "message"
+                                                        ],
+                                                        "type": "object"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "$katari_constructor",
+                                                    "$katari_value"
+                                                ],
+                                                "type": "object"
+                                            }
+                                        },
+                                        "required": [
+                                            "error"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "name": "prelude.throw",
+                                    "output": {
+                                        "not": {}
+                                    }
+                                },
+                                "kind": "concrete"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "17": {
+                "block": {
+                    "input": 8,
+                    "key": "prelude.http.fetch_file",
+                    "kind": "external",
+                    "reactor": "http"
+                },
+                "parameters": {
+                    "parameter": 8
+                }
+            },
+            "18": {
+                "block": {
+                    "body": 19,
+                    "defaults": {},
                     "description": "A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an\narrived response as an error — this wrapper takes the opinionated JSON-API stance).",
                     "kind": "agent",
                     "schema": {
@@ -2474,19 +3227,69 @@
                 },
                 "parameters": {}
             },
-            "17": {
+            "19": {
                 "block": {
-                    "input": 8,
+                    "input": 9,
                     "kind": "construct",
                     "name": "prelude.http.status_error"
                 },
                 "parameters": {
-                    "parameter": 8
+                    "parameter": 9
                 }
             },
-            "18": {
+            "2": {
                 "block": {
-                    "body": 25,
+                    "body": 3,
+                    "defaults": {},
+                    "description": "A text body: the @content@ string, sent verbatim (Content-Type is the caller's to set). The @content@\nmay be a secret (an OAuth `refresh_token` in a form-encoded body).",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {},
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "content": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "content"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "$katari_constructor": {
+                                    "const": "prelude.http.text"
+                                },
+                                "$katari_value": {
+                                    "additionalProperties": true,
+                                    "properties": {
+                                        "content": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "content"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "$katari_constructor",
+                                "$katari_value"
+                            ],
+                            "type": "object"
+                        },
+                        "requests": []
+                    }
+                },
+                "parameters": {}
+            },
+            "20": {
+                "block": {
+                    "body": 27,
                     "defaults": {},
                     "description": "POST @body@ — a JSON value tree — to @url@ as application/json with the given @headers@, and return the\nreply PARSED into its document value. This is the canonical one-call shape of a JSON API integration: build\nthe body as an ordinary record / array / scalar tree, post it, and read the reply as a value — no manual\n`json.stringify` / `json.parse` around the call. @body@ AND each header value may be a secret (an auth token\n— an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\" for Gemini — or a `refresh_token`\nin the body of an OAuth exchange): both are submitted only to @url@'s server, which stays public. A `file`\nplaced anywhere in @body@ rides as base64 (the `http.json` slot contract). The Content-Type defaults to\napplication/json unless a header overrides it. A non-2xx status throws `status_error` (its body text\nattached); a transport failure throws `fetch_error`; a 2xx body that is not JSON throws `json.parse_error`\n(a JSON API that broke its promise) — an empty 2xx body is `null`. To send already-serialized text, or to\nkeep the raw reply text, call `fetch` directly.",
                     "kind": "agent",
@@ -2627,135 +3430,19 @@
                 },
                 "parameters": {}
             },
-            "19": {
+            "21": {
                 "block": {
                     "kind": "sequence",
                     "operations": [
                         {
                             "kind": "loadLiteral",
-                            "output": 33,
+                            "output": 34,
                             "value": {
                                 "kind": "null"
                             }
                         }
                     ],
-                    "result": 33
-                },
-                "parameters": {}
-            },
-            "2": {
-                "block": {
-                    "body": 3,
-                    "defaults": {},
-                    "description": "A text body: the @content@ string, sent verbatim (Content-Type is the caller's to set). The @content@\nmay be a secret (an OAuth `refresh_token` in a form-encoded body).",
-                    "kind": "agent",
-                    "schema": {
-                        "genericBindings": {},
-                        "input": {
-                            "additionalProperties": true,
-                            "properties": {
-                                "content": {
-                                    "type": "string"
-                                }
-                            },
-                            "required": [
-                                "content"
-                            ],
-                            "type": "object"
-                        },
-                        "output": {
-                            "additionalProperties": false,
-                            "properties": {
-                                "$katari_constructor": {
-                                    "const": "prelude.http.text"
-                                },
-                                "$katari_value": {
-                                    "additionalProperties": true,
-                                    "properties": {
-                                        "content": {
-                                            "type": "string"
-                                        }
-                                    },
-                                    "required": [
-                                        "content"
-                                    ],
-                                    "type": "object"
-                                }
-                            },
-                            "required": [
-                                "$katari_constructor",
-                                "$katari_value"
-                            ],
-                            "type": "object"
-                        },
-                        "requests": []
-                    }
-                },
-                "parameters": {}
-            },
-            "20": {
-                "block": {
-                    "kind": "sequence",
-                    "operations": [
-                        {
-                            "field": "body",
-                            "kind": "getField",
-                            "output": 34,
-                            "source": 18
-                        },
-                        {
-                            "entries": [
-                                [
-                                    "text",
-                                    34
-                                ]
-                            ],
-                            "kind": "makeRecord",
-                            "output": 35
-                        },
-                        {
-                            "kind": "drop",
-                            "variables": [
-                                34
-                            ]
-                        },
-                        {
-                            "argument": 35,
-                            "kind": "delegate",
-                            "output": 36,
-                            "target": {
-                                "kind": "name",
-                                "name": "prelude.json.parse"
-                            }
-                        },
-                        {
-                            "kind": "drop",
-                            "variables": [
-                                35
-                            ]
-                        }
-                    ],
-                    "result": 36
-                },
-                "parameters": {}
-            },
-            "21": {
-                "block": {
-                    "arms": [
-                        {
-                            "body": 19,
-                            "pattern": {
-                                "kind": "literal",
-                                "value": {
-                                    "kind": "boolean",
-                                    "value": true
-                                }
-                            }
-                        }
-                    ],
-                    "fallback": 20,
-                    "kind": "match",
-                    "subject": 32
+                    "result": 34
                 },
                 "parameters": {}
             },
@@ -2766,12 +3453,78 @@
                         {
                             "field": "body",
                             "kind": "getField",
-                            "output": 29,
-                            "source": 18
+                            "output": 35,
+                            "source": 19
+                        },
+                        {
+                            "entries": [
+                                [
+                                    "text",
+                                    35
+                                ]
+                            ],
+                            "kind": "makeRecord",
+                            "output": 36
+                        },
+                        {
+                            "kind": "drop",
+                            "variables": [
+                                35
+                            ]
+                        },
+                        {
+                            "argument": 36,
+                            "kind": "delegate",
+                            "output": 37,
+                            "target": {
+                                "kind": "name",
+                                "name": "prelude.json.parse"
+                            }
+                        },
+                        {
+                            "kind": "drop",
+                            "variables": [
+                                36
+                            ]
+                        }
+                    ],
+                    "result": 37
+                },
+                "parameters": {}
+            },
+            "23": {
+                "block": {
+                    "arms": [
+                        {
+                            "body": 21,
+                            "pattern": {
+                                "kind": "literal",
+                                "value": {
+                                    "kind": "boolean",
+                                    "value": true
+                                }
+                            }
+                        }
+                    ],
+                    "fallback": 22,
+                    "kind": "match",
+                    "subject": 33
+                },
+                "parameters": {}
+            },
+            "24": {
+                "block": {
+                    "kind": "sequence",
+                    "operations": [
+                        {
+                            "field": "body",
+                            "kind": "getField",
+                            "output": 30,
+                            "source": 19
                         },
                         {
                             "kind": "loadLiteral",
-                            "output": 30,
+                            "output": 31,
                             "value": {
                                 "kind": "string",
                                 "value": ""
@@ -2781,25 +3534,25 @@
                             "entries": [
                                 [
                                     "left",
-                                    29
+                                    30
                                 ],
                                 [
                                     "right",
-                                    30
+                                    31
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 31
+                            "output": 32
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                29,
-                                30
+                                30,
+                                31
                             ]
                         },
                         {
-                            "argument": 31,
+                            "argument": 32,
                             "generics": [
                                 [
                                     "T",
@@ -2812,7 +3565,7 @@
                                 ]
                             ],
                             "kind": "delegate",
-                            "output": 32,
+                            "output": 33,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.equal"
@@ -2821,60 +3574,60 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                31
+                                32
                             ]
                         },
                         {
                             "kind": "call",
-                            "output": 37,
-                            "target": 21
+                            "output": 38,
+                            "target": 23
                         }
                     ],
-                    "result": 37
+                    "result": 38
                 },
                 "parameters": {}
             },
-            "23": {
+            "25": {
                 "block": {
                     "kind": "sequence",
                     "operations": [
                         {
                             "field": "status",
                             "kind": "getField",
-                            "output": 38,
-                            "source": 18
+                            "output": 39,
+                            "source": 19
                         },
                         {
                             "field": "body",
                             "kind": "getField",
-                            "output": 39,
-                            "source": 18
+                            "output": 40,
+                            "source": 19
                         },
                         {
                             "entries": [
                                 [
                                     "status",
-                                    38
+                                    39
                                 ],
                                 [
                                     "body",
-                                    39
+                                    40
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 40
+                            "output": 41
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                38,
-                                39
+                                39,
+                                40
                             ]
                         },
                         {
-                            "argument": 40,
+                            "argument": 41,
                             "kind": "delegate",
-                            "output": 41,
+                            "output": 42,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.http.status_error"
@@ -2883,27 +3636,27 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                40
+                                41
                             ]
                         },
                         {
                             "entries": [
                                 [
                                     "error",
-                                    41
+                                    42
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 42
+                            "output": 43
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                41
+                                42
                             ]
                         },
                         {
-                            "argument": 42,
+                            "argument": 43,
                             "generics": [
                                 [
                                     "T",
@@ -2942,7 +3695,7 @@
                                 ]
                             ],
                             "kind": "delegate",
-                            "output": 43,
+                            "output": 44,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.throw"
@@ -2951,19 +3704,19 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                42
+                                43
                             ]
                         }
                     ],
-                    "result": 43
+                    "result": 44
                 },
                 "parameters": {}
             },
-            "24": {
+            "26": {
                 "block": {
                     "arms": [
                         {
-                            "body": 22,
+                            "body": 24,
                             "pattern": {
                                 "kind": "literal",
                                 "value": {
@@ -2973,37 +3726,37 @@
                             }
                         }
                     ],
-                    "fallback": 23,
+                    "fallback": 25,
                     "kind": "match",
-                    "subject": 28
+                    "subject": 29
                 },
                 "parameters": {}
             },
-            "25": {
+            "27": {
                 "block": {
                     "kind": "sequence",
                     "operations": [
                         {
                             "field": "url",
                             "kind": "getField",
-                            "output": 10,
-                            "source": 9
+                            "output": 11,
+                            "source": 10
                         },
                         {
                             "field": "body",
                             "kind": "getField",
-                            "output": 11,
-                            "source": 9
+                            "output": 12,
+                            "source": 10
                         },
                         {
                             "field": "headers",
                             "kind": "getField",
-                            "output": 12,
-                            "source": 9
+                            "output": 13,
+                            "source": 10
                         },
                         {
                             "kind": "loadLiteral",
-                            "output": 13,
+                            "output": 14,
                             "value": {
                                 "kind": "string",
                                 "value": "POST"
@@ -3013,22 +3766,22 @@
                             "entries": [
                                 [
                                     "value",
-                                    11
+                                    12
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 14
+                            "output": 15
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                11
+                                12
                             ]
                         },
                         {
-                            "argument": 14,
+                            "argument": 15,
                             "kind": "delegate",
-                            "output": 15,
+                            "output": 16,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.http.json"
@@ -3037,44 +3790,44 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                14
+                                15
                             ]
                         },
                         {
                             "entries": [
                                 [
                                     "url",
-                                    10
+                                    11
                                 ],
                                 [
                                     "method",
-                                    13
+                                    14
                                 ],
                                 [
                                     "headers",
-                                    12
+                                    13
                                 ],
                                 [
                                     "body",
-                                    15
+                                    16
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 16
+                            "output": 17
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                10,
-                                12,
+                                11,
                                 13,
-                                15
+                                14,
+                                16
                             ]
                         },
                         {
-                            "argument": 16,
+                            "argument": 17,
                             "kind": "delegate",
-                            "output": 17,
+                            "output": 18,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.http.fetch"
@@ -3083,32 +3836,32 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                16
+                                17
                             ]
                         },
                         {
                             "kind": "bindPattern",
                             "pattern": {
                                 "kind": "variable",
-                                "variable": 18
+                                "variable": 19
                             },
-                            "source": 17
+                            "source": 18
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                17
+                                18
                             ]
                         },
                         {
                             "field": "status",
                             "kind": "getField",
-                            "output": 19,
-                            "source": 18
+                            "output": 20,
+                            "source": 19
                         },
                         {
                             "kind": "loadLiteral",
-                            "output": 20,
+                            "output": 21,
                             "value": {
                                 "kind": "integer",
                                 "value": 200
@@ -3118,25 +3871,25 @@
                             "entries": [
                                 [
                                     "left",
-                                    19
+                                    20
                                 ],
                                 [
                                     "right",
-                                    20
+                                    21
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 21
+                            "output": 22
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                19,
-                                20
+                                20,
+                                21
                             ]
                         },
                         {
-                            "argument": 21,
+                            "argument": 22,
                             "generics": [
                                 [
                                     "T",
@@ -3149,7 +3902,7 @@
                                 ]
                             ],
                             "kind": "delegate",
-                            "output": 22,
+                            "output": 23,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.greater_or_equal"
@@ -3158,18 +3911,18 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                21
+                                22
                             ]
                         },
                         {
                             "field": "status",
                             "kind": "getField",
-                            "output": 23,
-                            "source": 18
+                            "output": 24,
+                            "source": 19
                         },
                         {
                             "kind": "loadLiteral",
-                            "output": 24,
+                            "output": 25,
                             "value": {
                                 "kind": "integer",
                                 "value": 300
@@ -3179,25 +3932,25 @@
                             "entries": [
                                 [
                                     "left",
-                                    23
+                                    24
                                 ],
                                 [
                                     "right",
-                                    24
+                                    25
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 25
+                            "output": 26
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                23,
-                                24
+                                24,
+                                25
                             ]
                         },
                         {
-                            "argument": 25,
+                            "argument": 26,
                             "generics": [
                                 [
                                     "T",
@@ -3210,7 +3963,7 @@
                                 ]
                             ],
                             "kind": "delegate",
-                            "output": 26,
+                            "output": 27,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.less_than"
@@ -3219,34 +3972,34 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                25
+                                26
                             ]
                         },
                         {
                             "entries": [
                                 [
                                     "left",
-                                    22
+                                    23
                                 ],
                                 [
                                     "right",
-                                    26
+                                    27
                                 ]
                             ],
                             "kind": "makeRecord",
-                            "output": 27
+                            "output": 28
                         },
                         {
                             "kind": "drop",
                             "variables": [
-                                22,
-                                26
+                                23,
+                                27
                             ]
                         },
                         {
-                            "argument": 27,
+                            "argument": 28,
                             "kind": "delegate",
-                            "output": 28,
+                            "output": 29,
                             "target": {
                                 "kind": "name",
                                 "name": "prelude.and"
@@ -3255,19 +4008,19 @@
                         {
                             "kind": "drop",
                             "variables": [
-                                27
+                                28
                             ]
                         },
                         {
                             "kind": "call",
-                            "output": 44,
-                            "target": 24
+                            "output": 45,
+                            "target": 26
                         }
                     ],
-                    "result": 44
+                    "result": 45
                 },
                 "parameters": {
-                    "parameter": 9
+                    "parameter": 10
                 }
             },
             "3": {
@@ -3650,6 +4403,10 @@
                 "block": 0,
                 "private": false
             },
+            "prelude.http.fetch_file": {
+                "block": 16,
+                "private": false
+            },
             "prelude.http.json": {
                 "block": 8,
                 "private": false
@@ -3667,11 +4424,11 @@
                 "private": false
             },
             "prelude.http.post_json": {
-                "block": 18,
+                "block": 20,
                 "private": false
             },
             "prelude.http.status_error": {
-                "block": 16,
+                "block": 18,
                 "private": false
             },
             "prelude.http.text": {
@@ -3691,11 +4448,13 @@
             "13": "multipart_file.leaf",
             "14": "fetch",
             "15": "fetch.leaf",
-            "16": "status_error",
-            "17": "status_error.leaf",
-            "18": "post_json",
+            "16": "fetch_file",
+            "17": "fetch_file.leaf",
+            "18": "status_error",
+            "19": "status_error.leaf",
             "2": "text",
-            "25": "post_json.body",
+            "20": "post_json",
+            "27": "post_json.body",
             "3": "text.leaf",
             "4": "binary",
             "5": "binary.leaf",
@@ -5276,7 +6035,7 @@
                 "block": {
                     "body": 11,
                     "defaults": {},
-                    "description": "Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no\nminted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the\nserver-declared tool name, @arguments@ its arguments object as a plain value tree (records / arrays /\nscalars, and a `file` becomes base64 in place — the same slot contract as `http.json`). The result is\nDECODED against @T@ inside the runtime: a tool's `structuredContent` is read as @T@'s wire form (so a\n`$ref` handle object reconstructs a REAL `file` value, and records / arrays / scalars land as values), a\nplain-text reply decodes only into a string-shaped @T@, and a schema mismatch throws `validation_error`.\nInstantiate @T@ with `unknown` to keep the reply as a raw document value instead (the codegen's choice\nwhen no `outputSchema` maps): a `$ref` then stays an inert record inside the tree, which a later dynamic\ncall (`reflection.call_agent`) into a `file`-typed position still revives into a real handle. @T@\nappears only in the result, so it is never inferable — instantiate it explicitly; the @Scope@ marker is a\nphantom the row never infers, so a caller writes both to `[...]`, `mcp.call[Scope, T](url = ..., ...)` — a\ngenerated binding passes its own module-local marker. Nothing validates @arguments@ before the server does\n(unlike a minted tool) — a rejected call throws `server_error`. Scope-gated the same way as a minted tool\n(`Scope` on its row): a generated binding calls this only inside a `provide` scope over the same marker and\ndescriptor, and the runtime rejects a call with no live scope for that descriptor as a typed `server_error`.",
+                    "description": "Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no\nminted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the\nserver-declared tool name, @arguments@ its arguments object as a plain value tree (records / arrays /\nscalars, and a `file` becomes base64 in place — the same slot contract as `http.json`). The result is\nread as a value and checked against @T@ inside the runtime: a `$katari_ref` handle object becomes a REAL\n`file` value, records / arrays / scalars land as themselves, a plain-text reply reads only into a\nstring-shaped @T@, and a mismatch throws `validation_error`. Instantiate @T@ with `unknown` to keep the\nreply as a raw document value (the codegen's choice when no `outputSchema` maps); a `$katari_ref` in it\nis still a real `file` — the wire-to-value conversion is unconditional, never schema-directed. @T@\nappears only in the result, so it is never inferable — instantiate it explicitly; the @Scope@ marker is a\nphantom the row never infers, so a caller writes both to `[...]`, `mcp.call[Scope, T](url = ..., ...)` — a\ngenerated binding passes its own module-local marker. Nothing validates @arguments@ before the server does\n(unlike a minted tool) — a rejected call throws `server_error`. Scope-gated the same way as a minted tool\n(`Scope` on its row): a generated binding calls this only inside a `provide` scope over the same marker and\ndescriptor, and the runtime rejects a call with no live scope for that descriptor as a typed `server_error`.",
                     "kind": "agent",
                     "schema": {
                         "genericBindings": {
@@ -7119,6 +7878,380 @@
             "5": "call_error.leaf",
             "6": "call_agent",
             "7": "call_agent.leaf"
+        }
+    },
+    "prelude.region": {
+        "blocks": {
+            "0": {
+                "block": {
+                    "body": 1,
+                    "defaults": {},
+                    "description": "Open a nursery for the extent of @continuation@, as a scoped provider — the `use region.provide[region.scope, E](...)` form. It hands @continuation@ a `nursery[Scope, E]` handle whose fibers may raise at most the effects `E`, and settles with the continuation's result. `Scope` rides the continuation's row (that is what a `fork` / `join` / `cancel` / `watch` raises) and is DISCHARGED from `provide`'s own row, so no fiber outlives the block: the nursery closes when @continuation@ returns (its still-running fibers are cancelled). Pin `Scope` and the ceiling `E` as the first two type arguments (`region.provide[region.scope, my_effects]`); `R` and the residual outer row are inferred from the continuation. Discharging `Scope` is `provide`'s alone (only it opens the nursery), so a live join context cannot be forged. NEST UNDER DISTINCT MARKERS: share one marker across two nurseries and their scopes MERGE (fibers become mutually joinable), so declare a module-local `effect` per nursery when nesting.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {
+                            "E": 5,
+                            "Eouter": 7,
+                            "R": 6,
+                            "Scope": 4
+                        },
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "continuation": {
+                                    "additionalProperties": true,
+                                    "description": "The nursery body (bound by `use`): receives the handle, and its fibers run exactly while it does.",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "continuation"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "$generic": 6
+                        },
+                        "requests": [
+                            {
+                                "generic": 7,
+                                "kind": "generic"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "1": {
+                "block": {
+                    "input": 0,
+                    "key": "prelude.region.provide",
+                    "kind": "external",
+                    "reactor": "region"
+                },
+                "parameters": {
+                    "parameter": 0
+                }
+            },
+            "2": {
+                "block": {
+                    "body": 3,
+                    "defaults": {},
+                    "description": "Spawn @task@ (applied to @argument@) as a fiber in the nursery @nursery@, returning immediately with a `fiber[Scope, T]` handle. @task@'s effect must fit under the nursery's ceiling `E` (a child that raises less is fine; one that raises more is a type error), so every fiber is bounded by `E` — which is exactly what makes `watch` a total obligation. The fiber's escalations do not surface here; they well up at `watch`. Scope-gated (`with Scope`): callable only inside the `provide` that opened this nursery.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {
+                            "A": 10,
+                            "E": 9,
+                            "Scope": 8,
+                            "T": 11
+                        },
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "argument": {
+                                    "$generic": 10,
+                                    "description": "The argument applied to @task@."
+                                },
+                                "nursery": {
+                                    "additionalProperties": true,
+                                    "description": "The nursery handle from the enclosing `provide`.",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                },
+                                "task": {
+                                    "additionalProperties": true,
+                                    "description": "The child agent to run; its effect must fit under the nursery's ceiling `E`.",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "argument",
+                                "nursery",
+                                "task"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "$katari_agent": {}
+                            },
+                            "required": [
+                                "$katari_agent"
+                            ],
+                            "type": "object"
+                        },
+                        "requests": [
+                            {
+                                "generic": 8,
+                                "kind": "generic"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "3": {
+                "block": {
+                    "input": 1,
+                    "key": "prelude.region.fork",
+                    "kind": "external",
+                    "reactor": "region"
+                },
+                "parameters": {
+                    "parameter": 1
+                }
+            },
+            "4": {
+                "block": {
+                    "body": 5,
+                    "defaults": {},
+                    "description": "Await @handle@ and return the value it settled with. `Scope` is pinned by @nursery@, and @handle@'s own scope must match it, so a fiber from a DIFFERENT nursery (a different scope marker) is a type error here — a fiber is joinable only in the region that spawned it. Scope-gated (`with Scope`): callable only inside the opening `provide`.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {
+                            "E": 13,
+                            "Scope": 12,
+                            "T": 14
+                        },
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "handle": {
+                                    "additionalProperties": true,
+                                    "description": "A fiber spawned in THIS nursery (its scope marker must match).",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                },
+                                "nursery": {
+                                    "additionalProperties": true,
+                                    "description": "The nursery handle from the enclosing `provide`.",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "handle",
+                                "nursery"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "$generic": 14
+                        },
+                        "requests": [
+                            {
+                                "generic": 12,
+                                "kind": "generic"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "5": {
+                "block": {
+                    "input": 2,
+                    "key": "prelude.region.join",
+                    "kind": "external",
+                    "reactor": "region"
+                },
+                "parameters": {
+                    "parameter": 2
+                }
+            },
+            "6": {
+                "block": {
+                    "body": 7,
+                    "defaults": {},
+                    "description": "The nursery's WHITE HOLE: re-emit the fibers' escalations into the enclosing program as the ceiling effect `E`. It returns `never` — it only ever raises, never yields — so install a `handler` (or any row that covers `E`) around it to service the fibers' requests. Because every fiber's effect fits under `E` and `watch` re-emits the FULL `E`, covering `E` here covers every request any fiber can raise. Scope-gated (`with Scope`): callable only inside the opening `provide`.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {
+                            "E": 16,
+                            "Scope": 15
+                        },
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "nursery": {
+                                    "additionalProperties": true,
+                                    "description": "The nursery handle from the enclosing `provide`.",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "nursery"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "not": {}
+                        },
+                        "requests": [
+                            {
+                                "generic": 15,
+                                "kind": "generic"
+                            },
+                            {
+                                "generic": 16,
+                                "kind": "generic"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "7": {
+                "block": {
+                    "input": 3,
+                    "key": "prelude.region.watch",
+                    "kind": "external",
+                    "reactor": "region"
+                },
+                "parameters": {
+                    "parameter": 3
+                }
+            },
+            "8": {
+                "block": {
+                    "body": 9,
+                    "defaults": {},
+                    "description": "Tear @handle@ down: cancel the fiber and settle. `Scope` is pinned by @nursery@, and @handle@'s own scope must match it, so a fiber from a different nursery is a type error. Idempotent on an already-settled fiber. Scope-gated (`with Scope`): callable only inside the opening `provide`.",
+                    "kind": "agent",
+                    "schema": {
+                        "genericBindings": {
+                            "E": 18,
+                            "Scope": 17,
+                            "T": 19
+                        },
+                        "input": {
+                            "additionalProperties": true,
+                            "properties": {
+                                "handle": {
+                                    "additionalProperties": true,
+                                    "description": "A fiber spawned in THIS nursery (its scope marker must match).",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                },
+                                "nursery": {
+                                    "additionalProperties": true,
+                                    "description": "The nursery handle from the enclosing `provide`.",
+                                    "properties": {
+                                        "$katari_agent": {}
+                                    },
+                                    "required": [
+                                        "$katari_agent"
+                                    ],
+                                    "type": "object"
+                                }
+                            },
+                            "required": [
+                                "handle",
+                                "nursery"
+                            ],
+                            "type": "object"
+                        },
+                        "output": {
+                            "type": "null"
+                        },
+                        "requests": [
+                            {
+                                "generic": 17,
+                                "kind": "generic"
+                            }
+                        ]
+                    }
+                },
+                "parameters": {}
+            },
+            "9": {
+                "block": {
+                    "input": 4,
+                    "key": "prelude.region.cancel",
+                    "kind": "external",
+                    "reactor": "region"
+                },
+                "parameters": {
+                    "parameter": 4
+                }
+            }
+        },
+        "entries": {
+            "prelude.region.cancel": {
+                "block": 8,
+                "private": false
+            },
+            "prelude.region.fork": {
+                "block": 2,
+                "private": false
+            },
+            "prelude.region.join": {
+                "block": 4,
+                "private": false
+            },
+            "prelude.region.provide": {
+                "block": 0,
+                "private": false
+            },
+            "prelude.region.watch": {
+                "block": 6,
+                "private": false
+            }
+        },
+        "metadata": {
+            "schemaVersion": 3
+        },
+        "names": {
+            "0": "provide",
+            "1": "provide.leaf",
+            "2": "fork",
+            "3": "fork.leaf",
+            "4": "join",
+            "5": "join.leaf",
+            "6": "watch",
+            "7": "watch.leaf",
+            "8": "cancel",
+            "9": "cancel.leaf"
         }
     },
     "prelude.replay": {

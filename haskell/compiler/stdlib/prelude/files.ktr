@@ -1,4 +1,4 @@
-// The `prelude.file` sub-module: read a `file` value's content and metadata in-runtime, and produce /
+// The `prelude.files` sub-module: read a `file` value's content and metadata in-runtime, and produce /
 // release blobs from a program. A `file` is a slim handle into the project's blob store — the value carries
 // only the reference (identity); the bytes AND the metadata stay runtime-side, so programs pass files around
 // for free and nothing on the handle can go stale or be forged. These primitives are the bridge for the

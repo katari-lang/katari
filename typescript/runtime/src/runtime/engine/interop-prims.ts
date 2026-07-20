@@ -46,10 +46,10 @@ import type { BlobEntry } from "./types.js";
 const PARSE_ERROR = "prelude.json.parse_error";
 const VALIDATION_ERROR = "prelude.json.validation_error";
 
-// The domain error ctors the file prims throw (`prelude/file.ktr` declares them): a reader meeting a handle
+// The domain error ctors the file prims throw (`prelude/files.ktr` declares them): a reader meeting a handle
 // whose blob is gone (freed, or a made-up id), and `from_base64` meeting content that is not base64.
-const FILE_GONE = "prelude.file.gone";
-const MALFORMED_BASE64 = "prelude.file.malformed_base64";
+const FILE_GONE = "prelude.files.gone";
+const MALFORMED_BASE64 = "prelude.files.malformed_base64";
 
 // The largest array `range` will materialise. `range` allocates the whole array synchronously on the
 // actor's serial turn, so an unbounded (possibly AI-supplied) bound would stall the event loop or exhaust
@@ -78,7 +78,7 @@ function fileArgument(argument: Value, name: string): BlobRefValue {
 
 /** The blob row behind a file value. A missing row means the handle is gone — the blob was `free`d / deleted,
  *  or the id was made up (an AI hallucinating a `$katari_ref`). The two are indistinguishable from a slim
- *  handle and a program reacts to both the same way, so this is ONE catchable `file.gone` (not a panic):
+ *  handle and a program reacts to both the same way, so this is ONE catchable `files.gone` (not a panic):
  *  naming both causes, it lets an AI loop's guard feed a correctable message back to the model, or a converter
  *  select the failure for replay. */
 function blobRowOf(context: PrimContext, file: BlobRefValue): BlobEntry {
@@ -380,11 +380,11 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       : NULL_VALUE;
   },
 
-  // ─── prelude.file ───────────────────────────────────────────────────────────────────────────
+  // ─── prelude.files ──────────────────────────────────────────────────────────────────────────
   // A `file` value is a slim blob handle (identity only); content comes from the byte store and
   // metadata from the project's blob catalog (the `blobs` rows — the source of truth). Privacy is
   // the prim layer's monotonic rule, like every reader here: a private file taints the result.
-  "prelude.file.read_base64": async (argument, context) => {
+  "prelude.files.read_base64": async (argument, context) => {
     const file = fileArgument(argument, "value");
     // Check the catalog row FIRST: a `free`d blob's row is gone the instant it is freed, but its bytes are
     // deleted only after the commit — so `blobs.get` might still find them. Reading the row makes a freed
@@ -393,15 +393,15 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     const bytes = await context.blobs.get(context.projectId, file.blobId);
     return { kind: "string", value: Buffer.from(bytes).toString("base64") };
   },
-  "prelude.file.content_type": async (argument, context) => ({
+  "prelude.files.content_type": async (argument, context) => ({
     kind: "string",
     value: blobRowOf(context, fileArgument(argument, "value")).contentType ?? "",
   }),
-  "prelude.file.size": async (argument, context) => ({
+  "prelude.files.size": async (argument, context) => ({
     kind: "integer",
     value: blobRowOf(context, fileArgument(argument, "value")).size,
   }),
-  "prelude.file.from_base64": async (argument, context) => {
+  "prelude.files.from_base64": async (argument, context) => {
     const content = await readStringField(argument, "content", context);
     const contentType = await readStringField(argument, "content_type", context);
     const bytes = decodeBase64OrThrow(content);
@@ -422,7 +422,7 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     });
     return { kind: "ref", semanticKind: "file", blobId };
   },
-  "prelude.file.free": (argument, context) => {
+  "prelude.files.free": (argument, context) => {
     // Idempotent and silent: the pool frees the blob only when the current run owns it, else a no-op (an
     // uploaded file or another run's blob is untouched). Returns null regardless — a program cannot observe
     // whether anything was freed, so a retried block frees the same handle twice with identical behaviour.

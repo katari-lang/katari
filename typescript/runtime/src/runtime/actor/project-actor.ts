@@ -166,12 +166,12 @@ export class ProjectActor {
     // The shared scope store + the pool that wraps it: the engine reads / writes scopes in place, while every
     // reactor reowns through the same pool (so a run result crosses from a core instance to the api root).
     const store = createProjectStore();
-    // The pool's run resolver for `file.free` (`deleteBlobOwnedInRun`): a `core` engine instance carries its
+    // The pool's run resolver for `files.free` (`deleteBlobOwnedInRun`): a `core` engine instance carries its
     // run in the store; a NON-core owner — a long-lived webhook / mcp serve endpoint call instance a
     // delivery's residual blob hoisted onto — is resolved from its owning call reactor's received edge. The
-    // reactor fields are read lazily (the closure runs only when a program calls `file.free`, long after
+    // reactor fields are read lazily (the closure runs only when a program calls `files.free`, long after
     // construction), so referencing them before they are assigned below is fine. The api root belongs to no
-    // run (summoned by no delegation), so it resolves to `undefined` — which is exactly why `file.free`
+    // run (summoned by no delegation), so it resolves to `undefined` — which is exactly why `files.free`
     // refuses a user-uploaded file. Core is checked first (an O(1) store read), so its large received-edge
     // index is never scanned.
     this.pool = new ResourcePool(this.projectId, store, (owner) => {

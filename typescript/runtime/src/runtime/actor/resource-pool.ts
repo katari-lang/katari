@@ -61,7 +61,7 @@ export class ResourcePool {
   constructor(
     private readonly projectId: ProjectId,
     private readonly store: ProjectStore,
-    /** Resolve the run an arbitrary blob OWNER belongs to — for `file.free`'s run-scoped reclaim (below). A
+    /** Resolve the run an arbitrary blob OWNER belongs to — for `files.free`'s run-scoped reclaim (below). A
      *  `core` engine instance carries its run in the store; a NON-core owner (a long-lived webhook / mcp
      *  serve endpoint call instance a delivery's residual blob hoisted onto) is not in the store, so the actor
      *  wires a resolver spanning every reactor's received edge. The default — a bare pool (a unit test) — sees
@@ -108,7 +108,7 @@ export class ResourcePool {
     return true;
   }
 
-  /** Free a blob a program explicitly released via `file.free`, but only when it belongs to `runId`'s run —
+  /** Free a blob a program explicitly released via `files.free`, but only when it belongs to `runId`'s run —
    *  the run-scoped counterpart of `deleteBlobOwnedBy`. A produced blob HOISTS up its call chain, so by the
    *  time `free` runs it may be owned by ANY ancestor instance of the run — a core sub-call, or a long-lived
    *  webhook / mcp serve endpoint call instance a delivery's residual blob climbed onto — not just the

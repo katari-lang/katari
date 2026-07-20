@@ -371,7 +371,7 @@ export abstract class Reactor {
    *  a REAL blob ref (the callee's unconditional wire decode reconstructs one), so the `send` releases that
    *  ref to in-transit for a catching handler to reown AND hoists the raiser's remaining blobs onto the
    *  caller — without which the payload's blob would stay owned by the (soon torn-down) call instance and the
-   *  catcher's ref would dangle (`file.gone`). A caught throw's row is retired on its `escalateAck`, an
+   *  catcher's ref would dangle (`files.gone`). A caught throw's row is retired on its `escalateAck`, an
    *  uncaught one's on the raiser's teardown. */
   protected raiseThrow(
     delegation: DelegationId,
@@ -615,12 +615,12 @@ export abstract class Reactor {
   }
 
   /** The run an INSTANCE this reactor handles as callee belongs to, by the instance's own id (a reverse of
-   *  the received edge). The pool's run-scoped blob reclaim (`file.free`) uses it to place a blob's OWNER in
+   *  the received edge). The pool's run-scoped blob reclaim (`files.free`) uses it to place a blob's OWNER in
    *  a run even when the owner is not a `core` engine instance — a long-lived webhook / mcp serve endpoint
    *  call instance a delivery's residual blob hoisted onto. Public so the actor can compose one resolver over
    *  every reactor; a reactor that does not handle `instance` returns `undefined`. The scan is over this
    *  reactor's OWN received edges only — a small set for a call reactor (its in-flight / serving calls) — and
-   *  `file.free` is a rare, explicit program action, so no reverse index is warranted. */
+   *  `files.free` is a rare, explicit program action, so no reverse index is warranted. */
   runOfInstance(instance: InstanceId): InstanceId | undefined {
     for (const edge of this.handled.values()) {
       if (edge.instance === instance) return edge.run;

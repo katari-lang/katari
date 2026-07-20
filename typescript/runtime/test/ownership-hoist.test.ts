@@ -137,9 +137,9 @@ describe("ownership hoist", () => {
     expect(store.blobs[BLOB]?.owner).toBe(caller);
   });
 
-  test("runOfInstance reverse-resolves a handled instance's run — the reactor edge the file.free run resolver reads", () => {
+  test("runOfInstance reverse-resolves a handled instance's run — the reactor edge the files.free run resolver reads", () => {
     // A blob that hoisted onto a long-lived webhook / mcp serve endpoint call instance is owned by an instance
-    // absent from the engine store; `file.free`'s run resolver finds its run through this reverse of the
+    // absent from the engine store; `files.free`'s run resolver finds its run through this reverse of the
     // received edge, so a delivery's residual blob stays reclaimable within its run.
     const { pool } = setup();
     const reactor = new HoistTestReactor("webhook", pool);
