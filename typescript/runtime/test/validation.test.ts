@@ -1,5 +1,5 @@
 // The schema-conformance walk (`conformValue`): the delegate boundary's argument check, now a *pure,
-// strict* pass separate from the codec — it only checks, never rewrites (no `$constructor` repair). Covers
+// strict* pass separate from the codec — it only checks, never rewrites (no `$katari_constructor` repair). Covers
 // the value-model foldbacks (integer-as-number subtyping, blob-string / file / callable reference schemas),
 // nested `data` schemas, unions, tuples (including over-length rejection), closed records, and generics.
 
@@ -8,7 +8,11 @@ import { describe, expect, test } from "vitest";
 import { jsonToValue } from "../src/runtime/value/codec.js";
 import type { BlobId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
 import type { Value } from "../src/runtime/value/types.js";
-import { conformValue, fillGenericSchema, typeSubstitutionOf } from "../src/runtime/value/validation.js";
+import {
+  conformValue,
+  fillGenericSchema,
+  typeSubstitutionOf,
+} from "../src/runtime/value/validation.js";
 
 const SNAPSHOT = "snapshot-validation" as SnapshotId;
 
@@ -63,36 +67,32 @@ describe("conformValue", () => {
       kind: "ref",
       semanticKind: "string",
       blobId: "blob-1" as BlobId,
-      hash: "h",
-      size: 10,
     };
     expect(conformValue(ref, { type: "string" }).ok).toBe(true);
   });
 
-  test("a file ref satisfies the $ref reference schema and nothing narrower", () => {
+  test("a file ref satisfies the $katari_ref reference schema and nothing narrower", () => {
     const file: Value = {
       kind: "ref",
       semanticKind: "file",
       blobId: "blob-2" as BlobId,
-      hash: "h",
-      size: 10,
     };
     const fileSchema: JSONSchema = {
       type: "object",
-      properties: { $ref: {} },
-      required: ["$ref"],
+      properties: { $katari_ref: {} },
+      required: ["$katari_ref"],
       additionalProperties: true,
     };
     expect(conformValue(file, fileSchema).ok).toBe(true);
     expect(conformValue(file, { type: "string" }).ok).toBe(false);
   });
 
-  test("an agent value satisfies the $agent reference schema and an unconstrained one", () => {
+  test("an agent value satisfies the $katari_agent reference schema and an unconstrained one", () => {
     const agent: Value = { kind: "agent", name: createAgentName("main.tool"), snapshot: SNAPSHOT };
     const agentSchema: JSONSchema = {
       type: "object",
-      properties: { $agent: {} },
-      required: ["$agent"],
+      properties: { $katari_agent: {} },
+      required: ["$katari_agent"],
       additionalProperties: true,
     };
     expect(conformValue(agent, agentSchema).ok).toBe(true);
@@ -100,7 +100,7 @@ describe("conformValue", () => {
     expect(conformValue(agent, { type: "object", properties: {} }).ok).toBe(false);
   });
 
-  test("a closure value satisfies the $agent reference schema", () => {
+  test("a closure value satisfies the $katari_agent reference schema", () => {
     const closure: Value = {
       kind: "closure",
       blockId: 4,
@@ -110,21 +110,21 @@ describe("conformValue", () => {
     };
     const agentSchema: JSONSchema = {
       type: "object",
-      properties: { $agent: {} },
-      required: ["$agent"],
+      properties: { $katari_agent: {} },
+      required: ["$katari_agent"],
       additionalProperties: true,
     };
     expect(conformValue(closure, agentSchema).ok).toBe(true);
   });
 
-  // A `data` schema is nested: `{ $constructor: {const}, value: {object of fields} }` (the wire form).
+  // A `data` schema is nested: `{ $katari_constructor: {const}, $katari_value: {object of fields} }` (the wire form).
   const BOX_SCHEMA: JSONSchema = {
     type: "object",
     properties: {
-      $constructor: { const: "main.box" },
-      value: { type: "object", properties: { n: { type: "integer" } }, required: ["n"] },
+      $katari_constructor: { const: "main.box" },
+      $katari_value: { type: "object", properties: { n: { type: "integer" } }, required: ["n"] },
     },
-    required: ["$constructor", "value"],
+    required: ["$katari_constructor", "$katari_value"],
     additionalProperties: false,
   };
 
@@ -152,8 +152,8 @@ describe("conformValue", () => {
         BOX_SCHEMA,
         {
           type: "object",
-          properties: { $constructor: { const: "main.empty" }, value: { type: "object" } },
-          required: ["$constructor", "value"],
+          properties: { $katari_constructor: { const: "main.empty" }, $katari_value: { type: "object" } },
+          required: ["$katari_constructor", "$katari_value"],
           additionalProperties: false,
         },
       ],
@@ -222,5 +222,20 @@ describe("generic instantiation", () => {
     expect(filled.properties?.x).toEqual({ type: "integer" });
     expect(conformValue(record({ x: int(1) }), filled).ok).toBe(true);
     expect(conformValue(record({ x: str("s") }), filled).ok).toBe(false);
+  });
+
+  test("an annotated generic parameter keeps its description through the fill", () => {
+    const schema: JSONSchema = {
+      type: "object",
+      properties: { x: { $generic: 7, description: "The value to pick." } },
+      required: ["x"],
+      additionalProperties: true,
+    };
+    const substitution = typeSubstitutionOf(
+      { T: 7 },
+      { T: { kind: "type", schema: { type: "integer" } } },
+    );
+    const filled = fillGenericSchema(substitution, schema);
+    expect(filled.properties?.x).toEqual({ type: "integer", description: "The value to pick." });
   });
 });

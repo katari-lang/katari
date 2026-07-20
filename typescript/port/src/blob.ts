@@ -1,5 +1,5 @@
 // The blob side channel: how an FFI handler moves a blob's BYTES to / from the runtime. A blob crosses the FFI
-// boundary as a small handle (`{ $ref, size, hash, ... }`) — never its bytes — so reading a received file (or,
+// boundary as a small handle (`{ $katari_ref, ... }`) — never its bytes — so reading a received file (or,
 // in a later step, producing a new one) goes over HTTP to the runtime, out of band from the one-shot stdio
 // reply channel that carries only the handler's JSON result. The runtime hands the sidecar its own URL, the
 // project id, and the API bearer token as env (`KATARI_RUNTIME_URL` / `KATARI_PROJECT_ID` / `KATARI_API_KEY`);
@@ -7,17 +7,23 @@
 // the bearer. Outside a runtime-hosted sidecar (e.g. a bare unit test) the env is unset and they throw a clear
 // error rather than guessing an endpoint.
 
-/** The handle an FFI handler receives for a `File` argument (and returns to produce one): a content reference,
- *  not the bytes. `$ref` is the blob id; `size` / `hash` describe it. Declared as a type (not an interface) so
- *  it is structurally a `Json` object — a handler can `return context.uploadBlob(...)` (or a record containing
- *  the handle) directly, and the runtime lifts it into a `File` value. */
+/** The handle an FFI handler receives for a `File` argument (and returns to produce one): a slim content
+ *  reference — identity only, never the bytes or their metadata (those live runtime-side; a stale or
+ *  forged copy cannot exist on the handle). Declared as a type (not an interface) so it is structurally a
+ *  `Json` object — a handler can `return context.file(...)` (or a record containing the handle) directly,
+ *  and the runtime lifts it into a `File` value. */
 export type FileHandle = {
-  $ref: string;
-  size: number;
-  hash: string;
-  semanticKind?: string;
-  contentType?: string;
+  $katari_ref: string;
+  $katari_semantic_kind?: string;
 };
+
+/** One downloaded blob: the bytes plus the metadata the runtime served them with (the blob row's
+ *  Content-Type; the size is the byte count). What `KatariFile` caches per call. */
+export interface BlobDownload {
+  bytes: Uint8Array;
+  size: number;
+  contentType?: string;
+}
 
 /** The runtime endpoint a runtime-hosted sidecar was given, or a thrown error when run outside one. */
 function runtimeEndpoint(): { baseUrl: string; projectId: string; apiKey: string } {
@@ -46,15 +52,17 @@ function authHeader(apiKey: string): Record<string, string> {
 
 /** The blob id a handle (or a bare id string) names. */
 function blobIdOf(handle: FileHandle | string): string {
-  return typeof handle === "string" ? handle : handle.$ref;
+  return typeof handle === "string" ? handle : handle.$katari_ref;
 }
 
-/** Download a blob's bytes from the runtime by its handle (or bare blob id). The bytes stream over HTTP, not
- *  the stdio reply channel. Honors the handler's abort signal so a cancelled call stops waiting. */
+/** Download a blob from the runtime by its handle (or bare blob id): the bytes plus the served
+ *  metadata (the slim handle carries none — the response's Content-Type is the blob row's). The bytes
+ *  stream over HTTP, not the stdio reply channel. Honors the handler's abort signal so a cancelled
+ *  call stops waiting. */
 export async function downloadBlob(
   handle: FileHandle | string,
   signal?: AbortSignal,
-): Promise<Uint8Array> {
+): Promise<BlobDownload> {
   const { baseUrl, projectId, apiKey } = runtimeEndpoint();
   const response = await fetch(`${baseUrl}/projects/${projectId}/files/${blobIdOf(handle)}`, {
     headers: authHeader(apiKey),
@@ -63,7 +71,15 @@ export async function downloadBlob(
   if (!response.ok) {
     throw new Error(`katari: blob download failed (${response.status} ${response.statusText})`);
   }
-  return new Uint8Array(await response.arrayBuffer());
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const contentType = response.headers.get("content-type");
+  return {
+    bytes,
+    size: bytes.byteLength,
+    // The runtime sends a Content-Type only when the blob row records one, so a missing header IS
+    // "nothing recorded" — absence travels as absence, no sentinel to sniff.
+    ...(contentType !== null ? { contentType } : {}),
+  };
 }
 
 /** Options for producing a blob from a handler. */
@@ -127,11 +143,6 @@ export async function uploadBlob(
     throw new Error(`katari: blob upload failed (${response.status} ${response.statusText})`);
   }
   const produced = parseProducedBlob(await readJsonBody(response));
-  return {
-    $ref: produced.id,
-    size: produced.size,
-    hash: produced.hash,
-    semanticKind: "file",
-    ...(options?.contentType !== undefined ? { contentType: options.contentType } : {}),
-  };
+  // The slim handle: identity only — the metadata just registered lives on the blob's runtime row.
+  return { $katari_ref: produced.id, $katari_semantic_kind: "file" };
 }

@@ -5,10 +5,8 @@
 import {
   AGENT_KEY,
   CONSTRUCTOR_KEY,
-  CONTENT_TYPE_KEY,
   FILE_KEY,
-  HASH_KEY,
-  SIZE_KEY,
+  SEMANTIC_KIND_KEY,
   SNAPSHOT_KEY,
 } from "@katari-lang/types";
 import { Plus, Trash2, Upload } from "lucide-react";
@@ -93,7 +91,7 @@ function SchemaField(props: FieldProps) {
   }
 }
 
-/** The `$ref` / `$agent` reference schemas are objects requiring exactly that discriminator key. */
+/** The `$katari_ref` / `$katari_agent` reference schemas are objects requiring exactly that discriminator key. */
 function isReferenceSchema(node: JsonSchema, key: typeof FILE_KEY | typeof AGENT_KEY): boolean {
   return Array.isArray(node.required) && node.required.includes(key);
 }
@@ -360,7 +358,7 @@ function branchMatches(branch: Json, value: Json): boolean {
   if (typeof branch !== "object" || branch === null || Array.isArray(branch)) return false;
   const node = branch as JsonSchema;
   const properties = node.properties;
-  // Constructor union: match the `$constructor` tag.
+  // Constructor union: match the `$katari_constructor` tag.
   if (
     typeof properties === "object" &&
     properties !== null &&
@@ -417,14 +415,8 @@ function FileField({ value, onChange, context }: FieldProps) {
             setBusy(true);
             api
               .uploadFile(context.projectId, file)
-              .then((handle) =>
-                onChange({
-                  [FILE_KEY]: handle.id,
-                  [SIZE_KEY]: handle.size,
-                  [HASH_KEY]: handle.hash,
-                  [CONTENT_TYPE_KEY]: file.type || "application/octet-stream",
-                }),
-              )
+              // The slim wire handle: identity only — the metadata just uploaded lives on the blob's row.
+              .then((handle) => onChange({ [FILE_KEY]: handle.id, [SEMANTIC_KIND_KEY]: "file" }))
               .catch(() => toast("Upload failed.", "error"))
               .finally(() => setBusy(false));
           }}

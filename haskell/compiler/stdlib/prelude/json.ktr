@@ -1,101 +1,112 @@
-// The `prelude.json` sub-module: the `json` data type and its conversions. `json` is the tagged
-// mirror of a JSON document — one `data` constructor per JSON shape, closed into the union synonym
-// `json` — so a program can traverse an AI's reply with ordinary `match` arms. Referenced from user
-// code by the default-import qualifier: type `json.json`, constructor patterns `json.json_object(...)`,
-// conversions `json.parse(...)`.
+// The `prelude.json` sub-module: the JSON boundary, over PLAIN Katari values. A JSON document is not a
+// dedicated tree type — it is an ordinary value: a record / array / string / integer / number / boolean /
+// null (the "document shape"). A program traverses a parsed reply with shape filters (`case record(r)` /
+// `case array(a)` / `case string(s)`) and the total readers below, and builds one with ordinary record /
+// array literals. Referenced by the default-import qualifier: `json.parse(...)`, `json.field(...)`.
 //
-// The conversions — `json` is an ordinary data type, and every conversion treats it uniformly (no
-// special-casing of `json` inside a generic function):
+// A value renders to / from bare JSON through ONE codec, shared with the FFI boundary. Every reserved wire
+// key lives in the `$katari_` namespace (a `file` is `{ $katari_ref: id }`, a `data` value is
+// `{ $katari_constructor: name, $katari_value: { ...fields } }`, an agent / closure / tool its own handle
+// object), which a program never authors — so a bare record needs no escaping, and the reserved keys are
+// disjoint from any document a program writes.
 //
-//   - `parse : string -> json`         text -> the tree (traverse it with `match`)
-//   - `stringify : json -> string`     the tree -> its document text (inverts `parse`)
-//   - `encode[T] : T -> json`          embed any value into the tree, by its wire form
-//   - `decode[T] : json -> T`          read a tree back as a T, validated against T's schema
-//   - `parse_as[T] : string -> T`      fused `decode[T]` of `parse` (no intermediate tree)
-//   - `to_text[T] : T -> string`       fused `stringify` of `encode` (no intermediate tree)
+//   - `parse : string -> unknown`      text -> the value it denotes (a `$katari_ref` becomes a `file`, …)
+//   - `validate[T] : unknown -> T`     check a value against T's schema (returns it unchanged, or throws)
+//   - `parse_as[T] : string -> T`      `parse` then `validate[T]` (the typed text boundary)
+//   - `stringify[T] : T -> string`     ANY value -> its (compact, canonical) JSON text
 //
-// Laws: `stringify(parse(t)) == t`; `decode[T](encode(x)) == x` for every T. The value <-> `json`
-// conversion is a *total, blind bijection* — every value has one unambiguous wire form and back, with
-// no schema consulted — so the law holds for every T, including a T that contains `json`, an agent, or
-// a closure. Validation against T's schema is a *separate* pass layered on top (see the typed readers);
-// the codec itself never rewrites a value to fit. The fused pair agrees with the composed one
-// (`to_text(x) == stringify(encode(x))`, `parse_as[T](t) == decode[T](parse(t))`). Composing a larger
-// document out of existing `json` values — a tool list embedding schemas from `get_metadata` — is
-// explicit tree construction: `json_object(entries = { input_schema = m.input, ... })`.
+// `parse` and `stringify` are inverses through that codec: a document (record / array / scalar) round-trips
+// verbatim, so `stringify(parse(s)) == s` (modulo whitespace / number normalisation). `parse` interprets the
+// `$katari_` markers — external JSON never carries such a key, so a real document is unaffected — and a
+// `file` / `data` / callable value likewise stringifies to its handle object. `stringify` is TOTAL and
+// CANONICAL (one value, one text); it is also the READ CHANNEL that lets an AI SEE a handle / data value (an
+// error render, a handle embed, a tool result shown back to a model). A secret operand taints the whole
+// result (the monotonic information-flow rule).
 //
-// The typed readers (`parse_as[T]` / `decode[T]`) are schema-directed: the call site's instantiation
-// carries T's JSON Schema to the runtime (an inferred instantiation is stamped just like an explicit
-// one), the decoded value is validated against it, and a mismatch throws `decode_error` naming the
-// offending path. T appears only in the result, so it is never inferable from the arguments —
-// instantiate explicitly (`json.decode[my_type](...)`); an uninstantiated call is a compile error
-// (K3016).
-//
-// Errors: malformed text throws `parse_error`, a schema mismatch throws `decode_error` — ordinary
-// `throw` payloads, caught with `use handler { request throw(error: json.parse_error) -> never {
-// break ... } }`. (A non-finite number reaching `stringify` / `encode` / `to_text` is a numeric
-// invariant violation and panics — it has no JSON representation.)
-//
-// `encode` embeds by wire form: a bare record becomes `json_object` (a key beginning with `$` is
-// escaped by doubling it, so it never collides with a discriminator); a `data` value nests its fields
-// under `value` — `{ $constructor: name, value: { ...fields } }` — a disjoint shape a bare record
-// cannot forge; an array becomes `json_array`; a `file` its `$ref` handle object; an agent / closure
-// its `$agent` / `$closure` reference object (carrying the snapshot / scope it needs to reconstruct).
-// A secret operand taints the whole result, which then may not cross a user-facing boundary — the
-// usual monotonic information-flow rule.
-
-@"A JSON null."
-data json_null()
-@"A JSON boolean."
-data json_boolean(value: boolean)
-@"A JSON number without a fractional part."
-data json_integer(value: integer)
-@"A JSON number."
-data json_number(value: number)
-@"A JSON string."
-data json_string(value: string)
-@"A JSON array."
-data json_array(items: array[json])
-@"A JSON object."
-data json_object(entries: record[json])
-
-// A JSON document: exactly one of the seven JSON shapes. (A `type` synonym carries no `@"..."`
-// annotation; this comment is its documentation.)
-type json = json_null | json_boolean | json_integer | json_number | json_string | json_array | json_object
+// Errors: malformed text throws `parse_error` (`parse` / `parse_as`); a value that does not conform to the
+// requested type's schema throws `validation_error` (`validate` / `parse_as`), naming the offending path.
+// `stringify` is TOTAL — it never throws.
 
 @"A JSON document failed to parse: the text is not JSON. Thrown by `parse` / `parse_as`."
 data parse_error(message: string)
 
-@"A parsed document does not conform to the requested type's schema. Thrown by `decode` /
-`parse_as`; `message` names the offending path."
-data decode_error(message: string)
+@"A value does not conform to the requested type's schema. Thrown by `validate` / `parse_as`; `message`
+names the offending path."
+data validation_error(message: string)
 
-@"Parse a JSON document from text into the `json` tree (traverse it with `match`). A malformed
-document throws `parse_error`. A number without a fractional part parses as `json_integer`."
-primitive agent parse(text: string) -> json with prelude.throw[parse_error]
+@"Parse JSON text into the value it denotes — a record / array / string / integer / number / boolean / null,
+or a `file` where the text carries a `$katari_ref` handle. Traverse a document with shape filters
+(`case record(r)`) and the readers below, or pin its shape with `parse_as[T]`. A number without a fractional
+part parses as `integer`. Malformed text throws `parse_error`."
+primitive agent parse(@"The text of one complete JSON document." text: string) -> unknown with prelude.throw[parse_error]
 
-@"Parse a JSON document from text directly as a T, validated against T's schema — the typed text
-boundary, with no intermediate `json` tree. Instantiate T explicitly (it appears only in the result,
-so it cannot be inferred). A malformed document throws `parse_error`; a schema mismatch throws
-`decode_error` naming the offending path."
-primitive agent parse_as[T](text: string) -> T with prelude.throw[parse_error | decode_error]
+@"Check @value@ against T's schema and return it unchanged, or throw `validation_error` naming the offending
+path. A pure check — it never rewrites the value. Instantiate T explicitly (it appears only in the result,
+so it cannot be inferred)."
+primitive agent validate[T](@"The value to check against T." value: unknown) -> T with prelude.throw[validation_error]
 
-@"Render a `json` tree as its (compact) document text; inverts `parse`. For an arbitrary value,
-compose with the embedding: `stringify(value = encode(value = x))`."
-primitive agent stringify(value: json) -> string
+@"Parse JSON text directly as a T — `parse` then `validate[T]`, the typed text boundary. Instantiate T
+explicitly (it appears only in the result, so it cannot be inferred). Malformed text throws `parse_error`;
+a value that does not conform to T's schema throws `validation_error` naming the offending path."
+agent parse_as[T](@"The text of one complete JSON document." text: string) -> T with prelude.throw[parse_error | validation_error] {
+  validate[T](value = parse(text = text))
+}
 
-@"Embed any value into `json` by its wire form: a bare record becomes `json_object`, a `data` value
-nests its fields under `value` (`{ $constructor: name, value: { ...fields } }`), arrays `json_array`,
-scalars their JSON shape; a `file` becomes its `$ref` handle object, and an agent / closure its
-`$agent` / `$closure` reference object. `decode[T]` inverts it for every T (the conversion is total)."
-primitive agent encode[T](value: T) -> json
+@"Render ANY value as its (compact) JSON text — TOTAL and CANONICAL (one value, one text). A document value
+(record / array / string / integer / number / boolean / null) round-trips verbatim, so `stringify(parse(s))`
+is `s` up to whitespace; a `file` becomes its `$katari_ref` handle object, a `data` value nests its fields
+under `$katari_value` (`{ $katari_constructor: name, $katari_value: { ...fields } }`), and an agent / closure
+/ tool its handle object. `stringify` is the READ CHANNEL for showing an AI a handle / data value (an error
+render, a handle embed, a tool result rendered back to a model). A secret operand taints the whole result
+(the monotonic information-flow rule)."
+primitive agent stringify[T](value: T) -> string
 
-@"Render any value as the (compact) JSON text of its wire form — `stringify(value = encode(value =
-x))`; the inverse of `parse_as[T]`."
-primitive agent to_text[T](value: T) -> string
+// The total readers — plain Katari over `unknown`, for picking values out of a document of unknown or
+// irregular shape (an AI reply, a third-party API response) without a shape filter at every step. The
+// subject parameter is named `target`, uniform with the other container lookups (`record.get`,
+// `array.get`). Each reader is TOTAL: a missing key, an out-of-range index or a wrong shape yields `null` /
+// `""` / an empty container rather than an error, so probes chain freely — `text(target = field(target =
+// element(target = parsed, index = 0), key = "content"))` — and absence is checked once, at the end, where
+// it matters. For a document whose shape IS known, prefer the typed boundary (`parse_as[T]`), which
+// validates instead of defaulting. Where a genuine shape branch is wanted, use a shape filter
+// directly (`match (node) { case record(r) -> ... case array(a) -> ... case _ -> node }`).
 
-@"Read a `json` tree back as a T (the total inverse of `encode`: a `$constructor` object re-tags a
-`data` value, an `$agent` / `$closure` / `$ref` object reconstructs the callable / file), then
-validate the result against T's schema as a separate strict check. Instantiate T explicitly (it
-appears only in the result, so it cannot be inferred) — `json.decode[unknown]` reads without a
-shape. A schema mismatch throws `decode_error` naming the offending path."
-primitive agent decode[T](value: json) -> T with prelude.throw[decode_error]
+@"The record @target@ holds (its entries), or the empty record if @target@ is not a record."
+agent entries(target: unknown) -> record[unknown] {
+  match (target) {
+    case record(record_value) -> record_value
+    case _ -> record.empty()
+  }
+}
+
+@"The array @target@ holds (its elements), or the empty array if @target@ is not an array."
+agent items(target: unknown) -> array[unknown] {
+  match (target) {
+    case array(array_value) -> array_value
+    case _ -> array.empty()
+  }
+}
+
+@"The child at object key @key@ (`null` if @target@ is not a record or has no such key)."
+agent field(target: unknown, key: string) -> unknown {
+  match (target) {
+    case record(record_value) -> record.get(target = record_value, key = key)
+    case _ -> null
+  }
+}
+
+@"The element at array index @index@ (`null` if @target@ is not an array or @index@ is out of range)."
+agent element(target: unknown, index: integer) -> unknown {
+  match (target) {
+    case array(array_value) -> array.get(target = array_value, index = index)
+    case _ -> null
+  }
+}
+
+@"The string @target@ holds (the empty string if it is not a string)."
+agent text(target: unknown) -> string {
+  match (target) {
+    case string(string_value) -> string_value
+    case _ -> ""
+  }
+}

@@ -53,7 +53,7 @@ export const threads = pgTable(
     check("threads_status_check", sql`${table.status} in ('running', 'cancelling')`),
     check(
       "threads_kind_check",
-      sql`${table.kind} in ('agent', 'sequence', 'primitive', 'construct', 'request', 'match', 'for', 'handle', 'parallel', 'delegate', 'external')`,
+      sql`${table.kind} in ('agent', 'sequence', 'primitive', 'construct', 'request', 'match', 'for', 'forever', 'handle', 'parallel', 'delegate', 'external')`,
     ),
   ],
 );

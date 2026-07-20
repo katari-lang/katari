@@ -95,7 +95,7 @@ declarationStart = do
   void (char '@') <|> void (choice (map keyword declarationKeywords))
 
 declarationKeywords :: List Text
-declarationKeywords = ["agent", "private", "request", "external", "primitive", "data", "type", "import"]
+declarationKeywords = ["agent", "private", "request", "effect", "external", "primitive", "data", "type", "import"]
 
 -- | A module standing in for a non-recovered parse failure: one 'DeclarationError' at the error.
 errorModule :: ParseErrorBundle Text Void -> Module Parsed
@@ -141,6 +141,7 @@ documentedDeclaration = do
   choice
     [ DeclarationAgent <$> agentDeclarationWith annotation,
       DeclarationRequest <$> requestDeclarationWith annotation,
+      DeclarationMarkerEffect <$> markerEffectDeclarationWith annotation,
       DeclarationExternalAgent <$> externalAgentDeclarationWith annotation,
       DeclarationPrimitiveAgent <$> primitiveAgentDeclarationWith annotation,
       DeclarationData <$> dataDeclarationWith annotation
@@ -165,6 +166,24 @@ requestDeclarationWith annotation = do
         parameters = parameters,
         returnType = returnType,
         sourceSpan = mergeSpans (declarationStartSpan annotation requestSpan) (sourceSpanOf returnType)
+      }
+
+-- | @effect name[generics]@ — a marker effect declaration: no parameters, no return type, no
+-- operations at all. @effect@ stays a positional word (not reserved), so a value or generic
+-- parameter named @effect@ keeps working.
+markerEffectDeclarationWith :: Maybe (Located Text) -> Parser (MarkerEffectDeclaration Parsed)
+markerEffectDeclarationWith annotation = do
+  effectSpan <- keyword "effect"
+  name <- identifier
+  generics <- genericParameters
+  let endSpan = lastSpanOr name.sourceSpan generics
+  pure
+    MarkerEffectDeclaration
+      { annotation = (.value) <$> annotation,
+        name = name.value,
+        typeReference = parsedReference name.sourceSpan,
+        genericParameters = generics,
+        sourceSpan = mergeSpans (declarationStartSpan annotation effectSpan) endSpan
       }
 
 -- | @external agent name[generics](signatures) -> T [with E]@.

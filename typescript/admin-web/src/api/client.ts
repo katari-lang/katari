@@ -6,6 +6,7 @@
 import type {
   AgentDetail,
   AgentList,
+  Credential,
   EnvEntry,
   EnvEntryDetail,
   Escalation,
@@ -13,9 +14,13 @@ import type {
   HeadSnapshot,
   Health,
   Json,
+  OauthClient,
+  OauthClientInput,
+  Page,
   Project,
   Run,
   RunEscalationAudit,
+  RunEvent,
   RunEventsPage,
   RunState,
   RunTree,
@@ -83,6 +88,25 @@ async function requestJson<T>(method: string, path: string, body?: unknown): Pro
 
 const get = <T>(path: string) => requestJson<T>("GET", path);
 
+/** GET a paged list: the `data` array plus the `X-Total-Count` header the paged endpoints set (falling
+ *  back to the page length when the header is absent, so a non-paged deployment still reads sanely). */
+async function getPage<T>(path: string): Promise<Page<T>> {
+  const response = await fetch(`${BASE}${path}`, { headers: headers() });
+  const items = await unwrap<T[]>(response);
+  const header = response.headers.get("X-Total-Count");
+  const total = header === null ? items.length : Number(header);
+  return { items, total };
+}
+
+/** Build a `?a=1&b=2` suffix from defined params (numbers stringified), or "" when none are set. */
+function querySuffix(params: Record<string, string | number | undefined>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) query.set(key, String(value));
+  }
+  return query.size === 0 ? "" : `?${query.toString()}`;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
 
@@ -93,20 +117,20 @@ export const api = {
   deleteProject: (projectId: string) =>
     requestJson<{ id: string }>("DELETE", `/projects/${projectId}`),
 
-  listSnapshots: (projectId: string) => get<SnapshotSummary[]>(`/projects/${projectId}/snapshots`),
+  listSnapshots: (
+    projectId: string,
+    filter: { search?: string; limit?: number; offset?: number } = {},
+  ) => getPage<SnapshotSummary>(`/projects/${projectId}/snapshots${querySuffix(filter)}`),
   getHeadSnapshot: (projectId: string) =>
     get<HeadSnapshot>(`/projects/${projectId}/snapshots/head`),
   /** Rollback (or roll-forward): move the live head; only new runs follow it. */
   setSnapshotHead: (projectId: string, snapshotId: string) =>
     requestJson<{ id: string }>("PUT", `/projects/${projectId}/snapshots/head`, { snapshotId }),
 
-  listRuns: (projectId: string, filter: { state?: RunState; limit?: number } = {}) => {
-    const query = new URLSearchParams();
-    if (filter.state !== undefined) query.set("state", filter.state);
-    if (filter.limit !== undefined) query.set("limit", String(filter.limit));
-    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return get<Run[]>(`/projects/${projectId}/runs${suffix}`);
-  },
+  listRuns: (
+    projectId: string,
+    filter: { state?: RunState; search?: string; limit?: number; offset?: number } = {},
+  ) => getPage<Run>(`/projects/${projectId}/runs${querySuffix(filter)}`),
   getRun: (projectId: string, runId: string) => get<Run>(`/projects/${projectId}/runs/${runId}`),
   startRun: (
     projectId: string,
@@ -123,14 +147,15 @@ export const api = {
   listRunEvents: (
     projectId: string,
     runId: string,
-    options: { after?: number; limit?: number } = {},
-  ) => {
-    const query = new URLSearchParams();
-    if (options.after !== undefined) query.set("after", String(options.after));
-    if (options.limit !== undefined) query.set("limit", String(options.limit));
-    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${suffix}`);
-  },
+    options: {
+      after?: number;
+      offset?: number;
+      limit?: number;
+      kind?: RunEvent["kind"];
+      search?: string;
+      order?: "asc" | "desc";
+    } = {},
+  ) => get<RunEventsPage>(`/projects/${projectId}/runs/${runId}/events${querySuffix(options)}`),
 
   listEscalations: (projectId: string) => get<Escalation[]>(`/projects/${projectId}/escalations`),
   answerEscalation: (projectId: string, escalationId: string, value: Json) =>
@@ -140,6 +165,15 @@ export const api = {
       {
         value,
       },
+    ),
+  /** Begin the runtime-hosted OAuth flow for an `oauth`-presentation escalation: the runtime mints the
+   *  authorization URL the surface then opens. The escalation itself is answered later by the OAuth
+   *  callback, so this returns only the URL to send the user to. 404 when the escalation is gone,
+   *  409 when its presentation is not `oauth`. */
+  startOauthFlow: (projectId: string, escalationId: string) =>
+    requestJson<{ authorizationUrl: string }>(
+      "POST",
+      `/projects/${projectId}/escalations/${escalationId}/oauth-flow`,
     ),
 
   listAgents: (projectId: string, snapshotId?: string) =>
@@ -153,7 +187,8 @@ export const api = {
       }`,
     ),
 
-  listFiles: (projectId: string) => get<FileEntry[]>(`/projects/${projectId}/files`),
+  listFiles: (projectId: string, filter: { limit?: number; offset?: number } = {}) =>
+    getPage<FileEntry>(`/projects/${projectId}/files${querySuffix(filter)}`),
   uploadFile: async (projectId: string, file: File) => {
     const response = await fetch(`${BASE}/projects/${projectId}/files`, {
       method: "POST",
@@ -190,4 +225,54 @@ export const api = {
     ),
   deleteEnvEntry: (projectId: string, key: string) =>
     requestJson<{ key: string }>("DELETE", `/projects/${projectId}/env/${encodeURIComponent(key)}`),
+
+  /** The stored OAuth credentials as metadata (token material is write-only, never returned). */
+  listCredentials: (projectId: string) =>
+    get<{ credentials: Credential[] }>(`/projects/${projectId}/credentials`).then(
+      (body) => body.credentials,
+    ),
+  /** Begin a proactive login for a credential BY NAME (before any run needs it, or to re-authorize). An
+   *  mcp login supplies the server `url`; a configured login sends none. Returns the authorization URL. */
+  loginCredential: (projectId: string, name: string, url?: string) =>
+    requestJson<{ authorizationUrl: string }>(
+      "POST",
+      `/projects/${projectId}/credentials/${encodeURIComponent(name)}/login`,
+      url === undefined ? {} : { url },
+    ),
+  /** Forget a stored credential (a forced re-authorization — e.g. to switch accounts). */
+  forgetCredential: (projectId: string, name: string) =>
+    fetch(`${BASE}/projects/${projectId}/credentials/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }).then((response) => {
+      if (!response.ok && response.status !== 204) {
+        throw new ApiError(response.status, "forget_failed", `Forget failed (${response.status}).`);
+      }
+    }),
+
+  /** The operator-registered OAuth clients (secret write-only — never returned). */
+  listOauthClients: (projectId: string) =>
+    get<{ clients: OauthClient[] }>(`/projects/${projectId}/oauth-clients`).then(
+      (body) => body.clients,
+    ),
+  /** Register (or replace) an OAuth client — a full idempotent PUT. */
+  setOauthClient: (projectId: string, name: string, body: OauthClientInput) =>
+    fetch(`${BASE}/projects/${projectId}/oauth-clients/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    }).then((response) => {
+      if (!response.ok && response.status !== 204) return unwrap<unknown>(response);
+      return undefined;
+    }),
+  /** Delete a registered OAuth client. */
+  deleteOauthClient: (projectId: string, name: string) =>
+    fetch(`${BASE}/projects/${projectId}/oauth-clients/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }).then((response) => {
+      if (!response.ok && response.status !== 204) {
+        throw new ApiError(response.status, "delete_failed", `Delete failed (${response.status}).`);
+      }
+    }),
 };

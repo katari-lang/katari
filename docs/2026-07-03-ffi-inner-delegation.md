@@ -35,15 +35,18 @@ snapshot** (an agent and its FFI handlers deploy together) and converts JSON↔V
   instance (reclaimed at its drop unless the call's own result ascends them — `markInstanceDropped` now also
   reclaims scopes via `ResourcePool.reclaimScopesOwnedBy`), and stages the post-commit delivery through the
   `innerCalls` bridge (child delegation → transport token).
-- **Escalations** (`onEscalate`): a child's **panic — or, since the throw model (doc
-  `2026-07-03-throw-error-model.md`), a `prelude.throw` — settles the inner call as an error** — the
-  handler's own try/catch is its failure handle (core's throw-handler analog); the dead callee is
-  terminated (a caught failure never resumes — catch-and-break semantics), and an uncaught JS error
-  re-raises through the handler's
-  own failure. Every **other** ask (a user-facing request, a control escape) is proxied **up** under the
-  call's own delegation with a fresh escalation id, bridged in `relays`; the answering `escalateAck` is
-  proxied back **down** the same bridge. The transport never sees escalations — a handler needs no
-  escalation protocol.
+- **Escalations** (`onEscalate`): the reactor intercepts **nothing** — EVERY child ask (a panic, a
+  `prelude.throw`, a user-facing request, a control escape) is proxied **up** under the call's own delegation
+  with a fresh escalation id, bridged in `relays`; the answering `escalateAck` is proxied back **down** the
+  same bridge. The transport never sees escalations — a handler needs no escalation protocol. A callee's
+  failure is therefore **not** caught here in JS (doc `2026-07-14-ffi-no-catch.md`): a panic/throw unwinds up
+  like any escalate — caught by a katari-side throw handler placed above the call, or, uncaught, failing the
+  run — so `context.call` never rejects on a callee failure (catch a callee's error in katari, not in the
+  handler). The dead callee is torn down not by a special-cased terminate but by the cancel cascade: once the
+  proxied failure resolves upward, this call is terminated and `terminateChildren` reaches the callee (and any
+  siblings). This is **uniform across all call reactors** — webhook / mcp / time deliveries proxy their callee
+  failures up the same way, so a served callback/tool that fails with no handler of its own cancels the whole
+  endpoint (per-request resilience is the agent author's job — wrap the body in a katari handler).
 - **Terminate distribution** (`onTerminate`): a terminate from above moves the call to `cancelling`,
   cancels every still-running child, and the upward `terminateAck` waits for the transport's abort
   confirmation AND the children's drain — the same graceful-cancel barrier as core's cascade.
@@ -78,8 +81,9 @@ language-level decision).
 
 Known pre-existing gap (unchanged, now shared with core): an acceptance-surface panic (unresolvable name /
 schema violation — no instance is born) cannot consume an `escalateAck`, so a katari handler answering such
-a panic with `next(v)` strands the answer. For inner calls the panic→error mapping makes this reachable only
-through the proxied-request path, not the common try/catch one.
+a panic with `next(v)` strands the answer. For inner calls every panic now takes the proxied-escalation path
+(there is no longer a try/catch settlement path — see `2026-07-14-ffi-no-catch.md`), so this is reachable
+exactly as it is for core.
 
 ## The port, redesigned
 
@@ -91,8 +95,12 @@ checked the katari side of the boundary; no runtime re-validation):
   blob-backed strings → `KatariString` (type a string parameter as `KatariText = string | KatariString`,
   read with `text(…)`), data values → `KatariData(name, value)`, received callables → `KatariAgent`.
 - `context.call<Result>(agent, argument?, { reactor? })` — the inner agent call; rejects with
-  `KatariCallError` (callee failed) / `KatariCancelledError` (cancelled). `KatariAgent.call(args)` runs a
-  received callable via `prelude.ai.call_agent`, carrying its own snapshot + generics.
+  `KatariCallError` (a LOCAL bad dispatch — the callee could not be resolved / is not callable) or
+  `KatariCancelledError` (cancelled). A callee that runs and then FAILS (panics or raises a typed throw) does
+  NOT reject this call — its failure proxies up the delegation, caught by a katari-side handler above or
+  failing the run (`KatariThrowError` is now the handler's OWN outward `katari.throw` only, never an
+  inner-call rejection — doc `2026-07-14-ffi-no-catch.md`). `KatariAgent.call(args)` runs a received callable
+  via `prelude.ai.call_agent`, carrying its own snapshot + generics.
 - `context.file(bytesOrText, { contentType? })` replaces `uploadBlob`; returning the `KatariFile` (or any
   value containing it) hands the file on. The handler's return value is encoded blindly (wrappers → wire
   forms, `$`-keys escaped, cycles/bigints/raw bytes rejected per-call).

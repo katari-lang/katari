@@ -1,0 +1,39 @@
+// The `prelude.webhook` sub-module: dynamically generated inbound HTTP endpoints. `inbound` is an
+// `external` whose calls route to the runtime's `webhook` reactor (in-runtime, like `http.fetch` —
+// no FFI sidecar), called as `webhook.inbound`.
+//
+// `inbound` inverts `http.fetch`: instead of the program calling the outside world, the outside
+// world calls the program. The runtime mints a fresh, unguessable public URL and, for as long as
+// @subscriber@ runs, converts every `POST` to that URL into a call of @callback@ — the JSON request
+// body is the argument, the callback's result is the JSON response body. The URL is the capability:
+// whoever holds it can invoke the callback, nobody else can (the route lives outside the
+// bearer-authenticated API surface, and the token is generated fresh per call).
+//
+// @subscriber@ owns the URL's lifetime. It receives the minted URL and typically registers it with
+// an external service (a calendar's push-notification API, a repository's webhook settings — usually
+// via an FFI external a library ships), then stays alive for as long as deliveries should flow — a
+// registration that must be renewed periodically renews in a loop; a manual registration escalates
+// the URL as an open question and waits. When @subscriber@ returns, `inbound` deactivates the URL
+// and returns the subscriber's result; cancelling the run cancels @subscriber@ (its FFI cleanup
+// runs, e.g. deleting the registration) and deactivates the URL the same way.
+//
+// Delivery semantics: the HTTP caller waits for the callback and receives its result as JSON with
+// status 200. A MALFORMED body — one that does not conform to @callback@'s declared input schema — is
+// pre-validated at the boundary and rejected with status 400 (the callback never runs, and the endpoint
+// keeps serving). An EXECUTION failure is different: a callback that throws or panics on a WELL-FORMED
+// delivery proxies UP like any escalation and cancels the whole endpoint (the run fails unless a katari
+// handler above @subscriber@ catches it) — one bad delivery can drop the endpoint, so for per-request
+// resilience wrap the callback's body in a handler that turns a failure into a value it returns. A delivery
+// in flight across a runtime restart is lost (the webhook provider's retry redelivers); the URL itself is
+// durable — it survives restarts until @subscriber@ settles.
+
+@"Serve a fresh, dynamically generated public webhook URL for the extent of @subscriber@. The
+runtime converts every POST to the URL into a call of @callback@ (JSON body in, JSON result out,
+validated against @callback@'s input schema). @subscriber@ receives the URL, registers it wherever
+deliveries should come from, and stays alive while they flow; when it returns, the URL is
+deactivated and its result becomes `inbound`'s result. Both callables' effects flow to the caller's
+handlers unchanged."
+external agent inbound[R, effect E](
+  @"Called once per POST. A body failing its input schema is rejected 400 before it runs; its unhandled failure cancels the endpoint." callback: agent never -> unknown with E,
+  @"The URL's owner: receives the minted public URL, and the endpoint serves exactly while it runs." subscriber: agent (url: string) -> R with E,
+) -> R with E from "webhook"

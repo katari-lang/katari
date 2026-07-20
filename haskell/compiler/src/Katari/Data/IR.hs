@@ -50,9 +50,12 @@ newtype Metadata = Metadata
   }
   deriving stock (Eq, Show)
 
--- | The metadata the compiler stamps on every emitted 'IRModule'.
+-- | The metadata the compiler stamps on every emitted 'IRModule'. Version 2 added 'OperationDrop'
+-- and version 3 'OperationDefer': each time the wire shape gained an operation an older runtime
+-- cannot execute, and this constant is exactly that contract — a runtime rejects IR whose version
+-- it does not understand.
 currentMetadata :: Metadata
-currentMetadata = Metadata {schemaVersion = 1}
+currentMetadata = Metadata {schemaVersion = 3}
 
 -- | One module's lowered output. The runtime loads it and resolves callables by 'QualifiedName'
 -- through 'entries'
@@ -61,10 +64,25 @@ data IRModule = IRModule
     -- | Every block (a 'BlockAgent' wrapper, an agent body, a leaf body, or a structural node), keyed by id.
     -- Each is wrapped in a 'BlockInformation' that carries how its thread's scope is seeded on entry.
     blocks :: Map BlockId BlockInformation,
-    -- | Top-level callable name -> its 'BlockAgent', for resolving an 'OperationDelegate' 'CalleeName' at run time.
-    entries :: Map QualifiedName BlockId,
+    -- | Top-level callable name -> its 'EntryInformation', for resolving an 'OperationDelegate'
+    -- 'CalleeName' at run time (and for materialising a first-class agent value by name).
+    entries :: Map QualifiedName EntryInformation,
     -- | Debug-only block names (pretty printer / traces). The runtime's hot path ignores it.
     names :: Map BlockId Text
+  }
+  deriving stock (Eq, Show)
+
+-- | One top-level callable entry: the 'BlockAgent' wrapper it resolves to, plus whether the source
+-- declaration marked the agent's handle private. Privacy is carried on the entry — rather than
+-- stripping a private agent from 'entries' — because entries is also the module's first-class /
+-- delegate resolution table, which must keep resolving a private agent (the compiler already gates the
+-- call side). The runtime reads this flag only at its run-start boundary, to refuse starting a private
+-- agent from the operator surface; every other resolution ignores it. Only an 'AgentDeclaration' can be
+-- private, so a signature-determined callable (data constructor / request / external / primitive) is
+-- always public.
+data EntryInformation = EntryInformation
+  { block :: BlockId,
+    private :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -102,6 +120,9 @@ data Block where
   BlockExternal :: External -> Block
   BlockMatch :: Match -> Block
   BlockFor :: For -> Block
+  -- | @forever { body }@: run 'body' again each time it completes, discarding its value — the unbounded
+  -- sibling of the sequential 'For' with nothing collected, so a long-lived loop's state stays flat.
+  BlockForever :: Forever -> Block
   BlockHandle :: Handle -> Block
   -- | A parallel sequence literal (@parallel [e1, ...]@): its elements run concurrently.
   BlockParallel :: ParallelBlock -> Block
@@ -197,6 +218,18 @@ data For = For
   }
   deriving stock (Eq, Show)
 
+-- | @forever [(var …)] { body }@: each time 'body' completes, run it again — one iteration at a time, its
+-- value discarded (nothing is collected, unlike 'For', so iteration count does not grow the loop's state).
+-- 'initialStates' seed the body's @state_N@ parameters exactly as 'For' does (empty for a stateless
+-- @forever { … }@); a @next … with (…)@ advances them across iterations. The block completes only when the
+-- body @break@s (unwinding an @EXIT@ to it, carrying the loop's result value); otherwise it never completes
+-- on its own, ending by cancellation or an ask unwinding past it.
+data Forever = Forever
+  { initialStates :: List VariableId,
+    body :: BlockId
+  }
+  deriving stock (Eq, Show)
+
 -- | A @handle@ scope: runs 'body', dispatches escalations to 'handlers', and on completion runs
 -- 'thenClause'. State vars are seeded from the caller's scope.
 data Handle = Handle
@@ -271,6 +304,17 @@ data Operation where
   OperationExit :: ExitOperation -> Operation
   -- | A non-local continue (next / for-next). 'target' is the enclosing handle / for it resumes.
   OperationContinue :: ContinueOperation -> Operation
+  -- | Release bindings this same sequence wrote and provably never reads again. Inserted by the
+  -- post-lowering liveness pass ("Katari.Lowering.Drop"), never by lowering itself; the runtime
+  -- deletes each binding from the thread's local scope, shrinking the scope row it persists every
+  -- turn. Scope-level GC remains the backstop for everything the pass cannot prove dead.
+  OperationDrop :: DropOperation -> Operation
+  -- | Arm a @finally@ block as a finalizer of the CURRENT INSTANCE: the runtime pushes
+  -- (block, the executing thread's scope) onto the instance's finalizer stack and runs the stack in
+  -- reverse arming order right before the instance acknowledges its terminal (a normal completion's
+  -- @delegateAck@ or a cancellation's @cancelAck@) — never on a panic. Passing the statement twice
+  -- (a loop body) arms twice; that is the stack discipline, not a defect.
+  OperationDefer :: DeferOperation -> Operation
   deriving stock (Eq, Show)
 
 data CallOperation = CallOperation
@@ -287,7 +331,7 @@ data DelegateOperation = DelegateOperation
     -- runtime schemas keyed by the callee's declared parameter names (the encoding of
     -- 'ApplyGenericsOperation.generics'). The runtime merges it with the substitution the callee VALUE
     -- itself carries and uses the result to fill the callee's @$generic@ schema placeholders (argument
-    -- validation, @get_metadata@, typed @json.decode@). Empty for a non-generic callee.
+    -- validation, @get_metadata@, typed @json.parse_as@). Empty for a non-generic callee.
     generics :: List (Text, GenericArgumentSchema)
   }
   deriving stock (Eq, Show)
@@ -359,6 +403,20 @@ data ContinueOperation = ContinueOperation
     value :: Maybe VariableId,
     -- | @with (name = e, ...)@ state updates: (state var in the target's scope, new-value var here).
     modifiers :: List (VariableId, VariableId)
+  }
+  deriving stock (Eq, Show)
+
+-- | See 'OperationDefer'. The armed block reads the enclosing scope through the ordinary parent
+-- chain (its finalizer thread spawns with the arming scope as its parent), so it carries no
+-- parameters of its own.
+newtype DeferOperation = DeferOperation
+  { block :: BlockId
+  }
+  deriving stock (Eq, Show)
+
+-- | See 'OperationDrop'. The list is non-empty and sorted by id, so the emitted IR is deterministic.
+newtype DropOperation = DropOperation
+  { variables :: List VariableId
   }
   deriving stock (Eq, Show)
 
@@ -479,6 +537,9 @@ instance ToJSON IRModule where
         "names" .= irModule.names
       ]
 
+instance ToJSON EntryInformation where
+  toJSON entry = object ["block" .= entry.block, "private" .= entry.private]
+
 instance ToJSON BlockInformation where
   toJSON blockInformation =
     object ["block" .= blockInformation.block, "parameters" .= blockInformation.parameters]
@@ -513,6 +574,12 @@ instance ToJSON Block where
           "initialStates" .= for.initialStates,
           "body" .= for.body,
           "thenClause" .= for.thenClause
+        ]
+    BlockForever forever' ->
+      taggedObject
+        "forever"
+        [ "initialStates" .= forever'.initialStates,
+          "body" .= forever'.body
         ]
     BlockHandle handle ->
       taggedObject
@@ -557,6 +624,8 @@ instance ToJSON Operation where
     OperationExit op -> taggedObject "exit" ["target" .= op.target, "value" .= op.value]
     OperationContinue op ->
       taggedObject "continue" ["target" .= op.target, "value" .= op.value, "modifiers" .= op.modifiers]
+    OperationDrop op -> taggedObject "drop" ["variables" .= op.variables]
+    OperationDefer op -> taggedObject "defer" ["block" .= op.block]
 
 instance ToJSON CalleeReference where
   toJSON reference = case reference of

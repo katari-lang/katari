@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/bundle",
-  "version": "0.1.0-rc7",
+  "version": "0.1.0-rc8",
   "description": "esbuild-based bundler for Katari FFI sidecar modules. Spawned by the `katari` CLI during `katari apply`.",
   "type": "module",
   "main": "dist/index.mjs",
@@ -33,7 +33,7 @@
   "bugs": "https://github.com/katari-lang/katari/issues",
   "dependencies": {
     "@katari-lang/types": "workspace:*",
-    "esbuild": "^0.28.0"
+    "esbuild": "^0.28.1"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",

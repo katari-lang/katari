@@ -17,7 +17,6 @@ where
 import Control.Monad (when)
 import Data.Aeson (FromJSON (..), Value, toJSON, withObject, (.:))
 import Data.Aeson qualified as Aeson
-import Data.List (isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -39,7 +38,7 @@ import Katari.Cli.Api
     updateProject,
     withTrace,
   )
-import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, requireRuntimeAuth, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
+import Katari.Cli.Common (assembleSourcesOrExit, compileSourcesOrExit, dieIn, requireRuntimeAuth, resolveNodeHelperInvocation, resolveProjectRoot, resolveRuntimeUrl, warnCompilerMismatch, writeOrExit)
 import Katari.Cli.Options (GlobalOptions (..), directoryOption, globalOptionsParser)
 import Katari.Cli.Output (OutputContext, newOutputContext, printText, progress, verboseLog)
 import Katari.Data.IR (IRModule)
@@ -51,10 +50,9 @@ import Katari.Project.Resolve (ResolvedPackage (..), ResolvedProject (..), lockf
 import Katari.Project.Upload (ModuleHash (..), UploadPlan (..), hashModule, planUpload)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Options.Applicative
-import System.Directory (canonicalizePath, doesFileExist, findExecutable)
-import System.Environment (lookupEnv)
+import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
 
 data Options = Options
@@ -217,7 +215,7 @@ packagesFromResolved resolved =
 runKatariBundle :: FilePath -> List BundlePackage -> IO (Maybe Value)
 runKatariBundle root packages = do
   (bundleCommand, prefixArguments) <-
-    resolveBundleInvocation root >>= \case
+    resolveNodeHelperInvocation "KATARI_BUNDLE_BIN" "katari-bundle" root >>= \case
       Just invocation -> pure invocation
       Nothing ->
         dieIn
@@ -243,62 +241,6 @@ runKatariBundle root packages = do
     ExitSuccess -> case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 (Text.pack output)) of
       Left decodeError -> dieIn "apply" ("katari-bundle returned unparseable JSON: " <> Text.pack decodeError)
       Right (response :: BundleResponse) -> pure response.bundle
-
--- | Where the bundler comes from, as @Just (command, prefixArgs)@ in npm-convention order (a local
--- install beats a global one), or @Nothing@ when none of the three resolves (the caller turns that
--- into a clear error):
---
---   1. @KATARI_BUNDLE_BIN@ — the explicit override, honoured only when it points at a file that
---      exists. A stale value (e.g. a shell universal variable left over from an old checkout) falls
---      through instead of spawning a dead path. A JS file (@.js@ \/ @.mjs@ \/ @.cjs@) runs through
---      @node@ (a dev checkout's @dist\/cli.mjs@), anything else spawns directly.
---   2. A project-local npm install: @node_modules\/.bin\/katari-bundle@, walking up from the project
---      root like node's own resolution (the katari project may sit inside a workspace whose
---      @node_modules@ lives higher). What that entry IS differs by package manager: npm symlinks
---      the JS entry point (run it through @node@, so the executable bit never matters), while pnpm
---      writes a POSIX launcher script (execute it directly — feeding a shell script to @node@ is a
---      SyntaxError). Canonicalizing first tells the two apart.
---   3. @katari-bundle@ on PATH (a global install, or an npx\/npm-script parent that prepended the
---      local @.bin@ itself).
-resolveBundleInvocation :: FilePath -> IO (Maybe (String, List String))
-resolveBundleInvocation root = do
-  binOverride <- lookupEnv "KATARI_BUNDLE_BIN"
-  overridePath <- case binOverride of
-    Just path -> do
-      exists <- doesFileExist path
-      pure (if exists then Just path else Nothing)
-    Nothing -> pure Nothing
-  case overridePath of
-    Just path
-      | isJsFile path -> pure (Just ("node", [path]))
-      | otherwise -> pure (Just (path, []))
-    Nothing -> do
-      localBin <- findLocalBundleBin root
-      case localBin of
-        Just path -> do
-          resolved <- canonicalizePath path
-          pure . Just $
-            if isJsFile resolved
-              then ("node", [resolved])
-              else (path, [])
-        Nothing -> do
-          onPath <- findExecutable "katari-bundle"
-          case onPath of
-            Just executable -> pure (Just (executable, []))
-            Nothing -> pure Nothing
-  where
-    isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
-
--- | The nearest @node_modules\/.bin\/katari-bundle@ at or above the directory, if any.
-findLocalBundleBin :: FilePath -> IO (Maybe FilePath)
-findLocalBundleBin directory = do
-  let candidate = directory </> "node_modules" </> ".bin" </> "katari-bundle"
-  exists <- doesFileExist candidate
-  if exists
-    then pure (Just candidate)
-    else
-      let parent = takeDirectory directory
-       in if parent == directory then pure Nothing else findLocalBundleBin parent
 
 -- | The wire shape of @katari-bundle@'s stdout: @{ "bundle": SidecarBundle | null }@. The bundle is kept
 -- opaque (a 'Value') — it is produced by our own bundler and stored verbatim by the runtime, so the CLI

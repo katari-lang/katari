@@ -8,6 +8,7 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Katari.Data.AST
 import Katari.Data.ModuleName (ModuleName (..), covers, lastSegment)
+import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..))
 import Katari.Diagnostics (Diagnostics)
 import Katari.Error (compilerErrorCode)
@@ -19,6 +20,9 @@ import Katari.Primitive
     binaryOperatorName,
     binaryOperatorRightLabel,
     preludeModuleName,
+    recordMergeLeftLabel,
+    recordMergeName,
+    recordMergeRightLabel,
     unaryOperatorName,
     unaryOperatorOperandLabel,
   )
@@ -43,6 +47,16 @@ spec = do
 
     it "maps every unary operator to a prelude export with matching labels" $
       mapMaybe checkUnary [minBound .. maxBound] `shouldBe` []
+
+  describe "prelude.record.merge (the partial-application residual's merge target)" $
+    it "declares exactly the parameters lowering's merge labels emit" $
+      -- Lowering synthesizes @prelude.record.merge(left = ..., right = ...)@ in every partial
+      -- application's residual body ('Katari.Lowering.lowerPartialApplication'), tying the residual's
+      -- incoming record to @left@ and the captured supplied record to @right@. A stdlib rename of these
+      -- parameters would otherwise only surface in the docker-gated e2e; this guards it here.
+      let QualifiedName {moduleName = mergeModuleName, name = mergeAgentName} = recordMergeName
+       in Map.lookup mergeAgentName (primitiveParametersOf mergeModuleName)
+            `shouldBe` Just [recordMergeLeftLabel, recordMergeRightLabel]
 
   describe "isReservedModuleName" $ do
     it "reserves the prelude root" $
@@ -97,16 +111,22 @@ stdlibContext =
 -- Operator table ↔ prelude exports
 ---------------------------------------------------------------------------------------------------
 
--- | The parameter names of each @prelude@ agent, keyed by agent name — the source of truth the
--- desugar's emitted argument labels must match.
-primitiveParameters :: Map Text [Text]
-primitiveParameters = case Map.lookup preludeModuleName parsedStdlib of
+-- | The parameter names of each primitive agent in a stdlib module, keyed by agent name — the source
+-- of truth the compiler's emitted argument labels (operator desugar, partial-application merge) must
+-- match.
+primitiveParametersOf :: ModuleName -> Map Text [Text]
+primitiveParametersOf moduleName = case Map.lookup moduleName parsedStdlib of
   Nothing -> Map.empty
   Just (parsed, _) ->
     Map.fromList
       [ (declaration.name, (.name) <$> declaration.parameters)
         | DeclarationPrimitiveAgent declaration <- parsed.declarations
       ]
+
+-- | The @prelude@ root's primitive parameters — the source of truth the operator desugar's argument
+-- labels must match.
+primitiveParameters :: Map Text [Text]
+primitiveParameters = primitiveParametersOf preludeModuleName
 
 checkBinary :: BinaryOperator -> Maybe Text
 checkBinary operator = checkOperator (binaryOperatorName operator) [binaryOperatorLeftLabel, binaryOperatorRightLabel]

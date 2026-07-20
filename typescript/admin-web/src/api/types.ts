@@ -46,13 +46,23 @@ export interface Run {
   completedAt: string | null;
 }
 
+/** How a surface should render an open escalation. The runtime folds the request-name sniff into this
+ *  sum once at its service boundary, so each surface only dispatches on `kind`: a schema-driven answer
+ *  form (the answer schema rides here, or `null` when the request is unanswerable), or an OAuth
+ *  authorization the runtime hosts (answered out-of-band by its callback, never by a posted value). The
+ *  oauth `url` is the server a run paused on (an mcp credential); it is `null` for a configured credential,
+ *  which authenticates against an operator-registered client and so names no server (a genuine absence). */
+export type EscalationPresentation =
+  | { kind: "form"; answerSchema: JsonSchema | null }
+  | { kind: "oauth"; name: string; url: string | null };
+
 export interface Escalation {
   id: string;
   request: string;
   argument: Json;
   runId: string;
   createdAt: string;
-  answerSchema: JsonSchema | null;
+  presentation: EscalationPresentation;
 }
 
 export interface RunEscalationAudit {
@@ -60,6 +70,48 @@ export interface RunEscalationAudit {
   question: Json;
   answer: Json;
   answeredAt: string;
+}
+
+/** One stored OAuth credential, as the admin API lists it: metadata only (the token material is
+ *  write-only — it enters through the runtime-hosted flow, never the API). `profile` is the acquisition
+ *  discriminant the runtime returns — the page dispatches on IT, never on a name-match heuristic: a
+ *  `configured` credential re-authorizes directly against its registered client, an `mcp` one prompts
+ *  for its server URL. */
+export interface Credential {
+  name: string;
+  profile: "mcp" | "configured";
+  updatedAt: string;
+}
+
+/** One operator-registered OAuth client, as the registry lists it. `hasSecret` says whether a secret is
+ *  stored WITHOUT revealing it — the secret is write-only over the API. `authorizationParameters` (extra
+ *  provider-specific authorize-URL parameters, e.g. Google's `access_type=offline`) is plain
+ *  configuration, readable both ways. */
+export interface OauthClient {
+  name: string;
+  issuer: string;
+  authorizeEndpoint: string;
+  tokenEndpoint: string;
+  clientId: string;
+  hasSecret: boolean;
+  scopes: string[];
+  authorizationParameters: Record<string, string>;
+}
+
+/** A PUT registering (or replacing) an OAuth client — a full replace of the plain fields, with three-way
+ *  secret semantics (the secret is write-only, so a re-register cannot echo it back): a present
+ *  `clientSecret` stores a new one, an ABSENT one keeps whatever is stored (nothing on a fresh
+ *  registration — a public client), and `clearSecret` is the explicit downgrade to public. Never send
+ *  both. */
+export interface OauthClientInput {
+  issuer: string;
+  authorizeEndpoint: string;
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  clearSecret: boolean;
+  scopes: string[];
+  authorizationParameters: Record<string, string>;
 }
 
 /** What a delegation-tree node's instance runs, as the runtime projects it for display. */
@@ -76,9 +128,13 @@ export interface TreeEscalation {
   createdAt: string;
 }
 
+/** The runtime's reactor names — every kind an instance / delegation edge / trace event can carry
+ *  (mirrors the runtime's `ReactorName`). One alias so a new reactor is a single edit here. */
+export type ReactorKind = "core" | "api" | "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth";
+
 export interface TreeInstance {
   id: string;
-  kind: "core" | "api" | "ffi" | "http";
+  kind: ReactorKind;
   status: "running" | "cancelling" | "awaitingAnswer";
   target: TreeTarget | null;
   snapshotId: string | null;
@@ -90,7 +146,7 @@ export interface TreeInstance {
 export interface DelegationTreeNode {
   delegationId: string;
   state: "running" | "cancelling";
-  reactor: "core" | "api" | "ffi" | "http";
+  reactor: ReactorKind;
   createdAt: string;
   instance: TreeInstance | null;
 }
@@ -107,8 +163,8 @@ export interface RunTree {
 export interface RunEvent {
   seq: number;
   kind: "delegate" | "delegateAck" | "escalate" | "escalateAck" | "terminate" | "terminateAck";
-  from: "core" | "api" | "ffi" | "http";
-  to: "core" | "api" | "ffi" | "http";
+  from: ReactorKind;
+  to: ReactorKind;
   delegationId: string;
   escalationId: string | null;
   target: TreeTarget | null;
@@ -119,11 +175,30 @@ export interface RunEvent {
   createdAt: string;
 }
 
+/** The six external-event kinds a trace is made of — the trace `kind` filter's domain. */
+export const RUN_EVENT_KINDS = [
+  "delegate",
+  "delegateAck",
+  "escalate",
+  "escalateAck",
+  "terminate",
+  "terminateAck",
+] as const satisfies readonly RunEvent["kind"][];
+
 /** The events endpoint's payload: one page of the trace, with the run's state riding along so a single
- *  poll both extends the trace and answers "is it still running". */
+ *  poll both extends the trace and answers "is it still running". `total` = the filtered event count
+ *  (for the pager); it is present only on an offset browse (the console's mode) — a keyset tail
+ *  (`after`) omits it, since counting the whole run on every poll would be wasted work. */
 export interface RunEventsPage {
   state: RunState;
   events: RunEvent[];
+  total?: number;
+}
+
+/** A page of a listing whose total rides on the `X-Total-Count` header (runs / snapshots / files). */
+export interface Page<T> {
+  items: T[];
+  total: number;
 }
 
 export interface AgentEntry {

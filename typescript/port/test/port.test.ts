@@ -10,6 +10,7 @@ import {
   defaultSidecar,
   type HandlerContext,
   katari,
+  KatariAgent,
   KatariCallError,
   KatariCancelledError,
   KatariData,
@@ -65,13 +66,15 @@ describe("Sidecar dispatch", () => {
     ]);
   });
 
-  test("unescapes wire record keys on the way in and re-escapes them on the way out", async () => {
+  test("passes wire record keys through verbatim in both directions", async () => {
     const sidecar = new Sidecar();
+    // `$weird` is not a reserved `$katari_` marker, so it is an ordinary record key — the handler receives
+    // it verbatim and its echoed result travels back unchanged (no escaping on either edge).
     sidecar.register<{ $weird: string }>("ext.echo", (argument) => ({ $weird: argument.$weird }));
     const { messages, send } = collector();
-    sidecar.handle(dispatch("d1", "ext.echo", { $$weird: "kept" }), send);
+    sidecar.handle(dispatch("d1", "ext.echo", { $weird: "kept" }), send);
     await tick();
-    expect(messages).toEqual([{ kind: "result", delegation: "d1", value: { $$weird: "kept" } }]);
+    expect(messages).toEqual([{ kind: "result", delegation: "d1", value: { $weird: "kept" } }]);
   });
 
   test("aborts an in-flight handler and confirms cancelled once it settles", async () => {
@@ -178,7 +181,12 @@ describe("context.call (the inner agent-call channel)", () => {
     await tick();
     // The inner call went out; the handler is suspended on it.
     expect(messages).toMatchObject([
-      { kind: "delegate", delegation: "d1", agent: "main.add", argument: { a: 1, b: 2 } },
+      {
+        kind: "delegate",
+        delegation: "d1",
+        callee: { kind: "named", agent: "main.add" },
+        argument: { a: 1, b: 2 },
+      },
     ]);
     const delegate = messages[0];
     if (delegate?.kind !== "delegate") throw new Error("expected a delegate message");
@@ -195,7 +203,7 @@ describe("context.call (the inner agent-call channel)", () => {
     expect(messages[1]).toEqual({ kind: "result", delegation: "d1", value: 13 });
   });
 
-  test("carries an explicit reactor and defaults to none (core) otherwise", async () => {
+  test("a named callee carries an explicit reactor and defaults to none (core) otherwise", async () => {
     const sidecar = new Sidecar();
     sidecar.register("ext.caller", (_argument, context) => {
       void context.call("main.sibling", null, { reactor: "ffi" }).catch(() => {});
@@ -206,9 +214,45 @@ describe("context.call (the inner agent-call channel)", () => {
     sidecar.handle(dispatch("d1", "ext.caller"), send);
     await tick();
     const delegates = messages.filter((message) => message.kind === "delegate");
-    expect(delegates[0]).toMatchObject({ agent: "main.sibling", reactor: "ffi" });
-    expect(delegates[1]).toMatchObject({ agent: "main.plain" });
-    expect(delegates[1]).not.toHaveProperty("reactor");
+    expect(delegates[0]).toMatchObject({ callee: { kind: "named", agent: "main.sibling", reactor: "ffi" } });
+    expect(delegates[1]).toMatchObject({ callee: { kind: "named", agent: "main.plain" } });
+    const plainCallee = delegates[1]?.kind === "delegate" ? delegates[1].callee : undefined;
+    expect(plainCallee).not.toHaveProperty("reactor");
+  });
+
+  test("KatariAgent.call dispatches the received callable as a `value` callee (no call_agent name)", async () => {
+    const sidecar = new Sidecar();
+    // A callable the handler received as its argument (a `$katari_agent` reference decodes to a KatariAgent).
+    const callable: Json = { $katari_agent: "main.greeter", $katari_snapshot: "s1" };
+    sidecar.register<{ target: KatariAgent }>("ext.caller", async ({ target }) => {
+      const reply = await target.call<string>({ name: "world" });
+      return `got: ${reply}`;
+    });
+    const { messages, send } = collector();
+    sidecar.handle(dispatch("d1", "ext.caller", { target: callable }), send);
+    await tick();
+    // The inner call went out carrying the callable's raw wire verbatim — no wired-in agent name.
+    expect(messages).toMatchObject([
+      {
+        kind: "delegate",
+        delegation: "d1",
+        callee: { kind: "value", callable },
+        argument: { name: "world" },
+      },
+    ]);
+    const delegate = messages[0];
+    if (delegate?.kind !== "delegate") throw new Error("expected a delegate message");
+    sidecar.handle(
+      {
+        kind: "delegateResult",
+        delegation: "d1",
+        call: delegate.call,
+        outcome: { kind: "result", value: "hi" },
+      },
+      send,
+    );
+    await tick();
+    expect(messages[1]).toEqual({ kind: "result", delegation: "d1", value: "got: hi" });
   });
 
   test("rejects the awaiting handler with KatariCallError on an error outcome", async () => {
@@ -337,21 +381,25 @@ describe("typed throw (katari.throw)", () => {
       {
         kind: "throw",
         delegation: "d1",
-        error: { $constructor: "main.my_error", value: { message: "ffi boom" } },
+        error: { $katari_constructor: "main.my_error", $katari_value: { message: "ffi boom" } },
       },
     ]);
   });
 
-  test("an inner call's throw outcome rejects with KatariThrowError carrying the decoded payload", async () => {
+  test("a callee's failure never surfaces on the inner channel as a KatariThrowError (that class is outward-only)", async () => {
+    // `KatariThrowError` is ONLY the handler's own outward throw (`katari.throw`, above). A callee's failure
+    // no longer settles the inner call — the runtime proxies a callee's panic/throw UP the delegation, so the
+    // inner channel carries only result / error / cancelled. The one inner failure the handler sees is a
+    // LOCAL bad dispatch, delivered as `error` → `KatariCallError` — never a `KatariThrowError`.
     const sidecar = new Sidecar();
+    let wasThrowError = true;
     sidecar.register("ext.caller", async (_argument, context) => {
       try {
-        await context.call("main.failing");
+        await context.call("main.missing");
         return "unreachable";
       } catch (error) {
-        if (!(error instanceof KatariThrowError)) return "wrong error class";
-        const payload = error.error;
-        return payload instanceof KatariData ? `caught: ${payload.name}` : "wrong payload";
+        wasThrowError = error instanceof KatariThrowError;
+        return error instanceof KatariCallError ? `caught: ${error.message}` : "wrong error";
       }
     });
     const { messages, send } = collector();
@@ -364,45 +412,13 @@ describe("typed throw (katari.throw)", () => {
         kind: "delegateResult",
         delegation: "d1",
         call: delegate.call,
-        outcome: {
-          kind: "throw",
-          error: { $constructor: "main.my_error", value: { message: "inner boom" } },
-        },
+        outcome: { kind: "error", message: "no such agent" },
       },
       send,
     );
     await tick();
-    expect(messages[1]).toEqual({
-      kind: "result",
-      delegation: "d1",
-      value: "caught: main.my_error",
-    });
-  });
-
-  test("an uncaught inner throw propagates as this call's own throw reply (the rethrow)", async () => {
-    const sidecar = new Sidecar();
-    // The handler does not catch: the callee's typed error must ride through unchanged.
-    sidecar.register("ext.caller", (_argument, context) => context.call("main.failing"));
-    const { messages, send } = collector();
-    sidecar.handle(dispatch("d1", "ext.caller"), send);
-    await tick();
-    const delegate = messages[0];
-    if (delegate?.kind !== "delegate") throw new Error("expected a delegate message");
-    sidecar.handle(
-      {
-        kind: "delegateResult",
-        delegation: "d1",
-        call: delegate.call,
-        outcome: { kind: "throw", error: { message: "inner boom" } },
-      },
-      send,
-    );
-    await tick();
-    expect(messages[1]).toEqual({
-      kind: "throw",
-      delegation: "d1",
-      error: { message: "inner boom" },
-    });
+    expect(messages[1]).toEqual({ kind: "result", delegation: "d1", value: "caught: no such agent" });
+    expect(wasThrowError).toBe(false);
   });
 
   test("a throw payload with no wire form fails the call as an error, not the process", async () => {

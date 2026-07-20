@@ -71,6 +71,13 @@ resolveExpression = \case
     cases <- traverse resolveCaseArm node.cases
     pure (ExpressionMatch MatchExpression {subject = subject, cases = cases, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionFor node -> resolveFor node
+  ExpressionForever node -> do
+    -- Mirror `for`'s state handling: the `var` initials resolve in the enclosing scope, then the bindings
+    -- scope over the body and register as state variables a `next … with (…)` may target. There is no loop
+    -- pattern (no source / element), so the body carries no local element bindings.
+    (varBindings, varScope) <- resolveVariableBindings node.varBindings
+    body <- bindBodyWithState node.body.sourceSpan varScope [] (resolveBlock node.body)
+    pure (ExpressionForever ForeverExpression {varBindings = varBindings, body = body, sourceSpan = node.sourceSpan, typeOf = ()})
   ExpressionBlock node -> do
     block <- resolveBlock node.block
     pure (ExpressionBlock BlockExpression {block = block, sourceSpan = node.sourceSpan, typeOf = ()})
@@ -93,7 +100,10 @@ resolveRecordEntry entry = do
 
 resolveCallArgument :: CallArgument Parsed -> Identifier (CallArgument Identified)
 resolveCallArgument argument = do
-  value <- resolveExpression argument.value
+  -- A hole carries no names, so it passes through untouched; only an expression payload resolves.
+  value <- case argument.value of
+    ArgumentHole sourceSpan -> pure (ArgumentHole sourceSpan)
+    ArgumentExpression expression -> ArgumentExpression <$> resolveExpression expression
   pure CallArgument {name = argument.name, labelReference = retagReference argument.labelReference, value = value, sourceSpan = argument.sourceSpan}
 
 resolveTemplateElement :: TemplateElement Parsed -> Identifier (TemplateElement Identified)
@@ -208,7 +218,7 @@ primitiveCall sourceSpan member arguments =
           }
     -- Synthetic labels carry no navigable source (label resolution is @()@), so the reference is built directly.
     buildArgument (label, value) =
-      CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = value, sourceSpan = sourceSpan}
+      CallArgument {name = label, labelReference = Reference {sourceSpan = sourceSpan, resolution = ()}, value = ArgumentExpression value, sourceSpan = sourceSpan}
 
 ---------------------------------------------------------------------------------------------------
 -- match / for / handler
@@ -414,6 +424,11 @@ resolveStatement blockSpan statement continueRest = case statement of
   StatementForBreak node -> do
     value <- resolveExpression node.value
     prepend (StatementForBreak ForBreakStatement {value = value, sourceSpan = node.sourceSpan}) continueRest
+  -- The finalizer body is a nested block scope (it reads the enclosing scope through the parent chain
+  -- but binds its own @let@s within itself); it introduces no binding into the rest of the block.
+  StatementFinally node -> do
+    body <- resolveBlock node.body
+    prepend (StatementFinally FinallyStatement {body = body, sourceSpan = node.sourceSpan}) continueRest
   StatementError sourceSpan -> prepend (StatementError sourceSpan) continueRest
 
 prepend ::

@@ -55,10 +55,22 @@ export function delegateProxyOf(
  *  run root unhandled, it fails the run with its message. */
 export const PANIC_REQUEST = "prelude.panic" as QualifiedName;
 
+/** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the core acceptance surface
+ *  (`CoreReactor.onDelegate`), never summoned as an instance. The engine re-shapes a direct call of a
+ *  `tool` value into this form, so the acceptance surface is the single home of dynamic dispatch. */
+export const CALL_AGENT_NAME = "prelude.reflection.call_agent" as QualifiedName;
+
 /** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
  *  reactor-level panic (an ffi error, an unresolvable delegate target). */
 export function panicArgument(message: string): Value {
   return { kind: "record", fields: { msg: { kind: "string", value: message } } };
+}
+
+/** A data constructor's semantics — tag the argument record's fields with the constructor's name — in
+ *  one place, so the `construct` leaf body and the delegate op's inlined construct cannot drift. */
+export function constructValue(argument: Value, constructorName: QualifiedName): Value {
+  const fields = argument.kind === "record" ? argument.fields : {};
+  return { kind: "record", fields, ctor: constructorName };
 }
 
 /** Raise a `panic` from a failing thread: an ask carrying `{ msg }` to its parent, escalating outward
@@ -144,6 +156,11 @@ export function proxyAsk(
  * `escalateAck` is converted back to an internal `askAck` here, in `resumeEscalation`.
  */
 export function escapeAsk(ctx: StepContext, from: ThreadId, fromAskId: AskId, ask: AskKind): void {
+  if (ask.kind === "request" && ask.request === PANIC_REQUEST) {
+    // A panic leaving the instance means its state is no longer trusted: mark it failed so its terminal
+    // skips finalizers, whether the panic struck user code or a finalizer body (which lands here too).
+    ctx.instance.phase = { kind: "failed" };
+  }
   const delegation = ctx.instance.delegationId;
   if (delegation === null) {
     throw new Error("an instance with no delegation cannot escalate (engine bug)");

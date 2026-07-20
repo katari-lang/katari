@@ -3,3 +3,6 @@
 /bin/
 katari-vscode.vsix
 *.vsix
+# Build artifacts copied from @katari-lang/language (the source of truth) by scripts/bundle.mjs.
+/syntaxes/
+/language-configuration.json

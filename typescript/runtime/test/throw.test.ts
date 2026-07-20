@@ -128,7 +128,7 @@ describe("the typed error model (prelude.throw)", () => {
         },
         ...throwWrapper(5, 6, 50),
       },
-      entries: { [createAgentName("main")]: 0, [THROW]: 5 },
+      entries: { [createAgentName("main")]: { block: 0, private: false }, [THROW]: { block: 5, private: false } },
       names: {},
     };
 
@@ -215,7 +215,7 @@ describe("the typed error model (prelude.throw)", () => {
         },
         ...throwWrapper(8, 9, 80),
       },
-      entries: { [createAgentName("main")]: 0, [THROW]: 8 },
+      entries: { [createAgentName("main")]: { block: 0, private: false }, [THROW]: { block: 8, private: false } },
       names: {},
     };
 
@@ -233,7 +233,7 @@ describe("the typed error model (prelude.throw)", () => {
         },
         ...throwWrapper(5, 6, 50),
       },
-      entries: { [createAgentName("main")]: 0, [THROW]: 5 },
+      entries: { [createAgentName("main")]: { block: 0, private: false }, [THROW]: { block: 5, private: false } },
       names: {},
     };
 
@@ -242,7 +242,7 @@ describe("the typed error model (prelude.throw)", () => {
 
   test("a tainted payload is redacted in the run's error message (fail-closed boundary)", async () => {
     // main: throw({ message: secret() }) — the payload's field is private, so the failure message must
-    // carry `$redacted`, never the plaintext.
+    // carry `$katari_redacted`, never the plaintext.
     const prims = new PrimRegistry();
     prims.register("test.secret", () => markPrivate({ kind: "string", value: "hunter2" }));
     const ir: IRModule = {
@@ -273,15 +273,15 @@ describe("the typed error model (prelude.throw)", () => {
         ...primitiveWrapper(7, 8, 70, "test.secret"),
       },
       entries: {
-        [createAgentName("main")]: 0,
-        [THROW]: 5,
-        [createAgentName("test.secret")]: 7,
+        [createAgentName("main")]: { block: 0, private: false },
+        [THROW]: { block: 5, private: false },
+        [createAgentName("test.secret")]: { block: 7, private: false },
       },
       names: {},
     };
 
     const failure = run(ir, null, prims);
-    await expect(failure).rejects.toThrow(/throw: .*\$redacted/);
+    await expect(failure).rejects.toThrow(/throw: .*\$katari_redacted/);
     await expect(failure).rejects.not.toThrow(/hunter2/);
   });
 
@@ -343,7 +343,7 @@ describe("the typed error model (prelude.throw)", () => {
         },
         ...primitiveWrapper(5, 6, 50, "prelude.json.parse"),
       },
-      entries: { [createAgentName("main")]: 0, [createAgentName("prelude.json.parse")]: 5 },
+      entries: { [createAgentName("main")]: { block: 0, private: false }, [createAgentName("prelude.json.parse")]: { block: 5, private: false } },
       names: {},
     };
 
@@ -417,7 +417,7 @@ describe("the typed error model (prelude.throw)", () => {
         },
         ...primitiveWrapper(5, 6, 50, "prelude.divide"),
       },
-      entries: { [createAgentName("main")]: 0, [createAgentName("prelude.divide")]: 5 },
+      entries: { [createAgentName("main")]: { block: 0, private: false }, [createAgentName("prelude.divide")]: { block: 5, private: false } },
       names: {},
     };
 

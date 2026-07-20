@@ -117,6 +117,55 @@ renderTypeError typeError =
         <> info.reactor
         <> "` in a `from` clause; the external reactors are "
         <> Text.intercalate ", " info.known
+    TypeErrorReservedReactor info ->
+      "The `"
+        <> info.reactor
+        <> "` reactor serves only the compiled stdlib externals, so a user module cannot declare an"
+        <> " external `from \""
+        <> info.reactor
+        <> "\"` — a call would reach the reactor with a key it cannot serve. Implement the external over"
+        <> " the FFI instead (omit the `from` clause, or write `from \"ffi\"`)"
+    TypeErrorMalformedUse info -> case info.reason of
+      MalformedUseWrittenContinuation ->
+        "`continuation` is the argument `use` itself passes to its provider — a `use` application cannot also write one"
+      MalformedUseProviderShape ->
+        "a `use` provider must be a handler or an application — a handler literal, a (qualified) name, or a call; bind any other expression first (`let p = ...` then `use p`, or apply it: `use expression(...)`)"
+      MalformedUseHoleArgument ->
+        "a `use` provider is applied exactly once, so its application cannot leave a `_` hole; bind the partial application first (`let p = f(x = _, ...)` then `use p`)"
+    TypeErrorUnknownHoleLabel info ->
+      "`"
+        <> info.label
+        <> " = _` does not name a parameter of the callee; its parameters are ["
+        <> Text.intercalate ", " info.parameters
+        <> "]"
+    TypeErrorFinallyEffect info ->
+      "A `finally` finalizer's net effect must be within `io`, but this body's effect is "
+        <> info.effect
+        <> ". A finalizer runs at instance termination, when the parent may already be awaiting this"
+        <> " instance's cancellation; a request would escalate through that parent (deadlocking against"
+        <> " its own cancellation wait), and a control escape has no target there. Perform only `io`"
+        <> " (routed to sibling reactors), or handle any request locally inside the `finally` body."
+    TypeErrorPanicHandlerParameter info ->
+      "A `panic` handler's parameter must be named `msg` (the wired-in panic message), but this one is"
+        <> " named `"
+        <> info.actualName
+        <> "`. Write `request panic(msg: string) { ... }`."
+    TypeErrorParallelForVarBinding info ->
+      "A `parallel for` cannot declare `var` state ("
+        <> Text.intercalate ", " (renderBackticked <$> info.variableNames)
+        <> "): its iterations run concurrently, so each one would advance the state from the same"
+        <> " initial value and only one iteration's final write could survive the join — a silent"
+        <> " last-write-wins, never a fold. Drop the `var`: have each iteration `next` its"
+        <> " contribution, and fold the collected array after the join (e.g. in the `then` clause)."
+    TypeErrorParallelHandlerVarBinding info ->
+      "A `parallel handler` cannot declare `var` state ("
+        <> Text.intercalate ", " (renderBackticked <$> info.variableNames)
+        <> "): it dispatches its request bodies concurrently, so overlapping bodies would each"
+        <> " advance the state from the same value and the later write would silently drop the"
+        <> " earlier one — a lost update, never a fold. Drop `parallel` so the requests serialize"
+        <> " through the state, or drop the `var` if the bodies need no shared state."
+  where
+    renderBackticked name = "`" <> name <> "`"
 
 -- | Errors produced by the type-system layer (normalization, union / intersection, subtyping).
 data TypeError where
@@ -158,6 +207,42 @@ data TypeError where
   -- (a typo, or an unimplemented reactor). Rejected at compile time rather than silently defaulting to
   -- the FFI reactor at runtime.
   TypeErrorUnknownReactor :: UnknownReactorErrorInfo -> TypeError
+  -- | A USER module's @external ... from "name"@ clause names a built-in reactor (http / webhook / mcp /
+  -- time). Those reactors serve only the compiled stdlib externals (they dispatch on the stdlib keys), so
+  -- a user-declared external would reach them with a key they cannot serve — a runtime panic at best, a
+  -- silent mis-serve at worst. Only the embedded stdlib modules may name them; the user channel is @ffi@
+  -- (or no clause). Distinct from an unknown name (K3018): the reactor exists, this module may not name it.
+  TypeErrorReservedReactor :: ReservedReactorErrorInfo -> TypeError
+  -- | A @use@ statement is written in a shape @use@ does not admit — see 'MalformedUseReason' for the
+  -- specific violation. Distinct from a malformed /type/ (K3011): the type expression is fine, the
+  -- @use@ construct itself is misused.
+  TypeErrorMalformedUse :: MalformedUseErrorInfo -> TypeError
+  -- | A partial application's @label = _@ hole names no parameter of the callee. Distinct from a
+  -- missing-argument subtype failure (K3001): the hole is extra, not absent, so the residual function
+  -- could never receive it.
+  TypeErrorUnknownHoleLabel :: UnknownHoleLabelErrorInfo -> TypeError
+  -- | A @finally@ finalizer body's net effect is not within @io@ — it performs a request that would
+  -- escalate through the parent, or carries a control escape with no target at instance termination.
+  -- Distinct from an ordinary subtype failure (K3001): the restriction is peculiar to a finalizer,
+  -- which runs while the parent may already be awaiting the instance's cancellation.
+  TypeErrorFinallyEffect :: FinallyEffectErrorInfo -> TypeError
+  -- | A bare @panic@ handler (@request panic(…) { … }@) whose parameter is not named @msg@. Panic is
+  -- undeclared, so its parameter name is wired in as @msg@ (the message); a differently-named parameter
+  -- would otherwise fail as a cryptic object-subtype mismatch (K3001). Reported specifically so the fix
+  -- ("name it @msg@") is obvious.
+  TypeErrorPanicHandlerParameter :: PanicHandlerParameterErrorInfo -> TypeError
+  -- | A @parallel for@ declares @var@ state. The loop's iterations run concurrently, each advancing
+  -- the state from its initial value, so a shared accumulator cannot exist — the joined state would
+  -- keep only one iteration's final write (a silent last-write-wins), never a fold. Rejected at the
+  -- entrance rather than letting the defect run; the composable shape is to collect each iteration's
+  -- value and fold after the join.
+  TypeErrorParallelForVarBinding :: ParallelForVarBindingErrorInfo -> TypeError
+  -- | A @parallel handler@ declares @var@ state. A parallel handler dispatches its request bodies
+  -- concurrently, so two overlapping bodies would read the same state, each advance it, and the
+  -- later write would silently drop the earlier one — a lost update; the FIFO dispatch of a
+  -- sequential handler is exactly what makes such state sound. Rejected at the entrance like
+  -- K3024: drop @parallel@ to serialize the requests through the state, or drop the @var@.
+  TypeErrorParallelHandlerVarBinding :: ParallelHandlerVarBindingErrorInfo -> TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -177,6 +262,13 @@ typeErrorCode = \case
   TypeErrorCannotInferGeneric _ -> "K3016"
   TypeErrorWrongReferenceKind _ -> "K3017"
   TypeErrorUnknownReactor _ -> "K3018"
+  TypeErrorMalformedUse _ -> "K3019"
+  TypeErrorUnknownHoleLabel _ -> "K3020"
+  TypeErrorFinallyEffect _ -> "K3021"
+  TypeErrorReservedReactor _ -> "K3022"
+  TypeErrorPanicHandlerParameter _ -> "K3023"
+  TypeErrorParallelForVarBinding _ -> "K3024"
+  TypeErrorParallelHandlerVarBinding _ -> "K3025"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -197,6 +289,13 @@ typeErrorSeverity = \case
   TypeErrorCannotInferGeneric _ -> SeverityError
   TypeErrorWrongReferenceKind _ -> SeverityError
   TypeErrorUnknownReactor _ -> SeverityError
+  TypeErrorMalformedUse _ -> SeverityError
+  TypeErrorUnknownHoleLabel _ -> SeverityError
+  TypeErrorFinallyEffect _ -> SeverityError
+  TypeErrorReservedReactor _ -> SeverityError
+  TypeErrorPanicHandlerParameter _ -> SeverityError
+  TypeErrorParallelForVarBinding _ -> SeverityError
+  TypeErrorParallelHandlerVarBinding _ -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.
@@ -301,6 +400,66 @@ data WrongReferenceKindErrorInfo = WrongReferenceKindErrorInfo
 data UnknownReactorErrorInfo = UnknownReactorErrorInfo
   { reactor :: Text,
     known :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @reactor@ is the built-in reactor name a user module's @from@ clause tried to claim.
+newtype ReservedReactorErrorInfo = ReservedReactorErrorInfo
+  { reactor :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | The specific way a @use@ statement is misused; rendered per case so each violation keeps its own
+-- guidance text.
+data MalformedUseReason
+  = -- | A @use@ application writes a @continuation@ argument, but that label is reserved: @use@ itself
+    -- passes the continuation (the rest of the block) under it.
+    MalformedUseWrittenContinuation
+  | -- | The provider expression has no application reading (it is not a handler literal, a name, an
+    -- instantiation, or a call), so admitting it would make @use@'s meaning depend on provider syntax.
+    MalformedUseProviderShape
+  | -- | The provider application leaves a @_@ hole. @use@ applies its provider exactly once (the
+    -- continuation is that application's argument), so a partial application has no @use@ reading.
+    MalformedUseHoleArgument
+  deriving (Eq, Ord, Show)
+
+newtype MalformedUseErrorInfo = MalformedUseErrorInfo
+  { reason :: MalformedUseReason
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @label@ is the hole's label as written; @parameters@ are the callee's declared parameter labels
+-- (so the message can point at what the user probably meant).
+data UnknownHoleLabelErrorInfo = UnknownHoleLabelErrorInfo
+  { label :: Text,
+    parameters :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @effect@ is the finalizer body's offending residual effect, rendered in surface syntax (e.g. the
+-- request it escalates), so the message can name why the body is not within @io@.
+newtype FinallyEffectErrorInfo = FinallyEffectErrorInfo
+  { effect :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | The actual (wrong) name of a bare @panic@ handler's parameter — it must be @msg@.
+newtype PanicHandlerParameterErrorInfo = PanicHandlerParameterErrorInfo
+  { actualName :: Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @variableNames@ are the @var@ names the @parallel for@ declared, in declaration order, so the
+-- message can name the state that cannot fold across concurrent iterations.
+newtype ParallelForVarBindingErrorInfo = ParallelForVarBindingErrorInfo
+  { variableNames :: List Text
+  }
+  deriving (Eq, Ord, Show)
+
+-- | @variableNames@ are the @var@ names the @parallel handler@ declared, in declaration order, so
+-- the message can name the state whose updates would race across concurrent request dispatches.
+newtype ParallelHandlerVarBindingErrorInfo = ParallelHandlerVarBindingErrorInfo
+  { variableNames :: List Text
   }
   deriving (Eq, Ord, Show)
 

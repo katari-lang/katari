@@ -30,8 +30,10 @@ module Katari.Cli.Common
     tryLoadNearestConfig,
     warnCompilerMismatch,
     assembleSourcesOrExit,
+    compileResultOrExit,
     compileSourcesOrExit,
     writeOrExit,
+    resolveNodeHelperInvocation,
   )
 where
 
@@ -39,6 +41,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (IOException, catch)
 import Control.Monad (unless, when)
 import Data.FileEmbed (embedStringFile, makeRelativeToProject)
+import Data.List (isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -56,10 +59,10 @@ import Katari.Project.Discovery (configFilename, findProjectRoot)
 import Katari.Project.Error (renderProjectError)
 import Katari.Project.Resolve (ResolvedProject (..), assembleProject, compileInputSources)
 import Network.HTTP.Client.TLS (newTlsManager)
-import System.Directory (getCurrentDirectory)
+import System.Directory (canonicalizePath, doesFileExist, findExecutable, getCurrentDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO (stderr)
 
 -- | The CLI's own version, singly sourced for @--version@ and the registry compiler-pin warning.
@@ -254,12 +257,72 @@ writeOrExit subcommand description action =
     dieIn subcommand (description <> ": " <> Text.pack (show ioException))
 
 -- | Compile the assembled sources, print any diagnostics to stderr, and either exit with code 1 (on
--- an error-severity diagnostic) or return the lowered IR per module. Warnings are printed but do not
--- block.
-compileSourcesOrExit :: Map ModuleName Text -> IO (Map ModuleName IRModule)
-compileSourcesOrExit sources = do
+-- an error-severity diagnostic) or return the full 'Compile.CompileResult'. Warnings are printed but
+-- do not block. The full result exists for consumers that need more than the IR (docs reads the
+-- typed ASTs next to the lowered modules).
+compileResultOrExit :: Map ModuleName Text -> IO Compile.CompileResult
+compileResultOrExit sources = do
   let result = Compile.compile Compile.CompileInput {Compile.sources = sources}
       rendered = renderDiagnostics result.diagnostics
   unless (Text.null rendered) $ TextIO.hPutStrLn stderr rendered
   when (hasErrors result.diagnostics) $ exitWith (ExitFailure 1)
-  pure result.loweredModules
+  pure result
+
+-- | 'compileResultOrExit' narrowed to the lowered IR per module, the only artifact most commands
+-- consume.
+compileSourcesOrExit :: Map ModuleName Text -> IO (Map ModuleName IRModule)
+compileSourcesOrExit sources = (.loweredModules) <$> compileResultOrExit sources
+
+-- | Where a spawned node helper (@katari-bundle@ during apply, @katari-mcp@ during @mcp pull@) comes
+-- from, as @Just (command, prefixArgs)@ in npm-convention order (a local install beats a global
+-- one), or @Nothing@ when none of the three resolves (the caller turns that into a clear error):
+--
+--   1. The environment-variable override, honoured only when it points at a file that exists. A
+--      stale value (e.g. a shell universal variable left over from an old checkout) falls through
+--      instead of spawning a dead path. A JS file (@.js@ \/ @.mjs@ \/ @.cjs@) runs through @node@ (a
+--      dev checkout's @dist\/cli.mjs@), anything else spawns directly.
+--   2. A project-local npm install: @node_modules\/.bin\/\<name\>@, walking up from the start
+--      directory like node's own resolution (the katari project may sit inside a workspace whose
+--      @node_modules@ lives higher). What that entry IS differs by package manager: npm symlinks
+--      the JS entry point (run it through @node@, so the executable bit never matters), while pnpm
+--      writes a POSIX launcher script (execute it directly — feeding a shell script to @node@ is a
+--      SyntaxError). Canonicalizing first tells the two apart.
+--   3. @\<name\>@ on PATH (a global install, or an npx\/npm-script parent that prepended the local
+--      @.bin@ itself).
+resolveNodeHelperInvocation :: String -> String -> FilePath -> IO (Maybe (String, List String))
+resolveNodeHelperInvocation environmentVariable executableName startDirectory = do
+  binOverride <- lookupEnv environmentVariable
+  overridePath <- case binOverride of
+    Just path -> do
+      exists <- doesFileExist path
+      pure (if exists then Just path else Nothing)
+    Nothing -> pure Nothing
+  case overridePath of
+    Just path
+      | isJsFile path -> pure (Just ("node", [path]))
+      | otherwise -> pure (Just (path, []))
+    Nothing -> do
+      localBin <- findLocalHelperBin startDirectory
+      case localBin of
+        Just path -> do
+          resolved <- canonicalizePath path
+          pure . Just $
+            if isJsFile resolved
+              then ("node", [resolved])
+              else (path, [])
+        Nothing -> do
+          onPath <- findExecutable executableName
+          case onPath of
+            Just executable -> pure (Just (executable, []))
+            Nothing -> pure Nothing
+  where
+    isJsFile path = any (`isSuffixOf` path) [".js", ".mjs", ".cjs"]
+    -- The nearest node_modules/.bin/<name> at or above the directory, if any.
+    findLocalHelperBin directory = do
+      let candidate = directory </> "node_modules" </> ".bin" </> executableName
+      exists <- doesFileExist candidate
+      if exists
+        then pure (Just candidate)
+        else
+          let parent = takeDirectory directory
+           in if parent == directory then pure Nothing else findLocalHelperBin parent

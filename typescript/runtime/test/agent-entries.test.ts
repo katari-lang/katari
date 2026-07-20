@@ -10,15 +10,16 @@ function schemaOf(input: object, output: object): SchemaInfo {
   return { input, output, requests: [], genericBindings: {} };
 }
 
-/** A minimal one-entry module: `entries[name] -> agent block` carrying the given schema. */
-function moduleWithAgent(name: string, schema: SchemaInfo): IRModule {
+/** A minimal one-entry module: `entries[name] -> agent block` carrying the given schema (public by
+ *  default; `private` marks the entry handle-private). */
+function moduleWithAgent(name: string, schema: SchemaInfo, isPrivate = false): IRModule {
   return {
     metadata: { schemaVersion: 1 },
     blocks: {
       0: { block: { kind: "agent", body: 1, schema, defaults: {} }, parameters: {} },
       1: { block: { kind: "sequence", result: null, operations: [] }, parameters: {} },
     },
-    entries: { [createAgentName(name)]: 0 },
+    entries: { [createAgentName(name)]: { block: 0, private: isPrivate } },
     names: {},
   };
 }
@@ -40,8 +41,18 @@ describe("collectEntries", () => {
     ]);
     const entries = collectEntries(modules);
     expect(entries.size).toBe(2);
-    expect(entries.get("main.main")?.schema.input).toEqual(mainSchema.input);
-    expect(entries.get("main.ask")?.schema.output).toEqual(askSchema.output);
+    expect(entries.get("main.main")?.block.schema.input).toEqual(mainSchema.input);
+    expect(entries.get("main.ask")?.block.schema.output).toEqual(askSchema.output);
+  });
+
+  test("carries each entry's handle privacy (so a listing surface can hide a private agent)", () => {
+    const modules = new Map<string, IRModule>([
+      ["main", moduleWithAgent("main.shown", mainSchema)],
+      ["main.hidden", moduleWithAgent("main.hidden", askSchema, true)],
+    ]);
+    const entries = collectEntries(modules);
+    expect(entries.get("main.shown")?.private).toBe(false);
+    expect(entries.get("main.hidden")?.private).toBe(true);
   });
 
   test("skips an entry whose block is missing or not an agent (defensive against malformed IR)", () => {
@@ -50,7 +61,7 @@ describe("collectEntries", () => {
       blocks: {
         0: { block: { kind: "sequence", result: null, operations: [] }, parameters: {} },
       },
-      entries: { [createAgentName("main.notAgent")]: 0, [createAgentName("main.dangling")]: 9 },
+      entries: { [createAgentName("main.notAgent")]: { block: 0, private: false }, [createAgentName("main.dangling")]: { block: 9, private: false } },
       names: {},
     };
     const entries = collectEntries(new Map([["main", malformed]]));

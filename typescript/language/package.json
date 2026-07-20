@@ -1,0 +1,29 @@
+{
+  "name": "@katari-lang/language",
+  "displayName": "Katari language definition",
+  "description": "The single source of truth for the Katari editor-language artifacts: the TextMate grammar and the language configuration. The VSCode extension copies these in at build time and the website imports them for syntax highlighting.",
+  "version": "0.1.0-rc8",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/language"
+  },
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "homepage": "https://katari-lang.dev",
+  "files": [
+    "katari.tmLanguage.json",
+    "language-configuration.json"
+  ],
+  "exports": {
+    "./grammar": "./katari.tmLanguage.json",
+    "./language-configuration": "./language-configuration.json"
+  },
+  "scripts": {
+    "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.1.0"
+  }
+}

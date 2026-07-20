@@ -1,0 +1,69 @@
+// The `prelude.time` sub-module: durable wall-clock time. `now`, `sleep`, `sleep_until` and `watch` are
+// `external`s whose calls route to the runtime's `time` reactor (in-runtime, like `http.fetch` — no FFI
+// sidecar) via the `from "time"` clause. They are called as `time.now`, `time.sleep`, `time.sleep_until`
+// and `time.watch`.
+//
+// WHY THESE ARE EXTERNAL CALLS, NOT PRIMS. A prim runs as pure computation inside a turn, and the
+// runtime's replay contract is that a turn is a deterministic function of its durable inputs (uncommitted
+// turns re-run from those inputs after a commit failure or restart). A prim reading the wall clock —
+// `Date.now()` — breaks exactly that contract: a replayed turn would observe a different instant than its
+// first execution did. Routing `now` through the reactor moves the clock read OUTSIDE the turn: the
+// instant arrives as a `delegateAck` the caller's turn merely consumes, and the commit that lands that
+// consumption makes the value durable atomically with everything that observed it — after which no replay
+// recomputes it. (A restart BEFORE that commit re-resolves the still-open call from the current clock,
+// which is sound: nothing durable observed the earlier instant.) The same reactor owns the timers `sleep`
+// / `watch` wait on, so their deadlines persist and re-arm across a restart.
+//
+// Because these are external calls they perform io (the un-dischargeable `io` effect, which propagates to
+// the run root) — the strict, non-lifting call path, the same as `http.fetch`.
+
+@"The current wall-clock time, as epoch milliseconds (whole milliseconds since 1970-01-01T00:00:00Z).
+The instant becomes durable together with the work that first observes it, so once any downstream step has
+seen the value it never changes under replay or recovery. (A restart in the narrow window before that
+commit re-reads the clock and resolves a fresh instant — sound, because nothing durable saw the first.)"
+external agent now() -> number from "time"
+
+@"Sleep for @milliseconds@ before resolving with `null`. The wake deadline (now + @milliseconds@) is
+persisted: a runtime restart re-arms the timer, and a deadline that already passed while the runtime was
+down resolves immediately on recovery. A @milliseconds@ that is zero or negative resolves at once."
+external agent sleep(@"The delay, in milliseconds; zero or negative resolves at once." milliseconds: number) -> null from "time"
+
+@"Sleep until the absolute epoch-millisecond instant @time@, then resolve with `null`. The same durable
+deadline as `sleep`, but pinned to an absolute wall-clock instant rather than a relative delay — an
+instant already in the past resolves immediately."
+external agent sleep_until(@"The absolute wake instant, in epoch milliseconds; a past instant resolves at once." time: number) -> null from "time"
+
+@"A fixed interval: an occurrence every @milliseconds@ after the watch starts (the first occurrence is
+one interval in, not at the start). @milliseconds@ must be positive."
+data interval(@"The gap between occurrences, in milliseconds; a non-positive gap panics the watch." milliseconds: number)
+
+@"A cron schedule: the occurrences of the standard cron @expression@ (the 5-field form, or the 6-field
+form whose leading field is seconds) read in the IANA @timezone@ (e.g. \"Asia/Tokyo\", \"UTC\"). The
+timezone is required and explicit — there is no ambient default, because \"every day at 09:00\" means a
+different instant in each zone and the runtime must not guess which one."
+data cron(
+  @"5 fields, or 6 with a leading seconds field; a malformed expression panics the watch." expression: string,
+  @"An IANA zone name; an unknown zone panics the watch." timezone: string,
+)
+
+// When each occurrence fires. (Type synonyms take no docs.)
+type schedule = interval | cron
+
+@"Call @deliver_to@ once per @schedule@ occurrence, forever, passing the occurrence's scheduled epoch
+millisecond as @time@. `watch` never resolves on its own (`-> never`); it runs until the run is
+cancelled, at which point the in-flight delivery is cancelled and the watch tears down. @deliver_to@'s
+effects @E@ flow to the caller's handlers unchanged.
+
+Durability. The next occurrence is persisted; a restart re-arms it. If one or more occurrences were
+missed while the runtime was down, `watch` fires EXACTLY ONCE immediately on recovery (the earliest
+missed occurrence's scheduled time — it does not backfill every missed one), then continues on schedule.
+Deliveries are serialized: the next occurrence is not armed until the current delivery settles, so a
+@deliver_to@ slower than the interval simply rate-limits the ticks rather than queueing them.
+
+No built-in retry. A @deliver_to@ that throws or panics is NOT retried — the failure propagates and kills
+the watch, exactly as an uncaught failure in any callee does. Resilience is composed at the call site (a
+`replay` provider plus a converter around @deliver_to@), never baked into `watch`."
+external agent watch[effect E](
+  @"When occurrences fire: an `interval(...)` or a `cron(...)` value." schedule: schedule,
+  @"Called once per occurrence; its @time@ is the occurrence's scheduled epoch millisecond, not the delivery instant." deliver_to: agent (time: number) -> null with E,
+) -> never with E | io from "time"

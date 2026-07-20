@@ -2,9 +2,10 @@
 // Each takes an `Executor` so the deploy can run them all inside one transaction.
 
 import type { IRModule, SidecarBundle } from "@katari-lang/types";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { modules, projects, snapshots } from "../../db/tables/projects.js";
+import { escapeLike, listPageWithTotal } from "../../lib/paging.js";
 import type { ModuleHash } from "../../runtime/ids.js";
 
 export const snapshotRepository = {
@@ -84,14 +85,28 @@ export const snapshotRepository = {
       .where(and(eq(snapshots.projectId, projectId), eq(snapshots.id, snapshotId)));
   },
 
-  list(executor: Executor, projectId: string) {
-    return (
-      executor
-        .select({ id: snapshots.id, message: snapshots.message, createdAt: snapshots.createdAt })
-        .from(snapshots)
-        .where(eq(snapshots.projectId, projectId))
-        // Newest deploy first; `id` breaks ties deterministically when two land in the same instant.
-        .orderBy(desc(snapshots.createdAt), desc(snapshots.id))
-    );
+  /** A project's deploy history, newest first, plus the `total` matching the filter (for the pager).
+   *  `limit` omitted returns the whole history (the agents-page snapshot selector needs every version);
+   *  `offset` pages it, and `search` narrows by deploy message. */
+  async list(
+    executor: Executor,
+    projectId: string,
+    filter: { search?: string; limit?: number; offset?: number } = {},
+  ): Promise<{
+    rows: Array<{ id: string; message: string; createdAt: Date }>;
+    total: number;
+  }> {
+    const conditions: SQL[] = [eq(snapshots.projectId, projectId)];
+    if (filter.search !== undefined) {
+      conditions.push(ilike(snapshots.message, `%${escapeLike(filter.search)}%`));
+    }
+    const where = and(...conditions);
+    const page = executor
+      .select({ id: snapshots.id, message: snapshots.message, createdAt: snapshots.createdAt })
+      .from(snapshots)
+      .where(where)
+      // Newest deploy first; `id` breaks ties deterministically when two land in the same instant.
+      .orderBy(desc(snapshots.createdAt), desc(snapshots.id));
+    return listPageWithTotal({ executor, query: page, window: filter, table: snapshots, where });
   },
 };

@@ -3,10 +3,10 @@
 // core's `ExternalThread` proxy, dispatch it through their transport, and turn the transport's completion
 // into the call's `delegateAck` (result), an `escalate` (a no-result error → a panic), or a `terminateAck`
 // (an abort confirmed). The whole per-delegation callee-instance lifecycle — the call map, the caller it
-// replies to, the running / cancelling / awaitingAnswer state machine, the envelope + ext persistence, and
-// the at-most-once-shaped recovery — lives here once; a concrete reactor supplies only its transport-specific
-// bits (how to dispatch / abort / settle an inner call, and how to read / write its ext row) plus a per-call
-// payload.
+// replies to, the running / cancelling / awaitingAnswer state machine, the envelope + extension persistence,
+// and the at-most-once-shaped recovery — lives here once; a concrete reactor supplies only its
+// transport-specific bits (how to dispatch / abort / settle an inner call) plus a per-call payload and the
+// extension codec that round-trips that payload with the durable extension document.
 //
 // A call is also a *caller*: its handler can ask the runtime to call another agent (an inner delegation —
 // the generic agent-call channel). The base owns that whole protocol too, symmetric to a core instance's
@@ -34,11 +34,12 @@
 // Execution is AT-MOST-ONCE: the runtime never re-runs external work (see `recover`) — a call whose process
 // died fails as a panic, and whether to retry is a katari-level decision, not the runtime's.
 
-import type { Json } from "@katari-lang/types";
-import { PANIC_REQUEST } from "../engine/common.js";
-import { isFailureRequest } from "../escalation-filter.js";
-import type { DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
+import type { Json, QualifiedName } from "@katari-lang/types";
+import type { ExternalCallStatus } from "../../db/tables/execution.js";
+import type { BlobEntry } from "../engine/types.js";
+import type { AskKind, DelegateTarget, ExternalEvent, ReactorName } from "../event/types.js";
 import {
+  type BlobId,
   type DelegationId,
   type EscalationId,
   type InstanceId,
@@ -46,8 +47,8 @@ import {
   newEscalationId,
   newInstanceId,
 } from "../ids.js";
-import { jsonToValue } from "../value/codec.js";
-import type { Value } from "../value/types.js";
+import { jsonToValue, valueToJson } from "../value/codec.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
 import { messageOf } from "./failure.js";
 import type { Loader, PersistenceTx } from "./persistence.js";
 import { Reactor } from "./reactor.js";
@@ -58,8 +59,9 @@ export type ExternalTarget = Extract<DelegateTarget, { kind: "external" }>;
 
 /** The lifecycle state of an in-flight call: `running` (transport in flight), `cancelling` (aborting, awaiting
  *  the transport's stop and the children's drain), or `awaitingAnswer` (transport errored, panic escalated,
- *  awaiting a caught-panic answer or the run's terminate). */
-export type CallStatus = "running" | "cancelling" | "awaitingAnswer";
+ *  awaiting a caught-panic answer or the run's terminate). The same union the durable row stores
+ *  (`external_call_instances.status` — one SoT for the vocabulary). */
+export type CallStatus = ExternalCallStatus;
 
 /** A completion fed back from a transport (the ffi / http completion shape, structurally shared): a `result`
  *  (→ delegateAck), a `throw` (a typed `prelude.throw` the reactor escalates with `error` as its decoded
@@ -75,8 +77,8 @@ export interface ExternalCompletion {
 }
 
 /** One escalation this reactor is proxying upward for a call: the outer id it re-raised the ask under (the
- *  row key), and the child leg its answer descends to. Durable on the call's ext row, so an in-flight
- *  answer still routes down after a restart. */
+ *  row key), and the child leg its answer descends to. Durable in the call's extension document, so an
+ *  in-flight answer still routes down after a restart. */
 export interface EscalationRelayRow {
   escalation: EscalationId;
   child: DelegationId;
@@ -84,32 +86,33 @@ export interface EscalationRelayRow {
 }
 
 /** One inner delegation's transport correlation: the delegation the base opened, and the transport's own
- *  `call` token its settled outcome is delivered under. Durable on the call's ext row, so a result landing
- *  after a warm reset still reaches its consumer (only a transport-process death makes it stale — the call
- *  is then failing anyway, and the stale delivery is dropped). */
+ *  `call` token its settled outcome is delivered under. Durable in the call's extension document, so a
+ *  result landing after a warm reset still reaches its consumer (only a transport-process death makes it
+ *  stale — the call is then failing anyway, and the stale delivery is dropped). */
 export interface InnerCallRow {
   delegation: DelegationId;
   call: string;
 }
 
 /** A settled inner delegation on its way to the transport: the parent call's `delegation`, the transport's
- *  `call` token, and the outcome (a result — or a typed throw's payload — still as an engine `Value`; the
- *  concrete lowers it at its own boundary, e.g. revealing secrets to the FFI sidecar). */
+ *  `call` token, and the outcome. Since a callee's failure now proxies UP (it no longer settles the inner
+ *  call — see `onEscalate`), only a `result` (still an engine `Value`; the concrete lowers it at its own
+ *  boundary, e.g. revealing secrets to the FFI sidecar) or a `cancelled` ever rides this path; the `error`
+ *  arm is a defensive residue for a designated-inner-delegation reactor that synthesises one. */
 export interface InnerDelivery {
   delegation: DelegationId;
   call: string;
   outcome:
     | { kind: "result"; value: Value }
-    | { kind: "throw"; value: Value }
     | { kind: "error"; message: string }
     | { kind: "cancelled" };
 }
 
 /** One in-flight call's state, keyed by its delegation. Its instance id (the issuer of its replies) and its
  *  caller (the reply-to) are NOT here — they are the received-delegation edge, held once in the base
- *  `handled` index (added / dropped alongside this entry). `relays` is durable (the ext row); the two
- *  hold-state fields are in-memory only — a reload reproduces them (`transportSettled` by re-aborting,
- *  `pendingOutcome` by the recovery outcome the transport reports). */
+ *  `handled` index (added / dropped alongside this entry). `relays` is durable (the extension document);
+ *  the two hold-state fields are in-memory only — a reload reproduces them (`transportSettled` by
+ *  re-aborting, `pendingOutcome` by the recovery outcome the transport reports). */
 interface Call<Payload> {
   status: CallStatus;
   payload: Payload;
@@ -120,21 +123,9 @@ interface Call<Payload> {
   pendingOutcome: ExternalCompletion["outcome"] | undefined;
 }
 
-/** One reloaded call a concrete reactor's `loadCallRows` yields (envelope ⋈ its ext row). */
-export interface LoadedCall<Payload> {
-  delegation: DelegationId;
-  instance: InstanceId;
-  caller: ReactorName;
-  run: InstanceId;
-  status: CallStatus;
-  payload: Payload;
-  relays: EscalationRelayRow[];
-  innerCalls: InnerCallRow[];
-}
-
-/** The fields a concrete reactor persists for one call (its ext row), supplied by the base. The caller
- *  (reply-to) is NOT here — it is the instance's ambient on the generic envelope; the ext row is the
- *  transport payload + status plus the two inner-delegation bridges. */
+/** What a concrete reactor's extension codec encodes for one call — its transport payload plus the two
+ *  inner-delegation bridges (the base maintains them; the codec decides where they ride in the document).
+ *  The caller (reply-to) / run / status are NOT here: they are the envelope's and the row's own columns. */
 export interface CallRow<Payload> {
   instance: InstanceId;
   delegation: DelegationId;
@@ -144,9 +135,42 @@ export interface CallRow<Payload> {
   innerCalls: InnerCallRow[];
 }
 
-export abstract class ExternalCallReactor<Payload> extends Reactor {
+/** What a concrete reactor's extension codec decodes back out of one reloaded call's document: the warm
+ *  payload and the bridges. The envelope half (delegation / instance / caller / run) and the status come
+ *  from the row itself, so the base re-seeds those uniformly. */
+export interface DecodedCallExtension<Payload> {
+  payload: Payload;
+  relays: EscalationRelayRow[];
+  innerCalls: InnerCallRow[];
+}
+
+/** The ONE ack-shaping seam a call payload may carry: decoding its own `delegateAck` value straight from
+ *  the transport's RAW wire Json. A plain-data payload omits it and the base wire decoder (`jsonToValue`)
+ *  runs; a payload whose result is assembled FROM the call attaches it where its variant is decided
+ *  (`openPayload`) — the mcp direct call decodes the raw reply UNCONDITIONALLY (the wire's own `$katari_*`
+ *  markers reconstruct the value: a `$katari_ref` becomes a REAL `file`, a `$katari_constructor` a data
+ *  value), then merely VALIDATES the result against its generic `T`. Shaping at the WIRE boundary (raw Json
+ *  in, Value out) keeps hostile / quirky server Json away from the generic decoder, which is total only for
+ *  wire-shaped documents. A reply the direct call cannot decode (a marker that will not reconstruct) or that
+ *  does not conform to `T` is turned into a typed `validation_error` throw in the reactor's own `complete`,
+ *  BEFORE this seam runs — the seam that builds the value is not SUPPOSED to throw. Should any decoder here
+ *  throw regardless (the base wire decoder on a reactor that does not pre-fold, or a bug), the base settle
+ *  seam catches it and folds it into `escalateResultDecodeFailure` — so the seam is total either way. */
+export interface AckDecodingPayload {
+  decodeAck?: (raw: Json) => Value;
+}
+
+/** Read a payload's optional ack decoder structurally. The class's payload parameter is constrained only to
+ *  `object` because constraining it to the all-optional `AckDecodingPayload` would trip TypeScript's
+ *  weak-type check for the plain-data payloads (ffi / http / webhook) that share no field with it. */
+function ackDecoderOf(payload: object): ((raw: Json) => Value) | undefined {
+  const decoding: AckDecodingPayload = payload;
+  return decoding.decodeAck;
+}
+
+export abstract class ExternalCallReactor<Payload extends object> extends Reactor {
   /** In-flight calls (warm SoT) keyed by their delegation, plus the per-turn dirty set `persist` upserts and
-   *  the instance ids of calls resolved this turn (their envelopes are dropped, cascading the ext row). */
+   *  the instance ids of calls resolved this turn (their envelopes are dropped, cascading the extension row). */
   private readonly calls = new Map<DelegationId, Call<Payload>>();
   /** The reverse of the base received edge: a call's instance back to its delegation — how an inner
    *  delegation's reply (whose base-resolved context names the caller *instance*) finds its parent call. */
@@ -161,11 +185,27 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   private pendingDeliveries: InnerDelivery[] = [];
   private readonly dirty = new Set<DelegationId>();
   private droppedInstances: InstanceId[] = [];
+  /** The calls parked pending a credential, awaiting an authorize answer: the call (a listing's park
+   *  belongs to its provide) to the escalation it raised. A cross-cutting concern — a call parks pending a
+   *  credential and re-runs its dispatch on the answering ack — owned here so any transport reactor gets it
+   *  by naming its park request (`parkRequestName`) and its re-dispatch (`redispatchParked`); the map is a
+   *  derived index over durable state (the open escalation row is the SoT, rebuilt by `reconstructPark`). */
+  private readonly parked = new Map<DelegationId, EscalationId>();
+  /** Park retries staged by this turn's authorize acks, re-dispatched strictly post-commit (durable-first:
+   *  the retired escalation row commits before the transport re-attempts). */
+  private parkRetries: DelegationId[] = [];
 
   // ─── concrete-reactor hooks (the only transport-specific surface) ────────────────────────────────
 
-  /** Build the per-call payload (the call's transport data) for a fresh delegate. */
-  protected abstract openPayload(target: ExternalTarget, argument: Value | null): Payload;
+  /** Build the per-call payload (the call's transport data) for a fresh delegate. `generics` is the
+   *  external agent's own instantiation (the call site's stamped substitution) — how a reactor that
+   *  decodes its reply against a result generic reaches that schema; a reactor with no such generic
+   *  ignores it. */
+  protected abstract openPayload(
+    target: ExternalTarget,
+    argument: Value | null,
+    generics: GenericSubstitution | undefined,
+  ): Payload;
 
   /** Dispatch a fresh call to the transport (always means "run it"). */
   protected abstract dispatch(delegation: DelegationId, payload: Payload): void;
@@ -180,15 +220,45 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
    *  transport confirms with a `cancelled` completion (synthesising one when the request is already gone). */
   protected abstract abort(delegation: DelegationId): void;
 
-  /** Persist one call's ext row through its own `tx` port (the base has already staged the envelope). */
-  protected abstract persistCallRow(tx: PersistenceTx, row: CallRow<Payload>): Promise<void>;
+  /** Encode one call's kind-specific reconstruction material as its extension document. Delegates to the
+   *  reactor's pure `encode…Extension` codec; the hook itself may consult reactor state to pick the
+   *  document's variant (the mcp park). The base writes the document through `tx.external` and seals it
+   *  uniformly — the codec never sees the seal. */
+  protected abstract encodeCallExtension(row: CallRow<Payload>): Json;
 
-  /** Read this reactor's in-flight calls (envelope ⋈ ext row) on reactivation. */
-  protected abstract loadCallRows(loader: Loader): Promise<Array<LoadedCall<Payload>>>;
+  /** Decode one reloaded call's extension document back into its warm payload + bridges — the pure
+   *  `decode…Extension` codec's inverse of the above. */
+  protected abstract decodeCallExtension(extension: Json): DecodedCallExtension<Payload>;
+
+  /** The public capability token a call mints, if this kind mints one (webhook / mcp-serve). The base
+   *  maintains the `capability_routes` index row in the same commit as the call row, so cold inbound
+   *  routing can never observe a token without its route. `null` — the default — writes no route. */
+  protected capabilityTokenOf(_payload: Payload): string | null {
+    return null;
+  }
 
   /** Deliver one settled inner delegation to the transport (strictly post-commit). Default no-op: a reactor
    *  whose transport never opens inner delegations (http) never has one staged. */
   protected deliverInnerOutcome(_delivery: InnerDelivery): void {}
+
+  /** A call resolved and is being dropped — a concrete reactor releases the per-call state it indexes
+   *  outside the base (the webhook reactor's token registry). Default no-op. */
+  protected onDropCall(_delegation: DelegationId): void {}
+
+  /** The request name a parked call escalates and is reconstructed from on reload — `null` (the default)
+   *  for a reactor that never parks (ffi / http / webhook / time). A parking reactor names its authorize
+   *  request here (the mcp reactor returns `prelude.oauth.authorize`), which is the ONE thing that turns
+   *  the base's dormant park machinery on for it. */
+  protected parkRequestName(): QualifiedName | null {
+    return null;
+  }
+
+  /** Re-run one parked call's operation after its authorize escalation was answered — the transport
+   *  side-effect slot, called strictly post-commit and only while the call is still `running`. A parking
+   *  reactor overrides this to re-dispatch its own operation FROM SCRATCH (the mcp reactor re-lists a
+   *  provide, or re-dispatches a tool / direct call); a still-failing attempt parks again with a fresh
+   *  escalation — the one unbounded authorize loop. Default no-op (a non-parking reactor stages none). */
+  protected redispatchParked(_delegation: DelegationId): void {}
 
   /** The instance handling `delegation`, or `undefined` — for a concrete reactor that owns per-call resources
    *  (an ffi call's produced blob) to attribute them to the right instance. Reads the base received edge. */
@@ -196,10 +266,119 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     return this.handledInstanceOf(delegation);
   }
 
+  /** Register a blob this call's transport produced mid-call (its bytes already in the `BlobStore`) as owned
+   *  by the call's instance — so the call's `delegateAck`, an upward event, HOISTS it onto the core caller
+   *  the same way it hoists every other blob the instance still owns, exactly like a core sub-call's result
+   *  blob. An ffi handler produces one over the blob side channel; an mcp tool result's image content produces
+   *  one at the transport seam. Returns whether it took: `false` when the call is already gone (cancelled /
+   *  completed), so the caller can delete the just-stored bytes — which have no row referencing them — rather
+   *  than orphan them. */
+  registerProducedBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): boolean {
+    const instance = this.callInstance(delegation);
+    if (instance === undefined) return false;
+    this.pool.registerBlob(blobId, { owner: instance, ...entry });
+    return true;
+  }
+
   /** The transport payload of a live call — a concrete reactor reads a fresh inner delegation's ambient
    *  (e.g. the snapshot the parent call was dispatched against) from it. */
   protected payloadOf(delegation: DelegationId): Payload | undefined {
     return this.calls.get(delegation)?.payload;
+  }
+
+  /** The lifecycle status of a live call, or `undefined` once resolved — for a concrete reactor whose
+   *  transport signals something outside the four base outcomes (the mcp park) to decide whether the call
+   *  can still be acted on, without owning a parallel status map. */
+  protected callStatusOf(delegation: DelegationId): CallStatus | undefined {
+    return this.calls.get(delegation)?.status;
+  }
+
+  /** Whether `escalation` is one this call is RELAYING upward for an inner delegation's child ask (a
+   *  `relays` bridge entry), as opposed to an ask the call raised for itself. A concrete reactor that
+   *  raises its own asks under a call's delegation (the mcp authorize park) needs the distinction on
+   *  reload: both faces are open rows with the same delegation and request name, but a relayed one must
+   *  descend through the bridge when answered, never resume the call itself. */
+  protected hasEscalationRelay(delegation: DelegationId, escalation: EscalationId): boolean {
+    return this.calls.get(delegation)?.relays.has(escalation) ?? false;
+  }
+
+  /** Stage a live call's row for re-persist this turn — for a concrete reactor whose OWN durable state on
+   *  the row changed outside the base's mutations (the mcp park flips its extension variant). A no-op for
+   *  a resolved call (its drop supersedes any upsert). */
+  protected markCallDirty(delegation: DelegationId): void {
+    if (this.calls.has(delegation)) this.dirty.add(delegation);
+  }
+
+  // ─── the credential park (a general "call parked pending a credential, re-runnable" concern) ─────
+
+  /** Park a live call pending a credential: raise the reactor's authorize request from the call's own
+   *  instance (through the base `send` path, so a durable escalation row opens — the park state's SoT —
+   *  and the ask relays to the api root like any escalate), and leave the call unsettled until the
+   *  answering ack retries it (`redispatchParked`). The status guard is the general call lifecycle: a
+   *  cancelling call's park doubles as the transport's abort confirmation (any completion of a cancelling
+   *  call confirms it), an errored call (`awaitingAnswer`) has no in-flight work to park, and only a
+   *  `running` call parks. The park's durable halves commit together — the escalation row (via `send`) and,
+   *  for a reactor that persists a re-runnable dispatch while parked, its extension (marking the row dirty
+   *  writes it this same turn) — so "open authorize row" ⟺ "re-runnable park". */
+  protected parkCall(delegation: DelegationId, argument: Value | null): void {
+    const call = this.calls.get(delegation);
+    if (call === undefined) return; // the call resolved meanwhile — the signal is moot
+    switch (call.status) {
+      case "cancelling":
+        this.complete({ delegation, outcome: { kind: "cancelled" } });
+        return;
+      case "awaitingAnswer":
+        return;
+      case "running":
+        break;
+    }
+    const request = this.parkRequestName();
+    if (request === null) {
+      throw new Error(`${this.name} parked a call with no park request name (bug)`);
+    }
+    const { instance, caller, run } = this.routeOf(delegation);
+    const escalation = newEscalationId();
+    this.parked.set(delegation, escalation);
+    this.markCallDirty(delegation);
+    this.send(
+      {
+        kind: "escalate",
+        delegation,
+        escalation,
+        ask: { kind: "request", request, argument },
+        from: this.name,
+        to: caller,
+        run,
+      },
+      instance,
+    );
+  }
+
+  /** Whether a live call is parked on an authorize escalation — a parking reactor's extension codec reads
+   *  this to persist the call's re-runnable dispatch (vs the at-most-once tag), since the parked set is
+   *  reactor-lifecycle state, not something the pure codec can see. */
+  protected isParked(delegation: DelegationId): boolean {
+    return this.parked.has(delegation);
+  }
+
+  /** Rebuild a reloaded call's park from its open authorize escalation row, if it has one — called by a
+   *  parking reactor's `recover` (an open authorize row IS the durable park state, so the call reconstructs
+   *  as parked, waiting for the ack, never refused by the at-most-once reconciliation). A row that is a
+   *  RELAY bridge does NOT count, and that case is reachable: a parked child's ask escapes its calling core
+   *  instance, whose caller is this reactor, so an active PARENT re-raises it upward under its own
+   *  delegation — an open row with the same reactor and request name as a genuine park — but its answer must
+   *  descend the bridge to the child, never resume the parent. Returns whether it reconstructed as parked. */
+  protected reconstructPark(delegation: DelegationId): boolean {
+    const request = this.parkRequestName();
+    if (request === null) return false;
+    const escalation = this.openRaisedEscalationOf(delegation, request);
+    if (escalation === undefined || this.hasEscalationRelay(delegation, escalation)) return false;
+    this.parked.set(delegation, escalation);
+    return true;
   }
 
   /** The instance + caller (reply-to) + run (trace context) of a live call, read from the base
@@ -223,15 +402,17 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   // ─── inner delegations (the callee calling other agents) ────────────────────────────────────────
 
   /** Open an inner delegation from a live call: issue an ordinary `delegate` with the call's instance as its
-   *  caller (the base opens the caller-owned row) and bridge it to the transport's `call` token. Returns the
-   *  delegation id, or `null` when the call cannot accept new work (gone, cancelling, or already settled) —
-   *  the concrete then fails the token back to the transport directly. */
+   *  caller (the base opens the caller-owned row) and bridge it to the transport's `call` token. `generics`
+   *  is the callee value's resolved instantiation (a `value` callee carries its own), recorded as the new
+   *  instance's ambient substitution. Returns the delegation id, or `null` when the call cannot accept new
+   *  work (gone, cancelling, or already settled) — the concrete then fails the token back to the transport. */
   protected openInnerDelegation(
     parent: DelegationId,
     target: DelegateTarget,
     to: ReactorName,
     argument: Value | null,
     call: string,
+    generics?: GenericSubstitution,
   ): DelegationId | null {
     const parentCall = this.calls.get(parent);
     if (
@@ -248,7 +429,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.dirty.add(parent);
     // An inner delegation stays inside the parent call's run — its trace context is the call's ambient.
     this.send(
-      { kind: "delegate", delegation, target, argument, from: this.name, to, run },
+      {
+        kind: "delegate",
+        delegation,
+        target,
+        argument,
+        ...(generics !== undefined ? { generics } : {}),
+        from: this.name,
+        to,
+        run,
+      },
       instance,
     );
     return delegation;
@@ -282,16 +472,16 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.maybeSettle(parent);
   }
 
-  /** An inner delegation escalated. A PANIC or a `prelude.throw` is the inner call *failing*: the callee's
-   *  handler — the call's immediate caller — handles it with its own try/catch (core's throw handler
-   *  analog), so it settles the inner call as a failure and the dead callee is cancelled (a caught failure
-   *  never resumes, like a handle that catches-and-breaks); an uncaught one then re-raises through the
-   *  handler's own failure. A panic flattens to an error message; a throw stays typed — its payload rides
-   *  to the transport, so the handler catches (or rethrows) the same error a katari-side handler would.
-   *  Any other ask (a user-facing request, a control escape) is beyond the handler — it is proxied UP under
-   *  the call's own delegation with a fresh escalation id, bridged in `relays` so the answer descends the
-   *  same path; the transport never sees it. A cancelling call drops the ask (its children are being torn
-   *  down anyway). */
+  /** An inner delegation escalated. This reactor intercepts NOTHING of its child's escalations — a callee's
+   *  failure is not caught here in JS. EVERY ask (a PANIC, a `prelude.throw`, a user-facing request, a
+   *  control escape) is proxied UP under the call's own delegation with a fresh escalation id, bridged in
+   *  `relays` so the answer descends the same path; the transport never sees it (the effect-handler ideal:
+   *  intercept nothing, proxy all). A callee's panic/throw therefore unwinds up like any escalate — caught
+   *  by a katari-side handler above (a throw handler) or, uncaught, failing the run — rather than settling
+   *  the inner call as a failure a JS `context.call` could catch. The dead callee is torn down not by a
+   *  special-cased terminate here but by the cancel cascade: once the proxied failure resolves upward, this
+   *  call is terminated and its `onTerminate` → `terminateChildren` reaches the callee. A cancelling call
+   *  drops the ask (its children are being torn down anyway). */
   protected onEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
     context: { caller: InstanceId | undefined },
@@ -299,54 +489,55 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const parent =
       context.caller === undefined ? undefined : this.callByInstance.get(context.caller);
     if (parent === undefined) return; // the raiser's call is gone; the child is being torn down independently
+    // Re-raise the child's ask under the very call that parents it (the default proxy path). A reactor that
+    // RE-ROUTES a child's ask to a DIFFERENT call — the region nursery's `watch` — calls `relayAskUnder`
+    // directly with that destination as the parent instead of overriding here.
+    this.relayAskUnder(parent, event.delegation, event.escalation, event.ask);
+  }
+
+  /** Proxy one child ask UP under `parent`'s own delegation with a fresh escalation id, bridged in `parent`'s
+   *  `relays` so the answer descends the same path back to `child` (see `onEscalateAck`); the transport never
+   *  sees it (the effect-handler ideal: intercept nothing, proxy all). `onEscalate` calls this with the call
+   *  that PARENTS the escalating child; a reactor re-routing a child's ask to another call (the region
+   *  nursery re-emitting a fiber's escalation at its `watch`, not at the `provide` that spawned the fiber)
+   *  calls it with that destination call as `parent`. Returns false — dropping the ask — when `parent` is
+   *  winding its children down (`cancelling`, or a completion already `pendingOutcome`): the child is being
+   *  torn down, so its escalate is moot, and forwarding it would relay an ask the call orphans when it drops.
+   *  Symmetric to `openInnerDelegation`, which refuses new work in exactly these two states. */
+  protected relayAskUnder(
+    parent: DelegationId,
+    child: DelegationId,
+    childEscalation: EscalationId,
+    ask: AskKind,
+  ): boolean {
     const call = this.calls.get(parent);
-    // Drop the ask when the call is winding its children down — `cancelling` (a terminate from above), or a
-    // completion already `pendingOutcome` (the transport finished and `complete` terminated the children):
-    // the child is being torn down, so its escalate is moot, and forwarding it would relay an ask the call
-    // will orphan when it resolves and drops. Symmetric to `openInnerDelegation`, which refuses new work in
-    // exactly these two states.
     if (call === undefined || call.status === "cancelling" || call.pendingOutcome !== undefined) {
-      return;
+      return false;
     }
     const { instance, caller, run } = this.routeOf(parent);
-    if (event.ask.kind === "request" && isFailureRequest(event.ask.request)) {
-      this.stageInnerDelivery(
-        parent,
-        event.delegation,
-        event.ask.request === PANIC_REQUEST
-          ? { kind: "error", message: panicMessageOf(event.ask.argument) }
-          : innerThrowOf(event.ask.argument),
-      );
-      // Cancel the failing callee (its delegation row is still live — an acceptance-surface failure never
-      // acks, a raised one suspends awaiting an answer that will never come). One already cancelling (or
-      // already retired) needs no second terminate.
-      const child = this.issuedRowOf(event.delegation);
-      if (child !== undefined && child.state === "running") {
-        this.send({
-          kind: "terminate",
-          delegation: event.delegation,
-          from: this.name,
-          to: child.peer,
-          run: event.run,
-        });
-      }
-      return;
-    }
     const outer = newEscalationId();
-    call.relays.set(outer, { child: event.delegation, escalation: event.escalation });
+    call.relays.set(outer, { child, escalation: childEscalation });
     this.dirty.add(parent);
     this.send(
       {
         kind: "escalate",
         delegation: parent,
         escalation: outer,
-        ask: event.ask,
+        ask,
         from: this.name,
         to: caller,
         run,
       },
       instance,
     );
+    return true;
+  }
+
+  /** Whether `delegation` is currently RELAYING any escalation upward (a `relays` bridge entry) — the region
+   *  `watch` reads it to serialise its re-emissions: a held-open watch call carries at most one outstanding
+   *  relay at a time, so a non-empty relay set means "busy, awaiting the handler's answer". */
+  protected hasOpenRelay(delegation: DelegationId): boolean {
+    return (this.calls.get(delegation)?.relays.size ?? 0) > 0;
   }
 
   // ─── the shared callee lifecycle ─────────────────────────────────────────────────────────────────
@@ -356,11 +547,13 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   protected onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): void {
     if (event.target.kind !== "external") return; // only external targets route here
     const instance = newInstanceId();
-    this.acceptDelegation(event.delegation, instance, event.from, event.run);
+    // `event.caller` is the core instance that issued this external call — the target its produced blobs
+    // hoist onto when the call acks (stamped by the base `send`).
+    this.acceptDelegation(event.delegation, instance, event.from, event.run, event.caller);
     this.callByInstance.set(instance, event.delegation);
     this.put(event.delegation, {
       status: "running",
-      payload: this.openPayload(event.target, event.argument),
+      payload: this.openPayload(event.target, event.argument, event.generics),
       relays: new Map(),
       transportSettled: false,
       pendingOutcome: undefined,
@@ -402,6 +595,19 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     event: Extract<ExternalEvent, { kind: "escalateAck" }>,
     _context: { raiser: InstanceId | undefined },
   ): void {
+    // An authorize answer resumes a parked call. The base has already retired the escalation row, and the
+    // answer's VALUE is deliberately ignored — the contract is "the credential store now holds what you
+    // need", so the retry re-reads the store rather than trusting a wire value (which would also leak token
+    // material through the plaintext audit). The unpark commits whole before the transport re-attempts
+    // (durable-first): marking the call dirty reverts its extension to the non-parked variant in the same
+    // commit that retires the row, so a crash in between reloads a plain call (refused at-most-once by the
+    // reconciliation — the retry may have executed), never a double park.
+    if (this.parked.get(event.delegation) === event.escalation) {
+      this.parked.delete(event.delegation);
+      this.markCallDirty(event.delegation);
+      this.parkRetries.push(event.delegation);
+      return;
+    }
     const call = this.calls.get(event.delegation);
     if (call === undefined) return;
     const relay = call.relays.get(event.escalation);
@@ -491,12 +697,37 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     if (outcome === undefined) return;
     call.pendingOutcome = undefined;
     switch (outcome.kind) {
-      case "result":
+      case "result": {
+        // The payload decodes its own ack straight from the transport's raw wire Json (the ONE ack-shaping
+        // seam, `AckDecodingPayload`): the default is the base wire decoder, an mcp direct call decodes its
+        // reply unconditionally (the wire's markers reconstructed) then validates against its `T` — all at
+        // this boundary. The `send` below is an upward event, so it HOISTS every blob this call still owns
+        // onto the core caller (and releases the value-carried resources to in-transit for the caller's
+        // reown): a produced blob reaches the caller whether or not the decoded value happened to carry its
+        // ref, so no per-call adoption backstop is needed.
+        let value: Value;
+        try {
+          const decode = ackDecoderOf(call.payload) ?? jsonToValue;
+          value = decode(outcome.value);
+        } catch (cause) {
+          // The settle seam is TOTAL: a transport whose result Json cannot be reconstructed into a Value —
+          // a hostile / malformed `$katari_*` marker (a `$katari_redacted` header, a non-string `$katari_ref`),
+          // an over-deep tree (a RangeError) — must NOT throw out of the actor turn, or an uncaught decode
+          // poisons the substrate and drops every warm run of the whole project. Fold the failure into the
+          // reactor's declared escalation and wait like an errored call, exactly as the `throw` / `error`
+          // outcomes do. This is the general form of what an mcp direct call already does in its `complete`
+          // (re-shaping an undecodable reply into a typed throw BEFORE this seam) — now every reactor's raw
+          // wire is caught here, in one place, rather than each hardening its own completion path.
+          this.escalateResultDecodeFailure(delegation, cause, caller, run, instance);
+          call.status = "awaitingAnswer";
+          this.dirty.add(delegation);
+          return;
+        }
         this.send(
           {
             kind: "delegateAck",
             delegation,
-            value: jsonToValue(outcome.value),
+            value,
             from: this.name,
             to: caller,
             run,
@@ -505,6 +736,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         );
         this.drop(delegation);
         return;
+      }
       case "cancelled":
         this.send({ kind: "terminateAck", delegation, from: this.name, to: caller, run });
         this.drop(delegation);
@@ -513,16 +745,17 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         // The callee raised a typed error of its own: re-raise it as `prelude.throw`, so a katari-side
         // handler catches the sidecar's error exactly like a stdlib throw. Like the error case the call
         // then waits — a throw answers with `never`, so resolution comes as a `terminate` (a handler broke
-        // out of its handle, or the run is failing).
-        this.escalateThrow(delegation, outcome.error, caller, run);
+        // out of its handle, or the run is failing). The raiser of the row is this call's own instance.
+        this.escalateThrow(delegation, outcome.error, caller, run, instance);
         call.status = "awaitingAnswer";
         this.dirty.add(delegation);
         return;
       case "error":
         // A no-result error escalates to the caller (panic by default; a reactor whose errors a program
         // anticipates — http — overrides with a typed throw). Unhandled, it fails the run; if a handler
-        // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer).
-        this.escalateError(delegation, outcome.message, caller, run);
+        // catches it, the escalateAck becomes this call's result (so the call waits, awaitingAnswer). The
+        // raiser of the row is this call's own instance.
+        this.escalateError(delegation, outcome.message, caller, run, instance);
         call.status = "awaitingAnswer";
         this.dirty.add(delegation);
         return;
@@ -531,12 +764,24 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
 
   /** The escalation a typed `throw` completion becomes: the payload decodes at this seam (the transport
    *  boundary, like a result's value) and re-raises as `prelude.throw`. A payload that does not decode is
-   *  protocol drift, not a program-anticipatable error — that one degrades to a panic. */
+   *  protocol drift, not a program-anticipatable error — that one degrades to a panic.
+   *
+   *  KNOWN GAP (FFI typing): the payload is decoded with the plain wire decoder and is NOT validated /
+   *  coerced against the external agent's DECLARED `throw[T]`. An FFI author who raises a plain record
+   *  (forgetting the port's `KatariData` nominal tag) yields a value that statically claims `T` but carries
+   *  no constructor tag, so a downstream `case T(...)` match finds no arm — a silent no-match (surfaced, not
+   *  introduced, by replay converters doing a nominal `match`; the `replay_probe` fixture works around it by
+   *  re-tagging the payload as a nominal `data` in Katari). PROPOSED FIX: add a `decodeThrow?: (raw: Json) =>
+   *  Value` seam to the call payload, exactly mirroring `AckDecodingPayload.decodeAck` — populated by the ffi
+   *  reactor's `openPayload` from the external agent's declared throw generic — so this site coerces the raw
+   *  payload against `T` (reconstructing / tagging it) or raises a loud typed `validation_error` when its
+   *  constructor does not match, instead of `jsonToValue`. Deferred here to avoid an FFI-typing overhaul. */
   private escalateThrow(
     delegation: DelegationId,
     error: Json,
     caller: ReactorName,
     run: InstanceId,
+    raiser: InstanceId,
   ): void {
     let payload: Value;
     try {
@@ -547,10 +792,11 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         `the callee threw an undecodable error payload: ${messageOf(cause)}`,
         caller,
         run,
+        raiser,
       );
       return;
     }
-    this.raiseThrow(delegation, payload, caller, run);
+    this.raiseThrow(delegation, payload, caller, run, raiser);
   }
 
   /** The escalation a no-result error becomes. Panic by default — an external process / infrastructure
@@ -561,8 +807,34 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     message: string,
     caller: ReactorName,
     run: InstanceId,
+    raiser: InstanceId,
   ): void {
-    this.raisePanic(delegation, message, caller, run);
+    this.raisePanic(delegation, message, caller, run, raiser);
+  }
+
+  /** Escalate a settle-seam decode failure — the transport's `result` Json could not be reconstructed into a
+   *  Value (a hostile / malformed `$katari_*` marker, an over-deep tree). Keeps the settle seam TOTAL: the
+   *  base wraps its decode in a try/catch and folds a failure here rather than letting it throw out of the
+   *  actor turn. It mirrors `escalateError` (a no-result error — the same "the call cannot produce a value"
+   *  shape), so the DEFAULT is a panic: an undecodable result on a TRUSTED boundary — an ffi sidecar's own
+   *  reply, a webhook subscriber's engine value, an oauth token from the credential store — is an
+   *  engine-invariant break, not a program-anticipatable error. A reactor whose result crosses an UNTRUSTED
+   *  boundary overrides it with its typed throw (http → `fetch_error`, mcp `callTool` → `server_error`),
+   *  exactly as it overrides `escalateError`. */
+  protected escalateResultDecodeFailure(
+    delegation: DelegationId,
+    cause: unknown,
+    caller: ReactorName,
+    run: InstanceId,
+    raiser: InstanceId,
+  ): void {
+    this.raisePanic(
+      delegation,
+      `the call's result could not be decoded: ${messageOf(cause)}`,
+      caller,
+      run,
+      raiser,
+    );
   }
 
   /** Bridge a settled inner delegation to its transport token and stage the post-commit delivery. A missing
@@ -594,12 +866,22 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     const deliveries = this.pendingDeliveries;
     this.pendingDeliveries = [];
     for (const delivery of deliveries) this.deliverInnerOutcome(delivery);
+    // The parked calls this turn's authorize acks resumed: re-run each from scratch (the transport
+    // side-effect slot). A call that resolved (a racing cancel) or moved to cancelling since the ack is
+    // skipped — its teardown owns it now; a still-`running` one is re-dispatched by the concrete reactor.
+    const retries = this.parkRetries;
+    this.parkRetries = [];
+    for (const delegation of retries) {
+      if (this.calls.get(delegation)?.status === "running") this.redispatchParked(delegation);
+    }
   }
 
-  /** Write the calls this turn touched as own-kind instances (envelope + ext), dropping resolved ones (their
-   *  envelope drop cascades the ext). The base additionally flushes the caller-owned rows of the calls'
-   *  inner delegations. The envelope status collapses `awaitingAnswer` to the `running` instance lifecycle
-   *  (alive, waiting); the ext row carries the precise status plus the two inner-delegation bridges. */
+  /** Write the calls this turn touched as own-kind instances (envelope + extension row), dropping resolved
+   *  ones (their envelope drop cascades the extension and any capability route). The base additionally
+   *  flushes the caller-owned rows of the calls' inner delegations. The envelope status collapses
+   *  `awaitingAnswer` to the `running` instance lifecycle (alive, waiting); the extension row carries the
+   *  precise status plus the codec-encoded document — and a token-minting kind's capability route commits
+   *  alongside it. */
   async persist(tx: PersistenceTx): Promise<void> {
     const live = [...this.dirty].flatMap((delegation) => {
       const call = this.calls.get(delegation);
@@ -610,26 +892,33 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
       this.markInstance(route.instance, {
         delegationId: delegation,
         // The caller (reply-to) and the run (trace context) are the instance's ambient, written on the
-        // generic envelope here — not repeated in the concrete ext row.
+        // generic envelope here — not repeated in the extension document.
         callerReactor: route.caller,
         runId: route.run,
         status: call.status === "cancelling" ? "cancelling" : "running",
       });
     for (const instanceId of this.droppedInstances) this.markInstanceDropped(instanceId);
     await this.persistBase(tx.base);
-    for (const { delegation, call, route } of live)
-      await this.persistCallRow(tx, {
-        instance: route.instance,
-        delegation,
+    for (const { delegation, call, route } of live) {
+      await tx.external.putCall({
+        instanceId: route.instance,
         status: call.status,
-        payload: call.payload,
-        relays: [...call.relays].map(([escalation, relay]) => ({
-          escalation,
-          child: relay.child,
-          childEscalation: relay.escalation,
-        })),
-        innerCalls: this.innerCallRowsOf(delegation),
+        extension: this.encodeCallExtension({
+          instance: route.instance,
+          delegation,
+          status: call.status,
+          payload: call.payload,
+          relays: [...call.relays].map(([escalation, relay]) => ({
+            escalation,
+            child: relay.child,
+            childEscalation: relay.escalation,
+          })),
+          innerCalls: this.innerCallRowsOf(delegation),
+        }),
       });
+      const token = this.capabilityTokenOf(call.payload);
+      if (token !== null) await tx.routes.putRoute({ token, instance: route.instance });
+    }
     this.dirty.clear();
     this.droppedInstances = [];
   }
@@ -639,19 +928,22 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
    *  work fails at-most-once as a panic — and that error path cancels the call's inner delegations, so no
    *  orphans survive a restart), a `cancelling` call re-aborts (the transport confirms with a synthesised
    *  `cancelled`; its children's terminates replay from the outbox), an `awaitingAnswer` call just waits
-   *  (its request already stopped; the core side drives the escalation's resolution). The inner-delegation
-   *  bridges reload with each call. */
+   *  (its request already stopped; the core side drives the escalation's resolution). The payload + the
+   *  inner-delegation bridges reload through the reactor's extension codec. */
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
-    for (const row of await this.loadCallRows(loader)) {
+    for (const row of await loader.external.instances(this.name)) {
+      const decoded = this.decodeCallExtension(row.extension);
       // Re-seed the base received edge (instance + summoner + run) and the local transport status + payload.
-      this.acceptDelegation(row.delegation, row.instance, row.caller, row.run);
+      // The caller INSTANCE (the hoist target) is not persisted for a call: a reloaded call's produced blobs
+      // were in-memory and are gone (at-most-once recovery fails it), so it will never hoist — `undefined`.
+      this.acceptDelegation(row.delegation, row.instance, row.caller, row.run, undefined);
       this.callByInstance.set(row.instance, row.delegation);
       this.calls.set(row.delegation, {
         status: row.status,
-        payload: row.payload,
+        payload: decoded.payload,
         relays: new Map(
-          row.relays.map((relay) => [
+          decoded.relays.map((relay) => [
             relay.escalation,
             { child: relay.child, escalation: relay.childEscalation },
           ]),
@@ -659,7 +951,7 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
         transportSettled: false,
         pendingOutcome: undefined,
       });
-      for (const inner of row.innerCalls) {
+      for (const inner of decoded.innerCalls) {
         this.innerCalls.set(inner.delegation, { parent: row.delegation, call: inner.call });
         this.indexInnerCall(row.delegation, inner.delegation);
       }
@@ -677,9 +969,17 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
     this.pendingDeliveries = [];
     this.dirty.clear();
     this.droppedInstances = [];
+    // Parks and staged retries are derived from the durable escalation rows; the reload after a poisoned
+    // commit rebuilds them (`reconstructPark`), and an unretired row replays its ack from the outbox.
+    this.parked.clear();
+    this.parkRetries = [];
   }
 
-  private innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
+  /** The live inner-delegation bridges of one parent call, as its persistable rows — read by `persist`, and by
+   *  a concrete reactor whose reload must rebuild in-memory routing over its still-running inner delegations
+   *  (the region reactor repopulates a reloaded nursery's running-fiber set from the `fiber:`-token bridges).
+   *  `protected` for exactly that reload rebuild; the base's own use is unchanged. */
+  protected innerCallRowsOf(parent: DelegationId): InnerCallRow[] {
     const rows: InnerCallRow[] = [];
     const children = this.innerCallsByParent.get(parent);
     if (children === undefined) return rows;
@@ -711,6 +1011,10 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   }
 
   private drop(delegation: DelegationId): void {
+    this.onDropCall(delegation);
+    // A parked call resolves only by teardown (its durable escalation row cascades with the raiser
+    // instance); forget the derived park index so a stray later ack finds nothing to resume.
+    this.parked.delete(delegation);
     const instance = this.handledInstanceOf(delegation);
     if (instance !== undefined) {
       this.droppedInstances.push(instance);
@@ -728,22 +1032,19 @@ export abstract class ExternalCallReactor<Payload> extends Reactor {
   }
 }
 
-/** The `{ msg }` a panic escalation carries, as the inner call's error message. */
-function panicMessageOf(argument: Value | null): string {
-  if (argument !== null && argument.kind === "record") {
-    const message = argument.fields.msg;
-    if (message !== undefined && message.kind === "string") return message.value;
+/** Lower a settled inner delegation's outcome to the transport-completion shape `complete` consumes —
+ *  for a reactor whose WHOLE call settles with one designated inner delegation (webhook / mcp-serve: the
+ *  subscriber's outcome is the call's outcome, fed back as a synthesised completion). `reveal` keeps
+ *  content across the internal Json round-trip (this boundary faces the engine, not a user). */
+export function innerOutcomeAsCompletion(
+  outcome: InnerDelivery["outcome"],
+): ExternalCompletion["outcome"] {
+  switch (outcome.kind) {
+    case "result":
+      return { kind: "result", value: valueToJson(outcome.value, "reveal") };
+    case "error":
+      return { kind: "error", message: outcome.message };
+    case "cancelled":
+      return { kind: "cancelled" };
   }
-  return "the callee panicked";
-}
-
-/** The `{ error }` payload a child's `prelude.throw` escalation carries, as a typed inner outcome — the
- *  payload rides to the transport, still an engine `Value` (the concrete lowers it at its boundary). A
- *  malformed argument (no `error` field — an engine bug, not a user input) degrades to a plain error. */
-function innerThrowOf(argument: Value | null): InnerDelivery["outcome"] {
-  if (argument !== null && argument.kind === "record") {
-    const payload = argument.fields.error;
-    if (payload !== undefined) return { kind: "throw", value: payload };
-  }
-  return { kind: "error", message: "the callee threw" };
 }

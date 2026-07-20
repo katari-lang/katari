@@ -8,11 +8,15 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
 
@@ -191,33 +195,144 @@ test("apply compiles, bundles, and deploys the playground", async () => {
   expect(stderr).toContain("Applied snapshot");
 });
 
-test("basics.main: data/match, for, parallel for, handlers, prelude", async () => {
-  const { stdout, stderr } = await katari(["run", "basics.main", "--project", "playground"]);
+test("playground.basics.main: data/match, for, parallel for, handlers, prelude", async () => {
+  const { stdout, stderr } = await katari(["run", "playground.basics.main", "--project", "playground"]);
   expect(stdout).toContain("ticks=[0,1,2]");
   expect(stdout).toContain("sum(squares(4))=30");
+  // Partial application, value-checked end to end: doubles is a residual of scale, and decorated
+  // omits a ?=-defaulted parameter so the callee's runtime default must fill it through the residual.
+  expect(stdout).toContain("doubles=[3,42]");
+  expect(stdout).toContain("decorated=>> hello!");
   // The wait loop tails the run's execution trace to stderr: the launch delegate and the final ack
   // must have printed as summary lines while stdout stayed result-only.
-  expect(stderr).toContain("delegate api→core basics.main");
+  expect(stderr).toContain("delegate api→core playground.basics.main");
   expect(stderr).toContain("delegateAck core→api");
 });
 
-test("tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
-  const { stdout } = await katari(["run", "tools.main", "--project", "playground"]);
+test("playground.tools.main: schema derivation, typed JSON boundary, dynamic dispatch", async () => {
+  const { stdout } = await katari(["run", "playground.tools.main", "--project", "playground"]);
   expect(stdout).toContain("result=5");
 });
 
-test("errors.main: typed throw caught, panic caught, missing-secret fallback", async () => {
-  const { stdout } = await katari(["run", "errors.main", "--project", "playground"]);
+test("playground.webhook.main: a minted inbound URL serves validated deliveries, then deactivates", async () => {
+  const { stdout } = await katari(["run", "playground.webhook.main", "--project", "playground"]);
+  // The subscriber POSTed {value:21} and {value:4} to its own minted URL; each delivery ran the
+  // callback (doubling) and the response body came back as the result text.
+  expect(stdout).toContain("delivered: 42 and 8");
+});
+
+test("playground.mcp_demo.main: the built-in MCP client mints the server's tools as agents", async () => {
+  // A real MCP server on a loopback port (stateless streamable HTTP: a fresh server + transport per
+  // request), exposing one `add` tool. The playground program opens it with `use mcp.provide(url = ...)`,
+  // reads each minted agent's metadata, and dispatches `add` through `reflection.call_agent` — all
+  // inside the provide scope the tools are gated by.
+  const readBody = (request: IncomingMessage): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      let raw = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => {
+        raw += chunk;
+      });
+      request.on("end", () => {
+        try {
+          resolve(raw === "" ? undefined : JSON.parse(raw));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+      request.on("error", reject);
+    });
+  const mcpHttp = createServer((request, response) => {
+    void (async () => {
+      const mcp = new McpServer({ name: "katari-e2e", version: "1.0.0" });
+      mcp.registerTool(
+        "add",
+        { description: "Adds two integers.", inputSchema: { x: z.number(), y: z.number() } },
+        ({ x, y }) => ({ content: [{ type: "text", text: String(x + y) }] }),
+      );
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      response.on("close", () => {
+        void transport.close();
+        void mcp.close();
+      });
+      await mcp.connect(transport);
+      await transport.handleRequest(request, response, await readBody(request));
+    })().catch(() => {
+      if (!response.headersSent) response.writeHead(500).end();
+    });
+  });
+  await new Promise<void>((resolve) => mcpHttp.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = mcpHttp.address();
+    if (address === null || typeof address === "string") throw new Error("expected a TCP address");
+    const port = address.port;
+    const { stdout } = await katari([
+      "run",
+      "playground.mcp_demo.main",
+      "--project",
+      "playground",
+      "--arg",
+      JSON.stringify({ url: `http://127.0.0.1:${port}/mcp` }),
+    ]);
+    // The minted agent advertised the server-declared name, and the dynamic dispatch returned 19+23.
+    expect(stdout).toContain("tools=add");
+    expect(stdout).toContain("42");
+  } finally {
+    mcpHttp.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      mcpHttp.close(() => resolve());
+    });
+  }
+});
+
+test("playground.errors.main: typed throw caught, panic caught, missing-secret fallback", async () => {
+  const { stdout } = await katari(["run", "playground.errors.main", "--project", "playground"]);
   expect(stdout).toContain("7 is odd — no half");
   expect(stdout).toContain("half=6");
   expect(stdout).toContain("panic caught: division by zero");
   expect(stdout).toContain("no secret under playground.no_such_key");
 });
 
-test("ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
+test("playground.time.main: durable now + sleep resolve through the built-in time reactor", async () => {
+  // A ~1s durable sleep bracketed by two `time.now` readings — the result text is deterministic in its
+  // prefix (the elapsed span is at least the sleep, but not asserted exactly).
+  const { stdout } = await katari(["run", "playground.time.main", "--project", "playground"]);
+  expect(stdout).toContain("slept for");
+}, 20_000);
+
+test("playground.region.main: fan-out fork/join, parallel contrast, and the white-hole subscription", async () => {
+  // The structured-concurrency nursery, end to end through the built-in `region` reactor (no sidecar):
+  // `fan_out` forks three squarers and joins each ([4,9,16]); `parallel for` computes the same set for
+  // contrast; and `subscribe` drives the WHITE HOLE — an emitter fiber's `on_message` escalations well
+  // up at `region.watch` to a handler that (composition) forks a second emitter and, after four
+  // messages, throws `enough` to tear the nursery down. The compiled nursery handle conforms at the
+  // runtime delegation boundary, so the whole line resolves deterministically.
+  const { stdout } = await katari(["run", "playground.region.main", "--project", "playground"]);
+  expect(stdout).toContain("fan_out=[4,9,16]");
+  expect(stdout).toContain("parallel=[4,9,16]");
+  expect(stdout).toContain("subscription saw four messages across two emitters");
+});
+
+test("playground.replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
+  // A `replay` provider re-runs the block on `replay.interrupted`; a user converter decides which failures
+  // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);
+  // `exhausting` spends a 2-attempt budget and the exhaustion re-raises the TYPED `warming_up`; `rejected`
+  // shows selective retry — the fatal `unauthorized` is rethrown, not replayed, so it leaves at once; and
+  // `reauth_intercepted` composes `immediate` + an intercepted `replay.attention` to re-run in place.
+  const success = await katari(["run", "playground.replay_demo.main", "--project", "playground"]);
+  expect(success.stdout).toContain("result: connected on attempt 3");
+  const exhausted = await katari(["run", "playground.replay_demo.exhausting", "--project", "playground"]);
+  expect(exhausted.stdout).toContain("gave up while warming up (attempt 2)");
+  const rejected = await katari(["run", "playground.replay_demo.rejected", "--project", "playground"]);
+  expect(rejected.stdout).toContain("unauthorized: revoked credential");
+  const reauth = await katari(["run", "playground.replay_demo.reauth_intercepted", "--project", "playground"]);
+  expect(reauth.stdout).toContain("session: calendar loaded on attempt 2");
+}, 20_000);
+
+test("playground.ffi.main: sidecar values, blobs both directions, inner delegation, typed throws", async () => {
   const { stdout } = await katari([
     "run",
-    "ffi.main",
+    "playground.ffi.main",
     "--project",
     "playground",
     "--arg",
@@ -234,7 +349,7 @@ test("a suspended run survives a server restart (boot reactivation), then comple
 
   // Detach a run that suspends on two escalations (the parallel `consult` children). `--detach` prints
   // the bare run id to stdout (progress goes to stderr).
-  const { stdout } = await katari(["run", "interactive.main", "--project", "playground", "--detach"]);
+  const { stdout } = await katari(["run", "playground.interactive.main", "--project", "playground", "--detach"]);
   const runId = stdout.trim();
   expect(runId).toMatch(UUID);
   await waitFor("both escalations to open", async () => {
@@ -329,7 +444,7 @@ test("rollback moves the head; new runs follow it", async () => {
   expect(headAfterRollback.id).toBe(firstSnapshot);
 
   // A new run follows the rolled-back head.
-  const { stdout: runOut } = await katari(["run", "basics.main", "--project", "playground"]);
+  const { stdout: runOut } = await katari(["run", "playground.basics.main", "--project", "playground"]);
   expect(runOut).toContain("sum(squares(4))=30");
 });
 

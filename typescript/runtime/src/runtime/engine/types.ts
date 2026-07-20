@@ -7,8 +7,8 @@
 // `engine.ts` header for why they are not their own table). The per-thread execution state below is
 // the engine's working set; its exact fields will firm up in the engine phase.
 
-import type { BlockId, QualifiedName } from "@katari-lang/types";
-import type { DelegateTarget, ReactorName } from "../event/types.js";
+import type { BlockId, ExternalReactorName, QualifiedName } from "@katari-lang/types";
+import type { DelegateTarget, ModifierMap, ReactorName } from "../event/types.js";
 import type {
   AskId,
   BlobId,
@@ -42,6 +42,15 @@ export type Scope = {
 
 export type ThreadStatus = "running" | "cancelling";
 
+/**
+ * Where a thread structurally comes from: ordinary user execution, or the instance's `finally` drain. The
+ * distinction is load-bearing and lives on the thread (never sniffed from an unrelated field): a user cancel
+ * cascade never crosses into a finalizer subtree, and a finalizer performing a user-facing escalation is a
+ * compile-time-forbidden move the runtime backstops with a panic. Every spawn inherits its parent's origin,
+ * so a finalizer's own sub-threads are `finalizer` too; only the finalizer roots are stamped explicitly.
+ */
+export type ThreadOrigin = "user" | "finalizer";
+
 /** Fields every thread carries regardless of which block it runs. */
 export type ThreadBase = {
   id: ThreadId;
@@ -54,6 +63,8 @@ export type ThreadBase = {
   /** The block this thread runs. */
   blockId: BlockId;
   status: ThreadStatus;
+  /** User execution or a finalizer subtree — see `ThreadOrigin`. */
+  origin: ThreadOrigin;
   /**
    * For each ask this thread bubbled up under its own local `askId`, the child `(thread, askId)` to send
    * the answer back to — one hop down. When a thread receives an ask it does not consume, it re-raises a
@@ -92,6 +103,7 @@ export type Thread =
   | RequestThread
   | MatchThread
   | ForThread
+  | ForeverThread
   | HandleThread
   | ParallelThread
   | DelegateThread
@@ -136,11 +148,38 @@ export type SequenceThread = ThreadBase & {
 // tracks its dispatch lifecycle (below).
 
 /**
- * A primitive leaf body: runs the prim named on its block against its `input` variable and acks the
- * value. The run may be async (a bounded env / blob fetch), awaited inline within the turn; the prim has
- * no children, so it completes within its instance's turn.
+ * A primitive leaf body: runs a prim against an argument and acks the value. The run may be async (a
+ * bounded env / blob fetch), awaited inline within the turn; the prim has no children, so it completes
+ * within its instance's turn. `invocation` declares where the run's inputs come from, so `createPrimitive`
+ * dispatches over the union instead of sniffing an optional field's presence.
  */
-export type PrimitiveThread = ThreadBase & { kind: "primitive" };
+export type PrimitiveThread = ThreadBase & {
+  kind: "primitive";
+  invocation: PrimitiveInvocation;
+};
+
+/**
+ * How a primitive thread sources its prim name / argument / generics:
+ *   - `block` — the ordinary in-module leaf body: the prim name and input variable live on the thread's
+ *     block (resolved from `blockId`), and its generics are the instance's ambient (the delegate that
+ *     summoned the instance stamped them).
+ *   - `inline` — the CROSS-MODULE fast path: a named call whose callee resolved to a primitive-bodied
+ *     agent runs as this in-instance leaf instead of summoning a child instance (see
+ *     `operations.enterDelegate`) — no delegation, no outbox round trip, no journal rows. The invocation
+ *     then carries everything the run needs itself (the callee's block lives in a foreign module this
+ *     instance cannot read): the prim name, the call's argument, and the call site's generic
+ *     instantiation (what the delegate would have stamped as the child instance's ambient). Born and
+ *     completed within one turn, so it never persists mid-flight.
+ */
+export type PrimitiveInvocation =
+  | { kind: "block" }
+  | {
+      kind: "inline";
+      /** The prim registry key — the callee's primitive BLOCK's `name` (what the block path reads). */
+      name: string;
+      argument: Value;
+      generics?: GenericSubstitution;
+    };
 
 /** A data-constructor leaf body: builds the tagged value of its constructor from `input` and acks it. */
 export type ConstructThread = ThreadBase & { kind: "construct" };
@@ -181,6 +220,31 @@ export type ForThread = ThreadBase & {
   postCancelCollect: Record<number, { value: Value; modifiers: Record<number, Value> }>;
   /** Once the source is exhausted, the then-clause's call (if any): its value is the loop's value. */
   thenPending: CallId | null;
+};
+
+/**
+ * Drives a `forever` loop: one body iteration at a time, each spawned as a fresh child thread whose
+ * completion value is DISCARDED and immediately followed by the next iteration. It is `for` minus the
+ * source, the value collection, and the then-clause: it carries `var` state across iterations (`states`,
+ * re-seeded into each iteration's `state_N`, advanced by a `next … with (…)`) and is a `break` target (a
+ * `break value` — a `break-for` naming its block — cancels the in-flight iteration and completes the loop
+ * with that value). But nothing is collected and no cursor exists — the durable footprint is the current
+ * state values plus one pending call, flat no matter how many iterations have run (each completed
+ * iteration's child scope reclaimed by the intra-instance GC). Every other ask — a request, or a `return`
+ * / outer `break` unwinding toward a lexical ancestor — proxies up unchanged.
+ */
+export type ForeverThread = ThreadBase & {
+  kind: "forever";
+  /** The in-flight iteration's child call (exactly one at any time once created). */
+  pending: CallId | null;
+  /** Current `var` state values, keyed by each state's body variable id (so a `with (s = …)` modifier —
+   *  which names that variable — updates it directly). Re-seeded into the body's `state_N` each iteration.
+   *  Empty for a stateless `forever { … }`. */
+  states: Record<number, Value>;
+  /** An iteration body's call -> the state modifiers to apply once its targeted `next`-cancel completes,
+   *  then start the next iteration (the forever analogue of a `for`'s `postCancelCollect`, minus the
+   *  collected value forever discards). */
+  postCancelAdvance: Record<number, { modifiers: ModifierMap }>;
 };
 
 /**
@@ -243,21 +307,33 @@ export type DelegateThread = ThreadBase & {
 };
 
 /**
- * The thread running an `ExternalBlock` body. It behaves exactly like a `DelegateThread`, but its callee is
- * the `ffi` reactor instead of another core instance: on `create` it emits a `delegate` to ffi (target
- * `{ external, key }`) and suspends as the caller-side proxy, resuming on the `delegateAck` (its result), an
- * `escalate` (an FFI error → a panic it relays inward), or a `terminateAck` (its abort confirmed). The engine
- * drives it through the same proxy machinery as `DelegateThread`: `delegationId` is the ffi delegation it
- * proxies, `relays` carries an inbound escalation it is relaying inward.
+ * A proxy whose callee runs in an external reactor rather than another core instance. It behaves exactly
+ * like a `DelegateThread` — suspending until the `delegateAck` (its result), an `escalate` (an external
+ * error → a panic it relays inward), or a `terminateAck` (its abort confirmed) — but it carries the
+ * callee's `reactor`, so its downward legs (a descending `escalateAck`, a cancel's `terminate`) route to
+ * the reactor actually running the callee instead of core. Two roles wear this shape (the `role` sum
+ * below); only the `wrapper` one is spawned from an `ExternalBlock` and emits its own `delegate` on
+ * `create` — a `dispatched` proxy is installed by the delegate operation, which already emitted it.
  */
 export type ExternalThread = ThreadBase & {
   kind: "external";
   delegationId: DelegationId;
   relays: Record<number, EscalationId>;
-  /** The reactor this proxy's callee runs in — `ffi` (a sidecar handler) or `http` (the built-in fetch).
-   *  Copied from the external block's `reactor` marker at spawn, so the proxy's downward legs (its
-   *  `delegate` / `terminate`) route to the right reactor without re-reading the block. */
-  reactor: "ffi" | "http";
+  /** The reactor this proxy's callee runs in — e.g. `ffi` (a sidecar handler) or `http` (the built-in
+   *  fetch). Copied from the external block's `reactor` marker at spawn, or from the dynamic dispatch's
+   *  resolved routing (the compiler / the tool value guarantee the name), so the proxy's downward legs
+   *  route to the right reactor without re-reading the block. */
+  reactor: ExternalReactorName;
+  /** WHY this proxy exists — a sum decided at creation, dispatched where the ack value's meaning differs:
+   *   - `wrapper`: the compiled `external agent` hop. The instance's whole body is this external leaf, so
+   *     the ack value IS the instance's own result — the core reactor conforms it against the instance's
+   *     declared output schema (the untyped-boundary check).
+   *   - `dispatched`: a mid-body dynamically dispatched external callee (a minted tool). The ack value is
+   *     an ordinary intermediate bound into the calling body, NOT the instance's result — conforming it
+   *     against the instance's output would reject (or hang) a typed caller mid-body; the engine's
+   *     ordinary schema boundaries (the callee's own wrapper conform, this instance's conform when IT
+   *     returns) apply instead. */
+  role: "wrapper" | "dispatched";
 };
 
 // ─── Cancel exits ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +355,38 @@ export type CancelExit =
    *  parent) with the break `value` — bypassing any then-clause. */
   | { kind: "completeWith"; value: Value };
 
+// ─── Finalizers (the `finally` terminal) ──────────────────────────────────────────────────────────
+
+/**
+ * One `finally` block armed by a `defer` op, awaiting the instance's terminal: the finalizer BLOCK to run
+ * and the SCOPE it was armed in (the executing thread's scope). The spawned finalizer chains to that scope,
+ * so it reads the enclosing bindings and carries no parameters of its own. Armed in source order (pushed);
+ * drained in reverse (popped, LIFO) at the terminal.
+ */
+export type ArmedFinalizer = { block: BlockId; scopeId: ScopeId };
+
+/**
+ * The terminal an instance is heading toward once its finalizers drain — the outcome the drain defers.
+ * `completed` acks the original result (the `delegateAck`); `cancelled` discards it and acks a cancel (the
+ * `terminateAck`). A cancel arriving mid-drain flips a `completed` disposition to `cancelled` in place, so
+ * the completed result is discarded (the atomicity rule).
+ */
+export type FinalizerDisposition = { kind: "completed"; value: Value } | { kind: "cancelled" };
+
+/**
+ * An instance's control phase — a sum type rather than a pair of flags, so an impossible combination is
+ * unrepresentable and a recovery restores exactly one clear state:
+ *   - `running`: ordinary execution (finalizers may still be arming);
+ *   - `finalizing`: the post-terminal drain — the user tree is gone and the armed finalizers run one at a
+ *     time toward `disposition`, before the deferred ack;
+ *   - `failed`: a panic escaped this instance, so its state is not trusted — its terminal skips finalizers
+ *     entirely (whether the panic struck user code or a finalizer body).
+ */
+export type InstancePhase =
+  | { kind: "running" }
+  | { kind: "finalizing"; disposition: FinalizerDisposition }
+  | { kind: "failed" };
+
 // ─── Instance (= shard) ─────────────────────────────────────────────────────────────────────────
 
 export type InstanceStatus = "running" | "cancelling";
@@ -289,7 +397,16 @@ export type InstanceStatus = "running" | "cancelling";
  *  entity + a sentinel id (`apiRootIdOf(project)`), never an in-memory engine instance. Api-targeted events
  *  route to the `ApiReactor` by the substrate's `event.to`, not by any caller-id comparison here; that is
  *  why there is no `ApiInstance` in the engine model below. */
-export type InstanceKind = "core" | "api" | "ffi" | "http";
+export type InstanceKind =
+  | "core"
+  | "api"
+  | "ffi"
+  | "http"
+  | "webhook"
+  | "mcp"
+  | "time"
+  | "oauth"
+  | "region";
 
 /**
  * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right
@@ -335,6 +452,10 @@ export type CoreInstance = {
   // that root thread. The actor routes the round trip by `delegation` (→ `delegationChild` = the raiser).
   /** A cancelling thread's id -> the exit it performs once its subtree's teardown is confirmed. */
   cancelExits: Record<number, CancelExit>;
+  /** `finally` blocks armed by `defer` ops in source order; drained in reverse (LIFO) at the terminal. */
+  finalizers: ArmedFinalizer[];
+  /** Whether the instance is running, draining finalizers, or failed — see `InstancePhase`. */
+  phase: InstancePhase;
   // Instance-local id counters.
   nextThreadId: number;
   nextCallId: number;
@@ -361,6 +482,12 @@ export type ProjectStore = {
    *  and the descriptor a `ref` value / download needs. The warm SoT for blob ownership; persisted to the
    *  `blobs` table as a snapshot (like scopes) by the `ResourcePool`. */
   blobs: Record<BlobId, BlobEntry>;
+  /** A derived index over `blobs[].owner`, symmetric to `scopesByOwner`: the blobs each instance currently
+   *  owns. Maintained on every owner change (register / re-own / free / the ownership hoist) through the
+   *  `blob.ts` helpers, so the per-owner sweeps (an instance teardown's reclaim, the hoist) iterate only that
+   *  instance's blobs instead of scanning the whole ledger. An in-transit blob (`owner = null`) sits in no
+   *  bucket. */
+  blobsByOwner: Map<InstanceId, Set<BlobId>>;
 };
 
 /** A blob's warm-store entry: who owns its bytes, plus the content descriptor (the bytes themselves are in
@@ -388,6 +515,10 @@ export type EngineState = {
   // `delegationId` is its source of truth. Answer routing rides per-thread in `Thread.forwardRoutes`. The
   // actor needs no escalation mirror (a returning `escalateAck` routes to the raiser via `delegationChild`).
   cancelExits: Record<number, CancelExit>;
+  /** The armed-but-not-yet-run `finally` blocks and the drain's phase ride the persisted engine state, so a
+   *  restart mid-finalization resumes the drain toward the same deferred terminal (result-or-cancel). */
+  finalizers: ArmedFinalizer[];
+  phase: InstancePhase;
   nextThreadId: number;
   nextCallId: number;
   nextAskId: number;

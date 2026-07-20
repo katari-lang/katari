@@ -25,7 +25,7 @@ import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.Environment (Scheme, ValueEnvironment)
 import Katari.Data.ModuleName (ModuleName)
-import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
+import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Diagnostics (Diagnostics)
 import Katari.Panic (panic)
 import Katari.Typechecker.Check (checkAgentBody, checkExternalReactor, dataValueScheme, prepareAgent, requestValueScheme, seedAgentType, signatureValueScheme, synthAgent)
@@ -103,9 +103,9 @@ checkAcyclic node = case node.declaration of
     pure (Map.singleton node.qualifiedName scheme, Map.singleton node.qualifiedName typedDeclaration)
   ValueData declaration -> signatureOnly (dataValueScheme declaration.sourceSpan node.qualifiedName declaration.parameters)
   ValueExternal declaration -> do
-    -- Reject an unknown `from "reactor"` name up front (a typo / unimplemented reactor), rather than
-    -- letting it silently default to the FFI reactor at runtime.
-    checkExternalReactor declaration.sourceSpan declaration.reactor
+    -- Reject an unknown `from "reactor"` name (a typo / unimplemented reactor) and a user module's claim
+    -- on a stdlib-only built-in reactor up front, rather than letting either surface at runtime dispatch.
+    checkExternalReactor declaration.sourceSpan node.qualifiedName.moduleName declaration.reactor
     -- An external call performs io (impure): the strict, non-lifting call path + an un-dischargeable io
     -- effect that rides to the run root.
     signatureOnly (signatureValueScheme declaration.genericParameters declaration.parameters declaration.returnType declaration.effects True)
@@ -168,6 +168,7 @@ buildTypedModule typedAgents identifiedModule =
               Just typed -> DeclarationAgent typed
               Nothing -> panic ("buildTypedModule: no typed agent for " <> renderQualifiedName qualifiedName)
       DeclarationRequest declaration -> DeclarationRequest (retagRequestDeclaration declaration)
+      DeclarationMarkerEffect declaration -> DeclarationMarkerEffect (retagMarkerEffectDeclaration declaration)
       DeclarationImport declaration -> DeclarationImport declaration
       DeclarationExternalAgent declaration -> DeclarationExternalAgent (retagExternalAgentDeclaration declaration)
       DeclarationPrimitiveAgent declaration -> DeclarationPrimitiveAgent (retagPrimitiveAgentDeclaration declaration)

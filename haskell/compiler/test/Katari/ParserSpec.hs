@@ -111,6 +111,58 @@ spec = do
     it "rejects a newline before an agent's body brace (no Allman braces)" $
       shouldFail "agent main() -> integer\n{ 1 }"
 
+    it "parses a marker effect declaration" $ do
+      module' <- parseClean "effect scoped[resource]"
+      case module'.declarations of
+        [DeclarationMarkerEffect marker] -> do
+          marker.name `shouldBe` "scoped"
+          length marker.genericParameters `shouldBe` 1
+        _ -> expectationFailure "expected one marker effect"
+
+    it "parses a marker effect without generics and keeps its doc annotation" $ do
+      module' <- parseClean "@\"a pure capability\"\neffect sandboxed"
+      case module'.declarations of
+        [DeclarationMarkerEffect marker] -> do
+          marker.annotation `shouldBe` Just "a pure capability"
+          marker.genericParameters `shouldBe` []
+        _ -> expectationFailure "expected one marker effect"
+
+    it "parses a string literal in type position as a singleton type" $ do
+      module' <- parseClean "type fast = \"fast\""
+      case module'.declarations of
+        [DeclarationTypeSynonym synonym] -> case synonym.definition of
+          TypeStringLiteral node -> node.value `shouldBe` "fast"
+          _ -> expectationFailure "expected a string literal type"
+        _ -> expectationFailure "expected one type synonym"
+
+    it "unescapes a string literal type exactly like an expression literal" $ do
+      module' <- parseClean "type odd = \"a\\n\\\"b\\\\\""
+      case module'.declarations of
+        [DeclarationTypeSynonym synonym] -> case synonym.definition of
+          TypeStringLiteral node -> node.value `shouldBe` "a\n\"b\\"
+          _ -> expectationFailure "expected a string literal type"
+        _ -> expectationFailure "expected one type synonym"
+
+    it "parses a `literal` generic parameter as a literal-binding type parameter" $ do
+      module' <- parseClean "agent connect[literal url_type](url: url_type) -> url_type { url }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.genericParameters of
+          [parameter] -> do
+            parameter.name `shouldBe` "url_type"
+            parameter.bindsLiteral `shouldBe` True
+          _ -> expectationFailure "expected one generic parameter"
+        _ -> expectationFailure "expected one agent"
+
+    it "keeps a bare `[literal]` a plain parameter named literal (positional word, not reserved)" $ do
+      module' <- parseClean "agent f[literal]() -> integer { 1 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.genericParameters of
+          [parameter] -> do
+            parameter.name `shouldBe` "literal"
+            parameter.bindsLiteral `shouldBe` False
+          _ -> expectationFailure "expected one generic parameter"
+        _ -> expectationFailure "expected one agent"
+
     it "parses a type synonym with generics" $ do
       module' <- parseClean "type pair[T] = [T, T]"
       case module'.declarations of
@@ -157,6 +209,36 @@ spec = do
       case body.returnExpression of
         Just (ExpressionCall node) -> length node.arguments `shouldBe` 2
         _ -> expectationFailure "expected a call"
+
+    it "parses a `_` argument value as a hole (partial application)" $ do
+      body <- parseClean "agent main() -> integer { sum_two(a = _, b = 3) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall node) -> case node.arguments of
+          [holeArgument, suppliedArgument] -> do
+            case holeArgument.value of
+              ArgumentHole _ -> pure ()
+              ArgumentExpression _ -> expectationFailure "expected the first argument to be a hole"
+            case suppliedArgument.value of
+              ArgumentExpression _ -> pure ()
+              ArgumentHole _ -> expectationFailure "expected the second argument to be an expression"
+          _ -> expectationFailure "expected two arguments"
+        _ -> expectationFailure "expected a call"
+
+    it "keeps an underscore-prefixed identifier argument an ordinary expression" $ do
+      body <- parseClean "agent main() -> integer { sum_two(a = _x, b = 3) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall node) -> case node.arguments of
+          (firstArgument : _) -> case firstArgument.value of
+            ArgumentExpression (ExpressionVariable variable) -> variable.name `shouldBe` "_x"
+            _ -> expectationFailure "expected a variable expression argument"
+          _ -> expectationFailure "expected arguments"
+        _ -> expectationFailure "expected a call"
+
+    it "still parses a bare `_` outside an argument value as a variable expression" $ do
+      body <- parseClean "agent main() -> integer { _ }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionVariable variable) -> variable.name `shouldBe` "_"
+        _ -> expectationFailure "expected a variable expression"
 
     it "parses a record literal and field access" $ do
       _ <- parseClean "agent main() -> integer { let r = { name = \"a\", age = 30 }\n r.age }"
@@ -207,6 +289,30 @@ spec = do
       case body.returnExpression of
         Just (ExpressionFor node) -> node.parallel `shouldBe` True
         _ -> expectationFailure "expected a for"
+
+    it "parses a forever loop" $ do
+      body <- parseClean "agent main() -> never { forever { tick() } }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionForever node) -> do
+          length node.body.statements `shouldBe` 0
+          length node.varBindings `shouldBe` 0
+        _ -> expectationFailure "expected a forever loop"
+
+    it "parses a forever loop with a `var` state header" $ do
+      body <- parseClean "agent main() -> integer { forever (var n = 0) { break n } }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionForever node) -> length node.varBindings `shouldBe` 1
+        _ -> expectationFailure "expected a forever loop with a var header"
+
+    it "keeps `forever` an ordinary identifier away from a loop head (a call, and a declared agent name)" $ do
+      -- The word is recognised positionally (only directly before `{`), so the stdlib's `replay.forever`
+      -- agent — declared and called by that name — must keep parsing as an identifier.
+      body <- parseClean "agent main() -> integer { forever(x = 1) }" >>= soleAgentBody
+      case body.returnExpression of
+        Just (ExpressionCall _) -> pure ()
+        _ -> expectationFailure "expected a call to an agent named forever"
+      _ <- parseClean "agent forever(x: integer) -> integer { x }"
+      pure ()
 
     it "parses a parallel tuple" $ do
       body <- parseClean "agent main() -> integer { parallel [a, b, c] }" >>= soleAgentBody
@@ -259,6 +365,16 @@ spec = do
       case body.statements of
         (StatementUse useStatement : _) -> useStatement.binder `shouldSatisfy` (/= Nothing)
         _ -> expectationFailure "expected a use statement"
+
+  describe "finally" $ do
+    it "parses a finally statement carrying a block" $ do
+      body <- parseClean "agent main() -> integer {\n  finally { let cleanup = 1 }\n  7\n}" >>= soleAgentBody
+      case body.statements of
+        (StatementFinally finallyStatement : _) -> length finallyStatement.body.statements `shouldBe` 1
+        _ -> expectationFailure "expected a leading finally statement"
+
+    it "rejects `finally` used as an identifier (it is a reserved keyword)" $
+      shouldFail "agent main() -> integer { let finally = 1 }"
 
   describe "comments and layout" $ do
     it "ignores line and block comments" $ do

@@ -7,15 +7,17 @@
 // inbound ones via the actor.
 
 import type { Block } from "@katari-lang/types";
-import type { AskKind, ReactorName } from "../event/types.js";
+import { isUserFacingRequest } from "../escalation-filter.js";
+import type { AskKind, ModifierMap, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { isTainted, markPrivate } from "../value/privacy.js";
-import type { Value } from "../value/types.js";
+import type { GenericSubstitution, Value } from "../value/types.js";
 import {
   childrenOf,
   completeInstance,
   completeThread,
+  constructValue,
   escapeAsk,
   proxyAsk,
   raisePanic,
@@ -34,10 +36,13 @@ import type {
   AgentThread,
   CancelExit,
   ExternalThread,
+  FinalizerDisposition,
+  ForeverThread,
   ForThread,
   HandleThread,
   MatchThread,
   ParallelThread,
+  PrimitiveThread,
   RequestThread,
   SequenceThread,
   Thread,
@@ -81,6 +86,9 @@ export async function dispatchCreate(ctx: StepContext, thread: Thread): Promise<
     case "for":
       createFor(ctx, thread);
       return;
+    case "forever":
+      createForever(ctx, thread);
+      return;
     case "handle":
       createHandle(ctx, thread);
       return;
@@ -109,7 +117,13 @@ export function dispatchCallAck(
   }
   switch (thread.kind) {
     case "agent":
-      completeInstance(ctx, value); // the body completed normally (no explicit return)
+      if (ctx.instance.phase.kind === "finalizing") {
+        // A finalizer thread completed: run the next armed one, or emit the deferred terminal ack.
+        runNextFinalizer(ctx);
+        return;
+      }
+      // The body completed normally (no explicit return): reach the terminal, running finalizers first.
+      beginTerminal(ctx, { kind: "completed", value });
       return;
     case "sequence":
       resumeSequence(ctx, thread, callId, value);
@@ -123,6 +137,10 @@ export function dispatchCallAck(
       return;
     case "for":
       handleForCallAck(ctx, thread, callId, value);
+      return;
+    case "forever":
+      // An iteration completed: its value is discarded and the next iteration starts at once.
+      startForeverIteration(ctx, thread);
       return;
     case "handle":
       handleHandleCallAck(ctx, thread, callId, value);
@@ -153,6 +171,9 @@ export function dispatchAsk(
     case "for":
       forAsk(ctx, thread, from, askId, ask);
       return;
+    case "forever":
+      foreverAsk(ctx, thread, from, askId, ask);
+      return;
     case "handle":
       handleAsk(ctx, thread, from, askId, ask);
       return;
@@ -161,8 +182,9 @@ export function dispatchAsk(
     case "parallel":
     case "delegate":
     case "external":
-      // None of these is a control target or a request handler: bubble every ask up unchanged. (A delegate /
-      // external proxy has no in-instance children to ask it, so this is reached only defensively.)
+      // None of these is a control target or a request handler: bubble every ask up unchanged. (A
+      // delegate / external proxy has no in-instance children to ask it, so those two are reached only
+      // defensively.)
       proxyAsk(ctx, thread, ask, from, askId);
       return;
     case "primitive":
@@ -241,10 +263,13 @@ function finishCancel(ctx: StepContext, thread: Thread): void {
       removeThread(ctx, thread.id);
       return;
     case "returnInstance":
-      completeInstance(ctx, exit.value);
+      // An explicit `return` completed the instance: reach the terminal, running finalizers first.
+      beginTerminal(ctx, { kind: "completed", value: exit.value });
       return;
     case "terminateInstance":
-      terminateInstance(ctx);
+      // The user body's cancel cascade cleared: reach the cancel terminal, running finalizers first (unless
+      // the instance failed, in which case `beginTerminal` skips them).
+      beginTerminal(ctx, { kind: "cancelled" });
       return;
     case "completeWith":
       completeThread(ctx, thread, exit.value);
@@ -268,7 +293,16 @@ function noteChildGone(ctx: StepContext, parentId: ThreadId): void {
 export function dispatchCancel(ctx: StepContext, thread: Thread): void {
   switch (thread.kind) {
     case "agent":
-      // The instance is being terminated: tear down the body, then terminateAck.
+      if (ctx.instance.phase.kind === "finalizing") {
+        // Atomicity: a cancel arriving mid-drain neither cancels the running finalizers nor restarts
+        // anything. Flip the deferred terminal to `cancelled` in place and let the drain finish — its
+        // terminal then acks the cancel and discards the completed result. (`finalizing` implies not
+        // failed: a panic escaping mid-drain would have moved the phase to `failed`.)
+        ctx.instance.phase = { kind: "finalizing", disposition: { kind: "cancelled" } };
+        return;
+      }
+      // The instance is being terminated: tear down the user body, then (unless it failed) run finalizers
+      // before the terminateAck. A failed instance takes this path too — `beginTerminal` skips its finalizers.
       beginCancel(ctx, thread, { kind: "terminateInstance" });
       return;
     case "delegate":
@@ -292,6 +326,7 @@ export function dispatchCancel(ctx: StepContext, thread: Thread): void {
     case "sequence":
     case "match":
     case "for":
+    case "forever":
     case "parallel":
     case "handle":
       beginCancel(ctx, thread, { kind: "ackParent" });
@@ -319,6 +354,14 @@ export function dispatchCancelAck(ctx: StepContext, thread: Thread, callId: Call
     const action = thread.postCancelCollect[callId];
     delete thread.postCancelCollect[callId];
     collectIteration(ctx, thread, callId, action.value, action.modifiers);
+    return;
+  }
+  if (thread.kind === "forever" && thread.postCancelAdvance[callId] !== undefined) {
+    // A targeted `next`-cancel of a forever iteration finished: apply its modifiers and re-iterate (no
+    // value is collected — the forever analogue of the `for` case above).
+    const action = thread.postCancelAdvance[callId];
+    delete thread.postCancelAdvance[callId];
+    advanceForever(ctx, thread, action.modifiers);
     return;
   }
   noteChildGone(ctx, thread.id);
@@ -356,6 +399,18 @@ function agentAsk(
     beginCancel(ctx, thread, { kind: "returnInstance", value: ask.value });
     return;
   }
+  // Runtime backstop for the `finally` io-only rule (the compiler forbids this statically): a finalizer may
+  // not perform a user-facing escalation that would proxy through the parent — io-effect delegations
+  // (http / mcp / webhook, in-instance leaf prims) go straight to their reactor and never reach here, but a
+  // capability request would. Panic naming the restriction rather than escaping to a handler / the user. The
+  // panic itself is a failure request (not user-facing), so it escapes normally — the instance then fails.
+  if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
+    const child = ctx.instance.threads[from];
+    if (child !== undefined && child.origin === "finalizer") {
+      raisePanic(ctx, child, FINALLY_ESCALATION_PANIC);
+      return;
+    }
+  }
   // A request, or a control ask targeting a lexical ancestor instance: escape as an outbound escalate.
   escapeAsk(ctx, from, askId, ask);
 }
@@ -376,6 +431,82 @@ function applyDefaults(
     }
   }
   return { kind: "record", fields };
+}
+
+// ─── finalizers (the `finally` terminal) ──────────────────────────────────────────────────────────
+
+/** The panic a finalizer's forbidden escalation raises (backstop for the compiler's io-only `finally` rule). */
+const FINALLY_ESCALATION_PANIC =
+  "a finally block may not perform an escalation that proxies through the parent (finally is io-only)";
+
+/**
+ * Reach the instance's terminal. A trusted instance with armed finalizers DEFERS its ack: it enters the
+ * `finalizing` phase and drains the stack in reverse before acking `disposition` (the original result for a
+ * normal completion, a discarded result for a cancel). A `failed` instance (a panic escaped) or one with no
+ * finalizers acks immediately — a panicked instance's state is not trusted, so its finalizers are skipped.
+ */
+function beginTerminal(ctx: StepContext, disposition: FinalizerDisposition): void {
+  const instance = ctx.instance;
+  if (instance.phase.kind === "failed" || instance.finalizers.length === 0) {
+    emitTerminal(ctx, disposition);
+    return;
+  }
+  instance.phase = { kind: "finalizing", disposition };
+  // The user tree is gone; the root now drives finalizers as ordinary children, so restore it to `running`
+  // (a cancel-induced terminal left it `cancelling`) and drop the cancel exit that would ack its parent.
+  const root = agentRootOf(ctx);
+  root.status = "running";
+  delete instance.cancelExits[root.id];
+  runNextFinalizer(ctx);
+}
+
+/** Emit the instance's terminal ack for `disposition` and retire it (its finalizers, if any, already drained). */
+function emitTerminal(ctx: StepContext, disposition: FinalizerDisposition): void {
+  switch (disposition.kind) {
+    case "completed":
+      completeInstance(ctx, disposition.value); // the deferred delegateAck with the original result
+      return;
+    case "cancelled":
+      terminateInstance(ctx); // the deferred terminateAck (the completed result, if any, is discarded)
+      return;
+  }
+}
+
+/**
+ * Run the next armed finalizer (reverse arming order) as an ordinary child of the agent root, or — the stack
+ * drained — emit the deferred terminal ack. Each finalizer chains to the scope it was armed in (so it reads
+ * the enclosing bindings) and is stamped `finalizer` so a user cancel never cascades into its subtree.
+ */
+function runNextFinalizer(ctx: StepContext): void {
+  const instance = ctx.instance;
+  if (instance.phase.kind !== "finalizing") return;
+  const armed = instance.finalizers.pop();
+  if (armed === undefined) {
+    const { disposition } = instance.phase;
+    instance.phase = { kind: "running" };
+    emitTerminal(ctx, disposition);
+    return;
+  }
+  const root = agentRootOf(ctx);
+  const callId = allocateCallId(instance);
+  root.pending = { callId, output: null };
+  spawnThread(ctx, {
+    parent: root.id,
+    parentCallId: callId,
+    parentScopeId: armed.scopeId,
+    blockId: armed.block,
+    parameters: {},
+    origin: "finalizer",
+  });
+}
+
+/** The instance's root `AgentThread` — the finalizer drain's parent and the instance's terminal boundary. */
+function agentRootOf(ctx: StepContext): AgentThread {
+  const root = ctx.instance.threads[ctx.instance.rootThreadId];
+  if (root === undefined || root.kind !== "agent") {
+    throw new Error("the instance root is not an agent thread (engine bug)");
+  }
+  return root;
 }
 
 // ─── sequence ───────────────────────────────────────────────────────────────────────────────────
@@ -399,22 +530,46 @@ function resumeSequence(
 
 // ─── leaf bodies (primitive / construct / request / external) ────────────────────────────────────
 
-async function createPrimitive(ctx: StepContext, thread: Thread): Promise<void> {
-  const block = getBlock(ctx, thread.blockId);
-  if (block.kind !== "primitive") throw new Error(`thread ${thread.id} is not a primitive block`);
-  const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
+async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promise<void> {
+  // An `inline` invocation (the cross-module fast path) carries its own name / argument / generics —
+  // the callee's block lives in a foreign module this instance cannot read. A `block` invocation reads
+  // them off its block, and its generics are the instance's ambient (the delegate that summoned the
+  // instance stamped them).
+  let name: string;
+  let argument: Value;
+  let generics: GenericSubstitution | undefined;
+  switch (thread.invocation.kind) {
+    case "inline":
+      name = thread.invocation.name;
+      argument = thread.invocation.argument;
+      generics = thread.invocation.generics;
+      break;
+    case "block": {
+      const block = getBlock(ctx, thread.blockId);
+      if (block.kind !== "primitive") {
+        throw new Error(`thread ${thread.id} is not a primitive block`);
+      }
+      name = block.name;
+      argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
+      generics = ctx.instance.ambientGenerics;
+      break;
+    }
+  }
   // A prim failure is never a crash: an anticipated, typed failure (`KatariThrow` — malformed JSON, a
   // schema mismatch) raises `prelude.throw` with its payload; any other JS error is a `panic` (a zero
   // divisor, an engine backstop). Both bubble toward a handler / the run — only the throw is catchable.
   let value: Value;
   try {
-    value = await ctx.prims.run(block.name, argument, {
+    value = await ctx.prims.run(name, argument, {
       projectId: ctx.projectId,
       ir: ctx.irSource,
       blobs: ctx.blobs,
-      ...(ctx.instance.ambientGenerics !== undefined
-        ? { generics: ctx.instance.ambientGenerics }
-        : {}),
+      // The warm blob catalog: a metadata prim (`files.size`) reads the row a slim ref points at.
+      blobEntryOf: (blobId) => ctx.store.blobs[blobId],
+      // The turn-scoped blob write seams, for the two effectful file prims (`from_base64` / `free`). The
+      // engine only forwards to the reactor's pool-backed closures; ownership / run scoping live there.
+      blobEffects: { produce: ctx.produceBlob, freeInRun: ctx.freeBlobInRun },
+      ...(generics !== undefined ? { generics } : {}),
     });
   } catch (error) {
     if (error instanceof KatariThrow) {
@@ -435,8 +590,7 @@ function createConstruct(ctx: StepContext, thread: Thread): void {
   const block = getBlock(ctx, thread.blockId);
   if (block.kind !== "construct") throw new Error(`thread ${thread.id} is not a construct block`);
   const argument = readVariable(ctx.store, thread.scopeId, block.input) ?? NULL_VALUE;
-  const fields = argument.kind === "record" ? argument.fields : {};
-  completeThread(ctx, thread, { kind: "record", fields, ctor: block.name });
+  completeThread(ctx, thread, constructValue(argument, block.name));
 }
 
 /** A request leaf raises its request as an ask to its parent (the instance root agent), which has no
@@ -478,6 +632,12 @@ function createExternal(ctx: StepContext, thread: ExternalThread): void {
         snapshot: ctx.ir.snapshot,
       },
       argument,
+      // The external agent's own instantiation (this instance's ambient) rides to the reactor, so a
+      // reactor that decodes its reply against a result generic — the mcp direct call against its `T` —
+      // reads the schema the call site stamped. A reactor that ignores it (ffi / http) is unaffected.
+      ...(ctx.instance.ambientGenerics !== undefined
+        ? { generics: ctx.instance.ambientGenerics }
+        : {}),
     },
     // `to` is the call reactor this routes to (`ffi` / `http`), from the block's marker via the proxy thread;
     // the target does not repeat it.
@@ -706,6 +866,86 @@ function finishFor(ctx: StepContext, thread: ForThread, thenClause: { body: numb
   });
 }
 
+// ─── forever (unbounded loop) ────────────────────────────────────────────────────────────────────
+
+function createForever(ctx: StepContext, thread: ForeverThread): void {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "forever") throw new Error(`thread ${thread.id} is not a forever block`);
+  // Seed the loop state keyed by each state's body variable (so a `with` modifier updates it directly),
+  // exactly as `createFor` does. Empty for a stateless `forever { … }`.
+  const bodyParameters = ctx.ir.block(block.body).parameters;
+  block.initialStates.forEach((initial, index) => {
+    const stateVariable = bodyParameters[`state_${index}`];
+    if (stateVariable !== undefined) {
+      thread.states[stateVariable] = readVariable(ctx.store, thread.scopeId, initial) ?? NULL_VALUE;
+    }
+  });
+  startForeverIteration(ctx, thread);
+}
+
+/** Spawn one body iteration as a fresh child thread in a fresh scope, so per-iteration bindings die with
+ *  the iteration (the intra-instance GC reclaims the completed child's scope at the turn boundary). The
+ *  body block takes no parameters — it reads the enclosing scope lexically. However many iterations have
+ *  run, the loop holds exactly one pending call and nothing collected: the flat-durable-footprint
+ *  invariant this construct exists for. A body with no suspension point spins within the turn — an
+ *  infinite pure loop is expressible in any language; a useful daemon body always suspends (an external
+ *  call, a sleep, a request). */
+function startForeverIteration(ctx: StepContext, thread: ForeverThread): void {
+  const block = getBlock(ctx, thread.blockId);
+  if (block.kind !== "forever") throw new Error(`thread ${thread.id} is not a forever block`);
+  const callId = allocateCallId(ctx.instance);
+  thread.pending = callId;
+  spawnThread(ctx, {
+    parent: thread.id,
+    parentCallId: callId,
+    parentScopeId: thread.scopeId,
+    blockId: block.body,
+    // Carry the current `var` state into the iteration (unchanged by an implicit next / fallthrough;
+    // updated by a `next … with (…)` before this is called).
+    parameters: stateParameters(ctx, thread, block.body),
+  });
+}
+
+/** A `forever` catches its OWN `break` and its OWN `next`, both naming this loop's block. A `break value`
+ *  cancels the in-flight iteration and completes the loop with the value (the same cancel-then-complete
+ *  cascade a `for`'s `break-for` uses). A `next … with (…)` cancels the iteration, applies the state
+ *  modifiers, and starts the next iteration (collecting no value — the loop maps nothing). Every other ask
+ *  (a request, or a `return` / outer `break` unwinding past the loop) bubbles up unchanged. */
+function foreverAsk(
+  ctx: StepContext,
+  thread: ForeverThread,
+  from: ThreadId,
+  askId: AskId,
+  ask: AskKind,
+): void {
+  if (ask.kind === "break-for" && ask.target === thread.blockId) {
+    beginCancel(ctx, thread, { kind: "completeWith", value: ask.value });
+    return;
+  }
+  if (ask.kind === "next-for" && ask.target === thread.blockId) {
+    // Mirror `for`'s `next-for`: cancel that iteration's subtree (the `next` may have escaped from inside
+    // still-running nested structure), then apply the modifiers and re-iterate on its teardown.
+    const child = ctx.instance.threads[from];
+    const callId = child?.parentCallId ?? null;
+    if (child === undefined || callId === null) {
+      throw new Error(`next-for from ${from} has no iteration call`);
+    }
+    thread.postCancelAdvance[callId] = { modifiers: ask.modifiers };
+    beginCancel(ctx, child, { kind: "ackParent" });
+    return;
+  }
+  proxyAsk(ctx, thread, ask, from, askId);
+}
+
+/** Apply a `next … with (…)`'s state modifiers and start the next iteration (a `forever`'s advance, once
+ *  the previous iteration's targeted cancel has cleared — the analogue of a `for`'s `collectIteration`). */
+function advanceForever(ctx: StepContext, thread: ForeverThread, modifiers: ModifierMap): void {
+  for (const [variable, modifierValue] of Object.entries(modifiers)) {
+    thread.states[Number(variable)] = modifierValue;
+  }
+  startForeverIteration(ctx, thread);
+}
+
 // ─── handle (effect handler) ─────────────────────────────────────────────────────────────────────
 
 function createHandle(ctx: StepContext, thread: HandleThread): void {
@@ -911,7 +1151,7 @@ function handleBusy(thread: HandleThread): boolean {
 /** Build the `state_N` parameter values for a block (body / handler / then-clause) from current states. */
 function stateParameters(
   ctx: StepContext,
-  thread: ForThread | HandleThread,
+  thread: ForThread | HandleThread | ForeverThread,
   blockId: number,
 ): Record<string, Value> {
   const parameters: Record<string, Value> = {};

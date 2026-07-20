@@ -4,7 +4,9 @@ import Data.Foldable (toList)
 import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
+import Katari.Compile (CompileInput (..), CompileResult (..), compile)
 import Katari.Data.AST
 import Katari.Data.Environment (GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), ValueEnvironment, monoScheme)
 import Katari.Data.GenericKind (GenericKind (..))
@@ -14,8 +16,8 @@ import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..))
 import Katari.Data.SourceSpan (Located (..), Position (..), SourceSpan (..))
 import Katari.Data.Variance (Variance (..))
-import Katari.Diagnostics (Diagnostics)
-import Katari.Error (CompilerError (..), typeErrorCode)
+import Katari.Diagnostics (Diagnostics, renderDiagnostics)
+import Katari.Error (CompilerError (..), compilerErrorCode, typeErrorCode)
 import Katari.Typechecker.Check
 import Katari.Typechecker.Context
   ( Checker,
@@ -727,6 +729,68 @@ spec = do
           (_, diagnostics) = runAt sourceLocal mempty (synthExpressionType forExpr)
        in hasErrorCode "K3014" diagnostics `shouldBe` True
 
+  describe "parallel for with `var` state (K3024)" $ do
+    it "rejects a `parallel for` declaring `var` state (concurrent iterations cannot fold an accumulator)" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  parallel for (let value in [1, 2, 3], var total: integer = 0) {\n"
+            <> "    next with { total = total + value }\n"
+            <> "  } then (_elements) { total }\n"
+            <> "}"
+        )
+        `shouldBe` ["K3024"]
+
+    it "accepts the same accumulator on a sequential `for` (iterations run in order, so the state folds)" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  for (let value in [1, 2, 3], var total: integer = 0) {\n"
+            <> "    next with { total = total + value }\n"
+            <> "  } then (_elements) { total }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts a `parallel for` without `var` state (a pure concurrent map)" $
+      compiledCodes "agent main() -> array[integer] { parallel for (let value in [1, 2, 3]) { next value * value } }"
+        `shouldBe` []
+
+  describe "parallel handler with `var` state (K3025)" $ do
+    it "rejects a `parallel handler` declaring `var` state (concurrent request dispatches cannot fold an accumulator)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use parallel handler (var counter: integer = 0) {\n"
+            <> "    request tick() { next counter with { counter = counter + 1 } }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` ["K3025"]
+
+    it "accepts the same accumulator on a sequential handler (requests dispatch in FIFO order, so the state folds)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use handler (var counter: integer = 0) {\n"
+            <> "    request tick() { next counter with { counter = counter + 1 } }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "accepts a `parallel handler` without `var` state (stateless bodies are safe to dispatch concurrently)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer {\n"
+            <> "  use parallel handler {\n"
+            <> "    request tick() { next 1 }\n"
+            <> "  }\n"
+            <> "  tick()\n"
+            <> "}"
+        )
+        `shouldBe` []
+
   describe "jump statements" $ do
     it "`return` inside an agent body is in scope (its value is checked at the agent edge, not here)" $
       let action = enterAgentBody (BoundaryId 0) (walkStatements [returnStatementBuilder (integerLiteral 1)] (pure ()))
@@ -895,17 +959,518 @@ spec = do
           (_, diagnostics) = runChecker environment (synthExpressionType (qualifiedVariableExpression topLevelName))
        in hasErrorCode "K3015" diagnostics `shouldBe` True
 
-  describe "checkExternalReactor (a `from` clause names a real reactor)" $ do
+  describe "checkExternalReactor (a `from` clause names a reactor this module may use)" $ do
+    let userModule = ModuleName "test"
     it "accepts an absent clause (defaults to ffi)" $
-      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan Nothing)
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule Nothing)
        in toList diagnostics `shouldBe` []
-    it "accepts the known reactors ffi and http" $
-      let (_, ffiDiagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "ffi"))
-          (_, httpDiagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "http"))
-       in (toList ffiDiagnostics, toList httpDiagnostics) `shouldBe` ([], [])
+    it "accepts ffi from a user module (the one user-facing channel)" $
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just "ffi"))
+       in toList diagnostics `shouldBe` []
     it "rejects an unknown reactor name (K3018)" $
-      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (Just "grpc"))
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just "grpc"))
        in hasErrorCode "K3018" diagnostics `shouldBe` True
+    it "rejects a user module's claim on every built-in reactor (K3022)" $
+      let rejected reactor =
+            let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan userModule (Just reactor))
+             in hasErrorCode "K3022" diagnostics
+       in all rejected ["http", "webhook", "mcp", "time", "oauth", "region"] `shouldBe` True
+    it "accepts a built-in reactor from an embedded stdlib module (its compiled externals ARE the reactor's keys)" $
+      let (_, diagnostics) = runAt mempty mempty (checkExternalReactor testSpan (ModuleName "prelude.time") (Just "time"))
+       in toList diagnostics `shouldBe` []
+    it "rejects a user source declaring `from \"time\"` end to end (K3022, not a runtime dispatch panic)" $
+      compiledCodes "external agent my_now() -> number from \"time\"" `shouldContain` ["K3022"]
+    it "rejects a user source declaring `from \"oauth\"` end to end (K3022 — the oauth reactor is stdlib-only)" $
+      compiledCodes "external agent my_token(name: string) -> string from \"oauth\"" `shouldContain` ["K3022"]
+    it "accepts a program calling the stdlib `oauth.token` (the new prelude.oauth module compiles)" $
+      compiledCodes "agent main() -> string of private with io | prelude.throw[oauth.server_error] { oauth.token(name = \"github\") }"
+        `shouldBe` []
+
+  describe "forever loops (end to end)" $ do
+    it "types as never with no break, so it conforms to any declared return" $
+      compiledCodes "agent main() -> integer { forever { let _x = 1 } }" `shouldBe` []
+
+    it "propagates the body's effects to the enclosing row (performed every iteration)" $
+      compiledCodes "request tick() -> null\nagent daemon() -> never with tick { forever { tick() } }" `shouldBe` []
+
+    it "rejects a body effect the declared row does not carry (the loop performs it every iteration)" $
+      compiledCodes "request tick() -> null\nagent daemon() -> never with pure { forever { tick() } }" `shouldSatisfy` (not . null)
+
+    it "types as the break value's type: `break v` exits the loop with `v`" $
+      compiledCodes "agent main() -> integer { forever { break 1 } }" `shouldBe` []
+
+    it "rejects a break value that does not match the declared result (K3001)" $
+      compiledCodes "agent main() -> integer { forever { break \"x\" } }" `shouldContain` ["K3001"]
+
+    it "unions multiple break values into the loop's result" $
+      compiledCodes
+        ( "data a()\ndata b()\n"
+            <> "agent choose(flag: boolean) -> a | b {\n"
+            <> "  forever { if (flag) { break a() } else { break b() } }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "a break inside forever targets the forever, not an enclosing `for` (the for still yields an array)" $
+      compiledCodes
+        ( "agent main() -> array[integer] {\n"
+            <> "  for (let x in [1, 2, 3]) { forever { break x } }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "carries `var` state across iterations, advanced by `next … with (…)`, and broken out with a value" $
+      compiledCodes
+        ( "agent main() -> integer {\n"
+            <> "  forever (var n = 0) {\n"
+            <> "    if (n < 3) { next with { n = n + 1 } } else { break n }\n"
+            <> "  }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "checks a `with` modifier against its `var` type (K3001 on a mismatch)" $
+      compiledCodes "agent main() -> never { forever (var n = 0) { next with { n = \"x\" } } }" `shouldContain` ["K3001"]
+
+    it "a bare `next` (implicit re-iterate) needs no var and keeps the loop typed as never" $
+      compiledCodes "request tick() -> null\nagent main() -> never with tick { forever { tick() } }" `shouldBe` []
+
+    it "still supports the composed catch-and-break (a surrounding handler's break exits with the value)" $
+      compiledCodes
+        ( "request done(value: integer) -> never\n"
+            <> "agent main() -> integer {\n"
+            <> "  use handler {\n"
+            <> "    request done(value: integer) -> never { break value }\n"
+            <> "  }\n"
+            <> "  forever { done(value = 1) }\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+  -- The residual-type assertions run end to end (through 'Katari.Compile'): the enclosing agent's
+  -- return annotation states the expected residual type, so a clean compile IS the type assertion.
+  describe "partial application (`_` holes)" $ do
+    let scaleDecl = "agent scale(factor: number, value: number) -> number { factor * value }\n"
+        tickDecl = "request tick() -> integer\nagent effectful(label: string, count: integer) -> string with tick { label }\n"
+        pickDecl = "agent pick[T](value: T, fallback: T) -> T { value }\n"
+        defaultedDecl = "agent defaulted(x: integer, y: integer ?= 3) -> integer { x + y }\n"
+
+    it "types the residual as an agent over exactly the holed parameter" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = 2.0, value = _) }") `shouldBe` []
+
+    it "rejects a residual annotation whose holed parameter has a different type (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: string) -> number { scale(factor = 2.0, value = _) }") `shouldContain` ["K3001"]
+
+    it "moves the callee's effect onto the residual: the partial application itself is pure" $
+      compiledCodes (tickDecl <> "agent partial() -> agent (count: integer) -> string with tick with pure { effectful(label = \"x\", count = _) }") `shouldBe` []
+
+    it "rejects a residual annotation that drops the callee's effect (K3001)" $
+      compiledCodes (tickDecl <> "agent partial() -> agent (count: integer) -> string { effectful(label = \"x\", count = _) }") `shouldContain` ["K3001"]
+
+    it "keeps a holed defaulted parameter optional on the residual" $
+      compiledCodes (defaultedDecl <> "agent partial() -> agent (x: integer, y ?: integer) -> integer { defaulted(x = _, y = _) }") `shouldBe` []
+
+    it "rejects a hole label that names no callee parameter (K3020)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = 2.0, wrong = _) }") `shouldContain` ["K3020"]
+
+    it "rejects a required parameter that is neither supplied nor holed (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(value = _) }") `shouldContain` ["K3001"]
+
+    it "checks a supplied argument against its parameter as a full call would (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { scale(factor = \"x\", value = _) }") `shouldContain` ["K3001"]
+
+    it "accepts a private supplied argument as a full call would, baking it into a private residual" $
+      -- A pure callee lifts across attribute worlds identically at a partial site now that both share
+      -- 'Katari.Typechecker.Check.checkArgumentShape': the private `secret` is accepted (a full
+      -- `scale(factor = secret, value = 2.0)` would accept it too), and the residual's handle carries
+      -- that private attribute, so the residual typed as a `private` agent compiles cleanly.
+      compiledCodes (scaleDecl <> "agent partial(secret: number of private) -> (agent (value: number) -> number) of private { scale(factor = secret, value = _) }") `shouldBe` []
+
+    it "carries the baked-in private attribute on the residual — a public residual annotation is rejected (K3001)" $
+      compiledCodes (scaleDecl <> "agent partial(secret: number of private) -> agent (value: number) -> number { scale(factor = secret, value = _) }") `shouldContain` ["K3001"]
+
+    it "the residual's eventual result matches a full call's: both observe the private argument (`number of private`)" $
+      compiledCodes
+        ( scaleDecl
+            <> "agent via_full(secret: number of private) -> number of private { scale(factor = secret, value = 21.0) }\n"
+            <> "agent via_residual(secret: number of private) -> number of private { let double = scale(factor = secret, value = _)\ndouble(value = 21.0) }"
+        )
+        `shouldBe` []
+
+    it "infers a generic from the supplied arguments" $
+      compiledCodes (pickDecl <> "agent partial() -> agent (value: integer) -> integer { pick(value = _, fallback = 3) }") `shouldBe` []
+
+    it "reports a generic determined only by holed parameters (K3016)" $
+      compiledCodes (pickDecl <> "agent partial() -> agent (value: integer, fallback: integer) -> integer { pick(value = _, fallback = _) }") `shouldContain` ["K3016"]
+
+    it "composes with explicit instantiation: `pick[integer](value = _, fallback = _)`" $
+      compiledCodes (pickDecl <> "agent partial() -> agent (value: integer, fallback: integer) -> integer { pick[integer](value = _, fallback = _) }") `shouldBe` []
+
+    it "partially applies an agent value (a `let`-bound callee)" $
+      compiledCodes (scaleDecl <> "agent partial() -> agent (value: number) -> number { let f = scale\nf(factor = 2.0, value = _) }") `shouldBe` []
+
+    it "the residual is callable like any agent value" $
+      compiledCodes (scaleDecl <> "agent run() -> number { let double = scale(factor = 2.0, value = _)\ndouble(value = 21.0) }") `shouldBe` []
+
+    it "rejects a hole in a `use` provider application (K3019)" $
+      compiledCodes
+        ( "agent provider(continuation: agent (value: null) -> integer, extra: integer) -> integer { continuation(value = null) }\n"
+            <> "agent run() -> integer { let x : integer = use provider(extra = _)\nx }"
+        )
+        `shouldContain` ["K3019"]
+
+  -- A finalizer runs at instance termination — the parent may already be awaiting the instance's
+  -- cancellation — so its net effect must be within `io`: it may not escalate a request through that
+  -- parent. The rule is checked on the finally body's residual effect (a request handled locally
+  -- inside the body is discharged before it counts).
+  describe "finally" $ do
+    it "accepts a pure finalizer body" $
+      compiledCodes "agent main() -> integer { finally { let cleanup = 1 }\n7 }" `shouldBe` []
+
+    it "accepts an io finalizer body, joining its io into the enclosing effect row" $
+      compiledCodes
+        ( "primitive agent log(message: string) -> null with io\n"
+            <> "agent main() -> integer with io { finally { log(message = \"bye\") }\n7 }"
+        )
+        `shouldBe` []
+
+    it "leaks the finalizer's io into the enclosing row, so a `pure` agent is rejected (K3001)" $
+      compiledCodes
+        ( "primitive agent log(message: string) -> null with io\n"
+            <> "agent main() -> integer with pure { finally { log(message = \"bye\") }\n7 }"
+        )
+        `shouldContain` ["K3001"]
+
+    it "accepts a finalizer that raises a request it handles locally" $
+      compiledCodes
+        ( "request ping() -> integer\n"
+            <> "agent main() -> integer { finally { use handler { request ping() { next 1 } }\nlet answer = ping() }\n7 }"
+        )
+        `shouldBe` []
+
+    it "rejects a finalizer that escalates an unhandled throw (K3021)" $
+      compiledCodes "agent main() -> integer { finally { prelude.throw(error = \"boom\") }\n7 }"
+        `shouldContain` ["K3021"]
+
+    it "rejects a finalizer that escalates a custom request (K3021)" $
+      compiledCodes
+        ( "request tick() -> integer\n"
+            <> "agent main() -> integer with io { finally { let counted = tick() }\n7 }"
+        )
+        `shouldContain` ["K3021"]
+
+  -- A string literal in type position is that string's singleton type: `"x" <: "x"` and
+  -- `"x" <: string`, but never the other way around. Literal types enter through written annotations
+  -- (here) and literal-binding generics (below); a string literal EXPRESSION still synthesizes
+  -- `string`, so nothing changes for programs that never write a literal type.
+  describe "string literal singleton types" $ do
+    it "accepts a literal-typed value where the same literal is expected" $
+      compiledCodes "agent pass(mode: \"fast\") -> \"fast\" { mode }" `shouldBe` []
+
+    it "accepts a literal-typed value where string is expected (\"x\" <: string)" $
+      compiledCodes "agent widen(mode: \"fast\") -> string { mode }" `shouldBe` []
+
+    it "rejects a literal-typed value where a different literal is expected (K3001)" $
+      compiledCodes "agent cross(mode: \"fast\") -> \"slow\" { mode }" `shouldContain` ["K3001"]
+
+    it "rejects a plain string where a literal is expected (string </: \"x\", K3001)" $
+      compiledCodes "agent narrow(mode: string) -> \"fast\" { mode }" `shouldContain` ["K3001"]
+
+    it "accepts a literal member flowing into a union of literals" $
+      compiledCodes "agent pick(mode: \"fast\") -> \"fast\" | \"slow\" { mode }" `shouldBe` []
+
+    it "rejects a literal outside the expected union (K3001)" $
+      compiledCodes "agent pick(mode: \"other\") -> \"fast\" | \"slow\" { mode }" `shouldContain` ["K3001"]
+
+    it "checks a literal call argument at its singleton against a literal-annotated parameter" $
+      compiledCodes "agent takes(mode: \"fast\") -> \"fast\" { mode }\nagent run() -> \"fast\" { takes(mode = \"fast\") }" `shouldBe` []
+
+    it "rejects a mismatched literal call argument against a literal-annotated parameter (K3001)" $
+      compiledCodes "agent takes(mode: \"fast\") -> \"fast\" { mode }\nagent run() -> \"fast\" { takes(mode = \"slow\") }" `shouldContain` ["K3001"]
+
+    it "a string literal expression still synthesizes `string` (a literal-typed let annotation is not met, K3001)" $
+      compiledCodes "agent run() -> string { let mode : \"fast\" = \"fast\"\nmode }" `shouldContain` ["K3001"]
+
+  -- The TypeScript `const` type-parameter analog: a `literal`-marked generic binds at a string
+  -- literal argument's singleton type; everything else infers exactly as before, and an unmarked
+  -- generic can never receive a singleton implicitly.
+  describe "literal-binding generic parameters" $ do
+    let connectDecl = "agent connect[literal url_type extends string](url: url_type) -> url_type { url }\n"
+        plainDecl = "agent plain[T](value: T) -> T { value }\n"
+
+    it "binds the singleton from a literal argument" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://x\" { connect(url = \"https://x\") }") `shouldBe` []
+
+    it "the singleton binding is exact — a different literal annotation is rejected (K3001)" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://y\" { connect(url = \"https://x\") }") `shouldContain` ["K3001"]
+
+    it "binds plain string from a variable argument" $
+      compiledCodes (connectDecl <> "agent run(address: string) -> string { connect(url = address) }") `shouldBe` []
+
+    it "a variable argument never produces a singleton (K3001 against a literal annotation)" $
+      compiledCodes (connectDecl <> "agent run(address: string) -> \"https://x\" { connect(url = address) }") `shouldContain` ["K3001"]
+
+    it "an unmarked generic binds string from a literal argument, exactly as before" $
+      compiledCodes (plainDecl <> "agent run() -> string { plain(value = \"x\") }") `shouldBe` []
+
+    it "an unmarked generic never binds a singleton implicitly (K3001)" $
+      compiledCodes (plainDecl <> "agent run() -> \"x\" { plain(value = \"x\") }") `shouldContain` ["K3001"]
+
+    it "explicit literal instantiation works through type-position literals" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://x\" { connect[\"https://x\"](url = \"https://x\") }") `shouldBe` []
+
+    it "explicit literal instantiation rejects a mismatched literal argument (K3001)" $
+      compiledCodes (connectDecl <> "agent run() -> \"https://x\" { connect[\"https://x\"](url = \"https://y\") }") `shouldContain` ["K3001"]
+
+    it "a literal request generic stamps the singleton into the performed row" $
+      compiledCodes
+        ( "request fetch[literal url_type extends string](url: url_type) -> string\n"
+            <> "agent run() -> string with fetch[\"https://x\"] { fetch(url = \"https://x\") }"
+        )
+        `shouldBe` []
+
+    it "the performed singleton row fits under a plain-string row (covariant request parameter)" $
+      compiledCodes
+        ( "request fetch[literal url_type extends string](url: url_type) -> string\n"
+            <> "agent run() -> string with fetch[string] { fetch(url = \"https://x\") }"
+        )
+        `shouldBe` []
+
+    it "the performed singleton row does not fit under a different literal's row (K3001)" $
+      compiledCodes
+        ( "request fetch[literal url_type extends string](url: url_type) -> string\n"
+            <> "agent run() -> string with fetch[\"https://y\"] { fetch(url = \"https://x\") }"
+        )
+        `shouldContain` ["K3001"]
+
+  -- A marker effect (`effect name[generics]`) is a pure type-level capability: it rides effect rows,
+  -- gates calls, is introduced and discharged by signatures alone, cannot be performed (it binds no
+  -- value name) and cannot be handled.
+  describe "marker effect declarations" $ do
+    let scopedDecl = "effect scoped[resource]\n"
+        -- The provide SHAPE, with a neutral name: a higher-order signature that mints the capability
+        -- for its callback's row and discharges it from its own result row. A primitive, because only
+        -- a signature (not a checked body) can discharge a marker — and a primitive adds no io.
+        provideDecl =
+          "primitive agent with_resource[R, effect E](run: agent (token: string) -> R with E | scoped[\"db\"]) -> R with E\n"
+        workerDecl = "agent worker(token: string) -> integer with scoped[\"db\"] { 0 }\n"
+
+    it "declares a marker and carries it in an effect row" $
+      compiledCodes (scopedDecl <> workerDecl) `shouldBe` []
+
+    it "introduces and discharges the marker through the higher-order signature (the result row is pure)" $
+      compiledCodes (scopedDecl <> provideDecl <> workerDecl <> "agent main() -> integer with pure { with_resource(run = worker) }") `shouldBe` []
+
+    it "gates a direct call: the marker row does not fit a pure caller (K3001)" $
+      compiledCodes (scopedDecl <> workerDecl <> "agent main() -> integer with pure { worker(token = \"t\") }") `shouldContain` ["K3001"]
+
+    it "scopes by argument: a callback tagged with a different resource is rejected (K3001)" $
+      compiledCodes
+        ( scopedDecl
+            <> provideDecl
+            <> "agent other_worker(token: string) -> integer with scoped[\"other\"] { 0 }\n"
+            <> "agent main() -> integer with pure { with_resource(run = other_worker) }"
+        )
+        `shouldContain` ["K3001"]
+
+    it "marker generics are phantom, hence row-compared covariantly (a literal tag fits a string tag)" $
+      compiledCodes (scopedDecl <> workerDecl <> "agent caller() -> integer with scoped[string] { worker(token = \"t\") }") `shouldBe` []
+
+    it "rejects a handler naming a marker (K3017 — nothing to catch)" $
+      compiledCodes
+        ( scopedDecl
+            <> "agent run() -> integer { use handler { request scoped() -> null { break 0 } }\n1 }"
+        )
+        `shouldContain` ["K3017"]
+
+    it "a marker is unperformable by construction (no value name to call, K2001)" $
+      compiledCodes (scopedDecl <> "agent run() -> null { scoped() }") `shouldContain` ["K2001"]
+
+  -- A scoped provider written with the UNION continuation row `-> R with E | scoped[url]` (the
+  -- semantically correct spelling `mcp.provide` / `katari mcp pull`'s `with_tools` declare). Inference
+  -- solves the provider's own residual `E` from a call site by CANCELLING the shared `scoped[url]`
+  -- entry against the actual's, rather than subtracting it into a lacks set (which the dispose step
+  -- then rejected against a rigid `E`). The nested case additionally exercises the name-keyed arg-union:
+  -- two literal scopes merge to `scoped["a" | "b"]`, and each provide subtracts its own url from the
+  -- merged arg, so both discharge to pure.
+  describe "scoped provider inference (union continuation rows)" $ do
+    let scopedDecl = "effect scoped[resource]\n"
+        stepA = "agent step_a(token: string) -> integer with scoped[\"a\"] { 0 }\n"
+        stepB = "agent step_b(token: string) -> integer with scoped[\"b\"] { 0 }\n"
+        -- The provider is a primitive (only a signature can discharge a marker; a primitive adds no io),
+        -- one over a fixed literal scope and one generic over a literal-binding url.
+        withA = "primitive agent with_a[R, effect E](continuation: agent (value: integer) -> R with E | scoped[\"a\"]) -> R with E\n"
+        provideUrl = "primitive agent provide[literal URL, R, effect E](url: URL, continuation: agent (value: integer) -> R with E | scoped[URL]) -> R with E\n"
+
+    it "infers a wrapper's residual E through the union row (a rigid E passes through)" $
+      -- The regression: solving `with_a`'s E from `k`'s `E | scoped["a"]` used to subtract scoped into a
+      -- lacks set, yielding `E \\ scoped` which the dispose rejected against the rigid declared `E`.
+      -- Cancelling the shared `scoped["a"]` solves `E := E`, so this compiles.
+      compiledCodes
+        ( scopedDecl
+            <> withA
+            <> "agent wrap[R, effect E](k: agent (value: integer) -> R with E | scoped[\"a\"]) -> R with E { with_a(continuation = k) }"
+        )
+        `shouldBe` []
+
+    it "the same wrapper compiles with explicit generics (the inference-free path was never broken)" $
+      compiledCodes
+        ( scopedDecl
+            <> withA
+            <> "agent wrap[R, effect E](k: agent (value: integer) -> R with E | scoped[\"a\"]) -> R with E { with_a[R, E](continuation = k) }"
+        )
+        `shouldBe` []
+
+    it "a single use-provide over a literal url discharges its scope to pure" $
+      compiledCodes
+        ( scopedDecl
+            <> stepA
+            <> provideUrl
+            <> "agent single() -> integer with pure {\n  let v : integer = use provide(url = \"a\")\n  step_a(token = \"x\")\n}"
+        )
+        `shouldBe` []
+
+    it "two nested use-provides compose: a tool from EACH scope (and one from the outer scope) inside the inner block, both discharged to pure" $
+      compiledCodes
+        ( scopedDecl
+            <> stepA
+            <> stepB
+            <> provideUrl
+            <> "agent nested() -> integer with pure {\n"
+            <> "  let va : integer = use provide(url = \"a\")\n"
+            <> "  let vb : integer = use provide(url = \"b\")\n"
+            <> "  let x = step_a(token = \"x\")\n"
+            <> "  let y = step_b(token = \"y\")\n"
+            <> "  let z = step_a(token = \"z\")\n"
+            <> "  x + y + z\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "negative: scoped[\"a\"] alone never satisfies scoped[\"b\"] (K3001)" $
+      compiledCodes
+        ( scopedDecl
+            <> stepB
+            <> "agent wrong() -> integer with scoped[\"a\"] { step_b(token = \"x\") }"
+        )
+        `shouldContain` ["K3001"]
+
+    it "a tail-lacks (override) mismatch names the subtracted marker instead of rendering two identical rows" $ do
+      -- An overwrite-spelled provider param `{...E, scoped["x"]}` (tail lacks scoped) against a union
+      -- continuation `E | scoped["x"]` (tail lacks nothing): both rows denormalize to `scoped["x"] | E`,
+      -- so the message must name the difference (`scoped`) or it reads as two identical rows.
+      let message =
+            compiledMessages
+              ( scopedDecl
+                  <> "external agent prov[R, effect E](k: agent (value: null) -> R with {...E, scoped[\"x\"]}) -> R with E\n"
+                  <> "agent wrong[R, effect E](k: agent (value: null) -> R with E | scoped[\"x\"]) -> R with io | E { prov[R, E](k = k) }"
+              )
+      message `shouldSatisfy` Text.isInfixOf "additionally excludes"
+      message `shouldSatisfy` Text.isInfixOf "scoped"
+
+  -- The `prelude.region` stdlib module: structured concurrency as a nursery, built on the same scoped
+  -- marker discipline as `mcp.provide`. `provide` opens the nursery and discharges its scope marker;
+  -- `fork` spawns a child bounded by the ceiling `E`; `join` / `cancel` operate on a fiber; `watch`
+  -- re-emits the fibers' escalations as `E`. Two soundness properties are checked end to end: a fiber is
+  -- joinable only in the region that spawned it (the nursery pins its scope marker INVARIANTLY, so two
+  -- distinct markers do not merge into a union), and a child's effect may not exceed the ceiling.
+  describe "region (structured concurrency nursery)" $ do
+    let botEvents =
+          "request on_message(source: string, msg: string) -> null\n"
+            <> "request needs_approval(x: string) -> boolean\n"
+            <> "type bot_events = on_message | needs_approval\n"
+        discordWatch =
+          "agent discord_watch(input: null) -> never with bot_events {\n"
+            <> "  let a = on_message(source = \"s\", msg = \"m\")\n"
+            <> "  let b = needs_approval(x = \"y\")\n"
+            <> "  forever { }\n"
+            <> "}\n"
+        tickWorker =
+          "request tick() -> null\n"
+            <> "type ev = tick\n"
+            <> "agent worker(input: null) -> integer with ev {\n  let a = tick()\n  42\n}\n"
+
+    it "the nursery usage example type-checks: provide opens it, fork spawns a child under the ceiling, watch re-emits, a handler discharges" $
+      compiledCodes
+        ( botEvents
+            <> discordWatch
+            <> "agent bot() -> null with io {\n"
+            <> "  let r : region.nursery[region.scope, bot_events] = use region.provide[region.scope, bot_events]\n"
+            <> "  use handler {\n"
+            <> "    request on_message(source: string, msg: string) -> null { null }\n"
+            <> "    request needs_approval(x: string) -> boolean { true }\n"
+            <> "  }\n"
+            <> "  let f = region.fork(nursery = r, task = discord_watch, argument = null)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "fork, join, cancel and watch compose in one nursery: join returns the child's value" $
+      compiledCodes
+        ( tickWorker
+            <> "agent bot() -> integer with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  use handler { request tick() -> null { null } }\n"
+            <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "  let result : integer = region.join(nursery = r, handle = f)\n"
+            <> "  let g = region.cancel(nursery = r, handle = f)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldBe` []
+
+    it "rejects joining a fiber from a DIFFERENT region: distinct scope markers do not merge (K3001)" $
+      -- Two nurseries under distinct markers `scope_a` / `scope_b`; a fiber forked in the first is passed
+      -- to the second's `join`. The nursery pins its marker invariantly, so `join` cannot infer the mere
+      -- UNION of the two scopes — the fiber's `scope_a` is rejected against the nursery's `scope_b`.
+      compiledCodes
+        ( tickWorker
+            <> "effect scope_a\n"
+            <> "effect scope_b\n"
+            <> "agent bot() -> integer with io {\n"
+            <> "  let ra : region.nursery[scope_a, ev] = use region.provide[scope_a, ev]\n"
+            <> "  let rb : region.nursery[scope_b, ev] = use region.provide[scope_b, ev]\n"
+            <> "  let fa = region.fork(nursery = ra, task = worker, argument = null)\n"
+            <> "  region.join(nursery = rb, handle = fa)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "rejects forking a child whose effect exceeds the nursery's ceiling E (K3001)" $
+      -- The nursery ceiling is `on_message` only; `rogue_watch` also raises `rogue`, which does not fit.
+      compiledCodes
+        ( "request on_message(source: string, msg: string) -> null\n"
+            <> "request rogue(x: string) -> null\n"
+            <> "type ceiling = on_message\n"
+            <> "agent rogue_watch(input: null) -> never with rogue {\n  let a = rogue(x = \"y\")\n  forever { }\n}\n"
+            <> "agent bot() -> null with io | on_message {\n"
+            <> "  let r : region.nursery[region.scope, ceiling] = use region.provide[region.scope, ceiling]\n"
+            <> "  let f = region.fork(nursery = r, task = rogue_watch, argument = null)\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
+
+    it "rejects joining a fiber that escaped its provide, in a foreign region: the marker has nowhere to be discharged (K3001)" $
+      -- A fiber value may leave its `provide` (it is an opaque handle), but it can only be joined back in
+      -- a nursery carrying its own scope marker. `leak` returns a `region.scope` fiber; `consume` opens a
+      -- nursery under the distinct `other` marker and cannot join it.
+      compiledCodes
+        ( tickWorker
+            <> "effect other\n"
+            <> "agent leak() -> region.fiber[region.scope, integer] with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  region.fork(nursery = r, task = worker, argument = null)\n"
+            <> "}\n"
+            <> "agent consume() -> null with io {\n"
+            <> "  let leaked = leak()\n"
+            <> "  let r2 : region.nursery[other, ev] = use region.provide[other, ev]\n"
+            <> "  let bad = region.join(nursery = r2, handle = leaked)\n"
+            <> "  null\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
 
 ------------------------------------------------------------------------------------------------
 -- Runners
@@ -942,6 +1507,20 @@ hasErrorCode code diagnostics =
     typeErrorCode' = \case
       CompilerErrorType typeError -> Just (typeErrorCode typeError)
       _ -> Nothing
+
+-- | The error codes of a whole single-module @test@ program compiled through the full pipeline
+-- (stdlib spliced in). Used where the assertion needs surface syntax the direct-AST fixtures cannot
+-- spell (partial-application holes); @== []@ asserts a clean compile.
+compiledCodes :: Text -> List Text
+compiledCodes source =
+  let result = compile CompileInput {sources = Map.singleton (ModuleName "test") source}
+   in [compilerErrorCode located.value | located <- toList result.diagnostics]
+
+-- | The rendered diagnostic text of a single-module compile — for asserting on a message's WORDING
+-- (not just its code), e.g. that an override mismatch names the entry it disagrees on.
+compiledMessages :: Text -> Text
+compiledMessages source =
+  renderDiagnostics (compile CompileInput {sources = Map.singleton (ModuleName "test") source}).diagnostics
 
 ------------------------------------------------------------------------------------------------
 -- Type fixtures
@@ -1100,7 +1679,7 @@ callExpression callee arguments =
           [ CallArgument
               { name = name,
                 labelReference = Reference {sourceSpan = testSpan, resolution = ()},
-                value = value,
+                value = ArgumentExpression value,
                 sourceSpan = testSpan
               }
             | (name, value) <- arguments
@@ -1177,7 +1756,7 @@ identityScheme genericId =
             parameterInformation =
               Map.singleton
                 "a"
-                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, upperBound = Nothing}
+                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
           },
       valueType = pureAgentType (paramObject [("x", genericVariable genericId)]) (genericVariable genericId)
     }
@@ -1212,7 +1791,8 @@ typeEnvironmentWithFakeRequest =
             { name = fakeRequestName,
               genericParameters = emptyGenerics,
               parameterType = recordNormalized [],
-              returnType = nullType
+              returnType = nullType,
+              marker = False
             },
       synonymEnvironment = mempty,
       elaborateContext = emptyContext mempty (Map.singleton fakeRequestName emptyGenerics) mempty
@@ -1515,7 +2095,7 @@ extractSequenceElement normalizedType = case normalizedType.baseType of
 carriesIntegerAndString :: NormalizedType -> Bool
 carriesIntegerAndString normalizedType = case normalizedType.baseType of
   NormalizedBaseTypeLayered layer ->
-    layer.numberLayer == NumberSlotInteger && layer.stringLayer
+    layer.numberLayer == NumberSlotInteger && layer.stringLayer == StringSlotString
   _ -> False
 
 -- | Wrap a normalized type in @of private@: keep its base and generics, raise its outer attribute

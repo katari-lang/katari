@@ -1,0 +1,52 @@
+// The `prelude.reflection` sub-module: agents as first-class, inspectable values. Called qualified
+// via the default import — `reflection.get_metadata`, `reflection.call_agent`, type
+// `reflection.agent_metadata`.
+//
+// The two primitives close one loop: `get_metadata` reads a callable's public signature (so an AI
+// can be shown what a tool accepts) and `call_agent` dispatches a callable value with a
+// runtime-built argument (so an AI's pick can be invoked). Callables whose public signature is
+// decided at RUNTIME — an MCP server's tools (`prelude.mcp`) — are minted by the runtime itself and
+// participate in both exactly like compiled agents: a tool IS an agent.
+//
+// `get_metadata` derives a callable value's public signature — its qualified name, its `@"..."`
+// description, and the JSON Schemas of its input / output / requests, each schema a plain document
+// value (a record / array tree). To assemble a tool list, build the surrounding document with ordinary
+// record / array literals, embedding each schema by plain assignment — e.g.
+// `{ name = m.name, input_schema = m.input }`. Each schema is already a document value, so it drops
+// straight into the surrounding record; there is no wire step to apply.
+//
+// `call_agent` dispatches a callable VALUE with a runtime-built argument record — the
+// dynamic-dispatch counterpart of a static call, for a target an AI picked out of a tool list. The
+// runtime validates every delegation's argument against the callee's input schema, so malformed args
+// throw `call_error` at the call site rather than corrupting the callee — an AI-driven tool loop can
+// catch it and let the model retry with corrected arguments.
+
+@"The public metadata of one callable: its (qualified) name, its `@\"...\"` description, and the JSON
+Schemas of its input, output and requests — each schema a plain document value, ready to embed in an AI
+tool list. A local (closure) callable has an empty name."
+data agent_metadata(
+  @"The qualified name; empty for a local closure." name: string,
+  @"The `@\"...\"` documentation text; empty when undocumented." description: string,
+  @"The input record's JSON Schema, as a document value." input: unknown,
+  @"The output's JSON Schema, as a document value." output: unknown,
+  @"The requests' schemas: one { name, input, output } object per request the callable may perform." requests: unknown,
+)
+
+@"Derive `agent_metadata` from a callable value (a top-level agent, a data constructor, a request, an
+external, a local closure, or a runtime-minted tool such as an MCP server's). A generic callable
+instantiated with `[T]` yields schemas specialised to the instantiation; a runtime-minted tool yields
+the name / description / input schema its provider declared."
+primitive agent get_metadata(@"The callable value to inspect." value: agent never -> unknown with all) -> agent_metadata
+
+@"A dynamic dispatch failed before the target ran: the target is not a callable, or `args` does not
+conform to its input schema (`message` names the offending path). Thrown by `call_agent`."
+data call_error(@"The non-callable kind, or the offending path of the schema mismatch." message: string)
+
+@"Invoke a callable VALUE with a runtime-built argument record — dynamic dispatch for a target an AI
+picked out of a tool list. `args` is validated against the target's input schema at the delegation
+boundary; a mismatch throws `call_error` at this call site (catch it to let the model retry). The
+target's effects flow through unchanged."
+primitive agent call_agent[R, effect E](
+  @"The callable value to dispatch (e.g. the tool an AI picked)." target: agent never -> R with E,
+  @"The target's whole argument record, keyed by its parameter names." args: unknown,
+) -> R with E | prelude.throw[call_error]

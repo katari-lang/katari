@@ -1,0 +1,77 @@
+// Agents as AI tools, end to end — without a real AI, so the whole loop is deterministic:
+//
+//   1. `tool_list` derives each tool's schema with `reflection.get_metadata` and builds the JSON an AI
+//      tool-calling API would receive — ordinary record / array literals, embedding each schema (already
+//      a document value) by plain assignment.
+//   2. A canned "AI reply" (a tool pick + arguments, as JSON text) is read with the TYPED text
+//      boundary `json.parse_as[T]`: parsed and validated against T's schema in one step, so the
+//      reply's shape is pinned by a type instead of a shape-filter dance. (The untyped `json.parse` +
+//      shape-filter traversal remains available for exploring documents of unknown shape.)
+//   3. `dispatch` finds the picked tool by its metadata name and invokes it with `reflection.call_agent`;
+//      the runtime validates the AI-built arguments against the tool's input schema at the
+//      delegation boundary (a mismatch throws `reflection.call_error` — catch it to let the model retry).
+//
+// With a real AI, step 2's canned reply becomes an `http.fetch` of the tool-calling API with
+// step 1's body — the rest is unchanged (the standalone discord-bot example does exactly that).
+// Runtime-minted tools (an MCP server's, via `use mcp.provide(url = ...)`) flow through this same
+// metadata / dispatch machinery, indistinguishable from the compiled agents below.
+
+@"Raised when the AI reply names a tool that is not in the list (never, in this demo)."
+request bad_reply(message: string) -> never
+
+@"Adds two integers."
+agent add_numbers(x: integer, y: integer) -> integer {
+  x + y
+}
+
+@"Greets someone by name."
+agent greet(name: string) -> string {
+  f"hello, ${name}"
+}
+
+@"The AI-facing tool list: one { name, description, input_schema } object per tool, as a document value."
+agent tool_list(tools: array[agent never -> unknown with all]) -> unknown {
+  for (tool in tools) {
+    let m = reflection.get_metadata(value = tool)
+    next {
+      name = m.name,
+      description = m.description,
+      input_schema = m.input,
+    }
+  }
+}
+
+@"Find the tool whose qualified name is @picked@, call it with the AI-built @args@, and render the
+result as the JSON text sent back to the AI. The delegation boundary validates @args@ against the
+tool's input schema; a mismatch throws `reflection.call_error`."
+agent dispatch(tools: array[agent never -> unknown with all], picked: string, args: unknown) -> string {
+  for (tool in tools) {
+    let m = reflection.get_metadata(value = tool)
+    if (m.name == picked) {
+      // The tool's result is an arbitrary value; `stringify` renders it as canonical JSON text (total).
+      return json.stringify(value = reflection.call_agent(target = tool, args = args))
+    } else {
+      null
+    }
+  }
+  bad_reply(message = f"unknown tool: ${picked}")
+}
+
+@"One tool-calling turn over a canned AI reply. Returns what would be sent back to the AI:
+the tool list request body and the dispatched tool's result, both as JSON text."
+agent main() -> string {
+  let tools = [add_numbers, greet]
+
+  // 1. What the AI receives: the tool list as JSON text (the tool-call request body).
+  let body = json.stringify(value = tool_list(tools = tools))
+
+  // 2. What the AI replies, read through the typed text boundary: `parse_as[T]` validates the
+  //    document against T's schema and throws `json.validation_error` (naming the offending path) if
+  //    it does not fit (malformed text is `json.parse_error`).
+  let reply = "{\"tool\":\"playground.tools.add_numbers\",\"arguments\":{\"x\":2,\"y\":3}}"
+  let picked = json.parse_as[{ tool: string, arguments: record[unknown] }](text = reply)
+
+  // 3. Dispatch the pick; the result goes back to the AI as JSON text.
+  let result = dispatch(tools = tools, picked = picked.tool, args = picked.arguments)
+  f"tools=${body}; result=${result}"
+}

@@ -2,19 +2,20 @@
 // the shared callee-call lifecycle). An `http.fetch` call reaches it as a `delegate` (an external leaf marked
 // `reactor: "http"`) routed from core's `ExternalThread` proxy, exactly like an FFI call; it performs the
 // request through its transport (an in-runtime `fetch`) and the base turns the outcome into the call's
-// `delegateAck` (the `{ status, body }` response), an `escalate` (a request that produced no response → a
+// `delegateAck` (the `{ status, headers, body }` response), an `escalate` (a request that produced no response → a
 // `throw[http.fetch_error]` that bubbles to the caller's handler), or a `terminateAck` (an abort confirmed).
 //
-// It owns its in-flight calls durably as `http`-kind instances (`http_instances` — the call's status + caller),
-// and on recovery it does NOT re-send (an http request is not idempotent): the transport's `recover` leaves a
-// surviving request alone and reports an error for a gone one, so an interrupted running call fails like any
-// other no-response. This at-most-once guarantee is the whole reason http is a reactor rather than a
-// core-inline primitive.
+// It owns its in-flight calls durably as `http`-kind instances (an external-call row carrying only the
+// status — the extension document is empty), and on recovery it does NOT re-send (an http request is not
+// idempotent): the transport's `recover` leaves a surviving request alone and reports an error for a gone
+// one, so an interrupted running call fails like any other no-response. This at-most-once guarantee is the
+// whole reason http is a reactor rather than a core-inline primitive.
 //
 // A no-response error (DNS failure, refused connection, timeout, restart interruption) is a *program-
 // anticipatable* failure, so it escalates as `throw[http.fetch_error]` (the stdlib `prelude/http.ktr`
 // declares the effect) — a caller handles it to control retry; unhandled, it fails the run with the payload.
 
+import type { Json } from "@katari-lang/types";
 import { errorData } from "../engine/throw-signal.js";
 import type { ReactorName } from "../event/types.js";
 import type { HttpTransport } from "../external/http-transport.js";
@@ -23,17 +24,20 @@ import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
   type CallRow,
+  type DecodedCallExtension,
   ExternalCallReactor,
   type ExternalTarget,
-  type LoadedCall,
 } from "./external-call-reactor.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
+import { messageOf } from "./failure.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The transport data an http call holds. The argument is kept only to dispatch the request; recovery never
- *  re-sends (at-most-once), so it is not persisted — a reloaded call carries `null`. */
+ *  re-sends (at-most-once), so it is not persisted — a reloaded call carries `null`. `responseKind` (decided
+ *  once from the external's dispatch key: `fetch` → text, `fetch_file` → file) selects how the response body
+ *  is captured; it too is moot on reload (a reloaded call never re-dispatches). */
 interface HttpPayload {
   argument: Value | null;
+  responseKind: "text" | "file";
 }
 
 export class HttpReactor extends ExternalCallReactor<HttpPayload> {
@@ -46,15 +50,22 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
     super(pool);
   }
 
-  protected openPayload(_target: ExternalTarget, argument: Value | null): HttpPayload {
-    return { argument };
+  protected openPayload(target: ExternalTarget, argument: Value | null): HttpPayload {
+    // The dispatch key tells `fetch` (text response) from `fetch_file` (the body captured to a blob) —
+    // decided ONCE here, at the payload boundary, then carried as the payload's `responseKind`.
+    return { argument, responseKind: target.key === FETCH_FILE_KEY ? "file" : "text" };
   }
 
   protected dispatch(delegation: DelegationId, payload: HttpPayload): void {
     this.transport.dispatch({
       delegation,
-      // Lower the engine's Value to plain Json for the request; a secret header value is revealed here (http
-      // is an allowed sink — an API key flows to its request), unlike the user-facing API which redacts.
+      responseKind: payload.responseKind,
+      // Lower the engine's Value to plain Json for the request. This is THE single transport boundary the
+      // stdlib rule names: a secret submission surface — a header value OR the body — is revealed here (http
+      // is an allowed sink toward the destination server: an API key flows to its auth header, an OAuth
+      // `refresh_token` to its form body), unlike the user-facing API which redacts. The `url` carries no
+      // secret (the type system forbids a private URL), so revealing the whole argument reveals only what
+      // was deliberately submitted.
       argument: payload.argument === null ? null : valueToJson(payload.argument, "reveal"),
     });
   }
@@ -64,43 +75,60 @@ export class HttpReactor extends ExternalCallReactor<HttpPayload> {
   }
 
   /** An http no-response is program-anticipatable: escalate `throw[http.fetch_error]` (not a panic), so a
-   *  caller's throw handler controls retry. */
+   *  caller's throw handler controls retry. `raiser` (this http call's instance) owns the durable row. */
   protected override escalateError(
     delegation: DelegationId,
     message: string,
     caller: ReactorName,
     run: InstanceId,
+    raiser: InstanceId,
   ): void {
-    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller, run);
+    this.raiseThrow(delegation, errorData(FETCH_ERROR, message), caller, run, raiser);
+  }
+
+  /** An undecodable http response (a hostile server whose body / header names mimic a `$katari_*` marker, so
+   *  the wire decoder cannot reconstruct the `{ status, headers, body | file }` value) is program-
+   *  anticipatable exactly like a no-response: fold it into the same `throw[http.fetch_error]` — for both
+   *  `fetch` and `fetch_file`, which share this base seam — so a caller's handler still controls retry and a
+   *  hostile server can never poison the actor. */
+  protected override escalateResultDecodeFailure(
+    delegation: DelegationId,
+    cause: unknown,
+    caller: ReactorName,
+    run: InstanceId,
+    raiser: InstanceId,
+  ): void {
+    this.escalateError(
+      delegation,
+      `the response could not be decoded: ${messageOf(cause)}`,
+      caller,
+      run,
+      raiser,
+    );
   }
 
   protected abort(delegation: DelegationId): void {
     this.transport.abort(delegation);
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<HttpPayload>): Promise<void> {
-    // The inner-delegation bridges (`relays` / `innerCalls`) are not persisted: an http transport surfaces
-    // no inner agent calls, so both are empty by construction.
-    await tx.http.putHttpInstance({
-      instanceId: row.instance,
-      status: row.status,
-    });
+  /** The empty extension document: an http call's only kind-specific durable datum is its status (a row
+   *  column). No request (at-most-once recovery never re-sends), and no inner-delegation bridges — an
+   *  http transport surfaces no inner agent calls, so the fields do not exist rather than sit nullable. */
+  protected encodeCallExtension(_row: CallRow<HttpPayload>): Json {
+    return {};
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<HttpPayload>>> {
-    return (await loader.http.instances()).map((row) => ({
-      delegation: row.delegation,
-      instance: row.instance,
-      caller: row.caller,
-      run: row.run,
-      status: row.status,
-      // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
-      payload: { argument: null },
-      relays: [],
-      innerCalls: [],
-    }));
+  protected decodeCallExtension(_extension: Json): DecodedCallExtension<HttpPayload> {
+    // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none;
+    // `responseKind` is moot for the same reason (a reloaded call never re-dispatches) — default to text.
+    return { payload: { argument: null, responseKind: "text" }, relays: [], innerCalls: [] };
   }
 }
 
 /** The domain error ctor an http no-response throws (`prelude/http.ktr` declares it). */
 const FETCH_ERROR = "prelude.http.fetch_error";
+
+/** The dispatch key `http.fetch_file` arrives under — the compiled external's rendered qualified name.
+ *  Compared exactly at `openPayload` to pick the file-capturing response shape; every other http call
+ *  (`http.fetch`) captures the body as text. */
+const FETCH_FILE_KEY = "prelude.http.fetch_file";

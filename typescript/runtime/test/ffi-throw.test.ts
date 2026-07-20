@@ -1,9 +1,9 @@
 // The typed error channel across the FFI boundary, end to end through the ProjectActor: a handler raises
 // `FfiThrow` (the in-process analogue of the port's `katari.throw`) and the call fails as a `prelude.throw`
 // a katari-side handler catches — while a plain JS error stays a panic that the throw handler must NOT
-// catch. Inward, a katari callee's throw reaches the handler's `context.call` as a typed `FfiThrow`
-// rejection (payload intact, not a flattened message), and an uncaught one rethrows: the payload rides the
-// full circle katari → sidecar → katari unchanged.
+// catch. Inward, a katari callee's throw is NOT delivered to the handler's `context.call` (which no longer
+// rejects on a callee failure): it proxies UP the delegation, caught by a katari throw-handler placed above
+// the external call, or — uncaught — failing the run with its payload intact (not flattened to a panic).
 
 import {
   createAgentName,
@@ -154,11 +154,11 @@ function ir(): IRModule {
       },
     },
     entries: {
-      [createAgentName("main")]: 0,
-      [createAgentName("plain")]: 10,
-      [createAgentName("compute")]: 6,
-      [createAgentName("thrower")]: 15,
-      [THROW]: 20,
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("plain")]: { block: 10, private: false },
+      [createAgentName("compute")]: { block: 6, private: false },
+      [createAgentName("thrower")]: { block: 15, private: false },
+      [THROW]: { block: 20, private: false },
     },
     names: {},
   };
@@ -186,7 +186,10 @@ describe("typed throw across the FFI boundary", () => {
   test("a handler's FfiThrow is caught by a katari-side `prelude.throw` handler", async () => {
     const result = run("main", {
       compute: () => {
-        throw new FfiThrow({ $constructor: "main.my_error", value: { message: "ffi boom" } });
+        throw new FfiThrow({
+          $katari_constructor: "main.my_error",
+          $katari_value: { message: "ffi boom" },
+        });
       },
     });
     await expect(result).resolves.toEqual({ kind: "integer", value: -1 });
@@ -195,7 +198,10 @@ describe("typed throw across the FFI boundary", () => {
   test("an uncaught FfiThrow fails the run with the serialized payload (not a panic)", async () => {
     const failure = run("plain", {
       compute: () => {
-        throw new FfiThrow({ $constructor: "main.my_error", value: { message: "ffi boom" } });
+        throw new FfiThrow({
+          $katari_constructor: "main.my_error",
+          $katari_value: { message: "ffi boom" },
+        });
       },
     });
     await expect(failure).rejects.toThrow(/throw: .*ffi boom/);
@@ -211,32 +217,28 @@ describe("typed throw across the FFI boundary", () => {
     await expect(failure).rejects.toThrow(/panic: .*infrastructure kaboom/);
   });
 
-  test("a katari callee's throw reaches the handler as a typed FfiThrow rejection", async () => {
-    const result = run("plain", {
+  test("a callee's prelude.throw is not caught in JS — it proxies up to a katari throw-handler", async () => {
+    // `context.call` does not reject on the callee's throw; the throw proxies UP past this handler. main wraps
+    // the external call in `handle ... with throw => break -1`, so the katari throw-handler catches it — the
+    // callee's error is caught in katari, never surfacing as a JS `FfiThrow` rejection here.
+    const result = run("main", {
       compute: async (_argument, context) => {
-        try {
-          await context.call("thrower");
-          return "unreachable";
-        } catch (error) {
-          if (!(error instanceof FfiThrow)) throw error;
-          const payload = error.error;
-          const message =
-            typeof payload === "object" && payload !== null && !Array.isArray(payload)
-              ? payload.message
-              : null;
-          return `caught: ${String(message)}`;
-        }
+        await context.call("thrower");
+        return "unreachable"; // never reached — the throw unwound past this await
       },
     });
-    await expect(result).resolves.toEqual({ kind: "string", value: "caught: inner boom" });
+    await expect(result).resolves.toEqual({ kind: "integer", value: -1 });
   });
 
-  test("an uncaught inner throw rethrows: the payload rides katari → sidecar → katari unchanged", async () => {
-    // The handler does not catch, so the callee's typed error becomes the handler's own typed throw —
-    // which main's katari-side handler catches, closing the full circle.
-    const result = run("main", {
+  test("a callee's throw proxies up with its payload intact and, uncaught, fails the run", async () => {
+    // The `plain` entry wraps the external call in no handler: the callee's typed throw proxies all the way
+    // up with its payload preserved and fails the run as a throw — not flattened to a panic, and not caught in
+    // JS. (The payload still rides katari → sidecar → katari unchanged; what changed is that no JS rethrow is
+    // involved — the throw proxies past the handler rather than being re-raised by it.)
+    const failure = run("plain", {
       compute: (_argument, context) => context.call("thrower"),
     });
-    await expect(result).resolves.toEqual({ kind: "integer", value: -1 });
+    await expect(failure).rejects.toThrow(/throw: .*inner boom/);
+    await expect(failure).rejects.not.toThrow(/panic/);
   });
 });

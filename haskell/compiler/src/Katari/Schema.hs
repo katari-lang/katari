@@ -3,11 +3,12 @@
 -- (plain JSON), not its internal tagged value model, and follows JSON Schema Draft 2020-12 wherever the
 -- standard has a canonical shape (@array@ via @items@, a tuple via @prefixItems@, a @record@ via a
 -- schema-valued @additionalProperties@, a union via @anyOf@). The four concepts JSON Schema cannot
--- express get a @$@-prefixed extension property, ignored by standard validators:
+-- express get a @$katari_@-prefixed extension property (the reserved wire namespace), ignored by standard
+-- validators:
 --
---   * a @data@ value carries its constructor identity under @$constructor@ (a union discriminator);
---   * a callable (agent / closure) value is a @$agent@ reference object;
---   * a @file@ value is a @$ref@ blob-handle object;
+--   * a @data@ value carries its constructor identity under @$katari_constructor@ (a union discriminator);
+--   * a callable (agent / closure) value is a @$katari_agent@ reference object;
+--   * a @file@ value is a @$katari_ref@ blob-handle object;
 --   * a not-yet-instantiated type generic is a @$generic@ placeholder ('SchemaGeneric'), filled by
 --     'fillGenericSchema' at an instantiation site.
 --
@@ -29,6 +30,7 @@ import Data.Text (Text)
 import Katari.Data.Id (GenericId)
 import Katari.Data.JSONSchema
   ( AdditionalProperties (..),
+    DescribedSchema (..),
     JSONSchema (..),
     ObjectSchema (..),
   )
@@ -57,21 +59,21 @@ type DataDefinitions = Map QualifiedName DataDefinition
 -- | Reserved property name carrying a tagged value's constructor identity — the discriminator a
 -- consumer uses to pick the matching arm of a union of @data@ types.
 constructorDiscriminatorKey :: Text
-constructorDiscriminatorKey = "$constructor"
+constructorDiscriminatorKey = "$katari_constructor"
 
 -- | Reserved property nesting a tagged value's fields under their own object, so no field name can ever
--- collide with the @$constructor@ discriminator — the wire form is a disjoint union (a @data@ value's
--- two keys, @$constructor@ and @value@, cannot be produced by a bare record, whose @$@-keys are escaped).
+-- collide with the @$katari_constructor@ discriminator. Both keys live in the reserved @$katari_@
+-- namespace, which a program never authors, so a @data@ value's wire form is disjoint from any bare record.
 valueNestingKey :: Text
-valueNestingKey = "value"
+valueNestingKey = "$katari_value"
 
 -- | Reserved property name marking a callable (agent / closure) reference value.
 callableReferenceKey :: Text
-callableReferenceKey = "$agent"
+callableReferenceKey = "$katari_agent"
 
 -- | Reserved property name marking a @file@ value's blob handle.
 fileReferenceKey :: Text
-fileReferenceKey = "$ref"
+fileReferenceKey = "$katari_ref"
 
 -- | Convert a 'SemanticType' to its JSON Schema. @data@ references are inline-expanded from
 -- 'DataDefinitions'; a recursive reference is broken with an open schema.
@@ -85,6 +87,9 @@ toJSONSchema dataDefinitions = convert Set.empty
       SemanticTypeInteger -> SchemaInteger
       SemanticTypeNumber -> SchemaNumber
       SemanticTypeString -> SchemaString
+      -- A string literal singleton admits exactly one value, which is what @const@ says. The runtime's
+      -- conformance walk already checks @const@ schemas, so a literal-instantiated generic validates.
+      SemanticTypeStringLiteral value -> SchemaConst (toJSON value)
       SemanticTypeBoolean -> SchemaBoolean
       -- A @file@ is a blob handle supplied by orchestration, never produced inline by the AI; the
       -- schema documents the @$ref@ reference object so a runtime-passed handle validates.
@@ -150,8 +155,8 @@ toJSONSchema dataDefinitions = convert Set.empty
                 ObjectSchema
                   { properties = [constructorProperty, (valueNestingKey, valueObject)],
                     -- The wire form is exactly the discriminator and the nested fields object; both are
-                    -- always present, and no other top-level key is admitted (the two are disjoint from a
-                    -- bare record's escaped keys).
+                    -- always present, and no other top-level key is admitted (both live in the reserved
+                    -- @$katari_@ namespace, disjoint from any bare record).
                     required = [constructorDiscriminatorKey, valueNestingKey],
                     additionalProperties = AdditionalPropertiesBoolean False
                   }
@@ -175,13 +180,23 @@ buildSubstitution parameterGenericIds arguments =
 callableReferenceSchema :: JSONSchema
 callableReferenceSchema = referenceSchema callableReferenceKey
 
--- | The schema of a @file@ value: a @$ref@-tagged blob handle. Loose by design, like
--- 'callableReferenceSchema'.
+-- | The schema of a @file@ value: a slim @$katari_ref@ blob handle — IDENTITY ONLY. The blob's metadata
+-- (size / hash / contentType) lives on its runtime row, never on the handle, so a bare
+-- @{"$katari_ref": id}@ is a complete handle: exactly what an AI replays from a conversation into a tool
+-- call, with nothing to copy wrong. @$katari_semantic_kind@ is accepted (the engine writes it; decode
+-- defaults a missing one to @file@) and the object stays open.
 fileReferenceSchema :: JSONSchema
-fileReferenceSchema = referenceSchema fileReferenceKey
+fileReferenceSchema =
+  SchemaObject
+    ObjectSchema
+      { properties = [(fileReferenceKey, SchemaString), ("$katari_semantic_kind", SchemaString)],
+        required = [fileReferenceKey],
+        additionalProperties = AdditionalPropertiesBoolean True
+      }
 
 -- | An open object requiring just one @$@-prefixed discriminator property (whose value is left
--- unconstrained). The shared shape behind 'callableReferenceSchema' and 'fileReferenceSchema'.
+-- unconstrained). The shape behind 'callableReferenceSchema' (loose by design — the AI does not
+-- construct callables; they are runtime-supplied).
 referenceSchema :: Text -> JSONSchema
 referenceSchema discriminatorKey =
   SchemaObject
@@ -212,6 +227,7 @@ fillGenericSchema substitution = fill
                 allowed -> allowed
             }
       SchemaAnyOf branches -> SchemaAnyOf (fill <$> branches)
+      SchemaDescribed described -> SchemaDescribed DescribedSchema {description = described.description, schema = fill described.schema}
       other -> other
 
 -- | Whether a schema still mentions a @$generic@ placeholder anywhere. (A schema is /proper/ once this
@@ -227,4 +243,5 @@ mentionsGeneric schema = case schema of
         AdditionalPropertiesSchema valueSchema -> mentionsGeneric valueSchema
         AdditionalPropertiesBoolean _ -> False
   SchemaAnyOf branches -> any mentionsGeneric branches
+  SchemaDescribed described -> mentionsGeneric described.schema
   _ -> False

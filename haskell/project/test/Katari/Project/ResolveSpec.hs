@@ -133,43 +133,57 @@ spec = do
     it "unions the root and a well-namespaced dependency" $ do
       let project =
             projectWith
-              (rootPackageWith ["main"])
+              (rootPackageWith ["app", "app.entry"])
               [("lib", dependencyPackage "lib" ["lib", "lib.util"] Nothing)]
       case assembleProject project of
         Left projectError -> expectationFailure ("expected success, got " <> show projectError)
         Right assembly ->
           Map.keysSet assembly.sources
-            `shouldBe` Map.keysSet (sourcesFor ["main", "lib", "lib.util"])
+            `shouldBe` Map.keysSet (sourcesFor ["app", "app.entry", "lib", "lib.util"])
+
+    it "accepts a root whose modules stay inside its own namespace" $ do
+      let project = projectWith (rootPackageWith ["app", "app.util"]) []
+      case assembleProject project of
+        Left projectError -> expectationFailure ("expected success, got " <> show projectError)
+        Right assembly -> Map.keysSet assembly.sources `shouldBe` Map.keysSet (sourcesFor ["app", "app.util"])
+
+    it "rejects a root module outside the package's own namespace" $ do
+      -- The root package "app" is now bound by the same rule as its dependencies: a bare "main" module
+      -- (not "app" or "app.*") escapes the namespace and is rejected at the project layer.
+      let project = projectWith (rootPackageWith ["main"]) []
+      assembleProject project `shouldSatisfy` either isOutOfNamespace (const False)
 
     it "rejects a module outside the dependency's namespace" $ do
-      let project = projectWith (rootPackageWith ["main"]) [("lib", dependencyPackage "lib" ["other"] Nothing)]
+      let project = projectWith (rootPackageWith ["app"]) [("lib", dependencyPackage "lib" ["other"] Nothing)]
       assembleProject project `shouldSatisfy` either isOutOfNamespace (const False)
 
     it "rejects a dependency whose [package].name disagrees with its key" $ do
-      let project = projectWith (rootPackageWith ["main"]) [("lib", dependencyPackage "different" ["lib"] Nothing)]
+      let project = projectWith (rootPackageWith ["app"]) [("lib", dependencyPackage "different" ["lib"] Nothing)]
       assembleProject project `shouldSatisfy` either isNameMismatch (const False)
 
     it "rejects a module name provided by two packages" $ do
-      let project = projectWith (rootPackageWith ["lib"]) [("lib", dependencyPackage "lib" ["lib"] Nothing)]
+      -- With every package namespaced under its own name, a collision needs two packages that share a
+      -- name: here the root "app" and a dependency also keyed "app" both contribute module "app".
+      let project = projectWith (rootPackageWith ["app"]) [("app", dependencyPackage "app" ["app"] Nothing)]
       assembleProject project `shouldSatisfy` either isModuleCollision (const False)
 
     it "rejects a dependency on the compiler-reserved prelude namespace" $ do
-      let project = projectWith (rootPackageWith ["main"]) [("prelude", dependencyPackage "prelude" ["prelude"] Nothing)]
+      let project = projectWith (rootPackageWith ["app"]) [("prelude", dependencyPackage "prelude" ["prelude"] Nothing)]
       assembleProject project `shouldSatisfy` either isReservedName (const False)
 
   describe "compileInputSources" $
     it "projects the assembly down to module -> source text" $ do
-      let project = projectWith (rootPackageWith ["main"]) [("lib", dependencyPackage "lib" ["lib"] Nothing)]
+      let project = projectWith (rootPackageWith ["app"]) [("lib", dependencyPackage "lib" ["lib"] Nothing)]
       case assembleProject project of
         Left projectError -> expectationFailure ("expected success, got " <> show projectError)
         Right assembly ->
           compileInputSources assembly
-            `shouldBe` Map.fromList [(ModuleName "main", "source of main"), (ModuleName "lib", "source of lib")]
+            `shouldBe` Map.fromList [(ModuleName "app", "source of app"), (ModuleName "lib", "source of lib")]
 
   describe "lockfileFromResolved" $ do
     it "projects dependency provenance into the lockfile" $ do
       let provenance = LockedPath PathLock {location = "../lib"}
-          project = projectWith (rootPackageWith ["main"]) [("lib", dependencyPackage "lib" ["lib"] (Just provenance))]
+          project = projectWith (rootPackageWith ["app"]) [("lib", dependencyPackage "lib" ["lib"] (Just provenance))]
           lockfile = lockfileFromResolved project
       lockfile.version `shouldBe` 1
       lockfile.snapshot `shouldBe` Nothing
@@ -178,7 +192,7 @@ spec = do
     it "preserves a git pin and propagates the snapshot id" $ do
       let provenance = LockedGit GitSource {url = "https://github.com/x/y", rev = "deadbeef", sha = Text.replicate 64 "a"}
           rootConfig = (configNamed "app") {dependencies = DependenciesSection {registry = Nothing, snapshot = Just "v0.1.0", packages = ["lib"]}}
-          rootPackage = ResolvedPackage {root = "/app", config = rootConfig, sources = sourcesFor ["main"], provenance = Nothing}
+          rootPackage = ResolvedPackage {root = "/app", config = rootConfig, sources = sourcesFor ["app"], provenance = Nothing}
           project = projectWith rootPackage [("lib", dependencyPackage "lib" ["lib"] (Just provenance))]
           lockfile = lockfileFromResolved project
       lockfile.snapshot `shouldBe` Just "v0.1.0"

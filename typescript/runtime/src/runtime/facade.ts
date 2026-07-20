@@ -14,18 +14,34 @@ import { createAgentName, type Json, type SidecarBundle } from "@katari-lang/typ
 import { and, eq, notInArray } from "drizzle-orm";
 import { config } from "../config/index.js";
 import { db } from "../db/client.js";
-import { runs, TERMINAL_RUN_STATES } from "../db/tables/execution.js";
+import { capabilityRoutes, instances, runs, TERMINAL_RUN_STATES } from "../db/tables/execution.js";
 import { projects, snapshots } from "../db/tables/projects.js";
-import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
+import { decryptSecret, encryptSecret } from "../lib/crypto.js";
+import {
+  BadRequestError,
+  ConflictError,
+  NotFoundError,
+  ServiceUnavailableError,
+} from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
+import { credentialRepository } from "../modules/credential/credential.repository.js";
 import { envReader } from "../modules/env/env.service.js";
+import {
+  type McpServeHttpReply,
+  mcpServeEndpointOf,
+  serveMcpMessage,
+  unknownMcpServeEndpoint,
+} from "../modules/mcp/mcp-serve.js";
+import { oauthClientService } from "../modules/oauth-client/oauth-client.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
-import { messageOf } from "./actor/failure.js";
+import { isTransientError, messageOf } from "./actor/failure.js";
 import { registerHostPrims } from "./engine/host-prims.js";
 import { PrimRegistry } from "./engine/prims.js";
-import type { BlobEntry } from "./engine/types.js";
+import type { BlobEntry, InstanceKind } from "./engine/types.js";
+import { type CredentialStore, decodeStoredCredential } from "./external/credentials.js";
 import { FetchHttpTransport } from "./external/http-transport.js";
+import { SdkMcpTransport } from "./external/mcp-transport.js";
 import { nodeSidecarMaterialize, SnapshotFfiTransport } from "./external/snapshot-transport.js";
 import {
   type BlobId,
@@ -38,11 +54,11 @@ import {
 } from "./ids.js";
 import { ProjectRegistry } from "./registry.js";
 import { createBlobStore } from "./value/blob-store.js";
-import { jsonToValue } from "./value/codec.js";
+import { jsonToValue, valueToJson } from "./value/codec.js";
 import type { Value } from "./value/types.js";
 
 /** Decode client-supplied `Json` (a run argument, an escalation answer) into an engine `Value`, mapping a
- *  malformed-input decode failure — a reserved `$`-key, a non-string `$constructor` tag, an undecodable
+ *  malformed-input decode failure — a reserved `$katari_` key, a non-string `$katari_constructor` tag, an undecodable
  *  file / agent / closure handle — to a 400 rather than letting `jsonToValue`'s plain `Error` surface as a
  *  500. These acceptance surfaces are the only unchecked entries for client `Json`, so the decode guard
  *  lives here, once. */
@@ -111,6 +127,45 @@ const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 const prims = new PrimRegistry();
 registerHostPrims(prims, { env: envReader });
 
+/** The per-project credential store the credentials core resolves tokens through: the `credentials` table
+ *  (the AES-GCM sealed `StoredCredential` + its integer generation — see `db/tables/credentials.ts`).
+ *  `load` unseals and decodes a stored credential; `save` is the token-refresh write-back, an atomic
+ *  compare-and-set on the generation the caller loaded — refused when a completed authorization flow
+ *  (whose upsert always wins) replaced the credential in between. */
+function credentialStoreFor(projectId: ProjectId): CredentialStore {
+  return {
+    async load(name) {
+      const row = await credentialRepository.load(db, projectId, name);
+      if (row === null) return null;
+      // An unsealable value (key rotation, storage corruption) is funnelled through the decoder's own
+      // failure path, so it classifies exactly like an undecodable blob: unreadable credential material,
+      // fixed by re-authorizing — never a distinct error species for the caller to handle.
+      let raw: string;
+      try {
+        raw = decryptSecret(row.value);
+      } catch {
+        raw = "";
+      }
+      return { credential: decodeStoredCredential(name, raw), generation: row.generation };
+    },
+    save(name, credential, expectedGeneration) {
+      return credentialRepository.saveWithGeneration(
+        db,
+        projectId,
+        name,
+        encryptSecret(JSON.stringify(credential)),
+        expectedGeneration,
+      );
+    },
+    // A `configured` credential's refresh reads its registered client LIVE from the `oauth_clients`
+    // registry (so a rotated secret takes effect); `null` when the operator deleted the client — the
+    // refresh is then dead and the resolution parks for re-login.
+    resolveConfiguredClient(clientName) {
+      return oauthClientService.resolveClientCredentials(projectId, clientName);
+    },
+  };
+}
+
 const registry = new ProjectRegistry({
   ir: new DbIrSource(db),
   persistence: new DbPersistence(db),
@@ -124,7 +179,51 @@ const registry = new ProjectRegistry({
   // The built-in http client: a fresh in-runtime `fetch` transport per project actor (its own completion
   // sink). The api root performs `http.fetch` requests through it.
   httpFactory: () => new FetchHttpTransport(),
+  // The built-in MCP client: the SDK-backed transport, one per project actor (its own connections).
+  // Its blob producer bridges a tool result's binary content (an image block) into a project blob owned
+  // by the mcp call's instance — the exact ownership + ascent path an FFI handler's mid-call upload
+  // takes (`produceFfiBlob`), just in-process. A vanished call (ConflictError) returns null, so the
+  // transport degrades that block to its text placeholder instead of failing the whole result. Its
+  // credential store resolves `mcp.oauth(...)` names against the project's `credentials` table.
+  mcpFactory: (projectId) =>
+    new SdkMcpTransport({
+      produceBlob: async (delegation, bytes, contentType) => {
+        try {
+          const produced = await mintAndStoreBlob(projectId, bytes, contentType, (blobId, entry) =>
+            registry.actorFor(projectId).registerProducedMcpBlob(delegation, blobId, entry),
+          );
+          // The slim handle: identity only — the metadata just registered lives on the blob's row.
+          return { $ref: produced.id, semanticKind: "file" };
+        } catch {
+          return null;
+        }
+      },
+      credentials: credentialStoreFor(projectId),
+    }),
+  // The oauth reactor resolves `oauth.token(name)` calls through the same per-project credential store the
+  // mcp transport reads its bearer from (the `credentials` table + the `oauth_clients` registry).
+  credentialsFactory: (projectId) => credentialStoreFor(projectId),
+  // The public base the dynamically generated endpoints (`webhook.inbound`, `mcp.serve`) mint their
+  // capability URLs under (KATARI_PUBLIC_URL, or the local port) — one address, one knob.
+  publicBaseUrl: config.publicUrl,
 });
+
+/** Resolve a public capability token (`POST /inbound/<token>`, `POST /mcp/<token>`) to the project and
+ *  endpoint kind serving it — ONE query over `capability_routes` ⋈ `instances` for every token-minting
+ *  surface. The route row is the cold-start index (the token's SoT is the call's extension document);
+ *  the joined envelope `kind` lets each public surface accept only its own endpoints. `null` when no
+ *  live endpoint holds the token. */
+async function resolveCapabilityToken(
+  token: string,
+): Promise<{ projectId: string; kind: InstanceKind } | null> {
+  const [row] = await db
+    .select({ projectId: capabilityRoutes.projectId, kind: instances.kind })
+    .from(capabilityRoutes)
+    .innerJoin(instances, eq(capabilityRoutes.instanceId, instances.id))
+    .where(eq(capabilityRoutes.token, token))
+    .limit(1);
+  return row ?? null;
+}
 
 /** Resolve the snapshot a run pins: the explicit one, or the project's live head. */
 async function resolveSnapshot(projectId: string, snapshotId?: string): Promise<string> {
@@ -148,19 +247,42 @@ export const facade = {
     const snapshotId = await resolveSnapshot(input.projectId, input.snapshotId);
     const argument =
       input.argument !== undefined ? decodeClientJson(input.argument, "the run argument") : null;
+    const actor = registry.actorFor(input.projectId as ProjectId);
+    // The run-start API is an external input boundary: resolve the entry agent and conform the argument up
+    // front, rejecting an unresolvable entry OR a malformed argument as a 400 — rather than letting either
+    // reach core's acceptance surface as a pre-birth panic (whose raiser would be the permanent run
+    // instance). `conformRunArgument` returns a self-contained rejection sentence, `null` when it is safe to
+    // launch, or THROWS a transient error (an IR-store blip) — which must NOT launch an unvalidated run
+    // (a deterministic pre-birth failure would then wedge it), so surface it as retryable (a 503).
+    let rejection: string | null;
+    try {
+      rejection = await actor.conformRunArgument(
+        createAgentName(input.qualifiedName),
+        snapshotId as SnapshotId,
+        argument,
+      );
+    } catch (error) {
+      if (isTransientError(error)) {
+        throw new ServiceUnavailableError(
+          "the run could not be validated (a transient error); retry",
+        );
+      }
+      throw error;
+    }
+    if (rejection !== null) {
+      throw new BadRequestError(rejection);
+    }
     // The engine mints the run's permanent run instance and kicks the run off; that instance's id is the
     // durable run handle (`runs.id`). The run's metadata (`runs` row) is written by the engine in the SAME
     // commit as the run's `delegate` — `await started` resolves once that launch commit is durable, so the
     // run is immediately visible to the API's reads. The in-process `result` promise is ignored (the API
     // reads the outcome from the `runs` row, correct even after a crash + recovery).
-    const { run, result, started } = registry
-      .actorFor(input.projectId as ProjectId)
-      .startRun(
-        createAgentName(input.qualifiedName),
-        snapshotId as SnapshotId,
-        argument,
-        input.name ?? input.qualifiedName,
-      );
+    const { run, result, started } = actor.startRun(
+      createAgentName(input.qualifiedName),
+      snapshotId as SnapshotId,
+      argument,
+      input.name ?? input.qualifiedName,
+    );
     void result.catch(() => {}); // swallow: the durable outcome is the delegation, not this promise
     await started;
     return { runId: run };
@@ -209,6 +331,60 @@ export const facade = {
    *  in-flight http, reject its in-process run promises, and drop the actor. A no-op when never warmed. */
   evictProject(projectId: string): void {
     registry.evict(projectId as ProjectId);
+  },
+
+  /** Deliver one inbound webhook POST. The token alone locates its endpoint — its `capability_routes`
+   *  row resolves it to a project (waking a cold actor, whose reload re-registers the token), and the
+   *  actor's webhook reactor converts the body into a delegation of the endpoint's callback. Returns the
+   *  callback's outcome with its values lowered at THIS user-facing boundary (private content redacts —
+   *  a webhook caller is outside the trust boundary). */
+  async deliverWebhook(input: {
+    token: string;
+    body: Json;
+  }): Promise<
+    | { kind: "unknown" }
+    | { kind: "gone" }
+    | { kind: "result"; value: Json }
+    | { kind: "rejected"; error: Json }
+    | { kind: "error" }
+  > {
+    const route = await resolveCapabilityToken(input.token);
+    // A token minted by another kind of endpoint (an mcp serve URL posted here) is as unknown to THIS
+    // surface as a random string — exactly the per-kind token indexes' behaviour before routes unified.
+    if (route === null || route.kind !== "webhook") return { kind: "unknown" };
+    const outcome = await registry
+      .actorFor(route.projectId as ProjectId)
+      .deliverWebhook(input.token, decodeClientJson(input.body, "the webhook body"));
+    switch (outcome.kind) {
+      case "unknown":
+      case "gone":
+        return { kind: outcome.kind };
+      case "result":
+        return { kind: "result", value: valueToJson(outcome.value, "redact") };
+      case "throw":
+        // A webhook delivery's `throw` outcome is now always a `reflection.call_error` — a malformed body,
+        // pre-validated, so the callback never ran. (A genuine execution failure proxies UP and never settles
+        // a delivery.) It surfaces as the per-request rejection, the route's 400.
+        return { kind: "rejected", error: valueToJson(outcome.value, "redact") };
+      case "error":
+        // The panic message stays server-side (it may name internals); the caller gets a bare 500.
+        return { kind: "error" };
+    }
+  },
+
+  /** Serve one inbound MCP request (`POST /mcp/<token>`). The token alone locates its endpoint — its
+   *  `capability_routes` row resolves it to a project (waking a cold actor, whose reload re-registers
+   *  the token) — and the JSON-RPC handling is stateless, so nothing session-shaped exists to lose
+   *  across a restart. Values lower inside the endpoint adapter at THIS user-facing boundary (private
+   *  content redacts — an MCP caller is outside the trust boundary, like a webhook caller). */
+  async deliverMcp(input: { token: string; body: string }): Promise<McpServeHttpReply> {
+    const route = await resolveCapabilityToken(input.token);
+    // A kind mismatch (a webhook token posted to /mcp) is as unknown to this surface as a random string.
+    const endpoint =
+      route === null || route.kind !== "mcp"
+        ? unknownMcpServeEndpoint()
+        : mcpServeEndpointOf(registry.actorFor(route.projectId as ProjectId), input.token);
+    return serveMcpMessage(endpoint, input.body);
   },
 
   /** Store the bytes an FFI handler produced mid-call (content-addressed by their hash) and register the blob

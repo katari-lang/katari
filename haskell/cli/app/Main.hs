@@ -13,10 +13,12 @@ import Katari.Cli.Command.Apply qualified as Apply
 import Katari.Cli.Command.Build qualified as Build
 import Katari.Cli.Command.Cancel qualified as Cancel
 import Katari.Cli.Command.Check qualified as Check
+import Katari.Cli.Command.Docs qualified as Docs
 import Katari.Cli.Command.Env qualified as Env
 import Katari.Cli.Command.File qualified as File
 import Katari.Cli.Command.Init qualified as Init
 import Katari.Cli.Command.Ls qualified as Ls
+import Katari.Cli.Command.Mcp qualified as Mcp
 import Katari.Cli.Command.Project qualified as Project
 import Katari.Cli.Command.Run qualified as Run
 import Katari.Cli.Command.Status qualified as Status
@@ -27,6 +29,7 @@ data Command
   = CommandInit Init.Options
   | CommandCheck Check.Options
   | CommandBuild Build.Options
+  | CommandDocs Docs.Options
   | CommandApply Apply.Options
   | CommandAdd Add.Options
   | CommandRemove Add.Options
@@ -37,6 +40,7 @@ data Command
   | CommandLs Ls.Options
   | CommandEnv Env.Options
   | CommandFile File.Options
+  | CommandMcp Mcp.Options
   | CommandProject Project.Options
 
 commandParser :: Parser Command
@@ -45,6 +49,7 @@ commandParser =
     ( command "init" (info (CommandInit <$> Init.optionsParser) (progDesc "Scaffold a new Katari project"))
         <> command "check" (info (CommandCheck <$> Check.optionsParser) (progDesc "Compile the project and report diagnostics"))
         <> command "build" (info (CommandBuild <$> Build.optionsParser) (progDesc "Compile the project to IR JSON"))
+        <> command "docs" (info (CommandDocs <$> Docs.optionsParser) (progDesc "Emit the package's library API reference as JSON (--stdlib for the prelude)"))
         <> command "apply" (info (CommandApply <$> Apply.optionsParser) (progDesc "Compile and deploy the project to the runtime as a new snapshot"))
         <> command "add" (info (CommandAdd <$> Add.optionsParser) (progDesc "Add dependencies to katari.toml and refresh katari.lock"))
         <> command "remove" (info (CommandRemove <$> Add.optionsParser) (progDesc "Remove dependencies from katari.toml and refresh katari.lock"))
@@ -55,6 +60,7 @@ commandParser =
         <> command "ls" (info (CommandLs <$> Ls.optionsParser) (progDesc "List runs (default), agents, snapshots, projects, escalations, files or env"))
         <> command "env" (info (CommandEnv <$> Env.optionsParser) (progDesc "Manage the project's env entries (get / set / unset)"))
         <> command "file" (info (CommandFile <$> File.optionsParser) (progDesc "Upload / download project files"))
+        <> command "mcp" (info (CommandMcp <$> Mcp.optionsParser) (progDesc "MCP integration (pull bindings; list / forget stored credentials)"))
         <> command "project" (info (CommandProject <$> Project.optionsParser) (progDesc "Manage projects on the runtime (remove, rollback)"))
     )
 
@@ -93,6 +99,7 @@ dispatch = \case
   CommandInit options -> ("init", Init.run options)
   CommandCheck options -> ("check", Check.run options)
   CommandBuild options -> ("build", Build.run options)
+  CommandDocs options -> ("docs", Docs.run options)
   CommandApply options -> ("apply", Apply.run options)
   CommandAdd options -> ("add", Add.run Add.ModeAdd options)
   CommandRemove options -> ("remove", Add.run Add.ModeRemove options)
@@ -103,4 +110,5 @@ dispatch = \case
   CommandLs options -> ("ls", Ls.run options)
   CommandEnv options -> ("env", Env.run options)
   CommandFile options -> ("file", File.run options)
+  CommandMcp options -> ("mcp", Mcp.run options)
   CommandProject options -> ("project", Project.run options)

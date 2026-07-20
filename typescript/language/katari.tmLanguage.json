@@ -1,0 +1,297 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Katari",
+  "scopeName": "source.katari",
+  "fileTypes": ["ktr"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#annotation" },
+    { "include": "#declarations" },
+    { "include": "#expression" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.katari",
+          "match": "//.*$"
+        },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.katari",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [
+        { "include": "#block-comment" }
+      ]
+    },
+    "annotation": {
+      "name": "comment.documentation.katari",
+      "begin": "@\"",
+      "end": "\"",
+      "patterns": [
+        { "include": "#string-escapes" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(external|primitive)\\s+(agent)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.modifier.external.katari" },
+            "2": { "name": "keyword.declaration.katari" },
+            "3": { "name": "entity.name.function.katari" }
+          }
+        },
+        {
+          "match": "\\b(agent|request)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.katari" },
+            "2": { "name": "entity.name.function.katari" }
+          }
+        },
+        {
+          "match": "\\b(data|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.katari" },
+            "2": { "name": "entity.name.type.katari" }
+          }
+        }
+      ]
+    },
+    "expression": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#constants" },
+        { "include": "#hole" },
+        { "include": "#operators" },
+        { "include": "#punctuation" },
+        { "include": "#function-call" },
+        { "include": "#identifier" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.katari",
+          "match": "\\b(if|else|match|case|return|next|break|for|then|handler|use|parallel|in|with|finally)\\b"
+        },
+        {
+          "comment": "`forever` is a positional word (only a loop head directly before `{`), so the lookahead keeps `replay.forever(...)` an ordinary identifier.",
+          "name": "keyword.control.katari",
+          "match": "\\bforever\\b(?=\\s*\\{)"
+        },
+        {
+          "comment": "`literal` is positional too (a generic-kind marker, as in `[literal name extends string]`); the lookahead for a following identifier keeps ordinary uses of the name untouched.",
+          "name": "storage.modifier.literal.katari",
+          "match": "\\bliteral\\b(?=\\s+[A-Za-z_])"
+        },
+        {
+          "name": "keyword.declaration.katari",
+          "match": "\\b(agent|request|data|external|primitive|let|var|import|as|from|type|of|extends)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.katari",
+          "match": "\\b(integer|boolean|number|string|file|never|unknown|array|record|all|io|pure)\\b"
+        },
+        {
+          "name": "support.type.attribute.katari",
+          "match": "\\b(public|private)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "name": "constant.language.katari",
+      "match": "\\b(null|true|false)\\b"
+    },
+    "hole": {
+      "comment": "A bare `_` is a partial-application hole (`scale(factor = 2.0, value = _)`), not an identifier.",
+      "name": "variable.language.hole.katari",
+      "match": "(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])"
+    },
+    "numbers": {
+      "name": "constant.numeric.katari",
+      "match": "\\b\\d+(\\.\\d+)?([eE][+\\-]?\\d+)?\\b"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "comment": "`?=` marks a parameter default; matched before `=` so the `?` is not left unscoped.",
+          "name": "keyword.operator.default.katari",
+          "match": "\\?="
+        },
+        {
+          "name": "keyword.operator.arrow.katari",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.comparison.katari",
+          "match": "==|!="
+        },
+        {
+          "name": "keyword.operator.relational.katari",
+          "match": "<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.katari",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.concat.katari",
+          "match": "\\+\\+"
+        },
+        {
+          "name": "keyword.operator.arithmetic.katari",
+          "match": "[+\\-*/]"
+        },
+        {
+          "name": "keyword.operator.assignment.katari",
+          "match": "="
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.terminator.katari",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.katari",
+          "match": ","
+        },
+        {
+          "name": "punctuation.accessor.katari",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.colon.katari",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.separator.pipe.katari",
+          "match": "\\|"
+        }
+      ]
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.katari" }
+      }
+    },
+    "identifier": {
+      "name": "variable.other.katari",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+    },
+    "strings": {
+      "patterns": [
+        { "include": "#template-multiline" },
+        { "include": "#string-multiline" },
+        { "include": "#template-single" },
+        { "include": "#string-single" }
+      ]
+    },
+    "string-single": {
+      "name": "string.quoted.double.katari",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.katari" }
+      },
+      "end": "\"|$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.katari" }
+      },
+      "patterns": [
+        { "include": "#string-escapes" }
+      ]
+    },
+    "string-multiline": {
+      "name": "string.quoted.triple.katari",
+      "begin": "\"\"\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.katari" }
+      },
+      "end": "\"\"\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.katari" }
+      },
+      "patterns": [
+        { "include": "#string-escapes" }
+      ]
+    },
+    "template-single": {
+      "name": "string.template.katari",
+      "begin": "f\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.template.begin.katari" }
+      },
+      "end": "\"|$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.template.end.katari" }
+      },
+      "patterns": [
+        { "include": "#string-escapes" },
+        { "include": "#template-expression" }
+      ]
+    },
+    "template-multiline": {
+      "name": "string.template.katari",
+      "begin": "f\"\"\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.template.begin.katari" }
+      },
+      "end": "\"\"\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.template.end.katari" }
+      },
+      "patterns": [
+        { "include": "#string-escapes" },
+        { "include": "#template-expression" }
+      ]
+    },
+    "template-expression": {
+      "name": "meta.embedded.expression.katari",
+      "begin": "\\$\\{",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.embedded.begin.katari" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.embedded.end.katari" }
+      },
+      "patterns": [
+        { "include": "#balanced-braces" },
+        { "include": "#expression" }
+      ]
+    },
+    "balanced-braces": {
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.brace.begin.katari" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.brace.end.katari" }
+      },
+      "patterns": [
+        { "include": "#balanced-braces" },
+        { "include": "#expression" }
+      ]
+    },
+    "string-escapes": {
+      "name": "constant.character.escape.katari",
+      "match": "\\\\([\"\\\\/bfnrt$]|u[0-9a-fA-F]{4})"
+    }
+  }
+}

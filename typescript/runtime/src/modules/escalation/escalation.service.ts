@@ -1,16 +1,23 @@
-import type { AgentBlock, JSONSchema, Json } from "@katari-lang/types";
+import type { JSONSchema, Json } from "@katari-lang/types";
 import { db } from "../../db/client.js";
 import { BadRequestError, NotFoundError } from "../../lib/errors.js";
 import { decodeClientJson, facade } from "../../runtime/facade.js";
 import { valueToJson } from "../../runtime/value/codec.js";
 import { conformValue, renderConformFailures } from "../../runtime/value/validation.js";
-import { collectEntries, deriveAnswerSchema, loadSnapshotModules } from "../agent/agent.reader.js";
+import {
+  type CallableEntry,
+  collectEntries,
+  deriveAnswerSchema,
+  loadSnapshotModules,
+} from "../agent/agent.reader.js";
+import { type EscalationPresentation, presentEscalation } from "./escalation.presentation.js";
 import { escalationRepository, type OpenEscalationView } from "./escalation.repository.js";
 
-/** The wire shape of an open escalation: its `argument` `Value` rendered back to Json, plus the schema
- *  an answer must satisfy (null when the request has no entry in the run's snapshot — the client falls
- *  back to unvalidated input). */
-function toEscalationResponse(view: OpenEscalationView, answerSchema: JSONSchema | null) {
+/** The wire shape of an open escalation: its `argument` `Value` rendered back to Json, plus its
+ *  `presentation` — the form/oauth sum every rendering surface dispatches on. The answer schema, when
+ *  one applies, rides inside the form variant (null when the request has no entry in the run's
+ *  snapshot — the client falls back to unvalidated input). */
+function toEscalationResponse(view: OpenEscalationView, presentation: EscalationPresentation) {
   return {
     id: view.id,
     request: view.request,
@@ -18,18 +25,19 @@ function toEscalationResponse(view: OpenEscalationView, answerSchema: JSONSchema
     argument: view.argument === null ? null : valueToJson(view.argument, "redact"),
     runId: view.runId,
     createdAt: view.createdAt,
-    answerSchema,
+    presentation,
   };
 }
 
 export const escalationService = {
   /** The open (user-facing) escalations awaiting an answer for a project — read directly from the Layer 1
    *  `escalations` table (the durable source of truth), like the runs list reads from `delegations`. Each
-   *  view carries the request's answer schema, derived from the raising run's snapshot IR; snapshots are
-   *  loaded once per distinct id (not once per escalation). */
+   *  view is folded into its presentation sum here, once; a form view carries the request's answer schema,
+   *  derived from the raising run's snapshot IR (snapshots are loaded once per distinct id, not once per
+   *  escalation). */
   async listOpen(projectId: string) {
     const views = await escalationRepository.listOpen(db, projectId);
-    const entriesBySnapshot = new Map<string | null, Map<string, AgentBlock>>();
+    const entriesBySnapshot = new Map<string | null, Map<string, CallableEntry>>();
     const responses = [];
     for (const view of views) {
       let entries = entriesBySnapshot.get(view.snapshotId);
@@ -46,7 +54,12 @@ export const escalationService = {
         }
         entriesBySnapshot.set(view.snapshotId, entries);
       }
-      responses.push(toEscalationResponse(view, deriveAnswerSchema(entries, view.request)));
+      responses.push(
+        toEscalationResponse(
+          view,
+          presentEscalation(view, deriveAnswerSchema(entries, view.request)),
+        ),
+      );
     }
     return responses;
   },

@@ -1,15 +1,19 @@
 // Schema conformance for runtime values — the checking half of the JSON boundary, and a *separate* pass
 // from the codec. The codec (`./codec.ts`, `../engine/json-value.ts`) is a blind, total bijection: it
 // turns wire JSON into a `Value` (and back) with no schema in sight. This module then decides whether a
-// decoded `Value` fits a `JSONSchema`, so the delegate surface can reject a malformed argument (an AI-built
-// `call_agent` args record, a `katari run` argument) as a panic. It only *checks* — it never rewrites the
-// value to fit (the AI supplies a value already in wire shape, e.g. a `data` value's `$constructor` tag,
-// so there is nothing to repair).
+// decoded `Value` fits a `JSONSchema`, so each dynamic input boundary can reject a malformed argument in its
+// OWN terms: a `call_agent` args record as a catchable `reflection.call_error` (engine-side), an mcp / webhook
+// delivery and a `katari run` argument as a per-request 400 (actor-side), and the delegate acceptance surface
+// — the last-line defence every path has already pre-validated — as a PANIC (a genuine defect). It only
+// *checks* — it never rewrites the value to fit: the codec has already read every `$katari_` marker into its
+// real value (a `$katari_ref` into a `file`, a `$katari_constructor` object into a `data` value), so a
+// conforming value arrives already in shape, with nothing to repair.
 //
-// The compiler emits a `data` type as a nested schema — `{ "$constructor": {const}, "value": {fields} }`
-// (Haskell `Katari.Schema`) — matching the wire form, while the engine keeps a `data` value's constructor
-// out-of-band (`value.ctor`) and its fields flat. This module bridges the two: it checks `value.ctor`
-// against the `$constructor` const and the flat fields against the `value` sub-schema.
+// The compiler emits a `data` type as a nested schema — `{ "$katari_constructor": {const}, "$katari_value":
+// {fields} }` (Haskell `Katari.Schema`) — matching the wire form, while the engine keeps a `data` value's
+// constructor out-of-band (`value.ctor`) and its fields flat. This module bridges the two: it checks
+// `value.ctor` against the `$katari_constructor` const and the flat fields against the `$katari_value`
+// sub-schema.
 //
 // Failure messages carry the path, the expectation, and the offending value's *kind* — never its content
 // (a value may be private). Kinds are shape, not data.
@@ -49,7 +53,11 @@ export function fillGenericSchema(
 ): JSONSchema {
   if (substitution.size === 0) return schema;
   if (schema.$generic !== undefined) {
-    return substitution.get(schema.$generic) ?? schema;
+    const bound = substitution.get(schema.$generic);
+    if (bound === undefined) return schema;
+    // An annotated generic parameter carries its description on the sentinel; the annotation site's
+    // text survives the fill (and wins over any description the argument schema brought along).
+    return schema.description === undefined ? bound : { ...bound, description: schema.description };
   }
   const filled: JSONSchema = { ...schema };
   if (schema.items !== undefined) filled.items = fillGenericSchema(substitution, schema.items);
@@ -96,7 +104,7 @@ export function typeSubstitutionOf(
 // ─── the conformance walk ─────────────────────────────────────────────────────────────────────
 
 /** Whether a schema constrains anything at all (`{}` — and a bare `$generic` — accept every value). */
-function isUnconstrained(schema: JSONSchema): boolean {
+export function isUnconstrained(schema: JSONSchema): boolean {
   return (
     schema.type === undefined &&
     schema.const === undefined &&
@@ -117,7 +125,7 @@ function referenceKeyOf(schema: JSONSchema): string | undefined {
   return undefined;
 }
 
-/** The `$constructor` const of a `data` schema (its discriminator), or `undefined` for a plain object. */
+/** The `$katari_constructor` const of a `data` schema (its discriminator), or `undefined` for a plain object. */
 function dataConstructorOf(schema: JSONSchema): string | undefined {
   const constructorSchema = schema.properties?.[CONSTRUCTOR_KEY];
   return typeof constructorSchema?.const === "string" ? constructorSchema.const : undefined;
@@ -156,7 +164,7 @@ function conform(value: Value, schema: JSONSchema, path: string, failures: Confo
     // A blob-backed string's content is not readable synchronously (this walk is sync). A non-string
     // const can never equal a string, so reject. A *string* const, though, we accept unconditionally —
     // a KNOWN HOLE: a >4KB string satisfies any string `const` regardless of content. Left deliberately:
-    // a >4KB literal-type const is degenerate, and the `$constructor` discriminator no longer routes
+    // a >4KB literal-type const is degenerate, and the `$katari_constructor` discriminator no longer routes
     // through here (it is checked via `value.ctor`, see `conformData`). Closing it would mean hashing the
     // const with the blob's algorithm and comparing to `ref.hash`.
     if (value.kind === "ref" && value.semanticKind === "string") {
@@ -179,7 +187,7 @@ function conform(value: Value, schema: JSONSchema, path: string, failures: Confo
 
   // A callable or a blob handle satisfies its `$`-keyed reference schema (and an unconstrained one);
   // any other constraint cannot hold for it.
-  if (value.kind === "agent" || value.kind === "closure") {
+  if (value.kind === "agent" || value.kind === "closure" || value.kind === "tool") {
     if (!(isUnconstrained(schema) || referenceKeyOf(schema) === AGENT_KEY)) {
       failures.push({ path, message: `expected ${describeSchema(schema)}, got a callable value` });
     }
@@ -192,8 +200,8 @@ function conform(value: Value, schema: JSONSchema, path: string, failures: Confo
     return;
   }
 
-  // A `data` schema (nested `{ $constructor: {const}, value: {fields} }`) is checked against the value's
-  // out-of-band constructor and flat fields, not by walking a literal `$constructor` property.
+  // A `data` schema (nested `{ $katari_constructor: {const}, $katari_value: {fields} }`) is checked against
+  // the value's out-of-band constructor and flat fields, not by walking a literal `$katari_constructor` property.
   const dataConstructor = dataConstructorOf(schema);
   if (dataConstructor !== undefined) {
     conformData(value, dataConstructor, schema, path, failures);
@@ -354,7 +362,7 @@ function conformRecord(
   }
 
   for (const required of schema.required ?? []) {
-    // The `$constructor` / `$ref` / `$agent` reserved requireds are handled by the `data` and reference
+    // The `$katari_constructor` / `$katari_ref` / `$katari_agent` reserved requireds are handled by the `data` and reference
     // paths above; a plain object schema's requireds are ordinary fields.
     if (required === CONSTRUCTOR_KEY || required === AGENT_KEY || required === FILE_KEY) continue;
     if (value.fields[required] === undefined) {
@@ -393,6 +401,7 @@ function describeValue(value: Value): string {
       return value.semanticKind === "string" ? "a string" : "a file handle";
     case "closure":
     case "agent":
+    case "tool":
       return "a callable value";
     default:
       return `a value of type ${value.kind}`;

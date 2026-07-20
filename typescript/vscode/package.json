@@ -2,7 +2,7 @@
   "name": "katari-vscode",
   "displayName": "Katari",
   "description": "Syntax highlighting and language support for the Katari language.",
-  "version": "0.1.0-rc7",
+  "version": "0.1.0-rc8",
   "private": true,
   "license": "MIT",
   "publisher": "yukikurage",
@@ -20,7 +20,41 @@
   "categories": [
     "Programming Languages"
   ],
+  "keywords": [
+    "katari",
+    "agent orchestration",
+    "ai agents",
+    "language server",
+    "lsp"
+  ],
   "contributes": {
+    "commands": [
+      {
+        "command": "katari.check",
+        "category": "Katari",
+        "title": "Check project"
+      },
+      {
+        "command": "katari.build",
+        "category": "Katari",
+        "title": "Build project"
+      },
+      {
+        "command": "katari.apply",
+        "category": "Katari",
+        "title": "Apply (deploy) project"
+      },
+      {
+        "command": "katari.mcpPull",
+        "category": "Katari",
+        "title": "Generate MCP tool bindings"
+      },
+      {
+        "command": "katari.restartLanguageServer",
+        "category": "Katari",
+        "title": "Restart language server"
+      }
+    ],
     "languages": [
       {
         "id": "katari",
@@ -56,13 +90,14 @@
           },
           "default": [],
           "description": "Extra command-line arguments passed to katari-lsp (useful for verbose logging flags during LSP development)."
+        },
+        "katari.cli.path": {
+          "type": "string",
+          "default": "katari",
+          "description": "Path to the katari CLI executable used by the 'Katari: ...' commands (check, build, apply, mcp pull). Leave unset to use a katari on PATH (the extension bundles no CLI); set an absolute path or a PATH name to override it with your own build."
         }
       }
     }
-  },
-  "exports": {
-    "./grammar": "./syntaxes/katari.tmLanguage.json",
-    "./language-configuration": "./language-configuration.json"
   },
   "scripts": {
     "build": "node scripts/bundle.mjs",
@@ -70,18 +105,16 @@
     "vscode:prepublish": "NODE_ENV=production node scripts/bundle.mjs",
     "server:copy": "node scripts/copy-server-binary.mjs",
     "package": "vsce package --no-dependencies --out katari-vscode.vsix",
-    "package:local": "node scripts/copy-server-binary.mjs && node scripts/bundle.mjs && vsce package --no-dependencies --out katari-vscode.vsix",
-    "test": "node --experimental-vm-modules ./scripts/tokenize-samples.mjs"
+    "package:local": "node scripts/copy-server-binary.mjs && node scripts/bundle.mjs && vsce package --no-dependencies --out katari-vscode.vsix"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
+    "@katari-lang/language": "workspace:*",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^3.6.0",
-    "esbuild": "^0.25.0",
-    "typescript": "^5.4.0",
-    "vscode-oniguruma": "^2.0.1",
-    "vscode-textmate": "^9.1.0"
+    "esbuild": "^0.25.12",
+    "typescript": "^5.4.0"
   }
 }

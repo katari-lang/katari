@@ -1,15 +1,17 @@
 // Open-escalation queries. An open escalation a user can answer is a run-root request the engine could not
-// handle: an `escalations` row in the `open` state whose raiser is a run root (its instance's delegation is
-// the api root's run delegation). Core opens an escalation row only for a user-facing request (a panic /
-// control escape that reaches the run root fails the run, it is never an open row), so selecting the open
-// run-root escalations needs no further request filter. This reads the Layer 1 `escalations` table directly —
-// the same source the warm actor rebuilds its in-memory view from on recovery — so the API and the engine
-// always agree.
+// handle: an `escalations` row in the `open` state, addressed to the api root (`to_reactor = 'api'`), whose
+// `request` names a genuine user-facing capability. The base now opens a durable row for EVERY escalate
+// uniformly — a failure (panic / throw) and a control escape reaching the run root are `to = api` rows too
+// (the api fails the run on them) — so `to_reactor = 'api'` alone no longer selects the answerable set; the
+// user-facing classification is applied HERE, at the read (`isUserFacingRequest`), not in the base. This
+// reads the Layer 1 `escalations` table directly — the same source the warm actor rebuilds its in-memory
+// view from on recovery — so the API and the engine always agree.
 
 import { and, eq, type SQL } from "drizzle-orm";
 import type { Executor } from "../../db/client.js";
 import { escalations, runs } from "../../db/tables/execution.js";
 import { unsealFromStorage } from "../../runtime/actor/seal.js";
+import { isUserFacingRequest } from "../../runtime/escalation-filter.js";
 import type { Value } from "../../runtime/value/types.js";
 
 /** An open escalation as the API presents it (its `argument` rendered to Json by the service). For a
@@ -26,11 +28,12 @@ export interface OpenEscalationView {
   createdAt: Date;
 }
 
-/** The shared open-escalation select: user-facing rows are the ones addressed to the api root
- *  (`to_reactor = 'api'`) — core opens a row only for a user-facing request, and stamps its `to`. An
- *  escalation row exists only while open, so presence alone selects the open ones — no state filter.
- *  The left join picks up the raising run's snapshot pin; the run row always exists for a user-facing
- *  escalation, so a missing one just degrades `snapshotId` to null. */
+/** The shared open-escalation select: rows addressed to the api root (`to_reactor = 'api'`) whose `request`
+ *  is a genuine user-facing capability — the base opens a `to = api` row for a run-root FAILURE too (a panic /
+ *  throw / control escape), so the `isUserFacingRequest` post-filter is what excludes those. An escalation
+ *  row exists only while open, so presence alone selects the open ones — no state filter. The left join picks
+ *  up the raising run's snapshot pin; the run row always exists for a user-facing escalation, so a missing
+ *  one just degrades `snapshotId` to null. */
 async function selectOpen(executor: Executor, conditions: SQL[]): Promise<OpenEscalationView[]> {
   const rows = await executor
     .select({
@@ -44,8 +47,12 @@ async function selectOpen(executor: Executor, conditions: SQL[]): Promise<OpenEs
     .from(escalations)
     .leftJoin(runs, eq(runs.id, escalations.runId))
     .where(and(eq(escalations.toReactor, "api"), ...conditions));
-  // Decrypt the at-rest question before the service redacts it for the wire (the inverse of seal-on-write).
-  return rows.map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));
+  // Keep only the user-facing (answerable) rows, then decrypt the at-rest question before the service
+  // redacts it for the wire (the inverse of seal-on-write). A failure row (panic / throw / control) is a
+  // `to = api` row too, so this filter — not the `to_reactor` predicate — is what makes it un-answerable.
+  return rows
+    .filter((row) => isUserFacingRequest(row.request))
+    .map((row) => ({ ...row, argument: unsealFromStorage(row.argument) }));
 }
 
 export const escalationRepository = {

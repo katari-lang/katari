@@ -19,6 +19,7 @@ import Katari.Identifier.Monad
 resolveType :: SyntacticTypeExpression Parsed -> Identifier (SyntacticTypeExpression Identified)
 resolveType = \case
   TypePrimitive node -> pure (TypePrimitive node)
+  TypeStringLiteral node -> pure (TypeStringLiteral node)
   TypeNever sourceSpan -> pure (TypeNever sourceSpan)
   TypeUnknown sourceSpan -> pure (TypeUnknown sourceSpan)
   TypeAll sourceSpan -> pure (TypeAll sourceSpan)
@@ -114,6 +115,7 @@ resolvePreparedGenericParameter (parameter, resolution) = do
         labelReference = retagReference parameter.labelReference,
         typeReference = identifiedReference parameter.typeReference.sourceSpan (Just resolution),
         kind = parameter.kind,
+        bindsLiteral = parameter.bindsLiteral,
         upperBound = upperBound,
         sourceSpan = parameter.sourceSpan
       }

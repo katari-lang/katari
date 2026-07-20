@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           # Library packages first, then the platform binaries, then the shim that ties them
           # together — so a partially failed publish never leaves the shim pointing at nothing.
-          for dir in typescript/types typescript/port typescript/runtime typescript/bundle; do
+          for dir in typescript/types typescript/port typescript/runtime typescript/bundle typescript/mcp; do
             (cd "$dir" && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
           done
           for dir in .staged/*/; do

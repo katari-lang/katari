@@ -16,7 +16,14 @@ import type { CoreInstance, ProjectStore } from "./types.js";
 
 /** A fresh, empty warm store for a project (scope ids start at 0). */
 export function createProjectStore(): ProjectStore {
-  return { instances: {}, scopes: {}, scopesByOwner: new Map(), nextScopeId: 0, blobs: {} };
+  return {
+    instances: {},
+    scopes: {},
+    scopesByOwner: new Map(),
+    nextScopeId: 0,
+    blobs: {},
+    blobsByOwner: new Map(),
+  };
 }
 
 /** Look up a loaded core instance; throws if absent (the caller routed to an instance not in the store). */

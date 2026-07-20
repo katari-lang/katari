@@ -1,0 +1,29 @@
+// `finally { ... }` arms a finalizer of the current agent instance (Go-`defer`-like): armed blocks run
+// in reverse arming order right before the instance acknowledges its terminal — a normal completion or
+// a cancellation — and never on a panic. Arming the same statement twice (e.g. in a loop body) arms it
+// twice; that stack discipline is the point, not a defect.
+//
+// A finalizer runs while the parent may already be awaiting this instance's cancellation, so its net
+// effect must stay within `io`: it may not escalate a request through that parent (io routes to sibling
+// reactors instead). A request RAISED and HANDLED locally inside the finalizer body is discharged, so it
+// is fine; an UNHANDLED request that would escape is rejected at compile time (K3021).
+
+@"A cleanup capability, provided and discharged INSIDE the finalizer that uses it."
+request cleanup() -> null
+
+@"Arm two finalizers before returning. They run in reverse arming order — the `cleanup` one first, then
+the note — right before this instance acknowledges completion (and on cancellation, but never on a
+panic). The first finalizer is pure; the second raises `cleanup`, but a handler INSIDE it discharges the
+request, so nothing escalates to a parent that may already be awaiting this instance's cancellation, and
+its net effect stays within `io`. (Richer finalizers that write a real log line arrive with the runtime's
+io prims; until then a finalizer keeps to `io` or a locally-handled request like this.)"
+agent run() -> string {
+  finally { let _note = "bookkeeping done" }
+  finally {
+    use handler {
+      request cleanup() -> null { next null }
+    }
+    let _released = cleanup()
+  }
+  "work complete"
+}

@@ -13,7 +13,7 @@ import type { Value } from "../value/types.js";
 import type { StepContext } from "./context.js";
 import { allocateScope, writeVariable } from "./scope.js";
 import { allocateThreadId } from "./store.js";
-import type { Thread, ThreadBase } from "./types.js";
+import type { Thread, ThreadBase, ThreadOrigin } from "./types.js";
 
 /** Resolve a block by id within the running instance's snapshot (unwrapping its `BlockInformation`). */
 export function getBlock(ctx: StepContext, blockId: BlockId): Block {
@@ -33,6 +33,9 @@ export function spawnThread(
     parentScopeId: ScopeId;
     blockId: BlockId;
     parameters: Record<string, Value>;
+    /** Override the origin the child would otherwise inherit from its parent — supplied only when spawning a
+     *  finalizer root under the (user) agent root, to stamp the whole finalizer subtree `finalizer`. */
+    origin?: ThreadOrigin;
   },
 ): ThreadId {
   const information = ctx.ir.block(args.blockId);
@@ -52,6 +55,9 @@ export function spawnThread(
     scopeId,
     blockId: args.blockId,
     status: "running",
+    // Inherit the spawning parent's origin (a finalizer's sub-threads are finalizers too), unless the caller
+    // stamps one explicitly (the finalizer root spawned under the user agent root).
+    origin: args.origin ?? ctx.instance.threads[args.parent]?.origin ?? "user",
     forwardRoutes: {},
   };
   ctx.instance.threads[threadId] = threadForBlock(information.block, base);
@@ -66,20 +72,24 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
     case "sequence":
       return { ...base, kind: "sequence", cursor: 0, pending: null };
     case "primitive":
-      return { ...base, kind: "primitive" };
+      return { ...base, kind: "primitive", invocation: { kind: "block" } };
     case "construct":
       return { ...base, kind: "construct" };
     case "request":
       return { ...base, kind: "request" };
     case "external":
       // Born like a delegate proxy: a fresh delegation it will open on `create` when it emits its
-      // `delegate` to its reactor (`ffi` by default, or `http` when the leaf is so marked).
+      // `delegate` to its reactor. The block's marker is copied verbatim — the compiler already pins it
+      // to the known reactor names (and stamps `ffi` when the `from` clause is absent). This is the
+      // `wrapper` role: the spawning instance's whole body is this external leaf, so the ack value is
+      // the instance's own result (conformed against its declared output at the core reactor).
       return {
         ...base,
         kind: "external",
         delegationId: newDelegationId(),
         relays: {},
-        reactor: block.reactor === "http" ? "http" : "ffi",
+        reactor: block.reactor,
+        role: "wrapper",
       };
     case "match":
       return { ...base, kind: "match", pending: null };
@@ -95,6 +105,8 @@ export function threadForBlock(block: Block, base: ThreadBase): Thread {
         postCancelCollect: {},
         thenPending: null,
       };
+    case "forever":
+      return { ...base, kind: "forever", pending: null, states: {}, postCancelAdvance: {} };
     case "handle":
       return {
         ...base,

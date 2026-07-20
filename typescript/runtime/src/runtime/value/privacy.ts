@@ -31,6 +31,8 @@ export function isTainted(value: Value): boolean {
       return Object.values(value.fields).some(isTainted);
     case "array":
       return value.elements.some(isTainted);
+    case "tool":
+      return isTainted(value.context);
     default:
       return false;
   }

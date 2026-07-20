@@ -13,6 +13,7 @@
 // its api-side run instance — a run-root core instance records `callerReactor = api` (the summoning delegate's
 // `from`), so a reply it emits routes to `api` without core inferring it.
 
+import { rebuildBlobOwnerIndex } from "../engine/blob.js";
 import {
   delegateProxyOf,
   PANIC_REQUEST,
@@ -25,7 +26,6 @@ import { drive } from "../engine/drive.js";
 import { unreachableOwnedScopes } from "../engine/gc.js";
 import { createInstance, isInstanceComplete, teardownInstance } from "../engine/instance.js";
 import { rebuildScopeOwnerIndex } from "../engine/scope.js";
-import { errorData } from "../engine/throw-signal.js";
 import type { CoreInstance, ProjectStore } from "../engine/types.js";
 import {
   agentSnapshot,
@@ -45,7 +45,7 @@ import {
 } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
-import type { GenericSubstitution, Value } from "../value/types.js";
+import type { Value } from "../value/types.js";
 import {
   conformValue,
   fillGenericSchema,
@@ -117,6 +117,7 @@ export class CoreReactor extends Reactor {
     this.store.scopesByOwner = new Map();
     this.store.nextScopeId = 0;
     this.store.blobs = {};
+    this.store.blobsByOwner = new Map();
     this.touchedInstances.clear();
   }
 
@@ -133,11 +134,27 @@ export class CoreReactor extends Reactor {
     this.store.scopes = engine.scopes;
     this.store.blobs = engine.blobs;
     this.store.nextScopeId = engine.nextScopeId;
-    // The loaded scopes replaced the map wholesale; rebuild the owner index over them before any sweep reads it.
+    // The loaded scopes / blobs replaced their maps wholesale; rebuild the owner indexes over them before any
+    // sweep (or the ownership hoist) reads them.
     rebuildScopeOwnerIndex(this.store);
+    rebuildBlobOwnerIndex(this.store);
+    // The delegations core issued and the escalations it raised reload through the base, uniformly.
+    await this.loadBase(loader.base);
+    // The caller INSTANCE (the blob-hoist target) of each reloaded instance is re-derived from the durable
+    // `delegations.caller_instance_id` — the SoT recorded for EVERY delegation — keyed by delegation id, NOT
+    // from `callerInstanceOf`, which reads only the caller-side rows core ITSELF owns (its sub-calls). An
+    // instance a webhook subscriber / mcp.serve continuation / ffi inner delegation summoned has its
+    // caller-side row owned by THAT reactor, so its hoist target would otherwise reload as `undefined` and
+    // every later upward event would silently skip the hoist — reclaiming the produced blob at completion
+    // teardown. A run root's row (`caller = api`) is absent here, which is correct: the run→api boundary
+    // hoists nothing anyway.
+    const callerInstances = new Map<DelegationId, InstanceId>();
+    for (const row of await loader.core.summoningDelegations()) {
+      callerInstances.set(row.delegation, row.caller);
+    }
     // Re-seed the handled-delegation index (delegation → child instance) from each instance's own summoning
     // delegation — the instance (its payload) is the source of truth. The caller side (the proxy to resume on
-    // an ack) needs no rebuild here: it reads the issued delegations reloaded just below (`callerInstanceOf`).
+    // an ack) needs no rebuild here: it reads the issued delegations reloaded just above (`callerInstanceOf`).
     for (const instance of Object.values(this.store.instances)) {
       if (instance.delegationId !== null) {
         this.acceptDelegation(
@@ -145,81 +162,71 @@ export class CoreReactor extends Reactor {
           instance.id,
           instance.callerReactor,
           instance.runId,
+          callerInstances.get(instance.delegationId),
         );
       }
     }
-    // The delegations core issued and the escalations it raised reload through the base, uniformly.
-    await this.loadBase(loader.base);
   }
 
   // ─── delegate / delegateAck ─────────────────────────────────────────────────────────────────
 
   protected async onDelegate(event: Extract<ExternalEvent, { kind: "delegate" }>): Promise<void> {
-    // A `call_agent` delegate is pure indirection: unwrap it to the callable its argument carries and run
-    // *that*, under the same delegation (so the caller's proxy, escalation relays and cancel cascade see an
-    // ordinary sub-call). The loop unwraps a nested `call_agent(target = call_agent, ...)` too; each round
-    // descends into the argument record, so it terminates. A malformed argument throws `ai.call_error` —
-    // the dynamic dispatch failed before the target ran, which a tool loop anticipates (and may retry).
-    let target = event.target;
-    let argument = event.argument;
-    let generics = event.generics;
-    let dynamicDispatch = false;
-    while (target.kind === "named" && target.name === CALL_AGENT_NAME) {
-      dynamicDispatch = true;
-      const unwrapped = unwrapCallAgent(argument);
-      if ("error" in unwrapped) {
-        this.raiseThrow(
-          event.delegation,
-          errorData(CALL_ERROR, unwrapped.error),
-          event.from,
-          event.run,
-        );
-        return;
-      }
-      target = unwrapped.target;
-      argument = unwrapped.argument;
-      generics = unwrapped.generics;
-    }
-    // Only named / closure targets route to core; an external target goes to the ffi reactor, never here.
+    // Dynamic dispatch (`call_agent`, a callee VALUE, a tool) is resolved where the call is EMITTED —
+    // the engine's delegate operation, the FFI / webhook boundaries — so a delegate arriving here is
+    // already a concrete named / closure target for core to summon. (An external target routes to its
+    // own reactor, never here.)
+    const target = event.target;
+    const argument = event.argument;
+    const generics = event.generics;
     // Resolving the target reads the IR. A *deterministic* resolution failure (a missing module / unknown
-    // agent — e.g. a bad qualified name from a run command) is a program failure, so fail it to the caller:
-    // a panic for a static entry, `ai.call_error` when the name arrived through a `call_agent` unwrap (the
-    // AI-supplied target is the anticipated failure). A *transient* infra failure (a `TransientError` — an
-    // IR DB read blip) is NOT a program failure: rethrow it so the substrate retries the delegate from
-    // durable state (failing it would wrongly fail the run forever). Neither failure path opens a row or
-    // needs a turn owner, so it births no instance.
+    // agent — a stale `$katari_agent` reference in a sub-call) is a program failure, so fail it to the caller as a
+    // panic. A *transient* infra failure (a `TransientError` — an IR DB read blip) is NOT a program failure:
+    // rethrow it so the substrate retries the delegate from durable state (failing it would wrongly fail the
+    // run forever). The panic is an escalation like any other, so it opens a durable raiser-owned row — but
+    // the callee is not born yet, so the row is owned by the delegate's ISSUER (`preInstanceRaiser`), always
+    // a MORTAL sub-call caller (a run / inner delegate is validated at its boundary and never reaches here),
+    // whose teardown cascades the row.
     let resolved: { agentBlockId: number; capturedScopeId: ScopeId | null; snapshot: SnapshotId };
     try {
       await this.ir.preload(agentSnapshot(target));
       resolved = this.resolveTarget(target);
     } catch (error) {
       if (isTransientError(error)) throw error;
-      this.failDelegate(dynamicDispatch, event.delegation, messageOf(error), event.from, event.run);
+      this.raisePanic(
+        event.delegation,
+        messageOf(error),
+        event.from,
+        event.run,
+        this.preInstanceRaiser(event),
+      );
       return;
     }
-    // The delegate acceptance check: the argument must conform to the target's input schema. Statically
-    // checked call sites conform by construction; this is the enforcement point for every *dynamic* entry —
-    // a run command's JSON argument (violation = panic; there is no handler above the root anyway) or a
-    // `call_agent` args record (violation = `ai.call_error`, so the tool loop can catch it and retry).
-    // The argument is passed through unchanged: the codec already decoded it, and this is a pure check,
-    // never a rewrite.
+    // The delegate acceptance check: the argument must conform to the target's input schema. This is the
+    // last-line DEFENCE, not the enforcement point — every dynamic entry pre-validates its own argument and
+    // renders its own error upstream: a `call_agent` args record as a catchable `reflection.call_error`
+    // (engine-side), and an mcp / webhook delivery and a run command's JSON argument as a per-request 400
+    // (actor-side). So a mismatch reaching HERE is a type-system hole or a genuine defect (an FFI handler
+    // passing a malformed argument) — never an anticipated error, so it is a PANIC. Panic (unlike a
+    // `call_error`) is orthogonal to the callee's effect row, so injecting it cannot make the row lie by
+    // introducing a throw the row does not declare; a `call_error` here would. A statically checked call site
+    // conforms by construction, so this never fires for one. The argument is passed through unchanged: the
+    // codec already decoded it, and this is a pure check, never a rewrite.
     const targetBlock = this.ir
       .access(resolved.snapshot, moduleOf(target))
       .block(resolved.agentBlockId).block;
     if (targetBlock.kind === "agent") {
       const substitution = typeSubstitutionOf(targetBlock.schema.genericBindings, generics);
       const inputSchema = fillGenericSchema(substitution, targetBlock.schema.input);
-      // Strict acceptance: the codec already decoded the argument (a total, blind bijection); this only
-      // checks it against the input schema, never rewrites it. A missing argument is checked as an empty
-      // record — an agent with no required input accepts it, a data / required-field input rightly fails.
+      // A missing argument is checked as an empty record — an agent with no required input accepts it, a
+      // data / required-field input rightly fails.
       const check = conformValue(argument ?? { kind: "record", fields: {} }, inputSchema);
       if (!check.ok) {
-        this.failDelegate(
-          dynamicDispatch,
+        this.raisePanic(
           event.delegation,
           `${describeTarget(target)}: the argument does not conform to the input schema — ${renderConformFailures(check.failures)}`,
           event.from,
           event.run,
+          this.preInstanceRaiser(event),
         );
         return;
       }
@@ -241,26 +248,10 @@ export class CoreReactor extends Reactor {
     // Record the handled delegation (the callee-side index → this child instance + its summoner), so an inbound
     // terminate / escalateAck for it finds the child and its replies route back. The caller-side delegation row
     // was already opened by its caller (core's issuing turn, or the api root's startRun); this turn only summons
-    // the child and runs it.
-    this.acceptDelegation(event.delegation, instance.id, event.from, event.run);
+    // the child and runs it. `event.caller` is the issuing instance (the hoist target for this child's upward
+    // events) — stamped by the base `send`.
+    this.acceptDelegation(event.delegation, instance.id, event.from, event.run, event.caller);
     await this.runTurn(instance, [{ kind: "create", thread: instance.rootThreadId }]);
-  }
-
-  /** Fail a delegate at the acceptance surface: `ai.call_error` when the target arrived through a
-   *  `call_agent` unwrap (a dynamic dispatch a tool loop anticipates and may catch), a panic otherwise
-   *  (a static call site conforms by construction, so reaching here means the program is broken). */
-  private failDelegate(
-    dynamicDispatch: boolean,
-    delegation: DelegationId,
-    message: string,
-    to: ReactorName,
-    run: InstanceId,
-  ): void {
-    if (dynamicDispatch) {
-      this.raiseThrow(delegation, errorData(CALL_ERROR, message), to, run);
-    } else {
-      this.raisePanic(delegation, message, to, run);
-    }
   }
 
   /** A core sub-call returned: the base has already retired the delegation; hand its value to the caller's
@@ -287,9 +278,14 @@ export class CoreReactor extends Reactor {
     // has the IR, the wrapper instance's schema, and its generics (mirroring the input conform at
     // `onDelegate`). A violation is a broken contract, not a program-anticipatable error, so it fails the
     // call as a panic raised at the proxy — exactly as an external *error* does — naming the boundary,
-    // rather than corrupting a match / field read far downstream. A core sub-call is statically typed by
-    // construction and skips this.
-    if (proxy.kind === "external") {
+    // rather than corrupting a match / field read far downstream. Only the WRAPPER role conforms: there
+    // the instance's whole body is the external leaf, so the ack value IS the instance's own result. A
+    // `dispatched` proxy (a mid-body dynamically dispatched tool) delivers an ordinary intermediate —
+    // conforming that against the CALLER's output schema would wrongly reject a typed caller mid-body;
+    // its value meets the ordinary schema boundaries instead (the tool's runtime schema at dispatch, this
+    // instance's own output conform when it returns). A core sub-call is statically typed by construction
+    // and skips this entirely.
+    if (proxy.kind === "external" && proxy.role === "wrapper") {
       const failure = await this.conformExternalResult(caller, event.value);
       if (failure !== null) {
         await this.runTurnWith(caller, (ctx) =>
@@ -436,6 +432,13 @@ export class CoreReactor extends Reactor {
       // Stamped as `from` on every event the engine emits; each emit site supplies its own `to` from edge
       // knowledge (the callee's reactor, or the summoner), so the harvest below only buffers routed events.
       reactorName: this.name,
+      // The blob write seams the effectful file prims (`from_base64` / `free`) reach through: a produced blob
+      // is owned by the running instance (so its next upward event hoists it up, like an FFI-produced blob),
+      // and a free reclaims a blob only when this instance's run owns it. Closing over `this.pool` + the
+      // instance keeps the pool an actor-layer concept the engine never imports.
+      produceBlob: (blobId, entry) =>
+        this.pool.registerBlob(blobId, { owner: instance.id, ...entry }),
+      freeBlobInRun: (blobId) => this.pool.deleteBlobOwnedInRun(blobId, instance.runId),
     });
     seed(ctx);
     await drive(ctx);
@@ -465,6 +468,26 @@ export class CoreReactor extends Reactor {
     return id !== undefined ? this.store.instances[id] : undefined;
   }
 
+  /** The raiser a pre-instance failure (an unresolvable / non-conforming delegate, before the callee is
+   *  born) is attributed to: the delegate's ISSUER, which core owns the caller-side row for (a mortal core
+   *  instance — its teardown cascades the failure row). A pre-instance failure can ONLY happen for a
+   *  sub-call (`from = core`): a RUN delegate is validated at the run-start boundary (an unresolvable /
+   *  malformed entry is a 400, never launched), and an INNER delegate (ffi / mcp / webhook) has its target +
+   *  argument validated at that reactor's own boundary — so neither ever reaches this pre-instance panic.
+   *  Attributing to the permanent run instance (the old `?? event.run`) would make it the raiser of an
+   *  ephemeral row that no cascade reclaims, which the design forbids (the run instance is the run's
+   *  permanent result container). So a missing caller here is an engine invariant break — fail loudly rather
+   *  than resurrect the permanent-raiser leak. */
+  private preInstanceRaiser(event: Extract<ExternalEvent, { kind: "delegate" }>): InstanceId {
+    const caller = this.callerInstanceOf(event.delegation);
+    if (caller === undefined) {
+      throw new Error(
+        `core pre-instance failure for ${event.delegation} has no issuer core owns (a run / inner delegate reached the acceptance surface unvalidated — engine bug)`,
+      );
+    }
+    return caller;
+  }
+
   private resolveTarget(target: DelegateTarget): {
     agentBlockId: number;
     capturedScopeId: ScopeId | null;
@@ -489,51 +512,6 @@ export class CoreReactor extends Reactor {
         throw new Error("core cannot summon an external (ffi) target as an instance");
     }
   }
-}
-
-/** The wired-in dynamic-dispatch callable: a delegate to it is unwrapped at the acceptance surface, never
- *  summoned as an instance (its `BlockPrimitive` body exists only as a schema carrier). */
-const CALL_AGENT_NAME = "prelude.ai.call_agent";
-
-/** The domain error ctor a failed dynamic dispatch throws (`prelude/ai.ktr` declares it). */
-const CALL_ERROR = "prelude.ai.call_error";
-
-/** Read a `call_agent` argument record into the delegate it stands for: `target` (a callable value)
- *  becomes the delegate target (carrying its own generics), `args` becomes the argument. */
-function unwrapCallAgent(
-  argument: Value | null,
-):
-  | { target: DelegateTarget; argument: Value | null; generics?: GenericSubstitution }
-  | { error: string } {
-  if (argument === null || argument.kind !== "record") {
-    return { error: "call_agent: expected an argument record carrying { target, args }" };
-  }
-  const callable = argument.fields.target;
-  const args = argument.fields.args ?? null;
-  if (callable === undefined) {
-    return { error: 'call_agent: the argument record is missing "target"' };
-  }
-  if (callable.kind === "agent") {
-    return {
-      target: { kind: "named", name: callable.name, snapshot: callable.snapshot },
-      argument: args,
-      ...(callable.generics !== undefined ? { generics: callable.generics } : {}),
-    };
-  }
-  if (callable.kind === "closure") {
-    return {
-      target: {
-        kind: "closure",
-        blockId: callable.blockId,
-        scopeId: callable.scopeId,
-        snapshot: callable.snapshot,
-        module: callable.module,
-      },
-      argument: args,
-      ...(callable.generics !== undefined ? { generics: callable.generics } : {}),
-    };
-  }
-  return { error: `call_agent: "target" is not a callable value (got ${callable.kind})` };
 }
 
 /** A target's user-facing label for a panic message (a closure has no qualified name). */

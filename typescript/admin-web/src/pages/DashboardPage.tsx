@@ -19,8 +19,8 @@ export function DashboardPage() {
   if (project.isPending) return <LoadingBlock />;
   if (project.data === undefined) return null;
 
-  const liveRuns = (runs.data ?? []).filter(isLiveRun);
-  const recentRuns = (runs.data ?? []).slice(0, 5);
+  const liveRuns = (runs.data?.items ?? []).filter(isLiveRun);
+  const recentRuns = (runs.data?.items ?? []).slice(0, 5);
 
   return (
     <>
@@ -112,7 +112,7 @@ export function DashboardPage() {
 
 function MiniRunList({ projectId, runIds }: { projectId: string; runIds: string[] }) {
   const runs = useRuns(projectId, { limit: 25 });
-  const byId = new Map((runs.data ?? []).map((run) => [run.id, run]));
+  const byId = new Map((runs.data?.items ?? []).map((run) => [run.id, run]));
   return (
     <ul className="divide-y divide-edge">
       {runIds.map((runId) => {

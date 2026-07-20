@@ -85,6 +85,13 @@ spec = do
       codesFor (phantomDecl <> "agent run() -> integer { phantom(value = 1) }") `shouldContain` ["K3016"]
     it "a bare (uncalled) generic reference is still rejected (K3015)" $
       codesFor (identityDecl <> "agent run() -> integer { let f = identity\n1 }") `shouldContain` ["K3015"]
+    -- A partial application infers only from its SUPPLIED arguments: a `_` hole constrains nothing,
+    -- so a parameter mentioned solely in holed positions is un-inferrable (explicit `identity[T]` is
+    -- the escape hatch), rather than silently solving to `never` off the closed argument object.
+    it "reports a parameter determined only by `_` holes in a partial application (K3016)" $
+      codesFor (identityDecl <> "agent run() -> integer { let f = identity(value = _)\n1 }") `shouldContain` ["K3016"]
+    it "accepts the explicit escape hatch `identity[integer](value = _)`" $
+      codesFor (identityDecl <> "agent run() -> integer { let f = identity[integer](value = _)\nf(value = 1) }") `shouldBe` []
 
   describe "handler inference (a handler is a generic value over R / E, applied at use)" $ do
     it "a bare handler (no application) is an unapplied generic value (K3015)" $
@@ -134,6 +141,41 @@ spec = do
       -- effect carried by the continuation — is not admitted; only a handler-shaped provider, generic in its
       -- continuation effect, accepts one (then the escape rides E to the enclosing agent).
       codesFor (providerDecl <> "agent run() -> integer { let x : integer = use foo\nreturn 5 }") `shouldContain` ["K3001"]
+
+  describe "use call-provider (the written arguments joined with the continuation, one application)" $ do
+    it "a parameterised provider infers R / E from the continuation at the single call site" $
+      codesFor (supplyDecl <> "agent run() -> string { let x : integer = use supply(base = 1)\n\"result\" }") `shouldBe` []
+    it "the provider's written arguments still typecheck (K3001 on a mismatch)" $
+      codesFor (supplyDecl <> "agent run() -> string { let x : integer = use supply(base = \"one\")\n\"result\" }") `shouldContain` ["K3001"]
+    it "rejects a use binder the call provider's continuation does not accept (K3001)" $
+      codesFor (supplyDecl <> "agent run() -> string { let x : string = use supply(base = 1)\n\"result\" }") `shouldContain` ["K3001"]
+    it "the continuation's requests ride the inferred E to the enclosing agent" $
+      codesFor (tickDecl <> supplyDecl <> "agent run() -> integer with tick { let x : integer = use supply(base = 1)\ntick() }") `shouldBe` []
+    it "rejects a request the enclosing agent's declared effect excludes (K3001, via the inferred E)" $
+      codesFor (tickDecl <> supplyDecl <> "agent run() -> integer with pure { let x : integer = use supply(base = 1)\ntick() }") `shouldContain` ["K3001"]
+    it "an explicitly written continuation label is reserved (K3019)" $
+      codesFor (supplyDecl <> noopDecl <> "agent run() -> string { let x : integer = use supply(base = 1, continuation = noop)\n\"result\" }") `shouldContain` ["K3019"]
+    it "rejects a provider shape with no application reading (K3019) — a field read must be bound or applied" $
+      codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p\n\"result\" }") `shouldContain` ["K3019"]
+    it "a computed provider is still usable by applying it (a zero-argument call)" $
+      codesFor (monoProviderDecl <> "agent run() -> string { let fs = { p = bar }\nlet x : integer = use fs.p()\n\"result\" }") `shouldBe` []
+
+  describe "request-row payload inference (a generic named only inside a continuation's effect)" $ do
+    -- A retry-style provider names `Error` ONLY in its continuation's throw row (`{...E, throw[Error]}`);
+    -- inference must relate that row's payload to the continuation argument so `Error` is solved rather than
+    -- reported un-inferrable, and the re-raised throw stays typed end to end.
+    it "infers Error from the continuation's throw row, keeping the re-raised throw typed" $
+      codesFor (reraiseDecl <> throwerDecl <> "agent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse reraise\nthrows() }") `shouldBe` []
+    it "the inferred Error is exact: a handler for the wrong payload does not discharge it (K3001)" $
+      codesFor (reraiseDecl <> throwerDecl <> "data other()\nagent run() -> integer { use handler { request prelude.throw(error: other) -> never { break 0 } }\nuse reraise\nthrows() }") `shouldContain` ["K3001"]
+    -- The pinning pair for the goFunction addition: a generic named in BOTH a value position (already
+    -- solvable before request-row payloads were related) and the continuation's throw row. The row's
+    -- proposal must AGREE with the value position's solution — programs the old inference solved stay
+    -- solved unchanged — and a disagreeing pair must surface, not silently prefer either occurrence.
+    it "a generic in a value position AND the throw row solves consistently (the row proposal changes nothing already solvable)" $
+      codesFor (guardDecl <> throwerDecl <> "agent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse guard(fallback = oops(n = 0))\nthrows() }") `shouldBe` []
+    it "a value-position payload disagreeing with the row's is not silently narrowed away" $
+      codesFor (guardDecl <> throwerDecl <> "data other()\nagent run() -> integer { use handler { request prelude.throw(error: oops) -> never { break 0 } }\nuse guard(fallback = other())\nthrows() }") `shouldSatisfy` (not . null)
 
   describe "request handler generic inference (param-derived)" $ do
     it "infers the request's generic from a handler parameter annotation" $
@@ -316,6 +358,33 @@ boundedRequestDecl = "request num[a extends number](value: a) -> a\n"
 providerDecl :: Text
 providerDecl = "external agent foo[R](continuation: agent(value: integer) -> R) -> R\n"
 
+-- | A parameterised provider written in Katari: config argument + continuation in ONE parameter
+-- record, so @use supply(base = 1)@ applies it once with the continuation joined in.
+supplyDecl :: Text
+supplyDecl = "agent supply[R, effect E](base: integer, continuation: agent(value: integer) -> R with E) -> R with E { continuation(value = base) }\n"
+
+noopDecl :: Text
+noopDecl = "agent noop(value: integer) -> integer { value }\n"
+
+-- | A non-generic provider (concrete R), so it can be carried in a record without an instantiation.
+monoProviderDecl :: Text
+monoProviderDecl = "external agent bar(continuation: agent(value: integer) -> string) -> string\n"
+
+-- | A retry-shaped provider whose only mention of @Error@ is inside the continuation's throw row (the
+-- OVERWRITE form a discharge needs). Exercises request-row payload inference: @Error@ must be solved from
+-- the continuation argument, not reported un-inferrable.
+reraiseDecl :: Text
+reraiseDecl = "agent reraise[R, Error, effect E](continuation: agent(value: null) -> R with {...E, prelude.throw[Error]}) -> R with E | prelude.throw[Error] { continuation(value = null) }\n"
+
+throwerDecl :: Text
+throwerDecl = "data oops(n: integer)\nagent throws() -> integer with prelude.throw[oops] { prelude.throw(error = oops(n = 1)) }\n"
+
+-- | Like 'reraiseDecl', but @Error@ ALSO appears in a value position (@fallback@) — the pinning shape for
+-- the request-row addition: the value occurrence alone solved @Error@ before rows were related, so the row
+-- proposal must agree with (never disturb) that solution.
+guardDecl :: Text
+guardDecl = "agent guard[R, Error, effect E](fallback: Error, continuation: agent(value: null) -> R with {...E, prelude.throw[Error]}) -> R with E | prelude.throw[Error] { continuation(value = null) }\n"
+
 ------------------------------------------------------------------------------------------------
 -- White-box helpers
 ------------------------------------------------------------------------------------------------
@@ -350,7 +419,7 @@ typeVar metavar = case metavarKinded GenericKindType metavar of
 
 -- | A registry of type metavariables from @(id, name, bound)@ triples.
 registry :: [(GenericId, Text, Maybe NormalizedKindedType)] -> Registry
-registry entries = Map.fromList [(metavar, Metavar {name = name, kind = GenericKindType, bound = bound}) | (metavar, name, bound) <- entries]
+registry entries = Map.fromList [(metavar, Metavar {name = name, kind = GenericKindType, bindsLiteral = False, bound = bound}) | (metavar, name, bound) <- entries]
 
 typeLowersOf :: GenericId -> Constraints -> [NormalizedType]
 typeLowersOf metavar constraints = Map.findWithDefault [] metavar constraints.typeBounds

@@ -14,17 +14,12 @@
 // Framing is one JSON object per line; `decodeRuntimeMessage` returns `null` for a line it cannot parse as
 // a message (a stray non-protocol line on stdin is skipped, never fatal).
 
-import type { Json } from "@katari-lang/types";
+import type { DelegateCallee, DelegateOutcome, Json } from "@katari-lang/types";
 
-/** The outcome of one inner agent call: the callee's `result`, a `throw` (it raised a typed
- *  `prelude.throw` — the payload rides back so the handler catches, or rethrows, the typed error), an
- *  `error` (it panicked / could not be resolved), or `cancelled` (it was terminated — usually because the
- *  parent call is being cancelled). */
-export type DelegateOutcome =
-  | { kind: "result"; value: Json }
-  | { kind: "throw"; error: Json }
-  | { kind: "error"; message: string }
-  | { kind: "cancelled" };
+// The delegate vocabulary is defined once in `@katari-lang/types` (`wire.ts`) — shared with the
+// runtime's `sidecar-protocol`, so the two ends of the wire cannot drift — and re-exported here so
+// protocol consumers keep one import site.
+export type { DelegateCallee, DelegateOutcome };
 
 /** Runtime → sidecar. A dispatch always means "run it": execution is at-most-once — the runtime never
  *  re-dispatches a call after a restart (an interrupted call fails as a panic on the katari side, where the
@@ -40,9 +35,8 @@ export type RuntimeMessage =
   | { kind: "delegateResult"; delegation: string; call: string; outcome: DelegateOutcome };
 
 /** Sidecar → runtime. A `throw` fails the call as a typed `prelude.throw` with `error` as its payload
- *  (caught by a katari-side handler); an `error` becomes a panic. `delegate.agent` is a qualified agent
- *  name for the `core` reactor, or an external key for a call reactor (`ffi` / `http`); an absent
- *  `reactor` means `core`. */
+ *  (caught by a katari-side handler); an `error` becomes a panic. A `delegate` runs another agent
+ *  (`callee`) on the in-flight handler's behalf. */
 export type SidecarMessage =
   | { kind: "result"; delegation: string; value: Json }
   | { kind: "throw"; delegation: string; error: Json }
@@ -52,8 +46,7 @@ export type SidecarMessage =
       kind: "delegate";
       delegation: string;
       call: string;
-      agent: string;
-      reactor?: string;
+      callee: DelegateCallee;
       argument: Json | null;
     };
 

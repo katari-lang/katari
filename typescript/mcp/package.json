@@ -1,0 +1,44 @@
+{
+  "name": "@katari-lang/mcp",
+  "version": "0.1.0-rc8",
+  "description": "MCP tool-listing helper for the Katari CLI: connects to an MCP server and emits its tool listing as JSON (running the OAuth authorization flow in memory when --oauth is given). Spawned by `katari mcp pull`.",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "bin": {
+    "katari-mcp": "dist/cli.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "yukikurage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/katari-lang/katari.git",
+    "directory": "typescript/mcp"
+  },
+  "homepage": "https://katari-lang.dev",
+  "bugs": "https://github.com/katari-lang/katari/issues",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,2141 @@
+// End-to-end tests for the built-in `region` reactor, driven through the whole ProjectActor (an in-runtime
+// nursery scheduler — no transport). This wave covers `prelude.region.provide` only, the SCOPED provider: the
+// reactor mints a `nursery` handle carrying its provide scope identity, dispatches the CONTINUATION as one
+// inner delegation with `{ value: nursery }`, and settles the whole call with the continuation's outcome. A
+// provide survives a restart completely (like `webhook` / `time`) — its scope re-registers and its
+// continuation resumes as durable core work — since there is no external process to reconcile.
+
+import {
+  createAgentName,
+  type IRModule,
+  type Operation,
+  type QualifiedName,
+  type SchemaInfo,
+} from "@katari-lang/types";
+import { describe, expect, test } from "vitest";
+import { InMemoryPersistence, type Persistence } from "../src/runtime/actor/persistence.js";
+import { ProjectActor } from "../src/runtime/actor/project-actor.js";
+import {
+  decodeRegionExtension,
+  type RegionExtension,
+} from "../src/runtime/actor/region-reactor.js";
+import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
+import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import { StubHttpTransport } from "../src/runtime/external/http-transport.js";
+import { StubFfiTransport } from "../src/runtime/external/runner.js";
+import type { ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
+import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
+
+const PROJECT = "project-region" as ProjectId;
+const SNAPSHOT = "snapshot-region" as SnapshotId;
+const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
+
+// agent main() {
+//   region.provide(continuation = continuation)   // region.provide[scope, E, R, Eouter](continuation)
+// }
+// agent continuation(value) { <continuationOperations> }   // dispatched with { value: nursery }
+// agent ask_value(input) { <request> }   // an unhandled request the recovery test suspends the run on
+//
+// The continuation's body is the one axis the tests vary; ask_value is always present (unused by the tests
+// that do not escalate).
+function provideIr(continuationOperations: Operation[]): IRModule {
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: {
+        block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadAgent", output: 11, name: createAgentName("continuation") },
+            { kind: "makeRecord", entries: [["continuation", 11]], output: 12 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.provide") },
+              argument: 12,
+              output: 13,
+            },
+            { kind: "exit", target: 0, value: 13 },
+          ],
+        },
+        parameters: { parameter: 10 },
+      },
+      2: {
+        block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      3: {
+        block: { kind: "external", key: "prelude.region.provide", input: 30, reactor: "region" },
+        parameters: { parameter: 30 },
+      },
+      // continuation: receives { value: nursery } and runs the test's chosen body.
+      6: {
+        block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      7: {
+        block: { kind: "sequence", result: null, operations: continuationOperations },
+        parameters: { parameter: 60 },
+      },
+      // ask_value: an unhandled request, so its escalation suspends the run at the run root (recovery test).
+      8: {
+        block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      9: {
+        block: { kind: "request", name: createAgentName("ask_value"), input: 90 },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.region.provide")]: { block: 2, private: false },
+      [createAgentName("continuation")]: { block: 6, private: false },
+      [createAgentName("ask_value")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+}
+
+function makeActor(
+  ir: IRModule,
+  persistence: Persistence = new InMemoryPersistence(),
+  blobs: InMemoryBlobStore = new InMemoryBlobStore(),
+): ProjectActor {
+  const registry = new SnapshotRegistry();
+  for (const name of Object.keys(ir.entries)) {
+    registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
+  }
+  return new ProjectActor({
+    projectId: PROJECT,
+    ir: registry,
+    prims: new PrimRegistry(),
+    blobs,
+    external: new StubFfiTransport(),
+    http: new StubHttpTransport(),
+    persistence,
+  });
+}
+
+async function waitUntil<T>(predicate: () => T | undefined): Promise<T> {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const value = predicate();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("waitUntil: predicate never held");
+}
+
+/** `waitUntil` for an async probe — the durable-buffer reads below poll the persistence, which is async. */
+async function eventually<T>(probe: () => Promise<T | undefined>): Promise<T> {
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("eventually: the probe never held");
+}
+
+// A richer IR than `provideIr`: it wires `prelude.region.fork` alongside `provide`, two request-agents
+// (`ask_value` to HOLD an agent open on an unanswered escalation, `fiber_ask` for a fiber's own escalation),
+// and a `task` agent a `fork` runs. The continuation's body, the task's body, and — for the escaped-nursery
+// case — `main`'s body are the axes the tests vary.
+//
+//   agent main()                         { region.provide(continuation) }     // or: provide then fork (escaped)
+//   agent continuation(value)            { <continuation ops> }               // dispatched with { value: nursery }
+//   agent task(input)                    { <task ops> }                       // the fiber body a fork runs
+//   agent ask_value(input) / fiber_ask(input) { <request> }                   // unhandled holds / fiber escalations
+//
+// It also wires `prelude.region.join` (so a continuation can await a fiber) and a fixed CLOSURE agent (block
+// 16, returning the captured variable 121) that the resource-reown test's task builds with `makeClosure` — a
+// fiber returning a scope-capturing closure, to prove a join carries the fiber's resources across.
+function forkIr(bodies: {
+  continuation: Operation[];
+  task: Operation[];
+  main?: Operation[];
+  canceller?: Operation[];
+}): IRModule {
+  // A `canceller` fiber body (wave 5): defaults to a no-op fiber. The cancel tests override it with a body that
+  // gates on a request then cancels a handle it was forked with (to panic a join parked concurrently).
+  const canceller: Operation[] = bodies.canceller ?? [
+    { kind: "loadLiteral", output: 221, value: { kind: "null" } },
+    { kind: "exit", target: 22, value: 221 },
+  ];
+  const main: Operation[] = bodies.main ?? [
+    { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+    { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.provide") },
+      argument: 102,
+      output: 103,
+    },
+    { kind: "exit", target: 0, value: 103 },
+  ];
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: {
+        block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      1: {
+        block: { kind: "sequence", result: null, operations: main },
+        parameters: { parameter: 100 },
+      },
+      2: {
+        block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      3: {
+        block: { kind: "external", key: "prelude.region.provide", input: 30, reactor: "region" },
+        parameters: { parameter: 30 },
+      },
+      4: {
+        block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      5: {
+        block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
+        parameters: { parameter: 50 },
+      },
+      6: {
+        block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      7: {
+        block: { kind: "sequence", result: null, operations: bodies.continuation },
+        parameters: { parameter: 60 },
+      },
+      8: {
+        block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      9: {
+        block: { kind: "request", name: createAgentName("ask_value"), input: 90 },
+        parameters: { parameter: 90 },
+      },
+      10: {
+        block: { kind: "agent", body: 11, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      11: {
+        block: { kind: "request", name: createAgentName("fiber_ask"), input: 110 },
+        parameters: { parameter: 110 },
+      },
+      12: {
+        block: { kind: "agent", body: 13, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      13: {
+        block: { kind: "sequence", result: null, operations: bodies.task },
+        parameters: { parameter: 120 },
+      },
+      14: {
+        block: { kind: "agent", body: 15, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      15: {
+        block: { kind: "external", key: "prelude.region.join", input: 150, reactor: "region" },
+        parameters: { parameter: 150 },
+      },
+      // A closure agent the resource-reown task returns via `makeClosure`: its body returns variable 121, the
+      // value the task captured from its own scope, so calling it hands back the captured value.
+      16: {
+        block: { kind: "agent", body: 17, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      17: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [{ kind: "exit", target: 16, value: 121 }],
+        },
+        parameters: { parameter: 170 },
+      },
+      // prelude.region.cancel (wave 5): tears one fiber down early, routed by its handle.
+      18: {
+        block: { kind: "agent", body: 19, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      19: {
+        block: { kind: "external", key: "prelude.region.cancel", input: 180, reactor: "region" },
+        parameters: { parameter: 180 },
+      },
+      // hold2: a second holding request (distinct from ask_value), so a continuation can hold AFTER a cancel to
+      // keep its nursery alive while a test observes the cancelled fiber's instance is gone.
+      20: {
+        block: { kind: "agent", body: 21, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      21: {
+        block: { kind: "request", name: createAgentName("hold2"), input: 200 },
+        parameters: { parameter: 200 },
+      },
+      // canceller: a fiber body a continuation forks alongside a worker — the parked-join-cancel test overrides
+      // it to gate then cancel the worker's handle (its `{ input }` argument carries `{ nursery, handle }`).
+      22: {
+        block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      23: {
+        block: { kind: "sequence", result: null, operations: canceller },
+        parameters: { parameter: 220 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.region.provide")]: { block: 2, private: false },
+      [createAgentName("prelude.region.fork")]: { block: 4, private: false },
+      [createAgentName("prelude.region.join")]: { block: 14, private: false },
+      [createAgentName("prelude.region.cancel")]: { block: 18, private: false },
+      [createAgentName("continuation")]: { block: 6, private: false },
+      [createAgentName("ask_value")]: { block: 8, private: false },
+      [createAgentName("fiber_ask")]: { block: 10, private: false },
+      [createAgentName("task")]: { block: 12, private: false },
+      [createAgentName("hold2")]: { block: 20, private: false },
+      [createAgentName("canceller")]: { block: 22, private: false },
+    },
+    names: {},
+  };
+}
+
+/** A continuation body: fork `task` with `argument`, then HOLD on an unanswered `ask_value` so the provide
+ *  stays alive while the fiber runs; the provide settles with the hold's eventual answer. */
+function forkThenHold(argument: string): Operation[] {
+  return [
+    { kind: "getField", source: 60, field: "value", output: 61 },
+    { kind: "loadAgent", output: 62, name: createAgentName("task") },
+    { kind: "loadLiteral", output: 63, value: { kind: "string", value: argument } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["nursery", 61],
+        ["task", 62],
+        ["argument", 63],
+      ],
+      output: 64,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.fork") },
+      argument: 64,
+      output: 65,
+    },
+    { kind: "makeRecord", entries: [], output: 66 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("ask_value") },
+      argument: 66,
+      output: 67,
+    },
+    { kind: "exit", target: 6, value: 67 },
+  ];
+}
+
+/** A task body that surfaces its argument: escalate its whole `{ input }` argument record as `fiber_ask`
+ *  (which relays up through the provide to the run root), returning the answer. A fiber blocked here stays
+ *  running. The argument is forwarded as the record it arrives in (a `fork` hands `task` `{ input: <arg> }`),
+ *  so it crosses the agent boundary unchanged. */
+const askingTask: Operation[] = [
+  {
+    kind: "delegate",
+    target: { kind: "name", name: createAgentName("fiber_ask") },
+    argument: 120,
+    output: 122,
+  },
+  { kind: "exit", target: 12, value: 122 },
+];
+
+/** A task body that settles at once with a constant — a fiber whose outcome the provide buffers. */
+const returningTask: Operation[] = [
+  { kind: "loadLiteral", output: 121, value: { kind: "string", value: "fiber-done" } },
+  { kind: "exit", target: 12, value: 121 },
+];
+
+/** A task body that returns its OWN argument (`{ input }.input`) — so a `join` observes exactly the value the
+ *  `fork` passed, proving the argument → fiber → join round trip. */
+const echoTask: Operation[] = [
+  { kind: "getField", source: 120, field: "input", output: 121 },
+  { kind: "exit", target: 12, value: 121 },
+];
+
+/** A task body that returns a scope-capturing CLOSURE: it reads its argument into its scope (variable 121),
+ *  then `makeClosure`s the fixed closure agent (block 16), whose body returns that captured variable. The
+ *  fiber's result thus carries a resource (the captured scope); a `join` must hand it across to the join's
+ *  caller intact, so calling the returned closure yields the captured value. */
+const closureTask: Operation[] = [
+  { kind: "getField", source: 120, field: "input", output: 121 },
+  { kind: "makeClosure", output: 122, agent: 16 },
+  { kind: "exit", target: 12, value: 122 },
+];
+
+/** A continuation body: fork @task@ with @argument@, then `join` the fiber and return its settled value. The
+ *  join awaits through the buffer or a waiter depending on whether the fiber has landed yet. */
+function forkThenJoin(argument: string): Operation[] {
+  return [
+    { kind: "getField", source: 60, field: "value", output: 61 },
+    { kind: "loadAgent", output: 62, name: createAgentName("task") },
+    { kind: "loadLiteral", output: 63, value: { kind: "string", value: argument } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["nursery", 61],
+        ["task", 62],
+        ["argument", 63],
+      ],
+      output: 64,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.fork") },
+      argument: 64,
+      output: 65,
+    },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["nursery", 61],
+        ["handle", 65],
+      ],
+      output: 66,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.join") },
+      argument: 66,
+      output: 67,
+    },
+    { kind: "exit", target: 6, value: 67 },
+  ];
+}
+
+/** The persisted `join` extension rows, decoded — a test confirms a join's call is durable (so a restart will
+ *  reload it and re-park its waiter) before crossing the restart boundary. */
+async function peekRegionJoins(
+  persistence: StoringPersistence,
+): Promise<Array<Extract<RegionExtension, { kind: "join" }>>> {
+  const joins: Array<Extract<RegionExtension, { kind: "join" }>> = [];
+  await persistence.load(PROJECT, async (loader) => {
+    for (const row of await loader.external.instances("region")) {
+      const extension = decodeRegionExtension(row.extension);
+      if (extension.kind === "join") joins.push(extension);
+    }
+  });
+  return joins;
+}
+
+/** The persisted `provide` extension rows, decoded — how a test reads a nursery's durable fiber buffer the
+ *  way a restart would reload it (unsealed through the loader). */
+async function peekRegionProvides(
+  persistence: StoringPersistence,
+): Promise<Array<Extract<RegionExtension, { kind: "provide" }>>> {
+  const provides: Array<Extract<RegionExtension, { kind: "provide" }>> = [];
+  await persistence.load(PROJECT, async (loader) => {
+    for (const row of await loader.external.instances("region")) {
+      const extension = decodeRegionExtension(row.extension);
+      if (extension.kind === "provide") provides.push(extension);
+    }
+  });
+  return provides;
+}
+
+// The WATCH IR — the white-hole shape. `main` opens a nursery; the `continuation` binds the nursery (variable
+// 61) and enters a `handle` (block 14) that catches `on_message`. The handle's protected BODY (block 15) forks
+// a worker fiber and then calls `region.watch(r)` — so a worker's `on_message` escalation, which would relay UP
+// through the provide in a watch-less region, is INTERCEPTED and re-emitted at the watch, where the handle
+// catches it. The worker body, the handle body, and the handler body are the axes the tests vary.
+//
+//   agent main()                  { region.provide(continuation) }
+//   agent continuation(value)     { r = value.value; handle { <handle body> } with on_message(m) { <handler> } }
+//   agent worker(input)           { <worker ops> }                 // a fiber the handle body forks
+//   agent on_message(input)       { request on_message }           // the fiber's escalation, re-emitted at watch
+//   region.provide / fork / watch wrappers + external leaves
+function watchIr(bodies?: {
+  worker?: Operation[];
+  handleBody?: Operation[];
+  handler?: Operation[];
+}): IRModule {
+  // Default worker: escalate `on_message` with its own argument, and return the answer (so a watch's handler
+  // answer round-trips back and the fiber's outcome — the answer — buffers on the provide).
+  const worker: Operation[] = bodies?.worker ?? [
+    { kind: "getField", source: 110, field: "input", output: 111 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("on_message") },
+      argument: 111,
+      output: 112,
+    },
+    { kind: "exit", target: 10, value: 112 },
+  ];
+  // Default handle body: fork one worker with a fixed argument, then watch the nursery forever. `r` is the
+  // continuation's variable 61, visible here through the lexical scope chain (handle body → handle → continuation).
+  const handleBody: Operation[] = bodies?.handleBody ?? [
+    { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+    { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["nursery", 61],
+        ["task", 150],
+        ["argument", 151],
+      ],
+      output: 152,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.fork") },
+      argument: 152,
+      output: 153,
+    },
+    { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.region.watch") },
+      argument: 154,
+      output: 155,
+    },
+    { kind: "exit", target: 14, value: 155 },
+  ];
+  // Default handler: answer the re-emitted request with a fixed value (a `next`, resuming the fiber).
+  const handler: Operation[] = bodies?.handler ?? [
+    { kind: "loadLiteral", output: 161, value: { kind: "string", value: "answered" } },
+    { kind: "continue", target: 14, value: 161, modifiers: [] },
+  ];
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: {
+        block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+            { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.region.provide") },
+              argument: 102,
+              output: 103,
+            },
+            { kind: "exit", target: 0, value: 103 },
+          ],
+        },
+        parameters: { parameter: 100 },
+      },
+      2: {
+        block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      3: {
+        block: { kind: "external", key: "prelude.region.provide", input: 30, reactor: "region" },
+        parameters: { parameter: 30 },
+      },
+      4: {
+        block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      5: {
+        block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
+        parameters: { parameter: 50 },
+      },
+      6: {
+        block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      // continuation: bind the nursery (61), then enter the handle scope (its result is the continuation's).
+      7: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "getField", source: 60, field: "value", output: 61 },
+            { kind: "call", target: 14, output: 62 },
+            { kind: "exit", target: 6, value: 62 },
+          ],
+        },
+        parameters: { parameter: 60 },
+      },
+      8: {
+        block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      9: {
+        block: { kind: "request", name: createAgentName("on_message"), input: 90 },
+        parameters: { parameter: 90 },
+      },
+      10: {
+        block: { kind: "agent", body: 11, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      11: {
+        block: { kind: "sequence", result: null, operations: worker },
+        parameters: { parameter: 110 },
+      },
+      12: {
+        block: { kind: "agent", body: 13, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      13: {
+        block: { kind: "external", key: "prelude.region.watch", input: 130, reactor: "region" },
+        parameters: { parameter: 130 },
+      },
+      // The handle: run the fork+watch body, catch on_message, no then-clause.
+      14: {
+        block: {
+          kind: "handle",
+          parallel: false,
+          initialStates: [],
+          body: 15,
+          handlers: [{ request: createAgentName("on_message"), body: 16 }],
+          thenClause: null,
+        },
+        parameters: {},
+      },
+      15: {
+        block: { kind: "sequence", result: null, operations: handleBody },
+        parameters: {},
+      },
+      16: {
+        block: { kind: "sequence", result: null, operations: handler },
+        parameters: { parameter: 160 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.region.provide")]: { block: 2, private: false },
+      [createAgentName("prelude.region.fork")]: { block: 4, private: false },
+      [createAgentName("prelude.region.watch")]: { block: 12, private: false },
+      [createAgentName("continuation")]: { block: 6, private: false },
+      [createAgentName("on_message")]: { block: 8, private: false },
+      [createAgentName("worker")]: { block: 10, private: false },
+    },
+    names: {},
+  };
+}
+
+describe("region reactor", () => {
+  test("provide hands its continuation a nursery token carrying the scope identity, and settles with the continuation's result", async () => {
+    // The continuation returns the nursery handle it received, so the run resolves with it — proving both
+    // that the continuation ran (the whole call settles with its outcome) and that the nursery carries this
+    // provide's scope identity.
+    const actor = makeActor(
+      provideIr([
+        { kind: "getField", source: 60, field: "value", output: 61 },
+        { kind: "exit", target: 6, value: 61 },
+      ]),
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const value = await result;
+    if (value.kind !== "record") throw new Error("expected the nursery record");
+    const scope = value.fields.$katari_region_scope;
+    if (scope === undefined || scope.kind !== "string") {
+      throw new Error("the nursery must carry a string scope identity");
+    }
+    expect(scope.value).toMatch(/^regionscope:/);
+  });
+
+  test("region.provide settles with the continuation's literal result", async () => {
+    // The continuation ignores the nursery and returns a constant; the provide's result IS that constant.
+    const actor = makeActor(
+      provideIr([
+        { kind: "loadLiteral", output: 61, value: { kind: "string", value: "done" } },
+        { kind: "exit", target: 6, value: 61 },
+      ]),
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
+  });
+
+  test("a running provide is restored across a restart and resumes when its continuation is answered", async () => {
+    // The continuation escalates the unhandled `ask_value` request and returns its answer. The escalation
+    // bubbles through the region provide (its base relays a child's ask upward) to the run root, suspending
+    // the run — the durable state a restart must recover: the provide's scope + its continuation resuming as
+    // durable core work, and the relayed open escalation.
+    const persistence = new StoringPersistence();
+    const ir = provideIr([
+      { kind: "makeRecord", entries: [], output: 61 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 61,
+        output: 62,
+      },
+      { kind: "exit", target: 6, value: 62 },
+    ]);
+
+    const actorOne = makeActor(ir, persistence);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    // Drive to the suspend point: the run is open on the unhandled `ask_value` request, relayed up through
+    // the live region provide.
+    await waitUntil(() => (actorOne.listOpenEscalations().length > 0 ? true : undefined));
+
+    // Restart: a fresh actor over the same rows. The provide re-registers its scope and its continuation
+    // resumes as durable core work (consumed at its original dispatch — never re-dispatched); the relayed
+    // open escalation rehydrates from its persisted row so the fresh actor can list and answer it.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const open = await waitUntil(() => {
+      const list = actorTwo.listOpenEscalations();
+      return list.length > 0 ? list : undefined;
+    });
+    expect(open).toHaveLength(1);
+    expect(open[0]?.request).toBe(createAgentName("ask_value"));
+
+    // Answering it resumes the continuation, which returns the answer; the region provide settles with that
+    // outcome, and the run completes with it — recorded durably as the run's `done` result.
+    const escalation = open[0]?.escalation;
+    if (escalation === undefined) throw new Error("no recovered open escalation");
+    await actorTwo.answerEscalation(escalation, { kind: "string", value: "answered" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "answered" });
+    expect(actorTwo.listOpenEscalations()).toHaveLength(0);
+  });
+
+  test("fork spawns the task as a separate fiber and delivers its argument", async () => {
+    // The continuation forks `task` (which re-escalates its `.input` as `fiber_ask`) then holds. The fiber
+    // runs as its OWN instance under the provide, so its escalation wells up at the run root carrying the
+    // exact argument the fork passed — proving both that a separate fiber ran and that the argument reached it.
+    const actor = makeActor(forkIr({ continuation: forkThenHold("delivered"), task: askingTask }));
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const fiberAsk = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    expect(fiberAsk.argument).toEqual({
+      kind: "record",
+      fields: { input: { kind: "string", value: "delivered" } },
+    });
+  });
+
+  test("independent forks each spawn their own fiber", async () => {
+    // The continuation forks `task` twice with distinct arguments, then holds. Both fibers run independently,
+    // so two distinct `fiber_ask` escalations surface at the root — one per forked argument.
+    const twoForks: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "alpha" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "loadLiteral", output: 66, value: { kind: "string", value: "beta" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 66],
+        ],
+        output: 67,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 67,
+        output: 68,
+      },
+      { kind: "makeRecord", entries: [], output: 69 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 69,
+        output: 70,
+      },
+      { kind: "exit", target: 6, value: 70 },
+    ];
+    const actor = makeActor(forkIr({ continuation: twoForks, task: askingTask }));
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const asks = await waitUntil(() => {
+      const found = actor
+        .listOpenEscalations()
+        .filter((open) => open.request === createAgentName("fiber_ask"));
+      return found.length >= 2 ? found : undefined;
+    });
+    const arguments_ = asks.map((ask) => {
+      const input = ask.argument?.kind === "record" ? ask.argument.fields.input : undefined;
+      return input?.kind === "string" ? input.value : null;
+    });
+    expect(new Set(arguments_)).toEqual(new Set(["alpha", "beta"]));
+  });
+
+  test("a fiber's escalation relays through the provide to the run root, and its answer returns to the fiber", async () => {
+    // The fiber escalates `fiber_ask` and returns the answer. The escalation relays up through the provide
+    // (the base's relay bridge) to the run root; answering it descends the same path back DOWN to the fiber,
+    // which then settles — and its outcome is buffered on the provide (nothing has joined it), carrying the
+    // answer that made the full round trip.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      forkIr({ continuation: forkThenHold("q"), task: askingTask }),
+      persistence,
+    );
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const fiberAsk = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    await actor.answerEscalation(fiberAsk.escalation, { kind: "string", value: "the-answer" });
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered).toHaveLength(1);
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "the-answer" },
+    });
+  });
+
+  test("a settled fiber's outcome is buffered durably on the provide and survives a restart", async () => {
+    // The fiber settles at once with a constant while the continuation holds. Its outcome is buffered on the
+    // provide's durable extension — a restart restores it, and the provide, resumed as durable core work,
+    // still settles with the CONTINUATION's answer (not the buffered fiber's), proving the buffer neither
+    // settled the call early nor was lost.
+    const persistence = new StoringPersistence();
+    const ir = forkIr({ continuation: forkThenHold("held"), task: returningTask });
+    const actorOne = makeActor(ir, persistence);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const beforeRestart = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(beforeRestart[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "fiber-done" },
+    });
+
+    // Restart: a fresh actor over the same rows re-registers the scope, resumes the held continuation, and
+    // reloads the fiber buffer intact from the provide extension.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const afterRestart = await peekRegionProvides(persistence);
+    expect(afterRestart[0]?.fiberBuffer[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "fiber-done" },
+    });
+
+    // Answering the continuation's hold settles the provide with the CONTINUATION's value; the fiber's
+    // buffered outcome is discarded as the provide drops (no join took it this wave).
+    const hold = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    await actorTwo.answerEscalation(hold.escalation, { kind: "string", value: "continuation-value" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "continuation-value" });
+  });
+
+  test("forking into a scope whose provide has already returned is refused", async () => {
+    // `main` keeps the nursery the provide returned and forks it AFTER the block closed — a dead-scope fork
+    // the type checker prevents (it discharges `Scope` at the provide), so the runtime backstop is a panic:
+    // `fork`'s row declares no throw, and region has no error sum. The run fails with the closed-scope panic.
+    const escapedMain: Operation[] = [
+      { kind: "loadAgent", output: 101, name: createAgentName("continuation") },
+      { kind: "makeRecord", entries: [["continuation", 101]], output: 102 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.provide") },
+        argument: 102,
+        output: 103,
+      },
+      { kind: "loadAgent", output: 104, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 105, value: { kind: "string", value: "late" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 103],
+          ["task", 104],
+          ["argument", 105],
+        ],
+        output: 106,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 106,
+        output: 107,
+      },
+      { kind: "exit", target: 0, value: 107 },
+    ];
+    // The continuation returns the nursery it was handed, so the provide settles (and closes the scope)
+    // before `main` reaches the fork.
+    const returnNursery: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "exit", target: 6, value: 61 },
+    ];
+    const actor = makeActor(
+      forkIr({ main: escapedMain, continuation: returnNursery, task: returningTask }),
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.fork.*has closed/);
+  });
+
+  test("a fiber still running when the provide returns leaks no resources", async () => {
+    // The continuation forks a fiber that blocks on `fiber_ask`, then returns a constant AT ONCE. The provide
+    // settles with that constant, and its cancel cascade tears the still-running fiber down (the structured-
+    // concurrency teardown the base supplies) — so the run finishes with the continuation's value and leaves
+    // no live instance, scope, or region call behind.
+    const persistence = new StoringPersistence();
+    const forkThenReturn: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "orphan" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "loadLiteral", output: 66, value: { kind: "string", value: "closed-clean" } },
+      { kind: "exit", target: 6, value: 66 },
+    ];
+    const actor = makeActor(forkIr({ continuation: forkThenReturn, task: askingTask }), persistence);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await expect(result).resolves.toEqual({ kind: "string", value: "closed-clean" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("join drains a fiber's buffered outcome and returns it", async () => {
+    // The continuation forks a fiber that settles AT ONCE, then holds on `ask_value` — held open until the
+    // test confirms the fiber's outcome is buffered — before joining. So the join provably drains the DURABLE
+    // buffer (the fiber landed first), and returns the fiber's value as the whole run's result.
+    const persistence = new StoringPersistence();
+    const forkHoldThenJoin: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "arg" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      // Hold until the test answers, so the fiber has settled into the buffer before the join runs.
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "exit", target: 6, value: 69 },
+    ];
+    const actor = makeActor(
+      forkIr({ continuation: forkHoldThenJoin, task: returningTask }),
+      persistence,
+    );
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Wait for the fiber to buffer AND the continuation to be holding on `ask_value`.
+    const hold = await waitUntil(() => {
+      const buffered = actor.listOpenEscalations().find(
+        (open) => open.request === createAgentName("ask_value"),
+      );
+      return buffered;
+    });
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+
+    // Release the hold: the continuation joins, drains the buffered outcome, and returns it.
+    await actor.answerEscalation(hold.escalation, { kind: "null" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "fiber-done" });
+    // A drained buffer leaves the nursery empty, and the whole run quiesces with nothing live behind it.
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("join before a fiber settles parks a waiter that the fiber's completion resumes", async () => {
+    // The continuation forks a fiber that BLOCKS on `fiber_ask`, then joins it at once — so the join is parked
+    // as a waiter (the fiber is still running, nothing is buffered). Answering the fiber's escalation lets it
+    // settle, which resumes the waiting join directly (never buffered), and the run returns the fiber's value.
+    const actor = makeActor(forkIr({ continuation: forkThenJoin("q"), task: askingTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const fiberAsk = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    await actor.answerEscalation(fiberAsk.escalation, { kind: "string", value: "waited-answer" });
+    await expect(result).resolves.toEqual({ kind: "string", value: "waited-answer" });
+  });
+
+  test("a fiber's returned value round-trips through join to its caller", async () => {
+    // The fiber returns its own forked argument; join hands exactly that value back to the continuation, which
+    // returns it — proving the argument → fiber → join value path (whether it drains a buffer or a waiter).
+    const actor = makeActor(forkIr({ continuation: forkThenJoin("payload"), task: echoTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).resolves.toEqual({ kind: "string", value: "payload" });
+  });
+
+  test("a join waiting on a running fiber re-parks across a restart and resumes when the fiber settles", async () => {
+    // The continuation forks a fiber blocked on `fiber_ask` and joins it (parking a waiter). A restart loses
+    // the in-memory waiter, but the provide reload rebuilds its running-fiber set from the durable inner-call
+    // bridges and the reloaded join re-parks against it. Answering the fiber then settles the join, so the run
+    // completes with the fiber's value — the whole join round trip surviving the restart.
+    const persistence = new StoringPersistence();
+    const ir = forkIr({ continuation: forkThenJoin("resume"), task: askingTask });
+    const actorOne = makeActor(ir, persistence);
+    const { run } = actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Drive to the parked point: the fiber is running (its `fiber_ask` is open) and the join's call is durable.
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    await eventually(async () => {
+      const joins = await peekRegionJoins(persistence);
+      return joins.length > 0 ? joins : undefined;
+    });
+
+    // Restart: a fresh actor over the same rows. The provide rebuilds its running fiber, and the reloaded join
+    // re-parks its waiter against it.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const fiberAsk = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("fiber_ask")),
+    );
+    await actorTwo.answerEscalation(fiberAsk.escalation, { kind: "string", value: "post-restart" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "post-restart" });
+  });
+
+  test("joining the same fiber twice panics on the second join", async () => {
+    // The continuation forks a returning fiber, joins it (single-consumer — the first join takes the outcome),
+    // then joins the SAME handle again. The second join finds the fiber neither buffered nor running, so it
+    // panics — `join`'s row declares no throw and region has no error sum, so a not-joinable handle (here a
+    // double join) is an engine-invariant backstop, failing the run.
+    const doubleJoin: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "once" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 66,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 66,
+        output: 68,
+      },
+      { kind: "exit", target: 6, value: 68 },
+    ];
+    const actor = makeActor(forkIr({ continuation: doubleJoin, task: returningTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.join.*not joinable/);
+  });
+
+  test("a resource the joined fiber returns reaches the join's caller and leaks nothing", async () => {
+    // The fiber returns a scope-capturing closure; the continuation joins it and CALLS the returned closure,
+    // which yields the value the fiber captured — so the join carried the fiber's resource (its captured scope)
+    // across intact to the join's caller. The run resolves with the captured value, and quiesces with no live
+    // instance, scope, or region call behind it (nothing dangled or leaked in the hand-off).
+    const persistence = new StoringPersistence();
+    const forkJoinCall: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "captured" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 66,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 66,
+        output: 67,
+      },
+      // Call the joined closure: if its captured scope crossed the join intact, this yields "captured".
+      { kind: "makeRecord", entries: [], output: 68 },
+      { kind: "delegate", target: { kind: "value", variable: 67 }, argument: 68, output: 69 },
+      { kind: "exit", target: 6, value: 69 },
+    ];
+    const actor = makeActor(forkIr({ continuation: forkJoinCall, task: closureTask }), persistence);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await expect(result).resolves.toEqual({ kind: "string", value: "captured" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("cancel tears a running fiber's instance down while the nursery stays alive", async () => {
+    // The continuation forks a fiber that BLOCKS on `fiber_ask`, holds on gate1 (so the fiber is provably
+    // running), cancels the fiber, then holds on gate2 (so the provide is still ALIVE while we observe). The
+    // cancelled fiber's core instance is torn down — its live-instance count drops — even though the nursery
+    // did not return: proof the cancel itself (not the provide's teardown) stopped the fiber's execution.
+    const persistence = new StoringPersistence();
+    const forkGate1CancelGate2: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "worker" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      // gate1: hold while the worker fiber is running, so the test can sample the live-instance count WITH it.
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      // Cancel the still-running worker fiber.
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 68,
+        output: 69,
+      },
+      // gate2: hold AFTER the cancel, so the provide is still alive while the test samples the count WITHOUT it.
+      { kind: "makeRecord", entries: [], output: 70 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("hold2") },
+        argument: 70,
+        output: 71,
+      },
+      { kind: "exit", target: 6, value: 71 },
+    ];
+    const actor = makeActor(
+      forkIr({ continuation: forkGate1CancelGate2, task: askingTask }),
+      persistence,
+    );
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The worker fiber is running (its `fiber_ask` is up) and the continuation holds on gate1 (`ask_value`).
+    const gate1 = await waitUntil(() => {
+      const fiber = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_ask"));
+      const hold = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("ask_value"));
+      return fiber !== undefined && hold !== undefined ? hold : undefined;
+    });
+    const withFiber = persistence.instanceCount();
+
+    // Release gate1: the continuation cancels the worker, then holds on gate2. The cancel settles `null` only
+    // after the fiber's teardown confirms, so by the time gate2 is up the fiber's instance is gone.
+    await actor.answerEscalation(gate1.escalation, { kind: "null" });
+    await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("hold2")),
+    );
+    const withoutFiber = await waitUntil(() =>
+      persistence.instanceCount() < withFiber ? persistence.instanceCount() : undefined,
+    );
+    expect(withoutFiber).toBeLessThan(withFiber);
+
+    // Releasing gate2 lets the whole run finish; nothing leaks behind the cancelled fiber.
+    const gate2 = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("hold2")),
+    );
+    await actor.answerEscalation(gate2.escalation, { kind: "string", value: "done" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "done" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
+  });
+
+  test("cancelling a fiber a join is parked on panics that join (cancel and join are exclusive)", async () => {
+    // The continuation forks a WORKER fiber (blocks on `fiber_ask`) and a CANCELLER fiber (gates on `ask_value`,
+    // then cancels the worker), then JOINS the worker — which parks (the worker is running). Answering the
+    // canceller's gate makes it cancel the worker, which panics the parked join: "await its result" (join) and
+    // "stop, I don't want it" (cancel) are contradictory intents, so their coexistence fails the run.
+    const cancellerBody: Operation[] = [
+      { kind: "getField", source: 220, field: "input", output: 221 },
+      { kind: "makeRecord", entries: [], output: 222 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 222,
+        output: 223,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 221,
+        output: 224,
+      },
+      { kind: "exit", target: 22, value: 224 },
+    ];
+    const forkJoinWithCanceller: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "worker" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      // Fork the canceller, handing it `{ nursery, handle }` so it can cancel the worker after it gates.
+      { kind: "loadAgent", output: 66, name: createAgentName("canceller") },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 66],
+          ["argument", 67],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 68,
+        output: 69,
+      },
+      // Join the worker — parks a waiter (the worker is still running).
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 70,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 70,
+        output: 71,
+      },
+      { kind: "exit", target: 6, value: 71 },
+    ];
+    const persistence = new StoringPersistence();
+    const actor = makeActor(
+      forkIr({ continuation: forkJoinWithCanceller, task: askingTask, canceller: cancellerBody }),
+      persistence,
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Drive to the parked point: the worker is running (its `fiber_ask` is up), the canceller is holding on its
+    // gate (`ask_value`), and the continuation's join is durably parked.
+    const gate = await waitUntil(() => {
+      const fiber = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_ask"));
+      const canceller = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("ask_value"));
+      return fiber !== undefined && canceller !== undefined ? canceller : undefined;
+    });
+    await eventually(async () => {
+      const joins = await peekRegionJoins(persistence);
+      return joins.length > 0 ? joins : undefined;
+    });
+
+    // Release the canceller's gate: it cancels the worker, panicking the join parked on it — failing the run.
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
+    await expect(result).rejects.toThrow(/region\.join.*cancelled/);
+  });
+
+  test("cancelling an already-settled fiber is an idempotent no-op that still succeeds", async () => {
+    // The continuation forks a fiber that settles AT ONCE (its outcome buffered), holds until the buffer lands,
+    // then cancels the now-settled fiber. The cancel finds nothing running — an idempotent no-op — yet still
+    // succeeds with `null`, and the continuation returns a constant the run resolves with.
+    const persistence = new StoringPersistence();
+    const forkHoldCancelReturn: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "loadLiteral", output: 70, value: { kind: "string", value: "cancel-noop" } },
+      { kind: "exit", target: 6, value: 70 },
+    ];
+    const actor = makeActor(
+      forkIr({ continuation: forkHoldCancelReturn, task: returningTask }),
+      persistence,
+    );
+    const { run, result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Wait until the fiber has buffered its outcome AND the continuation is holding, then release the hold.
+    const hold = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    await actor.answerEscalation(hold.escalation, { kind: "null" });
+
+    await expect(result).resolves.toEqual({ kind: "string", value: "cancel-noop" });
+    const done = await waitUntil(() => {
+      const record = persistence.peekRun(run);
+      return record?.state === "done" ? record : undefined;
+    });
+    expect(done.result).toEqual({ kind: "string", value: "cancel-noop" });
+    expect(persistence.instanceCount()).toBe(0);
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+    expect(persistence.outboxSize()).toBe(0);
+  });
+
+  test("joining a fiber after it was cancelled panics (a cancelled fiber is unknown)", async () => {
+    // The continuation forks a blocking fiber, cancels it, then joins the SAME handle. The cancel dropped the
+    // fiber from the running set (and it was never buffered — a cancelled fiber has no joinable outcome), so the
+    // join finds it unknown and panics — symmetric to a double-join, closing the cancel/join loop.
+    const forkCancelThenJoin: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 66,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 65],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "exit", target: 6, value: 69 },
+    ];
+    const actor = makeActor(forkIr({ continuation: forkCancelThenJoin, task: askingTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.join.*not joinable/);
+  });
+
+  test("joining a forged fiber handle (an unknown scope) panics", async () => {
+    // A continuation builds a FORGED fiber handle — a record carrying random `$katari_region_*` marker fields
+    // (exactly the shape a hostile mcp / http result could return) whose scope names no live nursery — and joins
+    // it. The scope is unguessable (18 random bytes), so a forged handle matches no live scope and the join
+    // panics: the engine-invariant backstop automatically rejects a hostile-wire handle, no decode gate needed.
+    const joinForged: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadLiteral", output: 62, value: { kind: "string", value: "regionscope:forged" } },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "fiber:forged" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["$katari_region_scope", 62],
+          ["$katari_region_fiber", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 64],
+        ],
+        output: 65,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.join") },
+        argument: 65,
+        output: 66,
+      },
+      { kind: "exit", target: 6, value: 66 },
+    ];
+    const actor = makeActor(forkIr({ continuation: joinForged, task: returningTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.join.*not joinable/);
+  });
+
+  test("cancelling a forged fiber handle (an unknown scope) panics", async () => {
+    // The `cancel` twin of the forged-join case: a forged handle whose scope names no live nursery is refused
+    // as a panic, automatically rejecting the hostile-wire handle.
+    const cancelForged: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadLiteral", output: 62, value: { kind: "string", value: "regionscope:forged" } },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "fiber:forged" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["$katari_region_scope", 62],
+          ["$katari_region_fiber", 63],
+        ],
+        output: 64,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["handle", 64],
+        ],
+        output: 65,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel") },
+        argument: 65,
+        output: 66,
+      },
+      { kind: "exit", target: 6, value: 66 },
+    ];
+    const actor = makeActor(forkIr({ continuation: cancelForged, task: returningTask }));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/region\.cancel.*not cancellable/);
+  });
+
+  test("watch re-emits a fiber's escalation at the handler installed around it, whose answer returns to the fiber", async () => {
+    // The white hole, end to end: the handle body forks a worker that escalates `on_message`, then watches. The
+    // worker's escalation does NOT relay up through the provide (the handle wraps only the WATCH, not the
+    // sibling worker) — `watch` intercepts it and re-emits it AT the watch, where the handle catches it. The
+    // handler answers "answered", which descends back to the worker; the worker returns it, and its outcome
+    // buffers on the provide. So a buffered "answered" proves the whole fiber → watch → handler → fiber round
+    // trip: without the interception the handle would never have seen `on_message` at all.
+    const persistence = new StoringPersistence();
+    const actor = makeActor(watchIr(), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered).toHaveLength(1);
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "answered" },
+    });
+  });
+
+  test("a fiber that escalates before watch is called accumulates in the mailbox and is re-emitted", async () => {
+    // The mailbox's "溜まっていた" requirement: the handle body forks the worker (which escalates `on_message`)
+    // BEFORE calling watch, so the escalation reaches the reactor before the watch registers. It is held in the
+    // nursery mailbox (not flushed up), and re-emitted once the watch — registered later in the same batch —
+    // claims it. Observed the same way as the round trip: the answer reaching the worker proves the escalation
+    // was held for the watch rather than escaping. (The default IR already forks-then-watches; this test names
+    // the guarantee explicitly, and asserts the mailbox drains to empty once serviced.)
+    const persistence = new StoringPersistence();
+    const actor = makeActor(watchIr(), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    // The one escalation was serviced, so the mailbox is drained back to empty.
+    const provide = (await peekRegionProvides(persistence)).find(
+      (extension) => extension.fiberBuffer.length > 0,
+    );
+    expect(provide?.mailbox).toEqual([]);
+  });
+
+  test("multiple fibers' escalations are re-emitted one at a time (FIFO, serial) and all serviced", async () => {
+    // Two workers with distinct arguments both escalate `on_message`; the sequential handle services them one
+    // at a time, answering each with its own message ("re:" + arg) so each worker returns a distinct value. Both
+    // outcomes buffer on the provide — proving every fiber's request wells up at the one watch and is serviced.
+    const persistence = new StoringPersistence();
+    const twoForks: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "alpha" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "beta" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 156],
+        ],
+        output: 157,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 157,
+        output: 158,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    // A worker escalates `on_message` (which wells up at the watch), and AFTER it is answered returns its own
+    // fork argument — so the two buffered outcomes are the two distinct arguments, proving BOTH fibers'
+    // requests were serviced (each fiber unblocks only once the handler answers its `on_message`).
+    const returningWorker: Operation[] = [
+      { kind: "getField", source: 110, field: "input", output: 111 },
+      { kind: "makeRecord", entries: [], output: 113 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 113,
+        output: 112,
+      },
+      { kind: "exit", target: 10, value: 111 },
+    ];
+    // The sequential handle services one request at a time; the handler answers each (with a constant, which
+    // the worker discards) and frees the handle for the next.
+    const handler: Operation[] = [
+      { kind: "loadLiteral", output: 161, value: { kind: "null" } },
+      { kind: "continue", target: 14, value: 161, modifiers: [] },
+    ];
+    const actor = makeActor(
+      watchIr({ handleBody: twoForks, handler, worker: returningWorker }),
+      persistence,
+    );
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const outcomes = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length >= 2,
+      );
+      return provide?.fiberBuffer;
+    });
+    const values = outcomes.map((buffered) =>
+      buffered.outcome.kind === "result" && buffered.outcome.value.kind === "string"
+        ? buffered.outcome.value.value
+        : null,
+    );
+    expect(new Set(values)).toEqual(new Set(["alpha", "beta"]));
+  });
+
+  test("a handler installed around watch can fork a NEW fiber into the same nursery", async () => {
+    // The white hole gives the handler the nursery: on the worker's `on_message`, the handler forks a SECOND
+    // worker (a `child` agent returning a constant) into the same nursery `r` (variable 61, in lexical scope),
+    // then answers the first. Both the first worker's answer and the forked child's constant buffer on the
+    // provide — proving the handler's position holds the nursery, the composition `watch` exists to enable.
+    const persistence = new StoringPersistence();
+    // The handler: fork `child` into `r`, then answer the original `on_message` with "answered".
+    const forkingHandler: Operation[] = [
+      { kind: "loadAgent", output: 162, name: createAgentName("child") },
+      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "childarg" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 162],
+          ["argument", 163],
+        ],
+        output: 164,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 164,
+        output: 165,
+      },
+      { kind: "loadLiteral", output: 166, value: { kind: "string", value: "answered" } },
+      { kind: "continue", target: 14, value: 166, modifiers: [] },
+    ];
+    const ir = watchIr({ handler: forkingHandler });
+    // Add the `child` agent (a fiber the handler forks) — returns a constant, so it buffers a distinct outcome.
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "loadLiteral", output: 181, value: { kind: "string", value: "child-ran" } },
+          { kind: "exit", target: 17, value: 181 },
+        ],
+      },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("child")] = { block: 17, private: false };
+
+    const actor = makeActor(ir, persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const values = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length >= 2,
+      );
+      if (provide === undefined) return undefined;
+      return provide.fiberBuffer.map((buffered) =>
+        buffered.outcome.kind === "result" && buffered.outcome.value.kind === "string"
+          ? buffered.outcome.value.value
+          : null,
+      );
+    });
+    expect(new Set(values)).toEqual(new Set(["answered", "child-ran"]));
+  });
+
+  test("a watch and its mailboxed escalation survive a restart, and the answer still returns to the fiber", async () => {
+    // Durability: a worker escalates `on_message`, the watch re-emits it, and it lands at the handle — which
+    // holds it (a handler that never answers, so the escalation is outstanding at restart). A fresh actor over
+    // the same rows re-registers the watch (its outstanding relay reloaded from the durable row) and reloads the
+    // provide's fiber buffer / mailbox. The reloaded handle re-catches the outstanding request and answers it,
+    // so the worker settles with the answer AFTER the restart — the whole white hole surviving the crash.
+    const persistence = new StoringPersistence();
+    // A handler that HOLDS on a second, unhandled request (`gate`) before answering — so at the restart point
+    // the worker's `on_message` is outstanding (re-emitted, caught, not yet answered).
+    const holdingHandler: Operation[] = [
+      { kind: "makeRecord", entries: [], output: 161 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 161,
+        output: 162,
+      },
+      { kind: "continue", target: 14, value: 162, modifiers: [] },
+    ];
+    const ir = watchIr({ handler: holdingHandler });
+    // Add the `gate` request agent the handler holds on.
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("gate"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("gate")] = { block: 17, private: false };
+
+    const actorOne = makeActor(ir, persistence);
+    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    // Drive to the suspend point: the handler is holding on `gate` (so the worker's on_message is outstanding at
+    // the watch), and the watch call is durable.
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+
+    // Restart: a fresh actor re-registers the watch and reloads the mailbox / outstanding relay.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const gate = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    // Answering the gate lets the handler answer the original on_message; the worker settles with that answer.
+    await actorTwo.answerEscalation(gate.escalation, { kind: "string", value: "post-restart" });
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "post-restart" },
+    });
+  });
+
+  // Augment a `watchIr` module with the two `file` prim agents (`from_base64` / `read_base64`) the blob-edge
+  // tests below use — the file API is the same monotonic blob machinery every reactor shares, wired here as
+  // ordinary primitive-block agents so a fiber / handler can mint and read a blob mid-run.
+  function withFilePrims(ir: IRModule): IRModule {
+    ir.blocks[32] = {
+      block: { kind: "agent", body: 33, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[33] = {
+      block: { kind: "primitive", name: "prelude.files.from_base64", input: 320 },
+      parameters: { parameter: 320 },
+    };
+    ir.blocks[34] = {
+      block: { kind: "agent", body: 35, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[35] = {
+      block: { kind: "primitive", name: "prelude.files.read_base64", input: 340 },
+      parameters: { parameter: 340 },
+    };
+    ir.entries[createAgentName("prelude.files.from_base64")] = { block: 32, private: false };
+    ir.entries[createAgentName("prelude.files.read_base64")] = { block: 34, private: false };
+    return ir;
+  }
+
+  test("watch: a handler's answer carrying a blob is readable by the fiber it descends to", async () => {
+    // The white hole in the ANSWER direction. The fiber escalates `on_message`; the handler — which runs in the
+    // long-lived continuation instance the whole handle+watch lives in — mints a blob with `files.from_base64`
+    // and answers WITH it. The answer descends the watch bridge back to the fiber, which reads the blob's
+    // content (`files.read_base64`) and returns it, so the read-back buffers on the provide. A gone / dangling
+    // answer blob would panic `read_base64` and never buffer, so a buffered "aGVsbG8=" proves the fiber read the
+    // handler's blob. The blob is owned by the continuation instance — an ancestor of every fiber, kept alive by
+    // the held-open `watch` — so it always outlives the reader without any answer-direction owner lift.
+    const persistence = new StoringPersistence();
+    const worker: Operation[] = [
+      { kind: "makeRecord", entries: [], output: 116 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 116,
+        output: 112,
+      },
+      // 112 is the answer blob the handler minted. Read it back and return the content.
+      { kind: "makeRecord", entries: [["value", 112]], output: 113 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.files.read_base64") },
+        argument: 113,
+        output: 114,
+      },
+      { kind: "exit", target: 10, value: 114 },
+    ];
+    const handler: Operation[] = [
+      { kind: "loadLiteral", output: 161, value: { kind: "string", value: "aGVsbG8=" } },
+      { kind: "loadLiteral", output: 162, value: { kind: "string", value: "" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["content", 161],
+          ["content_type", 162],
+        ],
+        output: 163,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.files.from_base64") },
+        argument: 163,
+        output: 164,
+      },
+      { kind: "continue", target: 14, value: 164, modifiers: [] },
+    ];
+    const actor = makeActor(withFilePrims(watchIr({ worker, handler })), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "aGVsbG8=" },
+    });
+  });
+
+  test("watch: a blob carried on a mailboxed escalation survives a restart and stays readable after re-emission", async () => {
+    // The white hole in the FORWARD direction, across a restart. Two worker fibers each mint a blob and escalate
+    // it under `on_message`; the sequential watch re-emits the first (the handler HOLDS it on `gate`), so the
+    // second's escalation — carrying its blob — sits in the nursery's DURABLE mailbox. A restart reloads the
+    // provide's mailbox with the blob ref intact and its bytes survive in the byte store; after recovery the
+    // watch re-emits the held escalation and the handler reads its blob (`files.read_base64`) to answer. Both
+    // workers buffer their own read-back content, so a buffered "d29ybGQ=" (the mailboxed fiber's) proves the
+    // carried blob's owner (the provide instance) and bytes were restored intact — a gone blob would panic the
+    // post-restart read.
+    const persistence = new StoringPersistence();
+    const blobs = new InMemoryBlobStore();
+    // Fork two workers (distinct base64 payloads), then watch — the second fork's escalation mailboxes while the
+    // first holds the serial watch busy.
+    const twoForks: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "aGVsbG8=" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "d29ybGQ=" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 156],
+        ],
+        output: 157,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 157,
+        output: 158,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    // A worker mints a blob from its fork argument (a base64 payload), escalates it WRAPPED in a record (the
+    // realistic request-argument shape), and returns the handler's answer.
+    const worker: Operation[] = [
+      { kind: "getField", source: 110, field: "input", output: 111 },
+      { kind: "loadLiteral", output: 117, value: { kind: "string", value: "" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["content", 111],
+          ["content_type", 117],
+        ],
+        output: 113,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.files.from_base64") },
+        argument: 113,
+        output: 114,
+      },
+      { kind: "makeRecord", entries: [["file", 114]], output: 116 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 116,
+        output: 112,
+      },
+      { kind: "exit", target: 10, value: 112 },
+    ];
+    // The handler HOLDS on `gate` (keeping the watch busy so the sibling escalation stays mailboxed), then reads
+    // the carried blob out of the request record and answers with its content.
+    const handler: Operation[] = [
+      { kind: "makeRecord", entries: [], output: 166 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 166,
+        output: 167,
+      },
+      { kind: "getField", source: 160, field: "file", output: 165 },
+      { kind: "makeRecord", entries: [["value", 165]], output: 168 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.files.read_base64") },
+        argument: 168,
+        output: 169,
+      },
+      { kind: "continue", target: 14, value: 169, modifiers: [] },
+    ];
+    const ir = withFilePrims(watchIr({ handleBody: twoForks, worker, handler }));
+    // Add the `gate` request agent the handler holds on (blocks 17 / 18, mirroring the restart test above).
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("gate"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("gate")] = { block: 17, private: false };
+
+    const actorOne = makeActor(ir, persistence, blobs);
+    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Drive to the suspend point: the handler holds the first worker on `gate`, and the second worker's blob is
+    // mailboxed on the provide.
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    const mailboxedBefore = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.mailbox.length > 0,
+      );
+      return provide?.mailbox;
+    });
+    const mailboxedAsk = mailboxedBefore[0]?.ask;
+    const carriedFile =
+      mailboxedAsk?.kind === "request" && mailboxedAsk.argument?.kind === "record"
+        ? mailboxedAsk.argument.fields.file
+        : undefined;
+    if (carriedFile?.kind !== "ref") throw new Error("the mailboxed escalation must carry a blob ref");
+
+    // Restart: a fresh actor over the same rows and the same byte store.
+    const actorTwo = makeActor(ir, persistence, blobs);
+    await actorTwo.activate();
+
+    // The mailbox — and the blob it carries — reloaded intact, and the bytes survive in the byte store.
+    const mailboxedAfter = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.mailbox.length > 0,
+      );
+      return provide?.mailbox;
+    });
+    const reloadedAsk = mailboxedAfter[0]?.ask;
+    const reloadedFile =
+      reloadedAsk?.kind === "request" && reloadedAsk.argument?.kind === "record"
+        ? reloadedAsk.argument.fields.file
+        : undefined;
+    if (reloadedFile?.kind !== "ref") throw new Error("the reloaded mailbox lost its blob ref");
+    expect(reloadedFile.blobId).toBe(carriedFile.blobId);
+    const bytes = await blobs.get(PROJECT, reloadedFile.blobId);
+    expect(Buffer.from(bytes).toString("utf8")).toBe("world");
+
+    // Answer the first gate (the handler answers the first worker and frees the serial watch), then the second
+    // gate the re-emitted mailboxed escalation raises. The second answer reads the RESTORED mailboxed blob.
+    const gateOne = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gateOne.escalation, { kind: "null" });
+    const gateTwo = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gateTwo.escalation, { kind: "null" });
+
+    // Both fibers settle with their own read-back content — the mailboxed "d29ybGQ=" proving its blob survived
+    // the restart and was readable after re-emission.
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length >= 2,
+      );
+      return provide?.fiberBuffer;
+    });
+    const values = buffered.map((entry) =>
+      entry.outcome.kind === "result" && entry.outcome.value.kind === "string"
+        ? entry.outcome.value.value
+        : null,
+    );
+    expect(new Set(values)).toEqual(new Set(["aGVsbG8=", "d29ybGQ="]));
+  });
+});

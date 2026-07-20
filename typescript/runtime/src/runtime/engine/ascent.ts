@@ -40,6 +40,10 @@ export function reachableResources(store: ProjectStore, value: Value): Reachable
       case "array":
         for (const element of current.elements) visit(element);
         return;
+      case "tool":
+        // A tool's reactor context may hold resources (a blob-backed value); keep them reachable.
+        visit(current.context);
+        return;
       default:
         return; // scalars / named agent capture no resources
     }

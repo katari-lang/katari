@@ -122,7 +122,7 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
     channel.reply({
       kind: "throw",
       delegation,
-      error: { $constructor: "main.my_error", value: { message: "typed!" } },
+      error: { $katari_constructor: "main.my_error", $katari_value: { message: "typed!" } },
     });
 
     expect(completions).toEqual([
@@ -130,7 +130,7 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
         delegation,
         outcome: {
           kind: "throw",
-          error: { $constructor: "main.my_error", value: { message: "typed!" } },
+          error: { $katari_constructor: "main.my_error", $katari_value: { message: "typed!" } },
         },
       },
     ]);
@@ -148,11 +148,17 @@ describe("SubprocessFfiTransport (protocol logic)", () => {
       kind: "delegate",
       delegation,
       call: "token-1",
-      agent: "main.helper",
+      callee: { kind: "named", agent: "main.helper" },
       argument: { n: 1 },
     });
     expect(delegates).toEqual([
-      { kind: "delegate", delegation, call: "token-1", agent: "main.helper", argument: { n: 1 } },
+      {
+        kind: "delegate",
+        delegation,
+        call: "token-1",
+        callee: { kind: "named", agent: "main.helper" },
+        argument: { n: 1 },
+      },
     ]);
 
     transport.deliverDelegateResult({

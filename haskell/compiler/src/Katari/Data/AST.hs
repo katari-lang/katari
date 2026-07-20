@@ -64,6 +64,7 @@ instance HasSourceSpan (Module phase) where
 data Declaration (phase :: Phase) where
   DeclarationAgent :: AgentDeclaration phase -> Declaration phase
   DeclarationRequest :: RequestDeclaration phase -> Declaration phase
+  DeclarationMarkerEffect :: MarkerEffectDeclaration phase -> Declaration phase
   DeclarationImport :: ImportDeclaration -> Declaration phase
   DeclarationExternalAgent :: ExternalAgentDeclaration phase -> Declaration phase
   DeclarationPrimitiveAgent :: PrimitiveAgentDeclaration phase -> Declaration phase
@@ -75,6 +76,7 @@ instance HasSourceSpan (Declaration phase) where
   sourceSpanOf = \case
     DeclarationAgent declaration -> declaration.sourceSpan
     DeclarationRequest declaration -> declaration.sourceSpan
+    DeclarationMarkerEffect declaration -> declaration.sourceSpan
     DeclarationImport declaration -> declaration.sourceSpan
     DeclarationExternalAgent declaration -> declaration.sourceSpan
     DeclarationPrimitiveAgent declaration -> declaration.sourceSpan
@@ -109,6 +111,11 @@ data GenericParameter (phase :: Phase) = GenericParameter
     -- | Generic ID
     typeReference :: Reference phase TypeReference,
     kind :: GenericKind,
+    -- | @literal name@ — the parameter binds at the argument's most specific literal type: a call
+    -- whose argument expression is a string literal proposes the literal's singleton type instead of
+    -- @string@. Only meaningful for type-kind parameters; an unmarked generic never binds a singleton
+    -- implicitly.
+    bindsLiteral :: Bool,
     -- | No upper bound  ~> unknown of private (top type)
     upperBound :: Maybe (SyntacticTypeExpression phase),
     sourceSpan :: SourceSpan
@@ -214,6 +221,23 @@ data RequestDeclaration (phase :: Phase) = RequestDeclaration
   }
 
 instance HasSourceSpan (RequestDeclaration phase) where
+  sourceSpanOf declaration = declaration.sourceSpan
+
+-- | @effect name[generics]@ — a marker effect: a pure type-level capability with NO operations. It
+-- occupies only the type namespace (there is no value to perform, so it is unperformable by
+-- construction), appears in effect rows exactly like a request reference, is rejected as a handler
+-- clause, and vanishes at lowering. Signatures use it to introduce and discharge scope-capability
+-- rows (@with E | name[T]@ on a parameter, absent from the result row).
+data MarkerEffectDeclaration (phase :: Phase) = MarkerEffectDeclaration
+  { annotation :: Maybe Text,
+    name :: Text,
+    -- | As effect (the only namespace a marker populates)
+    typeReference :: Reference phase TypeReference,
+    genericParameters :: List (GenericParameter phase),
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (MarkerEffectDeclaration phase) where
   sourceSpanOf declaration = declaration.sourceSpan
 
 -- | @import { ... } from "module"@ / @import "module" as alias@.
@@ -365,6 +389,9 @@ data Statement (phase :: Phase) where
   StatementForNext :: ForNextStatement phase -> Statement phase
   -- | @break v@ inside a @for@ body
   StatementForBreak :: ForBreakStatement phase -> Statement phase
+  -- | @finally { ... }@ — arm the block as a finalizer of the current agent instance (see
+  -- 'FinallyStatement'). A statement, not an expression: it yields no value, only the arming effect.
+  StatementFinally :: FinallyStatement phase -> Statement phase
   -- | Reserved sentinel for statement-level recovery. The parser does not emit it yet (it recovers
   -- only at declaration boundaries), but downstream walkers transport it so the slot exists already.
   StatementError :: SourceSpan -> Statement phase
@@ -380,6 +407,7 @@ instance HasSourceSpan (Statement phase) where
     StatementBreak statement -> statement.sourceSpan
     StatementForNext statement -> statement.sourceSpan
     StatementForBreak statement -> statement.sourceSpan
+    StatementFinally statement -> statement.sourceSpan
     StatementError sourceSpan -> sourceSpan
 
 data LetStatement (phase :: Phase) = LetStatement
@@ -444,6 +472,20 @@ data ForBreakStatement (phase :: Phase) = ForBreakStatement
   }
 
 instance HasSourceSpan (ForBreakStatement phase) where
+  sourceSpanOf statement = statement.sourceSpan
+
+-- | @finally { body }@ — arm @body@ as a finalizer of the current agent instance. Armed finalizers
+-- run in reverse arming order right before the instance acknowledges its terminal (a normal
+-- completion or a cancellation), and never on a panic. The body reads the enclosing scope through
+-- the ordinary parent chain, so it takes no parameters; its net effect must be within @io@ (a
+-- finalizer runs while the parent may already await the instance's cancellation, so it must not
+-- escalate a request through that parent).
+data FinallyStatement (phase :: Phase) = FinallyStatement
+  { body :: Block phase,
+    sourceSpan :: SourceSpan
+  }
+
+instance HasSourceSpan (FinallyStatement phase) where
   sourceSpanOf statement = statement.sourceSpan
 
 -- | One @name = expression@ entry in a @with (...)@ list of @next@
@@ -662,6 +704,8 @@ instance HasSourceSpan (RecordPattern phase) where
 data SyntacticTypeExpression (phase :: Phase) where
   -- | @null@ / @integer@ / @number@ / @string@ / @boolean@ / @file@
   TypePrimitive :: PrimitiveTypeNode -> SyntacticTypeExpression phase
+  -- | @"x"@ — a string literal singleton type (exactly this string; a subtype of @string@)
+  TypeStringLiteral :: StringLiteralTypeNode -> SyntacticTypeExpression phase
   -- | @never@ — the type bottom
   TypeNever :: SourceSpan -> SyntacticTypeExpression phase
   -- | @unknown@ — the type top
@@ -701,6 +745,7 @@ data SyntacticTypeExpression (phase :: Phase) where
 instance HasSourceSpan (SyntacticTypeExpression phase) where
   sourceSpanOf = \case
     TypePrimitive node -> node.sourceSpan
+    TypeStringLiteral node -> node.sourceSpan
     TypeNever sourceSpan -> sourceSpan
     TypeUnknown sourceSpan -> sourceSpan
     TypeAll sourceSpan -> sourceSpan
@@ -734,6 +779,17 @@ data PrimitiveTypeNode = PrimitiveTypeNode
   deriving stock (Eq, Show)
 
 instance HasSourceSpan PrimitiveTypeNode where
+  sourceSpanOf node = node.sourceSpan
+
+-- | @"x"@ in type position. Escaping follows expression string literals exactly (the parser reuses
+-- the lexer's string body), so a value literal and its singleton type are always spelled the same.
+data StringLiteralTypeNode = StringLiteralTypeNode
+  { value :: Text,
+    sourceSpan :: SourceSpan
+  }
+  deriving stock (Eq, Show)
+
+instance HasSourceSpan StringLiteralTypeNode where
   sourceSpanOf node = node.sourceSpan
 
 -- | @[module.]name@ — a kind-agnostic name reference. @moduleQualifier@ is the
@@ -864,6 +920,8 @@ data Expression (phase :: Phase) where
   ExpressionMatch :: MatchExpression phase -> Expression phase
   -- | @[par] for (...) { body } then (pattern) { ... }@
   ExpressionFor :: ForExpression phase -> Expression phase
+  -- | @forever { body }@ — repeat the block indefinitely; the expression types as @never@
+  ExpressionForever :: ForeverExpression phase -> Expression phase
   -- | Standalone @{ ... }@ in expression position
   ExpressionBlock :: BlockExpression phase -> Expression phase
   -- | @object.field@
@@ -890,6 +948,7 @@ instance HasSourceSpan (Expression phase) where
     ExpressionIf expression -> expression.sourceSpan
     ExpressionMatch expression -> expression.sourceSpan
     ExpressionFor expression -> expression.sourceSpan
+    ExpressionForever expression -> expression.sourceSpan
     ExpressionBlock expression -> expression.sourceSpan
     ExpressionFieldAccess expression -> expression.sourceSpan
     ExpressionTypeApplication expression -> expression.sourceSpan
@@ -965,16 +1024,37 @@ data CallExpression (phase :: Phase) = CallExpression
 instance HasSourceSpan (CallExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
--- | @label = value@ in a call argument list
+-- | @label = value@ / @label = _@ in a call argument list
 data CallArgument (phase :: Phase) = CallArgument
   { name :: Text,
     labelReference :: Reference phase LabelReference,
-    value :: Expression phase,
+    value :: CallArgumentValue phase,
     sourceSpan :: SourceSpan
   }
 
 instance HasSourceSpan (CallArgument phase) where
   sourceSpanOf argument = argument.sourceSpan
+
+-- | A call argument's payload: an ordinary expression, or a lone @_@ hole marking the parameter a
+-- partial application leaves open (@f(x = _, y = e)@ evaluates @e@ now and yields the residual
+-- @agent (x: X) -> R@). A hole is deliberately NOT an 'Expression' — it exists only in argument
+-- position, so every expression walker stays hole-free by construction.
+data CallArgumentValue (phase :: Phase) where
+  ArgumentHole :: SourceSpan -> CallArgumentValue phase
+  ArgumentExpression :: Expression phase -> CallArgumentValue phase
+
+instance HasSourceSpan (CallArgumentValue phase) where
+  sourceSpanOf = \case
+    ArgumentHole sourceSpan -> sourceSpan
+    ArgumentExpression expression -> sourceSpanOf expression
+
+-- | The @label = _@ holes of a call's arguments, in written order. Empty for an ordinary call; any
+-- entry makes the call a partial application. Shared by the checker (which types the residual
+-- function) and lowering (which emits a closure instead of a delegate), so the two dispatch on the
+-- same notion of "has holes".
+callArgumentHoles :: List (CallArgument phase) -> List (Text, SourceSpan)
+callArgumentHoles arguments =
+  [(argument.name, holeSpan) | argument <- arguments, ArgumentHole holeSpan <- [argument.value]]
 
 data BinaryOperator
   = BinaryOperatorAdd
@@ -1063,6 +1143,23 @@ data ForExpression (phase :: Phase) = ForExpression
   }
 
 instance HasSourceSpan (ForExpression phase) where
+  sourceSpanOf expression = expression.sourceSpan
+
+-- | @forever [(var name [: T] = initial, ...)] { body }@ — the unbounded sibling of the sequential @for@,
+-- fully symmetric with it minus the source, the per-iteration value collection, and the @then@ clause. It
+-- repeats @body@ indefinitely, one iteration at a time, carrying the @var@ state across iterations (a
+-- @next … with (…)@ advances the loop with updated state; falling off the body end re-iterates with the
+-- state unchanged) and DISCARDING each iteration's value — nothing is collected, so a long-lived loop's
+-- durable footprint stays flat. A @break value@ exits the loop with that value (the loop's result type is
+-- the union of its breaks, @never@ when it has none, so a plain @forever { … }@ conforms anywhere).
+data ForeverExpression (phase :: Phase) = ForeverExpression
+  { varBindings :: List (VariableBinding phase),
+    body :: Block phase,
+    sourceSpan :: SourceSpan,
+    typeOf :: ExpressionType phase
+  }
+
+instance HasSourceSpan (ForeverExpression phase) where
   sourceSpanOf expression = expression.sourceSpan
 
 -- | @pattern in source@
@@ -1212,6 +1309,7 @@ retagSyntacticTypeExpression ::
   SyntacticTypeExpression phase2
 retagSyntacticTypeExpression = \case
   TypePrimitive node -> TypePrimitive node
+  TypeStringLiteral node -> TypeStringLiteral node
   TypeNever sourceSpan -> TypeNever sourceSpan
   TypeUnknown sourceSpan -> TypeUnknown sourceSpan
   TypeAll sourceSpan -> TypeAll sourceSpan
@@ -1302,6 +1400,7 @@ retagGenericParameter parameter =
       labelReference = retagReference parameter.labelReference,
       typeReference = retagReference parameter.typeReference,
       kind = parameter.kind,
+      bindsLiteral = parameter.bindsLiteral,
       upperBound = retagSyntacticTypeExpression <$> parameter.upperBound,
       sourceSpan = parameter.sourceSpan
     }
@@ -1362,6 +1461,21 @@ retagRequestDeclaration declaration =
       genericParameters = retagGenericParameter <$> declaration.genericParameters,
       parameters = retagParameterSignature <$> declaration.parameters,
       returnType = retagSyntacticTypeExpression declaration.returnType,
+      sourceSpan = declaration.sourceSpan
+    }
+
+retagMarkerEffectDeclaration ::
+  ( ReferenceResolution phase1 TypeReference ~ ReferenceResolution phase2 TypeReference,
+    ReferenceResolution phase1 ModuleReference ~ ReferenceResolution phase2 ModuleReference
+  ) =>
+  MarkerEffectDeclaration phase1 ->
+  MarkerEffectDeclaration phase2
+retagMarkerEffectDeclaration declaration =
+  MarkerEffectDeclaration
+    { annotation = declaration.annotation,
+      name = declaration.name,
+      typeReference = retagReference declaration.typeReference,
+      genericParameters = retagGenericParameter <$> declaration.genericParameters,
       sourceSpan = declaration.sourceSpan
     }
 
@@ -1512,6 +1626,10 @@ deriving stock instance (EqPhase phase) => Eq (RequestDeclaration phase)
 
 deriving stock instance (ShowPhase phase) => Show (RequestDeclaration phase)
 
+deriving stock instance (EqPhase phase) => Eq (MarkerEffectDeclaration phase)
+
+deriving stock instance (ShowPhase phase) => Show (MarkerEffectDeclaration phase)
+
 deriving stock instance (EqPhase phase) => Eq (ExternalAgentDeclaration phase)
 
 deriving stock instance (ShowPhase phase) => Show (ExternalAgentDeclaration phase)
@@ -1563,6 +1681,10 @@ deriving stock instance (ShowPhase phase) => Show (ForNextStatement phase)
 deriving stock instance (EqPhase phase) => Eq (ForBreakStatement phase)
 
 deriving stock instance (ShowPhase phase) => Show (ForBreakStatement phase)
+
+deriving stock instance (EqPhase phase) => Eq (FinallyStatement phase)
+
+deriving stock instance (ShowPhase phase) => Show (FinallyStatement phase)
 
 deriving stock instance (EqPhase phase) => Eq (Modifier phase)
 
@@ -1692,6 +1814,10 @@ deriving stock instance (EqPhase phase) => Eq (CallArgument phase)
 
 deriving stock instance (ShowPhase phase) => Show (CallArgument phase)
 
+deriving stock instance (EqPhase phase) => Eq (CallArgumentValue phase)
+
+deriving stock instance (ShowPhase phase) => Show (CallArgumentValue phase)
+
 deriving stock instance (EqPhase phase) => Eq (BinaryOperatorExpression phase)
 
 deriving stock instance (ShowPhase phase) => Show (BinaryOperatorExpression phase)
@@ -1715,6 +1841,10 @@ deriving stock instance (ShowPhase phase) => Show (CaseArm phase)
 deriving stock instance (EqPhase phase) => Eq (ForExpression phase)
 
 deriving stock instance (ShowPhase phase) => Show (ForExpression phase)
+
+deriving stock instance (EqPhase phase) => Eq (ForeverExpression phase)
+
+deriving stock instance (ShowPhase phase) => Show (ForeverExpression phase)
 
 deriving stock instance (EqPhase phase) => Eq (ForInBinding phase)
 

@@ -8,7 +8,10 @@
 -- consumer's bare @import P@ then resolves to the package's same-named top module. The resolver
 -- checks this layout; it does not prefix or transform module names. It also rejects a dependency
 -- whose name is reserved by the compiler (the @primitive@ / stdlib namespace), so the failure is
--- reported here rather than as a K2008 against the dependency's own source.
+-- reported here rather than as a K2008 against the dependency's own source. The root package obeys
+-- the same convention against its own @[package].name@ (its modules must be that name or a @\<name>.@
+-- descendant), so a program is namespaced exactly like the packages it could publish; the rule is
+-- enforced uniformly across the whole closure.
 --
 -- Resolution is /root-authoritative/ (a package-set model, like Cargo @[patch]@ or npm @overrides@):
 -- the root project's @[overrides]@ and its single registry snapshot resolve the /entire/ transitive
@@ -363,35 +366,46 @@ loadLockedPackage rootDir cache name lockedSource = case lockedSource of
 -- Assembly / projection
 -- ===========================================================================
 
--- | Flatten a 'ResolvedProject': validate that each dependency package's key agrees with its
--- @[package].name@, that its name is not compiler-reserved, and that every module is inside the
--- package's namespace, reject cross-package module collisions, then union the source maps.
+-- | Flatten a 'ResolvedProject': validate that every package — the root and each dependency — keeps
+-- its modules inside its own @[package].name@ namespace and does not claim a compiler-reserved name,
+-- that each dependency's key agrees with its @[package].name@, reject cross-package module collisions,
+-- then union the source maps.
 --
--- The root package is exempt from the namespace check — it is the top program, free to name its
--- modules anything — but it still participates in collision detection against the dependencies.
+-- The root package is validated on the same footing as its dependencies: the project layer is the
+-- source of truth for @.ktr@ layout, so a root module that escapes the package's namespace is rejected
+-- here (a clear 'ResolveOutOfNamespace') rather than left to surface downstream. Collision detection
+-- still spans every package, the root included.
 assembleProject :: ResolvedProject -> Either ProjectError ProjectAssembly
 assembleProject project = do
-  let rootOwner = project.rootPackage.config.package.name
-      rootEntries = [(moduleName, (rootOwner, entry)) | (moduleName, entry) <- Map.toList project.rootPackage.sources]
+  rootEntries <- validatePackageNamespace project.rootPackage.config.package.name project.rootPackage
   dependencyEntryGroups <- traverse validateDependencyPackage (Map.toList project.depPackages)
   merged <- foldM mergeEntry Map.empty (rootEntries <> concat dependencyEntryGroups)
   pure (ProjectAssembly {sources = Map.map snd merged})
 
--- | Validate one dependency package and return its (module, (owner, entry)) contributions. The
--- dependency name is already a valid identifier by construction (every key reaching here came through
--- 'Katari.Project.Config.requireValidPackageName' or the lockfile's own name validation), so the only
--- name check left is the one the parsers cannot make: collision with the compiler-reserved namespace.
-validateDependencyPackage :: (Text, ResolvedPackage) -> Either ProjectError (List (ModuleName, (Text, SourceEntry)))
-validateDependencyPackage (name, package) = do
+-- | Validate one package's namespace under its authoritative name (the root's own @[package].name@, or
+-- a dependency's declared key) and return its @(module, (owner, entry))@ contributions: the name must
+-- not collide with the compiler-reserved @primitive@ / stdlib namespace, and every module it
+-- contributes must be that name itself or a @\<name>.@ descendant. The name is already a valid
+-- identifier by construction (validated by 'Katari.Project.Config.requireValidPackageName' or the
+-- lockfile's own name validation), so these are the only checks left — the ones the parsers cannot make.
+validatePackageNamespace :: Text -> ResolvedPackage -> Either ProjectError (List (ModuleName, (Text, SourceEntry)))
+validatePackageNamespace name package = do
   when (isReservedModuleName (ModuleName name)) $
     Left (ResolveReservedPackageName PackageNameInfo {name = name})
-  unless (package.config.package.name == name) $
-    Left (ResolveDependencyNameMismatch DependencyNameMismatchInfo {declaredKey = name, actualName = package.config.package.name})
   let namespaceRoot = ModuleName name
   forM_ (Map.keys package.sources) $ \moduleName ->
     unless (namespaceRoot `covers` moduleName) $
       Left (ResolveOutOfNamespace OutOfNamespaceInfo {package = name, moduleName = moduleName})
   pure [(moduleName, (name, entry)) | (moduleName, entry) <- Map.toList package.sources]
+
+-- | Validate one dependency package: its declared key must agree with its @[package].name@ — the one
+-- guarantee a dependency carries beyond the root, since it is addressed by that key — and then its
+-- namespace on the same footing as any package.
+validateDependencyPackage :: (Text, ResolvedPackage) -> Either ProjectError (List (ModuleName, (Text, SourceEntry)))
+validateDependencyPackage (name, package) = do
+  unless (package.config.package.name == name) $
+    Left (ResolveDependencyNameMismatch DependencyNameMismatchInfo {declaredKey = name, actualName = package.config.package.name})
+  validatePackageNamespace name package
 
 -- | Insert one owned entry into the merged map, failing on a cross-package module-name collision.
 mergeEntry ::

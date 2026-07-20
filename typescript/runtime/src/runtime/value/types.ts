@@ -12,7 +12,7 @@
 // transport (warn / redact on emission), and by logging (redaction). The flag is preserved across
 // every operation that reproduces the value as-is.
 
-import type { BlockId, GenericArgumentSchema, QualifiedName } from "@katari-lang/types";
+import type { BlockId, GenericArgumentSchema, JSONSchema, QualifiedName } from "@katari-lang/types";
 import type { BlobId, ScopeId, SnapshotId } from "../ids.js";
 
 /** The privacy SSoT: when true, the value is treated as private at rest, in transit, and in logs. */
@@ -28,7 +28,7 @@ export type Value = (
   /**
    * A record value. A bare object literal carries no `ctor`; a `data` value carries its constructor's
    * qualified name there (a tagged value). At the JSON boundary the tag rides under the reserved
-   * `$constructor` discriminator key (compiler `Katari.Schema.constructorDiscriminatorKey`); internally
+   * `$katari_constructor` discriminator key (compiler `Katari.Schema.constructorDiscriminatorKey`); internally
    * it is kept out-of-band so `obj.field` and width subtyping (`data <: object`) ignore it.
    */
   | { kind: "record"; fields: Record<string, Value>; ctor?: QualifiedName }
@@ -36,22 +36,39 @@ export type Value = (
   | BlobRefValue
   | ClosureValue
   | AgentValue
+  | ToolValue
 ) &
   PrivacyMarker;
 
-/** The semantic kind of the bytes a blob holds. Distinguishes content compare / display. */
+/** The semantic kind of the bytes a blob holds: a promoted large `string`, or a `file` value. */
 export type SemanticKind = "string" | "file";
 
-/** A reference to a content-addressed blob (the second axis of the value model alongside the blob itself). */
+/** A reference to a project blob (the second axis of the value model alongside the blob itself).
+ *  DELIBERATELY minimal — identity only. The blob's metadata (hash / size / contentType / owner)
+ *  lives on its `blobs` row, the single source of truth, read through the actor's warm catalog
+ *  where needed (the `prelude.files` prims, the download API). Nothing here is a cache an untrusted
+ *  wire (an AI replaying a handle) could get wrong. Two consequences, recorded in
+ *  docs/2026-07-09-slim-blob-ref.md: `==` on refs is blob IDENTITY (same blob, not same bytes), and
+ *  a future large-string promotion must mint content-addressed blob ids so promoted-string equality
+ *  stays structural. */
 export type BlobRefValue = {
   kind: "ref";
   semanticKind: SemanticKind;
   blobId: BlobId;
-  /** Content hash — used for `string == string` content comparison without fetching the bytes. */
-  hash: string;
-  size: number;
-  contentType?: string;
 };
+
+/** The reactors that may back a `tool` value (`"mcp"` today). Named so adding one later is a single
+ *  edit here: minting sites write the literal, and the wire decoders narrow through
+ *  `toToolReactorName`, so `dispatchCallable` can route on the field with no runtime whitelist. */
+export type ToolReactorName = "mcp";
+
+/** Narrow a wire-decoded reactor string to the tool-backing union. Tool values are runtime-minted, so
+ *  an unknown name here means a corrupted / drifted value — refused at the decode boundary rather than
+ *  routing a delegate event nowhere at dispatch time. */
+export function toToolReactorName(name: string): ToolReactorName {
+  if (name === "mcp") return name;
+  throw new Error(`a tool value names an unknown backing reactor "${name}"`);
+}
 
 /** A generic substitution attached to a callable value (from a `foo[T]` instantiation). */
 export type GenericSubstitution = Record<string, GenericArgumentSchema>;
@@ -79,4 +96,34 @@ export type AgentValue = {
   name: QualifiedName;
   snapshot: SnapshotId;
   generics?: GenericSubstitution;
+};
+
+/**
+ * A reactor-backed agent: the value-level mirror of an `external agent` declaration, minted only by
+ * the runtime (an MCP server's tool — `prelude.mcp.provide` mints one per server tool). Where a named
+ * agent references compiled code and a closure references a block + captured scope, a tool references
+ * a REACTOR (`reactor` + the reactor-scoped `name`) + an opaque `context` the reactor needs to
+ * execute (an MCP tool carries its server descriptor plus its provide scope's identity).
+ * `get_metadata` reads the attached runtime-decided signature; a call validates its argument against
+ * `inputSchema` where the dispatch is emitted (mismatch = `reflection.call_error`), then delegates
+ * DIRECTLY to the reactor —
+ * the argument passes through verbatim, the context rides the delegate target out-of-band (exactly
+ * like a closure's captured scope).
+ */
+export type ToolValue = {
+  kind: "tool";
+  /** The reactor that executes a call — the tool's implementation home. */
+  reactor: ToolReactorName;
+  /** The reactor-scoped dispatch key AND the public metadata name (an MCP server's tool name). */
+  name: string;
+  description: string;
+  /** Opaque, reactor-owned execution context (an MCP tool: `{url, auth}`, a header value private —
+   *  the privacy marker rides, so persistence seals it and user-facing boundaries redact it). */
+  context: Value;
+  /** The snapshot the tool was minted under (rides the external delegate target; informational). */
+  snapshot: SnapshotId;
+  inputSchema: JSONSchema;
+  /** The provider-declared output schema, when it declares one (MCP `outputSchema`) — metadata for
+   *  `get_metadata`; results are not validated against it. Absent means unknown. */
+  outputSchema?: JSONSchema;
 };

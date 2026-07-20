@@ -38,10 +38,12 @@ import Text.Megaparsec.Char.Lexer qualified as Lexer
 data SpaceMode = SpaceModeLine | SpaceModeMultiline
   deriving stock (Eq, Show)
 
--- | The nearest enclosing control construct, so @next@ / @break@ resolve to the for-loop or the
--- request-handler form without re-deciding it downstream. Reset to 'LoopContextNone' when crossing
--- an agent boundary (a nested closure does not see the outer loop / handler).
-data LoopContext = LoopContextNone | LoopContextFor | LoopContextHandler
+-- | The nearest enclosing control construct, so @next@ / @break@ resolve to the for-loop, the
+-- @forever@ loop, or the request-handler form without re-deciding it downstream. Reset to
+-- 'LoopContextNone' when crossing an agent boundary (a nested closure does not see the outer loop /
+-- handler). @forever@ is a @break@ target like @for@ (its @break@ exits the loop with a value), but it
+-- collects no iteration values, so it owns no @next@.
+data LoopContext = LoopContextNone | LoopContextFor | LoopContextForever | LoopContextHandler
   deriving stock (Eq, Show)
 
 data ParseContext = ParseContext
@@ -352,7 +354,9 @@ qualifiedName = do
 -- | Words that may never be a bare identifier because they introduce a statement, expression, or
 -- declaration. Type-only words (@integer@, @array@, @record@, @never@, @unknown@, @all@, @pure@,
 -- ...) are deliberately absent: they are recognised positionally by the type parser and remain
--- usable as expression identifiers / module names (e.g. @array.get@).
+-- usable as expression identifiers / module names (e.g. @array.get@). @forever@ is likewise absent —
+-- it is recognised positionally by the expression parser (only at an expression head directly before
+-- a @{@), so the stdlib's @replay.forever@ agent keeps its name.
 reservedWords :: Set Text
 reservedWords =
   Set.fromList
@@ -378,6 +382,7 @@ reservedWords =
       "break",
       "var",
       "let",
+      "finally",
       "then",
       "in",
       "with",

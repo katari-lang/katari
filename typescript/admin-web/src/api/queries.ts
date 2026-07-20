@@ -1,9 +1,9 @@
 // React-query hooks per resource. Live resources (runs, escalations) poll while something is in
 // flight and stop on their own once everything is terminal, so an idle console makes no traffic.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import type { Escalation, Json, Run, RunState } from "./types";
+import type { Escalation, Json, Run, RunEvent, RunState } from "./types";
 
 const LIVE_POLL_MILLISECONDS = 2500;
 
@@ -18,10 +18,14 @@ export function useProject(projectId: string) {
   return useQuery({ queryKey: ["projects", projectId], queryFn: () => api.getProject(projectId) });
 }
 
-export function useSnapshots(projectId: string) {
+export function useSnapshots(
+  projectId: string,
+  filter: { search?: string; limit?: number; offset?: number } = {},
+) {
   return useQuery({
-    queryKey: ["projects", projectId, "snapshots"],
-    queryFn: () => api.listSnapshots(projectId),
+    queryKey: ["projects", projectId, "snapshots", filter],
+    queryFn: () => api.listSnapshots(projectId, filter),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -32,12 +36,16 @@ export function useHeadSnapshot(projectId: string) {
   });
 }
 
-export function useRuns(projectId: string, filter: { state?: RunState; limit?: number } = {}) {
+export function useRuns(
+  projectId: string,
+  filter: { state?: RunState; search?: string; limit?: number; offset?: number } = {},
+) {
   return useQuery({
     queryKey: ["projects", projectId, "runs", filter],
     queryFn: () => api.listRuns(projectId, filter),
+    placeholderData: keepPreviousData,
     refetchInterval: (query) =>
-      (query.state.data ?? []).some(isLiveRun) ? LIVE_POLL_MILLISECONDS : false,
+      (query.state.data?.items ?? []).some(isLiveRun) ? LIVE_POLL_MILLISECONDS : false,
   });
 }
 
@@ -60,12 +68,25 @@ export function useRunTree(projectId: string, runId: string, live: boolean) {
   });
 }
 
-export function useRunEvents(projectId: string, runId: string, live: boolean) {
+/** One page of a run's trace. The params (offset / limit / kind / search / order) key the query, so a
+ *  filter or page change refetches while the previous page stays put (no flash to empty). It keeps
+ *  polling while the run is live so the visible page tracks the growing journal. */
+export function useRunEvents(
+  projectId: string,
+  runId: string,
+  params: {
+    offset?: number;
+    limit?: number;
+    kind?: RunEvent["kind"];
+    search?: string;
+    order?: "asc" | "desc";
+  },
+  live: boolean,
+) {
   return useQuery({
-    queryKey: ["projects", projectId, "runs", runId, "events"],
-    // One capped page from the start: the journal is append-only, so a full refetch while live always
-    // extends what was shown (no reordering); a run past the cap notes its truncation in the card.
-    queryFn: () => api.listRunEvents(projectId, runId, { limit: 1000 }),
+    queryKey: ["projects", projectId, "runs", runId, "events", params],
+    queryFn: () => api.listRunEvents(projectId, runId, params),
+    placeholderData: keepPreviousData,
     refetchInterval: live ? LIVE_POLL_MILLISECONDS : false,
   });
 }
@@ -100,10 +121,11 @@ export function useAgent(projectId: string, qualifiedName: string, snapshotId?: 
   });
 }
 
-export function useFiles(projectId: string) {
+export function useFiles(projectId: string, filter: { limit?: number; offset?: number } = {}) {
   return useQuery({
-    queryKey: ["projects", projectId, "files"],
-    queryFn: () => api.listFiles(projectId),
+    queryKey: ["projects", projectId, "files", filter],
+    queryFn: () => api.listFiles(projectId, filter),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -111,6 +133,20 @@ export function useEnv(projectId: string) {
   return useQuery({
     queryKey: ["projects", projectId, "env"],
     queryFn: () => api.listEnv(projectId),
+  });
+}
+
+export function useCredentials(projectId: string) {
+  return useQuery({
+    queryKey: ["projects", projectId, "credentials"],
+    queryFn: () => api.listCredentials(projectId),
+  });
+}
+
+export function useOauthClients(projectId: string) {
+  return useQuery({
+    queryKey: ["projects", projectId, "oauth-clients"],
+    queryFn: () => api.listOauthClients(projectId),
   });
 }
 
@@ -133,6 +169,18 @@ export function useCancelRun(projectId: string) {
     mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
       api.cancelRun(projectId, runId, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects", projectId, "runs"] }),
+  });
+}
+
+export function useStartOauthFlow(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (escalationId: string) => api.startOauthFlow(projectId, escalationId),
+    // The credential lands via the OAuth callback, which answers the escalation server-side. Starting
+    // the flow does not close the escalation, so we keep the inbox polling (invalidate to refetch
+    // promptly) and let the card drop once the callback has answered it.
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "escalations"] }),
   });
 }
 

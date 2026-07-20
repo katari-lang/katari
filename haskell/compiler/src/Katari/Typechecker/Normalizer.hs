@@ -29,6 +29,7 @@ import Data.Map.Merge.Strict qualified as Merge
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Common (intersectWithKeyM, unionWithKeyM)
 import Katari.Data.Environment (DataEnvironment, DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestEnvironment, RequestInformation (..), reKeyByGenericId)
@@ -260,7 +261,8 @@ normalizeType semanticBaseType = case semanticBaseType of
   SemanticTypeFile -> pure $ layered neverLayer {fileLayer = True}
   SemanticTypeInteger -> pure $ layered neverLayer {numberLayer = NumberSlotInteger}
   SemanticTypeNumber -> pure $ layered neverLayer {numberLayer = NumberSlotNumber}
-  SemanticTypeString -> pure $ layered neverLayer {stringLayer = True}
+  SemanticTypeString -> pure $ layered neverLayer {stringLayer = StringSlotString}
+  SemanticTypeStringLiteral value -> pure $ layered neverLayer {stringLayer = StringSlotLiterals (Set.singleton value)}
   SemanticTypeGeneric genericArgumentName -> pure bottomType {generics = Set.singleton genericArgumentName}
   SemanticTypeAgent parameterType returnType effect -> do
     normalizedArgument <- normalizeType parameterType
@@ -511,6 +513,18 @@ combineRequestEffect direction left right = case (left, right, direction) of
     combinedRequests <- keyedMerge direction (combineRequestArguments direction) leftRow.request rightRow.request
     pure $ RequestEffectRow EffectRow {request = combinedRequests, tails = combineTails direction leftRow.tails rightRow.tails}
 
+-- | The variance a request-row comparison uses for one declared parameter. A phantom (bivariant)
+-- parameter admits any relation in principle, but the row comparison pins it to covariant: a phantom
+-- parameter exists precisely to tag a row entry with extra type-level information (a scope
+-- capability, a marker effect's resource), and letting @req[a] ⊆ req[b]@ hold for unrelated @a@ / @b@
+-- would erase that tag. Covariant is the natural pin — it keeps @req["x"] ⊆ req[string]@ (widening a
+-- tag is harmless) while rejecting @req["x"] ⊆ req["y"]@. Inferred co-/contra-/invariance is used as
+-- declared; only the used-nowhere bottom is promoted.
+requestRowVariance :: Variance -> Variance
+requestRowVariance variance = case variance of
+  Bivariant -> Covariant
+  other -> other
+
 -- | Subtype the request parts of two effects (the old effect subtyping): expand the left's tails to
 -- their bounds, then compare requests (covariant) and tail lacks (contravariant).
 subtypeRequestEffect :: NormalizedEffect -> NormalizedEffect -> Normalizer ()
@@ -535,7 +549,7 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
                 Nothing -> tellEffectMismatch ("Left effect performs a request not present in the right effect: " <> renderQualifiedName qualifiedName) effectiveLeft right
                 Just rightArguments -> do
                   requestInfo <- requestInfoFor qualifiedName
-                  subtypeArgumentsWith ((.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
+                  subtypeArgumentsWith (requestRowVariance . (.variance) <$> requestInfo.genericParameters.parameterInformation) leftArguments rightArguments
           )
           (Map.toList effectiveLeftRow.request)
         -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
@@ -546,9 +560,23 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
                 Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
                 Just rightLacks ->
                   unless (rightLacks `Set.isSubsetOf` leftLacks) $
-                    tellEffectMismatch "Effect generic overrides are incompatible" effectiveLeft right
+                    -- The two rows denormalize to identical-looking text — a tail's @lacks@ set is
+                    -- invisible in the surface syntax — so the message names the requests the expected
+                    -- effect additionally removes from the shared generic, which is the difference the
+                    -- rows actually disagree on.
+                    tellEffectMismatch (overrideMismatchReason (Set.difference rightLacks leftLacks)) effectiveLeft right
           )
           (Map.toList effectiveLeftRow.tails)
+
+-- | The reason for a tail-lacks (effect-generic override) mismatch, naming the requests the expected
+-- effect additionally removes from the shared generic. Both the expected and actual rows render to the
+-- same surface text (a tail's @lacks@ set has no surface spelling), so without these names the error
+-- would show two identical rows; the difference set is exactly what the check rejected on.
+overrideMismatchReason :: Set QualifiedName -> Text
+overrideMismatchReason additionallyExcluded =
+  "Effect generic overrides are incompatible: the expected effect additionally excludes "
+    <> Text.intercalate ", " (renderQualifiedName <$> Set.toList additionallyExcluded)
+    <> " from the shared effect generic, which the actual effect still admits"
 
 -- | Combine the argument maps of one request name according to the request's declared variances.
 combineRequestArguments :: LatticeDirection -> QualifiedName -> Map Text NormalizedKindedType -> Map Text NormalizedKindedType -> Normalizer (Map Text NormalizedKindedType)
@@ -591,6 +619,17 @@ combineFlag :: LatticeDirection -> Bool -> Bool -> Bool
 combineFlag = \case
   Join -> (||)
   Meet -> (&&)
+
+-- | The string slot's lattice: the full @string@ absorbs the join and is the identity of the meet;
+-- two literal sets union / intersect like the boolean layer's value sets.
+combineStringSlot :: LatticeDirection -> StringSlot -> StringSlot -> StringSlot
+combineStringSlot direction left right = case (left, right, direction) of
+  (StringSlotString, _, Join) -> StringSlotString
+  (_, StringSlotString, Join) -> StringSlotString
+  (StringSlotString, other, Meet) -> other
+  (other, StringSlotString, Meet) -> other
+  (StringSlotLiterals leftValues, StringSlotLiterals rightValues, _) ->
+    StringSlotLiterals (combineSet direction leftValues rightValues)
 
 combineSet :: (Ord a) => LatticeDirection -> Set a -> Set a -> Set a
 combineSet = \case
@@ -636,7 +675,7 @@ combineLayers direction left right = do
       { nullLayer = combineFlag direction left.nullLayer right.nullLayer,
         -- NOTE: 'NumberSlot' is the chain Absent < Integer < Number, so join = max and meet = min
         numberLayer = (case direction of Join -> max; Meet -> min) left.numberLayer right.numberLayer,
-        stringLayer = combineFlag direction left.stringLayer right.stringLayer,
+        stringLayer = combineStringSlot direction left.stringLayer right.stringLayer,
         -- NOTE: booleans are a set ({} < {b} < {False, True}), so join = union and meet = intersection
         booleanLayer = combineSet direction left.booleanLayer right.booleanLayer,
         fileLayer = combineFlag direction left.fileLayer right.fileLayer,
@@ -768,7 +807,7 @@ subtypeLayers leftLayer rightLayer = do
   unless (leftLayer.nullLayer <= rightLayer.nullLayer) $ mismatch "Null layers are incompatible"
   -- NOTE: 'NumberSlot' is the chain Absent < Integer < Number, so the ordering is 'Ord'
   unless (leftLayer.numberLayer <= rightLayer.numberLayer) $ mismatch "Number layers are incompatible"
-  unless (leftLayer.stringLayer <= rightLayer.stringLayer) $ mismatch "String layers are incompatible"
+  unless (leftLayer.stringLayer `stringSlotWithin` rightLayer.stringLayer) $ mismatch "String layers are incompatible"
   unless (leftLayer.booleanLayer `Set.isSubsetOf` rightLayer.booleanLayer) $ mismatch "Boolean layers are incompatible"
   unless (leftLayer.fileLayer <= rightLayer.fileLayer) $ mismatch "File layers are incompatible"
   subtypeSlot (mismatch "Function layers are incompatible") subtypeFunction leftLayer.functionLayer rightLayer.functionLayer
@@ -1189,7 +1228,9 @@ denormalizeLayers layeredType = do
         NumberSlotAbsent -> []
         NumberSlotInteger -> [SemanticTypeInteger]
         NumberSlotNumber -> [SemanticTypeNumber]
-      stringPart = [SemanticTypeString | layeredType.stringLayer]
+      stringPart = case layeredType.stringLayer of
+        StringSlotString -> [SemanticTypeString]
+        StringSlotLiterals values -> SemanticTypeStringLiteral <$> Set.toAscList values
       -- A boolean singleton (@{True}@ / @{False}@) has no surface form, so any non-empty set renders
       -- as @boolean@ (lossy, display-only).
       booleanPart = [SemanticTypeBoolean | not (Set.null layeredType.booleanLayer)]

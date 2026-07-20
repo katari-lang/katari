@@ -193,8 +193,8 @@ function ObjectNode({
     );
   }
 
-  // A `data` constructor carries a `$constructor` const with the constructor name.
-  const constructorSchema = asObject(properties?.$constructor);
+  // A `data` constructor carries a `$katari_constructor` const with the constructor name.
+  const constructorSchema = asObject(properties?.$katari_constructor);
   const constructorName =
     constructorSchema !== null && typeof constructorSchema.const === "string"
       ? constructorSchema.const
@@ -203,7 +203,7 @@ function ObjectNode({
   const displayProperties =
     properties !== null
       ? Object.entries(properties).filter(
-          ([key]) => constructorName === null || key !== "$constructor",
+          ([key]) => constructorName === null || key !== "$katari_constructor",
         )
       : [];
   const additionalSchema = asObject(node.additionalProperties);
@@ -250,12 +250,12 @@ function isString(value: Json): value is string {
   return typeof value === "string";
 }
 
-/** The semantic type name for a Katari reference-object schema, or null. `{$agent}` → "agent";
- *  `{$ref, as:{const:"file"}}` → "file"; a bare `{$ref}` → "ref". */
+/** The semantic type name for a Katari reference-object schema, or null. `{$katari_agent}` → "agent";
+ *  `{$katari_ref, as:{const:"file"}}` → "file"; a bare `{$katari_ref}` → "ref". */
 function referenceTypeOf(properties: JsonSchema | null): string | null {
   if (properties === null) return null;
-  if (properties.$agent !== undefined) return "agent";
-  if (properties.$ref !== undefined) {
+  if (properties.$katari_agent !== undefined) return "agent";
+  if (properties.$katari_ref !== undefined) {
     const as = asObject(properties.as);
     return as?.const === "file" ? "file" : "ref";
   }

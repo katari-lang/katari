@@ -73,7 +73,10 @@ export class DbIrSource implements IrSource {
     return this.registry.access(snapshot, module);
   }
 
-  locate(snapshot: SnapshotId, name: QualifiedName): { module: string; blockId: BlockId } {
+  locate(
+    snapshot: SnapshotId,
+    name: QualifiedName,
+  ): { module: string; blockId: BlockId; private: boolean } {
     return this.registry.locate(snapshot, name);
   }
 }

@@ -14,10 +14,10 @@ primitive agent subtract[T extends number](left: T, right: T) -> T
 primitive agent multiply[T extends number](left: T, right: T) -> T
 @"Floor-modulo two numbers; preserves integer when both operands are integers. A zero divisor
 panics (guard with a comparison first)."
-primitive agent modulo[T extends number](left: T, right: T) -> T
+primitive agent modulo[T extends number](@"The dividend." left: T, @"The divisor." right: T) -> T
 @"Divide two numbers; always yields a number. A zero divisor panics (guard with a comparison
 first) — division never yields Infinity / NaN."
-primitive agent divide(left: number, right: number) -> number
+primitive agent divide(@"The dividend." left: number, @"The divisor." right: number) -> number
 @"Negate a number; preserves integer."
 primitive agent negate[T extends number](value: T) -> T
 
@@ -71,4 +71,4 @@ primitive agent concat(left: string, right: string) -> string
 throw(error: my_error) -> never { break fallback } }` — and an unhandled throw fails the run with
 the payload. `-> never` means a throw cannot be resumed: a handler recovers by `break`ing out of
 the handle (or rethrows)."
-request throw[T](error: T) -> never
+request throw[T](@"The error payload; a handler naming this payload type catches it." error: T) -> never

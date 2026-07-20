@@ -39,6 +39,18 @@ spec = do
       fooOf intType `shouldBeSubtypeOf` unionOf (fooOf stringType) (objectOf [("x", intType)])
     it "rejects data <: string" $
       fooOf intType `shouldNotBeSubtypeOf` stringType
+    it "accepts a string literal singleton <: itself" $
+      stringLiteralOf "x" `shouldBeSubtypeOf` stringLiteralOf "x"
+    it "accepts a string literal singleton <: string" $
+      stringLiteralOf "x" `shouldBeSubtypeOf` stringType
+    it "rejects a string literal singleton <: a different literal" $
+      stringLiteralOf "x" `shouldNotBeSubtypeOf` stringLiteralOf "y"
+    it "rejects string <: a string literal singleton" $
+      stringType `shouldNotBeSubtypeOf` stringLiteralOf "x"
+    it "accepts a literal <: a union of literals containing it" $
+      stringLiteralOf "x" `shouldBeSubtypeOf` unionOf (stringLiteralOf "x") (stringLiteralOf "y")
+    it "rejects a literal <: a union of other literals" $
+      stringLiteralOf "z" `shouldNotBeSubtypeOf` unionOf (stringLiteralOf "x") (stringLiteralOf "y")
     it "rejects object <: data (no implicit constructor injection)" $
       objectOf [("x", intType)] `shouldNotBeSubtypeOf` fooOf intType
     it "accepts a private data field <: object of private" $
@@ -352,7 +364,7 @@ environment =
           genericParameters =
             GenericParameters
               { parameterNames = ["T"],
-                parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, upperBound = Nothing}
+                parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, bindsLiteral = False, upperBound = Nothing}
               },
           constructor = constructorObjectOf [("x", genericOf genericT)]
         }
@@ -361,13 +373,14 @@ environment =
         { name = qualifiedName,
           genericParameters = GenericParameters {parameterNames = [], parameterInformation = mempty},
           parameterType = bottomType,
-          returnType = bottomType
+          returnType = bottomType,
+          marker = False
         }
 
 -- | A type-kind generic registered in 'environment' (in scope) with the upper bound @integer@.
 boundedTypeParameter :: GenericParameterInformation
 boundedTypeParameter =
-  GenericParameterInformation {genericId = boundedGeneric, kind = GenericKindType, variance = Bivariant, upperBound = Just (NormalizedKindedTypeType intType)}
+  GenericParameterInformation {genericId = boundedGeneric, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Just (NormalizedKindedTypeType intType)}
 
 -- | An effect-kind generic registered in 'environment' (in scope) with the effect upper bound @log@.
 boundedEffectParameter :: GenericParameterInformation
@@ -376,6 +389,7 @@ boundedEffectParameter =
     { genericId = boundedEffectGeneric,
       kind = GenericKindEffect,
       variance = Bivariant,
+      bindsLiteral = False,
       upperBound = Just (NormalizedKindedTypeEffect (effectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
     }
 
@@ -392,7 +406,10 @@ numberType :: NormalizedType
 numberType = layerType neverLayer {numberLayer = NumberSlotNumber}
 
 stringType :: NormalizedType
-stringType = layerType neverLayer {stringLayer = True}
+stringType = layerType neverLayer {stringLayer = StringSlotString}
+
+stringLiteralOf :: Text -> NormalizedType
+stringLiteralOf value = layerType neverLayer {stringLayer = StringSlotLiterals (Set.singleton value)}
 
 nullType :: NormalizedType
 nullType = layerType neverLayer {nullLayer = True}

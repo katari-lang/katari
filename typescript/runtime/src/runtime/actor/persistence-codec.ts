@@ -193,6 +193,9 @@ export function engineStateOf(instance: CoreInstance): EngineState {
   return {
     rootThreadId: instance.rootThreadId,
     cancelExits: instance.cancelExits,
+    // The armed finalizers and the drain phase ride the engine state so a restart mid-finalization resumes.
+    finalizers: instance.finalizers,
+    phase: instance.phase,
     nextThreadId: instance.nextThreadId,
     nextCallId: instance.nextCallId,
     nextAskId: instance.nextAskId,
@@ -230,6 +233,8 @@ export function deserializeProject(
       rootThreadId: row.engineState.rootThreadId,
       threads: threadsByInstance.get(row.id) ?? {},
       cancelExits: row.engineState.cancelExits,
+      finalizers: row.engineState.finalizers,
+      phase: row.engineState.phase,
       nextThreadId: row.engineState.nextThreadId,
       nextCallId: row.engineState.nextCallId,
       nextAskId: row.engineState.nextAskId,

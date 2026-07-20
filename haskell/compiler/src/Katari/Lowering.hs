@@ -40,14 +40,15 @@ import Katari.Data.Environment
   )
 import Katari.Data.IR
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
-import Katari.Data.JSONSchema (JSONSchema (..))
+import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.NormalizedType (bottomAttribute)
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), substituteGenerics)
 import Katari.Diagnostics (Diagnostics)
+import Katari.Lowering.Drop (insertDropOperations)
 import Katari.Panic (panic)
-import Katari.Primitive (panicRequestName, preludeModuleName)
+import Katari.Primitive (panicRequestName, preludeModuleName, recordMergeLeftLabel, recordMergeName, recordMergeRightLabel)
 import Katari.Schema qualified as Schema
 import Katari.Typechecker.Elaborate (ElaborateContext)
 import Katari.Typechecker.Environment (TypeEnvironment (..))
@@ -78,7 +79,10 @@ data LowerContext = LowerContext
 data RequestDefinition = RequestDefinition
   { parameterType :: SemanticType,
     returnType :: SemanticType,
-    parameterGenericIds :: Map Text GenericId
+    parameterGenericIds :: Map Text GenericId,
+    -- | A marker effect: type-level only, so it contributes no requests-schema entry — the runtime
+    -- must never present an unperformable capability tag as a catchable request.
+    marker :: Bool
   }
 
 -- | The scope-local environment, threaded by 'local'. 'localVariables' maps each resolved local to the
@@ -98,7 +102,7 @@ data LowerState = LowerState
   { nextBlockId :: Word32,
     nextVariableId :: Word32,
     blockTable :: Map BlockId BlockInformation,
-    entryTable :: Map QualifiedName BlockId,
+    entryTable :: Map QualifiedName EntryInformation,
     nameTable :: Map BlockId Text,
     -- | The operations of the block currently being built, accumulated in reverse for O(1) prepend and
     -- reversed once at the block boundary ('withFreshOperations').
@@ -173,9 +177,13 @@ recordBlock blockId block parameters name =
         nameTable = maybe state.nameTable (\debugName -> Map.insert blockId debugName state.nameTable) name
       }
 
-registerEntry :: QualifiedName -> BlockId -> Lower ()
-registerEntry qualifiedName blockId =
-  modify (\state -> state {entryTable = Map.insert qualifiedName blockId state.entryTable})
+-- | Register a top-level callable as a module entry. 'private' is the source declaration's handle
+-- privacy (an 'AgentDeclaration''s @private@; always 'False' for a signature-determined callable) — it
+-- rides on the entry so the runtime can refuse to start a private agent at its run-start boundary,
+-- while first-class / delegate resolution keeps resolving the entry unchanged.
+registerEntry :: QualifiedName -> BlockId -> Bool -> Lower ()
+registerEntry qualifiedName blockId private =
+  modify (\state -> state {entryTable = Map.insert qualifiedName EntryInformation {block = blockId, private = private} state.entryTable})
 
 ---------------------------------------------------------------------------------------------------
 -- Scope / jump-target helpers
@@ -245,6 +253,11 @@ topLevelCalleeName :: AST.Expression AST.Typed -> Maybe QualifiedName
 topLevelCalleeName = \case
   AST.ExpressionVariable expression -> topLevelResolution expression.variableReference
   AST.ExpressionQualifiedReference expression -> topLevelResolution expression.variableReference
+  -- An explicit @name[A, ...](...)@ call keeps delegating BY NAME: the type arguments ride the delegate's
+  -- own generics ('delegateCall' merges them), exactly as an inferred instantiation does, so an external
+  -- steered by an explicit generic (e.g. @mcp.provide[mcp.scope](...)@) routes to its name like a bare
+  -- call. A standalone (uncalled) @name[A]@ value still lowers through 'lowerTypeApplication'.
+  AST.ExpressionTypeApplication expression -> topLevelCalleeName expression.callee
   _ -> Nothing
 
 topLevelResolution :: AST.Reference AST.Typed AST.VariableReference -> Maybe QualifiedName
@@ -304,7 +317,8 @@ buildRequestDefinitions environment = Map.map convert
       RequestDefinition
         { parameterType = runDenormalize environment (denormalize information.parameterType),
           returnType = runDenormalize environment (denormalize information.returnType),
-          parameterGenericIds = Map.map (.genericId) information.genericParameters.parameterInformation
+          parameterGenericIds = Map.map (.genericId) information.genericParameters.parameterInformation,
+          marker = information.marker
         }
 
 -- | The open schema, used for the value-addressable wrappers lowering synthesises (a @use@
@@ -345,9 +359,40 @@ callableSchema context qualifiedName = case Map.lookup qualifiedName context.val
       (runDenormalize context.normalizerEnvironment (denormalize scheme.valueType))
   Nothing -> openSchema
 
+-- | Overlay a declaration's parameter @\@"..."@ annotations onto its input schema: each annotated
+-- label's property is wrapped in 'SchemaDescribed'. The schema is type-derived and the annotations are
+-- surface syntax, so the overlay runs after conversion rather than through the type environment. A
+-- non-object input (an inference fallback) has no properties to annotate and passes through.
+describeProperties :: List (Text, Maybe Text) -> JSONSchema -> JSONSchema
+describeProperties annotations schema = case schema of
+  SchemaObject objectSchema ->
+    SchemaObject
+      ObjectSchema
+        { properties = describeProperty <$> objectSchema.properties,
+          required = objectSchema.required,
+          additionalProperties = objectSchema.additionalProperties
+        }
+  _ -> schema
+  where
+    annotationByLabel = Map.fromList [(label, annotation) | (label, Just annotation) <- annotations]
+    describeProperty (label, propertySchema) = case Map.lookup label annotationByLabel of
+      Just annotation -> (label, SchemaDescribed DescribedSchema {description = annotation, schema = propertySchema})
+      Nothing -> (label, propertySchema)
+
+-- | 'describeProperties' lifted over a callable's 'SchemaInformation' (only the input carries
+-- parameter properties; the output and requests are untouched).
+describeInput :: List (Text, Maybe Text) -> SchemaInformation -> SchemaInformation
+describeInput annotations schemaInformation =
+  SchemaInformation
+    { input = describeProperties annotations schemaInformation.input,
+      output = schemaInformation.output,
+      requests = schemaInformation.requests,
+      genericBindings = schemaInformation.genericBindings
+    }
+
 -- | Turn an effect into its requests schema: each concrete request becomes a descriptor (its parameter /
 -- return type specialised by the request's arguments), each effect-generic a reference. @all@ cannot be
--- enumerated, so it contributes no concrete requests.
+-- enumerated, so it contributes no concrete requests; a marker effect is type-level only and vanishes.
 effectRequestSchemas :: LowerContext -> SemanticEffect -> List RequestSchema
 effectRequestSchemas context = go
   where
@@ -356,11 +401,22 @@ effectRequestSchemas context = go
       SemanticEffectAny -> []
       -- io is not a request, so it contributes no request schema (it is a type-level IO marker only).
       SemanticEffectIo -> []
-      SemanticEffectRequest qualifiedName arguments -> [RequestConcrete (requestDescriptor context qualifiedName arguments)]
+      SemanticEffectRequest qualifiedName arguments -> concreteRequest qualifiedName arguments
       SemanticEffectGeneric genericId -> [RequestGeneric genericId]
       SemanticEffectUnion effects -> concatMap go effects
       SemanticEffectOverwrite baseEffect overrides ->
-        go baseEffect <> concatMap (\(qualifiedName, arguments) -> [RequestConcrete (requestDescriptor context qualifiedName arguments)]) overrides
+        go baseEffect <> concatMap (uncurry concreteRequest) overrides
+    -- A marker effect names no operations, so a row that carries one exposes nothing to the runtime.
+    concreteRequest qualifiedName arguments
+      | isMarkerRequest context qualifiedName = []
+      | otherwise = [RequestConcrete (requestDescriptor context qualifiedName arguments)]
+
+-- | Whether a request name refers to a marker effect declaration (a name absent from the definitions
+-- is an ordinary request, matching 'requestDescriptor''s open fallback).
+isMarkerRequest :: LowerContext -> QualifiedName -> Bool
+isMarkerRequest context qualifiedName = case Map.lookup qualifiedName context.requestDefinitions of
+  Just definition -> definition.marker
+  Nothing -> False
 
 requestDescriptor :: LowerContext -> QualifiedName -> Map Text SemanticGenericArgument -> RequestDescriptor
 requestDescriptor context qualifiedName arguments = case Map.lookup qualifiedName context.requestDefinitions of
@@ -388,15 +444,18 @@ genericArgumentSchema context = \case
 -- | Lower one typed module to IR. The 'TypeEnvironment' / 'ValueEnvironment' are shared across the
 -- program (a referenced callable's schema may live in another module); the emitted IR is otherwise
 -- self-contained, with module-local 'BlockId' / 'VariableId' spaces. No lowering diagnostics fire on a
--- clean program (a malformed shape 'panic's), so the diagnostics are always empty.
+-- clean program (a malformed shape 'panic's), so the diagnostics are always empty. Once every block is
+-- built, the drop-insertion pass ("Katari.Lowering.Drop") releases provably-dead temporaries early —
+-- it needs the whole module's mentions, so it runs over the finished 'IRModule'.
 lowerModule :: TypeEnvironment -> ValueEnvironment -> ModuleName -> AST.Module AST.Typed -> (IRModule, Diagnostics)
 lowerModule typeEnvironment valueEnvironment _moduleName module' =
-  ( IRModule
-      { metadata = currentMetadata,
-        blocks = finalState.blockTable,
-        entries = finalState.entryTable,
-        names = finalState.nameTable
-      },
+  ( insertDropOperations
+      IRModule
+        { metadata = currentMetadata,
+          blocks = finalState.blockTable,
+          entries = finalState.entryTable,
+          names = finalState.nameTable
+        },
     diagnostics
   )
   where
@@ -434,7 +493,7 @@ lowerDeclaration = \case
   AST.DeclarationAgent declaration -> do
     let qualifiedName = resolvedQualifiedName declaration.variableReference
     agentBlock <- freshBlockId
-    registerEntry qualifiedName agentBlock
+    registerEntry qualifiedName agentBlock declaration.private
     buildAgent
       True
       agentBlock
@@ -467,6 +526,9 @@ lowerDeclaration = \case
       BlockPrimitive Primitive {name = renderQualifiedName (resolvedQualifiedName declaration.variableReference), input = input}
   AST.DeclarationImport _ -> pure ()
   AST.DeclarationTypeSynonym _ -> pure ()
+  -- A marker effect is type-level only: nothing to perform, nothing to handle, so it lowers to
+  -- nothing at all (and 'effectRequestSchemas' drops it from every requests schema).
+  AST.DeclarationMarkerEffect _ -> pure ()
   AST.DeclarationError _ -> pure ()
 
 -- | A declaration's user-facing description: its @\@"..."@ annotation, or empty when undocumented.
@@ -487,7 +549,9 @@ lowerSignatureCallable ::
 lowerSignatureCallable reference name annotation parameters makeLeaf = do
   let qualifiedName = resolvedQualifiedName reference
   agentBlock <- freshBlockId
-  registerEntry qualifiedName agentBlock
+  -- A signature-determined callable (data constructor / request / external / primitive) has no
+  -- @private@ syntax, so its entry is always public.
+  registerEntry qualifiedName agentBlock False
   inputVariable <- freshVariableId
   let defaults =
         Map.fromList
@@ -495,7 +559,8 @@ lowerSignatureCallable reference name annotation parameters makeLeaf = do
   leafBlock <- freshBlockId
   recordBlock leafBlock (makeLeaf inputVariable) (Map.singleton "parameter" inputVariable) (Just (name <> ".leaf"))
   context <- asks (.context)
-  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = callableSchema context qualifiedName, description = descriptionOf annotation, defaults = defaults}) mempty (Just name)
+  let schema = describeInput [(parameter.name, parameter.annotation) | parameter <- parameters] (callableSchema context qualifiedName)
+  recordBlock agentBlock (BlockAgent Agent {body = leafBlock, schema = schema, description = descriptionOf annotation, defaults = defaults}) mempty (Just name)
 
 ---------------------------------------------------------------------------------------------------
 -- Agents
@@ -533,7 +598,8 @@ buildAgent catchesReturn agentBlock name description genericBindings functionTyp
   let defaults =
         Map.fromList
           [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, AST.BindVariable _ _ (Just parameterDefault) <- [parameter.binder]]
-  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context genericBindings functionType, description = description, defaults = defaults}) mempty (Just name)
+      schema = describeInput [(parameter.name, parameter.annotation) | parameter <- parameters] (buildSchemaInformation context genericBindings functionType)
+  recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = schema, description = description, defaults = defaults}) mempty (Just name)
 
 -- | Read one declared parameter out of the incoming argument record and bind it, returning the locals
 -- it introduces. A plain variable parameter binds the field variable directly; a destructuring
@@ -621,6 +687,13 @@ lowerStatement = \case
   AST.StatementExpression expression -> do
     _ <- lowerExpression expression
     pure False
+  -- @finally { ... }@ lowers the body to its own parameterless 'Sequence' block (the finalizer reads
+  -- the enclosing scope through the parent chain) and arms it with an 'OperationDefer'. Arming does not
+  -- transfer control, so the rest of the block still runs.
+  AST.StatementFinally statement -> do
+    blockId <- buildBlockSequence statement.body
+    emit (OperationDefer DeferOperation {block = blockId})
+    pure False
   AST.StatementError _ -> pure False
   AST.StatementLet _ -> panic "lowering: StatementLet must be handled by lowerBlockValue"
   AST.StatementAgent _ -> panic "lowering: StatementAgent must be handled by lowerBlockValue"
@@ -656,6 +729,7 @@ lowerExpression = \case
   AST.ExpressionIf expression -> lowerIf expression
   AST.ExpressionMatch expression -> lowerMatch expression
   AST.ExpressionFor expression -> lowerFor expression
+  AST.ExpressionForever expression -> lowerForever expression
   AST.ExpressionBlock expression -> lowerBlockExpression expression.block
   AST.ExpressionHandler expression -> lowerHandlerExpression expression
   -- Operators are desugared into primitive calls by the identifier, so they never reach lowering.
@@ -719,31 +793,116 @@ buildElementBlock element = do
 -- | A call delegates to the callee with the single argument record built from its labelled arguments.
 -- The call's inferred generic instantiation (recorded by the checker; an explicit @callee[T]@ rides on
 -- the callee value via 'lowerTypeApplication' instead) is stamped onto the delegate as runtime schemas,
--- exactly like an 'OperationApplyGenerics' would carry them.
+-- exactly like an 'OperationApplyGenerics' would carry them. A call with @_@ holes is a partial
+-- application: it produces a closure instead of delegating ('lowerPartialApplication').
 lowerCall :: AST.CallExpression AST.Typed -> Lower VariableId
-lowerCall callExpression = do
+lowerCall callExpression = case AST.callArgumentHoles callExpression.arguments of
+  [] -> delegateCall callExpression []
+  _holes -> lowerPartialApplication callExpression
+
+-- | Delegate a call expression's callee with the argument record built from its labelled arguments
+-- joined with any synthetic extra entries — the @use@ statement adds its continuation closure this
+-- way, so it emits the exact delegate a directly written call would.
+delegateCall :: AST.CallExpression AST.Typed -> List (Text, VariableId) -> Lower VariableId
+delegateCall callExpression extraEntries = do
   target <- calleeReference callExpression.callee
-  argumentVariable <- buildArgumentRecord callExpression.arguments
+  argumentVariable <- buildArgumentRecord callExpression.arguments extraEntries
   context <- asks (.context)
-  let generics =
-        mapMaybe
-          (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
-          (Map.toList callExpression.instantiation)
+  let generics = delegateGenerics context callExpression
   output <- freshVariableId
   emit (OperationDelegate DelegateOperation {target = target, argument = argumentVariable, output = Just output, generics = generics})
   pure output
+
+-- | The runtime generic schemas stamped on a call's delegate: the call's own inferred instantiation,
+-- joined with any explicit @callee[A, ...]@ arguments the callee type-application recorded (so an
+-- explicit prefix — a marker scope, a decode target — reaches the delegate exactly as an inferred
+-- argument would, and a name-routed explicit call needs no separate 'OperationApplyGenerics'). A
+-- schema-free argument (a marker effect) drops out through 'genericArgumentSchema'.
+delegateGenerics :: LowerContext -> AST.CallExpression AST.Typed -> List (Text, GenericArgumentSchema)
+delegateGenerics context callExpression =
+  mapMaybe
+    (\(name, argument) -> (,) name <$> genericArgumentSchema context argument)
+    (Map.toList (calleeExplicitInstantiation callExpression.callee <> callExpression.instantiation))
+
+-- | The explicit generic arguments a call callee's type-application carries (empty for any other
+-- callee shape) — merged onto the delegate by 'delegateGenerics' since the callee routes by name.
+calleeExplicitInstantiation :: AST.Expression AST.Typed -> Map Text SemanticGenericArgument
+calleeExplicitInstantiation = \case
+  AST.ExpressionTypeApplication expression -> expression.instantiation <> calleeExplicitInstantiation expression.callee
+  _ -> Map.empty
 
 calleeReference :: AST.Expression AST.Typed -> Lower CalleeReference
 calleeReference callee = case topLevelCalleeName callee of
   Just qualifiedName -> pure (CalleeName qualifiedName)
   Nothing -> CalleeValue <$> lowerExpression callee
 
-buildArgumentRecord :: List (AST.CallArgument AST.Typed) -> Lower VariableId
-buildArgumentRecord arguments = do
-  entries <- mapM (\argument -> do value <- lowerExpression argument.value; pure (argument.name, value)) arguments
+buildArgumentRecord :: List (AST.CallArgument AST.Typed) -> List (Text, VariableId) -> Lower VariableId
+buildArgumentRecord arguments extraEntries = do
+  entries <- mapM loweredEntry arguments
   output <- freshVariableId
-  emit (OperationMakeRecord MakeRecordOperation {entries = entries, output = output})
+  emit (OperationMakeRecord MakeRecordOperation {entries = entries <> extraEntries, output = output})
   pure output
+  where
+    loweredEntry argument = case argument.value of
+      AST.ArgumentExpression expression -> do
+        value <- lowerExpression expression
+        pure (argument.name, value)
+      -- A holed call lowers through 'lowerPartialApplication' and a @use@ provider rejects holes at
+      -- check time; the pipeline gates on a clean check, so a hole here is a compiler bug.
+      AST.ArgumentHole _ -> panic "lowering: a `_` hole reached a full call's argument record"
+
+-- | A partial application @f(x = _, y = e)@ produces a CLOSURE over the enclosing scope, not a
+-- delegate. Now, in the enclosing scope: the callee is resolved once (a named callee stays a name; a
+-- value callee lowers to a captured variable), the supplied argument expressions are evaluated in
+-- written order — the same callee-then-arguments order a full call uses — and the supplied fields are
+-- built into ONE captured record. Later, when the residual is called: its body merges its own
+-- incoming argument record (the hole-labelled parameters) with that captured record via
+-- @prelude.record.merge@ (captured values win a shared key) and delegates to the callee. Merging —
+-- rather than rebuilding the record field by field — preserves the ABSENCE of an omitted optional
+-- hole, so the callee's runtime defaults still fill it. The call site's generic instantiation is
+-- stamped on the inner delegate exactly as on a full call's; an explicit @f[T]@ instead rides the
+-- captured callee value ('lowerTypeApplication').
+lowerPartialApplication :: AST.CallExpression AST.Typed -> Lower VariableId
+lowerPartialApplication callExpression = do
+  target <- calleeReference callExpression.callee
+  suppliedEntries <- concat <$> mapM suppliedEntry callExpression.arguments
+  suppliedRecord <- freshVariableId
+  emit (OperationMakeRecord MakeRecordOperation {entries = suppliedEntries, output = suppliedRecord})
+  context <- asks (.context)
+  let generics = delegateGenerics context callExpression
+  argumentVariable <- freshVariableId
+  (resultVariable, operations) <- withFreshOperations $ do
+    mergeArgument <- freshVariableId
+    emit (OperationMakeRecord MakeRecordOperation {entries = [(recordMergeLeftLabel, argumentVariable), (recordMergeRightLabel, suppliedRecord)], output = mergeArgument})
+    mergedArgument <- freshVariableId
+    emit (OperationDelegate DelegateOperation {target = CalleeName recordMergeName, argument = mergeArgument, output = Just mergedArgument, generics = mempty})
+    output <- freshVariableId
+    emit (OperationDelegate DelegateOperation {target = target, argument = mergedArgument, output = Just output, generics = generics})
+    pure output
+  bodyBlock <- freshBlockId
+  recordBlock
+    bodyBlock
+    (BlockSequence Sequence {operations = operations, result = Just resultVariable})
+    (Map.singleton "parameter" argumentVariable)
+    (Just "partial.body")
+  agentBlock <- freshBlockId
+  -- The residual's schema comes from the checker's stamped type — the callee's parameter object
+  -- restricted to the hole labels — so @get_metadata@ and the delegate boundary see exactly the
+  -- parameters that are still open (an optional hole stays optional).
+  recordBlock
+    agentBlock
+    (BlockAgent Agent {body = bodyBlock, schema = buildSchemaInformation context mempty callExpression.typeOf, description = "", defaults = mempty})
+    mempty
+    (Just "partial")
+  closureVariable <- freshVariableId
+  emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = agentBlock})
+  pure closureVariable
+  where
+    suppliedEntry argument = case argument.value of
+      AST.ArgumentExpression expression -> do
+        value <- lowerExpression expression
+        pure [(argument.name, value)]
+      AST.ArgumentHole _ -> pure []
 
 -- | @callee[args]@: attach the generic substitution to the callee value (for @get_metadata@ schema
 -- specialisation). A purely-attribute instantiation has no runtime schema, so it is a pass-through.
@@ -879,6 +1038,46 @@ lowerFor forExpression = do
   output <- freshVariableId
   emit (OperationCall CallOperation {target = forBlock, output = Just output})
   pure output
+
+-- | @forever [(var …)] { body }@. The body lowers to a sequence block seeded with the loop's @state_N@
+-- parameters (exactly as a @for@ body — 'lowerStateBindings' gives the initials, the @state_N@ mapping, and
+-- the state locals a @next … with (…)@ updates), reading the rest of the enclosing scope lexically. The
+-- runtime spawns a fresh iteration thread per pass carrying the current state, so per-iteration bindings
+-- live in that thread's own scope and are reclaimed when it completes. The loop is entered by an ordinary
+-- call; its output binds only when the body @break@s (an @EXIT@ targeting the forever block, which the
+-- forever thread catches and completes with the value), and never otherwise (the @-> never@ call shape).
+-- The body is lowered under @withForTarget@ so a @break@ / @next@ resolves to this block, as a @for@ does.
+lowerForever :: AST.ForeverExpression AST.Typed -> Lower VariableId
+lowerForever expression = do
+  blockId <- freshBlockId
+  (initialStates, stateParameters, stateLocals) <- lowerStateBindings expression.varBindings
+  body <- buildForeverBody blockId stateParameters stateLocals expression.body
+  recordBlock blockId (BlockForever Forever {initialStates = initialStates, body = body}) mempty Nothing
+  output <- freshVariableId
+  emit (OperationCall CallOperation {target = blockId, output = Just output})
+  pure output
+
+-- | The body of a @forever@ loop: a sequence block whose @state_N@ parameters carry the loop's @var@ state
+-- into each iteration (re-seeded by a @next … with (…)@), lowered under @withForTarget@ so a @break@ /
+-- @next@ targets the forever block. Mirrors 'buildForBody' without the iterator element (a @forever@ has no
+-- source).
+buildForeverBody ::
+  BlockId ->
+  List (Text, VariableId) ->
+  List (LocalVariableId, VariableId) ->
+  AST.Block AST.Typed ->
+  Lower BlockId
+buildForeverBody foreverBlock stateParameters stateLocals body = do
+  (completion, operations) <-
+    withFreshOperations $
+      withForTarget foreverBlock (withLocals stateLocals (lowerBlockValue body))
+  blockId <- freshBlockId
+  recordBlock
+    blockId
+    (BlockSequence Sequence {operations = operations, result = completionResult completion})
+    (Map.fromList stateParameters)
+    Nothing
+  pure blockId
 
 -- | Lower a list of @var@ state bindings (of a @for@ or a @handle@). Returns the initial-value variables
 -- (in the outer scope, for @initialStates@), the @state_N@ -> body-variable parameter entries, and the
@@ -1050,7 +1249,14 @@ lowerUse useStatement = do
   continuationBlock <- freshBlockId
   argumentVariable <- freshVariableId
   (completion, operations) <- withFreshOperations $ do
-    binderLocals <- maybe (pure []) (destructurePattern argumentVariable) useStatement.binder
+    -- The continuation is called with the protocol record @{value: A}@ (see the checker's
+    -- 'continuationAgentType'); the binder binds the @value@ FIELD, not the whole protocol record.
+    binderLocals <- case useStatement.binder of
+      Nothing -> pure []
+      Just binderPattern -> do
+        valueVariable <- freshVariableId
+        emit (OperationGetField GetFieldOperation {source = argumentVariable, field = "value", output = valueVariable})
+        destructurePattern valueVariable binderPattern
     withLocals binderLocals (lowerBlockValue useStatement.body)
   continuationBodyBlock <- freshBlockId
   recordBlock
@@ -1061,14 +1267,14 @@ lowerUse useStatement = do
   recordBlock continuationBlock (BlockAgent Agent {body = continuationBodyBlock, schema = openSchema, description = "", defaults = mempty}) mempty (Just "use.continuation")
   closureVariable <- freshVariableId
   emit (OperationMakeClosure MakeClosureOperation {output = closureVariable, agent = continuationBlock})
-  provider <- lowerExpression useStatement.provider
-  -- The provider is called like any agent: its argument record carries the continuation under the
-  -- protocol field @continuation@ (matching its declared type, which the delegate boundary validates).
-  wrappedVariable <- freshVariableId
-  emit (OperationMakeRecord MakeRecordOperation {entries = [("continuation", closureVariable)], output = wrappedVariable})
-  output <- freshVariableId
-  emit (OperationDelegate DelegateOperation {target = CalleeValue provider, argument = wrappedVariable, output = Just output, generics = mempty})
-  pure output
+  -- The checker types every provider as ONE application (a bare provider is wrapped into its
+  -- zero-written-argument call), so the callee was checked against the written arguments joined
+  -- with the continuation and the same joined record is delegated here — @use p(x = 1)@ emits
+  -- exactly the delegate of @p(x = 1, continuation = <closure>)@ (generics stamped and all).
+  case useStatement.provider of
+    AST.ExpressionCall callExpression ->
+      delegateCall callExpression [("continuation", closureVariable)]
+    _ -> panic "lowering: a typed `use` provider is always a call (the checker normalizes bare providers)"
 
 ---------------------------------------------------------------------------------------------------
 -- Patterns

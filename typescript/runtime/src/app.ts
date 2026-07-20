@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { config } from "./config/index.js";
@@ -8,6 +9,9 @@ import { bearerAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFound } from "./middleware/not-found.js";
 import { requestContext } from "./middleware/request-context.js";
+import { mcpServeRoutes } from "./modules/mcp/mcp.routes.js";
+import { oauthCallbackRoutes } from "./modules/oauth/oauth.routes.js";
+import { inboundRoutes } from "./modules/webhook/webhook.routes.js";
 import { apiRoutes } from "./routes.js";
 import type { AppEnv } from "./types/app-env.js";
 
@@ -22,7 +26,9 @@ export function createApp() {
   // Global middleware (order matters: context first so logging/ids are set).
   app.use("*", requestContext);
   app.use("*", secureHeaders());
-  app.use("*", cors({ origin: config.corsOrigin }));
+  // `X-Total-Count` (the paged-list total) must be exposed, or a cross-origin console cannot read it off
+  // the response — same-origin (the baked-in console) can already, but a separately-hosted one needs this.
+  app.use("*", cors({ origin: config.corsOrigin, exposeHeaders: ["X-Total-Count"] }));
 
   // Bearer auth on every request (KATARI_API_KEY is required at boot). It exempts /api/v1/health and the
   // console's static assets — see `auth.ts`.
@@ -31,6 +37,30 @@ export function createApp() {
   // Boundaries.
   app.onError(errorHandler);
   app.notFound(notFound);
+
+  // A shared body-size cap on the public capability surfaces (`/inbound`, `/mcp`): they accept
+  // unauthenticated POST bodies (the token is the only capability), so an unbounded read is a trivial
+  // memory-exhaustion vector. One rule for both surfaces — 1 MiB is ample for a webhook payload or an MCP
+  // JSON-RPC message; a larger delivery is rejected with 413 before its body is buffered.
+  const capabilityBodyLimit = bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (c) => c.json({ error: "the request body is too large" }, 413),
+  });
+  app.use("/inbound/*", capabilityBodyLimit);
+  app.use("/mcp/*", capabilityBodyLimit);
+
+  // The public inbound-webhook endpoints (`webhook.inbound`'s minted URLs). Outside `/api`, so
+  // `bearerAuth` passes them through — the unguessable token is the capability (see `webhook.routes.ts`).
+  app.route("/inbound", inboundRoutes);
+
+  // The public MCP serve endpoints (`mcp.serve`'s minted URLs) — the same capability-URL contract, the
+  // token scoping one stateless MCP server to one live call (see `mcp.routes.ts`).
+  app.route("/mcp", mcpServeRoutes);
+
+  // The public OAuth redirect callback (`GET /oauth/callback`) — the identity provider sends the user's
+  // browser here, which cannot carry a bearer token; the flow's minted `state` parameter is the
+  // capability (see `oauth.routes.ts`).
+  app.route("/oauth", oauthCallbackRoutes);
 
   const api = app.route("/api/v1", apiRoutes);
 

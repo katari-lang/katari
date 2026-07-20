@@ -24,7 +24,7 @@ import { PANIC_REQUEST } from "../engine/common.js";
 import { THROW_REQUEST } from "../engine/throw-signal.js";
 import type { BlobEntry } from "../engine/types.js";
 import { isUserFacingRequest } from "../escalation-filter.js";
-import type { ExternalEvent, ReactorName } from "../event/types.js";
+import { type ExternalEvent, escalateValue, type ReactorName } from "../event/types.js";
 import {
   type BlobId,
   type DelegationId,
@@ -313,11 +313,12 @@ export class ApiReactor extends Reactor {
 
   /** Reload the api reactor's warm state from durable rows. The run delegations its run instances issued
    *  (`from = api`, so a recovered run is cancellable and can record its terminal state) reload through the
-   *  base. Its *answerable* set — escalations addressed to it (`to = api`, raised by a run root) — is its
-   *  own data: every such row is user-facing by construction (core opens a row only for an answerable
-   *  request; a panic / control escape reaching the run root fails the run, it is never an open escalation),
-   *  so no re-classification is needed. The run instances themselves need no warm reload — they are pure
-   *  durable structure (FK anchors); everything warm about a run hangs off its delegation and these rows. */
+   *  base. Its *answerable* set — escalations addressed to it (`to = api`) — now carries FAILURE rows too (a
+   *  panic / throw / control escape reaching the run root is also a `to = api` escalate, since the base opens
+   *  a row for every escalate uniformly), so the loader's `answerableEscalations` filters to the user-facing
+   *  rows (the classification lives at this handler's read, not the base): a reloaded failure never re-enters
+   *  the answerable set. The run instances themselves need no warm reload — they are pure durable structure
+   *  (FK anchors); everything warm about a run hangs off its delegation and these rows. */
   async load(loader: Loader): Promise<void> {
     await this.loadBase(loader.base);
     for (const open of await loader.api.answerableEscalations()) {
@@ -378,10 +379,15 @@ export class ApiReactor extends Reactor {
     }
   }
 
-  /** A run's escalation reaching the root: a genuine request is kept open (the run stays suspended awaiting a
-   *  user's answer — the durable row was already opened by core, the raiser, so this only tracks the answerable
-   *  in memory); a panic / unhandled escape fails the run — retire the run delegation and, if that fired, record
-   *  `error` and terminate its still-suspended root (the teardown's eventual terminateAck is a sticky no-op). */
+  /** A run's escalation reaching the root — the api reactor is the terminal handler, and this is the ONE site
+   *  that classifies (a handler's local judgment, not the base's): a genuine user-facing request is kept open
+   *  (the run stays suspended awaiting a user's answer — the durable row was already opened by its raiser, so
+   *  this only tracks the answerable in memory); a failure (panic / throw) or unhandled control escape FAILS
+   *  the run — retire the run delegation, record `error`, audit it, and terminate the still-suspended root
+   *  (the teardown's eventual terminateAck is a sticky no-op). The failure row is NOT retired here: every
+   *  failure escalate is raised by a MORTAL instance (a core / ffi instance in the run's subtree — a run-start
+   *  failure never reaches core, being rejected at the run-start boundary), so its row cascades when the run
+   *  teardown drops that raiser. The api owns no ephemeral escalation row and never cleans one up. */
   protected onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
     const ask = event.ask;
     if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
@@ -406,6 +412,17 @@ export class ApiReactor extends Reactor {
         result: null,
         errorMessage: escalationErrorMessage(event),
       });
+      // Record the resolved failure in the run's history: the audit is the complete log of resolved
+      // escalations (answered + failed / cancelled), so a failure records its question with a null answer.
+      this.pendingAudits.push({
+        run: event.run,
+        escalation: event.escalation,
+        question: escalateValue(ask),
+        answer: null,
+      });
+      // Terminate the still-suspended root. Its teardown cascades the whole run subtree — INCLUDING the
+      // mortal instance that raised this failure escalate, whose escalation row goes with it (no explicit
+      // retire needed: the row's raiser is never the permanent run instance).
       this.send({
         kind: "terminate",
         delegation: event.delegation,
@@ -471,7 +488,7 @@ function escalationErrorMessage(event: Extract<ExternalEvent, { kind: "escalate"
     if (payload === undefined) return "throw: (no payload)";
     // The run's error message is neither sealed at rest nor redacted at the wire, so serialize through
     // the redacting codec: a tainted payload (itself, or through its container record) degrades to
-    // `$redacted` subtrees rather than leaking — the same fail-closed boundary as run results.
+    // `$katari_redacted` subtrees rather than leaking — the same fail-closed boundary as run results.
     const effective = argument?.private === true ? markPrivate(payload) : payload;
     return `throw: ${JSON.stringify(valueToJson(effective, "redact"))}`;
   }

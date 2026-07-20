@@ -8,14 +8,17 @@ import { describe, expect, test } from "vitest";
 import type { PersistedScope } from "../src/runtime/actor/persistence-codec.js";
 import { NO_OP_TX, type PersistenceTx } from "../src/runtime/actor/persistence.js";
 import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
+import { rebuildBlobOwnerIndex } from "../src/runtime/engine/blob.js";
 import { rebuildScopeOwnerIndex } from "../src/runtime/engine/scope.js";
-import type { BlobEntry, ProjectStore } from "../src/runtime/engine/types.js";
+import type { BlobEntry, CoreInstance, ProjectStore } from "../src/runtime/engine/types.js";
 import {
   type BlobId,
+  type DelegationId,
   type InstanceId,
   type ProjectId,
   type SnapshotId,
   toScopeId,
+  toThreadId,
 } from "../src/runtime/ids.js";
 import type { Value } from "../src/runtime/value/types.js";
 
@@ -35,6 +38,7 @@ function storeOwnedBy(owner: InstanceId): ProjectStore {
     scopesByOwner: new Map(),
     nextScopeId: 3,
     blobs: {},
+    blobsByOwner: new Map(),
   };
   rebuildScopeOwnerIndex(store);
   return store;
@@ -139,17 +143,22 @@ describe("ResourcePool blob reclaim", () => {
     semanticKind: "file",
   });
 
-  /** A store seeded with blobs only (no scopes); `owners` maps each blob id to its owner. */
+  /** A store seeded with blobs only (no scopes); `owners` maps each blob id to its owner. The
+   *  `blobsByOwner` index is rebuilt from the seeded ledger, as a real load would (the per-owner reclaim
+   *  reads it). */
   function storeWithBlobs(owners: Record<string, InstanceId | null>): ProjectStore {
     const blobs: Record<string, BlobEntry> = {};
     for (const [blobId, owner] of Object.entries(owners)) blobs[blobId] = blobEntry(owner);
-    return {
+    const store: ProjectStore = {
       instances: {},
       scopes: {},
       scopesByOwner: new Map(),
       nextScopeId: 0,
       blobs,
+      blobsByOwner: new Map(),
     };
+    rebuildBlobOwnerIndex(store);
+    return store;
   }
 
   /** A PersistenceTx whose `pool` port records the blob rows written / dropped. */
@@ -204,6 +213,142 @@ describe("ResourcePool blob reclaim", () => {
     const reclaimed = await pool.persist(tx);
     expect(reclaimed).toEqual([MINE]);
     expect(dropped).toEqual([MINE]);
+  });
+
+  test("reassignOwnedBlobs hoists an owner's WHOLE holding, keeping the index in step", async () => {
+    const SECOND = "blob-second" as BlobId;
+    const store = storeWithBlobs({ [MINE]: OWNER, [SECOND]: OWNER, [THEIRS]: OTHER, [TRANSIT]: null });
+    const pool = new ResourcePool(PROJECT, store);
+
+    // The whole-holding form moves every blob the owner holds — not just a named subset — onto `OTHER`.
+    pool.reassignOwnedBlobs(OWNER, OTHER);
+    expect(store.blobs[MINE]?.owner).toBe(OTHER);
+    expect(store.blobs[SECOND]?.owner).toBe(OTHER);
+    // The other owner's blob (already OTHER's) and the in-transit one are untouched.
+    expect(store.blobs[THEIRS]?.owner).toBe(OTHER);
+    expect(store.blobs[TRANSIT]?.owner).toBeNull();
+
+    // The derived index followed the move: the source bucket is gone, the target holds all three now.
+    expect(store.blobsByOwner.get(OWNER)).toBeUndefined();
+    expect([...(store.blobsByOwner.get(OTHER) ?? [])].sort()).toEqual([MINE, SECOND, THEIRS].sort());
+
+    // Both moved rows are staged for re-persist (their owner changed this turn).
+    const { tx, put } = recordingBlobTx();
+    await pool.persist(tx);
+    expect(put.sort()).toEqual([MINE, SECOND].sort());
+  });
+
+  /** A minimal core instance carrying the one field `deleteBlobOwnedInRun` reads — its `runId`. */
+  function instanceInRun(id: InstanceId, runId: InstanceId): CoreInstance {
+    return {
+      kind: "core",
+      id,
+      delegationId: "d" as DelegationId,
+      callerReactor: "core",
+      runId,
+      target: { kind: "named", name: "demo.main" as never, snapshot: "snap" as SnapshotId },
+      argument: null,
+      status: "running",
+      rootThreadId: toThreadId(0),
+      threads: {},
+      cancelExits: {},
+      finalizers: [],
+      phase: { kind: "running" },
+      nextThreadId: 0,
+      nextCallId: 0,
+      nextAskId: 0,
+    };
+  }
+
+  describe("deleteBlobOwnedInRun (the `files.free` run-scoped reclaim)", () => {
+    const RUN = "run-a" as InstanceId;
+    const OTHER_RUN = "run-b" as InstanceId;
+    const IN_RUN = "instance-in-run" as InstanceId; // a live core instance of RUN (an ancestor after a hoist)
+    const IN_OTHER_RUN = "instance-other-run" as InstanceId;
+    const API_ROOT = "instance-api-root" as InstanceId; // owns uploads; NOT a core instance in the store
+
+    /** A store whose blobs + core instances let the run-ownership check resolve each owner's run. */
+    function storeInRun(owners: Record<string, InstanceId | null>): ProjectStore {
+      const store = storeWithBlobs(owners);
+      store.instances = {
+        [IN_RUN]: instanceInRun(IN_RUN, RUN),
+        [IN_OTHER_RUN]: instanceInRun(IN_OTHER_RUN, OTHER_RUN),
+      };
+      return store;
+    }
+
+    test("frees a blob owned by ANY instance of the run (a hoisted blob may sit on an ancestor)", async () => {
+      const store = storeInRun({ [MINE]: IN_RUN });
+      const pool = new ResourcePool(PROJECT, store);
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      expect(store.blobs[MINE]).toBeUndefined();
+
+      const { tx, dropped } = recordingBlobTx();
+      // Row dropped and bytes staged for post-commit deletion, exactly like the intra-instance GC.
+      expect(await pool.persist(tx)).toEqual([MINE]);
+      expect(dropped).toEqual([MINE]);
+    });
+
+    test("refuses an api-root upload, another run's blob, an in-transit blob, and an unknown id (all no-ops)", () => {
+      const store = storeInRun({
+        [MINE]: API_ROOT, // an uploaded file — owner is not a core instance in the store
+        [THEIRS]: IN_OTHER_RUN, // a blob of a different run
+        [TRANSIT]: null, // in-transit mid-ascent
+      });
+      const pool = new ResourcePool(PROJECT, store);
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      pool.deleteBlobOwnedInRun(THEIRS, RUN);
+      pool.deleteBlobOwnedInRun(TRANSIT, RUN);
+      pool.deleteBlobOwnedInRun("blob-unknown" as BlobId, RUN);
+
+      // None was touched — a program can free only its own run's blobs.
+      expect(store.blobs[MINE]).toBeDefined();
+      expect(store.blobs[THEIRS]).toBeDefined();
+      expect(store.blobs[TRANSIT]).toBeDefined();
+    });
+
+    test("is idempotent: freeing the same handle twice is a plain no-op the second time", () => {
+      const store = storeInRun({ [MINE]: IN_RUN });
+      const pool = new ResourcePool(PROJECT, store);
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      expect(store.blobs[MINE]).toBeUndefined();
+      // The retry-safety guarantee: a re-run that frees the now-gone handle again does not throw or diverge.
+      expect(() => pool.deleteBlobOwnedInRun(MINE, RUN)).not.toThrow();
+      expect(store.blobs[MINE]).toBeUndefined();
+    });
+
+    const ENDPOINT_CALL = "instance-endpoint-call" as InstanceId; // a webhook/mcp serve endpoint — NOT a core instance
+
+    test("frees a blob owned by a NON-core endpoint call instance of the run (the resolver spans reactor edges)", () => {
+      // A webhook / mcp serve endpoint call instance is not a `core` engine instance, so it is absent from the
+      // store; the actor's run resolver finds its run from the owning reactor's received edge. A delivery's
+      // residual blob that HOISTED onto such an endpoint call must still be reclaimable by `files.free`.
+      const store = storeWithBlobs({ [MINE]: ENDPOINT_CALL });
+      const pool = new ResourcePool(PROJECT, store, (owner) =>
+        owner === ENDPOINT_CALL ? RUN : undefined,
+      );
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      expect(store.blobs[MINE]).toBeUndefined();
+    });
+
+    test("with the resolver, an api-root upload (no run) and another run's endpoint call are still refused", () => {
+      const ENDPOINT_OTHER = "instance-endpoint-other" as InstanceId;
+      const store = storeWithBlobs({ [MINE]: API_ROOT, [THEIRS]: ENDPOINT_OTHER });
+      // The api root belongs to no run (it resolves to `undefined`); the other endpoint call belongs to a
+      // DIFFERENT run — both must be refused, so a program frees only its own run's blobs.
+      const pool = new ResourcePool(PROJECT, store, (owner) =>
+        owner === ENDPOINT_OTHER ? OTHER_RUN : undefined,
+      );
+
+      pool.deleteBlobOwnedInRun(MINE, RUN);
+      pool.deleteBlobOwnedInRun(THEIRS, RUN);
+      expect(store.blobs[MINE]).toBeDefined();
+      expect(store.blobs[THEIRS]).toBeDefined();
+    });
   });
 
   test("deleteBlobOwnedBy frees only the named owner's blob (the file API's explicit delete)", async () => {

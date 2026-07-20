@@ -1,9 +1,87 @@
 {
-  "id": "f6a2261e-9b19-4891-ac2e-c3c7bf8322de",
+  "id": "605f9654-f45b-4ecc-b35c-1ff6f0f0ce37",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.credentials": {
+      "name": "credentials",
+      "schema": "",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "profile": {
+          "name": "profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'mcp'"
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generation": {
+          "name": "generation",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "credentials_project_id_projects_id_fk": {
+          "name": "credentials_project_id_projects_id_fk",
+          "tableFrom": "credentials",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "credentials_project_id_name_pk": {
+          "name": "credentials_project_id_name_pk",
+          "columns": [
+            "project_id",
+            "name"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "credentials_profile_check": {
+          "name": "credentials_profile_check",
+          "value": "\"credentials\".\"profile\" in ('mcp', 'configured')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.blobs": {
       "name": "blobs",
       "schema": "",
@@ -324,9 +402,83 @@
         },
         "threads_kind_check": {
           "name": "threads_kind_check",
-          "value": "\"threads\".\"kind\" in ('agent', 'sequence', 'primitive', 'construct', 'request', 'match', 'for', 'handle', 'parallel', 'delegate', 'external')"
+          "value": "\"threads\".\"kind\" in ('agent', 'sequence', 'primitive', 'construct', 'request', 'match', 'for', 'forever', 'handle', 'parallel', 'delegate', 'external')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.capability_routes": {
+      "name": "capability_routes",
+      "schema": "",
+      "columns": {
+        "token": {
+          "name": "token",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "instance_id": {
+          "name": "instance_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "capability_routes_instance_id_idx": {
+          "name": "capability_routes_instance_id_idx",
+          "columns": [
+            {
+              "expression": "instance_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "capability_routes_project_id_projects_id_fk": {
+          "name": "capability_routes_project_id_projects_id_fk",
+          "tableFrom": "capability_routes",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "capability_routes_instance_id_instances_id_fk": {
+          "name": "capability_routes_instance_id_instances_id_fk",
+          "tableFrom": "capability_routes",
+          "tableTo": "instances",
+          "columnsFrom": [
+            "instance_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.core_instances": {
@@ -651,86 +803,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.ffi_instances": {
-      "name": "ffi_instances",
-      "schema": "",
-      "columns": {
-        "instance_id": {
-          "name": "instance_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "snapshot_id": {
-          "name": "snapshot_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "key": {
-          "name": "key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "relays": {
-          "name": "relays",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "inner_calls": {
-          "name": "inner_calls",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "ffi_instances_instance_id_instances_id_fk": {
-          "name": "ffi_instances_instance_id_instances_id_fk",
-          "tableFrom": "ffi_instances",
-          "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "ffi_instances_snapshot_id_snapshots_id_fk": {
-          "name": "ffi_instances_snapshot_id_snapshots_id_fk",
-          "tableFrom": "ffi_instances",
-          "tableTo": "snapshots",
-          "columnsFrom": [
-            "snapshot_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.http_instances": {
-      "name": "http_instances",
+    "public.external_call_instances": {
+      "name": "external_call_instances",
       "schema": "",
       "columns": {
         "instance_id": {
@@ -744,13 +818,19 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "extension": {
+          "name": "extension",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
         }
       },
       "indexes": {},
       "foreignKeys": {
-        "http_instances_instance_id_instances_id_fk": {
-          "name": "http_instances_instance_id_instances_id_fk",
-          "tableFrom": "http_instances",
+        "external_call_instances_instance_id_instances_id_fk": {
+          "name": "external_call_instances_instance_id_instances_id_fk",
+          "tableFrom": "external_call_instances",
           "tableTo": "instances",
           "columnsFrom": [
             "instance_id"
@@ -900,7 +980,7 @@
         },
         "instances_kind_check": {
           "name": "instances_kind_check",
-          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http')"
+          "value": "\"instances\".\"kind\" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region')"
         }
       },
       "isRLSEnabled": false
@@ -1279,6 +1359,96 @@
           "value": "\"runs\".\"state\" in ('running', 'cancelling', 'done', 'error', 'cancelled')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.oauth_clients": {
+      "name": "oauth_clients",
+      "schema": "",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authorize_endpoint": {
+          "name": "authorize_endpoint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_endpoint": {
+          "name": "token_endpoint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_secret": {
+          "name": "client_secret",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authorization_parameters": {
+          "name": "authorization_parameters",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "oauth_clients_project_id_projects_id_fk": {
+          "name": "oauth_clients_project_id_projects_id_fk",
+          "tableFrom": "oauth_clients",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "oauth_clients_project_id_name_pk": {
+          "name": "oauth_clients_project_id_name_pk",
+          "columns": [
+            "project_id",
+            "name"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.env_entries": {

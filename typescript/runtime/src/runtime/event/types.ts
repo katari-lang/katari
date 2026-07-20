@@ -68,14 +68,37 @@ export type InternalEvent =
 export type DelegateTarget =
   | { kind: "named"; name: QualifiedName; snapshot: SnapshotId }
   | { kind: "closure"; blockId: BlockId; scopeId: ScopeId; snapshot: SnapshotId; module: string }
-  | { kind: "external"; key: string; snapshot: SnapshotId };
+  | {
+      kind: "external";
+      key: string;
+      snapshot: SnapshotId;
+      /** A reactor-backed `tool` value's execution context, riding the target out-of-band (the value
+       *  analog of a closure's `scopeId`). Absent for a compiled `external agent` call. */
+      context?: Value;
+    };
 
 /** Which reactor an external event originates from / is destined for. An event is self-routing: the
  *  substrate dispatches purely by `to` (`registry[to]`), and a reply inverts from/to. The engine emits
  *  routing-less `ExternalEventBody`s; the CORE reactor stamps from/to when they leave it. `ffi` runs FFI
  *  (sidecar) handlers, `http` the built-in http client — an external call is a `delegate` to one of them,
- *  exactly like a core sub-call. */
-export type ReactorName = "core" | "api" | "ffi" | "http";
+ *  exactly like a core sub-call, `webhook` the dynamically generated inbound endpoints
+ *  (`webhook.inbound` — the outside world calling the program), `mcp` the built-in MCP client
+ *  (`prelude.mcp.*` — connect / list / call against an MCP server), `time` durable wall-clock time
+ *  (`prelude.time.*` — a clock reading and the durable timers `sleep` / `watch` wait on), and `oauth`
+ *  on-demand OAuth token resolution (`prelude.oauth.token` — a bearer token for a stored credential, its
+ *  authorization escalated when the credential needs a human), and `region` the built-in structured-concurrency
+ *  nursery (`prelude.region.*` — `provide` opens a scope, and later `fork` / `join` / `watch` / `cancel` run
+ *  fibers inside it), an in-runtime scheduler with no external process, like `time`. */
+export type ReactorName =
+  | "core"
+  | "api"
+  | "ffi"
+  | "http"
+  | "webhook"
+  | "mcp"
+  | "time"
+  | "oauth"
+  | "region";
 
 /** An external event's payload — what the engine emits, before routing is stamped on it. */
 export type ExternalEventBody =
@@ -87,6 +110,14 @@ export type ExternalEventBody =
       /** The callee value's resolved generic substitution (`foo[args]`), recorded as the new
        *  instance's ambient substitution. Absent for a non-generic call. */
       generics?: GenericSubstitution;
+      /** The instance that ISSUES this delegation — the caller-side owner of the row, stamped by the base
+       *  `Reactor.send` from the emitting instance (never by the emit site, which need not know it). It rides
+       *  DOWN so the callee can record it in its received edge (`acceptDelegation`) and, when it later sends an
+       *  upward event, hoist its blobs one step onto exactly this instance. Cross-reactor by nature (the callee
+       *  reactor cannot otherwise know the caller *instance* — only the caller reactor owns the delegation
+       *  row), so the id has to travel on the event. Optional so a hand-built delegate (a reactor unit test)
+       *  may omit it — a delegate with no `caller` simply hoists nothing. */
+      caller?: InstanceId;
     }
   | { kind: "delegateAck"; delegation: DelegationId; value: Value }
   | { kind: "terminate"; delegation: DelegationId }
@@ -135,6 +166,14 @@ export function agentSnapshot(target: DelegateTarget): SnapshotId {
  *  the resources this value captures on send, the receiver reowns them on receipt. */
 export function escalateValue(ask: AskKind): Value | null {
   return ask.kind === "request" ? ask.argument : ask.value;
+}
+
+/** The `request` column an escalation row records for an ask: a capability request's qualified name, or a
+ *  control escape's bare kind (`next` / `break` / `return` / …). The two never collide — capability names
+ *  are qualified — so a reader classifies an escalation (user-facing vs failure vs control) from this one
+ *  string, and the base opens every escalate's row without ever having to. */
+export function askRequestName(ask: AskKind): string {
+  return ask.kind === "request" ? ask.request : ask.kind;
 }
 
 // FFI is no longer a private side channel on the external thread: an external call is a `delegate` to the

@@ -22,13 +22,16 @@ spec = describe "katari init" $ do
   it "scaffolds every project file with the name interpolated" $
     withSystemTempDirectory "katari-init" $ \directory -> do
       scaffold directory
+      -- The source module is scaffolded under the package name (src/demo.ktr, module `demo`), so the
+      -- root program obeys the same namespace rule as every package.
       mapM_
         (\path -> doesFileExist (directory </> path) `shouldReturn` True)
-        ["katari.toml", "src/main.ktr", ".gitignore", ".env.example", "compose.yaml", "README.md"]
+        ["katari.toml", "src/demo.ktr", ".gitignore", ".env.example", "compose.yaml", "README.md"]
       config <- TextIO.readFile (directory </> "katari.toml")
       config `shouldSatisfy` Text.isInfixOf "name = \"demo\""
       readme <- TextIO.readFile (directory </> "README.md")
       readme `shouldSatisfy` Text.isInfixOf "# demo"
+      readme `shouldSatisfy` Text.isInfixOf "demo.main"
 
   it "never overwrites an existing file on a re-run" $
     withSystemTempDirectory "katari-init" $ \directory -> do

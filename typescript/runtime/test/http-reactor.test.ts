@@ -6,25 +6,48 @@
 // response), the unhandled-error path (→ a run-failing `throw[http.fetch_error]`), and the at-most-once
 // recovery contract (an interrupted request is never re-sent — it fails on restart).
 
-import { createAgentName, type IRModule, type QualifiedName, type SchemaInfo } from "@katari-lang/types";
+import { createServer } from "node:http";
+import {
+  createAgentName,
+  type IRModule,
+  type Json,
+  type QualifiedName,
+  type SchemaInfo,
+} from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
+import { HttpReactor } from "../src/runtime/actor/http-reactor.js";
 import { InMemoryPersistence, type Persistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
+import { ResourcePool } from "../src/runtime/actor/resource-pool.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
 import { type EnvReader, registerHostPrims } from "../src/runtime/engine/host-prims.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
+import { createProjectStore } from "../src/runtime/engine/store.js";
+import { THROW_REQUEST } from "../src/runtime/engine/throw-signal.js";
 import {
+  FetchHttpTransport,
   type HttpCall,
   type HttpCompletion,
   type HttpTransport,
+  StubHttpTransport,
 } from "../src/runtime/external/http-transport.js";
 import { StubFfiTransport } from "../src/runtime/external/runner.js";
-import type { DelegationId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
+import type { BlobId, DelegationId, InstanceId, ProjectId, SnapshotId } from "../src/runtime/ids.js";
 import { moduleOfName, SnapshotRegistry } from "../src/runtime/ir.js";
-import { InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
+import { type BlobStore, InMemoryBlobStore } from "../src/runtime/value/blob-store.js";
+import type { Value } from "../src/runtime/value/types.js";
 
 const PROJECT = "project-http" as ProjectId;
 const SNAPSHOT = "snapshot-http" as SnapshotId;
+const RUN = "run-http" as InstanceId;
+
+/** A JSON tree nested `depth` deep — deep enough to overflow the wire decoder's recursion (a `RangeError`,
+ *  the one non-marker way a hostile response's decode can throw at the settle seam). */
+function deepTree(depth: number): Json {
+  let tree: Json = 0;
+  for (let level = 0; level < depth; level += 1) tree = [tree];
+  return tree;
+}
 const EMPTY_SCHEMA: SchemaInfo = { input: {}, output: {}, requests: [], genericBindings: {} };
 
 // agent main() {
@@ -96,9 +119,9 @@ const FETCH_IR: IRModule = {
     },
   },
   entries: {
-    [createAgentName("main")]: 0,
-    [createAgentName("prelude.env.get_secret")]: 6,
-    [createAgentName("prelude.http.fetch")]: 8,
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("prelude.env.get_secret")]: { block: 6, private: false },
+    [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
   },
   names: {},
 };
@@ -165,11 +188,139 @@ const CANCELLING_FETCH_IR: IRModule = {
     },
   },
   entries: {
-    [createAgentName("main")]: 0,
-    [createAgentName("prelude.http.fetch")]: 8,
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
   },
   names: {},
 };
+
+/** The public body text the public-body loopback test submits (a plain, non-secret string). */
+const PUBLIC_BODY_TEXT = "public-body-text";
+
+// agent main() {
+//   let key = prelude.env.get_secret({ key: "API_KEY" })     // a private string
+//   return prelude.http.fetch({
+//     url, method: "POST",
+//     headers: { authorization: key },   // secret in a header (a private submission surface)
+//     body: key,                         // AND the same secret in the body (the new private surface)
+//   })
+// }
+// Both surfaces carry the secret so one test proves the whole rule: the reveal at the reactor boundary
+// puts BOTH on the wire, and the response the server returns is untainted.
+function postSecretBodyIr(url: string): IRModule {
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "loadLiteral", output: 20, value: { kind: "string", value: "API_KEY" } },
+            { kind: "makeRecord", entries: [["key", 20]], output: 21 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.env.get_secret") },
+              argument: 21,
+              output: 22,
+            },
+            { kind: "makeRecord", entries: [["authorization", 22]], output: 23 },
+            { kind: "loadLiteral", output: 24, value: { kind: "string", value: url } },
+            { kind: "loadLiteral", output: 25, value: { kind: "string", value: "POST" } },
+            // The body slot reuses register 22 — the same private secret the header carries.
+            {
+              kind: "makeRecord",
+              entries: [
+                ["url", 24],
+                ["method", 25],
+                ["headers", 23],
+                ["body", 22],
+              ],
+              output: 27,
+            },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch") },
+              argument: 27,
+              output: 28,
+            },
+            { kind: "exit", target: 0, value: 28 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      6: { block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      7: {
+        block: { kind: "primitive", name: "prelude.env.get_secret", input: 70 },
+        parameters: { parameter: 70 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.env.get_secret")]: { block: 6, private: false },
+      [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+}
+
+// agent main() { return prelude.http.fetch({ url, method: "POST", headers: {}, body: PUBLIC_BODY_TEXT }) }
+// A plain public body: it must reach the wire exactly like before (a public value fits the now
+// private-capable `body` sink unchanged — public <: private).
+function postPublicBodyIr(url: string): IRModule {
+  return {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            { kind: "makeRecord", entries: [], output: 23 },
+            { kind: "loadLiteral", output: 24, value: { kind: "string", value: url } },
+            { kind: "loadLiteral", output: 25, value: { kind: "string", value: "POST" } },
+            { kind: "loadLiteral", output: 26, value: { kind: "string", value: PUBLIC_BODY_TEXT } },
+            {
+              kind: "makeRecord",
+              entries: [
+                ["url", 24],
+                ["method", 25],
+                ["headers", 23],
+                ["body", 26],
+              ],
+              output: 27,
+            },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch") },
+              argument: 27,
+              output: 28,
+            },
+            { kind: "exit", target: 0, value: 28 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+}
 
 /** A fixed env exposing one secret, so `get_secret("API_KEY")` yields a private `"sk-123"`. */
 const ENV: EnvReader = {
@@ -193,6 +344,11 @@ class ControlledHttpTransport implements HttpTransport {
   onComplete(sink: (completion: HttpCompletion) => void): void {
     this.sink = sink;
   }
+
+  // This double records the handle-carrying argument and never materialises a body, so it needs no resolver;
+  // it is hand-driven (completions are fed directly), so it never produces a response file either.
+  useBlobResolver(): void {}
+  useBlobProducer(): void {}
 
   dispatch(call: HttpCall): void {
     this.dispatched.push(call);
@@ -234,6 +390,7 @@ function makeActor(
   http: HttpTransport,
   persistence: Persistence = new InMemoryPersistence(),
   ir: IRModule = FETCH_IR,
+  blobs: BlobStore = new InMemoryBlobStore(),
 ): ProjectActor {
   const registry = new SnapshotRegistry();
   for (const name of Object.keys(ir.entries)) {
@@ -245,7 +402,7 @@ function makeActor(
     projectId: PROJECT,
     ir: registry,
     prims,
-    blobs: new InMemoryBlobStore(),
+    blobs,
     external: new StubFfiTransport(),
     http,
     persistence,
@@ -317,6 +474,68 @@ describe("http reactor", () => {
     );
   });
 
+  // A hostile / malformed response the wire decoder cannot reconstruct: a header named like a reserved
+  // `$katari_*` marker, a non-string `$katari_ref`, an over-deep tree. Fed directly (the real transport only
+  // ever emits string headers), each stands for a value a hostile server could get onto the settle seam.
+  const HOSTILE_RESPONSES: Array<{ name: string; value: Json }> = [
+    { name: "a `$katari_redacted` header", value: { status: 200, headers: { $katari_redacted: "1" }, body: "x" } },
+    { name: "a non-string `$katari_ref` header", value: { status: 200, headers: { $katari_ref: 7 }, body: "x" } },
+    { name: "an over-deep tree", value: deepTree(100000) },
+  ];
+
+  test.each(HOSTILE_RESPONSES)(
+    "does not poison the actor when the response carries $name — the run fails with throw[http.fetch_error]",
+    async ({ value }) => {
+      // Without the total settle seam the wire decoder would throw out of the actor turn (dropping every warm
+      // run of the project); with it, the undecodable response is folded into the same catchable fetch_error.
+      const transport = new ControlledHttpTransport();
+      const actor = makeActor(transport);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+      const call = await waitUntil(() => transport.dispatched[0]);
+      transport.feed({ delegation: call.delegation, outcome: { kind: "result", value } });
+
+      await expect(result).rejects.toThrow(
+        /throw: .*prelude\.http\.fetch_error.*could not be decoded/,
+      );
+    },
+  );
+
+  test("a fetch_file response the wire cannot decode escalates throw[http.fetch_error] too (the shared base seam)", () => {
+    // fetch_file settles through the SAME base seam as fetch, so a hostile `{ status, headers, file }` a
+    // program cannot decode folds into the same typed throw. Driven straight through the reactor: open a
+    // `fetch_file`-keyed call, feed a hostile completion, and read the escalate it raises.
+    const store = createProjectStore();
+    const pool = new ResourcePool(PROJECT, store);
+    const reactor = new HttpReactor(new StubHttpTransport(), pool);
+    const delegation = "d-fetch-file" as DelegationId;
+    const caller = "i-http-caller" as InstanceId;
+    reactor.react({
+      kind: "delegate",
+      delegation,
+      target: { kind: "external", key: "prelude.http.fetch_file", snapshot: SNAPSHOT },
+      argument: null,
+      from: "core",
+      to: "http",
+      run: RUN,
+      caller,
+    });
+    reactor.complete({
+      delegation,
+      outcome: { kind: "result", value: { status: 200, headers: { $katari_redacted: "1" } } },
+    });
+
+    const escalate = reactor.drainSends().find((event) => event.kind === "escalate");
+    if (escalate === undefined || escalate.kind !== "escalate") {
+      throw new Error("expected a fetch_error escalate");
+    }
+    expect(escalate.ask).toMatchObject({
+      kind: "request",
+      request: THROW_REQUEST,
+      argument: { fields: { error: { ctor: "prelude.http.fetch_error" } } },
+    });
+  });
+
   test("never re-sends an interrupted request on recovery — it fails at-most-once", async () => {
     const persistence = new StoringPersistence();
 
@@ -384,5 +603,472 @@ describe("http reactor", () => {
     // Recovery aborted the cancelling call; it never re-dispatched (no request re-sent).
     expect(secondTransport.aborted).toHaveLength(1);
     expect(secondTransport.dispatched).toHaveLength(0);
+  });
+});
+
+// The reveal boundary end-to-end: drive the whole ProjectActor through the REAL `FetchHttpTransport`
+// against a loopback http server, so what the server actually receives on the wire is the assertion. This
+// proves the stdlib rule change — a `string of private` body reaches the destination server (revealed at
+// the single transport boundary, exactly like a secret header) — and that the server's response is never
+// tainted by the private request.
+describe("http reactor — private body sink (real transport over loopback)", () => {
+  interface Loopback {
+    url: string;
+    /** The last request the server received, filled in on its `end` — read after the run resolves. */
+    received: { body: string; authorization: string | null };
+    close: () => Promise<void>;
+  }
+
+  /** Start a loopback server that records the request body + `authorization` header it receives and replies
+   *  200 "ok". Bound to 127.0.0.1 on an ephemeral port so tests never touch a real network. */
+  async function startLoopback(): Promise<Loopback> {
+    const received: Loopback["received"] = { body: "", authorization: null };
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        received.body = Buffer.concat(chunks).toString("utf8");
+        received.authorization = request.headers.authorization ?? null;
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ok");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback server did not bind a port");
+    }
+    return {
+      url: `http://127.0.0.1:${address.port}/submit`,
+      received,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  test("reveals a private body to the wire and leaves the response untainted", async () => {
+    const loopback = await startLoopback();
+    try {
+      const actor = makeActor(
+        new FetchHttpTransport(),
+        new InMemoryPersistence(),
+        postSecretBodyIr(loopback.url),
+      );
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+      const value = await result;
+
+      // The secret reached the actual wire in BOTH private submission surfaces (header AND body), revealed
+      // at the reactor boundary — the whole point of making the body a private-capable sink.
+      expect(loopback.received.body).toBe("sk-123");
+      expect(loopback.received.authorization).toBe("sk-123");
+
+      // Declassified: the response is public even though the request carried a secret body (the reactor
+      // mints the response with `jsonToValue`, which never marks a value private — no new taint rule).
+      expect(value.private).toBeUndefined();
+      expect(value.kind).toBe("record");
+      if (value.kind === "record") {
+        expect(value.fields.status).toEqual({ kind: "integer", value: 200 });
+        expect(value.fields.body).toEqual({ kind: "string", value: "ok" });
+        expect(value.fields.status?.private).toBeUndefined();
+        expect(value.fields.body?.private).toBeUndefined();
+      }
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("a plain public body still reaches the wire unchanged", async () => {
+    const loopback = await startLoopback();
+    try {
+      const actor = makeActor(
+        new FetchHttpTransport(),
+        new InMemoryPersistence(),
+        postPublicBodyIr(loopback.url),
+      );
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+      const value = await result;
+
+      // A public value fits the now private-capable `body` sink (public <: private) with no change on the
+      // wire — the regression guard that widening the sink did not break the ordinary case.
+      expect(loopback.received.body).toBe(PUBLIC_BODY_TEXT);
+      expect(value.kind).toBe("record");
+      if (value.kind === "record") {
+        expect(value.fields.status).toEqual({ kind: "integer", value: 200 });
+      }
+    } finally {
+      await loopback.close();
+    }
+  });
+});
+
+// The file body slots end-to-end: a `file` in a request body rides to the reactor as its HANDLE, and the
+// transport reads the bytes from the blob store only at the send boundary. These tests drive the whole
+// ProjectActor with a program that forwards its request argument to `http.fetch`, so the request body — a
+// real body-sum value built here with a file ref — is exactly what reaches the wire (a loopback server that
+// records the raw bytes it received). The last test proves the other half: the external-call envelope the
+// reactor hands the transport carries only the handle, never the base64.
+describe("http reactor — file request bodies (real transport over loopback)", () => {
+  const FILE_BLOB = "blob-http-body" as BlobId;
+  // Arbitrary non-UTF-8 bytes (a 0xff), so a base64 / raw comparison is meaningful and text framing is exact.
+  const FILE_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+  const FILE_CONTENT_TYPE = "image/png";
+  const FILE_BASE64 = Buffer.from(FILE_BYTES).toString("base64");
+
+  // agent main(request) { return http.fetch(request) } — forwards the whole request, so the test controls
+  // the body sum precisely (built as a runtime value and passed as the run argument).
+  const FORWARD_FETCH_IR: IRModule = {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch") },
+              argument: 1,
+              output: 2,
+            },
+            { kind: "exit", target: 0, value: 2 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "fetch", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.http.fetch")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+
+  const fileRef: Value = { kind: "ref", semanticKind: "file", blobId: FILE_BLOB };
+  const string = (value: string): Value => ({ kind: "string", value });
+  const dataValue = (ctor: string, fields: Record<string, Value>): Value => ({
+    kind: "record",
+    ctor: createAgentName(ctor),
+    fields,
+  });
+
+  /** The `{ url, method: POST, headers: {}, body }` request value the forwarding program sends. */
+  function request(url: string, body: Value): Value {
+    return {
+      kind: "record",
+      fields: {
+        url: string(url),
+        method: string("POST"),
+        headers: { kind: "record", fields: {} },
+        body,
+      },
+    };
+  }
+
+  interface RawLoopback {
+    url: string;
+    /** The raw request bytes + Content-Type the server received, read after the run resolves. */
+    received: { body: Buffer; contentType: string | null };
+    close: () => Promise<void>;
+  }
+
+  /** A loopback server that records the RAW request bytes (not decoded to text) + the Content-Type, so a
+   *  binary / multipart body's exact bytes are the assertion. Bound to 127.0.0.1 on an ephemeral port. */
+  async function startRawLoopback(): Promise<RawLoopback> {
+    const received: RawLoopback["received"] = { body: Buffer.alloc(0), contentType: null };
+    const server = createServer((incoming, response) => {
+      const chunks: Buffer[] = [];
+      incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+      incoming.on("end", () => {
+        received.body = Buffer.concat(chunks);
+        received.contentType = incoming.headers["content-type"] ?? null;
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ok");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback server did not bind a port");
+    }
+    return {
+      url: `http://127.0.0.1:${address.port}/upload`,
+      received,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  /** An actor with the file already uploaded (bytes in the store, its row in the warm catalog), driving the
+   *  forwarding program through the real `FetchHttpTransport`. */
+  async function actorWithFile(http: HttpTransport): Promise<ProjectActor> {
+    const blobs = new InMemoryBlobStore();
+    await blobs.put(PROJECT, FILE_BLOB, FILE_BYTES);
+    const actor = makeActor(http, new InMemoryPersistence(), FORWARD_FETCH_IR, blobs);
+    await actor.uploadBlob(FILE_BLOB, {
+      hash: "hash-http-body",
+      size: FILE_BYTES.byteLength,
+      contentType: FILE_CONTENT_TYPE,
+      semanticKind: "file",
+    });
+    return actor;
+  }
+
+  test("json body: a file leaf becomes base64 in place, the rest of the tree unchanged", async () => {
+    const loopback = await startRawLoopback();
+    try {
+      const actor = await actorWithFile(new FetchHttpTransport());
+      // { name: "avatar", data: <file> } — only `data` should become base64 on the wire.
+      const tree: Value = { kind: "record", fields: { name: string("avatar"), data: fileRef } };
+      const body = dataValue("prelude.http.json", { value: tree });
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
+      await result;
+
+      expect(loopback.received.contentType).toBe("application/json");
+      const document: unknown = JSON.parse(loopback.received.body.toString("utf8"));
+      expect(document).toEqual({ name: "avatar", data: FILE_BASE64 });
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("binary body: the file's raw bytes, its content type the Content-Type", async () => {
+    const loopback = await startRawLoopback();
+    try {
+      const actor = await actorWithFile(new FetchHttpTransport());
+      const body = dataValue("prelude.http.binary", { content: fileRef });
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
+      await result;
+
+      expect(new Uint8Array(loopback.received.body)).toEqual(FILE_BYTES);
+      expect(loopback.received.contentType).toBe(FILE_CONTENT_TYPE);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("multipart body: RFC 7578 parts, the file part carrying the raw bytes", async () => {
+    const loopback = await startRawLoopback();
+    try {
+      const actor = await actorWithFile(new FetchHttpTransport());
+      const parts: Value = {
+        kind: "array",
+        elements: [
+          dataValue("prelude.http.multipart_text", { name: string("caption"), content: string("hello") }),
+          dataValue("prelude.http.multipart_file", {
+            name: string("upload"),
+            filename: string("logo.png"),
+            content: fileRef,
+          }),
+        ],
+      };
+      const body = dataValue("prelude.http.multipart", { parts });
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, request(loopback.url, body));
+      await result;
+
+      expect(loopback.received.contentType).toMatch(/^multipart\/form-data; boundary=----katari[0-9a-f]+$/);
+      // Read the framing as latin1 so raw file bytes survive the round-trip for the structural assertions.
+      const framed = loopback.received.body.toString("latin1");
+      expect(framed).toContain('Content-Disposition: form-data; name="caption"');
+      expect(framed).toContain("hello");
+      expect(framed).toContain('Content-Disposition: form-data; name="upload"; filename="logo.png"');
+      expect(framed).toContain(`Content-Type: ${FILE_CONTENT_TYPE}`);
+      // The file part carries the exact raw bytes (not base64, not decoded).
+      expect(loopback.received.body.includes(Buffer.from(FILE_BYTES))).toBe(true);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("the envelope handed to the transport carries the file HANDLE, never the base64 bytes", async () => {
+    const transport = new ControlledHttpTransport();
+    const actor = await actorWithFile(transport);
+    const tree: Value = { kind: "record", fields: { data: fileRef } };
+    const body = dataValue("prelude.http.json", { value: tree });
+    actor.startRun(createAgentName("main"), SNAPSHOT, request("https://example.test/x", body));
+
+    const call = await waitUntil(() => transport.dispatched[0]);
+    // The body rides as the slim `$katari_ref` handle, exactly as the value plane / DB / trace hold it.
+    expect(call.argument).toMatchObject({
+      body: {
+        $katari_constructor: "prelude.http.json",
+        $katari_value: {
+          value: { data: { $katari_ref: FILE_BLOB, $katari_semantic_kind: "file" } },
+        },
+      },
+    });
+    // The base64 of the bytes is nowhere in the envelope — it is born only inside the transport's send.
+    expect(JSON.stringify(call.argument)).not.toContain(FILE_BASE64);
+  });
+});
+
+// The receive-side twin of the file-request-body tests: `http.fetch_file` captures a RESPONSE body into a
+// blob and returns its `file` HANDLE, so a downloaded payload's bytes (and their base64) never touch the
+// value plane. These drive the whole ProjectActor with a program that forwards its request argument to
+// `http.fetch_file`, through the REAL `FetchHttpTransport` against a loopback that serves bytes — so what
+// the run actually gets back (a `file` value whose blob holds the served bytes + Content-Type) is the
+// assertion. A `StoringPersistence` lets the blob row (its recorded content type) be read after the run.
+describe("http reactor — fetch_file response (real transport over loopback)", () => {
+  // agent main(request) { return http.fetch_file(request) } — forwards the whole request so the test
+  // controls the URL / method precisely (built as a runtime value and passed as the run argument). The
+  // external's dispatch key is the compiled qualified name, which is what the reactor keys the file-capture
+  // shape off of.
+  const FETCH_FILE_IR: IRModule = {
+    metadata: { schemaVersion: 1 },
+    blocks: {
+      0: { block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      1: {
+        block: {
+          kind: "sequence",
+          result: null,
+          operations: [
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("prelude.http.fetch_file") },
+              argument: 1,
+              output: 2,
+            },
+            { kind: "exit", target: 0, value: 2 },
+          ],
+        },
+        parameters: { parameter: 1 },
+      },
+      8: { block: { kind: "agent", body: 9, schema: EMPTY_SCHEMA, defaults: {} }, parameters: {} },
+      9: {
+        block: { kind: "external", key: "prelude.http.fetch_file", input: 90, reactor: "http" },
+        parameters: { parameter: 90 },
+      },
+    },
+    entries: {
+      [createAgentName("main")]: { block: 0, private: false },
+      [createAgentName("prelude.http.fetch_file")]: { block: 8, private: false },
+    },
+    names: {},
+  };
+
+  /** The `{ url, method: GET, headers: {}, body: "" }` request the forwarding program downloads. */
+  function downloadRequest(url: string): Value {
+    return {
+      kind: "record",
+      fields: {
+        url: { kind: "string", value: url },
+        method: { kind: "string", value: "GET" },
+        headers: { kind: "record", fields: {} },
+        body: { kind: "string", value: "" },
+      },
+    };
+  }
+
+  interface DownloadLoopback {
+    url: string;
+    close: () => Promise<void>;
+  }
+
+  /** A loopback server that serves fixed @bytes@ with @status@ and (optionally) a Content-Type, so a
+   *  download's exact bytes + recorded type are the assertion. Bound to 127.0.0.1 on an ephemeral port. */
+  async function startDownloadLoopback(options: {
+    bytes: Uint8Array;
+    status?: number;
+    contentType?: string;
+  }): Promise<DownloadLoopback> {
+    const server = createServer((_incoming, response) => {
+      const headers: Record<string, string> = {};
+      if (options.contentType !== undefined) headers["content-type"] = options.contentType;
+      response.writeHead(options.status ?? 200, headers);
+      response.end(Buffer.from(options.bytes));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback server did not bind a port");
+    }
+    return {
+      url: `http://127.0.0.1:${address.port}/download`,
+      close: () =>
+        new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        ),
+    };
+  }
+
+  /** The downloaded `file` ref out of a resolved `fetch_file` result — asserting its record shape en route. */
+  function fileRefOf(value: Value, expectedStatus: number): Extract<Value, { kind: "ref" }> {
+    expect(value.kind).toBe("record");
+    if (value.kind !== "record") throw new Error("expected a record result");
+    expect(value.fields.status).toEqual({ kind: "integer", value: expectedStatus });
+    const file = value.fields.file;
+    expect(file?.kind).toBe("ref");
+    if (file?.kind !== "ref") throw new Error("expected a file ref");
+    expect(file.semanticKind).toBe("file");
+    return file;
+  }
+
+  test("downloads a 2xx response body into a file; its bytes and content type land in the blob store", async () => {
+    // Non-UTF-8 bytes, so a text capture would have corrupted them — the point of `fetch_file`.
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+    const contentType = "image/png";
+    const loopback = await startDownloadLoopback({ bytes, contentType });
+    try {
+      const persistence = new StoringPersistence();
+      const blobs = new InMemoryBlobStore();
+      const actor = makeActor(new FetchHttpTransport(), persistence, FETCH_FILE_IR, blobs);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
+
+      const file = fileRefOf(await result, 200);
+      // The served bytes landed in the blob store under the returned handle — never on the value plane.
+      expect(new Uint8Array(await blobs.get(PROJECT, file.blobId))).toEqual(bytes);
+      // The response's Content-Type was recorded on the blob's row (the durable metadata a handle omits).
+      expect(persistence.peekBlob(file.blobId)?.contentType).toBe(contentType);
+      // The download hoisted onto a live owner (the run's result holder), not orphaned.
+      expect(persistence.peekBlob(file.blobId)?.ownerInstanceId).not.toBeNull();
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("a non-2xx response is still captured to a file (branch on status, like fetch)", async () => {
+    // A 404 body is captured too — the caller inspects `status` before trusting the download, exactly the
+    // `fetch` contract where an arrived response is a result, never an error.
+    const errorBody = new TextEncoder().encode("not found");
+    const loopback = await startDownloadLoopback({
+      bytes: errorBody,
+      status: 404,
+      contentType: "text/plain",
+    });
+    try {
+      const blobs = new InMemoryBlobStore();
+      const actor = makeActor(new FetchHttpTransport(), new InMemoryPersistence(), FETCH_FILE_IR, blobs);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
+
+      const file = fileRefOf(await result, 404);
+      expect(new Uint8Array(await blobs.get(PROJECT, file.blobId))).toEqual(errorBody);
+    } finally {
+      await loopback.close();
+    }
+  });
+
+  test("a response with no Content-Type records the octet-stream fallback on the blob row", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const loopback = await startDownloadLoopback({ bytes }); // no Content-Type served
+    try {
+      const persistence = new StoringPersistence();
+      const blobs = new InMemoryBlobStore();
+      const actor = makeActor(new FetchHttpTransport(), persistence, FETCH_FILE_IR, blobs);
+      const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, downloadRequest(loopback.url));
+
+      const file = fileRefOf(await result, 200);
+      expect(persistence.peekBlob(file.blobId)?.contentType).toBe("application/octet-stream");
+    } finally {
+      await loopback.close();
+    }
   });
 });

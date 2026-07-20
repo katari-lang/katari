@@ -1,0 +1,109 @@
+// Structured concurrency, end to end: `region.provide` opens a NURSERY (a single-entry/single-exit
+// scope), `region.fork` spawns a fiber into it, `region.join` awaits one, and `region.watch` is the
+// WHITE HOLE that re-emits the fibers' escalations where the enclosing program can handle them. All
+// five route to the built-in `region` reactor — an in-runtime scheduler, like `time` (no FFI sidecar).
+//
+// The scope is a PHANTOM marker (`region.scope`, or your own per-nursery `effect`): `provide` mints it
+// for the continuation's row and discharges it from its own, so no fiber outlives the block. The
+// second type argument is the fiber-effect CEILING `E` — every fiber's effect must fit under it, and
+// `watch` re-emits exactly `E`, so covering `E` at the watch covers every request any fiber can raise.
+
+// ─── fan-out: fork a set of fibers, join each for its result ──────────────────────────────────────
+
+@"A pure worker, forked as a fiber. Its parameter is named `input` because `region.fork` applies the
+task to `{ input: <argument> }` (the fork signature types the task `agent (input: A) -> T`)."
+agent square(input: integer) -> integer {
+  input * input
+}
+
+@"Fan-out with an EMPTY ceiling (`pure` — the fibers raise nothing): open a nursery, fork three
+squarers, then join each for its value. This is a fixed parallel map written as separate fork / join
+statements, so — unlike `parallel for` — a fork's handle is a first-class value you may store, pass,
+and join later (or never)."
+agent fan_out() -> array[integer] {
+  let nursery : region.nursery[region.scope, pure] = use region.provide[region.scope, pure]
+  let first = region.fork(nursery = nursery, task = square, argument = 2)
+  let second = region.fork(nursery = nursery, task = square, argument = 3)
+  let third = region.fork(nursery = nursery, task = square, argument = 4)
+  [
+    region.join(nursery = nursery, handle = first),
+    region.join(nursery = nursery, handle = second),
+    region.join(nursery = nursery, handle = third),
+  ]
+}
+
+// CONTRAST WITH `parallel for`. `parallel for` is the fixed-shape fork-join: one child per element,
+// all joined at the closing brace, results in order — the right tool when the set is known and every
+// result is awaited. `region` decouples the two halves: `fork` returns a handle NOW and the fiber
+// runs on independently, so you may fork a dynamic number, `join` only the ones you want (or `cancel`
+// the rest), spawn more from inside a handler, and let fibers escalate through `watch`. `fan_out`
+// above is the overlap; `subscribe` below is what only `region` can express.
+@"The same three squares as a fixed parallel map, for contrast — `parallel for` forks one child per
+element and joins them all at the brace."
+agent parallel_squares() -> array[integer] {
+  parallel for (let n in [2, 3, 4]) {
+    next square(input = n)
+  }
+}
+
+// ─── subscription: the white hole (fiber escalations re-emitted at a handler) ──────────────────────
+
+@"A message a fiber emits. As a fiber's escalation it does not surface at the `fork`; it wells up at
+the enclosing `region.watch`, where a handler installed around the watch answers it."
+request on_message(text: string) -> null
+
+@"A private signal that ends the subscription once enough messages have been seen — thrown by the
+handler, caught by the outer handler in `subscribe`. `watch` returns `never`, so termination is
+composed AROUND it with an escalation, exactly as `time.watch` is stopped."
+data enough()
+
+@"An emitter fiber: perform `on_message` twice under a caller-supplied label, then settle. Its effect
+(`on_message`) fits under the nursery's ceiling, so `watch` re-emits it."
+agent emitter(input: string) -> null with on_message {
+  on_message(text = f"${input}-1")
+  on_message(text = f"${input}-2")
+  null
+}
+
+@"Subscribe to a nursery's fibers through the WHITE HOLE. Open a nursery whose ceiling is `on_message`,
+install a handler for it AROUND the watch, fork one emitter, then `region.watch` to pump the fibers'
+messages up to that handler. Composition: on the first message the handler forks a SECOND emitter into
+the same nursery — a fiber spawned from inside the white hole. After four messages it throws `enough`,
+which escapes the nursery (cancelling any still-running fiber) and is caught below."
+agent subscribe() -> string {
+  // The outer catch: `enough` ends the whole subscription with a summary line.
+  use handler {
+    request prelude.throw(error: enough) -> never {
+      break "subscription saw four messages across two emitters"
+    }
+  }
+  let nursery : region.nursery[region.scope, on_message] = use region.provide[region.scope, on_message]
+  // The white hole's handler: it wraps the `watch` below, so every fiber's `on_message` surfaces here.
+  use handler (var seen = 0) {
+    request on_message(text: string) -> null {
+      if (seen == 0) {
+        // Composition: fork a second emitter from inside the handler, into the same nursery.
+        region.fork(nursery = nursery, task = emitter, argument = "B")
+        next null with { seen = seen + 1 }
+      } else {
+        if (seen + 1 >= 4) {
+          prelude.throw(error = enough())
+        } else {
+          next null with { seen = seen + 1 }
+        }
+      }
+    }
+  }
+  region.fork(nursery = nursery, task = emitter, argument = "A")
+  region.watch(nursery = nursery)
+}
+
+// ─── the tour entry ────────────────────────────────────────────────────────────────────────────────
+
+@"Run both region demos and render one summary line — `katari run playground.region.main`."
+agent main() -> string {
+  let squares = fan_out()
+  let fixed = parallel_squares()
+  let subscription = subscribe()
+  f"fan_out=${json.stringify(value = squares)} | parallel=${json.stringify(value = fixed)} | ${subscription}"
+}

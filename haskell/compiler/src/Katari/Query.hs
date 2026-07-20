@@ -180,6 +180,10 @@ parsedDeclarationSurface = \case
         Just (information DeclarationKindRequest declaration.annotation Nothing)
       )
     ]
+  -- A marker effect surfaces only in the type namespace (there is no value to perform); it presents
+  -- as a request there because that is how it is referenced — inside effect rows.
+  DeclarationMarkerEffect declaration ->
+    [(declaration.name, Nothing, Just (information DeclarationKindRequest declaration.annotation Nothing))]
   DeclarationData declaration ->
     [ ( declaration.name,
         Just (information DeclarationKindConstructor declaration.annotation Nothing),
@@ -347,6 +351,9 @@ declarationFacts moduleName = \case
       <> foldMap (genericParameterFacts moduleName) declaration.genericParameters
       <> foldMap (parameterSignatureFacts moduleName) declaration.parameters
       <> typeExpressionFacts moduleName declaration.returnType
+  DeclarationMarkerEffect declaration ->
+    typeReferenceFacts moduleName declaration.typeReference
+      <> foldMap (genericParameterFacts moduleName) declaration.genericParameters
   DeclarationExternalAgent declaration ->
     variableReferenceFacts moduleName declaration.variableReference
       <> foldMap (genericParameterFacts moduleName) declaration.genericParameters
@@ -467,6 +474,7 @@ fieldPatternFacts moduleName field = patternFacts moduleName field.bindPattern
 typeExpressionFacts :: ModuleName -> SyntacticTypeExpression Typed -> ModuleFacts
 typeExpressionFacts moduleName = \case
   TypePrimitive _ -> mempty
+  TypeStringLiteral _ -> mempty
   TypeNever _ -> mempty
   TypeUnknown _ -> mempty
   TypeAll _ -> mempty
@@ -524,6 +532,7 @@ statementFacts moduleName = \case
     expressionFacts moduleName statement.value
       <> foldMap (modifierFacts moduleName) statement.modifiers
   StatementForBreak statement -> expressionFacts moduleName statement.value
+  StatementFinally statement -> blockFacts moduleName statement.body
   StatementError _ -> mempty
 
 modifierFacts :: ModuleName -> Modifier Typed -> ModuleFacts
@@ -550,6 +559,12 @@ thenClauseFacts moduleName clause =
 -- Expressions
 ---------------------------------------------------------------------------------------------------
 
+-- | A hole contributes no facts (it is a marker, not an expression); an expression payload recurses.
+callArgumentFacts :: ModuleName -> CallArgument Typed -> ModuleFacts
+callArgumentFacts moduleName argument = case argument.value of
+  ArgumentHole _ -> mempty
+  ArgumentExpression expression -> expressionFacts moduleName expression
+
 expressionFacts :: ModuleName -> Expression Typed -> ModuleFacts
 expressionFacts moduleName expression = case expression of
   ExpressionLiteral literal -> typedSpanFacts literal.sourceSpan literal.typeOf
@@ -564,7 +579,7 @@ expressionFacts moduleName expression = case expression of
       <> typedSpanFacts record.sourceSpan record.typeOf
   ExpressionCall call ->
     expressionFacts moduleName call.callee
-      <> foldMap (\argument -> expressionFacts moduleName argument.value) call.arguments
+      <> foldMap (callArgumentFacts moduleName) call.arguments
       <> typedSpanFacts call.sourceSpan call.typeOf
   ExpressionBinaryOperator operator ->
     expressionFacts moduleName operator.left
@@ -589,6 +604,10 @@ expressionFacts moduleName expression = case expression of
       <> blockFacts moduleName for.body
       <> foldMap (thenClauseFacts moduleName) for.thenClause
       <> typedSpanFacts for.sourceSpan for.typeOf
+  ExpressionForever forever' ->
+    foldMap (variableBindingFacts moduleName) forever'.varBindings
+      <> blockFacts moduleName forever'.body
+      <> typedSpanFacts forever'.sourceSpan forever'.typeOf
   ExpressionBlock block ->
     blockFacts moduleName block.block
       <> typedSpanFacts block.sourceSpan block.typeOf
@@ -716,6 +735,7 @@ typeOfExpression = \case
   ExpressionIf expression -> expression.typeOf
   ExpressionMatch expression -> expression.typeOf
   ExpressionFor expression -> expression.typeOf
+  ExpressionForever expression -> expression.typeOf
   ExpressionBlock expression -> expression.typeOf
   ExpressionFieldAccess expression -> expression.typeOf
   ExpressionTypeApplication expression -> expression.typeOf

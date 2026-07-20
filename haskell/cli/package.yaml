@@ -66,6 +66,7 @@ library:
     - Katari.Cli.Command.Init
     - Katari.Cli.Command.Check
     - Katari.Cli.Command.Build
+    - Katari.Cli.Command.Docs
     - Katari.Cli.Command.Apply
     - Katari.Cli.Command.Add
     - Katari.Cli.Command.Run
@@ -75,7 +76,9 @@ library:
     - Katari.Cli.Command.Ls
     - Katari.Cli.Command.Env
     - Katari.Cli.Command.File
+    - Katari.Cli.Command.Mcp
     - Katari.Cli.Command.Project
+    - Katari.Cli.McpCodegen
 
 executables:
   katari:
@@ -104,6 +107,8 @@ tests:
       - filepath
       - temporary
       - text
+      - aeson
+      - bytestring
     build-tools:
       - hspec-discover
 

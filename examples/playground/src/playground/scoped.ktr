@@ -1,0 +1,73 @@
+// Scope-tagged capabilities — three type-system features working together, no runtime surface:
+//
+//   1. String literal singleton types: `"fast"` in type position is the type of exactly that
+//      string (`"fast" <: string`).
+//   2. Literal-binding generics: `[literal name]` binds a call's string-literal argument at its
+//      singleton type (the TypeScript `const` type-parameter analog); an unmarked generic still
+//      binds plain `string`.
+//   3. Marker effects: `effect scoped[resource]` declares a pure capability — it rides effect rows
+//      like a request, gates calls, can never be performed or handled, and vanishes at lowering.
+//
+// Together they form the shape a scoped provider uses: a higher-order signature mints
+// `scoped["<resource>"]` for its callback's row and discharges it from its own result row, so a
+// callback can only run inside the scope that tagged it (`with_scope` below is that shape).
+
+@"A pure scope capability: carried in effect rows, never performable, never handleable."
+effect scoped[resource]
+
+@"Binds `name` at the call argument's singleton type: `remember(value = \"fast\")` returns `\"fast\"`, not `string`."
+agent remember[literal name extends string](value: name) -> name { value }
+
+@"A step that may only be called from a row that carries the `playground.demo` scope."
+agent tagged_step(token: string) -> string with scoped["playground.demo"] {
+  f"step ran with token ${token}"
+}
+
+@"The provide SHAPE (a declaration nothing here calls): mints the capability for the callback's row and discharges it from its own result row, so the capability cannot outlive the scope."
+external agent with_scope[R, effect E](
+  run: agent (token: string) -> R with E | scoped["playground.demo"],
+) -> R with E
+
+@"Entry: a literal-bound generic returns a singleton, literal types widen to string, and this agent's own scope row covers `tagged_step`'s marker."
+agent main() -> string with scoped["playground.demo"] {
+  // (2) the literal-bound generic returns the singleton `"fast"`, so it fits the literal union...
+  let mode : "fast" | "slow" = remember(value = "fast")
+  // (1) ...and a literal type widens to plain `string` (`"fast" | "slow" <: string`).
+  let widened : string = mode
+  // (3) `tagged_step`'s `scoped["playground.demo"]` row is covered by this agent's own row; without
+  // it (or a `with_scope`-shaped provider) this call would be a type error.
+  let step = tagged_step(token = widened)
+  f"mode=${mode} | ${step}"
+}
+
+// MULTI-SCOPE COMPOSITION. Two scoped providers over two literal resources NEST, and both discharge to
+// pure. The key is the UNION continuation row `E | scoped[res]`: it lists `scoped[res]` as a separate
+// concrete entry, so when the two inner tool rows compose their scopes merge by arg-union into one entry
+// `scoped["server.a" | "server.b"]` (rows are request-name-keyed), and each provider discharges only its
+// own resource — the inner `provide` subtracts `"server.b"` from the merged arg, leaving `scoped["server.a"]`
+// for the outer to discharge. An OVERWRITE row `{...E, scoped[res]}` would instead pin the whole entry to
+// exactly `scoped[res]` and the second `provide` would reject the merged `scoped["a" | "b"]` — overwrite is
+// single-resource only. This is `mcp.provide` nested over two servers, in miniature; no runtime surface,
+// so `katari check` alone locks the composition.
+
+@"A step gated by resource a."
+agent step_a(token: string) -> string with scoped["server.a"] { f"a:${token}" }
+
+@"A step gated by resource b."
+agent step_b(token: string) -> string with scoped["server.b"] { f"b:${token}" }
+
+@"A `use`-shaped scoped provider over a literal resource: it mints `scoped[res]` for the block and discharges it from its own row. A primitive, because only a signature can discharge a marker — and a primitive adds no io, so a nest of these stays pure."
+primitive agent with_resource[literal res, R, effect E](
+  resource: res,
+  continuation: agent (value: null) -> R with E | scoped[res],
+) -> R with E
+
+@"Nest two providers; call a step from EACH resource (and one from the outer resource) inside the inner scope. Both scopes discharge — `compose`'s own row is pure."
+agent compose() -> string {
+  let a : null = use with_resource(resource = "server.a")
+  let b : null = use with_resource(resource = "server.b")
+  let first = step_a(token = "1")
+  let second = step_b(token = "2")
+  let third = step_a(token = "3")
+  f"${first} ${second} ${third}"
+}

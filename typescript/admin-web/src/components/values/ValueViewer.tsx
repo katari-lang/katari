@@ -1,4 +1,4 @@
-// Read-only renderer for wire Json values. The variant dispatch and key unescaping come from
+// Read-only renderer for wire Json values. The variant dispatch (the reserved `$katari_` keys) comes from
 // `@katari-lang/types/wire` — the same single definition the runtime codec and the FFI port encode
 // against — so this viewer can never drift from what the runtime actually emits.
 //
@@ -11,11 +11,8 @@ import {
   AGENT_KEY,
   CLOSURE_KEY,
   CONSTRUCTOR_KEY,
-  CONTENT_TYPE_KEY,
   FILE_KEY,
   MODULE_KEY,
-  SIZE_KEY,
-  unescapeRecordKey,
   VALUE_KEY,
   wireKindOf,
 } from "@katari-lang/types";
@@ -23,7 +20,6 @@ import { Braces, Download, EyeOff, FileIcon, FunctionSquare } from "lucide-react
 import { type ReactNode, useState } from "react";
 import { api } from "../../api/client";
 import type { Json } from "../../api/types";
-import { formatBytes } from "../../lib/format";
 import { useToast } from "../../lib/toast";
 import { Badge } from "../ui/Badge";
 import { CopyButton } from "../ui/Copy";
@@ -171,12 +167,7 @@ function ObjectNode({
       preview={`{ ${entries.length} field${entries.length === 1 ? "" : "s"} }`}
     >
       {entries.map(([key, child]) => (
-        <Node
-          key={key}
-          value={child}
-          projectId={projectId}
-          label={fieldLabel(unescapeRecordKey(key))}
-        />
+        <Node key={key} value={child} projectId={projectId} label={fieldLabel(key)} />
       ))}
     </Container>
   );
@@ -226,12 +217,7 @@ function specialNode(fields: { [key: string]: Json }, projectId: string, label?:
           preview={`{ ${entries.length} field${entries.length === 1 ? "" : "s"} }`}
         >
           {entries.map(([key, child]) => (
-            <Node
-              key={key}
-              value={child}
-              projectId={projectId}
-              label={fieldLabel(unescapeRecordKey(key))}
-            />
+            <Node key={key} value={child} projectId={projectId} label={fieldLabel(key)} />
           ))}
         </Container>
       );
@@ -239,14 +225,7 @@ function specialNode(fields: { [key: string]: Json }, projectId: string, label?:
     case "file":
       return (
         <Inline label={label}>
-          <FileChip
-            projectId={projectId}
-            blobId={String(fields[FILE_KEY])}
-            size={typeof fields[SIZE_KEY] === "number" ? fields[SIZE_KEY] : null}
-            contentType={
-              typeof fields[CONTENT_TYPE_KEY] === "string" ? fields[CONTENT_TYPE_KEY] : null
-            }
-          />
+          <FileChip projectId={projectId} blobId={String(fields[FILE_KEY])} />
         </Inline>
       );
     case "agent":
@@ -271,17 +250,7 @@ function specialNode(fields: { [key: string]: Json }, projectId: string, label?:
   }
 }
 
-function FileChip({
-  projectId,
-  blobId,
-  size,
-  contentType,
-}: {
-  projectId: string;
-  blobId: string;
-  size: number | null;
-  contentType: string | null;
-}) {
+function FileChip({ projectId, blobId }: { projectId: string; blobId: string }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const download = async () => {
@@ -304,8 +273,7 @@ function FileChip({
     <span className="inline-flex items-center gap-1">
       <Badge tone="neutral">
         <FileIcon className="size-3" />
-        file{size !== null && ` · ${formatBytes(size)}`}
-        {contentType !== null && ` · ${contentType}`}
+        file
       </Badge>
       <button
         type="button"

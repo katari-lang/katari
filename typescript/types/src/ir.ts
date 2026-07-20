@@ -9,7 +9,8 @@
 //   - Sum types are tagged with a `kind` discriminator.
 //   - `BlockId` / `VariableId` / `GenericId` are integers (Haskell `Word32` / `Int`).
 //   - Maps keyed by `BlockId` serialise as JSON objects with stringified-number keys; the
-//     `QualifiedName`-keyed `entries` map uses the rendered "module.name" string as the key.
+//     `QualifiedName`-keyed `entries` map uses the rendered "module.name" string as the key, and each
+//     value is an `EntryInformation` (`{ block, private }`).
 
 import type { Json } from "./json";
 
@@ -32,7 +33,9 @@ export type GenericId = number;
 // ─── Module ──────────────────────────────────────────────────────────────────────────────────
 
 export type Metadata = {
-  /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles. */
+  /** Bumped on backward-incompatible changes to the IR JSON shape, so the runtime can reject stale bundles.
+   *  Version 2 added the `drop` operation and version 3 the `defer` operation, each of which an
+   *  older runtime cannot execute. */
   schemaVersion: number;
 };
 
@@ -41,10 +44,26 @@ export type IRModule = {
   metadata: Metadata;
   /** Every block, wrapped in a `BlockInformation` that carries the parameters its scope is seeded with. */
   blocks: Record<number, BlockInformation>;
-  /** Top-level callable name -> its agent `BlockId`, for resolving a delegate `CalleeName` at run time. */
-  entries: Record<QualifiedName, BlockId>;
+  /** Top-level callable name -> its `EntryInformation`, for resolving a delegate `CalleeName` (and a
+   *  first-class agent value by name) at run time. */
+  entries: Record<QualifiedName, EntryInformation>;
   /** Debug-only block names (pretty printer / traces); ignored on the hot path. */
   names: Record<number, string>;
+};
+
+/**
+ * One top-level callable entry: the agent `BlockId` it resolves to, plus whether the source
+ * declaration marked the agent's handle private. Privacy rides on the entry — rather than stripping a
+ * private agent from `entries` — because `entries` is also the module's first-class / delegate
+ * resolution table, which must keep resolving a private agent (the compiler already gates the call
+ * side). The runtime reads `private` only at its run-start boundary, to refuse starting a private agent
+ * from the operator surface; every other resolution ignores it. Only a user `agent` declaration can be
+ * private, so a signature-determined callable (data constructor / request / external / primitive) is
+ * always public.
+ */
+export type EntryInformation = {
+  block: BlockId;
+  private: boolean;
 };
 
 // ─── Block wrapper ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +102,7 @@ export type Block =
   | ExternalBlock
   | MatchBlock
   | ForBlock
+  | ForeverBlock
   | HandleBlock
   | ParallelBlock;
 
@@ -137,6 +157,13 @@ export type RequestBlock = {
   input: VariableId;
 };
 
+/** The reactors an `external ... from "name"` clause may route a call to. This mirrors the compiler's
+ *  `externalReactorNames` (Katari.Typechecker.Check): the checker rejects any other name at compile time
+ *  (K3018) and lowering stamps `"ffi"` when the clause is absent, so IR can only ever carry these — which
+ *  is why the runtime copies the marker without a fallback. Adding a reactor is one edit here plus one in
+ *  the compiler's list. */
+export type ExternalReactorName = "ffi" | "http" | "webhook" | "mcp" | "time" | "oauth" | "region";
+
 /** Leaf body — an external agent dispatched by the external handler via `key`, with `input` as the argument.
  *  `reactor` names the reactor the call routes to (`"ffi"` — the sidecar — by default, or e.g. `"http"` for
  *  the built-in http reactor), from the declaration's `from "name"` clause. */
@@ -144,7 +171,7 @@ export type ExternalBlock = {
   kind: "external";
   key: string;
   input: VariableId;
-  reactor: string;
+  reactor: ExternalReactorName;
 };
 
 /** `match subject { ... }`: try `arms` in order, run the first match's body (or `fallback`). */
@@ -172,6 +199,20 @@ export type ForBlock = {
   initialStates: VariableId[];
   body: BlockId;
   thenClause: ThenClause | null;
+};
+
+/**
+ * `forever [(var s = init, ...)] { body }`: each time `body` completes, run it again — one iteration at a
+ * time, its value discarded (nothing is collected, unlike `for`, so iteration count never grows the loop's
+ * state). `initialStates` are in the caller's scope; the Nth seeds the body's `state_N` parameter, carried
+ * across iterations and advanced by a `next … with (…)` (empty for a stateless `forever { … }`). The block
+ * completes only when the body `break`s (unwinding an exit to it with the loop's result value); otherwise
+ * it ends only by cancellation or an ask unwinding past it.
+ */
+export type ForeverBlock = {
+  kind: "forever";
+  initialStates: VariableId[];
+  body: BlockId;
 };
 
 /**
@@ -221,7 +262,9 @@ export type Operation =
   | BindPatternOperation
   | ApplyGenericsOperation
   | ExitOperation
-  | ContinueOperation;
+  | ContinueOperation
+  | DropOperation
+  | DeferOperation;
 
 /** Enter a local structural node (`match` / `for` / `handle` / `par`) in the current scope. */
 export type CallOperation = { kind: "call"; target: BlockId; output: VariableId | null };
@@ -294,6 +337,23 @@ export type ContinueOperation = {
   /** `with (name = e, ...)` state updates: (state var in the target's scope, new-value var here). */
   modifiers: Array<[VariableId, VariableId]>;
 };
+
+/**
+ * Release bindings this same sequence wrote and provably never reads again (inserted by the compiler's
+ * conservative post-lowering liveness pass, `Katari.Lowering.Drop`). The runtime deletes each binding
+ * from the thread's LOCAL scope, shrinking the scope row persisted every turn; scope-level GC remains
+ * the backstop for anything the pass could not prove dead. The list is non-empty and sorted by id.
+ */
+export type DropOperation = { kind: "drop"; variables: VariableId[] };
+
+/**
+ * Arm a `finally` block as a finalizer of the CURRENT INSTANCE: the runtime pushes (block, the
+ * executing thread's scope) onto the instance's finalizer stack and runs the stack in reverse arming
+ * order right before the instance acknowledges its terminal (a normal completion's delegateAck or a
+ * cancellation's cancelAck) — never on a panic. The armed block reads the enclosing scope through the
+ * ordinary parent chain, so it carries no parameters of its own.
+ */
+export type DeferOperation = { kind: "defer"; block: BlockId };
 
 /** A callable-invocation target: a name (via `entries`) or a runtime value (an agent / closure). */
 export type CalleeReference =
@@ -374,4 +434,7 @@ export type JSONSchema = {
   anyOf?: JSONSchema[];
   not?: JSONSchema;
   $generic?: GenericId;
+  /** A parameter's `@"..."` annotation, overlaid on its property schema by the compiler. Annotates,
+   *  never constrains — validation ignores it; `get_metadata` and the listings pass it through. */
+  description?: string;
 };

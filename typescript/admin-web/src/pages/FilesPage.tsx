@@ -10,19 +10,26 @@ import { CopyableId } from "../components/ui/Copy";
 import { ConfirmDialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
+import { Pagination } from "../components/ui/Pagination";
 import { LoadingBlock } from "../components/ui/Spinner";
 import { Cell, Row, Table } from "../components/ui/Table";
 import { formatBytes } from "../lib/format";
 import { useToast } from "../lib/toast";
 
+const PAGE_SIZE = 50;
+
 export function FilesPage() {
   const { projectId = "" } = useParams();
-  const files = useFiles(projectId);
+  const [offset, setOffset] = useState(0);
+  const files = useFiles(projectId, { limit: PAGE_SIZE, offset });
   const toast = useToast();
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+
+  const items = files.data?.items ?? [];
+  const total = files.data?.total ?? 0;
 
   const upload = async (file: File) => {
     setUploading(true);
@@ -78,37 +85,46 @@ export function FilesPage() {
       />
       {files.isPending ? (
         <LoadingBlock />
-      ) : (files.data ?? []).length === 0 ? (
+      ) : items.length === 0 ? (
         <EmptyState
           icon={FileIcon}
           title="No files"
           description="Upload one to pass it to an agent."
         />
       ) : (
-        <Card>
-          <Table headers={["Id", "Size", "Content type", "Kind", ""]}>
-            {(files.data ?? []).map((file) => (
-              <Row key={file.id}>
-                <Cell>
-                  <CopyableId id={file.id} />
-                </Cell>
-                <Cell className="text-fg-muted">{formatBytes(file.size)}</Cell>
-                <Cell className="font-mono text-xs text-fg-muted">{file.contentType ?? "—"}</Cell>
-                <Cell className="text-fg-muted">{file.semanticKind}</Cell>
-                <Cell className="text-right">
-                  <span className="inline-flex gap-1">
-                    <Button size="sm" variant="ghost" onClick={() => void download(file.id)}>
-                      <Download className="size-3.5" /> Download
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setDeleting(file.id)}>
-                      <Trash2 className="size-3.5" />
-                    </Button>
-                  </span>
-                </Cell>
-              </Row>
-            ))}
-          </Table>
-        </Card>
+        <div className="flex flex-col gap-3">
+          <Card>
+            <Table headers={["Id", "Size", "Content type", "Kind", ""]}>
+              {items.map((file) => (
+                <Row key={file.id}>
+                  <Cell>
+                    <CopyableId id={file.id} />
+                  </Cell>
+                  <Cell className="text-fg-muted">{formatBytes(file.size)}</Cell>
+                  <Cell className="font-mono text-xs text-fg-muted">{file.contentType ?? "—"}</Cell>
+                  <Cell className="text-fg-muted">{file.semanticKind}</Cell>
+                  <Cell className="text-right">
+                    <span className="inline-flex gap-1">
+                      <Button size="sm" variant="ghost" onClick={() => void download(file.id)}>
+                        <Download className="size-3.5" /> Download
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setDeleting(file.id)}>
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    </span>
+                  </Cell>
+                </Row>
+              ))}
+            </Table>
+          </Card>
+          <Pagination
+            offset={offset}
+            limit={PAGE_SIZE}
+            total={total}
+            onOffset={setOffset}
+            unit="files"
+          />
+        </div>
       )}
       <ConfirmDialog
         open={deleting !== null}

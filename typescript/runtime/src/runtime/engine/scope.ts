@@ -123,3 +123,13 @@ export function writeVariable(
 ): void {
   getScope(store, scopeId).values[variable] = value;
 }
+
+/**
+ * Delete a binding from the given scope — the exact mirror of `writeVariable`, local-only: the compiler
+ * emits a `drop` only for variables the SAME sequence wrote, and every one of that sequence's writes
+ * landed in the executing thread's own scope, so the binding being released is local by construction
+ * (deleting up the chain could never be right — an ancestor's binding is someone else's to release).
+ */
+export function dropVariable(store: ProjectStore, scopeId: ScopeId, variable: number): void {
+  delete getScope(store, scopeId).values[variable];
+}

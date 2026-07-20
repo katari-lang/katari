@@ -13,6 +13,7 @@ module Katari.Cli.Templates
   ( ScaffoldFile (..),
     scaffoldFiles,
     interpolate,
+    interpolateDestination,
   )
 where
 
@@ -60,3 +61,10 @@ decodeTemplate = decodeUtf8With lenientDecode
 -- version (so a scaffolded @compose.yaml@ pins the runtime image tag that matches this CLI).
 interpolate :: Text -> Text -> Text -> Text
 interpolate name version = Text.replace "{{version}}" version . Text.replace "{{name}}" name
+
+-- | Fill only the @{{name}}@ placeholder in a scaffold destination path (@src/{{name}}.ktr@ ->
+-- @src/demo.ktr@), so a scaffolded module lands inside the package's own namespace — the module name
+-- a file contributes is its path under @src@, which must be the package name or a @\<name>.@ descendant.
+-- The @{{name}}@ literal lives here, next to 'interpolate', so the placeholder syntax has one home.
+interpolateDestination :: Text -> FilePath -> FilePath
+interpolateDestination name = Text.unpack . Text.replace "{{name}}" name . Text.pack

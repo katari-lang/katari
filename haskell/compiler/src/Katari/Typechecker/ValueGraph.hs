@@ -113,6 +113,7 @@ referencesInStatement = \case
   StatementBreak statement -> referencesInExpression statement.value
   StatementForNext statement -> referencesInExpression statement.value <> foldMap referencesInModifier statement.modifiers
   StatementForBreak statement -> referencesInExpression statement.value
+  StatementFinally statement -> referencesInBlock statement.body
   StatementError _ -> Set.empty
 
 referencesInModifier :: Modifier Identified -> Set QualifiedName
@@ -134,6 +135,9 @@ referencesInExpression = \case
       <> foldMap referencesInVariableBinding expression.varBindings
       <> referencesInBlock expression.body
       <> foldMap referencesInThenClause expression.thenClause
+  ExpressionForever expression ->
+    foldMap referencesInVariableBinding expression.varBindings
+      <> referencesInBlock expression.body
   ExpressionBlock expression -> referencesInBlock expression.block
   ExpressionFieldAccess expression -> referencesInExpression expression.object
   ExpressionTypeApplication expression -> referencesInExpression expression.callee
@@ -142,7 +146,9 @@ referencesInExpression = \case
   ExpressionQualifiedReference expression -> referenceOf expression.variableReference
 
 referencesInCallArgument :: CallArgument Identified -> Set QualifiedName
-referencesInCallArgument argument = referencesInExpression argument.value
+referencesInCallArgument argument = case argument.value of
+  ArgumentHole _ -> Set.empty
+  ArgumentExpression expression -> referencesInExpression expression
 
 referencesInCaseArm :: CaseArm Identified -> Set QualifiedName
 referencesInCaseArm arm = referencesInBlock arm.body

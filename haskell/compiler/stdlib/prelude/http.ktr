@@ -4,10 +4,21 @@
 //
 // Because it is an external call it performs io: the call is impure (it carries the un-dischargeable `io`
 // effect, which propagates to the run root), so it takes the strict, non-lifting call path. That gives the
-// information-flow rules for free: `url` / `method` / `body` are public `string`, so a secret cannot be sent
-// in a URL or body (a private value there is a type error — a secret must not go outbound); only header
-// *values* are `string of private` (a secret may be sent as an auth header); and the response is public
-// (declassified — it is the server's response, not a function of the secret).
+// information-flow rules for free. The uniform rule: a private value may leave the runtime ONLY toward the
+// request's destination server, through its deliberate submission surfaces — the header *values* AND the
+// `body`'s content are private-capable, so a secret may be submitted as an auth header or inside a form
+// body (Google's OAuth token endpoint wants the `refresh_token` in a POST body, with no header alternative).
+// Both surfaces are revealed at a single transport boundary, where the request leaves for the one server the
+// program named. `url` and `method` stay public `string`: a private value there is a type error, because a
+// URL leaks into logs, caches, proxies, and `Referer` headers — places that are not the destination server.
+// The response is public (declassified — it is the server's reply, not a function of the secret).
+//
+// The `body` is a four-way sum, one variant per HTTP body shape (see `body` below): a `text` string, a
+// `binary` file (raw bytes), a `multipart` form, or a `json` value tree. A `file` placed in a body always
+// rides to the reactor as its slim HANDLE; the transport reads its bytes from the blob store only at the
+// send boundary and splices them in — so a large upload never materialises onto the value plane, the durable
+// call record, or the trace (docs/2026-07-18-http-file-body.md). The `json` variant carries this intuition:
+// put a `file` anywhere in the tree and just that position becomes a base64 string on the wire.
 //
 // Errors: a non-2xx response is returned as its `status` to branch on (`match (response.status) { ... }`).
 // A request that never completes (DNS failure, refused connection, timeout, or a mid-flight restart) throws
@@ -15,17 +26,124 @@
 // request throw(error: http.fetch_error) -> never { break ... } }` to handle the failure locally and
 // control retry.
 
+// `post_json` parses its reply back to a value. The `json` module qualifier is shadowed HERE by this
+// module's own `json` body variant (below), so import `parse` / `parse_error` by name to reach them.
+import { parse, type parse_error } from prelude.json
+
 @"An HTTP request never completed: DNS failure, refused connection, timeout, or a mid-flight runtime
 restart. Thrown by `fetch`. (A response that did arrive is never an error — branch on its `status`.)"
 data fetch_error(message: string)
 
-@"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ (each value
-may be a secret, such as an auth token), and @body@. Returns the response @status@ code and @body@ text. A
-request that never completes throws `fetch_error` (catchable with `use handler { request throw(error:
-http.fetch_error) -> never { ... } }`)."
+// ─── the request body: exactly one of four shapes ─────────────────────────────────────────────────────
+//
+// `text` / `binary` / `multipart` are HTTP-standard bodies; the `json` base64-slot is the REST convention
+// AI providers and content APIs (GitHub's content API) adopted — not an HTTP standard, but the shape those
+// APIs take. A `data` constructor's own `@"..."` doc is not carried into the derived schema (only the
+// `body:` parameter label is), so these annotations document the source; the intuition lives in the module
+// header and `fetch`'s label.
+
+@"A text body: the @content@ string, sent verbatim (Content-Type is the caller's to set). The @content@
+may be a secret (an OAuth `refresh_token` in a form-encoded body)."
+data text(content: string of private)
+
+@"A raw-bytes body: the file @content@'s bytes, sent as-is — the shape an upload API (an S3 PUT) takes. The
+Content-Type defaults to the file's recorded content type; set a `Content-Type` header to override it."
+data binary(content: file)
+
+@"A `multipart/form-data` body (RFC 7578): the @parts@, each a named form field — text or file. The
+transport generates the boundary and sets the Content-Type, so do not set a `Content-Type` header for it."
+data multipart(parts: array[multipart_part])
+
+@"A JSON body from a value @value@ tree (records / arrays / scalars / files, mixed): serialised to a JSON
+document where every `file` leaf — and only a `file` leaf — becomes the base64 of its bytes, in place. This
+is the REST convention (a GitHub content upload, an AI provider's inline image), NOT an HTTP standard. To
+transmit a file's HANDLE instead of its bytes (almost never what an API wants), stringify it yourself first
+(e.g. embed `json.stringify(value = a_file)` as a string). Everything but a file goes on the wire as the tree
+you built. The tree may carry secrets (its type is private-capable), revealed only to the destination."
+data json(value: unknown of private)
+
+// A request body: exactly one of the four shapes. (A `type` synonym carries no `@"..."` annotation.)
+type body = text | binary | multipart | json
+
+@"A text form field: the field named @name@ with the text @content@ (which may be a secret)."
+data multipart_text(name: string, content: string of private)
+
+@"A file form field: the field named @name@ carrying the file @content@, advertised with @filename@. Its
+per-part Content-Type is the file's recorded content type."
+data multipart_file(name: string, filename: string, content: file)
+
+// One `multipart/form-data` part: a text field or a file field.
+type multipart_part = multipart_text | multipart_file
+
+@"Perform an HTTP request to @url@ with @method@ (e.g. \"GET\" / \"POST\"), the given @headers@ and @body@.
+The @body@ is one of `http.text` / `http.binary` / `http.multipart` / `http.json` (a `file` in any of them
+is read from the blob store at the send boundary, never materialised earlier). Each header value AND a
+private body surface (a `text`'s content, a `json`'s tree) may be a secret, submitted to @url@'s server,
+while @url@ and @method@ stay public. Returns the response @status@ code, its @headers@ (names lowercased;
+repeated headers joined with \", \") and its @body@ text. A request that never completes throws `fetch_error`
+(catchable with `use handler { request throw(error: http.fetch_error) -> never { ... } }`)."
 external agent fetch(
-  url: string,
-  method: string,
-  headers: record[string of private],
-  body: string,
-) -> { status: integer, body: string } with prelude.throw[fetch_error] from "http"
+  @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
+  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
+  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
+) -> { status: integer, headers: record[string], body: string } with prelude.throw[fetch_error] from "http"
+
+@"Perform an HTTP request to @url@ with @method@, the given @headers@ and @body@ — EXACTLY `fetch`'s
+request — but capture the RESPONSE body as a downloaded `file` rather than as text. The bytes land in the
+blob store and the reply carries only the slim @file@ HANDLE; the raw bytes (and their base64) never touch
+the value plane, the durable call record, or the trace. This is the receive-side twin of a `binary`
+REQUEST body, and it exists for the same reason: to keep a payload's bytes OFF the value plane. A plain
+`fetch` of a megabyte image would read it into the response `body` STRING, dragging that text (and its
+base64, once re-encoded) through every value, event, and trace it flows into — whereas `fetch_file` streams
+it straight to a blob and hands back a handle. Reach for it to download a file by URL: an image, a PDF, a
+CSV export, a release artifact. It is NOT for a base64 field buried inside a JSON reply (a data-URI in an
+API's JSON document) — `fetch_file` only ever captures the WHOLE response body; decode an embedded base64
+string with `files.from_base64` after an ordinary `fetch`. The downloaded @file@'s recorded content type is
+the response's `Content-Type` (falling back to `application/octet-stream` when the server sent none).
+Returns the response @status@ code (branch on it exactly like `fetch` — a non-2xx reply's body is still
+captured to a @file@, so a caller inspects @status@ before trusting the download), its @headers@ (names
+lowercased; repeated headers joined with \", \"), and the downloaded @file@. A request that never completes
+throws `fetch_error`, exactly like `fetch`."
+external agent fetch_file(
+  @"The absolute URL to request; public by type (a URL leaks into logs and proxies, so a secret here is a type error)." url: string,
+  @"The HTTP method, e.g. \"GET\" / \"POST\" (case-insensitive). For GET / HEAD the @body@ is not sent." method: string,
+  @"Request headers by name; each value may be a secret, revealed only to @url@'s server." headers: record[string of private],
+  @"The request body: `http.text` / `http.binary` / `http.multipart` / `http.json`; dropped for GET / HEAD." body: body,
+) -> { status: integer, headers: record[string], file: file } with prelude.throw[fetch_error] from "http"
+
+@"A JSON API responded with a non-2xx status. Thrown by `post_json` (the raw `fetch` never treats an
+arrived response as an error — this wrapper takes the opinionated JSON-API stance)."
+data status_error(@"The response's non-2xx status code." status: integer, @"The response body text." body: string)
+
+@"POST @body@ — a JSON value tree — to @url@ as application/json with the given @headers@, and return the
+reply PARSED into its document value. This is the canonical one-call shape of a JSON API integration: build
+the body as an ordinary record / array / scalar tree, post it, and read the reply as a value — no manual
+`json.stringify` / `json.parse` around the call. @body@ AND each header value may be a secret (an auth token
+— an \"Authorization\" of \"Bearer <key>\" for OpenAI, an \"x-goog-api-key\" for Gemini — or a `refresh_token`
+in the body of an OAuth exchange): both are submitted only to @url@'s server, which stays public. A `file`
+placed anywhere in @body@ rides as base64 (the `http.json` slot contract). The Content-Type defaults to
+application/json unless a header overrides it. A non-2xx status throws `status_error` (its body text
+attached); a transport failure throws `fetch_error`; a 2xx body that is not JSON throws `json.parse_error`
+(a JSON API that broke its promise) — an empty 2xx body is `null`. To send already-serialized text, or to
+keep the raw reply text, call `fetch` directly."
+agent post_json(
+  @"The absolute URL to POST to; public by type." url: string,
+  @"The JSON body as a value tree (records / arrays / scalars / files, mixed); may carry secrets." body: unknown of private,
+  @"Extra headers by name (the caller wins over the application/json default on a shared name); values may be secrets." headers: record[string of private],
+) -> unknown with io | prelude.throw[status_error | fetch_error | parse_error] {
+  // Post the value tree as an `http.json` body: it serialises the tree (files -> base64 in place) and
+  // sets the application/json Content-Type as a default the caller's headers can override.
+  let response = fetch(url = url, method = "POST", headers = headers, body = json(value = body))
+  if (response.status >= 200 && response.status < 300) {
+    // A JSON API's 2xx reply is a JSON document; parse it back to a value. An empty body (a 204-style
+    // reply) has no document, so it reads as `null`.
+    if (response.body == "") {
+      null
+    } else {
+      parse(text = response.body)
+    }
+  } else {
+    prelude.throw(error = status_error(status = response.status, body = response.body))
+  }
+}

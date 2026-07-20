@@ -32,6 +32,10 @@ export const config = {
         },
   // The bearer token every API caller must present (required — see `env.ts`). Auth is always enforced.
   apiKey: env.KATARI_API_KEY,
+  // The public base URL webhook endpoints are minted under (trailing slash trimmed so path joins are
+  // uniform). Defaults to the local port — reachable for same-host callers and the smoke tests; a real
+  // deployment behind a proxy / tunnel sets KATARI_PUBLIC_URL to its outside address.
+  publicUrl: (env.KATARI_PUBLIC_URL ?? `http://localhost:${env.PORT}`).replace(/\/$/, ""),
 } as const;
 
 export type Config = typeof config;

@@ -117,6 +117,73 @@ spec = describe "generic request (throw[T]) typing" $ do
       ]
       `shouldBe` []
 
+  -- Row subsumption compares each request parameter at its occurrence-inferred variance: covariant
+  -- when it appears only in parameter (handler-receives) positions, contravariant only in the result,
+  -- invariant in both, and phantom (used nowhere) compared covariantly. These pin all three fates.
+  it "accepts a narrower row where a wider one is expected (input-only parameter: covariant)" $
+    typeErrorCodes
+      [ ( "test",
+          "data oops(message: string)\n\
+          \data other(code: integer)\n\
+          \request throw[T](error: T) -> never\n\
+          \agent raiser() -> integer with throw[oops] { throw(error = oops(message = \"x\")) }\n\
+          \agent call(f: agent () -> integer with throw[oops | other]) -> integer with throw[oops | other] { f() }\n\
+          \agent main() -> integer with throw[oops | other] { call(f = raiser) }"
+        )
+      ]
+      `shouldBe` []
+
+  it "requires equal instantiations for a parameter used in both polarities (invariant, K3001)" $
+    typeErrorCodes
+      [ ( "test",
+          "data oops(message: string)\n\
+          \data other(code: integer)\n\
+          \request swap[T](value: T) -> T\n\
+          \agent narrow() -> integer with swap[oops] { 0 }\n\
+          \agent call(f: agent () -> integer with swap[oops | other]) -> integer with swap[oops | other] { f() }\n\
+          \agent main() -> integer with swap[oops | other] { call(f = narrow) }"
+        )
+      ]
+      `shouldContain` ["K3001"]
+
+  it "accepts an invariant parameter at exactly the same instantiation" $
+    typeErrorCodes
+      [ ( "test",
+          "data oops(message: string)\n\
+          \request swap[T](value: T) -> T\n\
+          \agent narrow() -> integer with swap[oops] { 0 }\n\
+          \agent call(f: agent () -> integer with swap[oops]) -> integer with swap[oops] { f() }\n\
+          \agent main() -> integer with swap[oops] { call(f = narrow) }"
+        )
+      ]
+      `shouldBe` []
+
+  it "compares a phantom parameter covariantly: a narrower tag fits a wider one" $
+    typeErrorCodes
+      [ ( "test",
+          "data oops(message: string)\n\
+          \data other(code: integer)\n\
+          \request ping[T]() -> null\n\
+          \agent tagged() -> integer with ping[oops] { 0 }\n\
+          \agent call(f: agent () -> integer with ping[oops | other]) -> integer with ping[oops | other] { f() }\n\
+          \agent main() -> integer with ping[oops | other] { call(f = tagged) }"
+        )
+      ]
+      `shouldBe` []
+
+  it "compares a phantom parameter covariantly: an unrelated tag is rejected (K3001)" $
+    typeErrorCodes
+      [ ( "test",
+          "data oops(message: string)\n\
+          \data other(code: integer)\n\
+          \request ping[T]() -> null\n\
+          \agent tagged() -> integer with ping[oops] { 0 }\n\
+          \agent call(f: agent () -> integer with ping[other]) -> integer with ping[other] { f() }\n\
+          \agent main() -> integer with ping[other] { call(f = tagged) }"
+        )
+      ]
+      `shouldContain` ["K3001"]
+
   -- No operators here: this driver seeds only the test module, so a desugared `prelude.*` call
   -- would trip the missing-stdlib backstop rather than exercise the raise.
   it "a raise typechecks in any expression position (its type is never)" $

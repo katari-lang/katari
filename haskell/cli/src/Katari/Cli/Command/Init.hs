@@ -20,7 +20,7 @@ import Katari.Cli.Common (cliVersion, dieIn, writeOrExit)
 import Katari.Cli.Options (GlobalOptions, globalOptionsParser)
 import Katari.Cli.Output (OutputContext (..), hint, newOutputContext, progress, warn)
 import Katari.Cli.Prompt (inputLine)
-import Katari.Cli.Templates (ScaffoldFile (..), interpolate, scaffoldFiles)
+import Katari.Cli.Templates (ScaffoldFile (..), interpolate, interpolateDestination, scaffoldFiles)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 import System.FilePath (takeBaseName, takeDirectory, (</>))
@@ -52,16 +52,19 @@ run options = do
   packageName <- resolveName context options targetDirectory
   createDirectoryIfMissing True targetDirectory
   forM_ scaffoldFiles $ \file -> do
-    let path = targetDirectory </> file.destination
+    -- The destination carries a @{{name}}@ placeholder too (e.g. @src/{{name}}.ktr@), so the scaffolded
+    -- source module lands under the package's own namespace, not a bare @main@.
+    let destination = interpolateDestination packageName file.destination
+        path = targetDirectory </> destination
     exists <- doesFileExist path
     if exists
-      then warn context (Text.pack file.destination <> " already exists; leaving it untouched")
-      else writeOrExit "init" ("could not write " <> Text.pack file.destination) $ do
+      then warn context (Text.pack destination <> " already exists; leaving it untouched")
+      else writeOrExit "init" ("could not write " <> Text.pack destination) $ do
         createDirectoryIfMissing True (takeDirectory path)
         TextIO.writeFile path (interpolate packageName cliVersion file.contents)
-        progress context ("  + " <> Text.pack file.destination)
+        progress context ("  + " <> Text.pack destination)
   progress context ("Initialized " <> packageName)
-  hint context "docker compose up -d && katari apply && katari run"
+  hint context ("docker compose up -d && katari apply && katari run " <> packageName <> ".main")
 
 -- | The package name: the argument (validated), an interactive prompt defaulting to the directory
 -- name, or that sanitised default directly when non-interactive.

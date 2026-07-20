@@ -8,7 +8,7 @@
 // A handler is written against its *declared* types, PureScript-style: the katari compiler already checked
 // the call site against the external agent's schema, so the argument is assumed to match `Argument` — no
 // defensive re-validation. The argument arrives decoded (`values.ts`): blob-backed contents are
-// `KatariFile` / `KatariString` (no raw `$ref` handling), data values are `KatariData`, received callables
+// `KatariFile` / `KatariString` (no raw `$katari_ref` handling), data values are `KatariData`, received callables
 // are `KatariAgent`. The context is the way back into the runtime: `context.call(...)` runs another agent
 // (core by default, or another reactor), `context.file(...)` produces a file value.
 
@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type { Json } from "@katari-lang/types";
 import { downloadBlob, uploadBlob } from "./blob.js";
 import {
+  type DelegateCallee,
   decodeRuntimeMessage,
   encodeSidecarMessage,
   LineBuffer,
@@ -30,12 +31,11 @@ import {
   type ValueBinding,
 } from "./values.js";
 
-/** The wired-in dynamic-dispatch agent `KatariAgent.call` goes through: it re-materialises the callable
- *  value (with its own snapshot + generics) and runs it — see the runtime's `call_agent` unwrap. */
-const CALL_AGENT = "prelude.ai.call_agent";
-
-/** An inner agent call failed: the callee panicked, or the call could not be resolved (an unknown agent /
- *  reactor). The message is the runtime's failure message. */
+/** An inner agent call could not be DISPATCHED: the callee value is not callable, or its agent / reactor /
+ *  argument could not be resolved (a LOCAL bad-dispatch failure, surfaced at the call site before any callee
+ *  ran). A callee that DID run and then failed (panicked or raised a typed throw) does NOT reject with this —
+ *  its failure unwinds up the delegation, caught by a katari-side handler above or failing the run. The
+ *  message is the runtime's failure message. */
 export class KatariCallError extends Error {
   constructor(message: string) {
     super(message);
@@ -43,11 +43,12 @@ export class KatariCallError extends Error {
   }
 }
 
-/** A typed katari error (`prelude.throw`). Thrown out of a handler — `katari.throw(payload)` — it fails the
- *  call as `throw[T]` with `payload` as the error value, caught by a katari-side handler like any stdlib
- *  throw (declare it on the agent: `external agent ... with prelude.throw[my_error]`). An inner
- *  `context.call` whose callee threw rejects with one too, carrying the decoded payload — so a handler that
- *  does not catch it rethrows the payload unchanged, exactly like a katari-side rethrow. */
+/** A typed katari error (`prelude.throw`) a handler raises for ITS OWN call. Thrown out of a handler —
+ *  `katari.throw(payload)` — it fails this call as `throw[T]` with `payload` as the error value, caught by a
+ *  katari-side handler like any stdlib throw (declare it on the agent: `external agent ... with
+ *  prelude.throw[my_error]`). Only used for the handler's OWN outward throw: an inner `context.call` whose
+ *  callee throws no longer rejects with this — the callee's throw proxies UP the delegation to be caught in
+ *  katari, so a handler never sees another agent's throw as a JS rejection. */
 export class KatariThrowError extends Error {
   constructor(readonly error: unknown) {
     // The JS-facing message is a logging courtesy; the katari-facing content is the payload.
@@ -94,9 +95,11 @@ export interface HandlerContext {
   signal: AbortSignal;
   /** Call another agent and await its (decoded) result — `core` agents by qualified name (the default), or
    *  another reactor's callee by key (`options.reactor`). The declared `Result` is assumed, like the
-   *  handler's own argument type. Rejects with `KatariThrowError` (the callee raised a typed throw — catch
-   *  it, or let it propagate to rethrow), `KatariCallError` (the callee panicked / could not be resolved),
-   *  or `KatariCancelledError` (the callee — or this whole call — was cancelled). */
+   *  handler's own argument type. Rejects with `KatariCallError` (a LOCAL bad dispatch — the callee could not
+   *  be resolved / is not callable) or `KatariCancelledError` (this call, or the whole handler call, was
+   *  cancelled). A callee that runs and then FAILS (panics or raises a typed `prelude.throw`) does NOT reject
+   *  this call — its failure unwinds UP the delegation, to be caught by a katari-side handler above or to
+   *  fail the run. Catch a callee's error in katari, not here. */
   call<Result = KatariValue>(
     agent: string,
     argument?: unknown,
@@ -179,22 +182,30 @@ export class Sidecar {
       }
       case "delegateResult":
         this.settlePendingCall(message.call, (pending) => {
+          // The inner channel settles only result / error / cancelled: a callee's OWN failure (a panic or a
+          // typed `prelude.throw`) no longer settles this call — it proxies UP the delegation, to be caught
+          // by a katari-side handler above or to fail the run. So `context.call` never rejects on a callee
+          // failure; the only rejections are a LOCAL bad dispatch (`error`, see the runtime's
+          // `resolveInnerCall`) and a cancellation. The wire's `throw` outcome is never produced here.
           switch (message.outcome.kind) {
             case "result":
               pending.resolve(decodeWireValue(message.outcome.value, pending.binding));
-              return;
-            case "throw":
-              // The typed rejection: catch it by class to handle the callee's error, or let it propagate —
-              // an uncaught one settles this whole call as the same typed throw (the dispatch catch).
-              pending.reject(
-                new KatariThrowError(decodeWireValue(message.outcome.error, pending.binding)),
-              );
               return;
             case "error":
               pending.reject(new KatariCallError(message.outcome.message));
               return;
             case "cancelled":
               pending.reject(new KatariCancelledError());
+              return;
+            default:
+              // The inner channel never produces a `throw` (a callee's throw proxies up). A stray one is
+              // protocol drift — reject loudly rather than leave `context.call` hanging forever on a
+              // settlement that will never come.
+              pending.reject(
+                new KatariCallError(
+                  `unexpected inner delegateResult outcome "${message.outcome.kind}"`,
+                ),
+              );
               return;
           }
         });
@@ -307,9 +318,8 @@ export class Sidecar {
   ): { context: HandlerContext; binding: ValueBinding } {
     const signal = dispatch.controller.signal;
     const sendDelegate = (
-      agent: string,
+      callee: DelegateCallee,
       wireArgument: Json | null,
-      reactor?: string,
     ): Promise<KatariValue> => {
       if (signal.aborted) return Promise.reject(new KatariCancelledError());
       // The token is unique ACROSS sidecar processes, not just within one: the runtime's bridge rows are
@@ -324,28 +334,39 @@ export class Sidecar {
           kind: "delegate",
           delegation: message.delegation,
           call: token,
-          agent,
-          ...(reactor !== undefined ? { reactor } : {}),
+          callee,
           argument: wireArgument,
         });
       });
     };
     const binding: ValueBinding = {
       download: (ref) => downloadBlob(ref, signal),
-      // A received callable runs through the dynamic-dispatch agent: the raw reference rides verbatim as
-      // `target` (it is already wire JSON — re-encoding would escape its `$`-keys), the argument is encoded.
+      // A received callable dispatches itself: the raw reference rides verbatim as the `value` callee (it is
+      // already wire JSON — re-encoding would escape its `$`-keys), and the runtime resolves it to a target.
       callCallable: (target, argument) =>
-        sendDelegate(CALL_AGENT, { target, args: encodeWireValue(argument) }),
+        sendDelegate({ kind: "value", callable: target }, encodeWireValue(argument)),
     };
     const context: HandlerContext = {
       signal,
       call: <Result>(agent: string, argument?: unknown, options?: CallOptions) =>
         // The declared Result is assumed (the typed-boundary assertion, like the argument type).
-        sendDelegate(agent, encodeWireValue(argument), options?.reactor) as Promise<Result>,
+        sendDelegate(
+          {
+            kind: "named",
+            agent,
+            ...(options?.reactor !== undefined ? { reactor: options.reactor } : {}),
+          },
+          encodeWireValue(argument),
+        ) as Promise<Result>,
       file: async (content, options) => {
         const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
         const handle = await uploadBlob(message.delegation, bytes, options, signal);
-        return new KatariFile(handle, binding, bytes);
+        // Seed the download cache with what this call just uploaded — reading it back costs nothing.
+        return new KatariFile(handle, binding, {
+          bytes,
+          size: bytes.byteLength,
+          ...(options?.contentType !== undefined ? { contentType: options.contentType } : {}),
+        });
       },
     };
     return { context, binding };
@@ -524,7 +545,12 @@ function formatConsoleArguments(args: readonly unknown[]): string {
 }
 
 export type { FileHandle } from "./blob.js";
-export type { DelegateOutcome, RuntimeMessage, SidecarMessage } from "./protocol.js";
+export type {
+  DelegateCallee,
+  DelegateOutcome,
+  RuntimeMessage,
+  SidecarMessage,
+} from "./protocol.js";
 export {
   KatariAgent,
   KatariData,

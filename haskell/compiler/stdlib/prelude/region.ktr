@@ -1,0 +1,106 @@
+// The `prelude.region` sub-module: STRUCTURED CONCURRENCY as ordinary agent values — a nursery. A
+// `region` opens a scope in which child agents (fibers) run concurrently; the scope has a single
+// entry and a single exit, so no fiber outlives the `provide` that opened it. This is the same scope
+// story `mcp.provide` uses (a `runST`-shaped provider that mints a marker for its continuation and
+// discharges it from its own result row), specialised to concurrency: `provide` opens the nursery,
+// `fork` spawns a fiber into it, `join` awaits one, `cancel` tears one down, and `watch` re-emits the
+// fibers' escalations as effects the enclosing program handles. Everything routes to the runtime's
+// `region` reactor (an in-runtime scheduler, like `http.fetch`'s in-runtime fetch — no FFI sidecar).
+//
+// THE SCOPE STORY. A fiber is a live child of exactly one nursery, not a value that may outlive it: it
+// exists only WHILE its `provide` is running. `provide` is a scoped provider (the ST-monad `runST`
+// shape) — it opens the nursery, hands the continuation a `nursery[Scope, E]` handle, and DISCHARGES
+// the caller-chosen `Scope` marker from its own result row. A `fiber` carries `Scope` in its effect
+// row (`fiber[Scope, T]` below), and every operation is gated `with Scope`, so a `join` / `cancel` is
+// only well-typed inside a row that still carries that scope — which only `provide`'s continuation
+// does. A fiber therefore cannot escape its `provide`: return one and the `Scope` it drags along has
+// nowhere to be discharged, so there is no live nursery to `join` it against — a type error at the use
+// site. A scope marker is a phantom (it names no operation, is never performed and never handled, and
+// vanishes at lowering); `scope` is the built-in one, but — exactly as `mcp` advises — DECLARE ONE
+// MARKER PER NURSERY when you nest them, so two regions' fibers never share a scope and a fiber from
+// one can never be `join`ed in the other.
+//
+// THE SCOPE IDENTITY lives in the marker NAME, not in any runtime value. `provide` is generic over the
+// marker it discharges, and DISCHARGE IS PROVIDE'S ALONE — only `provide` opens the nursery, so a
+// context that can `join` a fiber cannot be forged without one. Distinct nullary markers never merge
+// and never widen into one another, so two nested nurseries compose as a plain union of two scopes with
+// no covariance to reason about.
+//
+// THE FIBER-EFFECT CEILING `E`. A nursery fixes, up front, the effects its fibers may raise: `provide`'s
+// second type argument. `fork` accepts a child agent only if its effect fits under `E` (effect
+// subtyping — a child that raises less is fine, one that raises more is a type error), so the ceiling is
+// an upper bound on every fiber. The nursery handle carries `E` INVARIANTLY (it appears both
+// contravariantly and covariantly in `nursery` below), which pins `E` to exactly the ceiling `provide`
+// fixed: neither `fork` (which needs `E` as the ceiling) nor `watch` (which re-emits all of it) can
+// widen or narrow it. This is what makes the handler story below sound.
+//
+// WATCH IS THE WHITE HOLE. A fiber's escalations do not surface at its `fork` — a `fork` returns
+// immediately with a handle. They surface at `watch`, whose result row is `E | Scope`: `watch` is the
+// one place the fibers' requests well up into the enclosing program, so a `handler` (or any effect row)
+// installed around `watch` catches them. Because every fiber's effect fits under `E` and `watch`
+// re-emits the FULL `E`, a handler that covers `E` covers every request any fiber can raise — the
+// ceiling and the white hole together make "handle the region" a total obligation, checked by
+// `katari check` alone. `watch` returns `never`: it only ever raises, never yields a value.
+//
+// This is `mcp.provide` (a scoped marker discharged by a `runST` signature) crossed with `parallel` (a
+// set of concurrent children), with no runtime surface a program can reach except through these five
+// agents — so the composition is locked at type-check time.
+
+// The built-in nursery scope marker: a nullary phantom, carried in a fiber's effect row and in every
+// operation's row, never performable, never handleable. `provide` mints it for its continuation's row
+// and discharges it from its own, so a fiber tagged `scope` cannot outlive the `provide` that opened
+// its nursery. Nest nurseries under DISTINCT markers (declare your own module-local `effect`) so their
+// scopes never merge — distinct nullary markers never widen into one another.
+@"The built-in nursery scope: a nullary phantom marker, carried in a fiber's effect row and every operation's row, never performable, never handleable. `provide` mints it for its continuation and discharges it from its own row, so a fiber cannot outlive its nursery. Declare your own marker per nursery when nesting, so two regions' scopes never merge."
+effect scope
+
+// A running child of a nursery, as an opaque handle value. `Scope` rides its effect row (the same
+// agent-row position `mcp`'s `tool[Scope]` uses), so `fiber[a, T]` is NOT a subtype of `fiber[b, T]`
+// for distinct scope markers `a` / `b` — a fiber from one nursery cannot be passed to another's `join`.
+// `T` is the value the fiber settles with (covariant, the result of `join`). A `data` phantom `Scope`
+// would compare bivariantly (unconstrained) and silently let a fiber cross regions; carrying `Scope` in
+// an effect row routes the comparison through effect-row subtyping, which requires the scope present.
+// (Type synonyms take no docs.)
+type fiber[effect Scope, T] = agent never -> T with Scope
+
+// The nursery handle `provide` hands its continuation — the `r` every operation takes first. It
+// witnesses the two things the operations recover by unification: the scope marker `Scope` and the
+// fiber-effect ceiling `E`. Both are carried INVARIANTLY — each appears once contravariantly (a field
+// of the argument object) and once covariantly (a field of the result object) — so unifying a handle
+// pins `Scope` and `E` to EXACTLY what `provide` fixed. That exactness is load-bearing twice over: for
+// `Scope`, `join` recovers it from the nursery and then demands the fiber's scope MATCH it (an upper
+// AND lower bound), which is what rejects a fiber from a different region — a covariant-only scope would
+// let `join` infer the mere UNION of the two scopes and admit the mismatch. For `E`, `fork` reads it as
+// the ceiling a child may not exceed while `watch` re-emits precisely it, so it must be neither widened
+// nor narrowed. The inner agents are never called (their argument is `never`); each exists only to
+// carry `Scope` or `E` in an isolated effect row, at one polarity.
+type nursery[effect Scope, effect E] = agent (gate: agent never -> unknown with Scope, bound: agent never -> unknown with E) -> {gate: agent never -> unknown with Scope, bound: agent never -> unknown with E}
+
+@"Open a nursery for the extent of @continuation@, as a scoped provider — the `use region.provide[region.scope, E](...)` form. It hands @continuation@ a `nursery[Scope, E]` handle whose fibers may raise at most the effects `E`, and settles with the continuation's result. `Scope` rides the continuation's row (that is what a `fork` / `join` / `cancel` / `watch` raises) and is DISCHARGED from `provide`'s own row, so no fiber outlives the block: the nursery closes when @continuation@ returns (its still-running fibers are cancelled). Pin `Scope` and the ceiling `E` as the first two type arguments (`region.provide[region.scope, my_effects]`); `R` and the residual outer row are inferred from the continuation. Discharging `Scope` is `provide`'s alone (only it opens the nursery), so a live join context cannot be forged. NEST UNDER DISTINCT MARKERS: share one marker across two nurseries and their scopes MERGE (fibers become mutually joinable), so declare a module-local `effect` per nursery when nesting."
+external agent provide[effect Scope, effect E, R, effect Eouter](
+  @"The nursery body (bound by `use`): receives the handle, and its fibers run exactly while it does." continuation: agent (value: nursery[Scope, E]) -> R with Eouter | Scope,
+) -> R with Eouter from "region"
+
+@"Spawn @task@ (applied to @argument@) as a fiber in the nursery @nursery@, returning immediately with a `fiber[Scope, T]` handle. @task@'s effect must fit under the nursery's ceiling `E` (a child that raises less is fine; one that raises more is a type error), so every fiber is bounded by `E` — which is exactly what makes `watch` a total obligation. The fiber's escalations do not surface here; they well up at `watch`. Scope-gated (`with Scope`): callable only inside the `provide` that opened this nursery."
+external agent fork[effect Scope, effect E, A, T](
+  @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
+  @"The child agent to run; its effect must fit under the nursery's ceiling `E`." task: agent (input: A) -> T with E,
+  @"The argument applied to @task@." argument: A,
+) -> fiber[Scope, T] with Scope from "region"
+
+@"Await @handle@ and return the value it settled with. `Scope` is pinned by @nursery@, and @handle@'s own scope must match it, so a fiber from a DIFFERENT nursery (a different scope marker) is a type error here — a fiber is joinable only in the region that spawned it. Scope-gated (`with Scope`): callable only inside the opening `provide`."
+external agent join[effect Scope, effect E, T](
+  @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
+  @"A fiber spawned in THIS nursery (its scope marker must match)." handle: fiber[Scope, T],
+) -> T with Scope from "region"
+
+@"The nursery's WHITE HOLE: re-emit the fibers' escalations into the enclosing program as the ceiling effect `E`. It returns `never` — it only ever raises, never yields — so install a `handler` (or any row that covers `E`) around it to service the fibers' requests. Because every fiber's effect fits under `E` and `watch` re-emits the FULL `E`, covering `E` here covers every request any fiber can raise. Scope-gated (`with Scope`): callable only inside the opening `provide`."
+external agent watch[effect Scope, effect E](
+  @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
+) -> never with E | Scope from "region"
+
+@"Tear @handle@ down: cancel the fiber and settle. `Scope` is pinned by @nursery@, and @handle@'s own scope must match it, so a fiber from a different nursery is a type error. Idempotent on an already-settled fiber. Scope-gated (`with Scope`): callable only inside the opening `provide`."
+external agent cancel[effect Scope, effect E, T](
+  @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
+  @"A fiber spawned in THIS nursery (its scope marker must match)." handle: fiber[Scope, T],
+) -> null with Scope from "region"

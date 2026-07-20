@@ -137,6 +137,40 @@ describe("assembleDelegationTree", () => {
     ]);
   });
 
+  test("a run-root FAILURE row addressed to the api is NOT answerable (only user-facing rows are)", () => {
+    // Every escalate opens a durable row now — a panic / throw reaching the run root is a `to = api` row too
+    // (the api fails the run on it), so `to === 'api'` alone no longer implies answerable: the user-facing
+    // check on the `request` is what marks a failure un-answerable, exactly as the read filters do.
+    const escalationRows: TreeEscalationRow[] = [
+      {
+        id: "e-panic",
+        raiserInstanceId: "i-main",
+        request: "prelude.panic",
+        toReactor: "api",
+        createdAt: at(4),
+      },
+      {
+        id: "e-throw",
+        raiserInstanceId: "i-main",
+        request: "prelude.throw",
+        toReactor: "api",
+        createdAt: at(5),
+      },
+    ];
+    const tree = assembleDelegationTree("run-i", {
+      delegations: [delegation({ id: "d-root", callerInstanceId: "run-i" })],
+      instances: [
+        instance({ id: "run-i", kind: "api" }),
+        instance({ id: "i-main", delegationId: "d-root", target: named("main.main") }),
+      ],
+      escalations: escalationRows,
+    });
+    expect(tree?.instance?.openEscalations).toEqual([
+      { id: "e-panic", request: "prelude.panic", answerable: false, createdAt: at(4) },
+      { id: "e-throw", request: "prelude.throw", answerable: false, createdAt: at(5) },
+    ]);
+  });
+
   test("parallel children come back oldest first, and an ffi call surfaces its own status", () => {
     const tree = assembleDelegationTree("run-i", {
       delegations: [

@@ -78,6 +78,7 @@ atomType =
       TypeAll <$> keyword "all",
       TypeIo <$> keyword "io",
       TypePure <$> keyword "pure",
+      stringLiteralType,
       attributeLiteralType,
       TypeArray <$> keyword "array",
       TypeRecord <$> keyword "record",
@@ -105,6 +106,13 @@ primitiveType =
     primitive word kind =
       (\sourceSpan -> TypePrimitive PrimitiveTypeNode {kind = kind, sourceSpan = sourceSpan})
         <$> keyword word
+
+-- | @"x"@ — a string literal singleton type. The body reuses the lexer's expression string literal,
+-- so type-position escaping can never drift from value-position escaping.
+stringLiteralType :: Parser TypeExpression
+stringLiteralType = do
+  literal <- stringLiteral
+  pure (TypeStringLiteral StringLiteralTypeNode {value = literal.value, sourceSpan = literal.sourceSpan})
 
 attributeLiteralType :: Parser TypeExpression
 attributeLiteralType =
@@ -216,9 +224,12 @@ agentParameterType = try objectSugar <|> applicationType
 genericParameters :: Parser (List (GenericParameter Parsed))
 genericParameters = option [] (fst <$> brackets (commaSeparated1 genericParameter))
 
+-- | One generic parameter: @name@, @effect name@, @attribute name@, or @literal name@ (a type
+-- parameter that binds at a string literal argument's singleton type). @literal@ prefixes the bare
+-- name directly — it cannot combine with @effect@ / @attribute@, since only a type can be a literal.
 genericParameter :: Parser (GenericParameter Parsed)
 genericParameter = do
-  (kind, kindSpan) <- genericParameterKind
+  (kind, bindsLiteral, kindSpan) <- genericParameterKind
   name <- identifier
   upperBound <- optional (keyword "extends" *> typeExpression)
   pure
@@ -227,21 +238,24 @@ genericParameter = do
         labelReference = parsedReference name.sourceSpan,
         typeReference = parsedReference name.sourceSpan,
         kind = kind,
+        bindsLiteral = bindsLiteral,
         upperBound = upperBound,
         sourceSpan = mergeSpans (fromMaybe name.sourceSpan kindSpan) (maybe name.sourceSpan sourceSpanOf upperBound)
       }
 
--- | An optional @effect@ / @attribute@ kind prefix; absent (or not followed by a name) means a
--- plain type parameter, so @[effect]@ is a parameter literally named @effect@.
-genericParameterKind :: Parser (GenericKind, Maybe SourceSpan)
+-- | An optional @effect@ / @attribute@ / @literal@ prefix; absent (or not followed by a name) means a
+-- plain type parameter, so @[effect]@ is a parameter literally named @effect@ (and likewise
+-- @[literal]@).
+genericParameterKind :: Parser (GenericKind, Bool, Maybe SourceSpan)
 genericParameterKind =
-  prefix "effect" GenericKindEffect
-    <|> prefix "attribute" GenericKindAttribute
-    <|> pure (GenericKindType, Nothing)
+  prefix "effect" (GenericKindEffect, False)
+    <|> prefix "attribute" (GenericKindAttribute, False)
+    <|> prefix "literal" (GenericKindType, True)
+    <|> pure (GenericKindType, False, Nothing)
   where
-    prefix word kind = do
+    prefix word (kind, bindsLiteral) = do
       kindSpan <- try (keyword word <* lookAhead identifier)
-      pure (kind, Just kindSpan)
+      pure (kind, bindsLiteral, Just kindSpan)
 
 -- | @label : T [?= default]@ — a typed parameter of a request / external / primitive / data.
 parameterSignature :: Parser (ParameterSignature Parsed)

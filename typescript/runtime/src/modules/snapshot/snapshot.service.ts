@@ -3,7 +3,7 @@ import { db } from "../../db/client.js";
 import { NotFoundError, UnprocessableEntityError } from "../../lib/errors.js";
 import { type ModuleHash, toModuleHash } from "../../runtime/ids.js";
 import { snapshotRepository } from "./snapshot.repository.js";
-import type { DeploySnapshotInput } from "./snapshot.schema.js";
+import type { DeploySnapshotInput, ListSnapshotsQuery } from "./snapshot.schema.js";
 
 export const snapshotService = {
   /**
@@ -97,10 +97,12 @@ export const snapshotService = {
     return snapshot ?? empty;
   },
 
-  async list(projectId: string) {
+  /** The deploy history page plus its filtered `total` (surfaced by the route as `X-Total-Count`). */
+  async list(projectId: string, query: ListSnapshotsQuery = {}) {
     const [project] = await snapshotRepository.findProject(db, projectId);
     if (!project) throw new NotFoundError(`Project ${projectId} not found.`);
-    return snapshotRepository.list(db, projectId);
+    const { rows, total } = await snapshotRepository.list(db, projectId, query);
+    return { items: rows, total };
   },
 
   async getById(projectId: string, snapshotId: string) {

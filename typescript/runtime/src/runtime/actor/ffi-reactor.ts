@@ -2,35 +2,51 @@
 // the shared callee-call lifecycle). An external call reaches it as a `delegate` routed from core's
 // `ExternalThread` proxy; it dispatches the handler through its subprocess transport and the base turns the
 // completion into the call's `delegateAck` / `escalate` / `terminateAck`. It owns its in-flight calls as
-// durable `ffi_instances` rows (its callee-side warm state) — symmetric to core owning its instances.
-// Execution is AT-MOST-ONCE, like http: recovery never re-runs a handler (a handler whose process died
-// fails as a panic; retrying is katari-level policy), so the argument is not persisted either — a reloaded
-// call carries none, exactly like an http call.
+// durable `ffi`-kind external-call rows (its callee-side warm state) — symmetric to core owning its
+// instances. Execution is AT-MOST-ONCE, like http: recovery never re-runs a handler (a handler whose
+// process died fails as a panic; retrying is katari-level policy), so the argument is not persisted
+// either — a reloaded call carries none, exactly like an http call.
 //
 // A running handler can call back INTO the runtime (`innerDelegate` — the transport's inbound agent-call
-// channel): this reactor only resolves the request to a delegate target — a qualified agent name for `core`
-// (the default), or an external key for another call reactor (`ffi` / `http`) — against the parent call's
-// own snapshot (an agent and its FFI handler deploy together), and hands it to the base. Everything else
-// (the delegation lifecycle, terminate distribution, escalation proxying, the durable correlation) is the
-// base's; the settled outcome comes back through `deliverInnerOutcome`, lowered to plain JSON here.
+// channel): this reactor only resolves the request to a delegate target and hands it to the base. A `named`
+// callee resolves against the parent call's own snapshot (an agent and its FFI handler deploy together) — a
+// qualified agent name for `core` (the default), or an external key for another call reactor (`ffi` /
+// `http`). A `value` callee is a callable the handler received (`KatariAgent.call`); the shared dynamic
+// dispatch resolves it to its target (a tool validates its argument against its schema) and it runs on
+// `core`, carrying its own generics. Unlike the katari `call_agent` primitive, a bad callable value here is
+// a plain error (a panic): a malformed value crossing the FFI boundary is a bug, not a catchable failure.
+// Everything else (the delegation lifecycle, terminate distribution, escalation proxying, the durable
+// correlation) is the base's; the settled outcome comes back through `deliverInnerOutcome`, lowered here.
 
-import { createAgentName } from "@katari-lang/types";
-import type { BlobEntry } from "../engine/types.js";
-import type { DelegateTarget, ReactorName } from "../event/types.js";
+import { createAgentName, type Json } from "@katari-lang/types";
+import { type DispatchResult, dispatchCallable } from "../engine/dynamic-dispatch.js";
+import { conformCallableArgumentSync } from "../engine/interop-prims.js";
+import type { ReactorName } from "../event/types.js";
 import type { FfiInnerDelegate, FfiTransport } from "../external/runner.js";
 import type { DelegateOutcome } from "../external/sidecar-protocol.js";
-import type { BlobId, DelegationId, ProjectId, SnapshotId } from "../ids.js";
+import type { DelegationId, ProjectId, SnapshotId } from "../ids.js";
+import type { IrSource } from "../ir.js";
 import { jsonToValue, valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
+import { renderConformFailures } from "../value/validation.js";
+import {
+  documentOf,
+  encodeInnerCalls,
+  encodeRelays,
+  innerCallsOf,
+  relaysOf,
+  stringFieldOf,
+} from "./extension-codec.js";
 import {
   type CallRow,
+  type DecodedCallExtension,
+  type EscalationRelayRow,
   ExternalCallReactor,
   type ExternalTarget,
+  type InnerCallRow,
   type InnerDelivery,
-  type LoadedCall,
 } from "./external-call-reactor.js";
 import { messageOf } from "./failure.js";
-import type { Loader, PersistenceTx } from "./persistence.js";
 import type { ResourcePool } from "./resource-pool.js";
 
 /** An ffi call's transport data: the snapshot whose sidecar bundle hosts the handler, the dispatch key, and
@@ -42,6 +58,39 @@ interface FfiPayload {
   argument: Value | null;
 }
 
+/** The ffi extension document: what an in-flight handler call must reconstruct from — the version pin
+ *  (whose compiled sidecar bundle hosts the handler), the dispatch key, and the inner-delegation bridges.
+ *  The argument is deliberately absent: recovery never re-runs a handler (at-most-once), so nothing ever
+ *  reads it back — and not storing it keeps one less secret-bearing value at rest. */
+export interface FfiExtension {
+  snapshotId: SnapshotId;
+  key: string;
+  relays: EscalationRelayRow[];
+  innerCalls: InnerCallRow[];
+}
+
+/** Encode an ffi call's extension document (pure — the persistence port seals it as a whole). */
+export function encodeFfiExtension(extension: FfiExtension): Json {
+  return {
+    snapshotId: extension.snapshotId,
+    key: extension.key,
+    relays: encodeRelays(extension.relays),
+    innerCalls: encodeInnerCalls(extension.innerCalls),
+  };
+}
+
+/** Decode an ffi call's extension document (pure) — also what the run-tree repository renders an ffi
+ *  node's dispatch key / snapshot from, so the document's schema has exactly one owner. */
+export function decodeFfiExtension(extension: Json): FfiExtension {
+  const document = documentOf(extension);
+  return {
+    snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+    key: stringFieldOf(document, "key"),
+    relays: relaysOf(document),
+    innerCalls: innerCallsOf(document),
+  };
+}
+
 export class FfiReactor extends ExternalCallReactor<FfiPayload> {
   readonly name: ReactorName = "ffi";
 
@@ -49,6 +98,7 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     private readonly projectId: ProjectId,
     private readonly transport: FfiTransport,
     pool: ResourcePool,
+    private readonly irSource: IrSource,
   ) {
     super(pool);
   }
@@ -77,31 +127,23 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     this.transport.abort(delegation);
   }
 
-  protected async persistCallRow(tx: PersistenceTx, row: CallRow<FfiPayload>): Promise<void> {
-    // The argument is not persisted: recovery never re-runs the handler (at-most-once), so nothing ever
-    // reads it back — and not storing it keeps one less secret-bearing value at rest.
-    await tx.ffi.putFfiInstance({
-      instanceId: row.instance,
+  protected encodeCallExtension(row: CallRow<FfiPayload>): Json {
+    return encodeFfiExtension({
       snapshotId: row.payload.snapshot,
       key: row.payload.key,
-      status: row.status,
       relays: row.relays,
       innerCalls: row.innerCalls,
     });
   }
 
-  protected async loadCallRows(loader: Loader): Promise<Array<LoadedCall<FfiPayload>>> {
-    return (await loader.ffi.instances()).map((row) => ({
-      delegation: row.delegation,
-      instance: row.instance,
-      caller: row.caller,
-      run: row.run,
-      status: row.status,
+  protected decodeCallExtension(extension: Json): DecodedCallExtension<FfiPayload> {
+    const decoded = decodeFfiExtension(extension);
+    return {
       // The argument is not persisted (at-most-once recovery never re-sends), so a reloaded call has none.
-      payload: { snapshot: row.snapshot, key: row.key, argument: null },
-      relays: row.relays,
-      innerCalls: row.innerCalls,
-    }));
+      payload: { snapshot: decoded.snapshotId, key: decoded.key, argument: null },
+      relays: decoded.relays,
+      innerCalls: decoded.innerCalls,
+    };
   }
 
   // ─── the inner agent-call channel (a handler calling back into the runtime) ─────────────────────
@@ -116,27 +158,18 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
       this.failInnerDelegate(request, { kind: "cancelled" });
       return;
     }
-    const resolved = resolveInnerTarget(request, payload.snapshot);
+    const resolved = resolveInnerCall(request, payload.snapshot, this.irSource);
     if ("error" in resolved) {
       this.failInnerDelegate(request, { kind: "error", message: resolved.error });
-      return;
-    }
-    let argument: Value | null;
-    try {
-      argument = request.argument === null ? null : jsonToValue(request.argument);
-    } catch (error) {
-      this.failInnerDelegate(request, {
-        kind: "error",
-        message: `the call argument is not a decodable value: ${messageOf(error)}`,
-      });
       return;
     }
     const delegation = this.openInnerDelegation(
       request.delegation,
       resolved.target,
       resolved.to,
-      argument,
+      resolved.argument,
       request.call,
+      resolved.generics,
     );
     if (delegation === null) this.failInnerDelegate(request, { kind: "cancelled" });
   }
@@ -163,57 +196,108 @@ export class FfiReactor extends ExternalCallReactor<FfiPayload> {
     });
   }
 
-  /** Register a blob a running handler produced mid-call (its bytes already in the `BlobStore`) as owned by
-   *  this call's instance — so the call's `delegateAck` ascends it to the core caller through the base reactor's
-   *  release / reown, exactly like a core sub-call's result blob. Run as an out-of-loop command turn (the blob
-   *  upload's HTTP request), so the ownership row commits durably before the handler's result is processed.
-   *  Returns whether it took: `false` when the call is already gone (cancelled / completed), so the caller can
-   *  delete the just-uploaded bytes — which have no row referencing them — rather than orphan them. */
-  registerProducedBlob(
-    delegation: DelegationId,
-    blobId: BlobId,
-    entry: Omit<BlobEntry, "owner">,
-  ): boolean {
-    const instance = this.callInstance(delegation);
-    if (instance === undefined) return false;
-    this.pool.registerBlob(blobId, { owner: instance, ...entry });
-    return true;
-  }
+  // `registerProducedBlob` (a handler's mid-call upload over the blob side channel) is the base
+  // `ExternalCallReactor` method — shared with the mcp reactor, whose transport produces blobs from a
+  // tool result's image content the same way.
 }
 
-/** Lower a settled inner outcome to the sidecar's wire form. A result — and a typed throw's payload — cross
- *  the same boundary: the FFI sidecar is the allowed secret sink, exactly like the outer call's argument. */
+/** Lower a settled inner outcome to the sidecar's wire form. A `result` crosses the FFI sidecar's secret sink
+ *  (revealed, exactly like the outer call's argument); an `error` / `cancelled` pass through unchanged. A
+ *  callee's failure no longer settles the inner call (it proxies up), so no `throw` reaches this boundary. */
 function lowerInnerOutcome(outcome: InnerDelivery["outcome"]): DelegateOutcome {
   switch (outcome.kind) {
     case "result":
       return { kind: "result", value: valueToJson(outcome.value, "reveal") };
-    case "throw":
-      return { kind: "throw", error: valueToJson(outcome.value, "reveal") };
     default:
       return outcome;
   }
 }
 
-/** Resolve an inner call to a delegate target: the `core` reactor (the default) runs a named agent; a call
- *  reactor (`ffi` / `http`) runs an external key. Both resolve against the parent call's snapshot — an
- *  agent and its FFI handlers deploy together, so the sidecar names siblings of its own version (http
- *  ignores the snapshot). `api` is not a callee, and an unknown name is a spelling error — both fail. */
-function resolveInnerTarget(
+/** Resolve an inner call the sidecar asked for. A `named` callee resolves against the parent call's
+ *  snapshot — an agent and its FFI handlers deploy together, so the sidecar names siblings of its own
+ *  version (`core` runs a named agent, `ffi` / `http` an external key; http ignores the snapshot; `api` is
+ *  not a callee, and an unknown name is a spelling error). A `value` callee is a callable the handler
+ *  received: the shared dynamic dispatch resolves it to its target and it runs on `core`, carrying its own
+ *  generics. `context.call` is DYNAMIC dispatch, like the AI's `call_agent`: an INPUT / dispatch error is the
+ *  CALLER's, so it is a catchable `{ error }` (surfaced to `context.call` as `KatariCallError`) — the
+ *  argument is pre-validated against the callee's declared input schema here (a `tool` by `dispatchCallable`,
+ *  an agent / closure by `conformCallableArgumentSync`), so a mismatch never reaches the acceptance surface as
+ *  an uncatchable panic. Only a callee's EXECUTION failure proxies up (the no-catch model, unchanged). */
+function resolveInnerCall(
   request: FfiInnerDelegate,
   snapshot: SnapshotId,
-): { target: DelegateTarget; to: ReactorName } | { error: string } {
-  if (request.agent.length === 0) return { error: "the agent to call must be a non-empty name" };
-  const reactor = request.reactor ?? "core";
-  switch (reactor) {
-    case "core":
-      return {
-        target: { kind: "named", name: createAgentName(request.agent), snapshot },
-        to: "core",
-      };
-    case "ffi":
-    case "http":
-      return { target: { kind: "external", key: request.agent, snapshot }, to: reactor };
-    default:
-      return { error: `unknown reactor "${reactor}" (expected "core", "ffi", or "http")` };
+  irSource: IrSource,
+): DispatchResult | { error: string } {
+  const decoded = decodeArgument(request.argument);
+  if ("error" in decoded) return decoded;
+  const callee = request.callee;
+  switch (callee.kind) {
+    case "named": {
+      if (callee.agent.length === 0) return { error: "the agent to call must be a non-empty name" };
+      const reactor = callee.reactor ?? "core";
+      switch (reactor) {
+        case "core": {
+          const name = createAgentName(callee.agent);
+          // Resolve the target up front. `context.call` is dynamic dispatch, so an unresolvable named agent
+          // (a spelling error in the sidecar's call) is the CALLER's dispatch error — a catchable `{ error }`
+          // here, exactly like a non-conforming argument — never core's acceptance-surface panic, which the
+          // ffi call instance (not core) would have to own the escalation row for. The parent call's snapshot
+          // is loaded (its handler is running against it), so this resolves synchronously.
+          try {
+            irSource.locate(snapshot, name);
+          } catch (error) {
+            return { error: `${callee.agent}: the agent cannot be resolved — ${messageOf(error)}` };
+          }
+          const failures = conformCallableArgumentSync(
+            { kind: "agent", name, snapshot },
+            decoded.value,
+            irSource,
+          );
+          if (failures !== null) {
+            return {
+              error: `${callee.agent}: the argument does not conform to the input schema — ${renderConformFailures(failures)}`,
+            };
+          }
+          return { target: { kind: "named", name, snapshot }, to: "core", argument: decoded.value };
+        }
+        case "ffi":
+        case "http":
+          return {
+            target: { kind: "external", key: callee.agent, snapshot },
+            to: reactor,
+            argument: decoded.value,
+          };
+        default:
+          return { error: `unknown reactor "${reactor}" (expected "core", "ffi", or "http")` };
+      }
+    }
+    case "value": {
+      let callable: Value;
+      try {
+        callable = jsonToValue(callee.callable);
+      } catch (error) {
+        return { error: `the callable is not a decodable value: ${messageOf(error)}` };
+      }
+      // An agent / closure callee's input is pre-validated here (a `tool` and a non-callable value fall to
+      // `dispatchCallable`, which validates the tool and errors on the non-callable), so a bad argument is a
+      // catchable dispatch error rather than the acceptance surface's panic.
+      const failures = conformCallableArgumentSync(callable, decoded.value, irSource);
+      if (failures !== null) {
+        return {
+          error: `the argument does not conform to the input schema — ${renderConformFailures(failures)}`,
+        };
+      }
+      // The shared dispatch already returns the exact `DispatchResult` this resolver promises.
+      return dispatchCallable(callable, decoded.value);
+    }
+  }
+}
+
+/** Decode an inner call's wire argument into an engine value, or report it as a failure. */
+function decodeArgument(argument: Json | null): { value: Value | null } | { error: string } {
+  try {
+    return { value: argument === null ? null : jsonToValue(argument) };
+  } catch (error) {
+    return { error: `the call argument is not a decodable value: ${messageOf(error)}` };
   }
 }

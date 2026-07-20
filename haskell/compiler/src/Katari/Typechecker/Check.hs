@@ -9,7 +9,7 @@
 -- the normalized type — used by tests that only need the type-level result.
 module Katari.Typechecker.Check where
 
-import Control.Monad (filterM, foldM, unless, when, zipWithM)
+import Control.Monad (filterM, foldM, unless, void, when, zipWithM)
 import Control.Monad.RWS.Class (asks, tell)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -21,9 +21,10 @@ import Katari.Data.AST
 import Katari.Data.Environment (DataInformation (..), GenericParameterInformation (..), GenericParameters (..), RequestInformation (..), Scheme (..), emptyGenericParameters, instantiationByName, monoScheme, reKeyByGenericId)
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
+import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
-import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType)
+import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType, renderSemanticEffect)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (diagnosticAt)
@@ -32,15 +33,24 @@ import Katari.Error
     CannotInferGenericErrorInfo (..),
     CompilerError (..),
     ExpectedShapeErrorInfo (..),
+    FinallyEffectErrorInfo (..),
     GenericNotAppliedErrorInfo (..),
+    MalformedUseErrorInfo (..),
+    MalformedUseReason (..),
     MisplacedJumpErrorInfo (..),
     MissingAnnotationErrorInfo (..),
+    PanicHandlerParameterErrorInfo (..),
+    ParallelForVarBindingErrorInfo (..),
+    ParallelHandlerVarBindingErrorInfo (..),
+    ReservedReactorErrorInfo (..),
     TypeError (..),
+    UnknownHoleLabelErrorInfo (..),
     UnknownReactorErrorInfo (..),
     WrongReferenceKindErrorInfo (..),
   )
 import Katari.Panic (panic)
 import Katari.Primitive (panicRequestName)
+import Katari.Stdlib (isReservedModuleName)
 import Katari.Typechecker.Context
   ( Checker,
     CheckerEnvironment (..),
@@ -65,8 +75,8 @@ import Katari.Typechecker.Context
   )
 import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
-import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), collectConstraints, metavarKinded, solveConstraints)
-import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
+import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), asTypeMetavar, collectConstraints, metavarKinded, solveConstraints)
+import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
 
 ------------------------------------------------------------------------------------------------
 -- Bidirectional entry points
@@ -91,6 +101,7 @@ synthExpression = \case
   ExpressionIf expression -> synthIfExpression expression
   ExpressionMatch expression -> synthMatchExpression expression
   ExpressionFor expression -> synthForExpression expression
+  ExpressionForever expression -> synthForeverExpression expression
   ExpressionHandler expression -> synthHandlerExpression expression
   ExpressionBlock expression -> synthBlockExpression expression
   ExpressionFieldAccess expression -> synthFieldAccessExpression expression
@@ -181,6 +192,7 @@ walkStatements statements continuation = case statements of
           StatementForBreak forBreakStmt -> passThrough (StatementForBreak <$> checkForBreakStatement forBreakStmt)
           StatementBreak breakStmt -> passThrough (StatementBreak <$> checkBreakStatement breakStmt)
           StatementNext nextStmt -> passThrough (StatementNext <$> checkNextStatement nextStmt)
+          StatementFinally finallyStmt -> passThrough (StatementFinally <$> checkFinallyStatement finallyStmt)
           StatementError s -> passThrough (pure (StatementError s))
 
 -- | A @let@ binding: compute the value's type (against an annotation if present), bind, walk the
@@ -233,8 +245,23 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 ------------------------------------------------------------------------------------------------
 -- @use@ statement
 --
--- @{ stmts_before; let x : A = use h; stmts_after; return e }@ is typed as if it desugared into
--- @{ stmts_before; h(continuation = agent({value: A}) -> R with E' { stmts_after; e }) }@.
+-- @use@ is an APPLICATION form: it applies a provider ONCE to the written arguments joined with the
+-- continuation. @{ stmts_before; let x : A = use p(args…); stmts_after; return e }@ is typed as
+-- @{ stmts_before; p(args…, continuation = agent({value: A}) -> R with E' { stmts_after; e }) }@ —
+-- one rule for every admitted shape:
+--
+--   use handler {…}       a handler literal            (no written arguments)
+--   use p / use m.p       a (qualified) name           (no written arguments)
+--   use p[T]              an explicit instantiation    (no written arguments)
+--   use <callee>(args…)   an application               (the continuation joins @args@)
+--
+-- The bare shapes are the zero-argument case of the same rule, so a parameterised provider stays an
+-- ordinary generic agent: the continuation is an argument of the single application site, and @R@ /
+-- @E@ infer there exactly as for @use handler@. @continuation@ is therefore a reserved label in a
+-- @use@ application. Any OTHER expression (a field read, a match, …) is rejected: it has no
+-- application reading, and admitting it would make the meaning depend on the provider's syntactic
+-- shape. Bind it first (@let p = …; use p@) or apply it (@use expr(args…)@).
+--
 -- @x@'s annotation is required (the continuation's value type A), R is the continuation body's /tail/
 -- (its trailing value — a @return@ inside it short-circuits the enclosing agent, not the continuation,
 -- so it does not contribute to R), and E' is the continuation body's /inferred/ effect (so the subtype
@@ -264,14 +291,47 @@ handleUseStatement useStmt = do
     withEffectInference $
       withParameters bindings $
         synthBlock useStmt.body
-  let providerExpectedArgument = continuationExpectedArgument bindingType resultType inferredContinuationEffect
-  -- Apply the provider to the continuation argument through the shared callee-application rule, so a
-  -- @use@ provider is held to the same world / effect discipline as a direct call AND gets the same
-  -- generic-argument inference: a provider generic in its continuation result @R@ has @R@ inferred from
-  -- this continuation argument (whose return type is the continuation body's tail).
-  (typedProvider, scheme) <- synthApplicationCallee useStmt.provider
-  argumentAttribute <- runNormalizer useStmt.sourceSpan (foldAttribute providerExpectedArgument)
-  _ <- applyCallee useStmt.sourceSpan scheme providerExpectedArgument argumentAttribute
+  let continuationAgent = continuationAgentType bindingType resultType inferredContinuationEffect
+  -- Every admitted shape is normalized to ONE application here: a bare provider (a handler literal, a
+  -- (qualified) name, an explicit instantiation) becomes its zero-written-argument call, so a single
+  -- pipeline types every provider and a bare shape cannot drift from the call shape.
+  providerCall <- case useStmt.provider of
+    ExpressionCall callExpression -> do
+      when (any (\argument -> argument.name == "continuation") callExpression.arguments) $
+        reportType
+          callExpression.sourceSpan
+          (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseWrittenContinuation})
+      -- A provider is applied exactly ONCE (the continuation is that application's argument), so a
+      -- `_` hole — a partial application — has no `use` reading. Reject it, then strip the holes so
+      -- the provider is still typed as a full application (recovery).
+      case callArgumentHoles callExpression.arguments of
+        [] -> pure callExpression
+        ((_, holeSpan) : _) -> do
+          reportType holeSpan (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseHoleArgument})
+          pure
+            CallExpression
+              { callee = callExpression.callee,
+                arguments = [argument | argument <- callExpression.arguments, ArgumentExpression _ <- [argument.value]],
+                instantiation = callExpression.instantiation,
+                sourceSpan = callExpression.sourceSpan,
+                typeOf = callExpression.typeOf
+              }
+    ExpressionHandler _ -> pure (zeroArgumentApplication useStmt.provider)
+    ExpressionVariable _ -> pure (zeroArgumentApplication useStmt.provider)
+    ExpressionQualifiedReference _ -> pure (zeroArgumentApplication useStmt.provider)
+    ExpressionTypeApplication _ -> pure (zeroArgumentApplication useStmt.provider)
+    other -> do
+      -- No application reading exists for this shape; admitting it would make `use` mean different
+      -- things for different provider syntax. Reject, and still type the provider as if bare so
+      -- downstream checking continues.
+      reportType (sourceSpanOf other) (TypeErrorMalformedUse MalformedUseErrorInfo {reason = MalformedUseProviderShape})
+      pure (zeroArgumentApplication other)
+  -- The one rule: apply the provider to its written arguments joined with the continuation, through
+  -- the shared call path — same world / effect discipline, closed argument object, and generic
+  -- inference as a direct call (a provider generic in @R@ infers it from the continuation argument).
+  -- The typed node is always an 'ExpressionCall' — carrying the inferred instantiation — so lowering
+  -- emits the same single delegate a hand-written @provider(..., continuation = ...)@ would.
+  (typedProvider, _) <- synthCallExpressionWith [("continuation", continuationAgent)] providerCall
   pure
     UseStatement
       { binder = typedBinder,
@@ -279,6 +339,18 @@ handleUseStatement useStmt = do
         body = typedBody,
         sourceSpan = useStmt.sourceSpan
       }
+
+-- | A bare @use@ provider as its zero-written-argument application — the wrap that funnels every
+-- admitted provider shape into the one call-typed pipeline of 'handleUseStatement'.
+zeroArgumentApplication :: Expression Identified -> CallExpression Identified
+zeroArgumentApplication provider =
+  CallExpression
+    { callee = provider,
+      arguments = [],
+      instantiation = (),
+      sourceSpan = sourceSpanOf provider,
+      typeOf = ()
+    }
 
 ------------------------------------------------------------------------------------------------
 -- Per-expression synthesis (produces Typed AST + NormalizedType)
@@ -553,6 +625,48 @@ synthApplicationCallee = \case
     (components, scheme) <- checkHandlerScheme expression
     node <- assembleHandlerNode components (ownHandlerInstantiation scheme) scheme.valueType
     pure (node, scheme)
+  -- An explicit @callee[A, ...]@ in application position may bind a PREFIX of the callee's generic
+  -- parameters, leaving the trailing ones for the surrounding call to infer — the residual scheme keeps
+  -- them quantified. This is what lets a marker-scoped provider be steered by its (uninferrable) scope
+  -- marker while its result / effect generics stay inferred: @mcp.provide[mcp.scope](...)@ pins the scope
+  -- and infers @R@ / @E@ from the continuation. A FULL list (arity equal) leaves an empty residual — the
+  -- monomorphic callee an all-explicit @foo[A, B](...)@ has always produced. Only a call callee reads a
+  -- prefix; a standalone @foo[A]@ value still demands the full arity ('synthTypeApplicationExpression').
+  ExpressionTypeApplication expression -> do
+    (typedInnerCallee, innerScheme) <- synthApplicationCallee expression.callee
+    let allNames = innerScheme.genericParameters.parameterNames
+        information = innerScheme.genericParameters.parameterInformation
+        givenCount = length expression.typeArguments
+    if givenCount > length allNames
+      then do
+        reportApplicationArity expression.sourceSpan "value" (length allNames) givenCount
+        pure (typedInnerCallee, monoScheme bottomType)
+      else do
+        let (prefixNames, residualNames) = splitAt givenCount allNames
+            prefixParameters = GenericParameters {parameterNames = prefixNames, parameterInformation = Map.restrictKeys information (Set.fromList prefixNames)}
+        substitution <- buildGenericSubstitution expression.sourceSpan "value" prefixParameters expression.typeArguments
+        residualValueType <- runNormalizer expression.sourceSpan (substituteType substitution innerScheme.valueType)
+        -- The residual generics stay quantified; a bound that named a now-bound prefix generic is
+        -- rewritten so it refers to the supplied argument, not a vanished parameter.
+        let substituteBound :: GenericParameterInformation -> Normalizer GenericParameterInformation
+            substituteBound info = do
+              rewrittenBound <- traverse (substituteGenericArgument substitution) info.upperBound
+              pure info {upperBound = rewrittenBound}
+        residualInformation <-
+          runNormalizer expression.sourceSpan $
+            traverse substituteBound (Map.restrictKeys information (Set.fromList residualNames))
+        instantiation <- instantiationOf expression.sourceSpan prefixParameters substitution
+        semantic <- denormalizeAt expression.sourceSpan residualValueType
+        let node =
+              ExpressionTypeApplication
+                TypeApplicationExpression
+                  { callee = typedInnerCallee,
+                    typeArguments = retagSyntacticTypeExpression <$> expression.typeArguments,
+                    instantiation = instantiation,
+                    sourceSpan = expression.sourceSpan,
+                    typeOf = semantic
+                  }
+        pure (node, Scheme {genericParameters = GenericParameters {parameterNames = residualNames, parameterInformation = residualInformation}, valueType = residualValueType})
   other -> do
     (typedCallee, calleeType) <- synthExpression other
     pure (typedCallee, monoScheme calleeType)
@@ -587,13 +701,33 @@ synthTemplateExpression expression = do
 ------------------------------------------------------------------------------------------------
 
 synthCallExpression :: CallExpression Identified -> Checker (Expression Typed, NormalizedType)
-synthCallExpression expression = do
+synthCallExpression = synthCallExpressionWith []
+
+-- | As 'synthCallExpression', with extra synthetic (label, type) fields joined into the argument
+-- object — the @use@ pipeline adds its @continuation@ this way, so a provider is applied to ONE
+-- closed object carrying both the written arguments and the continuation.
+--
+-- A call whose arguments contain @label = _@ holes is a PARTIAL application: the supplied arguments
+-- are still typed (and evaluated) here, but the call is not performed — the expression's type is the
+-- residual function over exactly the holed parameters ('synthPartialApplication').
+synthCallExpressionWith :: List (Text, NormalizedType) -> CallExpression Identified -> Checker (Expression Typed, NormalizedType)
+synthCallExpressionWith extraFields expression = do
   -- Take the callee's full 'Scheme' (not a bare-instantiated type): a generic callee keeps its
   -- quantified parameters here so they can be inferred from the arguments below, rather than being
   -- rejected as an unapplied generic.
   (typedCallee, scheme) <- synthApplicationCallee expression.callee
-  (typedArgs, argumentObject, argumentAttribute) <- synthCallArguments expression.sourceSpan expression.arguments
-  (effectiveReturn, instantiation) <- applyCallee expression.sourceSpan scheme argumentObject argumentAttribute
+  (typedArgs, suppliedFields, argumentAttribute) <- synthCallArgumentsWith expression.sourceSpan expression.arguments extraFields
+  -- The labels written as string literals, read off the argument EXPRESSIONS (never the synthesized
+  -- types, which stay @string@): the only doorway through which a call proposes a literal singleton.
+  let literalArguments = literalCallArguments expression.arguments
+  (effectiveReturn, instantiation) <- case callArgumentHoles expression.arguments of
+    [] -> do
+      -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
+      -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
+      -- parameter match (against a required parameter it still fails the optional<:required check).
+      let argumentObject = namedObjectTypeWithRest bottomType suppliedFields
+      applyCallee expression.sourceSpan scheme literalArguments argumentObject argumentAttribute
+    holes -> synthPartialApplication expression.sourceSpan scheme literalArguments holes suppliedFields argumentAttribute
   typedExpression expression.sourceSpan effectiveReturn $ \semantic ->
     ExpressionCall
       CallExpression
@@ -614,22 +748,18 @@ synthCallExpression expression = do
 -- Returns the effective return type together with the resolved instantiation (declared parameter name
 -- -> inferred argument; empty for a non-generic callee), which the call node records so lowering can
 -- stamp the runtime schemas onto the delegate.
-applyCallee :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
-applyCallee sourceSpan scheme argumentObject argumentAttribute =
-  if null scheme.genericParameters.parameterNames
-    then (,mempty) <$> applyMonomorphicCallee sourceSpan scheme.valueType argumentObject argumentAttribute
-    else applyGenericValue sourceSpan scheme argumentObject argumentAttribute
-
--- | Apply a non-generic callee: it must already be a callable agent (no inference). A non-callable
--- callee is reported and degrades to bottom.
-applyMonomorphicCallee :: SourceSpan -> NormalizedType -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
-applyMonomorphicCallee sourceSpan calleeType argumentObject argumentAttribute = do
-  maybeFunction <- extractFunction sourceSpan calleeType
-  case maybeFunction of
-    Just (functionAttribute, function) -> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
-    Nothing -> do
-      reportExpectedShape sourceSpan "a callable agent" calleeType
-      pure bottomType
+applyCallee :: SourceSpan -> Scheme -> Map Text Text -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
+applyCallee sourceSpan scheme literalArguments argumentObject argumentAttribute = do
+  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme InferWholeParameter literalArguments argumentObject
+  case resolved of
+    Just (functionAttribute, function) -> do
+      -- Where the RESOLVED parameter expects a string literal singleton (a written annotation, an
+      -- explicit @f["x"]@ instantiation, or a just-solved literal binding), a syntactically-literal
+      -- argument is checked at its singleton type rather than @string@ ('checkedLiteralArguments').
+      let checkedArgument = checkedLiteralArguments literalArguments function.argumentType argumentObject
+      (,instantiation) <$> applyAgent sourceSpan functionAttribute function checkedArgument argumentAttribute
+    -- Already reported by 'resolveCalleeFunction'; degrade to bottom.
+    Nothing -> pure (bottomType, instantiation)
 
 -- | Raise a type's generics to their declared upper bounds before its shape is inspected, so a value
 -- typed as a bounded generic (@F extends agent(...)@, @S extends array[T]@) is usable at its bound.
@@ -671,7 +801,7 @@ inhabitedKinds layer =
     concat
       [ [NullKind | layer.nullLayer],
         [NumberKind | layer.numberLayer /= NumberSlotAbsent],
-        [StringKind | layer.stringLayer],
+        [StringKind | stringSlotInhabited layer.stringLayer],
         [BooleanKind | not (Set.null layer.booleanLayer)],
         [FileKind | layer.fileLayer],
         [FunctionKind | isJust layer.functionLayer],
@@ -723,32 +853,37 @@ extractFunction sourceSpan normalizedType = do
     Just (attribute, layer) | Just function <- layer.functionLayer -> Just (attribute, function)
     _ -> Nothing
 
-synthCallArguments ::
+-- | Type a call's written (expression-valued) arguments into the supplied (label, type) field list,
+-- joined with any extra synthetic fields — the @use@ pipeline adds its @continuation@ this way, so
+-- the provider is applied to ONE object carrying both the written arguments and the continuation.
+-- A @_@ hole passes through to the typed argument list untouched and contributes no field; the
+-- caller decides whether the call is a full application (no holes) or a partial one.
+synthCallArgumentsWith ::
   SourceSpan ->
   List (CallArgument Identified) ->
-  Checker (List (CallArgument Typed), NormalizedType, NormalizedAttribute)
-synthCallArguments sourceSpan arguments = do
+  List (Text, NormalizedType) ->
+  Checker (List (CallArgument Typed), List (Text, NormalizedType), NormalizedAttribute)
+synthCallArgumentsWith sourceSpan arguments extraFields = do
   entries <- traverse synthEntry arguments
-  let typedArguments = [typedArg | (typedArg, _, _) <- entries]
-      -- A call's arguments are exactly those written, so the object is /closed/ (@rest = never@): an
-      -- unwritten field is genuinely absent, which is what lets an omitted optional (defaulted)
-      -- parameter match (against a required parameter it still fails the optional<:required check).
-      object = namedObjectTypeWithRest bottomType [(name, normalizedType) | (_, name, normalizedType) <- entries]
+  let typedArguments = [typedArg | (typedArg, _) <- entries]
+      fields = [field | (_, Just field) <- entries] <> extraFields
   liftAmount <-
     runNormalizer sourceSpan $
-      foldr joinAttribute bottomAttribute <$> traverse foldAttribute [normalizedType | (_, _, normalizedType) <- entries]
-  pure (typedArguments, object, liftAmount)
+      foldr joinAttribute bottomAttribute <$> traverse (foldAttribute . snd) fields
+  pure (typedArguments, fields, liftAmount)
   where
-    synthEntry argument = do
-      (typedValue, normalizedType) <- synthExpression argument.value
-      let typedArg =
-            CallArgument
-              { name = argument.name,
-                labelReference = retagReference argument.labelReference,
-                value = typedValue,
-                sourceSpan = argument.sourceSpan
-              }
-      pure (typedArg, argument.name, normalizedType)
+    synthEntry argument = case argument.value of
+      ArgumentExpression expression -> do
+        (typedValue, normalizedType) <- synthExpression expression
+        pure (retagArgument argument (ArgumentExpression typedValue), Just (argument.name, normalizedType))
+      ArgumentHole holeSpan -> pure (retagArgument argument (ArgumentHole holeSpan), Nothing)
+    retagArgument argument value =
+      CallArgument
+        { name = argument.name,
+          labelReference = retagReference argument.labelReference,
+          value = value,
+          sourceSpan = argument.sourceSpan
+        }
 
 -- | Pure = no requests /and/ no escapes. Because a @return@ / @next@ / @break@ now contributes an escape
 -- effect, a control-flow branch that escapes is automatically impure here — the single rule that
@@ -782,8 +917,20 @@ liftByAttribute attribute normalizedType =
 -- non-pure (monadic) agent cannot be lifted across worlds, so its types are used as-is, the agent must
 -- already be callable in the current world (@functionAttribute <: public@), and its effect is re-emitted
 -- into the enclosing scope. Returns the (possibly lifted) result type.
-applyAgent :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
-applyAgent sourceSpan functionAttribute function argumentType argumentAttribute = do
+-- | The world-crossing argument-shape check shared by a full application ('applyAgent') and a partial
+-- one ('partialResidualType'), so neither site grows a second argument pipeline that can drift on how a
+-- pure callee lifts across attribute worlds. Given the resolved callee @function@ (its handle
+-- @functionAttribute@), the argument-shape type the site presents (@argumentType@ — the whole argument
+-- object for a full call; the supplied fields plus each hole at its declared type for a partial one) and
+-- that argument's observable @argumentAttribute@, it computes the pure-call lift and runs the ONE
+-- subtype check policing the argument shape. A /pure/ callee's parameter is lifted by the callee's handle
+-- joined with the argument's /excess/ over the /unlifted/ parameter (bottom when the argument already
+-- fits it, so a private argument absorbed by a private-expecting parameter does not lift), so an
+-- attribute-bearing argument — a @private@ value — is accepted; a non-pure callee's parameter is used
+-- as-is. Returns the (possibly lifted) result type; the callee's effect and world check are the caller's
+-- concern (a full call emits / enforces them, a partial one bakes the effect into the residual instead).
+checkArgumentShape :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+checkArgumentShape sourceSpan functionAttribute function argumentType argumentAttribute = do
   let pureCall = isPureEffect function.effect
   -- The argument's excess over the parameter: nothing when the argument already fits the unlifted
   -- parameter (the parameter absorbs the argument's attribute), otherwise the argument's full observable
@@ -800,17 +947,33 @@ applyAgent sourceSpan functionAttribute function argumentType argumentAttribute 
           then (liftByAttribute liftAttribute function.argumentType, liftByAttribute liftAttribute function.returnType)
           else (function.argumentType, function.returnType)
   runNormalizer sourceSpan (subtype argumentType effectiveParameter)
-  unless pureCall $ do
+  pure effectiveReturn
+
+-- | Apply an agent value to an argument at a full call site: check the argument shape through the shared
+-- 'checkArgumentShape' core, then police the callee's effect. A pure callee performs nothing extra; a
+-- non-pure (monadic) callee must already be callable in the current world (@functionAttribute <: public@)
+-- and re-emits its effect into the enclosing scope. Returns the (possibly lifted) result type.
+applyAgent :: SourceSpan -> NormalizedAttribute -> NormalizedFunction -> NormalizedType -> NormalizedAttribute -> Checker NormalizedType
+applyAgent sourceSpan functionAttribute function argumentType argumentAttribute = do
+  effectiveReturn <- checkArgumentShape sourceSpan functionAttribute function argumentType argumentAttribute
+  unless (isPureEffect function.effect) $ do
     runNormalizer sourceSpan (subtype functionAttribute bottomAttribute)
     emitEffect sourceSpan function.effect
   pure effectiveReturn
 
--- | The @continuation@ argument a @use@ provider / handler receives: @{continuation: agent({value: V})
--- -> R with E}@. The single home of the continuation ABI (the @value@ / @continuation@ field names and
--- the agent shape) shared by 'handleUseStatement' and 'synthHandlerExpression'.
+-- | The continuation agent a @use@ provider / handler receives: @agent({value: V}) -> R with E@. The
+-- single home of the continuation ABI (the @value@ field name and the agent shape) shared by
+-- 'handleUseStatement' and 'synthHandlerExpression'.
+continuationAgentType :: NormalizedType -> NormalizedType -> NormalizedEffect -> NormalizedType
+continuationAgentType valueType =
+  assembleAgent bottomAttribute (namedObjectType [("value", valueType)])
+
+-- | The parameter object a handler-shaped provider declares: @{continuation: agent({value: V}) -> R
+-- with E}@. Used by 'checkHandlerScheme' for the synthesized handler's outer parameter; a @use@ site
+-- builds its actual argument object through the shared call path ('synthCallExpressionWith') instead.
 continuationExpectedArgument :: NormalizedType -> NormalizedType -> NormalizedEffect -> NormalizedType
 continuationExpectedArgument valueType resultType effect =
-  namedObjectType [("continuation", assembleAgent bottomAttribute (namedObjectType [("value", valueType)]) resultType effect)]
+  namedObjectType [("continuation", continuationAgentType valueType resultType effect)]
 
 ------------------------------------------------------------------------------------------------
 -- Generic-argument inference at call sites
@@ -836,7 +999,7 @@ instantiateToMetavars sourceSpan parameters = do
       <$> traverse
         ( \(parameterName, info, metavar) -> do
             boundInMetavarTerms <- traverse (runNormalizer sourceSpan . substituteGenericArgument substitution) info.upperBound
-            pure (metavar, Metavar {name = parameterName, kind = info.kind, bound = boundInMetavarTerms})
+            pure (metavar, Metavar {name = parameterName, kind = info.kind, bindsLiteral = info.bindsLiteral, bound = boundInMetavarTerms})
         )
         allocated
   pure (substitution, registry)
@@ -845,39 +1008,68 @@ instantiateToMetavars sourceSpan parameters = do
       metavar <- freshGenericId
       pure (parameterName, info, metavar)
 
--- | Apply a generic callee by inferring its type arguments from the argument object. Falls back to
--- 'bottomType' (after a diagnostic) when the scheme is not a callable agent or a type argument cannot
--- be inferred. Also yields the resolved instantiation (declared name -> inferred argument) — the same
--- record an explicit @callee[T]@ leaves on its 'TypeApplicationExpression' — so an inferred
--- instantiation reaches the IR (and thereby the runtime's schema validation) all the same.
-applyGenericValue :: SourceSpan -> Scheme -> NormalizedType -> NormalizedAttribute -> Checker (NormalizedType, Map Text SemanticGenericArgument)
-applyGenericValue sourceSpan scheme argumentObject argumentAttribute = do
-  (substitution, registry) <- instantiateToMetavars sourceSpan scheme.genericParameters
-  openType <- runNormalizer sourceSpan (substituteType substitution scheme.valueType)
-  case openFunctionLayer openType of
-    Nothing -> do
-      reportExpectedShape sourceSpan "a callable agent" scheme.valueType
-      pure (bottomType, mempty)
-    Just openFunction -> do
-      -- Infer the type arguments from the argument against the open parameter, then substitute the
-      -- solution into the open scheme and dispose by applying it through the trusted 'applyAgent'.
-      solveResult <- inferGenericArguments sourceSpan registry argumentObject openFunction.argumentType
-      solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
-      -- The instantiation by declared parameter: the scheme opened each parameter to a metavariable
-      -- (`substitution`), and the solver bound the metavariables (`solveResult.substitution`) — their
-      -- composition is exactly what an explicit application would have written.
-      solvedByParameter <-
-        traverse
-          (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution)
-          substitution
-      instantiation <- instantiationOf sourceSpan scheme.genericParameters solvedByParameter
-      maybeFunction <- extractFunction sourceSpan solvedType
+-- | Resolve a callee scheme to the concrete function an application sees, paired with the resolved
+-- instantiation (declared parameter name -> argument; empty for a non-generic callee): a monomorphic
+-- callee is inspected directly; a generic one has its type arguments inferred from @argumentObject@
+-- (propose / solve / dispose), the solution substituted back — the same record an explicit
+-- @callee[T]@ leaves on its 'TypeApplicationExpression', so an inferred instantiation reaches the IR
+-- (and thereby the runtime's schema validation) all the same. Shared by a full application
+-- ('applyCallee') and a partial one ('synthPartialApplication'), so the two cannot drift on generic
+-- inference — a partial application infers from its SUPPLIED arguments only (holes constrain
+-- nothing; a parameter determined only by a holed argument is reported by the existing K3016, with
+-- explicit @f[T](x = _)@ as the escape hatch). A non-callable callee is reported and yields
+-- 'Nothing'.
+resolveCalleeFunction ::
+  SourceSpan ->
+  Scheme ->
+  InferenceParameterView ->
+  Map Text Text ->
+  NormalizedType ->
+  Checker (Maybe (NormalizedAttribute, NormalizedFunction), Map Text SemanticGenericArgument)
+resolveCalleeFunction sourceSpan scheme view literalArguments argumentObject =
+  if null scheme.genericParameters.parameterNames
+    then do
+      maybeFunction <- extractFunction sourceSpan scheme.valueType
       case maybeFunction of
-        Just (functionAttribute, function) ->
-          (,instantiation) <$> applyAgent sourceSpan functionAttribute function argumentObject argumentAttribute
+        Just resolved -> pure (Just resolved, mempty)
         Nothing -> do
-          reportExpectedShape sourceSpan "a callable agent" solvedType
-          pure (bottomType, mempty)
+          reportExpectedShape sourceSpan "a callable agent" scheme.valueType
+          pure (Nothing, mempty)
+    else do
+      (substitution, registry) <- instantiateToMetavars sourceSpan scheme.genericParameters
+      openType <- runNormalizer sourceSpan (substituteType substitution scheme.valueType)
+      case openFunctionLayer openType of
+        Nothing -> do
+          reportExpectedShape sourceSpan "a callable agent" scheme.valueType
+          pure (Nothing, mempty)
+        Just openFunction -> do
+          -- Infer the type arguments from the argument against the open parameter, then substitute
+          -- the solution into the open scheme; the caller disposes by using the concrete function.
+          let inferenceParameter = case view of
+                InferWholeParameter -> openFunction.argumentType
+                InferSuppliedLabels labels -> restrictObjectFields labels openFunction.argumentType
+              -- A parameter declared @literal@ binds at a literal argument's most specific type: where
+              -- the open parameter's field is exactly that parameter's bare metavariable and the
+              -- argument was written as a string literal, the proposal sees the literal's singleton
+              -- instead of @string@. Unmarked parameters see the argument exactly as before.
+              proposalArgument = proposedLiteralArguments registry literalArguments inferenceParameter argumentObject
+          solveResult <- inferGenericArguments sourceSpan registry proposalArgument inferenceParameter
+          solvedType <- runNormalizer sourceSpan (substituteType solveResult.substitution openType)
+          -- The instantiation by declared parameter: the scheme opened each parameter to a
+          -- metavariable (`substitution`), and the solver bound the metavariables
+          -- (`solveResult.substitution`) — their composition is exactly what an explicit application
+          -- would have written.
+          solvedByParameter <-
+            traverse
+              (runNormalizer sourceSpan . substituteGenericArgument solveResult.substitution)
+              substitution
+          instantiation <- instantiationOf sourceSpan scheme.genericParameters solvedByParameter
+          maybeFunction <- extractFunction sourceSpan solvedType
+          case maybeFunction of
+            Just resolved -> pure (Just resolved, instantiation)
+            Nothing -> do
+              reportExpectedShape sourceSpan "a callable agent" solvedType
+              pure (Nothing, mempty)
 
 -- | The propose / solve / dispose core of generic-argument inference, shared by a generic call
 -- ('applyGenericValue') and a request handler ('inferRequestHandlerSubstitution'). Given the
@@ -894,6 +1086,208 @@ inferGenericArguments sourceSpan registry argumentObject openParameterType = do
   reportUninferredGenerics sourceSpan registry solveResult.uninferred
   checkInferredBounds sourceSpan registry solveResult
   pure solveResult
+
+-- | How a call site's generic inference sees the callee's open parameter object. A full application
+-- matches the whole parameter (a missing required field then surfaces at the application's subtype
+-- check). A partial application matches only its SUPPLIED labels: the closed argument object's
+-- @never@ rest would otherwise align against every holed parameter and silently "infer" its generic
+-- to @never@ — restricting the view keeps such a generic genuinely unconstrained, so the existing
+-- K3016 reports it and @f[T](x = _)@ remains the escape hatch.
+data InferenceParameterView
+  = InferWholeParameter
+  | InferSuppliedLabels (Set.Set Text)
+
+-- | Restrict a parameter object type's named fields to @labels@; every other part of the type (other
+-- layers, the object's rest, the attribute) is kept. A non-object parameter is returned unchanged.
+restrictObjectFields :: Set.Set Text -> NormalizedType -> NormalizedType
+restrictObjectFields labels parameterType = case parameterType.baseType of
+  NormalizedBaseTypeLayered layer
+    | Just object <- layer.objectLayer ->
+        NormalizedType
+          { baseType =
+              NormalizedBaseTypeLayered
+                layer {objectLayer = Just NormalizedObject {fields = Map.restrictKeys object.fields labels, rest = object.rest}},
+            generics = parameterType.generics,
+            attribute = parameterType.attribute
+          }
+  _ -> parameterType
+
+------------------------------------------------------------------------------------------------
+-- String-literal argument refinement
+--
+-- A string literal expression synthesizes @string@ (never a singleton), so a call site that WANTS
+-- the literal's singleton type — a @literal@-marked generic, or a parameter whose type is a written
+-- literal singleton — refines the argument object here, per field and only where the parameter side
+-- asks for it. Refinement replaces a field's @string@ with the literal's singleton, a SUBTYPE of what
+-- was there, so it can only make checks pass that the parameter side explicitly opted into; nothing
+-- else about the call changes.
+------------------------------------------------------------------------------------------------
+
+-- | The call arguments written as string literals, syntactically (the checker looks at the argument
+-- expression node, never at the synthesized type): label -> the literal's text.
+literalCallArguments :: List (CallArgument Identified) -> Map Text Text
+literalCallArguments arguments =
+  Map.fromList
+    [ (argument.name, text)
+      | argument <- arguments,
+        ArgumentExpression (ExpressionLiteral literal) <- [argument.value],
+        LiteralValueString text <- [literal.value]
+    ]
+
+-- | Refine the literal-written fields of an argument object wherever the matching parameter field
+-- satisfies @parameterWantsLiteral@. Everything that is not a literal-written field of a plain
+-- object-to-object match is left untouched.
+refineLiteralArgumentFields ::
+  (NormalizedType -> Bool) ->
+  Map Text Text ->
+  NormalizedType ->
+  NormalizedType ->
+  NormalizedType
+refineLiteralArgumentFields parameterWantsLiteral literalArguments parameterType argumentObject
+  | Map.null literalArguments = argumentObject
+  | NormalizedBaseTypeLayered argumentLayer <- argumentObject.baseType,
+    Just arguments <- argumentLayer.objectLayer,
+    NormalizedBaseTypeLayered parameterLayer <- parameterType.baseType,
+    Just parameters <- parameterLayer.objectLayer =
+      let refineField label field
+            | Just literal <- Map.lookup label literalArguments,
+              Just parameterField <- Map.lookup label parameters.fields,
+              parameterWantsLiteral parameterField.normalizedType =
+                NormalizedFieldInformation {normalizedType = stringLiteralSingleton literal, optional = field.optional}
+            | otherwise = field
+          refinedObject = NormalizedObject {fields = Map.mapWithKey refineField arguments.fields, rest = arguments.rest}
+       in NormalizedType
+            { baseType = NormalizedBaseTypeLayered argumentLayer {objectLayer = Just refinedObject},
+              generics = argumentObject.generics,
+              attribute = argumentObject.attribute
+            }
+  | otherwise = argumentObject
+
+-- | The propose-step refinement: a field binds a literal singleton exactly when the OPEN parameter's
+-- field is the bare metavariable of a @literal@-marked generic. An unmarked generic therefore never
+-- binds a singleton implicitly, however the argument is written.
+proposedLiteralArguments :: Registry -> Map Text Text -> NormalizedType -> NormalizedType -> NormalizedType
+proposedLiteralArguments registry = refineLiteralArgumentFields wantsLiteral
+  where
+    literalMetavars = Map.keysSet (Map.filter (.bindsLiteral) registry)
+    wantsLiteral fieldType = isJust (asTypeMetavar literalMetavars fieldType)
+
+-- | The dispose-step refinement: a field is checked at its singleton exactly when the RESOLVED
+-- parameter's field mentions a string literal singleton — a written literal annotation, an explicit
+-- @f["x"]@ instantiation, or a literal binding the propose step just solved. A plain-@string@
+-- parameter keeps seeing @string@, so error messages for existing programs are unchanged.
+checkedLiteralArguments :: Map Text Text -> NormalizedType -> NormalizedType -> NormalizedType
+checkedLiteralArguments = refineLiteralArgumentFields wantsLiteral
+  where
+    wantsLiteral fieldType = case fieldType.baseType of
+      NormalizedBaseTypeLayered layer -> case layer.stringLayer of
+        StringSlotLiterals values -> not (Set.null values)
+        StringSlotString -> False
+      NormalizedBaseTypeUnknown -> False
+
+------------------------------------------------------------------------------------------------
+-- Partial application (@f(x = _, y = e)@)
+------------------------------------------------------------------------------------------------
+
+-- | Type a partial application: resolve the callee's function exactly as a full call would (generic
+-- arguments inferred from the SUPPLIED fields), check the supplied arguments and the
+-- required-parameter completeness, and yield the RESIDUAL function type — the callee's parameter
+-- object restricted to the hole labels (each keeping its declared type and optionality), returning
+-- the callee's return type WITH the callee's effect. The partial application itself performs nothing
+-- (no effect is emitted, no world check runs); the residual carries the whole call, and the ordinary
+-- application rules police it when it is eventually called.
+synthPartialApplication ::
+  SourceSpan ->
+  Scheme ->
+  Map Text Text ->
+  List (Text, SourceSpan) ->
+  List (Text, NormalizedType) ->
+  NormalizedAttribute ->
+  Checker (NormalizedType, Map Text SemanticGenericArgument)
+synthPartialApplication sourceSpan scheme literalArguments holes suppliedFields suppliedAttribute = do
+  -- The supplied arguments alone drive generic inference; the object is closed, exactly as a full
+  -- call's, so the inference sees the same shapes it would on the eventual call.
+  let suppliedObject = namedObjectTypeWithRest bottomType suppliedFields
+      suppliedLabels = Set.fromList (fst <$> suppliedFields)
+  (resolved, instantiation) <- resolveCalleeFunction sourceSpan scheme (InferSuppliedLabels suppliedLabels) literalArguments suppliedObject
+  case resolved of
+    -- Already reported by 'resolveCalleeFunction'; degrade to bottom.
+    Nothing -> pure (bottomType, instantiation)
+    Just (functionAttribute, function) -> do
+      residual <- partialResidualType sourceSpan literalArguments holes suppliedFields suppliedAttribute functionAttribute function
+      pure (residual, instantiation)
+
+-- | The residual function type of a partial application over the resolved callee function. Holes
+-- must name declared parameters (K3020 otherwise); the supplied fields plus each hole at exactly its
+-- declared type form ONE closed probe object subsumed under the callee's parameter object — the same
+-- closed-object machinery (and errors) a full call uses, so a wrong supplied type or a required
+-- parameter that is neither supplied nor holed reports as it would on the eventual call.
+partialResidualType ::
+  SourceSpan ->
+  Map Text Text ->
+  List (Text, SourceSpan) ->
+  List (Text, NormalizedType) ->
+  NormalizedAttribute ->
+  NormalizedAttribute ->
+  NormalizedFunction ->
+  Checker NormalizedType
+partialResidualType sourceSpan literalArguments holes suppliedFields suppliedAttribute functionAttribute function = do
+  maybeParameterObject <- partialParameterObject sourceSpan function.argumentType
+  case maybeParameterObject of
+    Nothing -> do
+      reportExpectedShape sourceSpan "a callee with named parameters (required by a `_` hole)" function.argumentType
+      pure bottomType
+    Just parameterObject -> do
+      -- An unknown hole label is reported and dropped from the residual, so downstream checking
+      -- continues with the parameters that do exist.
+      resolvedHoles <- traverse (lookupHoleField parameterObject) holes
+      let holeFields = Map.fromList (catMaybes resolvedHoles)
+      -- The probe stands in for the eventual full call, so it only makes sense when every hole
+      -- resolved: after a K3020 the dropped hole would read as a missing required parameter and
+      -- cascade a spurious K3001 on top. It runs through the SAME 'checkArgumentShape' core a full
+      -- call uses, so a pure callee lifts across attribute worlds identically here — an
+      -- attribute-bearing supplied argument (a @private@ value baked into the residual) is accepted
+      -- exactly as it would be by the eventual call, rather than rejected against the unlifted
+      -- parameter. The probe carries only the /supplied/ observable attribute: the holes stand in at
+      -- their declared types and contribute no captured value.
+      when (all isJust resolvedHoles) $ do
+        let probeFields = suppliedFields <> [(label, field.normalizedType) | (label, field) <- Map.toList holeFields]
+            -- The probe runs the same dispose-time literal refinement a full call would, so a supplied
+            -- literal against a literal-singleton parameter is accepted here too (holes are untouched:
+            -- they stand in at exactly their declared types and were never written as literals).
+            probeObject = checkedLiteralArguments literalArguments function.argumentType (namedObjectTypeWithRest bottomType probeFields)
+        void (checkArgumentShape sourceSpan functionAttribute function probeObject suppliedAttribute)
+      -- The residual parameter is the callee's parameter object restricted to the hole labels, with
+      -- each field's original 'NormalizedFieldInformation' — so an optional (defaulted) parameter
+      -- stays omittable on the residual. The rest is open, like every agent parameter object.
+      let residualParameter = layeredOf neverLayer {objectLayer = Just NormalizedObject {fields = holeFields, rest = unknownType}}
+      -- The residual's handle carries the callee's handle attribute joined with the captured
+      -- (supplied) arguments' observable attribute: a closure that bakes a private value in is
+      -- itself private at the handle, so a later call cannot launder it. This is deliberately
+      -- coarser than 'applyAgent''s excess computation — the partial site defers the call, so it
+      -- takes the conservative join rather than probing parameter absorption.
+      pure (assembleAgent (joinAttribute functionAttribute suppliedAttribute) residualParameter function.returnType function.effect)
+
+-- | The named parameter object of a callee's argument type, read through the standard "raise to
+-- bounds, sole layer" discipline every shape inspector uses. 'Nothing' when the parameter is not
+-- solely an object — such a callee has no labelled parameters for a hole to name.
+partialParameterObject :: SourceSpan -> NormalizedType -> Checker (Maybe NormalizedObject)
+partialParameterObject sourceSpan parameterType = do
+  raised <- soleLayer sourceSpan (Set.singleton ObjectKind) parameterType
+  pure $ case raised of
+    Just (_, layer) -> layer.objectLayer
+    Nothing -> Nothing
+
+-- | Look one hole's label up in the callee's parameter object; an unknown label is K3020 (the
+-- residual could never receive it) and yields 'Nothing' so the caller drops it.
+lookupHoleField :: NormalizedObject -> (Text, SourceSpan) -> Checker (Maybe (Text, NormalizedFieldInformation))
+lookupHoleField parameterObject (label, holeSpan) = case Map.lookup label parameterObject.fields of
+  Just field -> pure (Just (label, field))
+  Nothing -> do
+    reportType
+      holeSpan
+      (TypeErrorUnknownHoleLabel UnknownHoleLabelErrorInfo {label = label, parameters = Map.keys parameterObject.fields})
+    pure Nothing
 
 -- | The function layer of a type whose base is exactly a function (a scheme body opened to
 -- metavariables), without any bound raising — the open callee is a plain agent type, not a bounded
@@ -1053,6 +1447,35 @@ checkNextStatement nextStmt = do
         modifiers = typedModifiers,
         sourceSpan = nextStmt.sourceSpan
       }
+
+-- | Type a @finally@ finalizer body and enforce the finalizer effect discipline. The body is typed as
+-- an ordinary statement block whose value is discarded, with its inferred effect isolated so it can be
+-- checked on its own. A finalizer runs at instance termination — when the parent may already be
+-- awaiting the instance's cancellation — so its net effect must be within @io@: no request (which would
+-- escalate through that parent and could deadlock against its own cancellation wait), and no control
+-- escape (which has no target there). A request handled locally inside the body is discharged before
+-- this point, so it never appears in the residual checked here. The finalizer's io genuinely happens at
+-- termination, so it joins the enclosing effect row exactly as any statement's effect would (a valid
+-- body is within io, so only its io can contribute).
+checkFinallyStatement :: FinallyStatement Identified -> Checker (FinallyStatement Typed)
+checkFinallyStatement finallyStmt = do
+  (bodyEffect, (typedBody, _)) <- withEffectInference (synthBlock finallyStmt.body)
+  unless (isWithinIoEffect bodyEffect) $ do
+    rendered <- renderSemanticEffect <$> runNormalizer finallyStmt.sourceSpan (denormalizeEffect bodyEffect)
+    reportType finallyStmt.sourceSpan (TypeErrorFinallyEffect FinallyEffectErrorInfo {effect = rendered})
+  when bodyEffect.io (emitEffect finallyStmt.sourceSpan ioEffect)
+  pure FinallyStatement {body = typedBody, sourceSpan = finallyStmt.sourceSpan}
+
+-- | Whether an effect is within @io@: no concrete request, no unresolved effect tail, and no concrete
+-- escape — it performs at most external io. This is @effect ⊆ io@ as a structural predicate; it is
+-- 'isPureEffect' with the one allowance that io itself is permitted.
+isWithinIoEffect :: NormalizedEffect -> Bool
+isWithinIoEffect effect =
+  withinIoRequests effect.requests && not (hasConcreteEscape effect)
+  where
+    withinIoRequests = \case
+      RequestEffectAny -> False
+      RequestEffectRow row -> Map.null row.request && Map.null row.tails
 
 ------------------------------------------------------------------------------------------------
 -- Patterns
@@ -1393,7 +1816,7 @@ subtractCover scrutinee cover = case scrutinee.baseType of
                 -- cover leaves @false@.
                 nullLayer = scrutineeLayer.nullLayer && not coverLayer.nullLayer,
                 numberLayer = if scrutineeLayer.numberLayer <= coverLayer.numberLayer then NumberSlotAbsent else scrutineeLayer.numberLayer,
-                stringLayer = scrutineeLayer.stringLayer && not coverLayer.stringLayer,
+                stringLayer = stringSlotDifference scrutineeLayer.stringLayer coverLayer.stringLayer,
                 booleanLayer = Set.difference scrutineeLayer.booleanLayer coverLayer.booleanLayer,
                 fileLayer = scrutineeLayer.fileLayer && not coverLayer.fileLayer,
                 functionLayer = residualFunction,
@@ -1502,6 +1925,17 @@ processObserved sourceSpan observedAttribute walk = do
 
 synthForExpression :: ForExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthForExpression expression = do
+  -- A parallel `for` runs its iterations concurrently, each advancing the `var` state from the same
+  -- initial value, so an accumulator can never fold across them — the join would keep one iteration's
+  -- final write and silently drop the rest. A program defect, so it is rejected at the entrance
+  -- (K3024, like K3022 / K3023); the loop is still checked as written so its other diagnostics surface.
+  case expression.varBindings of
+    firstBinding : _
+      | expression.parallel ->
+          reportType
+            firstBinding.sourceSpan
+            (TypeErrorParallelForVarBinding ParallelForVarBindingErrorInfo {variableNames = (.name) <$> expression.varBindings})
+    _ -> pure ()
   (typedSource, sourceType) <- synthExpression expression.inBinding.source
   -- A `for` is a control construct: like `if` / `match`, it observes its source, so the source's
   -- attribute carries into the result ('observeResult' over the loop's residual effect enforces that —
@@ -1548,6 +1982,42 @@ synthForExpression expression = do
           varBindings = typedVarBindings,
           body = typedBody,
           thenClause = typedThen,
+          sourceSpan = expression.sourceSpan,
+          typeOf = semantic
+        }
+
+-- | @forever [(var …)] { body }@ types as the union of the @break@ values that exit it — @never@ (the
+-- bottom type) when there is no @break@, so a plain @forever { … }@ still conforms anywhere, exactly like a
+-- @-> never@ call. It is @for@ minus the source, the per-iteration value collection, and the @then@ clause:
+-- like @for@ it establishes a control boundary its own @break@ / @next@ discharge, carries @var@ state
+-- across iterations (a @next … with (…)@ advances it), and re-emits the body's residual effect (performed
+-- every iteration). Unlike @for@ it collects NO value — the @next@'s continue value and the body tail are
+-- both DISCARDED, never mapped into an array — so a long-lived loop's durable state stays flat.
+synthForeverExpression :: ForeverExpression Identified -> Checker (Expression Typed, NormalizedType)
+synthForeverExpression expression = do
+  -- The @var@ state scopes over the body (there is no @then@ clause). Mirrors @for@'s state handling.
+  (typedVarBindings, (typedBody, breakType)) <-
+    withVarBindingsTyped expression.varBindings $ do
+      boundaryId <- freshBoundaryId
+      -- Collect the body's whole effect: its @CONTINUE(forever)@ (a @next@ advancing the state), its
+      -- @EXIT(forever)@ (a @break value@), and any ordinary effects / outer escapes.
+      (bodyEffect, (typedBody, _discardedTail)) <-
+        withEffectInference $
+          enterForBody boundaryId $
+            synthBlock expression.body
+      -- Discharge the loop's own escapes. A @next@ carries no collected value (unlike @for@, whose
+      -- @next@ maps into the result array), so its continue type is discarded — @forever@ yields nothing
+      -- per iteration. A @break@ (@EXIT@) unwinds the loop; its value is the loop's result (@never@ when
+      -- there is no @break@, keeping @forever { }@ typed as @never@). The residual is the loop's effect.
+      let (_discardedContinue, afterContinue) = splitContinue boundaryId bodyEffect
+          (breakType, residualEffect) = splitExit boundaryId afterContinue
+      emitEffect expression.sourceSpan residualEffect
+      pure (typedBody, breakType)
+  typedExpression expression.sourceSpan breakType $ \semantic ->
+    ExpressionForever
+      ForeverExpression
+        { varBindings = typedVarBindings,
+          body = typedBody,
           sourceSpan = expression.sourceSpan,
           typeOf = semantic
         }
@@ -1675,11 +2145,23 @@ data HandlerComponents = HandlerComponents
 -- continuation's return and @E@ from its effect (the handled requests dropped).
 checkHandlerScheme :: HandlerExpression Identified -> Checker (HandlerComponents, Scheme)
 checkHandlerScheme expression = do
+  -- A parallel handler dispatches its request bodies concurrently, so two overlapping bodies would
+  -- each advance the `var` state from the same value and the later write would silently drop the
+  -- earlier one — a lost update; the FIFO dispatch of a sequential handler is exactly what makes
+  -- such state sound. A program defect, so it is rejected at the entrance (K3025, the handler
+  -- sibling of K3024); the handler is still checked as written so its other diagnostics surface.
+  case expression.stateVariables of
+    firstBinding : _
+      | expression.parallel ->
+          reportType
+            firstBinding.sourceSpan
+            (TypeErrorParallelHandlerVarBinding ParallelHandlerVarBindingErrorInfo {variableNames = (.name) <$> expression.stateVariables})
+    _ -> pure ()
   resultId <- freshGenericId
   effectId <- freshGenericId
   let resultVariable = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton resultId, attribute = bottomAttribute}
-      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, upperBound = Nothing}
-      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, upperBound = Nothing}
+      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
+      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
       handlerGenerics =
         GenericParameters
           { parameterNames = [handlerResultParameterName, handlerEffectParameterName],
@@ -1831,7 +2313,15 @@ walkRequestHandler handler =
   -- from its synthetic signature rather than the request environment. 'checkHandlerScheme' then keeps it
   -- out of the continuation's effect row, which is what makes it addable to any handler.
   if isPanicHandler handler
-    then Just <$> walkResolvedRequestHandler handler panicRequestName panicRequestInformation
+    then case handler.parameters of
+      -- Panic is undeclared, so its parameter name is wired in as @msg@ (the message). A single
+      -- differently-named parameter would otherwise fail as a cryptic object-subtype mismatch (K3001) —
+      -- report the specific fix instead and skip the handler.
+      [param]
+        | param.name /= "msg" -> do
+            reportType handler.sourceSpan (TypeErrorPanicHandlerParameter (PanicHandlerParameterErrorInfo {actualName = param.name}))
+            pure Nothing
+      _ -> Just <$> walkResolvedRequestHandler handler panicRequestName panicRequestInformation
     else do
       requestEnv <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
       let resolvedRequest = case handler.typeReference.resolution of
@@ -1841,6 +2331,12 @@ walkRequestHandler handler =
         Nothing -> do
           reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a request"}))
           pure Nothing
+        -- A marker effect resolves in the same (type) namespace but declares no operations, so there is
+        -- nothing a handler could catch: markers are introduced and discharged by signatures alone.
+        Just (_, requestInfo)
+          | requestInfo.marker -> do
+              reportType handler.sourceSpan (TypeErrorWrongReferenceKind (WrongReferenceKindErrorInfo {name = handler.name, expected = "a handleable request (a marker effect declares no operations)"}))
+              pure Nothing
         Just (requestName, requestInfo) -> Just <$> walkResolvedRequestHandler handler requestName requestInfo
 
 -- | Whether a handler clause is the ambient @panic@ catch: the bare (unqualified) name @panic@. Panic is
@@ -1858,7 +2354,8 @@ panicRequestInformation =
     { name = panicRequestName,
       genericParameters = emptyGenericParameters,
       parameterType = namedObjectType [("msg", stringType)],
-      returnType = bottomType
+      returnType = bottomType,
+      marker = False
     }
 
 -- | Walk a request handler whose handled request has been resolved (see 'walkRequestHandler'). Returns
@@ -2264,20 +2761,34 @@ signatureValueScheme ::
 -- on these. Kept in one place so adding a reactor is a single edit here; the runtime's routing must stay
 -- in step with this set.
 externalReactorNames :: List Text
-externalReactorNames = ["ffi", "http"]
+externalReactorNames = ["ffi", "http", "webhook", "mcp", "time", "oauth", "region"]
 
--- | Reject an @external@'s @from "name"@ clause when it names a reactor that does not exist (a typo, or an
--- unimplemented reactor) — K3018, at compile time rather than a silent runtime fallback to the FFI reactor.
--- An absent clause ('Nothing') defaults to the FFI reactor and is always valid.
-checkExternalReactor :: SourceSpan -> Maybe Text -> Checker ()
-checkExternalReactor sourceSpan = \case
+-- | The reactors reserved to the embedded stdlib modules. Each dispatches on the compiled stdlib
+-- externals' fully-qualified keys (@prelude.http.fetch@, @prelude.time.sleep@, @prelude.oauth.token@,
+-- ...), so an external a user module declared would reach it with a key it cannot serve. The one
+-- user-facing channel is @ffi@.
+stdlibOnlyReactorNames :: List Text
+stdlibOnlyReactorNames = ["http", "webhook", "mcp", "time", "oauth", "region"]
+
+-- | Validate an @external@'s @from "name"@ clause, in the module named @declaringModule@: a name outside
+-- 'externalReactorNames' (a typo, an unimplemented reactor) is K3018, and a built-in reactor named by a
+-- user module is K3022 — both at compile time, rather than a runtime dispatch panic (or a silent
+-- fallback to the FFI reactor). An absent clause ('Nothing') defaults to the FFI reactor and is always
+-- valid; the embedded stdlib modules (the reserved names) may name any reactor, since the built-in
+-- reactors exist precisely to serve their compiled externals.
+checkExternalReactor :: SourceSpan -> ModuleName -> Maybe Text -> Checker ()
+checkExternalReactor sourceSpan declaringModule = \case
   Nothing -> pure ()
   Just reactor
-    | reactor `elem` externalReactorNames -> pure ()
-    | otherwise ->
+    | reactor `notElem` externalReactorNames ->
         reportType
           sourceSpan
           (TypeErrorUnknownReactor UnknownReactorErrorInfo {reactor = reactor, known = externalReactorNames})
+    | reactor `elem` stdlibOnlyReactorNames && not (isReservedModuleName declaringModule) ->
+        reportType
+          sourceSpan
+          (TypeErrorReservedReactor ReservedReactorErrorInfo {reactor = reactor})
+    | otherwise -> pure ()
 
 signatureValueScheme genericDeclarations parameters returnType effectExpression performsIo = do
   genericParameters <- boundedGenericParameters genericDeclarations
@@ -2615,7 +3126,13 @@ booleanSingleton :: Bool -> NormalizedType
 booleanSingleton value = layeredOf neverLayer {booleanLayer = Set.singleton value}
 
 stringType :: NormalizedType
-stringType = layeredOf neverLayer {stringLayer = True}
+stringType = layeredOf neverLayer {stringLayer = StringSlotString}
+
+-- | A string literal singleton (@"x"@). Never synthesized for a string literal /expression/ (that
+-- stays @string@); it arises from annotations and from literal-binding generic parameters, where a
+-- call site refines a syntactic literal argument ('literalCallArguments').
+stringLiteralSingleton :: Text -> NormalizedType
+stringLiteralSingleton value = layeredOf neverLayer {stringLayer = StringSlotLiterals (Set.singleton value)}
 
 integerType :: NormalizedType
 integerType = layeredOf neverLayer {numberLayer = NumberSlotInteger}

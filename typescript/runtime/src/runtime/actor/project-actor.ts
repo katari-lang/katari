@@ -6,13 +6,22 @@
 // (in-process api commands, FFI completions) onto the serial bus. Everything is serial; concurrency is the
 // ack model (a parent that fanned out several delegates resumes each branch as its delegateAck lands).
 
-import type { QualifiedName } from "@katari-lang/types";
+import { createHash } from "node:crypto";
+import type { JSONSchema, QualifiedName } from "@katari-lang/types";
 import { createLogger } from "../../lib/logger.js";
 import type { PrimRunner } from "../engine/context.js";
+import { CALL_ERROR } from "../engine/dynamic-dispatch.js";
+import { callableMetadata, conformCallableArgument } from "../engine/interop-prims.js";
+import { blobStoreStringReader } from "../engine/json-value.js";
 import { createProjectStore } from "../engine/store.js";
+import { errorData } from "../engine/throw-signal.js";
 import type { BlobEntry } from "../engine/types.js";
 import type { ReactorName } from "../event/types.js";
-import type { HttpTransport } from "../external/http-transport.js";
+import { type Clock, SystemClock } from "../external/clock.js";
+import type { CredentialStore } from "../external/credentials.js";
+import type { HttpBlobResolver } from "../external/http-body.js";
+import type { HttpBlobProducer, HttpTransport } from "../external/http-transport.js";
+import { type McpTransport, StubMcpTransport } from "../external/mcp-transport.js";
 import type { FfiTransport } from "../external/runner.js";
 import {
   apiRootIdOf,
@@ -20,24 +29,47 @@ import {
   type DelegationId,
   type EscalationId,
   type InstanceId,
+  newBlobId,
   type ProjectId,
   type SnapshotId,
 } from "../ids.js";
 import type { IrSource } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
 import type { Value } from "../value/types.js";
+import { renderConformFailures } from "../value/validation.js";
 import { ApiReactor, type OpenEscalation } from "./api-reactor.js";
 import { CoreReactor } from "./core-reactor.js";
+import { isTransientError, messageOf } from "./failure.js";
 import { FfiReactor } from "./ffi-reactor.js";
 import { HttpReactor } from "./http-reactor.js";
+import { McpReactor, type McpServeCallOutcome, type McpServeToolsOutcome } from "./mcp-reactor.js";
+import { OauthReactor } from "./oauth-reactor.js";
 import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
+import { RegionReactor } from "./region-reactor.js";
 import { ResourcePool } from "./resource-pool.js";
 import { Substrate } from "./substrate.js";
+import { TimeReactor } from "./time-reactor.js";
+import { type WebhookDeliveryOutcome, WebhookReactor } from "./webhook-reactor.js";
 
 // The api root's run-result error and open-escalation shape live with the ApiReactor now; re-exported here
 // so existing importers (tests, callers) keep their entry point.
 export { type OpenEscalation, RunCancelledError } from "./api-reactor.js";
+
+/** One tool an `mcp.serve` endpoint advertises: the served record's key as the published name, and the
+ *  agent's reflected signature (its declared schemas, still `JSONSchema` — the MCP service lowers them
+ *  to the wire shape at its own boundary). */
+export interface McpServedToolMetadata {
+  name: string;
+  description: string;
+  input: JSONSchema;
+  output: JSONSchema;
+}
+
+/** What `listMcpServeTools` resolves to: the advertised tools, or `unknown` for a dead token. */
+export type McpServeToolsDescription =
+  | { kind: "unknown" }
+  | { kind: "tools"; tools: McpServedToolMetadata[] };
 
 export interface ProjectActorDependencies {
   projectId: ProjectId;
@@ -48,8 +80,39 @@ export interface ProjectActorDependencies {
   external: FfiTransport;
   /** The transport the `http` reactor performs built-in `http.fetch` requests through (an in-runtime fetch). */
   http: HttpTransport;
+  /** The transport the `mcp` reactor performs built-in `prelude.mcp.*` calls through (the SDK client).
+   *  Defaults to the loud stub (fine for tests; the facade injects the SDK-backed one). */
+  mcp?: McpTransport;
+  /** The public base URL the dynamically generated endpoints are minted under — `webhook.inbound`'s
+   *  `<base>/inbound/<token>` and `mcp.serve`'s `<base>/mcp/<token>`. One knob for both: they are the
+   *  same public address (KATARI_PUBLIC_URL). Defaults to the local dev address (fine for tests; the
+   *  facade injects the configured one). */
+  publicBaseUrl?: string;
+  /** The wall-clock + timers the `time` reactor reads through (durable `sleep` / `watch`, the `time.now`
+   *  reading). Defaults to the real `SystemClock` (fine in production; tests inject a controllable clock so
+   *  durable time is deterministic and needs no real waits). */
+  clock?: Clock;
+  /** The credential store the `oauth` reactor resolves `oauth.token(name)` calls through (the same
+   *  `credentials` table the mcp transport reads its bearer from). Defaults to the empty store — every
+   *  resolution parks pending authorization — which is fine for tests that never call `oauth.token`. */
+  credentials?: CredentialStore;
   persistence: Persistence;
 }
+
+/** The empty credential store the `oauth` reactor falls back to when the host wires none: nothing is ever
+ *  stored, so every `oauth.token` resolution parks pending authorization. Keeps the actor constructible in
+ *  tests that do not exercise OAuth without threading a store through every one. */
+const EMPTY_CREDENTIAL_STORE: CredentialStore = {
+  async load() {
+    return null;
+  },
+  async save() {
+    return false;
+  },
+  async resolveConfiguredClient() {
+    return null;
+  },
+};
 
 export class ProjectActor {
   private readonly projectId: ProjectId;
@@ -58,6 +121,9 @@ export class ProjectActor {
    *  issued by each run's own permanent run instance, not by this root. */
   private readonly apiRootId: InstanceId;
   private readonly persistence: Persistence;
+  /** The IR source, kept for reflection at the actor's own boundaries (a served MCP tool's advertised
+   *  metadata resolves through the same `callableMetadata` as `reflection.get_metadata`). */
+  private readonly ir: IrSource;
 
   /** The engine reactor: instances, the delegation routing graph, the IR turns. */
   private readonly core: CoreReactor;
@@ -67,6 +133,19 @@ export class ProjectActor {
   private readonly ffi: FfiReactor;
   /** The http reactor: built-in `http.fetch` calls — a `delegate` to it, an in-runtime fetch, its records. */
   private readonly http: HttpReactor;
+  /** The webhook reactor: `webhook.inbound` calls — dynamically generated public endpoints whose deliveries
+   *  become callback delegations. */
+  private readonly webhook: WebhookReactor;
+  /** The mcp reactor: built-in `prelude.mcp.*` calls — a `delegate` to it, the SDK client, its records. */
+  private readonly mcp: McpReactor;
+  /** The time reactor: built-in `prelude.time.*` calls — durable `sleep` / `watch` and the `now` reading. */
+  private readonly time: TimeReactor;
+  /** The oauth reactor: built-in `prelude.oauth.token` calls — on-demand bearer-token resolution, with an
+   *  authorization escalation when the named credential needs a human. */
+  private readonly oauth: OauthReactor;
+  /** The region reactor: built-in `prelude.region.*` calls — the structured-concurrency nursery (`provide`
+   *  opens a scope, later waves' `fork` / `join` / `watch` / `cancel` run fibers inside it). */
+  private readonly region: RegionReactor;
   /** The shared scope/blob resource — reset together with the reactors on a poisoned commit. */
   private readonly pool: ResourcePool;
   /** The bus: the serial mailbox + the one atomic commit per turn, routing inbound events by their `to`. */
@@ -74,17 +153,44 @@ export class ProjectActor {
   /** The injected transports, kept for disposal (their reactors hold them too, but teardown is actor-level). */
   private readonly externalTransport: FfiTransport;
   private readonly httpTransport: HttpTransport;
+  private readonly mcpTransport: McpTransport;
 
   constructor(dependencies: ProjectActorDependencies) {
     this.projectId = dependencies.projectId;
     this.apiRootId = apiRootIdOf(this.projectId);
     this.persistence = dependencies.persistence;
+    this.ir = dependencies.ir;
     this.externalTransport = dependencies.external;
     this.httpTransport = dependencies.http;
+    this.mcpTransport = dependencies.mcp ?? new StubMcpTransport();
     // The shared scope store + the pool that wraps it: the engine reads / writes scopes in place, while every
     // reactor reowns through the same pool (so a run result crosses from a core instance to the api root).
     const store = createProjectStore();
-    this.pool = new ResourcePool(this.projectId, store);
+    // The pool's run resolver for `files.free` (`deleteBlobOwnedInRun`): a `core` engine instance carries its
+    // run in the store; a NON-core owner — a long-lived webhook / mcp serve endpoint call instance a
+    // delivery's residual blob hoisted onto — is resolved from its owning call reactor's received edge. The
+    // reactor fields are read lazily (the closure runs only when a program calls `files.free`, long after
+    // construction), so referencing them before they are assigned below is fine. The api root belongs to no
+    // run (summoned by no delegation), so it resolves to `undefined` — which is exactly why `files.free`
+    // refuses a user-uploaded file. Core is checked first (an O(1) store read), so its large received-edge
+    // index is never scanned.
+    this.pool = new ResourcePool(this.projectId, store, (owner) => {
+      const coreRun = store.instances[owner]?.runId;
+      if (coreRun !== undefined) return coreRun;
+      for (const reactor of [
+        this.ffi,
+        this.http,
+        this.webhook,
+        this.mcp,
+        this.time,
+        this.oauth,
+        this.region,
+      ]) {
+        const run = reactor.runOfInstance(owner);
+        if (run !== undefined) return run;
+      }
+      return undefined;
+    });
     const pool = this.pool;
     this.core = new CoreReactor(
       this.projectId,
@@ -96,10 +202,90 @@ export class ProjectActor {
     );
     // The ffi reactor runs external (FFI) handlers through the injected transport; an external call reaches
     // it as a `delegate` from core's external proxy.
-    this.ffi = new FfiReactor(this.projectId, dependencies.external, pool);
+    this.ffi = new FfiReactor(this.projectId, dependencies.external, pool, dependencies.ir);
     // The http reactor performs built-in `http.fetch` calls through the injected transport (an in-runtime
     // fetch); an http call reaches it as a `delegate` from core's external proxy, exactly like ffi.
     this.http = new HttpReactor(dependencies.http, pool);
+    // Wire how the http transport materialises a `file` request body: at SEND time it reads the blob's bytes
+    // from the store and its content type from the warm catalog (the metadata a slim ref does not carry).
+    // Doing it here — from the actor's own blob store + catalog — keeps the bytes off the value plane, the
+    // durable call record, and the trace; only the handle ever rides those. A `file` body without this wiring
+    // (a bare transport) fails loudly. The content type is read first (a synchronous catalog snapshot), then
+    // the immutable, content-addressed bytes are fetched.
+    const blobResolver: HttpBlobResolver = async (blobId) => {
+      const contentType = store.blobs[blobId]?.contentType ?? "";
+      const bytes = await dependencies.blobs.get(this.projectId, blobId);
+      return { bytes, contentType };
+    };
+    dependencies.http.useBlobResolver(blobResolver);
+    // Wire how a `fetch_file` RESPONSE becomes a project blob — the receive-side twin of the resolver above.
+    // The transport reads the response bytes at the receive boundary; here we store them under a fresh id,
+    // hash them (content-addressed, like every produced blob), and register the blob as owned by the http
+    // call's instance so the reply's `delegateAck` hoists it to the caller, exactly like an FFI / MCP
+    // produced blob. Registering through the serial command turn (`registerProducedBlobOn`) commits the
+    // ownership row BEFORE the transport's completion (which carries only the handle) is processed. A
+    // vanished call reclaims the orphaned bytes and returns `null`, so the transport drops the download.
+    const blobProducer: HttpBlobProducer = async (delegation, bytes, contentType) => {
+      const blobId = newBlobId();
+      const entry: Omit<BlobEntry, "owner"> = {
+        hash: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength,
+        contentType,
+        semanticKind: "file",
+      };
+      await dependencies.blobs.put(this.projectId, blobId, bytes);
+      const registered = await this.registerProducedBlobOn(this.http, delegation, blobId, entry);
+      if (!registered) {
+        // The owning call vanished (cancelled / completed) before its download landed; no row references
+        // these bytes, so drop them rather than orphan them — the same fix `mintAndStoreBlob` applies.
+        await dependencies.blobs.delete(this.projectId, blobId).catch(() => {});
+        return null;
+      }
+      return blobId;
+    };
+    dependencies.http.useBlobProducer(blobProducer);
+    // The one public base both dynamically generated endpoint kinds mint their capability URLs under.
+    const publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
+    // The mcp reactor performs built-in `prelude.mcp.*` calls through the injected transport (the SDK
+    // client); an mcp call reaches it as a `delegate` from core's external proxy, exactly like http. Its
+    // `serve` shape additionally mints inbound endpoints (`<base>/mcp/<token>`) and re-enters the serial
+    // loop for its post-commit work through the scheduler closure — which reads `this.substrate`,
+    // assigned just below, only when work actually runs.
+    this.mcp = new McpReactor(
+      this.mcpTransport,
+      publicBaseUrl,
+      (work) => this.substrate.submit(this.mcp, work),
+      // A direct call's argument tree may hold blob-backed string leaves (lowered through the json prims'
+      // reader) and `file` leaves (base64'd through the same blob resolver the http body materialiser uses).
+      blobStoreStringReader(this.projectId, dependencies.blobs),
+      blobResolver,
+      pool,
+    );
+    // The webhook reactor serves `webhook.inbound` calls: it mints tokens and re-enters the serial loop for
+    // its post-commit work (the subscriber dispatch, synthesised completions) the same way.
+    this.webhook = new WebhookReactor(
+      publicBaseUrl,
+      (work) => this.substrate.submit(this.webhook, work),
+      pool,
+    );
+    // The time reactor serves `prelude.time.*` calls: it reads the injected clock and arms its durable timers,
+    // re-entering the serial loop for a fired timer's post-commit work (a resolve, a watch tick) the same way.
+    this.time = new TimeReactor(
+      dependencies.clock ?? new SystemClock(),
+      (work) => this.substrate.submit(this.time, work),
+      pool,
+    );
+    // The oauth reactor resolves `prelude.oauth.token` calls through the credential store, re-entering the
+    // serial loop for its post-commit work (an async token resolution's settle / park / throw) the same way.
+    this.oauth = new OauthReactor(
+      dependencies.credentials ?? EMPTY_CREDENTIAL_STORE,
+      (work) => this.substrate.submit(this.oauth, work),
+      pool,
+    );
+    // The region reactor serves `prelude.region.*` calls: an in-runtime nursery scheduler with no external
+    // process, re-entering the serial loop for a provide's post-commit work (the continuation dispatch, a
+    // synthesised completion) through the scheduler closure the same way.
+    this.region = new RegionReactor((work) => this.substrate.submit(this.region, work), pool);
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
     // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
     this.api = new ApiReactor(
@@ -112,6 +298,11 @@ export class ProjectActor {
       api: this.api,
       ffi: this.ffi,
       http: this.http,
+      webhook: this.webhook,
+      mcp: this.mcp,
+      time: this.time,
+      oauth: this.oauth,
+      region: this.region,
     };
     this.substrate = new Substrate(
       this.projectId,
@@ -147,6 +338,10 @@ export class ProjectActor {
     dependencies.http.onComplete((completion) =>
       this.substrate.submit(this.http, () => this.http.complete(completion)),
     );
+    // An mcp transport completion re-enters the same way, as an mcp reactor turn.
+    this.mcpTransport.onComplete((completion) =>
+      this.substrate.submit(this.mcp, () => this.mcp.complete(completion)),
+    );
   }
 
   // ─── api root commands (exposed for in-process callers; the logic lives in the ApiReactor) ──────────
@@ -161,6 +356,48 @@ export class ProjectActor {
     name?: string,
   ): { run: InstanceId; result: Promise<Value>; started: Promise<void> } {
     return this.api.startRun(qualifiedName, snapshot, argument, name ?? qualifiedName);
+  }
+
+  /** Validate a run's entry at the run-start boundary — the run-start API is an external input boundary like
+   *  a webhook, so BOTH an unresolvable entry agent AND a malformed argument are rejected (a 400) BEFORE the
+   *  run starts, rather than reaching core's acceptance surface as a pre-birth panic whose raiser would be
+   *  the PERMANENT run instance (which must never own an ephemeral escalation row — it is the run's result
+   *  container). Returns a rejection message, or `null` when the entry resolves and the argument conforms.
+   *  A *transient* resolution failure (an IR-store read blip) is NOT a rejection but must NOT defer-and-launch
+   *  either: launching an UNVALIDATED run would let a deterministic pre-birth failure at core wedge it (its
+   *  raiser being the permanent run instance, whose loud throw drops the delegate). So the transient error is
+   *  rethrown for the caller to surface as retryable (a 503) — the run is never launched unvalidated. */
+  async conformRunArgument(
+    qualifiedName: QualifiedName,
+    snapshot: SnapshotId,
+    argument: Value | null,
+  ): Promise<string | null> {
+    try {
+      // A private agent is handle-private: the compiler permits a call to it only from within a private
+      // world, and the run-start API is the runtime's operator-facing boundary — outside any world — so
+      // starting one here would surface its private escalations to the operator. Refuse it up front, the
+      // same 400 an unresolvable entry gets. Delegation / first-class resolution still resolve the entry
+      // (the block is untouched), so only this boundary is closed. `preload` first, so `locate` (a sync
+      // read of the loaded snapshot) can see the entry; a transient preload failure funnels through the
+      // catch as retryable, exactly as `conformCallableArgument`'s own preload would.
+      await this.ir.preload(snapshot);
+      if (this.ir.locate(snapshot, qualifiedName).private) {
+        return `the agent ${qualifiedName} is private and cannot be started from the runtime boundary`;
+      }
+      const failures = await conformCallableArgument(
+        { kind: "agent", name: qualifiedName, snapshot },
+        argument,
+        this.ir,
+      );
+      return failures === null
+        ? null
+        : `the run argument does not conform to ${qualifiedName}'s input schema — ${renderConformFailures(failures)}`;
+    } catch (error) {
+      // A transient IR-store blip is retryable — rethrow it (the caller maps it to a 503) rather than defer,
+      // which would launch an unvalidated run. A deterministic failure means the entry does not exist → 400.
+      if (isTransientError(error)) throw error;
+      return `the entry agent ${qualifiedName} cannot be resolved: ${messageOf(error)}`;
+    }
   }
 
   /** Request a run's cancellation (terminate cascade + durable cancel reason). Resolves once the cancel
@@ -186,20 +423,43 @@ export class ProjectActor {
     return this.api.deleteUploadedBlob(blobId);
   }
 
-  /** Register a blob an FFI handler produced mid-call as owned by that call's instance (bytes already in the
-   *  BlobStore) — so the call's return ascends it to the core caller, and a handler that dies before returning
-   *  has it reclaimed at teardown. Runs as a serial command turn so the ownership row commits before the
-   *  handler's result is processed; resolves once that commit is durable. Resolves to whether the blob was
-   *  registered (`false` when the call already vanished, so the caller can delete the orphaned bytes). */
+  /** Register a blob an FFI handler produced mid-call as owned by that call's instance (bytes already in
+   *  the BlobStore) — so the call's return ascends it to the core caller, and a handler that dies before
+   *  returning has it reclaimed at teardown. See `registerProducedBlobOn` for the commit contract. */
   registerProducedBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): Promise<boolean> {
+    return this.registerProducedBlobOn(this.ffi, delegation, blobId, entry);
+  }
+
+  /** Like `registerProducedBlob`, for a blob the MCP transport produced from a tool result's image
+   *  content: owned by that mcp call's instance, so the result's `delegateAck` ascends it to the caller. */
+  registerProducedMcpBlob(
+    delegation: DelegationId,
+    blobId: BlobId,
+    entry: Omit<BlobEntry, "owner">,
+  ): Promise<boolean> {
+    return this.registerProducedBlobOn(this.mcp, delegation, blobId, entry);
+  }
+
+  /** The shared contract behind the produced-blob entry points — the FFI handler's mid-call upload, the MCP
+   *  tool result's image, and the `http.fetch_file` download's blob producer (they differ only in which call
+   *  reactor owns the delegation): run as a serial command turn so the ownership row commits durably before
+   *  the transport's completion (which carries the blob's handle in its result) is processed. Resolves to
+   *  whether the blob was registered — `false` when the call already vanished, so the caller can delete
+   *  the orphaned bytes. */
+  private registerProducedBlobOn(
+    reactor: FfiReactor | McpReactor | HttpReactor,
     delegation: DelegationId,
     blobId: BlobId,
     entry: Omit<BlobEntry, "owner">,
   ): Promise<boolean> {
     let registered = false;
     return this.substrate
-      .enqueueCommand(this.ffi, () => {
-        registered = this.ffi.registerProducedBlob(delegation, blobId, entry);
+      .enqueueCommand(reactor, () => {
+        registered = reactor.registerProducedBlob(delegation, blobId, entry);
       })
       .then(() => registered);
   }
@@ -207,6 +467,114 @@ export class ProjectActor {
   /** The run-root escalations currently awaiting an answer. */
   listOpenEscalations(): OpenEscalation[] {
     return this.api.listOpenEscalations();
+  }
+
+  /** Deliver one inbound webhook POST to the endpoint serving `token`: the webhook reactor converts it into
+   *  a delegation of the endpoint's callback on a serial turn, and the returned promise resolves with the
+   *  callback's outcome (or `unknown` / `gone` for a dead endpoint) once it settles. The body is
+   *  pre-validated against the callback's declared input schema first, so a MALFORMED delivery is a
+   *  per-request 400 and the endpoint keeps serving — only a genuine failure while the callback RUNS proxies
+   *  up and drops the endpoint. */
+  async deliverWebhook(token: string, argument: Value): Promise<WebhookDeliveryOutcome> {
+    const callback = await this.webhookCallbackOf(token);
+    if (callback !== undefined) {
+      const rejection = await this.boundaryRejection(callback, argument);
+      if (rejection !== null) return { kind: "throw", value: rejection };
+    }
+    return new Promise((resolve) => {
+      this.substrate.submit(this.webhook, () => this.webhook.deliver(token, argument, resolve));
+    });
+  }
+
+  /** The callback value the webhook endpoint serving `token` holds, read on a serial turn — the seam the
+   *  delivery pre-validation resolves the declared input schema from (the actor resolves schemas, a reactor
+   *  turn cannot await), mirroring how the mcp listing reads its served entries. */
+  private webhookCallbackOf(token: string): Promise<Value | undefined> {
+    return new Promise((resolve) => {
+      this.substrate.submit(this.webhook, () => resolve(this.webhook.callbackFor(token)));
+    });
+  }
+
+  /** Pre-validate an external delivery / run argument against a served callable's DECLARED input schema (the
+   *  same `callableMetadata` seam the mcp listing uses). Returns the `reflection.call_error` value to answer
+   *  the request with on a mismatch — which each user-facing boundary maps to its own 400 / invalid-params —
+   *  or `null` when the argument conforms. A genuine failure while the callee RUNS is a separate concern (it
+   *  proxies up); this catches only a malformed request before anything runs. */
+  private async boundaryRejection(value: Value, argument: Value | null): Promise<Value | null> {
+    let failures: Awaited<ReturnType<typeof conformCallableArgument>>;
+    try {
+      failures = await conformCallableArgument(value, argument, this.ir);
+    } catch {
+      // A served value that is not callable / cannot be resolved: we cannot pre-validate it, so fall through
+      // to the reactor's own dispatch — which rejects it gracefully as a per-request error — rather than let
+      // the resolution throw surface as a 500. (Mirrors `dispatchCallable`'s own gracefulness.)
+      return null;
+    }
+    return failures === null
+      ? null
+      : errorData(
+          CALL_ERROR,
+          `the argument does not conform to the input schema — ${renderConformFailures(failures)}`,
+        );
+  }
+
+  /** Whether a live `mcp.serve` endpoint holds `token` — the MCP `initialize` liveness probe (cheap: the
+   *  reactor read runs on a serial turn, no metadata is resolved). */
+  async probeMcpServe(token: string): Promise<boolean> {
+    const outcome = await this.mcpServeToolEntries(token);
+    return outcome.kind === "tools";
+  }
+
+  /** The tools a live `mcp.serve` endpoint advertises, for MCP `tools/list`: each served record entry's
+   *  metadata resolved through the same `callableMetadata` as `reflection.get_metadata` — the record key
+   *  is the published name (overriding the callee's own), the schemas are the agent's declared signature. */
+  async listMcpServeTools(token: string): Promise<McpServeToolsDescription> {
+    const outcome = await this.mcpServeToolEntries(token);
+    if (outcome.kind === "unknown") return { kind: "unknown" };
+    const tools: McpServedToolMetadata[] = [];
+    for (const entry of outcome.entries) {
+      const metadata = await callableMetadata(entry.value, this.ir);
+      tools.push({
+        name: entry.name,
+        description: metadata.description,
+        input: metadata.input,
+        output: metadata.output,
+      });
+    }
+    return { kind: "tools", tools };
+  }
+
+  /** Deliver one MCP `tools/call` to the endpoint serving `token`: the mcp reactor converts it into a
+   *  delegation of the served record's agent on a serial turn, and the returned promise resolves with
+   *  the agent's outcome (or the dead-endpoint / unknown-tool variants) once it settles. */
+  async deliverMcpServeCall(
+    token: string,
+    tool: string,
+    argument: Value,
+  ): Promise<McpServeCallOutcome> {
+    // Pre-validate the argument against the served tool's declared input schema (resolved actor-side through
+    // the same `callableMetadata` seam as the listing). A malformed call is a per-request invalid-params and
+    // the endpoint keeps serving; a genuine failure while the tool RUNS still proxies up. An unknown token /
+    // tool falls through to `serveCall`, which answers it.
+    const entries = await this.mcpServeToolEntries(token);
+    if (entries.kind === "tools") {
+      const entry = entries.entries.find((candidate) => candidate.name === tool);
+      if (entry !== undefined) {
+        const rejection = await this.boundaryRejection(entry.value, argument);
+        if (rejection !== null) return { kind: "throw", value: rejection };
+      }
+    }
+    return new Promise((resolve) => {
+      this.substrate.submit(this.mcp, () => this.mcp.serveCall(token, tool, argument, resolve));
+    });
+  }
+
+  /** The reactor-side read behind the two listing entry points: the served record's entries, resolved
+   *  on a serial turn (a pure read — the turn only guarantees a consistent view of the warm calls). */
+  private mcpServeToolEntries(token: string): Promise<McpServeToolsOutcome> {
+    return new Promise((resolve) => {
+      this.substrate.submit(this.mcp, () => resolve(this.mcp.serveTools(token)));
+    });
   }
 
   /** Activate a (possibly recovered) actor: reload persisted state and reconcile in-flight external work,
@@ -223,6 +591,7 @@ export class ProjectActor {
   dispose(): void {
     this.externalTransport.close();
     this.httpTransport.close();
+    this.mcpTransport.close();
     this.api.poisonRunPromises(new Error("the project was deleted"));
   }
 
@@ -241,6 +610,11 @@ export class ProjectActor {
     this.api.reset();
     this.ffi.reset();
     this.http.reset();
+    this.webhook.reset();
+    this.mcp.reset();
+    this.time.reset();
+    this.oauth.reset();
+    this.region.reset();
     this.pool.reset();
     await this.persistence.load(this.projectId, async (loader) => {
       // The reactors read disjoint durable state through the loader, so the pure-read loads run concurrently.
@@ -249,7 +623,24 @@ export class ProjectActor {
       // run only after the pure reads have succeeded — but concurrently with each other. Both are
       // at-most-once: work the transport still holds is left running (a warm reset), gone work fails as a
       // panic (never re-run), a cancelling call re-aborts.
-      await Promise.all([this.ffi.load(loader), this.http.load(loader)]);
+      // The webhook load re-registers each endpoint's token — no external process to reconcile with, so
+      // (unlike ffi / http) a webhook call survives a restart completely.
+      // The time load re-arms each call's durable timer (a passed deadline fires at once) — like webhook,
+      // there is no external process to reconcile, so a time call survives a restart completely.
+      // The oauth load, like time, has no external process to reconcile: a reloaded resolution re-resolves
+      // (at-most-once-safe), and a parked call reconstructs from its open authorize escalation row.
+      // The region load, like time / webhook, has no external process to reconcile: a reloaded provide
+      // re-registers its scope and resumes (or re-dispatches) its continuation, surviving the restart
+      // completely.
+      await Promise.all([
+        this.ffi.load(loader),
+        this.http.load(loader),
+        this.webhook.load(loader),
+        this.mcp.load(loader),
+        this.time.load(loader),
+        this.oauth.load(loader),
+        this.region.load(loader),
+      ]);
       // Replay the undrained outbox: events produced before the crash but not yet consumed.
       for (const message of await loader.outbox.pending()) {
         this.substrate.enqueueOutbox(message.event, message.seq);
