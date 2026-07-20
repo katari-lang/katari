@@ -195,6 +195,20 @@ describe("prelude.json", () => {
     await expect(run("prelude.json.validate", { value }, contextWithT({}))).resolves.toEqual(value);
   });
 
+  test("schema_of[T] reifies the instantiated schema as a plain document value", async () => {
+    const reified = await run("prelude.reflection.schema_of", {}, contextWithT(POINT));
+    expect(valueToJson(reified, "reveal")).toEqual({
+      type: "object",
+      properties: { x: { type: "integer" }, y: { type: "integer" } },
+      required: ["x", "y"],
+      additionalProperties: true,
+    });
+  });
+
+  test("schema_of without a [T] instantiation fails loud (stale-compiler IR, not a silent {})", async () => {
+    await expect(run("prelude.reflection.schema_of", {})).rejects.toThrow(/recompile/);
+  });
+
   test("stringify renders a MIXED tree's canonical form (data nests, file becomes $katari_ref, keys verbatim)", async () => {
     const mixed: Value = {
       kind: "record",

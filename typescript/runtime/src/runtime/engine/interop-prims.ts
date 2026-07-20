@@ -445,6 +445,11 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       },
     };
   },
+  "prelude.reflection.schema_of": (_argument, context) => {
+    // Reify T's schema as a plain document value — the exact schema `json.validate[T]` checks
+    // against, rendered the same way `get_metadata` embeds a callable's input / output.
+    return literalLift(schemaToJson(instantiatedSchema(context, "reflection.schema_of")));
+  },
   "prelude.reflection.call_agent": () => {
     // Unreachable by construction: `CoreReactor.onDelegate` unwraps a `call_agent` delegate before
     // any instance is summoned, so this body block never runs.

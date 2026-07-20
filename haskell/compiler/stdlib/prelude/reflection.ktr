@@ -38,6 +38,14 @@ instantiated with `[T]` yields schemas specialised to the instantiation; a runti
 the name / description / input schema its provider declared."
 primitive agent get_metadata(@"The callable value to inspect." value: agent never -> unknown with all) -> agent_metadata
 
+@"Reify T's JSON Schema as a plain document value — the same schema `json.validate[T]` checks a value
+against and `get_metadata` embeds for a callable's input / output. The reified schema is what a type
+looks like FROM OUTSIDE (an AI told what shape to produce, a tool list assembled by hand): an object
+type lists its fields under `required`, a data value nests under `$katari_constructor` /
+`$katari_value`, a `file` is its `$katari_ref` handle object. Instantiate T explicitly — it appears
+nowhere in the signature, so it can never be inferred."
+primitive agent schema_of[T]() -> unknown
+
 @"A dynamic dispatch failed before the target ran: the target is not a callable, or `args` does not
 conform to its input schema (`message` names the offending path). Thrown by `call_agent`."
 data call_error(@"The non-callable kind, or the offending path of the schema mismatch." message: string)
