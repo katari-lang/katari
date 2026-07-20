@@ -1,0 +1,437 @@
+# One workflow cuts an entire `v*` release, and the public GitHub Release is the LAST thing it does.
+# build hands the platform binaries to the downstream jobs as workflow artifacts (not through the
+# Release), every channel — npm, the GHCR runtime image, Open VSX, the VS Marketplace — publishes,
+# and only once they have all succeeded does `finalize` create the GitHub Release with every asset
+# attached. So a half-published release is never visible: if any channel fails, there is no Release.
+#
+# Replaces the former fan-out (release-katari / release-npm / release-katari-runtime / release-vsix /
+# publish-vsix-marketplace), which created the Release first and hung the rest off it.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (vX.Y.Z[-prerelease])"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-versions:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "release: '$TAG' is not a vX.Y.Z[-prerelease] tag" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # A suffixed tag (…-rc1) is a prerelease: npm gets a non-latest dist-tag, the runtime image
+          # skips :latest, and the extension is not pushed to the Marketplace (vsce rejects a semver
+          # prerelease suffix at publish time).
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - name: Verify the tree matches the tag
+        run: node scripts/verify-versions.mjs --tag "${{ steps.tag.outputs.tag }}"
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+
+  build:
+    needs: verify-versions
+    strategy:
+      matrix:
+        include:
+          # Must stay in sync with scripts/versions-common.mjs BINARY_PLATFORMS and the shim's
+          # supported set (typescript/cli/bin/katari.mjs).
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-14
+            platform: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: "9.6.7"
+          enable-stack: true
+          stack-version: "3.7.1"
+
+      - name: Resolve cache key inputs
+        id: cache-key
+        shell: bash
+        run: echo "snapshot=$(grep '^snapshot:' stack.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ~/.stack
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.stack-root }}
+          key: ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'haskell/**/package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-stack-v2-${{ steps.cache-key.outputs.snapshot }}-
+
+      - name: Build
+        run: stack build katari-cli:katari katari-lsp:katari-lsp --copy-bins --local-bin-path ./bin
+
+      - name: Strip (linux)
+        if: runner.os == 'Linux'
+        run: strip ./bin/katari ./bin/katari-lsp
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          # The CLI tarball (consumed by publish-npm) and the LSP tarball (consumed by package-vsix)
+          # each hold a single binary; distinct name prefixes keep the two consumers' globs disjoint.
+          CLI_TARBALL="katari-$VERSION-${{ matrix.platform }}.tar.gz"
+          LSP_TARBALL="katari-lsp-$VERSION-${{ matrix.platform }}.tar.gz"
+          tar czf "$CLI_TARBALL" -C ./bin katari
+          tar czf "$LSP_TARBALL" -C ./bin katari-lsp
+          shasum -a 256 "$CLI_TARBALL" > "$CLI_TARBALL.sha256"
+          shasum -a 256 "$LSP_TARBALL" > "$LSP_TARBALL.sha256"
+          echo "cli_tarball=$CLI_TARBALL" >> "$GITHUB_OUTPUT"
+          echo "lsp_tarball=$LSP_TARBALL" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      - name: Upload the CLI tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: |
+            ${{ steps.package.outputs.cli_tarball }}
+            ${{ steps.package.outputs.cli_tarball }}.sha256
+
+      - name: Upload the LSP tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-${{ matrix.platform }}
+          path: |
+            ${{ steps.package.outputs.lsp_tarball }}
+            ${{ steps.package.outputs.lsp_tarball }}.sha256
+
+  publish-npm:
+    needs: [verify-versions, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing (OIDC) — no NPM_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - name: Resolve version and dist-tag
+        id: version
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          # Stable -> latest; a pre-release publishes under its identifier (rc, beta, ...) so
+          # `npm install @katari-lang/cli` never resolves to one by accident.
+          if [[ "$VERSION" == *-* ]]; then
+            SUFFIX="${VERSION#*-}"
+            DIST_TAG="${SUFFIX%%[.0-9]*}"
+            DIST_TAG="${DIST_TAG:-next}"
+          else
+            DIST_TAG="latest"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      # Node 24+: npm >= 11.5.1 is required for OIDC Trusted Publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --filter "./typescript/*" run build
+
+      - name: Download the CLI binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: .binaries
+          merge-multiple: true
+
+      - name: Stage the binary packages
+        run: node scripts/stage-binary-packages.mjs --version "${{ steps.version.outputs.version }}"
+
+      - name: Inject the shim's optionalDependencies
+        run: node scripts/bump-versions.mjs --version "${{ steps.version.outputs.version }}"
+
+      - name: Publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Library packages first, then the platform binaries, then the shim that ties them
+          # together — so a partially failed publish never leaves the shim pointing at nothing.
+          for dir in typescript/types typescript/port typescript/runtime typescript/bundle typescript/mcp; do
+            (cd "$dir" && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
+          done
+          for dir in .staged/*/; do
+            (cd "$dir" && npm publish --access public --tag "$DIST_TAG")
+          done
+          (cd typescript/cli && pnpm publish --access public --no-git-checks --tag "$DIST_TAG")
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist-tag }}
+
+  runtime-image:
+    needs: verify-versions
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        run: |
+          VERSION="${TAG#v}"
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/$OWNER/katari"
+          TAGS="$IMAGE:$VERSION"
+          # `:latest` moves only on a stable release, so a pre-release never becomes the default pull.
+          if [[ "$VERSION" != *-* ]]; then
+            TAGS="$TAGS,$IMAGE:latest"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: typescript/runtime/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  package-vsix:
+    needs: [verify-versions, build]
+    runs-on: ubuntu-22.04
+    strategy:
+      # One platform-specific VSIX per binary, same targets as the build matrix. The VSIX is just a
+      # zip, so a Linux runner can package the darwin-arm64 target too (it only bundles that binary).
+      matrix:
+        platform: [linux-x64, darwin-arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Download the katari-lsp binary for this platform
+        uses: actions/download-artifact@v4
+        with:
+          name: lsp-${{ matrix.platform }}
+          path: .lsp
+
+      - name: Bundle the server binary into the extension
+        shell: bash
+        run: |
+          # Place it where the extension resolves the bundled server (typescript/vscode/bin/katari-lsp);
+          # .vscodeignore keeps bin/ in the VSIX, so `vsce package` ships it.
+          mkdir -p typescript/vscode/bin
+          tar xzf ".lsp/katari-lsp-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz" -C typescript/vscode/bin katari-lsp
+          chmod +x typescript/vscode/bin/katari-lsp
+
+      - name: Package the platform VSIX
+        id: package
+        shell: bash
+        run: |
+          VSIX="katari-vscode-${{ steps.version.outputs.version }}-${{ matrix.platform }}.vsix"
+          # `vsce package` runs `vscode:prepublish` (the esbuild bundle) itself; the bundled binary in
+          # bin/ is picked up because .vscodeignore does not exclude it.
+          pnpm --filter katari-vscode exec vsce package \
+            --no-dependencies \
+            --target "${{ matrix.platform }}" \
+            --out "$GITHUB_WORKSPACE/$VSIX"
+          echo "vsix=$VSIX" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.platform }}
+          path: ${{ steps.package.outputs.vsix }}
+
+  publish-ovsx:
+    needs: [verify-versions, package-vsix]
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        platform: [linux-x64, darwin-arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Download the VSIX for this platform
+        uses: actions/download-artifact@v4
+        with:
+          name: vsix-${{ matrix.platform }}
+          path: .vsix
+
+      - name: Publish to Open VSX
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_TOKEN }}
+        run: |
+          VSIX=".vsix/katari-vscode-${{ steps.version.outputs.version }}-${{ matrix.platform }}.vsix"
+          # --skip-duplicate keeps a re-run idempotent (a version+target already on Open VSX is a no-op).
+          npx --yes ovsx publish "$VSIX" --pat "$OVSX_PAT" --skip-duplicate
+
+  publish-marketplace:
+    needs: [verify-versions, package-vsix]
+    # vsce rejects a semver prerelease suffix outright, so the Marketplace step runs on stable tags
+    # only. (The VSIX is still built and attached to the Release for prereleases.)
+    if: needs.verify-versions.outputs.prerelease == 'false'
+    runs-on: ubuntu-22.04
+    # The federated credential in Entra ID is scoped to this environment; azure/login trades the
+    # workflow's OIDC token for a Marketplace-publishing Azure identity, so no PAT is stored.
+    environment: vscode-marketplace
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        platform: [linux-x64, darwin-arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-versions.outputs.tag }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.verify-versions.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Download the VSIX for this platform
+        uses: actions/download-artifact@v4
+        with:
+          name: vsix-${{ matrix.platform }}
+          path: .vsix
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Publish to the VS Marketplace
+        shell: bash
+        run: |
+          VSIX=".vsix/katari-vscode-${{ steps.version.outputs.version }}-${{ matrix.platform }}.vsix"
+          # --azure-credential uses the identity azure/login established; --packagePath publishes the
+          # already-built VSIX (no repackage); --skip-duplicate makes a re-run a no-op.
+          pnpm --filter katari-vscode exec vsce publish \
+            --azure-credential \
+            --packagePath "$GITHUB_WORKSPACE/$VSIX" \
+            --skip-duplicate
+
+  finalize:
+    # The Release is cut here and nowhere else — only once every channel that had to run has. A
+    # skipped Marketplace (prerelease) is tolerated; a failure anywhere upstream leaves no Release.
+    needs: [verify-versions, publish-npm, runtime-image, publish-ovsx, publish-marketplace]
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      needs.runtime-image.result == 'success' &&
+      needs.publish-ovsx.result == 'success' &&
+      (needs.publish-marketplace.result == 'success' || needs.publish-marketplace.result == 'skipped')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download every release asset
+        uses: actions/download-artifact@v4
+        with:
+          path: .assets
+          merge-multiple: true
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify-versions.outputs.tag }}
+          prerelease: ${{ needs.verify-versions.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: .assets/*
