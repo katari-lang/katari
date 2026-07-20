@@ -46,9 +46,10 @@ runServer = do
         LSP.options =
           LSP.defaultOptions
             { LSP.optTextDocumentSync = Just textSyncOptions,
-              -- Auto-trigger completion after `.` (member / field access) and `(` (call-argument
-              -- label); without these the client only requests completion on explicit invocation.
-              LSP.optCompletionTriggerCharacters = Just ['.', '(']
+              -- Auto-trigger completion after `.` (member / field access), `(` (call-argument
+              -- label) and `,` (the next argument's label); without these the client only requests
+              -- completion on explicit invocation.
+              LSP.optCompletionTriggerCharacters = Just ['.', '(', ',']
             }
       }
   where

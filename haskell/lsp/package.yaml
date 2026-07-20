@@ -35,6 +35,7 @@ library:
     - Katari.LSP.Server
     - Katari.LSP.State
     - Katari.LSP.Convert
+    - Katari.LSP.CompletionContext
     - Katari.LSP.Handlers.Document
     - Katari.LSP.Handlers.Hover
     - Katari.LSP.Handlers.Definition
@@ -51,6 +52,20 @@ executables:
       - -with-rtsopts=-N
     dependencies:
       - katari-lsp
+
+tests:
+  lsp-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - katari-lsp
+      - hspec
+    build-tools:
+      - hspec-discover
 
 default-extensions:
   - DataKinds

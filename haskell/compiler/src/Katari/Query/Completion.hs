@@ -17,7 +17,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.Id (TypeResolution (..), VariableResolution (..))
-import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.ModuleName (ModuleName, covers, lastSegment, moduleNameFromSegments, renderModuleName)
 import Katari.Data.SemanticType (FieldInformation (..), SemanticType, renderSemanticType)
 import Katari.Data.SourceSpan (Position)
 import Katari.Identifier (defaultImportScope)
@@ -60,7 +60,10 @@ data CompletionItem = CompletionItem
     -- | Short type / signature line shown next to the label.
     detail :: Maybe Text,
     -- | The declaration's doc annotation, when present.
-    documentation :: Maybe Text
+    documentation :: Maybe Text,
+    -- | What accepting the item inserts, when that differs from the label — a parameter label
+    -- inserts @name = @ so the caller lands ready to type the argument value.
+    insertText :: Maybe Text
   }
   deriving stock (Eq, Show)
 
@@ -85,7 +88,7 @@ completionsAt snapshot moduleName position =
         | (name, resolution) <- Map.toAscList scope.typeBindings
       ]
     moduleItems =
-      [ CompletionItem {label = name, kind = CompletionKindModule, detail = Nothing, documentation = Nothing}
+      [ moduleItem name
         | (name, _) <- Map.toAscList scope.moduleBindings
       ]
 
@@ -137,12 +140,21 @@ resolveDottedPath snapshot moduleName position path = case Text.splitOn "." path
 resolveInModule :: QuerySnapshot -> ModuleName -> List Text -> Maybe Anchor
 resolveInModule snapshot referencedModule = \case
   [] -> Just (AnchorModule referencedModule)
-  segment : rest -> do
-    interface <- Map.lookup referencedModule snapshot.moduleInterfaces
-    exported <- Map.lookup segment interface.exports
-    resolution <- exported.variable
-    anchorType <- typeOfVariableResolution snapshot referencedModule resolution
-    chaseFields anchorType rest
+  segment : rest -> case exportedResolution segment of
+    Just resolution -> do
+      anchorType <- typeOfVariableResolution snapshot referencedModule resolution
+      chaseFields anchorType rest
+    -- Not an export: the segment may name a submodule (@prelude.oauth@, @ai.types@), which has an
+    -- interface of its own but no entry in the parent's exports.
+    Nothing -> do
+      let submodule = submoduleOf referencedModule segment
+      _ <- Map.lookup submodule snapshot.moduleInterfaces
+      resolveInModule snapshot submodule rest
+  where
+    exportedResolution segment = do
+      interface <- Map.lookup referencedModule snapshot.moduleInterfaces
+      exported <- Map.lookup segment interface.exports
+      exported.variable
 
 -- | Walk the remaining path segments through object fields.
 chaseFields :: SemanticType -> List Text -> Maybe Anchor
@@ -159,21 +171,42 @@ typeOfVariableResolution snapshot moduleName = \case
   VariableResolutionQualifiedName qualifiedName ->
     topLevelValueTypeOf snapshot qualifiedName
 
--- | A module's exports as completion items. A name exporting both a value and a type (a request /
+-- | A module's exports as completion items, followed by its direct submodules (@prelude.@ lists
+-- @string@, @oauth@, ... alongside @throw@). A name exporting both a value and a type (a request /
 -- data declaration) yields one item, classified by its value side.
 completionsOfModule :: QuerySnapshot -> ModuleName -> List CompletionItem
-completionsOfModule snapshot referencedModule = case Map.lookup referencedModule snapshot.moduleInterfaces of
-  Nothing -> []
-  Just interface ->
-    [ item
-      | (name, exported) <- Map.toAscList interface.exports,
-        item <- exportedItems name exported
-    ]
+completionsOfModule snapshot referencedModule = exportItems <> submoduleItems
   where
+    exportItems = case Map.lookup referencedModule snapshot.moduleInterfaces of
+      Nothing -> []
+      Just interface ->
+        [ item
+          | (name, exported) <- Map.toAscList interface.exports,
+            item <- exportedItems name exported
+        ]
     exportedItems name exported = case (exported.variable, exported.typeLevel) of
       (Just resolution, _) -> [valueItem snapshot referencedModule name resolution]
       (Nothing, Just resolution) -> [typeItem snapshot name resolution]
       (Nothing, Nothing) -> []
+    submoduleItems =
+      [ moduleItem (lastSegment interfaceModule)
+        | interfaceModule <- Map.keys snapshot.moduleInterfaces,
+          isDirectSubmodule referencedModule interfaceModule
+      ]
+
+-- | Whether @candidate@ is exactly one segment below @parent@ (@prelude@ → @prelude.oauth@ yes,
+-- @prelude.oauth.deeper@ no).
+isDirectSubmodule :: ModuleName -> ModuleName -> Bool
+isDirectSubmodule parent candidate =
+  parent /= candidate
+    && covers parent candidate
+    && not ("." `Text.isInfixOf` remainder)
+  where
+    remainder = Text.drop (Text.length (renderModuleName parent) + 1) (renderModuleName candidate)
+
+-- | The submodule of @parent@ named by one further segment.
+submoduleOf :: ModuleName -> Text -> ModuleName
+submoduleOf parent segment = moduleNameFromSegments [renderModuleName parent, segment]
 
 -- | A typed value's object fields as completion items.
 completionsOfFields :: SemanticType -> List CompletionItem
@@ -182,7 +215,8 @@ completionsOfFields semanticType =
       { label = name,
         kind = CompletionKindField,
         detail = Just (renderSemanticType field.semanticType),
-        documentation = Nothing
+        documentation = Nothing,
+        insertText = Nothing
       }
     | (name, field) <- Map.toAscList (objectFieldsOf semanticType)
   ]
@@ -192,13 +226,15 @@ completionsOfFields semanticType =
 ---------------------------------------------------------------------------------------------------
 
 -- | The parameter labels a callable still accepts, given the labels already written in the call.
+-- Accepting one inserts @name = @, leaving the cursor ready for the argument value.
 completionsOfCallLabels :: SemanticType -> Set Text -> List CompletionItem
 completionsOfCallLabels callableType usedLabels =
   [ CompletionItem
       { label = name,
         kind = CompletionKindField,
         detail = Just (renderSemanticType parameterType),
-        documentation = Nothing
+        documentation = Nothing,
+        insertText = Just (name <> " = ")
       }
     | (name, parameterType) <- Map.toAscList (parameterObjectFields (stripAttributes callableType)),
       not (Set.member name usedLabels)
@@ -215,18 +251,26 @@ valueItem snapshot moduleName name resolution = case resolution of
       { label = name,
         kind = CompletionKindLocalVariable,
         detail = renderSemanticType <$> localVariableTypeOf snapshot moduleName localVariableId,
-        documentation = Nothing
+        documentation = Nothing,
+        insertText = Nothing
       }
   VariableResolutionQualifiedName qualifiedName ->
     case Map.lookup qualifiedName snapshot.valueDeclarations of
       Nothing ->
-        CompletionItem {label = name, kind = CompletionKindAgent, detail = Nothing, documentation = Nothing}
+        CompletionItem
+          { label = name,
+            kind = CompletionKindAgent,
+            detail = Nothing,
+            documentation = Nothing,
+            insertText = Nothing
+          }
       Just declaration ->
         CompletionItem
           { label = name,
             kind = valueKindOf declaration.kind,
             detail = renderSemanticType <$> declaration.declaredType,
-            documentation = declaration.documentation
+            documentation = declaration.documentation,
+            insertText = Nothing
           }
   where
     valueKindOf = \case
@@ -238,19 +282,42 @@ valueItem snapshot moduleName name resolution = case resolution of
 typeItem :: QuerySnapshot -> Text -> TypeResolution -> CompletionItem
 typeItem snapshot name resolution = case resolution of
   TypeResolutionGeneric _ ->
-    CompletionItem {label = name, kind = CompletionKindTypeName, detail = Nothing, documentation = Nothing}
+    CompletionItem
+      { label = name,
+        kind = CompletionKindTypeName,
+        detail = Nothing,
+        documentation = Nothing,
+        insertText = Nothing
+      }
   TypeResolutionQualifiedName qualifiedName ->
     case Map.lookup qualifiedName snapshot.typeDeclarations of
       Nothing ->
-        CompletionItem {label = name, kind = CompletionKindTypeName, detail = Nothing, documentation = Nothing}
+        CompletionItem
+          { label = name,
+            kind = CompletionKindTypeName,
+            detail = Nothing,
+            documentation = Nothing,
+            insertText = Nothing
+          }
       Just declaration ->
         CompletionItem
           { label = name,
             kind = typeKindOf declaration.kind,
             detail = Nothing,
-            documentation = declaration.documentation
+            documentation = declaration.documentation,
+            insertText = Nothing
           }
   where
     typeKindOf = \case
       DeclarationKindRequest -> CompletionKindRequest
       _ -> CompletionKindTypeName
+
+moduleItem :: Text -> CompletionItem
+moduleItem name =
+  CompletionItem
+    { label = name,
+      kind = CompletionKindModule,
+      detail = Nothing,
+      documentation = Nothing,
+      insertText = Nothing
+    }

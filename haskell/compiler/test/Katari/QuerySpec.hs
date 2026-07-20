@@ -162,13 +162,25 @@ completionSpec = describe "completion" $ do
     map (.label) items `shouldBe` ["helper"]
     map (.documentation) items `shouldBe` [Just "Doubles a string."]
 
-  it "completes parameter labels inside a call" $ do
+  it "completes parameter labels inside a call, inserting `label = `" $ do
     case Completion.resolveDottedPath fixture mainModule (at 4 18) "helper" of
       Just (Completion.AnchorTyped callableType) -> do
         let items = Completion.completionsOfCallLabels callableType mempty
         map (.label) items `shouldBe` ["value"]
+        map (.insertText) items `shouldBe` [Just "value = "]
         Completion.completionsOfCallLabels callableType (Set.fromList ["value"]) `shouldBe` []
       other -> expectationFailure ("expected a typed anchor, got " <> show other)
+
+  it "descends into a submodule on member resolution" $ do
+    -- `prelude.string` is a submodule of `prelude`, not one of its exports — the dotted path must
+    -- still resolve so `prelude.string.` completes.
+    case Completion.resolveDottedPath fixture mainModule (at 5 4) "prelude.string" of
+      Just (Completion.AnchorModule moduleName) -> moduleName `shouldBe` ModuleName "prelude.string"
+      other -> expectationFailure ("expected a module anchor, got " <> show other)
+
+  it "lists submodules among a module's completions" $ do
+    let labels = map (.label) (Completion.completionsOfModule fixture (ModuleName "prelude"))
+    labels `shouldContain` ["string"]
 
   it "exposes module interfaces on the snapshot" $
     Map.member libraryModule fixture.moduleInterfaces `shouldBe` True
