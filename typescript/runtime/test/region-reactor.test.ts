@@ -1867,4 +1867,275 @@ describe("region reactor", () => {
       value: { kind: "string", value: "post-restart" },
     });
   });
+
+  // Augment a `watchIr` module with the two `file` prim agents (`from_base64` / `read_base64`) the blob-edge
+  // tests below use — the file API is the same monotonic blob machinery every reactor shares, wired here as
+  // ordinary primitive-block agents so a fiber / handler can mint and read a blob mid-run.
+  function withFilePrims(ir: IRModule): IRModule {
+    ir.blocks[32] = {
+      block: { kind: "agent", body: 33, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[33] = {
+      block: { kind: "primitive", name: "prelude.file.from_base64", input: 320 },
+      parameters: { parameter: 320 },
+    };
+    ir.blocks[34] = {
+      block: { kind: "agent", body: 35, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[35] = {
+      block: { kind: "primitive", name: "prelude.file.read_base64", input: 340 },
+      parameters: { parameter: 340 },
+    };
+    ir.entries[createAgentName("prelude.file.from_base64")] = { block: 32, private: false };
+    ir.entries[createAgentName("prelude.file.read_base64")] = { block: 34, private: false };
+    return ir;
+  }
+
+  test("watch: a handler's answer carrying a blob is readable by the fiber it descends to", async () => {
+    // The white hole in the ANSWER direction. The fiber escalates `on_message`; the handler — which runs in the
+    // long-lived continuation instance the whole handle+watch lives in — mints a blob with `file.from_base64`
+    // and answers WITH it. The answer descends the watch bridge back to the fiber, which reads the blob's
+    // content (`file.read_base64`) and returns it, so the read-back buffers on the provide. A gone / dangling
+    // answer blob would panic `read_base64` and never buffer, so a buffered "aGVsbG8=" proves the fiber read the
+    // handler's blob. The blob is owned by the continuation instance — an ancestor of every fiber, kept alive by
+    // the held-open `watch` — so it always outlives the reader without any answer-direction owner lift.
+    const persistence = new StoringPersistence();
+    const worker: Operation[] = [
+      { kind: "makeRecord", entries: [], output: 116 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 116,
+        output: 112,
+      },
+      // 112 is the answer blob the handler minted. Read it back and return the content.
+      { kind: "makeRecord", entries: [["value", 112]], output: 113 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.file.read_base64") },
+        argument: 113,
+        output: 114,
+      },
+      { kind: "exit", target: 10, value: 114 },
+    ];
+    const handler: Operation[] = [
+      { kind: "loadLiteral", output: 161, value: { kind: "string", value: "aGVsbG8=" } },
+      { kind: "loadLiteral", output: 162, value: { kind: "string", value: "" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["content", 161],
+          ["content_type", 162],
+        ],
+        output: 163,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.file.from_base64") },
+        argument: 163,
+        output: 164,
+      },
+      { kind: "continue", target: 14, value: 164, modifiers: [] },
+    ];
+    const actor = makeActor(withFilePrims(watchIr({ worker, handler })), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length > 0,
+      );
+      return provide?.fiberBuffer;
+    });
+    expect(buffered[0]?.outcome).toEqual({
+      kind: "result",
+      value: { kind: "string", value: "aGVsbG8=" },
+    });
+  });
+
+  test("watch: a blob carried on a mailboxed escalation survives a restart and stays readable after re-emission", async () => {
+    // The white hole in the FORWARD direction, across a restart. Two worker fibers each mint a blob and escalate
+    // it under `on_message`; the sequential watch re-emits the first (the handler HOLDS it on `gate`), so the
+    // second's escalation — carrying its blob — sits in the nursery's DURABLE mailbox. A restart reloads the
+    // provide's mailbox with the blob ref intact and its bytes survive in the byte store; after recovery the
+    // watch re-emits the held escalation and the handler reads its blob (`file.read_base64`) to answer. Both
+    // workers buffer their own read-back content, so a buffered "d29ybGQ=" (the mailboxed fiber's) proves the
+    // carried blob's owner (the provide instance) and bytes were restored intact — a gone blob would panic the
+    // post-restart read.
+    const persistence = new StoringPersistence();
+    const blobs = new InMemoryBlobStore();
+    // Fork two workers (distinct base64 payloads), then watch — the second fork's escalation mailboxes while the
+    // first holds the serial watch busy.
+    const twoForks: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "aGVsbG8=" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadLiteral", output: 156, value: { kind: "string", value: "d29ybGQ=" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 156],
+        ],
+        output: 157,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 157,
+        output: 158,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    // A worker mints a blob from its fork argument (a base64 payload), escalates it WRAPPED in a record (the
+    // realistic request-argument shape), and returns the handler's answer.
+    const worker: Operation[] = [
+      { kind: "getField", source: 110, field: "input", output: 111 },
+      { kind: "loadLiteral", output: 117, value: { kind: "string", value: "" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["content", 111],
+          ["content_type", 117],
+        ],
+        output: 113,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.file.from_base64") },
+        argument: 113,
+        output: 114,
+      },
+      { kind: "makeRecord", entries: [["file", 114]], output: 116 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("on_message") },
+        argument: 116,
+        output: 112,
+      },
+      { kind: "exit", target: 10, value: 112 },
+    ];
+    // The handler HOLDS on `gate` (keeping the watch busy so the sibling escalation stays mailboxed), then reads
+    // the carried blob out of the request record and answers with its content.
+    const handler: Operation[] = [
+      { kind: "makeRecord", entries: [], output: 166 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 166,
+        output: 167,
+      },
+      { kind: "getField", source: 160, field: "file", output: 165 },
+      { kind: "makeRecord", entries: [["value", 165]], output: 168 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.file.read_base64") },
+        argument: 168,
+        output: 169,
+      },
+      { kind: "continue", target: 14, value: 169, modifiers: [] },
+    ];
+    const ir = withFilePrims(watchIr({ handleBody: twoForks, worker, handler }));
+    // Add the `gate` request agent the handler holds on (blocks 17 / 18, mirroring the restart test above).
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("gate"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("gate")] = { block: 17, private: false };
+
+    const actorOne = makeActor(ir, persistence, blobs);
+    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Drive to the suspend point: the handler holds the first worker on `gate`, and the second worker's blob is
+    // mailboxed on the provide.
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    const mailboxedBefore = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.mailbox.length > 0,
+      );
+      return provide?.mailbox;
+    });
+    const mailboxedAsk = mailboxedBefore[0]?.ask;
+    const carriedFile =
+      mailboxedAsk?.kind === "request" && mailboxedAsk.argument?.kind === "record"
+        ? mailboxedAsk.argument.fields.file
+        : undefined;
+    if (carriedFile?.kind !== "ref") throw new Error("the mailboxed escalation must carry a blob ref");
+
+    // Restart: a fresh actor over the same rows and the same byte store.
+    const actorTwo = makeActor(ir, persistence, blobs);
+    await actorTwo.activate();
+
+    // The mailbox — and the blob it carries — reloaded intact, and the bytes survive in the byte store.
+    const mailboxedAfter = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.mailbox.length > 0,
+      );
+      return provide?.mailbox;
+    });
+    const reloadedAsk = mailboxedAfter[0]?.ask;
+    const reloadedFile =
+      reloadedAsk?.kind === "request" && reloadedAsk.argument?.kind === "record"
+        ? reloadedAsk.argument.fields.file
+        : undefined;
+    if (reloadedFile?.kind !== "ref") throw new Error("the reloaded mailbox lost its blob ref");
+    expect(reloadedFile.blobId).toBe(carriedFile.blobId);
+    const bytes = await blobs.get(PROJECT, reloadedFile.blobId);
+    expect(Buffer.from(bytes).toString("utf8")).toBe("world");
+
+    // Answer the first gate (the handler answers the first worker and frees the serial watch), then the second
+    // gate the re-emitted mailboxed escalation raises. The second answer reads the RESTORED mailboxed blob.
+    const gateOne = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gateOne.escalation, { kind: "null" });
+    const gateTwo = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gateTwo.escalation, { kind: "null" });
+
+    // Both fibers settle with their own read-back content — the mailboxed "d29ybGQ=" proving its blob survived
+    // the restart and was readable after re-emission.
+    const buffered = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence)).find(
+        (extension) => extension.fiberBuffer.length >= 2,
+      );
+      return provide?.fiberBuffer;
+    });
+    const values = buffered.map((entry) =>
+      entry.outcome.kind === "result" && entry.outcome.value.kind === "string"
+        ? entry.outcome.value.value
+        : null,
+    );
+    expect(new Set(values)).toEqual(new Set(["aGVsbG8=", "d29ybGQ="]));
+  });
 });
