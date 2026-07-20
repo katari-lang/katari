@@ -2,7 +2,7 @@
   "name": "@katari-lang/language",
   "displayName": "Katari language definition",
   "description": "The single source of truth for the Katari editor-language artifacts: the TextMate grammar and the language configuration. The VSCode extension copies these in at build time and the website imports them for syntax highlighting.",
-  "version": "0.1.0-rc8",
+  "version": "0.1.0",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/cli",
-  "version": "0.1.0-rc8",
+  "version": "0.1.0",
   "description": "Katari CLI: a thin Node shim that locates the prebuilt katari binary shipped by @katari-lang/cli-<platform> packages and forwards arguments. Installs the `katari` executable.",
   "type": "module",
   "bin": {

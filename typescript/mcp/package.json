@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/mcp",
-  "version": "0.1.0-rc8",
+  "version": "0.1.0",
   "description": "MCP tool-listing helper for the Katari CLI: connects to an MCP server and emits its tool listing as JSON (running the OAuth authorization flow in memory when --oauth is given). Spawned by `katari mcp pull`.",
   "type": "module",
   "main": "dist/index.mjs",

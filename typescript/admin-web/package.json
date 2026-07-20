@@ -1,6 +1,6 @@
 {
   "name": "@katari-lang/admin-web",
-  "version": "0.1.0-rc8",
+  "version": "0.1.0",
   "description": "Web console for a Katari runtime: projects, runs, agents, escalations, files, and env.",
   "private": true,
   "type": "module",
