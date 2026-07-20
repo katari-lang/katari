@@ -300,6 +300,19 @@ test("playground.time.main: durable now + sleep resolve through the built-in tim
   expect(stdout).toContain("slept for");
 }, 20_000);
 
+test("playground.region.main: fan-out fork/join, parallel contrast, and the white-hole subscription", async () => {
+  // The structured-concurrency nursery, end to end through the built-in `region` reactor (no sidecar):
+  // `fan_out` forks three squarers and joins each ([4,9,16]); `parallel for` computes the same set for
+  // contrast; and `subscribe` drives the WHITE HOLE — an emitter fiber's `on_message` escalations well
+  // up at `region.watch` to a handler that (composition) forks a second emitter and, after four
+  // messages, throws `enough` to tear the nursery down. The compiled nursery handle conforms at the
+  // runtime delegation boundary, so the whole line resolves deterministically.
+  const { stdout } = await katari(["run", "playground.region.main", "--project", "playground"]);
+  expect(stdout).toContain("fan_out=[4,9,16]");
+  expect(stdout).toContain("parallel=[4,9,16]");
+  expect(stdout).toContain("subscription saw four messages across two emitters");
+});
+
 test("playground.replay_demo: mechanism/policy split — exponential recovers, exhausts typed, rejects the fatal, re-auths in place", async () => {
   // A `replay` provider re-runs the block on `replay.interrupted`; a user converter decides which failures
   // signal it. `main` converts the transient `warming_up` and connects on attempt 3 (durable ms backoff);
