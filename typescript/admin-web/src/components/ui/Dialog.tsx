@@ -1,17 +1,20 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { Button } from "./Button";
 
-/** Modal on the native <dialog> element: focus trapping, Escape, and ::backdrop for free. */
+/** Modal on the native <dialog> element: focus trapping, Escape, and ::backdrop for free.
+ *  `width` picks the max width: `wide` suits a multi-field form, the default a short prompt. */
 export function Dialog({
   open,
   onClose,
   title,
   children,
+  width = "default",
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
+  width?: "default" | "wide";
 }) {
   const ref = useRef<HTMLDialogElement>(null);
 
@@ -35,7 +38,7 @@ export function Dialog({
         // affordance explicit for the keyboard path.
         if (event.key === "Escape") onClose();
       }}
-      className="m-auto w-full max-w-lg border border-edge-strong text-fg bg-surface backdrop:bg-black/40 backdrop:backdrop-blur-sm"
+      className={`m-auto w-full ${width === "wide" ? "max-w-2xl" : "max-w-lg"} border border-edge-strong text-fg bg-surface backdrop:bg-black/40 backdrop:backdrop-blur-sm`}
     >
       <div className="p-5">
         <h2 className="pb-3 text-base font-semibold">{title}</h2>

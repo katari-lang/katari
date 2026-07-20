@@ -45,7 +45,7 @@ export function CredentialsPage() {
     <>
       <PageHeader
         title="Credentials"
-        description="OAuth credentials your programs use via `oauth.token` / `mcp.oauth`, and the clients they authenticate as."
+        description="OAuth credentials and the clients they authenticate as."
       />
 
       <h2 className="mb-2 mt-2 text-sm font-medium text-fg-muted">Stored credentials</h2>
@@ -55,7 +55,7 @@ export function CredentialsPage() {
         <EmptyState
           icon={KeyRound}
           title="No credentials yet"
-          description="Log in to a registered OAuth client below, or run a workflow that needs one — the run pauses and asks."
+          description="Log in to a registered client below, or run a workflow that needs one."
         />
       ) : (
         <Card>
@@ -67,7 +67,7 @@ export function CredentialsPage() {
                   <Badge tone="neutral">{credential.profile}</Badge>
                 </Cell>
                 <Cell className="text-fg-muted">{formatDateTime(credential.updatedAt)}</Cell>
-                <Cell className="text-right">
+                <Cell className="text-right whitespace-nowrap">
                   <span className="inline-flex items-center gap-1">
                     <ReauthorizeButton
                       projectId={projectId}
@@ -97,7 +97,7 @@ export function CredentialsPage() {
         <EmptyState
           icon={KeyRound}
           title="No OAuth clients registered"
-          description="Register an OAuth client so a workflow can call its API with `oauth.token`."
+          description="Register a client, then log in to store a credential."
         />
       ) : (
         <Card>
@@ -105,8 +105,18 @@ export function CredentialsPage() {
             {(clients.data ?? []).map((client) => (
               <Row key={client.name}>
                 <Cell className="font-mono text-xs font-medium">{client.name}</Cell>
-                <Cell className="font-mono text-xs text-fg-muted">{client.issuer}</Cell>
-                <Cell className="font-mono text-xs text-fg-muted">{client.clientId}</Cell>
+                <Cell
+                  className="max-w-48 truncate font-mono text-xs text-fg-muted"
+                  title={client.issuer}
+                >
+                  {client.issuer}
+                </Cell>
+                <Cell
+                  className="max-w-56 truncate font-mono text-xs text-fg-muted"
+                  title={client.clientId}
+                >
+                  {client.clientId}
+                </Cell>
                 <Cell>
                   {client.hasSecret ? (
                     <Badge tone="danger">secret · write-only</Badge>
@@ -114,7 +124,7 @@ export function CredentialsPage() {
                     <Badge tone="neutral">public</Badge>
                   )}
                 </Cell>
-                <Cell className="text-right">
+                <Cell className="text-right whitespace-nowrap">
                   <span className="inline-flex items-center gap-1">
                     <LoginButton
                       label="Log in"
@@ -247,17 +257,13 @@ function McpLoginDialog({
   return (
     <Dialog open onClose={onClose} title={`Re-authorize ${name}`}>
       <div className="flex flex-col gap-3">
-        <Label text="Server URL">
+        <Label text="Server URL" hint="OAuth endpoints are discovered from it">
           <Input
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             placeholder="https://mcp.example.com/mcp"
           />
         </Label>
-        <p className="text-xs text-fg-faint">
-          The MCP server to authorize against. The runtime discovers its OAuth endpoints from this
-          URL.
-        </p>
         <div className="flex justify-end gap-2 pt-1">
           <Button onClick={onClose}>Cancel</Button>
           {url !== "" && (
@@ -431,7 +437,7 @@ function RegisterClientDialog({
     form.clientId === "";
 
   return (
-    <Dialog open onClose={onClose} title="Register OAuth client">
+    <Dialog open onClose={onClose} title="Register OAuth client" width="wide">
       <div className="flex flex-col gap-3">
         <Label text="Name">
           <Input
@@ -467,7 +473,10 @@ function RegisterClientDialog({
             onChange={(event) => update({ clientId: event.target.value })}
           />
         </Label>
-        <Label text="Client secret (leave blank to keep the current secret; blank on a new client = public)">
+        <Label
+          text="Client secret"
+          hint="write-only; blank keeps the stored one (none = public client)"
+        >
           <Input
             type="password"
             value={form.clientSecret}
@@ -478,27 +487,25 @@ function RegisterClientDialog({
         <Switch
           checked={removeSecret}
           onChange={setRemoveSecret}
-          label="Remove secret (make this a public client)"
+          label="Remove secret (public client)"
         />
-        <Label text="Scopes (space-separated)">
+        <Label text="Scopes" hint="space-separated">
           <Input
             value={scopesText}
             onChange={(event) => setScopesText(event.target.value)}
             placeholder="read write"
           />
         </Label>
-        <Label text="Extra authorize parameters (key=value pairs, space-separated)">
+        <Label
+          text="Extra authorize parameters"
+          hint="key=value, space-separated; appended to the authorization URL"
+        >
           <Input
             value={parametersText}
             onChange={(event) => setParametersText(event.target.value)}
             placeholder="access_type=offline prompt=consent"
           />
         </Label>
-        <p className="text-xs text-fg-faint">
-          Provider-specific query parameters appended to the authorization URL — e.g. Google needs
-          access_type=offline and prompt=consent to issue a refresh token. Standard OAuth parameters
-          cannot be overridden.
-        </p>
         <div className="flex justify-end gap-2 pt-1">
           <Button onClick={onClose}>Cancel</Button>
           <Button

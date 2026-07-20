@@ -47,6 +47,19 @@ export function Row({ onClick, children }: { onClick?: () => void; children: Rea
   );
 }
 
-export function Cell({ className, children }: { className?: string; children?: ReactNode }) {
-  return <td className={cn("px-4 py-2.5 align-middle", className)}>{children}</td>;
+export function Cell({
+  className,
+  title,
+  children,
+}: {
+  className?: string;
+  // Full value as a tooltip, for a cell whose text is truncated.
+  title?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <td title={title} className={cn("px-4 py-2.5 align-middle", className)}>
+      {children}
+    </td>
+  );
 }
