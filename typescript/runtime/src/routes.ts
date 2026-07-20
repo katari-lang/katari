@@ -10,6 +10,7 @@ import { oauthClientRoutes } from "./modules/oauth-client/oauth-client.routes.js
 import { projectRoutes } from "./modules/project/project.routes.js";
 import { runRoutes } from "./modules/run/run.routes.js";
 import { snapshotRoutes } from "./modules/snapshot/snapshot.routes.js";
+import { storeRoutes } from "./modules/store/store.routes.js";
 import type { AppEnv } from "./types/app-env.js";
 
 /**
@@ -29,4 +30,5 @@ export const apiRoutes = new Hono<AppEnv>()
   .route("/", oauthClientRoutes)
   .route("/", fileRoutes)
   .route("/", envRoutes)
+  .route("/", storeRoutes)
   .route("/", agentRoutes);

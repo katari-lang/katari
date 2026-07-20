@@ -25,6 +25,8 @@ import type {
   RunState,
   RunTree,
   SnapshotSummary,
+  StoreEntryDetail,
+  StoreEntrySummary,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -225,6 +227,19 @@ export const api = {
     ),
   deleteEnvEntry: (projectId: string, key: string) =>
     requestJson<{ key: string }>("DELETE", `/projects/${projectId}/env/${encodeURIComponent(key)}`),
+
+  listStore: (projectId: string) => get<StoreEntrySummary[]>(`/projects/${projectId}/store`),
+  getStoreEntry: (projectId: string, key: string) =>
+    get<StoreEntryDetail>(`/projects/${projectId}/store/${encodeURIComponent(key)}`),
+  setStoreEntry: (projectId: string, key: string, value: Json) =>
+    requestJson<{ key: string }>("PUT", `/projects/${projectId}/store/${encodeURIComponent(key)}`, {
+      value,
+    }),
+  deleteStoreEntry: (projectId: string, key: string) =>
+    requestJson<{ key: string }>(
+      "DELETE",
+      `/projects/${projectId}/store/${encodeURIComponent(key)}`,
+    ),
 
   /** The stored OAuth credentials as metadata (token material is write-only, never returned). */
   listCredentials: (projectId: string) =>

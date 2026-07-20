@@ -1,0 +1,69 @@
+// The `prelude.store` sub-module: the project's durable key-value store — named values that
+// outlive any single run. Where a handler's `var` is state WITHIN a run and `env` is operator-set
+// configuration INTO a run, the store is state BETWEEN runs: any run reads what another wrote, the
+// operator browses and edits the same tree in the console, and an AI reads a stored note back into
+// its context. Keys are path-like strings (`"memos/2026-07"`); a `store` value is a PREFIX — a view
+// of one subtree, plain data (`scope` narrows it), so an agent can be handed exactly the subtree it
+// should touch. Values are ordinary Katari values: a document, a data value, a `file` (the store
+// takes over the blob, so a stored file outlives the run that produced it), a secret
+// (`string of private` seals at rest exactly like a secret env entry, and stays redacted at every
+// user-facing boundary). Writes are last-write-wins; one project's runs are serialized, so two
+// writers never interleave.
+
+@"A view of one subtree of the project store: the path prefix every operation resolves its key
+under. Plain data, not a permission — `scope` narrows it, and handing an agent a scoped store is
+composition, not enforcement."
+data store(@"The path prefix; \"\" is the root." prefix: string)
+
+@"The whole project store — the root view."
+agent root() -> store {
+  store(prefix = "")
+}
+
+@"A narrowed view: the subtree at @path@ under @target@ — the store's `cd`. Plain prefix
+arithmetic, usable anywhere a `store` is."
+agent scope(target: store, path: string) -> store {
+  if (target.prefix == "") {
+    store(prefix = path)
+  } else {
+    store(prefix = f"${target.prefix}/${path}")
+  }
+}
+
+@"A lookup that found a value."
+data found(@"The stored value." value: unknown)
+
+@"A lookup that found nothing — distinct from a stored `null`."
+data absent(@"The key that had no entry." key: string)
+
+// One lookup's outcome. (Type synonyms take no docs.)
+type lookup = found | absent
+
+@"Read the value at @key@ under @target@'s prefix: `found(value)` or `absent(key)` — a stored
+`null` is `found(null)`, so presence and value never blur. Pin an expected shape with
+`json.validate[T]` on the found value."
+primitive agent get(target: store, key: string) -> lookup
+
+@"Write @value@ at @key@ under @target@'s prefix, creating or replacing the entry (last write
+wins). Any value fits: a document, a data value, a `file` (the store takes over its blob — the
+file outlives the writing run), a secret (sealed at rest). Replacing away the last stored
+reference to a file frees its blob."
+primitive agent set(target: store, key: string, value: unknown) -> null
+
+@"Delete the entry at @key@ under @target@'s prefix; deleting a missing key is a no-op. A file no
+stored entry references any more is freed with its entry."
+primitive agent delete(target: store, key: string) -> null
+
+@"A `list` entry: a key holding a value, directly under the listed prefix."
+data leaf(@"The key, relative to the listed prefix." key: string)
+
+@"A `list` entry: a path segment with more entries below it — descend with `scope`."
+data branch(@"The segment name, relative to the listed prefix." name: string)
+
+// One listing's element. (Type synonyms take no docs.)
+type entry = leaf | branch
+
+@"List what sits DIRECTLY under @target@'s prefix: a `leaf` per value-holding key and a `branch`
+per segment with entries below it (sorted; a name that is both leaf and branch yields both). The
+file-system face of the tree — descend a branch with `scope`."
+primitive agent list(target: store) -> array[entry]

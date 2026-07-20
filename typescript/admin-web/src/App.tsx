@@ -11,6 +11,7 @@ import { ProjectsPage } from "./pages/ProjectsPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SnapshotsPage } from "./pages/SnapshotsPage";
+import { StorePage } from "./pages/StorePage";
 
 export function App() {
   return (
@@ -27,6 +28,7 @@ export function App() {
         <Route path="/projects/:projectId/snapshots" element={<SnapshotsPage />} />
         <Route path="/projects/:projectId/files" element={<FilesPage />} />
         <Route path="/projects/:projectId/env" element={<EnvPage />} />
+        <Route path="/projects/:projectId/store" element={<StorePage />} />
         <Route path="/projects/:projectId/credentials" element={<CredentialsPage />} />
       </Route>
     </Routes>

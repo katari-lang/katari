@@ -569,6 +569,8 @@ async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promi
       // The turn-scoped blob write seams, for the two effectful file prims (`from_base64` / `free`). The
       // engine only forwards to the reactor's pool-backed closures; ownership / run scoping live there.
       blobEffects: { produce: ctx.produceBlob, freeInRun: ctx.freeBlobInRun },
+      // The store write prims' blob-ownership seams, same shape: actor-closed, engine-forwarded.
+      storeEffects: ctx.storeEffects,
       ...(generics !== undefined ? { generics } : {}),
     });
   } catch (error) {

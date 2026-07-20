@@ -241,6 +241,17 @@ export type EnvEntryDetail =
   | { key: string; isSecret: true; updatedAt: string }
   | { key: string; isSecret: false; value: string; updatedAt: string };
 
+export interface StoreEntrySummary {
+  key: string;
+  updatedAt: string;
+}
+
+/** One store entry's value as redacting wire JSON (a private node reads as `$katari_redacted`). */
+export interface StoreEntryDetail {
+  key: string;
+  value: Json;
+}
+
 export interface Health {
   status: string;
   uptimeSeconds: number;

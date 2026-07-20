@@ -114,7 +114,7 @@ export const instances = pgTable(
     check("instances_status_check", sql`${table.status} in ('running', 'cancelling')`),
     check(
       "instances_kind_check",
-      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region')`,
+      sql`${table.kind} in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region', 'store')`,
     ),
   ],
 );

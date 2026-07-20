@@ -136,6 +136,13 @@ export function useEnv(projectId: string) {
   });
 }
 
+export function useStore(projectId: string) {
+  return useQuery({
+    queryKey: ["projects", projectId, "store"],
+    queryFn: () => api.listStore(projectId),
+  });
+}
+
 export function useCredentials(projectId: string) {
   return useQuery({
     queryKey: ["projects", projectId, "credentials"],

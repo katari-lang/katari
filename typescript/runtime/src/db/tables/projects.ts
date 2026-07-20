@@ -94,3 +94,26 @@ export const envEntries = pgTable(
   },
   (table) => [primaryKey({ columns: [table.projectId, table.key] })],
 );
+
+/** The project's durable key-value store (`prelude.store`): one row per path-like key, the value a
+ *  Katari `Value` tree as JSON with every `private` node sealed (`sealForStorage`, the same AES-GCM
+ *  key a secret env entry uses). Blobs a stored value references are owned by the project's store
+ *  sentinel instance (`storeRootIdOf`), so a stored file outlives the run that wrote it and drops
+ *  with the project. */
+export const storeEntries = pgTable(
+  "store_entries",
+  {
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** The full path-like key (`"memos/2026-07"`) — prefix scoping is string arithmetic over this. */
+    key: text("key").notNull(),
+    /** The stored `Value` tree, sealed (`private` nodes ride as `$katari_sealed` ciphertext). */
+    value: jsonb("value").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [primaryKey({ columns: [table.projectId, table.key] })],
+);

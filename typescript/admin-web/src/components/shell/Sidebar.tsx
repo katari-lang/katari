@@ -1,6 +1,7 @@
 import {
   Bell,
   Camera,
+  Database,
   FileIcon,
   FunctionSquare,
   KeyRound,
@@ -21,6 +22,7 @@ const links = [
   { to: "snapshots", icon: Camera, label: "Snapshots" },
   { to: "files", icon: FileIcon, label: "Files" },
   { to: "env", icon: KeyRound, label: "Env" },
+  { to: "store", icon: Database, label: "Store" },
   { to: "credentials", icon: ShieldCheck, label: "Credentials" },
 ];
 

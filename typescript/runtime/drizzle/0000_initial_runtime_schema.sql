@@ -103,7 +103,7 @@ CREATE TABLE "instances" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "instances_status_check" CHECK ("instances"."status" in ('running', 'cancelling')),
-	CONSTRAINT "instances_kind_check" CHECK ("instances"."kind" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region'))
+	CONSTRAINT "instances_kind_check" CHECK ("instances"."kind" in ('core', 'api', 'ffi', 'http', 'webhook', 'mcp', 'time', 'oauth', 'region', 'store'))
 );
 --> statement-breakpoint
 CREATE TABLE "outbox" (
@@ -168,6 +168,14 @@ CREATE TABLE "env_entries" (
 	CONSTRAINT "env_entries_project_id_key_pk" PRIMARY KEY("project_id","key")
 );
 --> statement-breakpoint
+CREATE TABLE "store_entries" (
+	"project_id" uuid NOT NULL,
+	"key" text NOT NULL,
+	"value" jsonb NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "store_entries_project_id_key_pk" PRIMARY KEY("project_id","key")
+);
+--> statement-breakpoint
 CREATE TABLE "modules" (
 	"project_id" uuid NOT NULL,
 	"hash" text NOT NULL,
@@ -222,6 +230,7 @@ ALTER TABLE "runs" ADD CONSTRAINT "runs_project_id_projects_id_fk" FOREIGN KEY (
 ALTER TABLE "runs" ADD CONSTRAINT "runs_snapshot_id_snapshots_id_fk" FOREIGN KEY ("snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "oauth_clients" ADD CONSTRAINT "oauth_clients_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "env_entries" ADD CONSTRAINT "env_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "store_entries" ADD CONSTRAINT "store_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "modules" ADD CONSTRAINT "modules_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "projects" ADD CONSTRAINT "projects_head_snapshot_id_snapshots_id_fk" FOREIGN KEY ("head_snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "snapshots" ADD CONSTRAINT "snapshots_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

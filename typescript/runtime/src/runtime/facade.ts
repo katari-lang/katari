@@ -33,6 +33,7 @@ import {
   unknownMcpServeEndpoint,
 } from "../modules/mcp/mcp-serve.js";
 import { oauthClientService } from "../modules/oauth-client/oauth-client.service.js";
+import { storeRows } from "../modules/store/store.service.js";
 import { DbIrSource } from "./actor/db-ir-source.js";
 import { DbPersistence } from "./actor/db-persistence.js";
 import { isTransientError, messageOf } from "./actor/failure.js";
@@ -125,7 +126,7 @@ const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 // reads the project's `env_entries` store). One registry serves every project actor; the per-call
 // `PrimContext` supplies the project a given env read runs for.
 const prims = new PrimRegistry();
-registerHostPrims(prims, { env: envReader });
+registerHostPrims(prims, { env: envReader, store: storeRows });
 
 /** The per-project credential store the credentials core resolves tokens through: the `credentials` table
  *  (the AES-GCM sealed `StoredCredential` + its integer generation — see `db/tables/credentials.ts`).

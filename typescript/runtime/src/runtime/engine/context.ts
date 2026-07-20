@@ -62,6 +62,21 @@ export interface PrimContext {
   /** The running instance's ambient generic substitution (the call site stamped it on the delegate) —
    *  how a schema-directed prim (`json.validate[T]`) sees its own instantiation. */
   readonly generics?: GenericSubstitution;
+  /** The pool-backed blob-ownership seams of the `prelude.store` write prims — actor-provided, like
+   *  `blobEffects`. Present only for a prim running inside an instance turn; the prims guard. */
+  readonly storeEffects?: StoreEffects;
+}
+
+/** How a `prelude.store` write moves blob ownership, closed over the actor's `ResourcePool` (the
+ *  engine never imports the pool). `adoptForStore` runs BEFORE the row write: every blob the stored
+ *  value references that this turn may give away — owned by the writing run, in transit, or held by
+ *  the file library (api root) — moves onto the project's store sentinel, so it outlives the run.
+ *  `freeStoreBlobs` runs AFTER a replace / delete with the blobs the old value referenced that no
+ *  store entry still does: each is freed only if the store sentinel owns it (a no-op otherwise).
+ *  Both are idempotent, so an at-least-once re-run of the writing turn converges. */
+export interface StoreEffects {
+  adoptForStore(value: Value): void;
+  freeStoreBlobs(blobIds: BlobId[]): void;
 }
 
 /**
@@ -116,6 +131,8 @@ export interface StepContext {
   /** Free a blob a prim asked to release, but only when this instance's run owns it (a no-op otherwise) —
    *  the pool decides ownership; the engine only forwards the request with this turn's run. */
   freeBlobInRun(blobId: BlobId): void;
+  /** The pool-backed blob-ownership seams of the `prelude.store` write prims (see `StoreEffects`). */
+  storeEffects: StoreEffects;
   /** Push an internal event onto this turn's queue (processed before the turn ends). */
   enqueue(event: InternalEvent): void;
   /** Buffer an outbound external event: the emitting thread / instance knows the destination reactor (`to`),
@@ -143,6 +160,7 @@ export function makeStepContext(args: {
    *  importing the actor layer. */
   produceBlob: (blobId: BlobId, entry: Omit<BlobEntry, "owner">) => void;
   freeBlobInRun: (blobId: BlobId) => void;
+  storeEffects: StoreEffects;
 }): StepContext {
   const buffers: StepBuffers = { internalQueue: [], outbound: [], logs: [] };
   return {
@@ -156,6 +174,7 @@ export function makeStepContext(args: {
     buffers,
     produceBlob: args.produceBlob,
     freeBlobInRun: args.freeBlobInRun,
+    storeEffects: args.storeEffects,
     enqueue(event) {
       buffers.internalQueue.push(event);
     },
