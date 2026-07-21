@@ -277,6 +277,12 @@ export interface CoreLoader {
  *  set, a projection of core-raised rows, not edges it owns (those come through `BaseLoader`). */
 export interface ApiLoader {
   answerableEscalations(): Promise<PersistedOpenEscalation[]>;
+  /** The MACHINE-ANSWERED escalations addressed to it (`to = api`, a `prelude.store.*` request): an
+   *  unhandled store request whose runtime answer was interrupted by a crash before the `escalateAck`
+   *  committed. The reactivation re-answers each (idempotent — re-read yields the same value, re-write is
+   *  last-write-wins), so the run resumes. Disjoint from `answerableEscalations` (the user-facing filter
+   *  excludes store), so the two together cover every open `to = api` row exactly once. */
+  machineAnswerableEscalations(): Promise<PersistedOpenEscalation[]>;
 }
 
 /** Every call reactor's own-data read surface: its in-flight calls (envelope ⋈ `external_call_instances`,
@@ -392,6 +398,9 @@ const EMPTY_LOADER: Loader = {
   },
   api: {
     async answerableEscalations() {
+      return [];
+    },
+    async machineAnswerableEscalations() {
       return [];
     },
   },

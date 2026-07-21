@@ -406,8 +406,7 @@ export type InstanceKind =
   | "mcp"
   | "time"
   | "oauth"
-  | "region"
-  | "store";
+  | "region";
 
 /**
  * The `core` activation: a thread tree plus the bookkeeping to route inbound external events to the right

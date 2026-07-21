@@ -36,14 +36,12 @@ import {
   type ReactorName,
 } from "../event/types.js";
 import {
-  apiRootIdOf,
   type DelegationId,
   type InstanceId,
   newEscalationId,
   type ProjectId,
   type ScopeId,
   type SnapshotId,
-  storeRootIdOf,
 } from "../ids.js";
 import { type IrSource, moduleOfName } from "../ir.js";
 import type { BlobStore } from "../value/blob-store.js";
@@ -441,21 +439,6 @@ export class CoreReactor extends Reactor {
       produceBlob: (blobId, entry) =>
         this.pool.registerBlob(blobId, { owner: instance.id, ...entry }),
       freeBlobInRun: (blobId) => this.pool.deleteBlobOwnedInRun(blobId, instance.runId),
-      // The `prelude.store` write seams: adoption moves a stored value's blobs onto the store
-      // sentinel (run-owned / in-transit / file-library ones — see the pool), and the reclaim frees
-      // only sentinel-owned blobs. The sentinel's envelope row is ensured by the store rows port
-      // (an idempotent SQL upsert before the first entry write), so nothing is staged here.
-      storeEffects: {
-        adoptForStore: (value) =>
-          this.pool.adoptBlobsForStore(
-            value,
-            instance.runId,
-            apiRootIdOf(this.projectId),
-            storeRootIdOf(this.projectId),
-          ),
-        freeStoreBlobs: (blobIds) =>
-          this.pool.freeStoreBlobs(blobIds, storeRootIdOf(this.projectId)),
-      },
     });
     seed(ctx);
     await drive(ctx);

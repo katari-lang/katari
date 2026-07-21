@@ -48,6 +48,7 @@ import type { Persistence } from "./persistence.js";
 import type { Reactor } from "./reactor.js";
 import { RegionReactor } from "./region-reactor.js";
 import { ResourcePool } from "./resource-pool.js";
+import type { StoreRows } from "./store-responder.js";
 import { Substrate } from "./substrate.js";
 import { TimeReactor } from "./time-reactor.js";
 import { type WebhookDeliveryOutcome, WebhookReactor } from "./webhook-reactor.js";
@@ -96,6 +97,10 @@ export interface ProjectActorDependencies {
    *  `credentials` table the mcp transport reads its bearer from). Defaults to the empty store — every
    *  resolution parks pending authorization — which is fine for tests that never call `oauth.token`. */
   credentials?: CredentialStore;
+  /** The durable KV rows the `store` reactor reads and writes (`prelude.store.*` over `store_entries`).
+   *  Defaults to the empty store — every read is `absent`, every write a no-op — which is fine for tests
+   *  that never call `prelude.store`. */
+  storeRows?: StoreRows;
   persistence: Persistence;
 }
 
@@ -111,6 +116,19 @@ const EMPTY_CREDENTIAL_STORE: CredentialStore = {
   },
   async resolveConfiguredClient() {
     return null;
+  },
+};
+
+/** The empty store rows the `store` reactor falls back to when the host wires none: every read is `absent`
+ *  and every write a no-op. Keeps the actor constructible in tests that never exercise `prelude.store`. */
+const EMPTY_STORE_ROWS: StoreRows = {
+  async read() {
+    return undefined;
+  },
+  async upsert() {},
+  async remove() {},
+  async listKeys() {
+    return [];
   },
 };
 
@@ -287,11 +305,16 @@ export class ProjectActor {
     // synthesised completion) through the scheduler closure the same way.
     this.region = new RegionReactor((work) => this.substrate.submit(this.region, work), pool);
     // The api root schedules each command (start / cancel / answer) onto the bus as a serial command turn;
-    // the closure reads `this.substrate`, assigned just below, only when a command actually runs.
+    // the closure reads `this.substrate`, assigned just below, only when a command actually runs. It also
+    // AUTO-ANSWERS an unhandled `prelude.store.*` request that escalated to it — the store is the run's
+    // machine-responding environment (never an operator open question) — computing the answer through the
+    // injected durable KV rows.
     this.api = new ApiReactor(
       this.apiRootId,
       { enqueue: (thunk) => this.substrate.enqueueCommand(this.api, thunk) },
       pool,
+      this.projectId,
+      dependencies.storeRows ?? EMPTY_STORE_ROWS,
     );
     const registry: Record<ReactorName, Reactor> = {
       core: this.core,

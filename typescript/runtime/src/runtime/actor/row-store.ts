@@ -44,6 +44,7 @@ import {
   type PersistedThread,
 } from "./persistence-codec.js";
 import { sealForStorage, unsealFromStorage } from "./seal.js";
+import { isStoreRequest } from "./store-responder.js";
 
 /** One `core` envelope ⋈ `core_instances` row as the store reads it back. The envelope's routing fields
  *  come back nullable (the columns are), and the loader — not the store — decides a null is corrupt. */
@@ -284,6 +285,13 @@ export function storeLoader(store: RowStore): Loader {
       answerableEscalations: async () =>
         unsealEscalations(await store.openEscalations({ to: "api" })).filter((row) =>
           isUserFacingRequest(row.request),
+        ),
+      // The machine-answered set: `to = api` rows whose request the store responder owns. The user-facing
+      // filter excludes these, so a crashed-before-`escalateAck` store answer would otherwise never resume;
+      // the api reactor re-answers each on reload (idempotent). Disjoint from the answerable set above.
+      machineAnswerableEscalations: async () =>
+        unsealEscalations(await store.openEscalations({ to: "api" })).filter((row) =>
+          isStoreRequest(row.request),
         ),
     },
     external: {

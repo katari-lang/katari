@@ -397,16 +397,7 @@ function makeActor(
     registry.set(SNAPSHOT, moduleOfName(name as QualifiedName), ir);
   }
   const prims = new PrimRegistry();
-  registerHostPrims(prims, {
-    env: ENV,
-    store: {
-      read: async () => undefined,
-      upsert: async () => {},
-      remove: async () => {},
-      listKeys: async () => [],
-      isBlobReferenced: async () => false,
-    },
-  });
+  registerHostPrims(prims, { env: ENV });
   return new ProjectActor({
     projectId: PROJECT,
     ir: registry,

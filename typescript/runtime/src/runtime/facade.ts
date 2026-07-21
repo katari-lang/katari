@@ -126,7 +126,7 @@ const runtimeBaseUrl = `http://127.0.0.1:${config.port}/api/v1`;
 // reads the project's `env_entries` store). One registry serves every project actor; the per-call
 // `PrimContext` supplies the project a given env read runs for.
 const prims = new PrimRegistry();
-registerHostPrims(prims, { env: envReader, store: storeRows });
+registerHostPrims(prims, { env: envReader });
 
 /** The per-project credential store the credentials core resolves tokens through: the `credentials` table
  *  (the AES-GCM sealed `StoredCredential` + its integer generation — see `db/tables/credentials.ts`).
@@ -204,6 +204,9 @@ const registry = new ProjectRegistry({
   // The oauth reactor resolves `oauth.token(name)` calls through the same per-project credential store the
   // mcp transport reads its bearer from (the `credentials` table + the `oauth_clients` registry).
   credentialsFactory: (projectId) => credentialStoreFor(projectId),
+  // The store reactor reads and writes `prelude.store.*` calls through the project's durable KV rows
+  // (`store_entries`) — one shared port, project-keyed per call.
+  storeRows,
   // The public base the dynamically generated endpoints (`webhook.inbound`, `mcp.serve`) mint their
   // capability URLs under (KATARI_PUBLIC_URL, or the local port) — one address, one knob.
   publicBaseUrl: config.publicUrl,

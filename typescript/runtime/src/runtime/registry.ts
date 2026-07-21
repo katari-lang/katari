@@ -10,6 +10,7 @@
 import type { IRModule } from "@katari-lang/types";
 import { InMemoryPersistence, type Persistence } from "./actor/persistence.js";
 import { ProjectActor } from "./actor/project-actor.js";
+import type { StoreRows } from "./actor/store-responder.js";
 import type { PrimRunner } from "./engine/context.js";
 import { PrimRegistry } from "./engine/prims.js";
 import type { CredentialStore } from "./external/credentials.js";
@@ -43,6 +44,10 @@ export interface ProjectRegistryDependencies {
    *  (the `credentials` table + the `oauth_clients` registry). Defaults to omitted — the actor then falls
    *  back to its empty store (every resolution parks), fine for tests that never call `oauth.token`. */
   credentialsFactory?: (projectId: ProjectId) => CredentialStore;
+  /** The durable KV rows the `store` reactor reads and writes (`prelude.store.*` over `store_entries`),
+   *  a per-call project-keyed port shared across actors. Defaults to omitted — the actor then falls back
+   *  to its empty store, fine for tests that never call `prelude.store`. */
+  storeRows?: StoreRows;
   /** The public base URL the dynamically generated endpoints (webhook inbound, mcp serve) are minted
    *  under. Defaults to the local dev address. */
   publicBaseUrl?: string;
@@ -59,6 +64,7 @@ export class ProjectRegistry {
   private readonly httpFactory: () => HttpTransport;
   private readonly mcpFactory: (projectId: ProjectId) => McpTransport;
   private readonly credentialsFactory?: (projectId: ProjectId) => CredentialStore;
+  private readonly storeRows?: StoreRows;
   private readonly publicBaseUrl: string;
 
   constructor(dependencies: ProjectRegistryDependencies = {}) {
@@ -70,6 +76,7 @@ export class ProjectRegistry {
     this.httpFactory = dependencies.httpFactory ?? (() => new StubHttpTransport());
     this.mcpFactory = dependencies.mcpFactory ?? (() => new StubMcpTransport());
     this.credentialsFactory = dependencies.credentialsFactory;
+    this.storeRows = dependencies.storeRows;
     this.publicBaseUrl = dependencies.publicBaseUrl ?? "http://localhost:3000";
   }
 
@@ -98,6 +105,7 @@ export class ProjectRegistry {
       ...(this.credentialsFactory !== undefined
         ? { credentials: this.credentialsFactory(projectId) }
         : {}),
+      ...(this.storeRows !== undefined ? { storeRows: this.storeRows } : {}),
       publicBaseUrl: this.publicBaseUrl,
       persistence: this.persistence,
     });

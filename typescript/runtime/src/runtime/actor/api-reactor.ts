@@ -32,11 +32,13 @@ import {
   type InstanceId,
   newDelegationId,
   newInstanceId,
+  type ProjectId,
   type SnapshotId,
 } from "../ids.js";
 import { valueToJson } from "../value/codec.js";
 import { isTainted, markPrivate } from "../value/privacy.js";
 import type { Value } from "../value/types.js";
+import { messageOf } from "./failure.js";
 import type {
   Loader,
   PersistedRun,
@@ -46,6 +48,7 @@ import type {
 } from "./persistence.js";
 import { type AckContext, Reactor } from "./reactor.js";
 import type { ResourcePool } from "./resource-pool.js";
+import { answerStoreRequest, isStoreRequest, type StoreRows } from "./store-responder.js";
 
 /** One run-root request the engine could not handle internally, awaiting a user's answer. */
 export interface OpenEscalation {
@@ -104,6 +107,10 @@ export class ApiReactor extends Reactor {
     private readonly apiRootId: InstanceId,
     private readonly commands: CommandSink,
     pool: ResourcePool,
+    /** The project whose durable rows a machine-answered `prelude.store.*` escalation reads / writes. */
+    private readonly projectId: ProjectId,
+    /** The durable KV rows the runtime answers an unhandled `prelude.store.*` request against. */
+    private readonly storeRows: StoreRows,
   ) {
     super(pool);
   }
@@ -302,6 +309,75 @@ export class ApiReactor extends Reactor {
     });
   }
 
+  /** Machine-answer an unhandled `prelude.store.*` escalation: compute the answer against the durable rows
+   *  (async — a DB round-trip, OUTSIDE the react loop), then reply on a serial command turn with the same
+   *  `escalateAck` an operator answer sends. No open question is tracked (it never surfaces to a human), and
+   *  no audit is written (a machine environment interaction, not a user Q&A). Called live from `onEscalate`
+   *  and, on reload, from `load` for a store answer a crash interrupted before its `escalateAck` committed —
+   *  re-running is idempotent (a re-read yields the same value, a re-write is last-write-wins). A rows failure
+   *  fails the run (a defect the program did not anticipate — the store request declares no throw), the same
+   *  terminal a panic reaching the run root gets. */
+  private answerStoreEscalation(escalate: {
+    delegation: DelegationId;
+    escalation: EscalationId;
+    run: InstanceId;
+    request: QualifiedName;
+    argument: Value | null;
+  }): void {
+    void answerStoreRequest(this.storeRows, this.projectId, escalate.request, escalate.argument)
+      .then((value) =>
+        this.commands.enqueue(() => {
+          this.send({
+            kind: "escalateAck",
+            delegation: escalate.delegation,
+            escalation: escalate.escalation,
+            value,
+            from: this.name,
+            to: "core",
+            run: escalate.run,
+          });
+        }),
+      )
+      .catch((error) =>
+        this.commands.enqueue(() => this.failRunForStore(escalate, messageOf(error))),
+      );
+  }
+
+  /** Fail a run whose machine-answered store request could not be served (a durable-rows failure): retire the
+   *  run delegation, record the `error` outcome, and terminate the still-suspended root — exactly the failure
+   *  path a panic reaching the run root takes. Guarded by the retirement so a run already terminal (a racing
+   *  cancel) is untouched. */
+  private failRunForStore(
+    escalate: {
+      delegation: DelegationId;
+      run: InstanceId;
+      escalation: EscalationId;
+      argument: Value | null;
+    },
+    message: string,
+  ): void {
+    if (!this.retireDelegation(escalate.delegation)) return;
+    this.pendingRunOutcomes.push({
+      run: escalate.run,
+      state: "error",
+      result: null,
+      errorMessage: `store: ${message}`,
+    });
+    this.pendingAudits.push({
+      run: escalate.run,
+      escalation: escalate.escalation,
+      question: escalate.argument,
+      answer: null,
+    });
+    this.send({
+      kind: "terminate",
+      delegation: escalate.delegation,
+      from: this.name,
+      to: "core",
+      run: escalate.run,
+    });
+  }
+
   /** The run-root escalations currently awaiting an answer. */
   listOpenEscalations(): OpenEscalation[] {
     return Object.values(this.openEscalations).map(({ escalation, request, argument }) => ({
@@ -329,6 +405,20 @@ export class ApiReactor extends Reactor {
         request: open.request as QualifiedName,
         argument: open.argument,
       };
+    }
+    // Re-answer any store escalation whose runtime answer a crash interrupted before its `escalateAck`
+    // committed (its open row is durable, its run suspended). These never entered `openEscalations`, so they
+    // are re-driven from the durable rows, not the answerable set. Re-answering is idempotent; a store answer
+    // that already landed left no open row here to reload, and a still-pending outbox `escalate` that also
+    // re-drives it converges (last-write-wins, one stray ack core ignores).
+    for (const open of await loader.api.machineAnswerableEscalations()) {
+      this.answerStoreEscalation({
+        delegation: open.delegation,
+        escalation: open.escalation,
+        run: open.run,
+        request: open.request as QualifiedName,
+        argument: open.argument,
+      });
     }
   }
 
@@ -390,6 +480,23 @@ export class ApiReactor extends Reactor {
    *  teardown drops that raiser. The api owns no ephemeral escalation row and never cleans one up. */
   protected onEscalate(event: Extract<ExternalEvent, { kind: "escalate" }>): void {
     const ask = event.ask;
+    if (ask.kind === "request" && isStoreRequest(ask.request)) {
+      // The store is the run's MACHINE-answering environment: an unhandled `prelude.store.*` request is
+      // answered by the runtime against the durable rows, never surfaced as an operator question (it is not
+      // in `openEscalations`, so `listOpenEscalations` / `katari ls escalations` never show it). Reown the
+      // argument onto the api ROOT (not the run, like a user question): a stored value's `file` blob thereby
+      // lands api-root-owned — the file library — so it outlives the run, exactly the landing an upload gets.
+      // Then compute the answer (async rows I/O) and reply on the same downward path an operator answer takes.
+      if (ask.argument !== null) this.reownIncoming(ask.argument, this.apiRootId);
+      this.answerStoreEscalation({
+        delegation: event.delegation,
+        escalation: event.escalation,
+        run: event.run,
+        request: ask.request,
+        argument: ask.argument,
+      });
+      return;
+    }
     if (ask.kind === "request" && isUserFacingRequest(ask.request)) {
       // Reown the question's resources onto the run's instance: the raiser released them on send, and the
       // run now holds the open escalation across an arbitrary wait for the user's answer.

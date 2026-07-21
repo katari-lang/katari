@@ -177,41 +177,6 @@ export class ResourcePool {
     }
   }
 
-  /** Move every blob `value` references that the writer may give away onto the store sentinel — the
-   *  `prelude.store` write's ownership step, run BEFORE the row write. Movable: a blob the writing run owns
-   *  (checked at the RUN via `runOfOwner`, exactly like `deleteBlobOwnedInRun` — a hoisted blob may sit on any
-   *  ancestor), one in transit (`owner = null`), or one the file library holds (`apiRoot` — the store takes it
-   *  over, so a file-API delete can no longer dangle a stored reference). Another run's blob is left alone: the
-   *  stored ref then dangles when that run frees it, the same contract as holding any foreign ref. Idempotent —
-   *  a blob already on `storeRoot` is skipped — so an at-least-once re-run converges. */
-  adoptBlobsForStore(
-    value: Value,
-    runId: InstanceId | null,
-    apiRoot: InstanceId,
-    storeRoot: InstanceId,
-  ): void {
-    const { blobs } = reachableResources(this.store, value);
-    for (const blobId of blobs) {
-      const entry = this.store.blobs[blobId];
-      if (entry === undefined || entry.owner === storeRoot) continue;
-      const movable =
-        entry.owner === null ||
-        entry.owner === apiRoot ||
-        (runId !== null && entry.owner !== null && this.runOfOwner(entry.owner) === runId);
-      if (movable) {
-        setBlobOwner(this.store, blobId, storeRoot);
-        this.dirtyBlobs.add(blobId);
-      }
-    }
-  }
-
-  /** Free the given blobs where the store sentinel owns them (a no-op per blob otherwise) — the
-   *  `prelude.store` write's reclaim step, called with the blobs a replaced / deleted entry referenced that no
-   *  store entry still does. Idempotent, like every free. */
-  freeStoreBlobs(blobIds: readonly BlobId[], storeRoot: InstanceId): void {
-    for (const blobId of blobIds) this.deleteBlobOwnedBy(blobId, storeRoot);
-  }
-
   /** Release the resources `value` captures, currently owned by `owner`, to in-transit (`owner = null`) — so
    *  the value's recipient can re-own them rather than have them dropped with `owner`. Only `owner`'s own
    *  resources move; ancestors / others' are left as they are. */

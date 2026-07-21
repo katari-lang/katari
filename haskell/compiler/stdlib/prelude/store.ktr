@@ -4,11 +4,24 @@
 // operator browses and edits the same tree in the console, and an AI reads a stored note back into
 // its context. Keys are path-like strings (`"memos/2026-07"`); a `store` value is a PREFIX — a view
 // of one subtree, plain data (`scope` narrows it), so an agent can be handed exactly the subtree it
-// should touch. Values are ordinary Katari values: a document, a data value, a `file` (the store
-// takes over the blob, so a stored file outlives the run that produced it), a secret
+// should touch. Values are ordinary Katari values: a document, a data value, a `file`, a secret
 // (`string of private` seals at rest exactly like a secret env entry, and stays redacted at every
 // user-facing boundary). Writes are last-write-wins; one project's runs are serialized, so two
 // writers never interleave.
+//
+// Each operation is a `request` — part of the run's ENVIRONMENT. A program performs it; a handler in
+// scope may catch it (the same mechanism that catches `prelude.throw`) to intervene — a test stub, a
+// sandboxed subtree, a redirect. Unhandled, it escalates like any request to the run's OUTERMOST
+// environment, the runtime itself, which MACHINE-ANSWERS it against the project's durable rows — it is
+// never surfaced as a question to a human operator. The answer is durable, so a re-run during recovery
+// observes the same value the first attempt did: the store is replay-deterministic.
+//
+// Storing a `file` JOINS its bytes to the project's FILE LIBRARY: the stored file becomes a project
+// file (owned by the api root, listed on the console's Files page) that outlives the run that wrote
+// it. Overwriting or deleting an entry NEVER frees a file — the store only forgets the reference; the
+// file is removed by an explicit delete through the file API or the Files page, and a stored reference
+// to a file that was explicitly deleted reads as `gone` (`prelude.files`' contract for any handle to a
+// removed file).
 
 @"A view of one subtree of the project store: the path prefix every operation resolves its key
 under. Plain data, not a permission — `scope` narrows it, and handing an agent a scoped store is
@@ -42,17 +55,19 @@ type lookup = found | absent
 @"Read the value at @key@ under @target@'s prefix: `found(value)` or `absent(key)` — a stored
 `null` is `found(null)`, so presence and value never blur. Pin an expected shape with
 `json.validate[T]` on the found value."
-primitive agent get(target: store, key: string) -> lookup
+request get(target: store, key: string) -> lookup
 
 @"Write @value@ at @key@ under @target@'s prefix, creating or replacing the entry (last write
-wins). Any value fits: a document, a data value, a `file` (the store takes over its blob — the
-file outlives the writing run), a secret (sealed at rest). Replacing away the last stored
-reference to a file frees its blob."
-primitive agent set(target: store, key: string, value: unknown) -> null
+wins). Any value fits: a document, a data value, a `file`, a secret (sealed at rest). A stored
+`file` joins the project's file library — it becomes a project file (visible on the Files page)
+that outlives the writing run. Overwriting the entry does NOT free the file it replaced; a file is
+removed only by an explicit delete through the file API or the Files page."
+request set(target: store, key: string, value: unknown) -> null
 
-@"Delete the entry at @key@ under @target@'s prefix; deleting a missing key is a no-op. A file no
-stored entry references any more is freed with its entry."
-primitive agent delete(target: store, key: string) -> null
+@"Delete the entry at @key@ under @target@'s prefix; deleting a missing key is a no-op. Deleting an
+entry that held a `file` does NOT free the file — it stays in the project's file library; remove it
+with an explicit delete through the file API or the Files page."
+request delete(target: store, key: string) -> null
 
 @"A `list` entry: a key holding a value, directly under the listed prefix."
 data leaf(@"The key, relative to the listed prefix." key: string)
@@ -66,4 +81,4 @@ type entry = leaf | branch
 @"List what sits DIRECTLY under @target@'s prefix: a `leaf` per value-holding key and a `branch`
 per segment with entries below it (sorted; a name that is both leaf and branch yields both). The
 file-system face of the tree — descend a branch with `scope`."
-primitive agent list(target: store) -> array[entry]
+request list(target: store) -> array[entry]

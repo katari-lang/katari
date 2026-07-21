@@ -5,6 +5,7 @@
 // list (`escalation.repository`), and the run-tree's `answerable` mark. So the engine and every durable read
 // present the same answerable set, and a failure row never surfaces as answerable.
 
+import { isStoreRequest } from "./actor/store-responder.js";
 import { PANIC_REQUEST } from "./engine/common.js";
 import { THROW_REQUEST } from "./engine/throw-signal.js";
 
@@ -31,9 +32,14 @@ export function isFailureRequest(request: string): boolean {
 }
 
 /** Whether an escalation's `request` names a genuine user-answerable capability — i.e. it is not a failure
- *  channel (panic / throw) and not a control-flow escape. The `request` column stores a request ask's
- *  qualified name, or a control ask's bare `kind`; capability names are qualified, so they never collide
- *  with the bare control keywords. */
+ *  channel (panic / throw), not a control-flow escape, and not a MACHINE-ANSWERED request (a `prelude.store.*`
+ *  operation the runtime answers itself against the durable rows — never an operator question). The `request`
+ *  column stores a request ask's qualified name, or a control ask's bare `kind`; capability names are
+ *  qualified, so they never collide with the bare control keywords. So a store escalation is kept out of
+ *  every user-facing read — the api reactor's answerable set, `katari ls escalations`, the run-tree's
+ *  answerable mark — while the api reactor still recognises and machine-answers it (`isStoreRequest`). */
 export function isUserFacingRequest(request: string): boolean {
-  return !isFailureRequest(request) && !CONTROL_ESCAPE_KINDS.has(request);
+  return (
+    !isFailureRequest(request) && !CONTROL_ESCAPE_KINDS.has(request) && !isStoreRequest(request)
+  );
 }

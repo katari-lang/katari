@@ -97,9 +97,8 @@ export const envEntries = pgTable(
 
 /** The project's durable key-value store (`prelude.store`): one row per path-like key, the value a
  *  Katari `Value` tree as JSON with every `private` node sealed (`sealForStorage`, the same AES-GCM
- *  key a secret env entry uses). Blobs a stored value references are owned by the project's store
- *  sentinel instance (`storeRootIdOf`), so a stored file outlives the run that wrote it and drops
- *  with the project. */
+ *  key a secret env entry uses). A blob a stored value references is owned by the project's api root
+ *  (the file library), so a stored file outlives the run that wrote it and drops with the project. */
 export const storeEntries = pgTable(
   "store_entries",
   {

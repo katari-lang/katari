@@ -7,8 +7,6 @@
 //
 // Branding keeps the families from being mixed up at compile time without any runtime cost.
 
-import { createHash } from "node:crypto";
-
 type Brand<T, B extends string> = T & { readonly __brand: B };
 
 export type ProjectId = Brand<string, "ProjectId">;
@@ -50,27 +48,6 @@ export const toDelegationId = (value: string): DelegationId => value as Delegati
  *  layer, needing no registry. This is the one place the project / instance id families deliberately
  *  coincide (mirrors the prototype's `project-root entity id = projectId`). */
 export const apiRootIdOf = (projectId: ProjectId): InstanceId => projectId as string as InstanceId;
-
-/** The id of a project's one `store` sentinel — the permanent owner of every blob a stored value
- *  references, so a stored file outlives the run that wrote it and never shows up in the file
- *  library (which lists api-root-owned blobs). Like the api root it must be derivable in any layer
- *  with no registry, but it cannot BE the project id (the api root took that), so it is the v5
- *  (SHA-1, RFC 4122) UUID of the project id under a fixed namespace — deterministic, stable across
- *  restarts, and structurally a valid UUID for the `instances.id` column. */
-export const storeRootIdOf = (projectId: ProjectId): InstanceId => {
-  const digest = createHash("sha1")
-    .update(STORE_ROOT_NAMESPACE)
-    .update(projectId as string)
-    .digest();
-  digest[6] = ((digest[6] ?? 0) & 0x0f) | 0x50; // version 5
-  digest[8] = ((digest[8] ?? 0) & 0x3f) | 0x80; // RFC 4122 variant
-  const hex = digest.subarray(0, 16).toString("hex");
-  const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-  return uuid as InstanceId;
-};
-
-/** The fixed namespace `storeRootIdOf` hashes under — any constant works as long as it never changes. */
-const STORE_ROOT_NAMESPACE = "katari-store-root:";
 
 export const newEscalationId = (): EscalationId => newUuid() as EscalationId;
 export const newBlobId = (): BlobId => newUuid() as BlobId;

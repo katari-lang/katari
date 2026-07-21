@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from "vitest";
 import type { PrimContext } from "../src/runtime/engine/context.js";
-import { type EnvReader, registerHostPrims, type StoreRows } from "../src/runtime/engine/host-prims.js";
+import { type EnvReader, registerHostPrims } from "../src/runtime/engine/host-prims.js";
 import { PrimRegistry } from "../src/runtime/engine/prims.js";
 import { KatariThrow } from "../src/runtime/engine/throw-signal.js";
 import type { ProjectId } from "../src/runtime/ids.js";
@@ -36,17 +36,9 @@ function reader(secrets: Record<string, string>, publics: Record<string, string>
   };
 }
 
-const STUB_STORE_ROWS: StoreRows = {
-  read: async () => undefined,
-  upsert: async () => {},
-  remove: async () => {},
-  listKeys: async () => [],
-  isBlobReferenced: async () => false,
-};
-
 function primsWith(env: EnvReader): PrimRegistry {
   const prims = new PrimRegistry();
-  registerHostPrims(prims, { env, store: STUB_STORE_ROWS });
+  registerHostPrims(prims, { env });
   return prims;
 }
 
