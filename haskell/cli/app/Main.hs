@@ -79,7 +79,10 @@ main = do
           (commandParser <**> versionOption <**> helper)
           ( fullDesc
               <> header "katari — orchestration logic for AI agents"
-              <> progDesc "Use `katari <command> --help` for per-command options."
+              <> progDesc
+                "Use `katari <command> --help` for per-command options. Katari is under construction: \
+                \expect breaking changes between releases, and prefer hobby projects over production \
+                \workloads until v1.0.0."
           )
       )
   let (subcommand, runCommand) = dispatch command'

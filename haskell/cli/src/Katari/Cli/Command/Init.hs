@@ -65,6 +65,7 @@ run options = do
         progress context ("  + " <> Text.pack destination)
   progress context ("Initialized " <> packageName)
   hint context ("docker compose up -d && katari apply && katari run " <> packageName <> ".main")
+  hint context "Katari is under construction — great for hobby projects, not yet for production. v1.0.0 is coming."
 
 -- | The package name: the argument (validated), an interactive prompt defaulting to the directory
 -- name, or that sanitised default directly when non-interactive.
