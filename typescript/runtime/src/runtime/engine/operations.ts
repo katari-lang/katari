@@ -15,6 +15,8 @@ import type {
   DelegateOperation,
   ExitOperation,
   GenericArgumentSchema,
+  GenericId,
+  JSONSchema,
   Operation,
   QualifiedName,
   VariableId,
@@ -24,7 +26,11 @@ import { newDelegationId, type ScopeId, type SnapshotId } from "../ids.js";
 import { literalToValue } from "../value/codec.js";
 import { liftPrivacy } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
-import { renderConformFailures } from "../value/validation.js";
+import {
+  fillGenericSchema,
+  renderConformFailures,
+  typeSubstitutionOf,
+} from "../value/validation.js";
 import { CALL_AGENT_NAME, completeThread, constructValue, raiseThrow } from "./common.js";
 import type { StepContext } from "./context.js";
 import { CALL_ERROR, type DispatchResult, dispatchCallable } from "./dynamic-dispatch.js";
@@ -240,9 +246,10 @@ function planDelegate(
   // turning a would-be catchable `call_error` into an uncatchable panic. The target carries its own
   // instantiation on the value, so a `call_agent` delegate takes exactly that; a direct / value call still
   // merges the call-site instantiation the checker stamped for the callee itself.
-  const generics = viaCallAgent
-    ? dispatch.generics
-    : mergeGenerics(dispatch.generics, operation.generics);
+  const generics = composeAmbientGenerics(
+    ctx,
+    viaCallAgent ? dispatch.generics : mergeGenerics(dispatch.generics, operation.generics),
+  );
   if (dispatch.target.kind === "named" && dispatch.to === "core") {
     const leaf = resolveLeafBody(ctx, dispatch.target.name, dispatch.target.snapshot);
     if (leaf !== null && leaf.kind === "construct") {
@@ -286,6 +293,58 @@ function mergeGenerics(
   }
   return merged;
 }
+
+/** Resolve a delegate's generic arguments against the CALLER's ambient substitution — the missing half
+ *  of generic composition. The call site stamps `foo[T]` as a `$generic` placeholder referring to the
+ *  ENCLOSING agent's own type parameter (a `bar[T]` passing its own `T` down); left raw, that placeholder
+ *  reaches the callee — an inline prim's `context.generics` (`reflection.schema_of[T]`, `json.validate[T]`)
+ *  or a child instance's `ambientGenerics` — where it is read as the argument itself, so a reflected schema
+ *  ships the bare `{"$generic": id}` instead of the concrete type. Filling each argument against the caller's
+ *  own instantiation here makes the substitution that flows downstream as concrete as the caller is. A
+ *  non-generic caller (no ambient) or an argument with no placeholder is returned untouched. */
+function composeAmbientGenerics(
+  ctx: StepContext,
+  generics: GenericSubstitution | undefined,
+): GenericSubstitution | undefined {
+  if (generics === undefined) return undefined;
+  const substitution = callerTypeSubstitution(ctx);
+  if (substitution.size === 0) return generics;
+  const composed: GenericSubstitution = {};
+  for (const [name, argument] of Object.entries(generics)) {
+    composed[name] =
+      argument.kind === "type"
+        ? { kind: "type", schema: fillGenericSchema(substitution, argument.schema) }
+        : argument;
+  }
+  return composed;
+}
+
+/** The caller instance's own `[T]` bindings as a `GenericId` -> schema map (empty when it is not itself
+ *  generic). The bridge from the ambient substitution (name-keyed) to the `$generic` ids a stamped
+ *  argument carries, so `composeAmbientGenerics` can fill them. Reads the running agent's own block, always
+ *  in this instance's module/snapshot (`ctx.ir`); a resolution hiccup degrades to "no substitution" rather
+ *  than derailing the delegate. */
+function callerTypeSubstitution(ctx: StepContext): ReadonlyMap<GenericId, JSONSchema> {
+  const ambient = ctx.instance.ambientGenerics;
+  if (ambient === undefined) return EMPTY_SUBSTITUTION;
+  const target = ctx.instance.target;
+  try {
+    const blockId =
+      target.kind === "named"
+        ? ctx.irSource.locate(target.snapshot, target.name).blockId
+        : target.kind === "closure"
+          ? target.blockId
+          : null;
+    if (blockId === null) return EMPTY_SUBSTITUTION;
+    const block = ctx.ir.block(blockId).block;
+    if (block.kind !== "agent") return EMPTY_SUBSTITUTION;
+    return typeSubstitutionOf(block.schema.genericBindings, ambient);
+  } catch {
+    return EMPTY_SUBSTITUTION;
+  }
+}
+
+const EMPTY_SUBSTITUTION: ReadonlyMap<GenericId, JSONSchema> = new Map();
 
 /** Resolve a named core callee down to an inlinable leaf body (a `construct` / `primitive` block), or
  *  `null` when it is not one. Resolution reads the callee's module through `irSource` (sync — the
