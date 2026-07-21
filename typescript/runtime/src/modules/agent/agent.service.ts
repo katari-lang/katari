@@ -7,6 +7,7 @@
 // filter.
 
 import { NotFoundError } from "../../lib/errors.js";
+import { requestsToJson } from "../../runtime/value/schema-json.js";
 import { collectEntries, loadSnapshotModules } from "./agent.reader.js";
 
 export const agentService = {
@@ -45,6 +46,10 @@ export const agentService = {
       qualifiedName,
       input: entry.block.schema.input,
       output: entry.block.schema.output,
+      // The requests this callable may escalate, one `{name, input, output}` per concrete request (an
+      // effect generic surfaces as its `{$generic}` placeholder) — the SAME `RequestSchema[] -> Json`
+      // derivation `reflection.get_metadata` serves, so the console's listing can never drift from it.
+      requests: requestsToJson(entry.block.schema.requests),
       description: entry.block.description ?? "",
     };
   },

@@ -2,12 +2,19 @@
 // (`collectEntries`) and deriving an escalation's answer schema from a request entry
 // (`deriveAnswerSchema`). The DB-facing loader around them needs Postgres; these mappings are pure.
 
-import { createAgentName, type IRModule, type SchemaInfo } from "@katari-lang/types";
+import {
+  createAgentName,
+  type IRModule,
+  type JSONSchema,
+  type RequestSchema,
+  type SchemaInfo,
+} from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import { collectEntries, deriveAnswerSchema } from "../src/modules/agent/agent.reader.js";
+import { requestsToJson } from "../src/runtime/value/schema-json.js";
 
-function schemaOf(input: object, output: object): SchemaInfo {
-  return { input, output, requests: [], genericBindings: {} };
+function schemaOf(input: object, output: object, requests: RequestSchema[] = []): SchemaInfo {
+  return { input, output, requests, genericBindings: {} };
 }
 
 /** A minimal one-entry module: `entries[name] -> agent block` carrying the given schema (public by
@@ -66,6 +73,38 @@ describe("collectEntries", () => {
     };
     const entries = collectEntries(new Map([["main", malformed]]));
     expect(entries.size).toBe(0);
+  });
+});
+
+describe("agent detail requests", () => {
+  // The detail endpoint serves `requestsToJson(entry.block.schema.requests)` — the same
+  // `RequestSchema[] -> Json` derivation `reflection.get_metadata` uses. Pin the shape that reaches the
+  // console: one `{name, input, output}` per concrete request, a `{$generic}` placeholder otherwise.
+  const askInput: JSONSchema = { type: "object", properties: { question: { type: "string" } } };
+  const askOutput: JSONSchema = { type: "object", properties: { approved: { type: "boolean" } } };
+  const requests: RequestSchema[] = [
+    {
+      kind: "concrete",
+      descriptor: { name: createAgentName("main.ask"), input: askInput, output: askOutput },
+    },
+    { kind: "generic", generic: 7 },
+  ];
+
+  test("derives one {name, input, output} per concrete request, a placeholder for an effect generic", () => {
+    const module = moduleWithAgent("main.main", schemaOf(mainSchema.input, mainSchema.output, requests));
+    const entry = collectEntries(new Map([["main", module]])).get("main.main");
+    expect(entry).toBeDefined();
+    expect(requestsToJson(entry?.block.schema.requests ?? [])).toEqual([
+      { name: "main.ask", input: askInput, output: askOutput },
+      { $generic: 7 },
+    ]);
+  });
+
+  test("an agent that performs no request derives an empty list (the card is then hidden)", () => {
+    const entry = collectEntries(
+      new Map([["main", moduleWithAgent("main.main", mainSchema)]]),
+    ).get("main.main");
+    expect(requestsToJson(entry?.block.schema.requests ?? [])).toEqual([]);
   });
 });
 

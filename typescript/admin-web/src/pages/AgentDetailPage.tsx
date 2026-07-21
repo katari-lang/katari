@@ -136,6 +136,43 @@ export function AgentDetailPage() {
           </Card>
         </div>
       </div>
+      {detail.requests.length > 0 && (
+        <div className="mt-4">
+          <Card>
+            <CardHeader title="Requests" />
+            <CardBody className="space-y-4">
+              {detail.requests.map((request, index) => (
+                <div
+                  // biome-ignore lint/suspicious/noArrayIndexKey: a callable's requests are a stable positional list
+                  key={index}
+                  className="border-t border-edge pt-4 first:border-t-0 first:pt-0"
+                >
+                  {"$generic" in request ? (
+                    // An unresolved effect-generic parameter — the agent is polymorphic over this request set.
+                    <span className="font-mono text-sm text-fg-muted">
+                      generic #{request.$generic}
+                    </span>
+                  ) : (
+                    <>
+                      <div className="font-mono text-sm text-fg">{request.name}</div>
+                      <div className="mt-2 space-y-2">
+                        <div>
+                          <span className="text-xs text-fg-muted">input</span>
+                          <SchemaViewer schema={request.input} />
+                        </div>
+                        <div>
+                          <span className="text-xs text-fg-muted">output</span>
+                          <SchemaViewer schema={request.output} />
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </CardBody>
+          </Card>
+        </div>
+      )}
     </>
   );
 }

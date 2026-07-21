@@ -214,11 +214,20 @@ export interface AgentList {
   agents: AgentEntry[];
 }
 
+/** One request an agent may escalate, as the runtime derives it from the callable's `RequestSchema[]`
+ *  (the same `reflection.get_metadata` derivation): a concrete request with its name and input/output
+ *  schemas, or an unresolved effect-generic placeholder (`$generic` is the parameter's id). */
+export type AgentRequest =
+  | { name: string; input: JsonSchema; output: JsonSchema }
+  | { $generic: number };
+
 export interface AgentDetail {
   snapshotId: string;
   qualifiedName: string;
   input: JsonSchema;
   output: JsonSchema;
+  /** The requests this agent may escalate (one entry per concrete request); empty when it performs none. */
+  requests: AgentRequest[];
   /** The agent's `@"..."` doc annotation; empty string when undocumented. */
   description: string;
 }
