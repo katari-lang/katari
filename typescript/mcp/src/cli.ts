@@ -65,8 +65,14 @@ async function runListTools(rest: string[]): Promise<never> {
   }
   try {
     const listing = await performListTools(parsed, callbacks);
-    process.stdout.write(`${JSON.stringify(listing)}\n`);
-    // The SDK client is closed, but a lingering keep-alive socket must not hold the process.
+    // stdout is a PIPE when the Haskell `katari` binary spawns us, so `write` is asynchronous: a large
+    // listing (Notion's runs past the ~64 KB pipe buffer) is still draining when an immediate
+    // `process.exit` would truncate it — the reader then parses a half-written JSON string. Await the
+    // write's flush before exiting. `process.exit` is still needed: the MCP SDK leaves a keep-alive
+    // socket that would otherwise hold the event loop open past the listing.
+    await new Promise<void>((resolve) => {
+      process.stdout.write(`${JSON.stringify(listing)}\n`, () => resolve());
+    });
     process.exit(0);
   } catch (error) {
     bail(error instanceof Error ? error.message : String(error), 1);
