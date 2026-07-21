@@ -168,14 +168,6 @@ CREATE TABLE "env_entries" (
 	CONSTRAINT "env_entries_project_id_key_pk" PRIMARY KEY("project_id","key")
 );
 --> statement-breakpoint
-CREATE TABLE "store_entries" (
-	"project_id" uuid NOT NULL,
-	"key" text NOT NULL,
-	"value" jsonb NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "store_entries_project_id_key_pk" PRIMARY KEY("project_id","key")
-);
---> statement-breakpoint
 CREATE TABLE "modules" (
 	"project_id" uuid NOT NULL,
 	"hash" text NOT NULL,
@@ -201,6 +193,14 @@ CREATE TABLE "snapshots" (
 	"sidecar_bundle" jsonb,
 	"message" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "store_entries" (
+	"project_id" uuid NOT NULL,
+	"key" text NOT NULL,
+	"value" jsonb NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "store_entries_project_id_key_pk" PRIMARY KEY("project_id","key")
 );
 --> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -230,10 +230,10 @@ ALTER TABLE "runs" ADD CONSTRAINT "runs_project_id_projects_id_fk" FOREIGN KEY (
 ALTER TABLE "runs" ADD CONSTRAINT "runs_snapshot_id_snapshots_id_fk" FOREIGN KEY ("snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "oauth_clients" ADD CONSTRAINT "oauth_clients_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "env_entries" ADD CONSTRAINT "env_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "store_entries" ADD CONSTRAINT "store_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "modules" ADD CONSTRAINT "modules_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "projects" ADD CONSTRAINT "projects_head_snapshot_id_snapshots_id_fk" FOREIGN KEY ("head_snapshot_id") REFERENCES "public"."snapshots"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "snapshots" ADD CONSTRAINT "snapshots_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "store_entries" ADD CONSTRAINT "store_entries_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "blobs_owner_instance_id_idx" ON "blobs" USING btree ("owner_instance_id");--> statement-breakpoint
 CREATE INDEX "scopes_owner_instance_id_idx" ON "scopes" USING btree ("owner_instance_id");--> statement-breakpoint
 CREATE INDEX "capability_routes_instance_id_idx" ON "capability_routes" USING btree ("instance_id");--> statement-breakpoint
@@ -245,15 +245,4 @@ CREATE INDEX "instances_delegation_id_idx" ON "instances" USING btree ("delegati
 CREATE INDEX "outbox_project_id_idx" ON "outbox" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "run_events_run_id_seq_idx" ON "run_events" USING btree ("run_id","seq");--> statement-breakpoint
 CREATE INDEX "runs_project_id_idx" ON "runs" USING btree ("project_id");--> statement-breakpoint
-CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");-- The instances <-> delegations foreign keys form a cycle (instances.delegation_id -> delegations.id,
--- delegations.caller_instance_id -> instances.id), and turn batching can fold a whole causal chain --
--- caller instance, its delegation, the callee instance that delegation summoned -- into one commit.
--- No fixed per-table insert order satisfies both edges of the cycle across reactors, so the references
--- are checked at commit time instead of statement time. Referential ACTIONS (cascade / set null) are
--- unaffected by deferral; only the existence check moves to the commit boundary.
---
--- This lives in a hand-written migration (drizzle-kit --custom) because the drizzle schema DSL cannot
--- express DEFERRABLE; regenerating 0000 from src/db/tables/ will never recreate it. If the squash is
--- ever redone, this file must survive it.
-ALTER TABLE "instances" ALTER CONSTRAINT "instances_delegation_id_delegations_id_fk" DEFERRABLE INITIALLY DEFERRED;--> statement-breakpoint
-ALTER TABLE "delegations" ALTER CONSTRAINT "delegations_caller_instance_id_instances_id_fk" DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX "snapshots_project_id_idx" ON "snapshots" USING btree ("project_id");
