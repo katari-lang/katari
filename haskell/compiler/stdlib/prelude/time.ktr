@@ -67,3 +67,227 @@ external agent watch[effect E](
   @"When occurrences fire: an `interval(...)` or a `cron(...)` value." schedule: schedule,
   @"Called once per occurrence; its @time@ is the occurrence's scheduled epoch millisecond, not the delivery instant." deliver_to: agent (time: number) -> null with E,
 ) -> never with E | io from "time"
+
+// ── the civil (wall-clock) calendar: pure arithmetic, no clock, no timezone database ─────────────
+//
+// Howard Hinnant's closed-form civil-calendar algorithms (`civil_from_days` / `days_from_civil`) over
+// the proleptic Gregorian calendar, as plain Katari — exact for any instant, past or future, with no
+// month-length tables. The scope is deliberately honest: an instant is epoch milliseconds (what `now`
+// returns), a wall clock is `civil` fields at a FIXED offset passed explicitly (`offset_minutes`,
+// default 0 = UTC), and named timezones are NOT handled here — resolving "Asia/Tokyo" to an offset
+// takes the IANA database, which lives runtime-side (a `cron` schedule names its zone for exactly that
+// reason). A DST-correct wall clock for a named zone is out of scope on purpose: pass the offset that
+// is true for the instants you are converting.
+
+@"A wall-clock date-time split into its calendar fields (proleptic Gregorian). Produced by `to_civil`
+and folded back by `from_civil`; a plain value carrying NO zone of its own — it means whatever offset
+you read it at."
+data civil(
+  @"The calendar year." year: integer,
+  @"1 (January) to 12 (December)." month: integer,
+  @"1 to the month's length (`days_in_month`)." day: integer,
+  @"0 to 23." hour: integer,
+  @"0 to 59." minute: integer,
+  @"0 to 59." second: integer,
+  @"0 to 999." millisecond: integer,
+)
+
+@"Split an epoch-millisecond instant into its wall-clock fields at a fixed offset (@offset_minutes@
+east of UTC; the default 0 reads UTC). `from_civil` at the same offset is the exact inverse.
+Sub-millisecond precision is dropped."
+agent to_civil(epoch_milliseconds: number, offset_minutes: integer ?= 0) -> civil {
+  let total_milliseconds = math.floor(value = epoch_milliseconds) + offset_minutes * 60000
+  let total_seconds = math.floor(value = total_milliseconds / 1000)
+  let millisecond = total_milliseconds - total_seconds * 1000
+  let days = math.floor(value = total_seconds / 86400)
+  let seconds_of_day = total_seconds - days * 86400
+  // civil_from_days: shift the epoch to an era based on 1st March 2000 so the leap day falls at the end
+  // of the 400-year cycle, then invert the 400/100/4-year leap rules in closed form. Every division is a
+  // floor, so pre-1970 instants (negative days) fall through the same arithmetic.
+  let shifted = days + 719468
+  let era = math.floor(value = shifted / 146097)
+  let day_of_era = shifted - era * 146097
+  let year_of_era = math.floor(value = (day_of_era - math.floor(value = day_of_era / 1460) + math.floor(value = day_of_era / 36524) - math.floor(value = day_of_era / 146096)) / 365)
+  let year_from_march = year_of_era + era * 400
+  let day_of_year = day_of_era - (365 * year_of_era + math.floor(value = year_of_era / 4) - math.floor(value = year_of_era / 100))
+  let month_prime = math.floor(value = (5 * day_of_year + 2) / 153)
+  let day = day_of_year - math.floor(value = (153 * month_prime + 2) / 5) + 1
+  // The March-based month index (0..11) maps back to the calendar month; January and February belong
+  // to the following calendar year.
+  let month = if (month_prime < 10) { month_prime + 3 } else { month_prime - 9 }
+  let year = if (month <= 2) { year_from_march + 1 } else { year_from_march }
+  civil(
+    year = year,
+    month = month,
+    day = day,
+    hour = math.floor(value = seconds_of_day / 3600),
+    minute = math.floor(value = (seconds_of_day % 3600) / 60),
+    second = seconds_of_day % 60,
+    millisecond = millisecond,
+  )
+}
+
+@"Fold wall-clock fields back to an epoch-millisecond instant, reading them at a fixed offset
+(@offset_minutes@ east of UTC; the default 0 means the fields are UTC). The exact inverse of
+`to_civil` at the same offset. Out-of-range fields FOLD ARITHMETICALLY rather than erroring — month 13
+is January of the next year, day 0 is the last day of the previous month, hour 24 is midnight of the
+next day — so date arithmetic is plain field arithmetic: `day = value.day + 7` is one week later with
+every carry handled."
+agent from_civil(value: civil, offset_minutes: integer ?= 0) -> number {
+  // Normalize the month by floor division (floor `%` sends month 0 to December) so the linear folds
+  // below only ever see 1..12; every other field is linear in the fold and carries by itself.
+  let month_index = value.month - 1
+  let year = value.year + math.floor(value = month_index / 12)
+  let month = month_index % 12 + 1
+  // days_from_civil: January and February count as months 13/14 of the previous year so the leap day
+  // ends the year, then the 400/100/4-year leap rules fold the civil date to a day count from 1970.
+  let year_shifted = if (month <= 2) { year - 1 } else { year }
+  let era = math.floor(value = year_shifted / 400)
+  let year_of_era = year_shifted - era * 400
+  let month_prime = if (month > 2) { month - 3 } else { month + 9 }
+  let day_of_year = math.floor(value = (153 * month_prime + 2) / 5) + value.day - 1
+  let day_of_era = year_of_era * 365 + math.floor(value = year_of_era / 4) - math.floor(value = year_of_era / 100) + day_of_year
+  let days = era * 146097 + day_of_era - 719468
+  (days * 86400 + value.hour * 3600 + value.minute * 60 + value.second) * 1000 + value.millisecond - offset_minutes * 60000
+}
+
+@"The ISO 8601 day of the week — 1 (Monday) to 7 (Sunday) — of the instant's wall-clock date at
+@offset_minutes@ (default UTC)."
+agent day_of_week(epoch_milliseconds: number, offset_minutes: integer ?= 0) -> integer {
+  let total_milliseconds = math.floor(value = epoch_milliseconds) + offset_minutes * 60000
+  let days = math.floor(value = math.floor(value = total_milliseconds / 1000) / 86400)
+  // 1970-01-01 was a Thursday (ISO 4); `%` is a floor modulo, so pre-epoch days stay correct.
+  (days + 3) % 7 + 1
+}
+
+@"Whether @year@ is a Gregorian leap year (divisible by 4, except centuries not divisible by 400)."
+agent is_leap_year(year: integer) -> boolean {
+  year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+@"The number of days in @month@ (1..12) of @year@ — 28..31, leap-rule aware. A month outside 1..12
+first folds into its year like `from_civil` (month 13 is January of the next year)."
+agent days_in_month(year: integer, month: integer) -> integer {
+  let month_index = month - 1
+  let folded_year = year + math.floor(value = month_index / 12)
+  match (month_index % 12 + 1) {
+    case 2 -> if (is_leap_year(year = folded_year)) { 29 } else { 28 }
+    case 4 -> 30
+    case 6 -> 30
+    case 9 -> 30
+    case 11 -> 30
+    case _ -> 31
+  }
+}
+
+@"Format an instant as RFC3339 with millisecond precision — `YYYY-MM-DDTHH:MM:SS.mmmZ` at the default
+UTC offset, the same wall clock with a `±HH:MM` suffix at a non-zero @offset_minutes@. The wire inverse
+of `from_rfc3339`. A year outside 0..9999 renders faithfully (every digit, a leading `-`) even though
+strict RFC3339 wants exactly four."
+agent to_rfc3339(epoch_milliseconds: number, offset_minutes: integer ?= 0) -> string {
+  agent pad(value: integer, width: integer) -> string {
+    string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
+  }
+  let fields = to_civil(epoch_milliseconds = epoch_milliseconds, offset_minutes = offset_minutes)
+  let year = if (fields.year < 0) { "-" ++ pad(value = 0 - fields.year, width = 4) } else { pad(value = fields.year, width = 4) }
+  let date = f"${year}-${pad(value = fields.month, width = 2)}-${pad(value = fields.day, width = 2)}"
+  let clock = f"${pad(value = fields.hour, width = 2)}:${pad(value = fields.minute, width = 2)}:${pad(value = fields.second, width = 2)}.${pad(value = fields.millisecond, width = 3)}"
+  let zone = if (offset_minutes == 0) {
+    "Z"
+  } else {
+    let sign = if (offset_minutes < 0) { "-" } else { "+" }
+    let magnitude = math.abs(value = offset_minutes)
+    f"${sign}${pad(value = math.floor(value = magnitude / 60), width = 2)}:${pad(value = magnitude % 60, width = 2)}"
+  }
+  f"${date}T${clock}${zone}"
+}
+
+@"Parse an RFC3339 timestamp — `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or `±HH:MM` — to an
+epoch-millisecond UTC instant, or `null` when the string is not one (like `string.to_integer`).
+Validated, not clamped: a month or day that does not exist (February 30th) is `null`, not a silently
+carried date. `T` / `Z` also read lowercase; a fraction beyond milliseconds is truncated; a leap
+second (`:60`) folds into the next minute."
+agent from_rfc3339(value: string) -> number | null {
+  agent pad(value: integer, width: integer) -> string {
+    string.pad_start(value = string.to_string(value = value), width = width, padding = "0")
+  }
+  agent read_field(start: integer, end: integer) -> integer | null {
+    string.to_integer(value = string.slice(value = value, start = start, end = end))
+  }
+  agent digit_step(accumulator: boolean, value: string) -> boolean {
+    accumulator && string.contains(value = "0123456789", search = value)
+  }
+  let length = string.length(value = value)
+  if (length < 20) {
+    null
+  } else {
+    // The zone is the tail — one `Z`, or the six characters `±HH:MM`; everything between the seconds
+    // field and the zone is the optional fraction. Each region is validated by RE-RENDERING: parse the
+    // fields, format them back canonically, and require equality with the input — one comparison
+    // rejects every malformed shape (a stray sign inside a field, a missing separator, a dropped
+    // digit) that field-wise reads alone would let through.
+    let zone_is_utc = string.to_upper(value = string.slice(value = value, start = length - 1, end = length)) == "Z"
+    let zone_start = if (zone_is_utc) { length - 1 } else { length - 6 }
+    let offset_minutes = if (zone_is_utc) {
+      0
+    } else {
+      let sign = string.slice(value = value, start = zone_start, end = zone_start + 1)
+      match ([read_field(start = length - 5, end = length - 3), read_field(start = length - 2, end = length)]) {
+        case [integer(zone_hour), integer(zone_minute)] ->
+          if (
+            (sign == "+" || sign == "-")
+              && zone_hour <= 23
+              && zone_minute <= 59
+              && string.slice(value = value, start = zone_start, end = length) == f"${sign}${pad(value = zone_hour, width = 2)}:${pad(value = zone_minute, width = 2)}"
+          ) {
+            if (sign == "-") { 0 - (zone_hour * 60 + zone_minute) } else { zone_hour * 60 + zone_minute }
+          } else {
+            null
+          }
+        case _ -> null
+      }
+    }
+    // The fraction: `.` followed by one or more digits (each point checked — a fraction can be longer
+    // than any integer read would allow); the first three, right-padded with zeros, are the
+    // milliseconds, and the rest truncates.
+    let millisecond = if (zone_start == 19) {
+      0
+    } else {
+      let digits = string.slice(value = value, start = 20, end = zone_start)
+      let well_formed = (
+        zone_start > 20
+          && string.slice(value = value, start = 19, end = 20) == "."
+          && array.fold(target = string.split(value = digits, separator = ""), initial = true, step = digit_step)
+      )
+      match ([well_formed, string.to_integer(value = string.slice(value = digits ++ "00", start = 0, end = 3))]) {
+        case [true, integer(parsed)] -> parsed
+        case _ -> null
+      }
+    }
+    match ([offset_minutes, millisecond, read_field(start = 0, end = 4), read_field(start = 5, end = 7), read_field(start = 8, end = 10), read_field(start = 11, end = 13), read_field(start = 14, end = 16), read_field(start = 17, end = 19)]) {
+      case [integer(offset), integer(fraction), integer(year), integer(month), integer(day), integer(hour), integer(minute), integer(second)] -> {
+        let canonical_head = f"${pad(value = year, width = 4)}-${pad(value = month, width = 2)}-${pad(value = day, width = 2)}T${pad(value = hour, width = 2)}:${pad(value = minute, width = 2)}:${pad(value = second, width = 2)}"
+        // Validated, not clamped: the re-rendered head must match (case-normalized), and every field
+        // must be in range — except second 60, the leap second, which folds forward in `from_civil`.
+        if (
+          string.to_upper(value = string.slice(value = value, start = 0, end = 19)) != canonical_head
+            || month < 1
+            || month > 12
+            || day < 1
+            || day > days_in_month(year = year, month = month)
+            || hour > 23
+            || minute > 59
+            || second > 60
+        ) {
+          null
+        } else {
+          from_civil(
+            value = civil(year = year, month = month, day = day, hour = hour, minute = minute, second = second, millisecond = fraction),
+            offset_minutes = offset,
+          )
+        }
+      }
+      case _ -> null
+    }
+  }
+}
