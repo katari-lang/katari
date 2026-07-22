@@ -124,6 +124,16 @@ const samples = [
     ],
   },
   {
+    name: "effect generics: kind markers and the lacks constraint",
+    source: 'effect docs_scope\nagent race[R, effect E lacks settled, attribute A](task: agent (value: null) -> R with E) -> R with E {\n  task(value = null)\n}\n',
+    checks: [
+      ["effect", "storage.modifier.kind", "effect kind marker / marker-effect declaration"],
+      ["attribute", "storage.modifier.kind", "attribute kind marker"],
+      ["lacks", "keyword.declaration.lacks", "lacks constraint keyword"],
+      ["with", "keyword.control", "with keyword"],
+    ],
+  },
+  {
     name: "constants and comments",
     source: '// line comment\n/* block /* nested */ comment */\nagent main() {\n  let x = true\n  let y = null\n  let z = false\n}\n',
     checks: [

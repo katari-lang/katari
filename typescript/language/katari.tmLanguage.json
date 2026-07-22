@@ -93,6 +93,16 @@
           "match": "\\bliteral\\b(?=\\s+[A-Za-z_])"
         },
         {
+          "comment": "`effect` (a generic-kind marker in `[effect E]` and the marker-effect declaration `effect name`) and `attribute` (the kind marker in `[attribute A]`) are positional like `literal`: highlighted only before an identifier.",
+          "name": "storage.modifier.kind.katari",
+          "match": "\\b(effect|attribute)\\b(?=\\s+[A-Za-z_])"
+        },
+        {
+          "comment": "`lacks` opens an effect parameter's excluded-request list (`[effect E lacks settled]`) — positional, like `extends`, and only highlighted before a name.",
+          "name": "keyword.declaration.lacks.katari",
+          "match": "\\blacks\\b(?=\\s+[A-Za-z_])"
+        },
+        {
           "name": "keyword.declaration.katari",
           "match": "\\b(agent|request|data|external|primitive|let|var|import|as|from|type|of|extends)\\b"
         }
