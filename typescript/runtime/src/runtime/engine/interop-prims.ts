@@ -422,6 +422,17 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
       ? { kind: "number", value: parsed }
       : NULL_VALUE;
   },
+  "prelude.string.pad_start": async (argument, context) => {
+    const value = await readStringField(argument, "value", context);
+    const width = integerOf(field(argument, "width"));
+    const padding = Array.from(await readStringField(argument, "padding", context));
+    // Widths count code points, per the module contract (JS padStart would count UTF-16 units).
+    const missing = width - Array.from(value).length;
+    if (padding.length === 0 || missing <= 0) return { kind: "string", value };
+    const repeated: string[] = [];
+    while (repeated.length < missing) repeated.push(...padding);
+    return { kind: "string", value: repeated.slice(0, missing).join("") + value };
+  },
 
   // ─── prelude.files ──────────────────────────────────────────────────────────────────────────
   // A `file` value is a slim blob handle (identity only); content comes from the byte store and

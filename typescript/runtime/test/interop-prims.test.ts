@@ -884,6 +884,45 @@ describe("the scalar comparison order (comparison operators and the sort prims)"
     expect(input.kind === "array" && input.elements[0]).toEqual(integerValue(3));
   });
 
+  test("modulo is the declared FLOOR modulo: the result carries the divisor's sign", async () => {
+    // -1 % 12 must be 11 (JS's truncated % would say -1) — month folding and day-of-week count on it.
+    await expect(
+      run("prelude.modulo", { left: integerValue(-1), right: integerValue(12) }),
+    ).resolves.toEqual(integerValue(11));
+    await expect(
+      run("prelude.modulo", { left: integerValue(-24), right: integerValue(12) }),
+    ).resolves.toEqual(integerValue(0));
+    await expect(
+      run("prelude.modulo", { left: integerValue(7), right: integerValue(3) }),
+    ).resolves.toEqual(integerValue(1));
+  });
+
+  test("pad_start pads by code points and never truncates", async () => {
+    await expect(
+      run("prelude.string.pad_start", {
+        value: stringValue("7"),
+        width: integerValue(3),
+        padding: stringValue("0"),
+      }),
+    ).resolves.toEqual(stringValue("007"));
+    // Four astral code points already meet width 4 — JS padStart would count 8 UTF-16 units and pad nothing anyway,
+    // but a 5-width pad must add exactly one point, not three units.
+    await expect(
+      run("prelude.string.pad_start", {
+        value: stringValue("𝟘𝟘𝟘𝟘"),
+        width: integerValue(5),
+        padding: stringValue("x"),
+      }),
+    ).resolves.toEqual(stringValue("x𝟘𝟘𝟘𝟘"));
+    await expect(
+      run("prelude.string.pad_start", {
+        value: stringValue("hello"),
+        width: integerValue(3),
+        padding: stringValue("0"),
+      }),
+    ).resolves.toEqual(stringValue("hello"));
+  });
+
   test("sort_entries orders [key, value] tuples by key and is stable on equal keys", async () => {
     const entries: Value = {
       kind: "array",

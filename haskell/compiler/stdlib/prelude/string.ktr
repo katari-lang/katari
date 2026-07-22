@@ -52,3 +52,9 @@ primitive agent to_integer(value: string) -> integer | null
 @"Read the string as a number (any JSON-style numeric form), or `null` when it is not one. Compose
 with `trim` for padded input; for a diagnosed parse use `json.parse_as[number]` instead."
 primitive agent to_number(value: string) -> number | null
+
+@"The string left-padded with repetitions of @padding@ until it is @width@ code points long — the
+zero-pad of a date field, the column alignment of a table row. A value already @width@ or longer is
+returned unchanged (never truncated); the last repetition of a multi-point @padding@ is cut to fit.
+An empty @padding@ returns the value unchanged."
+primitive agent pad_start(value: string, width: integer, padding: string) -> string
