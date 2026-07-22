@@ -623,6 +623,34 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       });
       return;
     }
+    // Transfer the task closure's captured lexical scopes OFF the forking instance onto the PROVIDE instance,
+    // before the fiber is spawned. A forked closure captures the FORKER's scope, but the fiber is DETACHED —
+    // `fork` returns a handle at once and the forker runs on (and, in the common case, returns), so its
+    // intra-instance GC and its teardown reclaim that scope out from under the still-running fiber (the GC
+    // soundness invariant — "a borrowed scope keeps its borrower suspended" — does not hold for a fiber). The
+    // provide structurally OUTLIVES every fiber (the nursery cancels them all at drop) and every forker (the
+    // phantom `Scope` marker confines a live nursery to the provide's dynamic extent), so parking the captured
+    // environment on it keeps it alive exactly as long as any fiber can read through it, and its own drop
+    // reclaims it. Mirrors how a fiber's RETURNED resources reown onto the provide (`onDelegateAck`) — the
+    // inbound twin of that outbound.
+    //
+    // The forker is the OWNER of the closure's own captured scope, NOT the fork delegate's issuer: `region.fork`
+    // is an external agent, so the delegate reaching this reactor was issued by its wrapper instance, one hop
+    // removed from the user code that built the closure. `release` then moves only the forker's OWN scopes (a
+    // borrowed ancestor owned by another still-live instance stays put, kept alive by its own owner — no
+    // regression for a closure capturing above the nursery); a named-agent task owns no captured scope, so this
+    // is a no-op for it. The argument crosses into the fiber too and can capture the same forker's scopes.
+    const provideInstance = this.callInstance(scopeState.provide);
+    const forker =
+      payload.task.kind === "closure" ? this.pool.ownerOfScope(payload.task.scopeId) : null;
+    if (provideInstance !== undefined && forker !== null && forker !== provideInstance) {
+      this.pool.release(payload.task, forker);
+      this.reownIncoming(payload.task, provideInstance);
+      if (payload.argument !== null) {
+        this.pool.release(payload.argument, forker);
+        this.reownIncoming(payload.argument, provideInstance);
+      }
+    }
     // `task` is `agent (input: A) -> T`, so it receives `{ input: <argument> }` (the same parameter-record
     // convention the continuation's `{ value: nursery }` uses). This internal dispatch does not cross a
     // dynamic-input boundary's pre-check, so the record conforms by construction; a `dispatchCallable` error

@@ -216,6 +216,14 @@ export class ResourcePool {
     }
   }
 
+  /** The instance that currently owns `scopeId`, or `null` when it is in transit (`owner = null`) or unknown.
+   *  The region nursery reads it to find a forked closure's CREATING instance — the owner of the closure's own
+   *  captured scope, which is the forker the fiber's captured environment must be transferred off (a wrapper /
+   *  reactor hop means the fork's delegate issuer is NOT that instance, but the scope's owner always is). */
+  ownerOfScope(scopeId: ScopeId): InstanceId | null {
+    return this.store.scopes[scopeId]?.owner ?? null;
+  }
+
   /** Mark every scope `owner` still holds as touched this turn — the engine mutates the running instance's
    *  scopes in place (allocate, bind a variable) without going through this view, so the reactor flushes the
    *  owner's scopes wholesale after its turn. (A dropping instance does NOT call this: its scopes are freed
