@@ -894,6 +894,11 @@ instance HasSourceSpan AttributeLiteralNode where
 -- 'TypeName' or 'TypeApplication') that shadows the matching request of @base@.
 data OverrideTypeNode (phase :: Phase) = OverrideTypeNode
   { base :: SyntacticTypeExpression phase,
+    -- | @{...E lacks req | ...}@ — the subtraction clause: request NAMES removed from the base row
+    -- (a concrete entry is dropped, a generic tail records them in its lacks set). One type
+    -- expression whose union branches each name a request, like a binder's @lacks@. This is how a
+    -- signature SHOWS that a handler inside discharged a request the generic row might carry.
+    lacks :: Maybe (SyntacticTypeExpression phase),
     overrides :: List (SyntacticTypeExpression phase),
     sourceSpan :: SourceSpan
   }
@@ -1376,6 +1381,7 @@ retagSyntacticTypeExpression = \case
     TypeOverride
       OverrideTypeNode
         { base = retagSyntacticTypeExpression node.base,
+          lacks = retagSyntacticTypeExpression <$> node.lacks,
           overrides = retagSyntacticTypeExpression <$> node.overrides,
           sourceSpan = node.sourceSpan
         }

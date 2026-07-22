@@ -239,8 +239,27 @@ elaborate = \case
       AttributeLiteralPrivate -> SemanticAttributePrivate
   TypeOverride node -> do
     base <- elaborateAsEffect node.base
+    lacksNames <- maybe (pure Set.empty) lacksNamesOfExpression node.lacks
     overrides <- traverse elaborateOverrideEntry node.overrides
-    pureEffect $ SemanticEffectOverwrite base (catMaybes overrides)
+    pureEffect $ SemanticEffectOverwrite base lacksNames (catMaybes overrides)
+
+-- | The request-name set of a @lacks@ clause (a binder's, or an override row's), resolved
+-- STRUCTURALLY — union branches, each a bare name. The constraint is name-level, so a generic
+-- request is written bare and never arity-checked (that is why this does not go through
+-- 'elaborateAsEffect'). A branch that is not a request name reports K3026 and contributes nothing;
+-- an unresolved name stays silent (the identifier already reported it).
+lacksNamesOfExpression :: SyntacticTypeExpression Identified -> Elaborate (Set QualifiedName)
+lacksNamesOfExpression expression = case expression of
+  TypeUnion node -> Set.unions <$> traverse lacksNamesOfExpression node.branches
+  TypeName node -> case node.typeReference.resolution of
+    Just (TypeResolutionQualifiedName qualifiedName) -> do
+      context <- ask
+      if Map.member qualifiedName context.requestSignatures
+        then pure (Set.singleton qualifiedName)
+        else Set.empty <$ reportTypeError (sourceSpanOf expression) TypeErrorLacksEntry
+    Just (TypeResolutionGeneric _) -> Set.empty <$ reportTypeError (sourceSpanOf expression) TypeErrorLacksEntry
+    Nothing -> pure Set.empty
+  _ -> Set.empty <$ reportTypeError (sourceSpanOf expression) TypeErrorLacksEntry
 
 elaborateObjectField :: ObjectTypeField Identified -> Elaborate (Text, FieldInformation)
 elaborateObjectField field = do

@@ -165,8 +165,9 @@ bracesType = do
     overrideBody = do
       _ <- symbol "..."
       base <- typeExpression
+      lacks <- optional (keyword "lacks" *> typeExpression)
       overrides <- option [] (symbol "," *> commaSeparated applicationType)
-      pure (\sourceSpan -> TypeOverride OverrideTypeNode {base = base, overrides = overrides, sourceSpan = sourceSpan})
+      pure (\sourceSpan -> TypeOverride OverrideTypeNode {base = base, lacks = lacks, overrides = overrides, sourceSpan = sourceSpan})
     objectBody = do
       fields <- commaSeparated objectTypeField
       pure (\sourceSpan -> TypeObject ObjectTypeNode {fields = fields, sourceSpan = sourceSpan})

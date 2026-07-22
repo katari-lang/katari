@@ -116,6 +116,76 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
       ]
       `shouldContain` ["K3026"]
 
+  it "a catch-all handler covers a still-generic tail (the coverage split: {...E, fail[unknown]} absorbs bare E)" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent supervise[T, effect E](task: agent (value: null) -> T with E, recover: agent (value: null) -> T with E) -> T with E {\n\
+          \  use handler { request fail(error: unknown) -> null { break recover(value = null) } }\n\
+          \  task(value = null)\n\
+          \}\n\
+          \agent caller() -> string {\n\
+          \  agent task(value: null) -> string { fail(error = \"boom\"); \"ok\" }\n\
+          \  agent recover(value: null) -> string { \"crashed\" }\n\
+          \  supervise(task = task, recover = recover)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "a NARROW handler over a still-generic tail stays rejected (K3001 — no covering instantiation)" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent bad[effect E](task: agent (value: null) -> string with E) -> string with E {\n\
+          \  use handler { request fail(error: string) -> null { break \"caught\" } }\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldContain` ["K3001"]
+
+  it "a handler at the top payload discharges a still-generic tail's request (extract-and-compare: top instantiation fits unknown)" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent supervise[T, effect E](task: agent (value: null) -> T with E, recover: agent (value: null) -> T with {...E lacks fail}) -> T with {...E lacks fail} {\n\
+          \  use handler { request fail(error: unknown) -> null { break recover(value = null) } }\n\
+          \  task(value = null)\n\
+          \}\n\
+          \agent caller() -> string {\n\
+          \  agent task(value: null) -> string { fail(error = \"boom\"); \"ok\" }\n\
+          \  agent recover(value: null) -> string { \"crashed\" }\n\
+          \  supervise(task = task, recover = recover)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "a handler at a NARROWER payload over a still-generic tail is a type error (K3001 — the tail's top instantiation does not fit)" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent bad[effect E](task: agent (value: null) -> string with E) -> string with E {\n\
+          \  use handler { request fail(error: string) -> null { break \"caught\" } }\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldContain` ["K3001"]
+
+  it "the subtraction form {...E lacks req} drops a concrete entry and constrains the tail" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent shed[effect E](task: agent (value: null) -> string with {...E, fail[string]}) -> string with {...E lacks fail} {\n\
+          \  use handler { request fail(error: string) -> null { break \"caught\" } }\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
   it "a fully annotated local agent may recurse, directly and through a nested agent" $
     typeErrorCodes
       [ ( "test",

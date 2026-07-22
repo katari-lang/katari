@@ -2,6 +2,8 @@ module Katari.Data.SemanticType where
 
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
@@ -68,7 +70,10 @@ data SemanticEffect where
   -- | {...(eff expr), req1[generics], req2[generics]}
   -- Union:  req1[int] | req1[string] ~> req1[int | string]  (if covariant)
   -- Overwrite: {...req1[int], req1[string]} ~> req1[string]
-  SemanticEffectOverwrite :: SemanticEffect -> List (QualifiedName, Map Text SemanticGenericArgument) -> SemanticEffect
+  -- | @{...base lacks names, overwrites}@: the base row minus the lacks NAMES (name-level — a
+  -- concrete entry of the name drops, a generic tail records it in its lacks set), with the
+  -- overwrites' requests shadowing the remainder.
+  SemanticEffectOverwrite :: SemanticEffect -> Set QualifiedName -> List (QualifiedName, Map Text SemanticGenericArgument) -> SemanticEffect
   SemanticEffectGeneric :: GenericId -> SemanticEffect
   deriving (Eq, Ord, Show)
 
@@ -167,9 +172,10 @@ renderSemanticEffectLeaves = \case
   SemanticEffectRequest qualifiedName arguments -> [qualifiedName.name <> renderSemanticGenericArguments arguments]
   SemanticEffectGeneric genericId -> ["E" <> renderGenericId genericId]
   SemanticEffectUnion effects -> concatMap renderSemanticEffectLeaves effects
-  SemanticEffectOverwrite baseEffect overwrites ->
+  SemanticEffectOverwrite baseEffect lacksNames overwrites ->
     [ "{..."
         <> renderSemanticEffect baseEffect
+        <> (if Set.null lacksNames then "" else " lacks " <> Text.intercalate " | " ((.name) <$> Set.toList lacksNames))
         <> Text.concat [", " <> qualifiedName.name <> renderSemanticGenericArguments arguments | (qualifiedName, arguments) <- overwrites]
         <> "}"
     ]
@@ -242,8 +248,8 @@ substituteGenerics substitution = substituteType
       SemanticEffectIo -> SemanticEffectIo
       SemanticEffectRequest qualifiedName arguments -> SemanticEffectRequest qualifiedName (substituteArgument <$> arguments)
       SemanticEffectUnion effects -> SemanticEffectUnion (substituteEffect <$> effects)
-      SemanticEffectOverwrite baseEffect overwrites ->
-        SemanticEffectOverwrite (substituteEffect baseEffect) [(qualifiedName, substituteArgument <$> arguments) | (qualifiedName, arguments) <- overwrites]
+      SemanticEffectOverwrite baseEffect lacksNames overwrites ->
+        SemanticEffectOverwrite (substituteEffect baseEffect) lacksNames [(qualifiedName, substituteArgument <$> arguments) | (qualifiedName, arguments) <- overwrites]
       SemanticEffectGeneric genericId -> case Map.lookup genericId substitution of
         Just (SemanticGenericArgumentEffect replacement) -> replacement
         _ -> SemanticEffectGeneric genericId

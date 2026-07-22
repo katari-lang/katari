@@ -335,7 +335,7 @@ walkEffect context sign = \case
   SemanticEffectGeneric genericId -> Map.singleton genericId sign
   SemanticEffectRequest qualifiedName arguments -> walkApplicationArguments context sign qualifiedName arguments
   SemanticEffectUnion effects -> mergeVariances (map (walkEffect context sign) effects)
-  SemanticEffectOverwrite baseEffect overrides ->
+  SemanticEffectOverwrite baseEffect _lacksNames overrides ->
     mergeVariances
       ( walkEffect context sign baseEffect
           : [walkApplicationArguments context sign qualifiedName arguments | (qualifiedName, arguments) <- overrides]

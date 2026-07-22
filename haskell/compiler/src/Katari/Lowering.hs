@@ -404,7 +404,7 @@ effectRequestSchemas context = go
       SemanticEffectRequest qualifiedName arguments -> concreteRequest qualifiedName arguments
       SemanticEffectGeneric genericId -> [RequestGeneric genericId]
       SemanticEffectUnion effects -> concatMap go effects
-      SemanticEffectOverwrite baseEffect overrides ->
+      SemanticEffectOverwrite baseEffect _lacksNames overrides ->
         go baseEffect <> concatMap (uncurry concreteRequest) overrides
     -- A marker effect names no operations, so a row that carries one exposes nothing to the runtime.
     concreteRequest qualifiedName arguments

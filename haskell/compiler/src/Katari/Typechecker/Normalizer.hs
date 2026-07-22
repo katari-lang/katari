@@ -20,9 +20,9 @@
 -- denormalized at the report site; see the @tell*@ helpers.
 module Katari.Typechecker.Normalizer where
 
-import Control.Monad (foldM, unless, when, zipWithM)
+import Control.Monad (filterM, foldM, unless, when, zipWithM)
 import Control.Monad.RWS.CPS (RWS)
-import Control.Monad.RWS.Class (MonadWriter (..), asks, local)
+import Control.Monad.RWS.Class (MonadWriter (..), asks, censor, local)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Map.Merge.Strict qualified as Merge
@@ -337,7 +337,7 @@ normalizeEffect effect = case effect of
     pure $ case maybeInformation of
       Just information | not (Set.null information.lacks) -> effectRow EffectRow {request = mempty, tails = Map.singleton genericArgumentName information.lacks}
       _ -> singleTailEffect genericArgumentName
-  SemanticEffectOverwrite baseEffect overwrites -> do
+  SemanticEffectOverwrite baseEffect lacksNames overwrites -> do
     normalized <- normalizeEffect baseEffect
     overwriteRequests <-
       Map.fromList
@@ -351,7 +351,8 @@ normalizeEffect effect = case effect of
           )
           overwrites
     -- The overwrite applies only to the request part; escapes (never present in a normalized /written/
-    -- effect) pass through.
+    -- effect) pass through. The lacks names SUBTRACT: a concrete entry of the name drops, and every
+    -- tail records them — the row a handler leaves behind, now spellable in a signature.
     pure $ case normalized.requests of
       RequestEffectAny -> normalized
       RequestEffectRow row ->
@@ -360,9 +361,9 @@ normalizeEffect effect = case effect of
               RequestEffectRow
                 EffectRow
                   { -- the overwrite wins over the base's concrete request of the same name (left-biased union)
-                    request = Map.union overwriteRequests row.request,
-                    -- and over every tail's contribution: the overwritten names are removed from each tail
-                    tails = Map.map (Set.union (Map.keysSet overwriteRequests)) row.tails
+                    request = Map.union overwriteRequests (Map.withoutKeys row.request lacksNames),
+                    -- and over every tail's contribution: the overwritten AND lacked names are removed from each tail
+                    tails = Map.map (Set.union (Set.union (Map.keysSet overwriteRequests) lacksNames)) row.tails
                   }
           }
   SemanticEffectUnion effects -> foldM union bottomEffect =<< mapM normalizeEffect effects
@@ -560,20 +561,59 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
           )
           (Map.toList effectiveLeftRow.request)
         -- NOTE: a tail's lacks set is contravariant: the left's @E@ is covered by the right's @E@
-        -- only if the right removes no more requests than the left (right lacks ⊆ left lacks).
+        -- only if the right removes no more requests than the left (right lacks ⊆ left lacks) — OR
+        -- the removed request is RE-ADMITTED by the right's concrete row at arguments every
+        -- instantiation fits under ('coveredByConcreteEntry'). That second reading is the catch-all
+        -- handler shape: @{...E, throw[unknown]}@ absorbs a bare @E@, because whatever @throw@ the
+        -- tail carries lands inside the concrete @throw[unknown]@ — the split is sound name by name.
         mapM_
           ( \(genericId, leftLacks) ->
               case Map.lookup genericId rightRow.tails of
                 Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
-                Just rightLacks ->
-                  unless (rightLacks `Set.isSubsetOf` leftLacks) $
+                Just rightLacks -> do
+                  uncovered <- filterM (fmap not . coveredByConcreteEntry rightRow) (Set.toList (Set.difference rightLacks leftLacks))
+                  unless (null uncovered) $
                     -- The two rows denormalize to identical-looking text — a tail's @lacks@ set is
                     -- invisible in the surface syntax — so the message names the requests the expected
                     -- effect additionally removes from the shared generic, which is the difference the
                     -- rows actually disagree on.
-                    tellEffectMismatch (overrideMismatchReason (Set.difference rightLacks leftLacks)) effectiveLeft right
+                    tellEffectMismatch (overrideMismatchReason (Set.fromList uncovered)) effectiveLeft right
           )
           (Map.toList effectiveLeftRow.tails)
+
+-- | Whether the row's concrete entry for @qualifiedName@ admits EVERY instantiation of the request —
+-- what makes subtracting the name from a still-generic tail sound even though the tail might carry
+-- it: whatever instantiation the tail hides is covered by the concrete entry. True exactly when every
+-- declared parameter is covariant after the row pin (a contravariant position has no one covering
+-- instantiation, so it conservatively never covers) and the entry's argument at each position sits at
+-- (or above) the top of its kind. The trial comparison runs under a private world — base-type
+-- coverage, the match-exhaustiveness precedent — with its diagnostics discarded ('censor'): a failed
+-- trial only means "not covered", never an error of its own; the handler body's own checking still
+-- applies the observation discipline to whatever it does with a caught value.
+coveredByConcreteEntry :: EffectRow -> QualifiedName -> Normalizer Bool
+coveredByConcreteEntry row qualifiedName = case Map.lookup qualifiedName row.request of
+  Nothing -> pure False
+  Just entryArguments -> do
+    requestInfo <- requestInfoFor qualifiedName
+    let information = requestInfo.genericParameters.parameterInformation
+    if any (\parameter -> requestRowVariance parameter.variance /= Covariant) (Map.elems information)
+      then pure False
+      else do
+        let topArguments = topArgumentForKind . (.kind) <$> information
+            covariances = Covariant <$ information
+        (_, mismatches) <-
+          censor (const mempty) $
+            listen $
+              local (\environment -> environment {world = topAttribute}) $
+                subtypeArgumentsWith covariances topArguments entryArguments
+        pure (null mismatches)
+
+-- | The top value of one generic kind — the instantiation nothing exceeds under covariance.
+topArgumentForKind :: GenericKind -> NormalizedKindedType
+topArgumentForKind kind = case kind of
+  GenericKindType -> NormalizedKindedTypeType topType
+  GenericKindEffect -> NormalizedKindedTypeEffect topEffect
+  GenericKindAttribute -> NormalizedKindedTypeAttribute topAttribute
 
 -- | The reason for a tail-lacks (effect-generic override) mismatch, naming the requests the expected
 -- effect additionally removes from the shared generic. Both the expected and actual rows render to the
@@ -1303,7 +1343,16 @@ denormalizeEffect effect = do
     RequestEffectAny -> pure [SemanticEffectAny]
     RequestEffectRow row -> do
       requestEffects <- mapM (uncurry denormalizeRequest) (Map.toList row.request)
-      let genericEffects = SemanticEffectGeneric <$> Map.keys row.tails
+      -- A tail whose lacks set is fully re-admitted by concrete entries renders bare (the usual
+      -- handler-scheme row); an UNCOVERED lacks renders as its subtraction form `{...E lacks req}`,
+      -- so a signature that discharged a request from a generic row says so instead of lying.
+      let genericEffects =
+            [ if Set.null uncovered
+                then SemanticEffectGeneric genericId
+                else SemanticEffectOverwrite (SemanticEffectGeneric genericId) uncovered []
+              | (genericId, lacksNames) <- Map.toList row.tails,
+                let uncovered = Set.difference lacksNames (Map.keysSet row.request)
+            ]
       pure (requestEffects <> genericEffects)
   -- Escapes are internal and discharged before any public type; they only surface here in an
   -- effect-mismatch message, rendered as reserved pseudo-requests so the message stays total.

@@ -147,14 +147,14 @@ spec = do
   describe "normalizeEffect (overwrite)" $ do
     it "unions nested overwrite shadows instead of replacing them" $
       runNormalizer
-        (normalizeEffect (SemanticEffectOverwrite (SemanticEffectOverwrite (SemanticEffectGeneric effectGeneric) [(askName, mempty)]) [(logName, mempty)]))
+        (normalizeEffect (SemanticEffectOverwrite (SemanticEffectOverwrite (SemanticEffectGeneric effectGeneric) Set.empty [(askName, mempty)]) Set.empty [(logName, mempty)]))
         `shouldBe` effectRow
           EffectRow
             { request = Map.fromList [(askName, mempty), (logName, mempty)],
               tails = Map.singleton effectGeneric (Set.fromList [askName, logName])
             }
     it "records no shadow over a concrete base" $
-      runNormalizer (normalizeEffect (SemanticEffectOverwrite (SemanticEffectRequest askName mempty) [(askName, mempty)]))
+      runNormalizer (normalizeEffect (SemanticEffectOverwrite (SemanticEffectRequest askName mempty) Set.empty [(askName, mempty)]))
         `shouldBe` effectRow
           EffectRow
             { request = Map.singleton askName mempty,

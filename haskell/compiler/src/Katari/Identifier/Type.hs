@@ -54,8 +54,9 @@ resolveType = \case
     pure (TypeAttributed AttributedTypeNode {baseType = baseType, attribute = attribute, sourceSpan = node.sourceSpan})
   TypeOverride node -> do
     base <- resolveType node.base
+    lacks <- traverse resolveType node.lacks
     overrides <- traverse resolveType node.overrides
-    pure (TypeOverride OverrideTypeNode {base = base, overrides = overrides, sourceSpan = node.sourceSpan})
+    pure (TypeOverride OverrideTypeNode {base = base, lacks = lacks, overrides = overrides, sourceSpan = node.sourceSpan})
 
 resolveObjectTypeField :: ObjectTypeField Parsed -> Identifier (ObjectTypeField Identified)
 resolveObjectTypeField field = do

@@ -73,7 +73,7 @@ import Katari.Typechecker.Context
     withParameters,
     withWorld,
   )
-import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, schemeVariableFor)
+import Katari.Typechecker.Elaborate (elaborate, elaborateAsAttribute, elaborateAsEffect, elaborateAsType, lacksNamesOfExpression, schemeVariableFor)
 import Katari.Typechecker.Environment (TypeEnvironment (..), collectGenericParameters, stampBound)
 import Katari.Typechecker.Inference (Metavar (..), Registry, SolveResult (..), asTypeMetavar, collectConstraints, metavarKinded, solveConstraints)
 import Katari.Typechecker.Normalizer (Normalizer, boundedType, captureErrors, checkBounds, checkGenericBounds, denormalize, denormalizeEffect, denormalizeGenericArgument, foldAttribute, intersect, joinAttribute, normalizeAttribute, normalizeEffect, normalizeGenericArgument, normalizeType, objectAsType, substituteGenericArgument, substituteObject, substituteType, subtype, union)
@@ -2608,23 +2608,11 @@ boundedGenericParameters declarations = do
           normalized <- runNormalizer (sourceSpanOf expression) (normalizeGenericArgument semantic)
           pure (Just (genericId, normalized))
         Nothing -> pure Nothing
-    -- A `lacks` clause resolves its names STRUCTURALLY from the syntax (union branches, each a bare
-    -- name), not through the effect elaborator — the constraint is name-level, so a generic request
-    -- is written bare (`lacks race_settled`, whatever its arity) and an applied form has no reading.
-    -- Each name must resolve to a request; anything else reports K3026 and contributes nothing.
+    -- A binder's `lacks` clause resolves through the same structural resolver an override row's
+    -- clause uses ('lacksNamesOfExpression' — name-level, so a generic request is written bare).
     resolveLacks (genericId, expression) = do
-      names <- lacksNamesOf expression
+      names <- runElaborator (lacksNamesOfExpression expression)
       pure (genericId, names)
-    lacksNamesOf expression = case expression of
-      TypeUnion node -> Set.unions <$> traverse lacksNamesOf node.branches
-      TypeName node -> case node.typeReference.resolution of
-        Just (TypeResolutionQualifiedName qualifiedName) -> do
-          requestEnvironment <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
-          if Map.member qualifiedName requestEnvironment
-            then pure (Set.singleton qualifiedName)
-            else Set.empty <$ reportType (sourceSpanOf expression) TypeErrorLacksEntry
-        _ -> Set.empty <$ reportType (sourceSpanOf expression) TypeErrorLacksEntry
-      _ -> Set.empty <$ reportType (sourceSpanOf expression) TypeErrorLacksEntry
 
 prepareAgent :: AgentDeclaration Identified -> Checker AgentPreparation
 prepareAgent declaration = do
