@@ -186,6 +186,42 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
       ]
       `shouldBe` []
 
+  it "the extraction unions the tail's upper bound first: a handler at the bound's instantiation covers" $
+    typeErrorCodes
+      [ ( "test",
+          "request tagged[T](value: T) -> null\n\
+          \agent drain[effect E extends tagged[string]](task: agent (value: null) -> string with E) -> string with {...E lacks tagged} {\n\
+          \  use handler { request tagged(value: string) -> null { next null } }\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "extraction from the any effect is the covariant top: a narrow handler over `with all` is a type error (K3001)" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent bad(task: agent (value: null) -> string with all) -> string with all {\n\
+          \  use handler { request fail(error: string) -> null { break \"caught\" } }\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldContain` ["K3001"]
+
+  it "a catch-all at unknown covers the any effect" $
+    typeErrorCodes
+      [ ( "test",
+          "request fail[T](error: T) -> null\n\
+          \agent ok(task: agent (value: null) -> string with all) -> string with all {\n\
+          \  use handler { request fail(error: unknown) -> never { break \"caught\" } }\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
   it "a fully annotated local agent may recurse, directly and through a nested agent" $
     typeErrorCodes
       [ ( "test",

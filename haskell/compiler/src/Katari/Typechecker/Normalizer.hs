@@ -571,7 +571,7 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
               case Map.lookup genericId rightRow.tails of
                 Nothing -> tellEffectMismatch "Left effect has an effect generic not present in the right effect" effectiveLeft right
                 Just rightLacks -> do
-                  uncovered <- filterM (fmap not . coveredByConcreteEntry rightRow) (Set.toList (Set.difference rightLacks leftLacks))
+                  uncovered <- filterM (fmap not . coveredByConcreteEntry rightRow genericId) (Set.toList (Set.difference rightLacks leftLacks))
                   unless (null uncovered) $
                     -- The two rows denormalize to identical-looking text — a tail's @lacks@ set is
                     -- invisible in the surface syntax — so the message names the requests the expected
@@ -590,23 +590,52 @@ subtypeRequestEffect left right = case (left.requests, right.requests) of
 -- coverage, the match-exhaustiveness precedent — with its diagnostics discarded ('censor'): a failed
 -- trial only means "not covered", never an error of its own; the handler body's own checking still
 -- applies the observation discipline to whatever it does with a caught value.
-coveredByConcreteEntry :: EffectRow -> QualifiedName -> Normalizer Bool
-coveredByConcreteEntry row qualifiedName = case Map.lookup qualifiedName row.request of
+coveredByConcreteEntry :: EffectRow -> GenericId -> QualifiedName -> Normalizer Bool
+coveredByConcreteEntry row genericId qualifiedName = do
+  -- The extraction unions the tail's upper bound FIRST (transitively; an unbounded tail is the any
+  -- effect): a bound pins what the tail can actually carry, so `E extends tagged[string]` is covered
+  -- by a handler at `string`, no top instantiation required — and a bound that cannot carry the name
+  -- at all is covered by anything (there is nothing to catch).
+  bound <- boundedEffect mempty =<< effectBoundFor genericId
+  case bound.requests of
+    RequestEffectRow boundRow | Map.null boundRow.tails ->
+      case Map.lookup qualifiedName boundRow.request of
+        Nothing -> pure True
+        Just possibleArguments -> coversArguments qualifiedName possibleArguments row
+    -- The any effect (an unbounded tail), or a bound that did not fully expand: the possible
+    -- instantiation is the per-variance EXTREME — covariant (and pinned-bivariant) at the kind's
+    -- top, contravariant at its bottom, and an invariant parameter has no covering instantiation
+    -- at all (the type error the caller reports).
+    _ -> do
+      requestInfo <- requestInfoFor qualifiedName
+      let information = requestInfo.genericParameters.parameterInformation
+      if any (\parameter -> requestRowVariance parameter.variance == Invariant) (Map.elems information)
+        then pure False
+        else do
+          let extremes = extremeArgumentFor <$> information
+          coversArguments qualifiedName extremes row
+  where
+    extremeArgumentFor parameter = case requestRowVariance parameter.variance of
+      Contravariant -> bottomArgumentForKind parameter.kind
+      _ -> topArgumentForKind parameter.kind
+
+-- | Whether the row's concrete entry for @qualifiedName@ admits the given possible instantiation —
+-- the variance-aware trial comparison, run under a private world (base-type coverage, the
+-- match-exhaustiveness precedent) with its diagnostics discarded ('censor'): a failed trial only
+-- means "not covered", never an error of its own; the handler body's own checking still applies
+-- the observation discipline to whatever it does with a caught value.
+coversArguments :: QualifiedName -> Map Text NormalizedKindedType -> EffectRow -> Normalizer Bool
+coversArguments qualifiedName possibleArguments row = case Map.lookup qualifiedName row.request of
   Nothing -> pure False
   Just entryArguments -> do
     requestInfo <- requestInfoFor qualifiedName
-    let information = requestInfo.genericParameters.parameterInformation
-    if any (\parameter -> requestRowVariance parameter.variance /= Covariant) (Map.elems information)
-      then pure False
-      else do
-        let topArguments = topArgumentForKind . (.kind) <$> information
-            covariances = Covariant <$ information
-        (_, mismatches) <-
-          censor (const mempty) $
-            listen $
-              local (\environment -> environment {world = topAttribute}) $
-                subtypeArgumentsWith covariances topArguments entryArguments
-        pure (null mismatches)
+    let variances = requestRowVariance . (.variance) <$> requestInfo.genericParameters.parameterInformation
+    (_, mismatches) <-
+      censor (const mempty) $
+        listen $
+          local (\environment -> environment {world = topAttribute}) $
+            subtypeArgumentsWith variances possibleArguments entryArguments
+    pure (null mismatches)
 
 -- | The top value of one generic kind — the instantiation nothing exceeds under covariance.
 topArgumentForKind :: GenericKind -> NormalizedKindedType
@@ -614,6 +643,13 @@ topArgumentForKind kind = case kind of
   GenericKindType -> NormalizedKindedTypeType topType
   GenericKindEffect -> NormalizedKindedTypeEffect topEffect
   GenericKindAttribute -> NormalizedKindedTypeAttribute topAttribute
+
+-- | The bottom value of one generic kind — what a contravariant position's covering entry must admit.
+bottomArgumentForKind :: GenericKind -> NormalizedKindedType
+bottomArgumentForKind kind = case kind of
+  GenericKindType -> NormalizedKindedTypeType bottomType
+  GenericKindEffect -> NormalizedKindedTypeEffect bottomEffect
+  GenericKindAttribute -> NormalizedKindedTypeAttribute bottomAttribute
 
 -- | The reason for a tail-lacks (effect-generic override) mismatch, naming the requests the expected
 -- effect additionally removes from the shared generic. Both the expected and actual rows render to the
@@ -1137,9 +1173,40 @@ substituteEffect substitution effect = do
       foldM spliceTail base (Map.toList replacedTails)
   where
     spliceTail accumulated (genericId, lacks) = case Map.lookup genericId substitution of
-      Just (NormalizedKindedTypeEffect replacement) -> union accumulated (restrictEffect lacks replacement)
+      Just (NormalizedKindedTypeEffect replacement) -> do
+        -- An ANY replacement cannot represent its subtraction (any minus the lacks), so absorbing it
+        -- is sound only when the row's concrete entries cover each lacked name at its per-variance
+        -- extreme — the extraction-from-any rule. Silently absorbing was the hole that let a narrow
+        -- handler type over a `with all` continuation.
+        case replacement.requests of
+          RequestEffectAny | not (Set.null lacks) -> case accumulated.requests of
+            RequestEffectRow accumulatedRow -> do
+              uncovered <- filterM (fmap not . coveredByAnyExtraction accumulatedRow) (Set.toList lacks)
+              unless (null uncovered) $
+                tellEffectMismatch
+                  ( "The effect generic is instantiated at `all`, so the requests removed from it must admit every instantiation; these do not: "
+                      <> Text.intercalate ", " (renderQualifiedName <$> uncovered)
+                  )
+                  replacement
+                  accumulated
+              union accumulated replacement
+            RequestEffectAny -> union accumulated replacement
+          _ -> union accumulated (restrictEffect lacks replacement)
       Just other -> accumulated <$ tellKindMismatch GenericKindEffect (kindOf other) "Expected an effect argument for an effect generic"
       Nothing -> pure accumulated
+
+    -- Coverage against the any-extraction extremes alone (no bound: the replacement IS any).
+    coveredByAnyExtraction accumulatedRow qualifiedName = do
+      requestInfo <- requestInfoFor qualifiedName
+      let information = requestInfo.genericParameters.parameterInformation
+      if any (\parameter -> requestRowVariance parameter.variance == Invariant) (Map.elems information)
+        then pure False
+        else do
+          let extremes = extremeFor <$> information
+          coversArguments qualifiedName extremes accumulatedRow
+    extremeFor parameter = case requestRowVariance parameter.variance of
+      Contravariant -> bottomArgumentForKind parameter.kind
+      _ -> topArgumentForKind parameter.kind
 
 -- | As 'substituteType', for attributes (attribute-kind generic ids).
 substituteAttribute :: Map GenericId NormalizedKindedType -> NormalizedAttribute -> Normalizer NormalizedAttribute

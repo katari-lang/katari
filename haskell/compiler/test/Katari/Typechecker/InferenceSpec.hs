@@ -105,7 +105,7 @@ spec = do
     it "a request body may perform its own effect (joined into the handler effect)" $
       codesFor (tickDecl <> "request other() -> integer\nagent run() -> integer { use handler { request tick() -> integer { other() } }\n0 }") `shouldBe` []
     it "explicit handler[R, E] is a concrete handler value" $
-      codesFor (tickDecl <> "agent run() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } }\n0 }") `shouldBe` []
+      codesFor (tickDecl <> "agent run() -> integer { let h = handler[integer, pure] { request tick() -> integer { next 5 } }\n0 }") `shouldBe` []
     it "a then clause transforms the result: its body need not match R" $
       codesFor (tickDecl <> "agent run() -> integer { use handler { request tick() -> integer { 5 } } then (r) { \"done\" }\n0 }") `shouldBe` []
     it "an explicit break bypasses then and the handler still typechecks" $
@@ -129,7 +129,7 @@ spec = do
     it "applies a handler with several request handlers" $
       codesFor "request a() -> integer\nrequest b() -> integer\nagent run() -> integer { use handler { request a() -> integer { 1 } request b() -> integer { 2 } }\nlet x = a()\nlet y = b()\n0 }" `shouldBe` []
     it "still accepts an explicit handler[R, E] bound to a local" $
-      codesFor (tickDecl <> "agent run() -> integer { let h = handler[integer, all] (var counter = 0) { request tick() -> integer { next counter } }\n0 }") `shouldBe` []
+      codesFor (tickDecl <> "agent run() -> integer { let h = handler[integer, pure] (var counter = 0) { request tick() -> integer { next counter } }\n0 }") `shouldBe` []
 
   describe "use-provider inference (continuation-driven)" $ do
     it "infers a provider's result type R from the continuation's return type" $
@@ -181,13 +181,13 @@ spec = do
 
   describe "request handler generic inference (param-derived)" $ do
     it "infers the request's generic from a handler parameter annotation" $
-      codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo(x : integer) { next x } }\n0 }" `shouldBe` []
+      codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, pure] { request foo(x : integer) { next x } }\n0 }" `shouldBe` []
     it "still accepts an explicit request-handler signature" $
-      codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo[integer](x : integer) { next x } }\n0 }" `shouldBe` []
+      codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, pure] { request foo[integer](x : integer) { next x } }\n0 }" `shouldBe` []
     it "rejects a next value that mismatches the inferred request generic (K3001)" $
-      codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo(x : integer) { next \"s\" } }\n0 }" `shouldContain` ["K3001"]
+      codesFor "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, pure] { request foo(x : integer) { next \"s\" } }\n0 }" `shouldContain` ["K3001"]
     it "reports a request generic the parameters cannot determine (K3016)" $
-      codesFor "request mk[a]() -> a\nagent run() -> integer { let h = handler[integer, all] { request mk() { next 5 } }\n0 }" `shouldContain` ["K3016"]
+      codesFor "request mk[a]() -> a\nagent run() -> integer { let h = handler[integer, pure] { request mk() { next 5 } }\n0 }" `shouldContain` ["K3016"]
 
   describe "effect-generic inference (a generic value quantified over an effect)" $ do
     it "infers a residual effect E from the argument's effect" $
@@ -229,13 +229,13 @@ spec = do
     it "lowers an inferred generic call" $
       compileResult (identityDecl <> "agent run() -> integer { identity(value = 1) }") `shouldBe` ([], True)
     it "lowers an explicit handler" $
-      compileResult (tickDecl <> "agent run() -> integer { let h = handler[integer, all] { request tick() -> integer { next 5 } }\n0 }") `shouldBe` ([], True)
+      compileResult (tickDecl <> "agent run() -> integer { let h = handler[integer, pure] { request tick() -> integer { next 5 } }\n0 }") `shouldBe` ([], True)
     it "lowers a use-applied (inferred) handler" $
       compileResult (tickDecl <> "agent run() -> integer { use handler { request tick() -> integer { next 5 } }\n0 }") `shouldBe` ([], True)
     it "lowers a constructor-pattern match" $
       compileResult (boxDecl <> "agent f(b: box[integer]) -> integer { match (b) { case box(value => v) -> v } }") `shouldBe` ([], True)
     it "lowers a param-derived request handler" $
-      compileResult "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, all] { request foo(x : integer) { next x } }\n0 }" `shouldBe` ([], True)
+      compileResult "request foo[a](x: a) -> a\nagent run() -> integer { let h = handler[integer, pure] { request foo(x : integer) { next x } }\n0 }" `shouldBe` ([], True)
 
   describe "collectConstraints (propose, white-box)" $ do
     it "records a lower bound for a bare metavariable in covariant position" $
