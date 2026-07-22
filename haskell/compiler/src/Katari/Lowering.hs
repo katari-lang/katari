@@ -41,7 +41,7 @@ import Katari.Data.Environment
 import Katari.Data.IR
 import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), VariableResolution (..))
 import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
-import Katari.Data.ModuleName (ModuleName)
+import Katari.Data.ModuleName (ModuleName, moduleNameFromSegments)
 import Katari.Data.NormalizedType (bottomAttribute)
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
 import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), substituteGenerics)
@@ -921,8 +921,10 @@ lowerTypeApplication typeApplicationExpression = do
       emit (OperationApplyGenerics ApplyGenericsOperation {source = source, generics = generics, output = output})
       pure output
 
--- | A template literal folds its parts with the @primitive.concat@ string concatenation; interpolations
--- are string-typed (the checker enforces it), so no stringification is needed.
+-- | A template literal folds its parts with the @primitive.concat@ string concatenation. An
+-- interpolation is a scalar (string / number / boolean, per the checker) and every one rides
+-- @string.to_string@: for a number or boolean that is the canonical rendering, and for a string it is
+-- the identity — which also materialises a blob-backed string before the concat.
 lowerTemplate :: AST.TemplateExpression AST.Typed -> Lower VariableId
 lowerTemplate templateExpression = do
   parts <- mapM lowerTemplateElement templateExpression.elements
@@ -943,7 +945,15 @@ concatTemplate left right = do
 lowerTemplateElement :: AST.TemplateElement AST.Typed -> Lower VariableId
 lowerTemplateElement = \case
   AST.TemplateElementString element -> loadLiteral (LiteralString element.value)
-  AST.TemplateElementExpression element -> lowerExpression element.value
+  AST.TemplateElementExpression element -> do
+    value <- lowerExpression element.value
+    argumentVariable <- freshVariableId
+    emit (OperationMakeRecord MakeRecordOperation {entries = [("value", value)], output = argumentVariable})
+    output <- freshVariableId
+    emit (OperationDelegate DelegateOperation {target = CalleeName toStringName, argument = argumentVariable, output = Just output, generics = mempty})
+    pure output
+  where
+    toStringName = QualifiedName {moduleName = moduleNameFromSegments ["prelude", "string"], name = "to_string"}
 
 -- | A standalone @{ ... }@ block in expression position becomes a structural-node 'Sequence' entered in
 -- the current scope.

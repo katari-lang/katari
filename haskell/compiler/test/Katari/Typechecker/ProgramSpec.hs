@@ -59,8 +59,11 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "accepts a string interpolation in a template" $
     typeErrorCodes [("test", "agent greet(name: string) -> string { f\"hi ${name}\" }")] `shouldBe` []
 
-  it "rejects a non-string interpolation in a template (K3001)" $
-    typeErrorCodes [("test", "agent greet(count: integer) -> string { f\"n=${count}\" }")] `shouldContain` ["K3001"]
+  it "accepts a number and a boolean interpolation in a template (rendered canonically)" $
+    typeErrorCodes [("test", "agent greet(count: integer, flag: boolean) -> string { f\"n=${count} f=${flag}\" }")] `shouldBe` []
+
+  it "rejects a null interpolation in a template (K3001)" $
+    typeErrorCodes [("test", "agent greet(name: string | null) -> string { f\"hi ${name}\" }")] `shouldContain` ["K3001"]
 
   it "accepts a parameter default that matches its type" $
     typeErrorCodes [("test", "agent inc(x: number ?= 1) -> number { x }")] `shouldBe` []

@@ -686,8 +686,9 @@ synthTemplateExpression expression = do
       TemplateElementString stringElement ->
         pure (TemplateElementString stringElement)
       TemplateElementExpression element -> do
-        -- An interpolation must be a string; there is no implicit stringification.
-        typedValue <- checkExpression element.value stringType
+        -- An interpolation is a scalar — string, number or boolean ('templateInterpolationType');
+        -- the lowering renders non-strings through the canonical `to_string`.
+        typedValue <- checkExpression element.value templateInterpolationType
         pure
           ( TemplateElementExpression
               TemplateExpressionElement
@@ -3139,6 +3140,19 @@ integerType = layeredOf neverLayer {numberLayer = NumberSlotInteger}
 
 numberType :: NormalizedType
 numberType = layeredOf neverLayer {numberLayer = NumberSlotNumber}
+
+-- | @string | number | boolean@ — what an f-string interpolation accepts. Numbers and booleans render
+-- by the one canonical `to_string` rendering (the lowering wraps them); @null@ is deliberately out —
+-- an interpolated null is almost always a forgotten fallback, and keeping it a type error surfaces
+-- that at the template instead of printing "null".
+templateInterpolationType :: NormalizedType
+templateInterpolationType =
+  layeredOf
+    neverLayer
+      { stringLayer = StringSlotString,
+        numberLayer = NumberSlotNumber,
+        booleanLayer = Set.fromList [False, True]
+      }
 
 fileType :: NormalizedType
 fileType = layeredOf neverLayer {fileLayer = True}

@@ -9,7 +9,16 @@ import { valueEquals } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import type { PrimContext, PrimImplementation, PrimRunner } from "./context.js";
 import { INTEROP_PRIMITIVES } from "./interop-prims.js";
-import { boolOf, field, numberOf, stringOf } from "./prim-helpers.js";
+import {
+  boolOf,
+  compareScalarKeys,
+  field,
+  numberOf,
+  type ScalarKey,
+  scalarKeyOfNumber,
+  scalarKeyOfText,
+  stringOf,
+} from "./prim-helpers.js";
 
 export type { PrimImplementation } from "./context.js";
 
@@ -69,10 +78,10 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
     kind: "boolean",
     value: !valueEquals(field(argument, "left"), field(argument, "right")),
   }),
-  "prelude.less_than": comparison((left, right) => left < right),
-  "prelude.less_or_equal": comparison((left, right) => left <= right),
-  "prelude.greater_than": comparison((left, right) => left > right),
-  "prelude.greater_or_equal": comparison((left, right) => left >= right),
+  "prelude.less_than": comparison((ordering) => ordering < 0),
+  "prelude.less_or_equal": comparison((ordering) => ordering <= 0),
+  "prelude.greater_than": comparison((ordering) => ordering > 0),
+  "prelude.greater_or_equal": comparison((ordering) => ordering >= 0),
   "prelude.and": (argument) => ({
     kind: "boolean",
     value: boolOf(field(argument, "left")) && boolOf(field(argument, "right")),
@@ -82,9 +91,12 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
     value: boolOf(field(argument, "left")) || boolOf(field(argument, "right")),
   }),
   "prelude.not": (argument) => ({ kind: "boolean", value: !boolOf(field(argument, "value")) }),
-  "prelude.concat": (argument) => ({
+  // Async because an operand may be a blob-backed string (a >4KB body interpolated or `++`-ed).
+  "prelude.concat": async (argument, context) => ({
     kind: "string",
-    value: stringOf(field(argument, "left")) + stringOf(field(argument, "right")),
+    value:
+      (await stringContentOf(field(argument, "left"), context)) +
+      (await stringContentOf(field(argument, "right"), context)),
   }),
   // ─── prelude.math ─────────────────────────────────────────────────────────────────────────
   "prelude.math.abs": (argument) => {
@@ -134,12 +146,37 @@ function numeric(operation: (left: number, right: number) => number): PrimImplem
   };
 }
 
-/** A binary numeric comparison yielding a boolean. */
-function comparison(operation: (left: number, right: number) => boolean): PrimImplementation {
-  return (argument) => ({
+/** A binary comparison over the scalar order (`compareScalarKeys` — numbers numerically, strings by
+ *  code point, numbers before strings), yielding a boolean. Async because a string operand may be
+ *  blob-backed and needs materialising. */
+function comparison(operation: (ordering: number) => boolean): PrimImplementation {
+  return async (argument, context) => ({
     kind: "boolean",
-    value: operation(numberOf(field(argument, "left")), numberOf(field(argument, "right"))),
+    value: operation(
+      compareScalarKeys(
+        await comparableKeyOf(field(argument, "left"), context),
+        await comparableKeyOf(field(argument, "right"), context),
+      ),
+    ),
   });
+}
+
+/** The comparison key of a scalar operand: a number as itself, a string — possibly blob-backed, like
+ *  every string-accepting prim — as its materialised content. */
+async function comparableKeyOf(value: Value, context: PrimContext): Promise<ScalarKey> {
+  if (value.kind === "string" || (value.kind === "ref" && value.semanticKind === "string")) {
+    return scalarKeyOfText(await stringContentOf(value, context));
+  }
+  return scalarKeyOfNumber(value);
+}
+
+/** A possibly blob-backed string operand, materialised (any other kind is the usual shape panic). */
+async function stringContentOf(value: Value, context: PrimContext): Promise<string> {
+  if (value.kind === "ref" && value.semanticKind === "string") {
+    const bytes = await context.blobs.get(context.projectId, value.blobId);
+    return new TextDecoder().decode(bytes);
+  }
+  return stringOf(value);
 }
 
 /** Re-tag a numeric result as integer or number to match the input that produced it. */
