@@ -164,6 +164,10 @@ renderTypeError typeError =
         <> " advance the state from the same value and the later write would silently drop the"
         <> " earlier one — a lost update, never a fold. Drop `parallel` so the requests serialize"
         <> " through the state, or drop the `var` if the bodies need no shared state."
+    TypeErrorLacksEntry ->
+      "A `lacks` entry must be a bare request name. The constraint is name-level — it excludes every"
+        <> " instantiation of the named request, whatever its arguments — so an applied form"
+        <> " (`lacks throw[t]`) or anything that is not a request has no reading here."
   where
     renderBackticked name = "`" <> name <> "`"
 
@@ -243,6 +247,10 @@ data TypeError where
   -- sequential handler is exactly what makes such state sound. Rejected at the entrance like
   -- K3024: drop @parallel@ to serialize the requests through the state, or drop the @var@.
   TypeErrorParallelHandlerVarBinding :: ParallelHandlerVarBindingErrorInfo -> TypeError
+  -- | A @lacks@ entry on an effect parameter is not a bare request name. The constraint is
+  -- name-level (it excludes every instantiation of the request, whatever its arguments), so an
+  -- applied form or anything that is not a request has no reading.
+  TypeErrorLacksEntry :: TypeError
   deriving (Eq, Ord, Show)
 
 typeErrorCode :: TypeError -> Text
@@ -269,6 +277,7 @@ typeErrorCode = \case
   TypeErrorPanicHandlerParameter _ -> "K3023"
   TypeErrorParallelForVarBinding _ -> "K3024"
   TypeErrorParallelHandlerVarBinding _ -> "K3025"
+  TypeErrorLacksEntry -> "K3026"
 
 -- | Enumerated explicitly (rather than a catch-all) so adding a type error forces a severity
 -- decision. Every current type error fails compilation.
@@ -296,6 +305,7 @@ typeErrorSeverity = \case
   TypeErrorPanicHandlerParameter _ -> SeverityError
   TypeErrorParallelForVarBinding _ -> SeverityError
   TypeErrorParallelHandlerVarBinding _ -> SeverityError
+  TypeErrorLacksEntry -> SeverityError
 
 -- | @reason@ is the specific failure (e.g. which layer disagreed) — not derivable from the types,
 -- so it is carried; the rest of every error's text is generated from its structured fields.

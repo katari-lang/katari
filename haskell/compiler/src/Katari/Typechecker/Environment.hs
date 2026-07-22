@@ -22,6 +22,8 @@ import Control.Monad.RWS.CPS (runRWS)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.AST
@@ -118,27 +120,32 @@ data CollectedSynonym = CollectedSynonym
 -- start as placeholders the later stages fill) and its still-syntactic @extends@ bound, if any.
 -- 'Nothing' if the identifier left the parameter unresolved, which should not happen for a
 -- declaration's own generic.
-collectGenericParameter :: GenericParameter Identified -> Maybe (Text, GenericParameterInformation, Maybe (SyntacticTypeExpression Identified))
+collectGenericParameter :: GenericParameter Identified -> Maybe (Text, GenericParameterInformation, Maybe (SyntacticTypeExpression Identified), Maybe (SyntacticTypeExpression Identified))
 collectGenericParameter parameter = case parameter.typeReference.resolution of
   Just (TypeResolutionGeneric genericId) ->
     Just
       ( parameter.name,
-        GenericParameterInformation {genericId = genericId, kind = parameter.kind, variance = Bivariant, bindsLiteral = parameter.bindsLiteral, upperBound = Nothing},
-        parameter.upperBound
+        GenericParameterInformation {genericId = genericId, kind = parameter.kind, variance = Bivariant, bindsLiteral = parameter.bindsLiteral, upperBound = Nothing, lacks = Set.empty},
+        parameter.upperBound,
+        parameter.lacks
       )
   _ -> Nothing
 
--- | A declaration's collected generic parameters (in declaration order, by name) and its syntactic
--- @extends@ bounds, keyed by generic id. The bounds are elaborated + normalized and stamped onto the
--- parameters' 'upperBound' once the normalizer environment is available.
-collectGenericParameters :: List (GenericParameter Identified) -> (GenericParameters, Map GenericId (SyntacticTypeExpression Identified))
+-- | A declaration's collected generic parameters (in declaration order, by name), its syntactic
+-- @extends@ bounds, and its syntactic @lacks@ lists, both keyed by generic id. The bounds are
+-- elaborated + normalized and stamped onto the parameters' 'upperBound' once the normalizer
+-- environment is available; the lacks lists are resolved to request-name sets and stamped by
+-- 'Katari.Typechecker.Check.boundedGenericParameters' (the value-declaration path — the only one
+-- that offers the clause).
+collectGenericParameters :: List (GenericParameter Identified) -> (GenericParameters, Map GenericId (SyntacticTypeExpression Identified), Map GenericId (SyntacticTypeExpression Identified))
 collectGenericParameters parameters =
   let collected = mapMaybe collectGenericParameter parameters
    in ( GenericParameters
-          { parameterNames = [name | (name, _, _) <- collected],
-            parameterInformation = Map.fromList [(name, info) | (name, info, _) <- collected]
+          { parameterNames = [name | (name, _, _, _) <- collected],
+            parameterInformation = Map.fromList [(name, info) | (name, info, _, _) <- collected]
           },
-        Map.fromList [(info.genericId, bound) | (_, info, Just bound) <- collected]
+        Map.fromList [(info.genericId, bound) | (_, info, Just bound, _) <- collected],
+        Map.fromList [(info.genericId, lacksExpression) | (_, info, _, Just lacksExpression) <- collected]
       )
 
 -- | Split every module's declarations into the data / request / synonym lists, keyed by qualified
@@ -154,7 +161,7 @@ collectDeclarations modules =
   where
     declarations = [declaration | module' <- Map.elems modules, declaration <- module'.declarations]
     collectData declaration =
-      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+      let (genericParameters, genericBounds, _typeDeclarationLacks) = collectGenericParameters declaration.genericParameters
        in CollectedData
             { qualifiedName = referencedVariableName declaration.variableReference,
               genericParameters = genericParameters,
@@ -163,7 +170,7 @@ collectDeclarations modules =
               sourceSpan = declaration.sourceSpan
             }
     collectRequest declaration =
-      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+      let (genericParameters, genericBounds, _typeDeclarationLacks) = collectGenericParameters declaration.genericParameters
        in CollectedRequest
             { qualifiedName = referencedTypeName declaration.typeReference,
               genericParameters = genericParameters,
@@ -172,7 +179,7 @@ collectDeclarations modules =
               sourceSpan = declaration.sourceSpan
             }
     collectMarkerEffect declaration =
-      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+      let (genericParameters, genericBounds, _typeDeclarationLacks) = collectGenericParameters declaration.genericParameters
        in CollectedRequest
             { qualifiedName = referencedTypeName declaration.typeReference,
               genericParameters = genericParameters,
@@ -181,7 +188,7 @@ collectDeclarations modules =
               sourceSpan = declaration.sourceSpan
             }
     collectSynonym declaration =
-      let (genericParameters, genericBounds) = collectGenericParameters declaration.genericParameters
+      let (genericParameters, genericBounds, _typeDeclarationLacks) = collectGenericParameters declaration.genericParameters
        in CollectedSynonym
             { qualifiedName = referencedTypeName declaration.typeReference,
               genericParameters = genericParameters,
@@ -424,14 +431,15 @@ applyVariance variances parameters =
 -- 'upperBound' is shared with the AST 'GenericParameter', which makes a field update ambiguous (and
 -- -XDuplicateRecordFields-deprecated); 'applyVariance' updates 'variance' in place because that field
 -- is unique to 'GenericParameterInformation'.
-stampBound :: Map GenericId NormalizedKindedType -> GenericParameterInformation -> GenericParameterInformation
-stampBound bounds parameter =
+stampBound :: Map GenericId NormalizedKindedType -> Map GenericId (Set QualifiedName) -> GenericParameterInformation -> GenericParameterInformation
+stampBound bounds lacksSets parameter =
   GenericParameterInformation
     { genericId = parameter.genericId,
       kind = parameter.kind,
       variance = parameter.variance,
       bindsLiteral = parameter.bindsLiteral,
-      upperBound = Map.lookup parameter.genericId bounds
+      upperBound = Map.lookup parameter.genericId bounds,
+      lacks = Map.findWithDefault Set.empty parameter.genericId lacksSets
     }
 
 -- | Run a normalization sub-computation, anchoring any type errors it emits at @sourceSpan@. The
@@ -475,7 +483,7 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
     stampBoundsIn environment' qualifiedName sourceSpan parameters =
       let semanticBounds = Map.mapMaybe id (Map.findWithDefault mempty qualifiedName shapes.boundShapes)
           (normalizedBounds, diagnostics) = runNormalize environment' sourceSpan (traverse normalizeGenericArgument semanticBounds)
-       in (parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}, diagnostics)
+       in (parameters {parameterInformation = stampBound normalizedBounds mempty <$> parameters.parameterInformation}, diagnostics)
 
     -- First pass: stamp bounds against the variance-only environment. A bound's normalized /value/ does
     -- not depend on any declaration's bounds (only its bound /checks/ do), so these stamped parameters

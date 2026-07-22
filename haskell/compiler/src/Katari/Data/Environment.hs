@@ -5,6 +5,7 @@ module Katari.Data.Environment where
 
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Set (Set)
 import Data.Text (Text)
 import GHC.List (List)
 import Katari.Data.GenericKind (GenericKind)
@@ -30,7 +31,13 @@ data GenericParameterInformation = GenericParameterInformation
     -- this parameter instead of @string@. An unmarked parameter never binds a singleton implicitly.
     bindsLiteral :: Bool,
     -- | The declared @extends@ upper bound, normalized; 'Nothing' for an unbounded parameter
-    upperBound :: Maybe NormalizedKindedType
+    upperBound :: Maybe NormalizedKindedType,
+    -- | @effect E lacks req | ...@ — the request names no row instantiating this effect parameter may
+    -- contain (name-level). A use of the parameter normalizes to a tail carrying this set, so a
+    -- handler inside the declaration can peel exactly these requests while @E@ stays generic; a call
+    -- site whose argument row contains one fails the ordinary row subtype check. Empty for every
+    -- non-effect parameter and every unconstrained one.
+    lacks :: Set QualifiedName
   }
   deriving (Eq, Show)
 

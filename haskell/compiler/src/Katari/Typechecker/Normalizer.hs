@@ -328,8 +328,15 @@ normalizeEffect effect = case effect of
     requestInfo <- requestInfoFor qualifiedName
     checkApplicationBounds requestInfo.genericParameters normalizedGenericArguments
     pure $ effectRow EffectRow {request = Map.singleton qualifiedName normalizedGenericArguments, tails = mempty}
-  SemanticEffectGeneric genericArgumentName ->
-    pure $ singleTailEffect genericArgumentName
+  SemanticEffectGeneric genericArgumentName -> do
+    -- A reference to an effect parameter carries the binder's `lacks` set on its tail, so the row
+    -- machinery (handler peeling, tail substitution) sees the constraint wherever the parameter is
+    -- used. Out-of-scope ids (the checker's own metavariables, handler scheme variables) keep the
+    -- bare unconstrained tail 'singleTailEffect' builds.
+    maybeInformation <- asks (\environment -> Map.lookup genericArgumentName environment.genericsInScope)
+    pure $ case maybeInformation of
+      Just information | not (Set.null information.lacks) -> effectRow EffectRow {request = mempty, tails = Map.singleton genericArgumentName information.lacks}
+      _ -> singleTailEffect genericArgumentName
   SemanticEffectOverwrite baseEffect overwrites -> do
     normalized <- normalizeEffect baseEffect
     overwriteRequests <-

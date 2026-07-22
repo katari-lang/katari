@@ -364,7 +364,7 @@ environment =
           genericParameters =
             GenericParameters
               { parameterNames = ["T"],
-                parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, bindsLiteral = False, upperBound = Nothing}
+                parameterInformation = Map.singleton "T" GenericParameterInformation {genericId = genericT, kind = GenericKindType, variance = argumentVariance, bindsLiteral = False, upperBound = Nothing, lacks = Set.empty}
               },
           constructor = constructorObjectOf [("x", genericOf genericT)]
         }
@@ -380,7 +380,7 @@ environment =
 -- | A type-kind generic registered in 'environment' (in scope) with the upper bound @integer@.
 boundedTypeParameter :: GenericParameterInformation
 boundedTypeParameter =
-  GenericParameterInformation {genericId = boundedGeneric, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Just (NormalizedKindedTypeType intType)}
+  GenericParameterInformation {genericId = boundedGeneric, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Just (NormalizedKindedTypeType intType), lacks = Set.empty}
 
 -- | An effect-kind generic registered in 'environment' (in scope) with the effect upper bound @log@.
 boundedEffectParameter :: GenericParameterInformation
@@ -390,7 +390,8 @@ boundedEffectParameter =
       kind = GenericKindEffect,
       variance = Bivariant,
       bindsLiteral = False,
-      upperBound = Just (NormalizedKindedTypeEffect (effectRow EffectRow {request = Map.singleton logName mempty, tails = mempty}))
+      upperBound = Just (NormalizedKindedTypeEffect (effectRow EffectRow {request = Map.singleton logName mempty, tails = mempty})),
+      lacks = Set.empty
     }
 
 layerType :: LayeredType -> NormalizedType

@@ -118,6 +118,12 @@ data GenericParameter (phase :: Phase) = GenericParameter
     bindsLiteral :: Bool,
     -- | No upper bound  ~> unknown of private (top type)
     upperBound :: Maybe (SyntacticTypeExpression phase),
+    -- | @effect E lacks req | ...@ — the requests every row instantiating this effect parameter must
+    -- NOT contain (name-level: @prelude.throw@ excludes every @throw@ instantiation). Written as one
+    -- type expression whose union branches each name a request; only an effect-kind parameter parses
+    -- one. The constraint is what lets a handler inside the declaration peel exactly these requests
+    -- off a row that still carries @E@.
+    lacks :: Maybe (SyntacticTypeExpression phase),
     sourceSpan :: SourceSpan
   }
 
@@ -1402,6 +1408,7 @@ retagGenericParameter parameter =
       kind = parameter.kind,
       bindsLiteral = parameter.bindsLiteral,
       upperBound = retagSyntacticTypeExpression <$> parameter.upperBound,
+      lacks = retagSyntacticTypeExpression <$> parameter.lacks,
       sourceSpan = parameter.sourceSpan
     }
 

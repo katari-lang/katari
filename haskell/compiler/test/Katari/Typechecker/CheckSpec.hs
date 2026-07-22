@@ -1756,7 +1756,7 @@ identityScheme genericId =
             parameterInformation =
               Map.singleton
                 "a"
-                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
+                GenericParameterInformation {genericId = genericId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing, lacks = Set.empty}
           },
       valueType = pureAgentType (paramObject [("x", genericVariable genericId)]) (genericVariable genericId)
     }

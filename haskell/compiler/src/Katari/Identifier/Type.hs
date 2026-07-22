@@ -109,6 +109,7 @@ prepareGenericParameter parameter = do
 resolvePreparedGenericParameter :: (GenericParameter Parsed, TypeResolution) -> Identifier (GenericParameter Identified)
 resolvePreparedGenericParameter (parameter, resolution) = do
   upperBound <- traverse resolveType parameter.upperBound
+  lacks <- traverse resolveType parameter.lacks
   pure
     GenericParameter
       { name = parameter.name,
@@ -117,6 +118,7 @@ resolvePreparedGenericParameter (parameter, resolution) = do
         kind = parameter.kind,
         bindsLiteral = parameter.bindsLiteral,
         upperBound = upperBound,
+        lacks = lacks,
         sourceSpan = parameter.sourceSpan
       }
 

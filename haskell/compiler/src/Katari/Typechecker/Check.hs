@@ -24,7 +24,7 @@ import Katari.Data.Id (GenericId, LocalVariableId, TypeResolution (..), Variable
 import Katari.Data.ModuleName (ModuleName)
 import Katari.Data.NormalizedType
 import Katari.Data.QualifiedName (QualifiedName (..), renderQualifiedName)
-import Katari.Data.SemanticType (SemanticGenericArgument (..), SemanticType, renderSemanticEffect)
+import Katari.Data.SemanticType (SemanticEffect (..), SemanticGenericArgument (..), SemanticType, renderSemanticEffect)
 import Katari.Data.SourceSpan (HasSourceSpan (..), SourceSpan)
 import Katari.Data.Variance (Variance (..))
 import Katari.Diagnostics (diagnosticAt)
@@ -2161,8 +2161,8 @@ checkHandlerScheme expression = do
   resultId <- freshGenericId
   effectId <- freshGenericId
   let resultVariable = NormalizedType {baseType = NormalizedBaseTypeLayered neverLayer, generics = Set.singleton resultId, attribute = bottomAttribute}
-      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
-      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, bindsLiteral = False, upperBound = Nothing}
+      resultInfo = GenericParameterInformation {genericId = resultId, kind = GenericKindType, variance = Bivariant, bindsLiteral = False, upperBound = Nothing, lacks = Set.empty}
+      effectInfo = GenericParameterInformation {genericId = effectId, kind = GenericKindEffect, variance = Bivariant, bindsLiteral = False, upperBound = Nothing, lacks = Set.empty}
       handlerGenerics =
         GenericParameters
           { parameterNames = [handlerResultParameterName, handlerEffectParameterName],
@@ -2571,10 +2571,11 @@ data AgentPreparation = AgentPreparation
 -- 'buildGenericSubstitution' when an explicit type argument is supplied.
 boundedGenericParameters :: List (GenericParameter Identified) -> Checker GenericParameters
 boundedGenericParameters declarations = do
-  let (parameters, syntacticBounds) = collectGenericParameters declarations
+  let (parameters, syntacticBounds, syntacticLacks) = collectGenericParameters declarations
   withGenerics parameters $ do
     normalizedBounds <- Map.fromList . catMaybes <$> traverse normalizeBound (Map.toList syntacticBounds)
-    pure parameters {parameterInformation = stampBound normalizedBounds <$> parameters.parameterInformation}
+    lacksSets <- Map.fromList <$> traverse resolveLacks (Map.toList syntacticLacks)
+    pure parameters {parameterInformation = stampBound normalizedBounds lacksSets <$> parameters.parameterInformation}
   where
     normalizeBound (genericId, expression) = do
       maybeSemantic <- runElaborator (elaborate expression)
@@ -2583,6 +2584,21 @@ boundedGenericParameters declarations = do
           normalized <- runNormalizer (sourceSpanOf expression) (normalizeGenericArgument semantic)
           pure (Just (genericId, normalized))
         Nothing -> pure Nothing
+    -- A `lacks` clause elaborates as an effect (so request names resolve exactly as they do in a
+    -- row), then flattens to the excluded name set. The constraint is name-level, so only bare
+    -- request names have a reading — an applied form, a marker-free branch (io / pure / all), or a
+    -- nested generic reports K3026 and contributes nothing.
+    resolveLacks (genericId, expression) = do
+      semantic <- runElaborator (elaborateAsEffect expression)
+      case lacksNamesOf semantic of
+        Just names -> pure (genericId, names)
+        Nothing -> do
+          reportType (sourceSpanOf expression) TypeErrorLacksEntry
+          pure (genericId, Set.empty)
+    lacksNamesOf semanticEffect = case semanticEffect of
+      SemanticEffectRequest qualifiedName arguments | Map.null arguments -> Just (Set.singleton qualifiedName)
+      SemanticEffectUnion branches -> Set.unions <$> traverse lacksNamesOf branches
+      _ -> Nothing
 
 prepareAgent :: AgentDeclaration Identified -> Checker AgentPreparation
 prepareAgent declaration = do

@@ -232,6 +232,14 @@ genericParameter = do
   (kind, bindsLiteral, kindSpan) <- genericParameterKind
   name <- identifier
   upperBound <- optional (keyword "extends" *> typeExpression)
+  -- @lacks req | ...@ — only an effect parameter constrains its rows this way, so the clause is not
+  -- even offered elsewhere (a type parameter named after a request has no row to subtract from). The
+  -- union branches of the one type expression are the excluded request names.
+  lacks <-
+    if kind == GenericKindEffect
+      then optional (keyword "lacks" *> typeExpression)
+      else pure Nothing
+  let endSpan = maybe (maybe name.sourceSpan sourceSpanOf upperBound) sourceSpanOf lacks
   pure
     GenericParameter
       { name = name.value,
@@ -240,7 +248,8 @@ genericParameter = do
         kind = kind,
         bindsLiteral = bindsLiteral,
         upperBound = upperBound,
-        sourceSpan = mergeSpans (fromMaybe name.sourceSpan kindSpan) (maybe name.sourceSpan sourceSpanOf upperBound)
+        lacks = lacks,
+        sourceSpan = mergeSpans (fromMaybe name.sourceSpan kindSpan) endSpan
       }
 
 -- | An optional @effect@ / @attribute@ / @literal@ prefix; absent (or not followed by a name) means a

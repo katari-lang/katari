@@ -71,6 +71,51 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "rejects a parameter default that violates its type (K3001)" $
     typeErrorCodes [("test", "agent inc(x: number ?= \"a\") -> number { x }")] `shouldContain` ["K3001"]
 
+  it "a `lacks` effect parameter lets a handler peel the reserved request off a generic row" $
+    typeErrorCodes
+      [ ( "test",
+          "request settled(text: string) -> null\n\
+          \request noise() -> null\n\
+          \agent with_first[effect E lacks settled](task: agent (value: null) -> string with E) -> string with E {\n\
+          \  use handler { request settled(text: string) -> null { break text } }\n\
+          \  settled(text = task(value = null))\n\
+          \  \"(unreachable)\"\n\
+          \}\n\
+          \agent caller() -> string with noise {\n\
+          \  agent task(value: null) -> string { noise(); \"done\" }\n\
+          \  with_first(task = task)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "rejects a call whose task performs the reserved request (the lacks constraint, K3001)" $
+    typeErrorCodes
+      [ ( "test",
+          "request settled(text: string) -> null\n\
+          \agent with_first[effect E lacks settled](task: agent (value: null) -> string with E) -> string with E {\n\
+          \  use handler { request settled(text: string) -> null { break text } }\n\
+          \  settled(text = task(value = null))\n\
+          \  \"(unreachable)\"\n\
+          \}\n\
+          \agent caller() -> string {\n\
+          \  agent task(value: null) -> string { settled(text = \"sneaky\"); \"done\" }\n\
+          \  with_first(task = task)\n\
+          \}"
+        )
+      ]
+      `shouldContain` ["K3001"]
+
+  it "rejects a `lacks` entry that is not a bare request name (K3026)" $
+    typeErrorCodes
+      [ ( "test",
+          "agent bad[effect E lacks integer](task: agent (value: null) -> string with E) -> string with E {\n\
+          \  task(value = null)\n\
+          \}"
+        )
+      ]
+      `shouldContain` ["K3026"]
+
   it "a for `then` clause may read a `var` state variable" $
     typeErrorCodes [("test", "agent run() -> integer { for (x in [1], var total = 0) { next x with total = total + x } then (r) { total } }")] `shouldBe` []
 
