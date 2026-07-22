@@ -68,6 +68,50 @@ external agent watch[effect E](
   @"Called once per occurrence; its @time@ is the occurrence's scheduled epoch millisecond, not the delivery instant." deliver_to: agent (time: number) -> null with E,
 ) -> never with E | io from "time"
 
+// ── with_deadline: the first-wins race, packaged ─────────────────────────────────────────────────
+//
+// The race an app used to hand-roll (two `parallel` arms performing a settle request, a handler
+// `break`ing with the first) — writable generically now that `lacks` exists: the task's effect row
+// stays open, constrained only to not perform the settle channel itself. The outcome is a SUM, not an
+// in-band string: the app decides what a timeout renders as.
+
+@"The task settled first: its value."
+data completed[T](@"The task's result." value: T)
+
+@"The deadline passed first; the task's arm was cancelled."
+data deadline_passed()
+
+// Which side of a `with_deadline` race settled first. (Type synonyms take no docs.)
+type raced[T] = completed[T] | deadline_passed
+
+@"`with_deadline`'s settle channel — performed by whichever arm finishes first, handled (and `break`ed
+on) inside `with_deadline` alone. Its `lacks` constraint is what reserves it: a task cannot perform it,
+so the handler peel stays sound over the task's still-generic row."
+request race_settled[T](@"The settling side's outcome." outcome: T) -> null
+
+@"Race @task@ against a @milliseconds@ deadline and return whichever settled first: `completed` with
+the task's value, or `deadline_passed` — the loser's arm is cancelled (the ordinary cancel cascade; an
+in-flight external call is interrupted at-most-once, like any cancel). The task's own throws are NOT
+caught here — they escalate as usual; catch them (`prelude.catch`, or a handler) around or inside the
+task as the app prefers."
+agent with_deadline[T, effect E lacks race_settled](
+  @"The budget, in milliseconds." milliseconds: number,
+  @"The task to race; its row may be anything that does not perform `race_settled`." task: agent (value: null) -> T with E,
+) -> raced[T] with E | io {
+  use handler {
+    request race_settled(outcome: raced[T]) -> null { break outcome }
+  }
+  parallel [
+    race_settled(outcome = completed(value = task(value = null))),
+    {
+      sleep(milliseconds = milliseconds)
+      race_settled(outcome = deadline_passed())
+    },
+  ]
+  // Unreachable — an arm always performs `race_settled` before the parallel could complete.
+  deadline_passed()
+}
+
 // ── the civil (wall-clock) calendar: pure arithmetic, no clock, no timezone database ─────────────
 //
 // Howard Hinnant's closed-form civil-calendar algorithms (`civil_from_days` / `days_from_civil`) over

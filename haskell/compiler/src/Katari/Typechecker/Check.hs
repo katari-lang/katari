@@ -2608,21 +2608,23 @@ boundedGenericParameters declarations = do
           normalized <- runNormalizer (sourceSpanOf expression) (normalizeGenericArgument semantic)
           pure (Just (genericId, normalized))
         Nothing -> pure Nothing
-    -- A `lacks` clause elaborates as an effect (so request names resolve exactly as they do in a
-    -- row), then flattens to the excluded name set. The constraint is name-level, so only bare
-    -- request names have a reading — an applied form, a marker-free branch (io / pure / all), or a
-    -- nested generic reports K3026 and contributes nothing.
+    -- A `lacks` clause resolves its names STRUCTURALLY from the syntax (union branches, each a bare
+    -- name), not through the effect elaborator — the constraint is name-level, so a generic request
+    -- is written bare (`lacks race_settled`, whatever its arity) and an applied form has no reading.
+    -- Each name must resolve to a request; anything else reports K3026 and contributes nothing.
     resolveLacks (genericId, expression) = do
-      semantic <- runElaborator (elaborateAsEffect expression)
-      case lacksNamesOf semantic of
-        Just names -> pure (genericId, names)
-        Nothing -> do
-          reportType (sourceSpanOf expression) TypeErrorLacksEntry
-          pure (genericId, Set.empty)
-    lacksNamesOf semanticEffect = case semanticEffect of
-      SemanticEffectRequest qualifiedName arguments | Map.null arguments -> Just (Set.singleton qualifiedName)
-      SemanticEffectUnion branches -> Set.unions <$> traverse lacksNamesOf branches
-      _ -> Nothing
+      names <- lacksNamesOf expression
+      pure (genericId, names)
+    lacksNamesOf expression = case expression of
+      TypeUnion node -> Set.unions <$> traverse lacksNamesOf node.branches
+      TypeName node -> case node.typeReference.resolution of
+        Just (TypeResolutionQualifiedName qualifiedName) -> do
+          requestEnvironment <- asks (\environment -> environment.typeEnvironment.requestEnvironment)
+          if Map.member qualifiedName requestEnvironment
+            then pure (Set.singleton qualifiedName)
+            else Set.empty <$ reportType (sourceSpanOf expression) TypeErrorLacksEntry
+        _ -> Set.empty <$ reportType (sourceSpanOf expression) TypeErrorLacksEntry
+      _ -> Set.empty <$ reportType (sourceSpanOf expression) TypeErrorLacksEntry
 
 prepareAgent :: AgentDeclaration Identified -> Checker AgentPreparation
 prepareAgent declaration = do
