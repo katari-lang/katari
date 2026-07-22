@@ -150,6 +150,11 @@ type McpPayload =
       scope: string;
       /** The `{url, auth}` descriptor the scope connects and evicts under (privacy markers intact). */
       descriptor: Value;
+      /** The model-facing name prefix for this provide's minted tools (`<prefix>_<tool>`), or null for
+       *  the server-declared names. The WIRE name stays the server's own (each minted tool's context
+       *  carries it), so a prefix renames what the model and the toolbox keys see, never what the
+       *  server receives. Persisted so a reload re-mints identically. */
+      prefix: string | null;
       /** The continuation to run inside the scope — consumed (set to `null`) once dispatched, so a reload
        *  distinguishes a listing-phase interruption (re-list) from an active scope (resume). */
       continuation: Value | null;
@@ -197,6 +202,7 @@ export type McpExtension =
       snapshotId: SnapshotId;
       scopeId: string;
       descriptor: Value;
+      prefix: string | null;
       continuation: Value | null;
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
@@ -225,6 +231,7 @@ export function encodeMcpExtension(extension: McpExtension): Json {
         snapshotId: extension.snapshotId,
         scopeId: extension.scopeId,
         descriptor: asJson(extension.descriptor),
+        prefix: extension.prefix,
         continuation: asJson(extension.continuation),
         relays: encodeRelays(extension.relays),
         innerCalls: encodeInnerCalls(extension.innerCalls),
@@ -256,6 +263,7 @@ export function decodeMcpExtension(extension: Json): McpExtension {
         snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
         scopeId: stringFieldOf(document, "scopeId"),
         descriptor: warmFieldOf<Value>(document, "descriptor"),
+        prefix: typeof document.prefix === "string" ? document.prefix : null,
         continuation: warmFieldOf<Value | null>(document, "continuation"),
         relays: relaysOf(document),
         innerCalls: innerCallsOf(document),
@@ -464,6 +472,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         // 18 random bytes, base64url — the scope identity minted tools carry and callTool checks.
         scope: `mcpscope:${randomBytes(18).toString("base64url")}`,
         descriptor: descriptorOf(argument),
+        prefix:
+          fields.prefix !== undefined && fields.prefix.kind === "string"
+            ? fields.prefix.value
+            : null,
         continuation: fields.continuation ?? null,
       };
     }
@@ -488,14 +500,18 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         subscriber: fields.subscriber ?? null,
       };
     }
-    // A minted tool's server-declared name: a callTool. Its context is `{ descriptor, scope }` (a legacy /
-    // hand-built target may carry the bare descriptor and no scope — then the scope check is skipped).
+    // A minted tool's published name: a callTool. Its context is `{ descriptor, scope }` (a legacy /
+    // hand-built target may carry the bare descriptor and no scope — then the scope check is skipped),
+    // plus `server_tool` when the provide renamed the published identity with a prefix — the wire always
+    // carries the server-declared name.
     const context = target.context ?? null;
     const contextFields = context !== null && context.kind === "record" ? context.fields : {};
     const scopeValue = contextFields.scope;
+    const serverTool = contextFields.server_tool;
     return transportPayloadOf({
       kind: "callTool",
-      tool: target.key,
+      tool:
+        serverTool !== undefined && serverTool.kind === "string" ? serverTool.value : target.key,
       descriptor: contextFields.descriptor ?? context,
       scope: scopeValue !== undefined && scopeValue.kind === "string" ? scopeValue.value : null,
       argument,
@@ -711,7 +727,13 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (payload === undefined || payload.kind !== "provide") return; // resolved / cancelled meanwhile
     const continuation = payload.continuation;
     if (continuation === null) return; // already dispatched (a duplicate listing) — nothing to do
-    const toolbox = mintToolbox(listingJson, payload.descriptor, payload.scope, payload.snapshot);
+    const toolbox = mintToolbox(
+      listingJson,
+      payload.descriptor,
+      payload.scope,
+      payload.snapshot,
+      payload.prefix,
+    );
     // `{ value: toolbox }` conforms to the continuation's declared input BY CONSTRUCTION: `mcp.provide`'s
     // signature types the continuation as `agent (value: toolbox[URL]) -> ...`, and `mintToolbox` produces
     // exactly a `toolbox[URL]` (a record of the minted tools) for this same provide's URL. So this internal
@@ -1004,6 +1026,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
           snapshotId: payload.snapshot,
           scopeId: payload.scope,
           descriptor: payload.descriptor,
+          prefix: payload.prefix,
           continuation: payload.continuation,
           relays: row.relays,
           innerCalls: row.innerCalls,
@@ -1045,6 +1068,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             snapshot: decoded.snapshotId,
             scope: decoded.scopeId,
             descriptor: decoded.descriptor,
+            prefix: decoded.prefix,
             continuation: decoded.continuation,
           },
           relays: decoded.relays,
@@ -1191,18 +1215,36 @@ function descriptorUrl(descriptor: Value | null): string {
 /** Mint the toolbox for a settled `provide` listing: one agent value per server tool, carrying the
  *  server-declared signature and — as its context — a record of the DESCRIPTOR (`{url, auth}` with privacy
  *  markers intact; the transport's revealed copy is never minted) and this provide's SCOPE identity, which
- *  each tool call checks live. */
-function mintToolbox(listing: Json, descriptor: Value, scope: string, snapshot: SnapshotId): Value {
-  const context: Value = {
-    kind: "record",
-    fields: { descriptor, scope: { kind: "string", value: scope } },
+ *  each tool call checks live. A non-null `prefix` renames the MODEL-FACING identity — the record key and
+ *  the tool's metadata name become `<prefix>_<tool>` — while the context's `server_tool` keeps the
+ *  server-declared name for the wire, so two servers exposing the same tool name stop colliding without
+ *  the server ever seeing the rename. */
+export function mintToolbox(
+  listing: Json,
+  descriptor: Value,
+  scope: string,
+  snapshot: SnapshotId,
+  prefix: string | null,
+): Value {
+  const sharedFields: Record<string, Value> = {
+    descriptor,
+    scope: { kind: "string", value: scope },
   };
+  const sharedContext: Value = { kind: "record", fields: sharedFields };
   const fields: Record<string, Value> = Object.create(null);
   for (const tool of listingsOf(listing)) {
-    fields[tool.name] = {
+    const publishedName = prefix === null ? tool.name : `${prefix}_${tool.name}`;
+    const context: Value =
+      prefix === null
+        ? sharedContext
+        : {
+            kind: "record",
+            fields: { ...sharedFields, server_tool: { kind: "string", value: tool.name } },
+          };
+    fields[publishedName] = {
       kind: "tool",
       reactor: "mcp",
-      name: tool.name,
+      name: publishedName,
       description: tool.description,
       context,
       snapshot,

@@ -128,6 +128,7 @@ external agent provide[effect Scope, R, effect E](
   @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: string,
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs." continuation: agent (value: toolbox[Scope]) -> R with E | Scope,
+  @"A model-facing name prefix for this server's tools: with `prefix = \"notion\"` a server tool `search` is published as `notion_search` (the toolbox key and the tool's metadata name — the wire still carries the server-declared name). Set it when two connected servers expose the same tool name; `null` keeps the server's own names." prefix: string | null ?= null,
 ) -> R with E from "mcp"
 
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no

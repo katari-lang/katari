@@ -26,6 +26,11 @@ import {
   type SchemaInfo,
 } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
+import {
+  decodeMcpExtension,
+  encodeMcpExtension,
+  mintToolbox,
+} from "../src/runtime/actor/mcp-reactor.js";
 import { InMemoryPersistence, type Persistence } from "../src/runtime/actor/persistence.js";
 import { ProjectActor } from "../src/runtime/actor/project-actor.js";
 import { StoringPersistence } from "../src/runtime/actor/storing-persistence.js";
@@ -1205,5 +1210,66 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
     // The reactor rejects at its scope gate — nothing to feed, and the transport never hears of it.
     await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*no live mcp\.provide scope/);
     expect(transport.dispatched).toHaveLength(0);
+  });
+});
+
+describe("mintToolbox prefix (the model-facing rename)", () => {
+  const LISTING = {
+    tools: [
+      { name: "search", description: "find things", inputSchema: { type: "object" } },
+      { name: "read_page", description: "read one", inputSchema: { type: "object" } },
+    ],
+  };
+  const DESCRIPTOR: Value = {
+    kind: "record",
+    fields: { url: { kind: "string", value: "https://mcp.example.test/mcp" } },
+  };
+
+  test("no prefix keeps the server-declared names and mints no server_tool", () => {
+    const toolbox = mintToolbox(LISTING, DESCRIPTOR, "mcpscope:abc", SNAPSHOT, null);
+    if (toolbox.kind !== "record") throw new Error("toolbox must be a record");
+    expect(Object.keys(toolbox.fields)).toEqual(["search", "read_page"]);
+    const search = toolbox.fields.search;
+    if (search === undefined || search.kind !== "tool") throw new Error("search must be a tool");
+    expect(search.name).toBe("search");
+    if (search.context === undefined || search.context.kind !== "record") throw new Error("context");
+    expect(search.context.fields.server_tool).toBeUndefined();
+  });
+
+  test("a prefix renames the key and the metadata name, and keeps the wire name in server_tool", () => {
+    const toolbox = mintToolbox(LISTING, DESCRIPTOR, "mcpscope:abc", SNAPSHOT, "notion");
+    if (toolbox.kind !== "record") throw new Error("toolbox must be a record");
+    expect(Object.keys(toolbox.fields)).toEqual(["notion_search", "notion_read_page"]);
+    const search = toolbox.fields.notion_search;
+    if (search === undefined || search.kind !== "tool") throw new Error("prefixed tool");
+    expect(search.name).toBe("notion_search");
+    if (search.context === undefined || search.context.kind !== "record") throw new Error("context");
+    expect(search.context.fields.server_tool).toEqual({ kind: "string", value: "search" });
+    // The scope identity still rides every prefixed tool's own context.
+    expect(search.context.fields.scope).toEqual({ kind: "string", value: "mcpscope:abc" });
+  });
+});
+
+describe("the provide extension codec carries the prefix", () => {
+  test("encode/decode round-trips a prefix, and a pre-prefix row decodes to null", () => {
+    const encoded = encodeMcpExtension({
+      kind: "provide",
+      snapshotId: SNAPSHOT,
+      scopeId: "mcpscope:abc",
+      descriptor: { kind: "record", fields: {} },
+      prefix: "gh",
+      continuation: null,
+      relays: [],
+      innerCalls: [],
+    });
+    const decoded = decodeMcpExtension(encoded);
+    if (decoded.kind !== "provide") throw new Error("must stay a provide");
+    expect(decoded.prefix).toBe("gh");
+    // A row written before the prefix existed has no field — it must decode as null, not throw.
+    if (encoded === null || typeof encoded !== "object" || Array.isArray(encoded)) throw new Error("doc");
+    delete (encoded as Record<string, unknown>).prefix;
+    const legacy = decodeMcpExtension(encoded);
+    if (legacy.kind !== "provide") throw new Error("must stay a provide");
+    expect(legacy.prefix).toBeNull();
   });
 });
