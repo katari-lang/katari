@@ -134,6 +134,13 @@ const samples = [
     ],
   },
   {
+    name: "the subtraction form: lacks in type position",
+    source: 'agent supervise[T, effect E](task: agent (value: null) -> T with E) -> T with {...E lacks prelude.throw} {\n  task(value = null)\n}\n',
+    checks: [
+      ["lacks", "keyword.declaration.lacks", "lacks in the override row"],
+    ],
+  },
+  {
     name: "constants and comments",
     source: '// line comment\n/* block /* nested */ comment */\nagent main() {\n  let x = true\n  let y = null\n  let z = false\n}\n',
     checks: [
