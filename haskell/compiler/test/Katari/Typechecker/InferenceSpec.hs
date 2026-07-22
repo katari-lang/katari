@@ -53,8 +53,10 @@ spec = do
       codesFor "agent f() -> boolean { 1 == \"x\" }" `shouldBe` []
     it "less-than accepts numbers and returns boolean" $
       codesFor "agent f() -> boolean { 1 < 2 }" `shouldBe` []
-    it "rejects a string operand to less-than via T's number bound (K3001)" $
-      codesFor "agent f() -> boolean { \"a\" < \"b\" }" `shouldContain` ["K3001"]
+    it "less-than accepts strings (the scalar order covers number | string)" $
+      codesFor "agent f() -> boolean { \"a\" < \"b\" }" `shouldBe` []
+    it "rejects a boolean operand to less-than via T's number | string bound (K3001)" $
+      codesFor "agent f() -> boolean { true < false }" `shouldContain` ["K3001"]
     it "rejects a string operand to + via T's number bound (K3001)" $
       codesFor "agent f() -> number { 1 + \"x\" }" `shouldContain` ["K3001"]
     it "negate infers T = integer and preserves it" $

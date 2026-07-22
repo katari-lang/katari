@@ -27,14 +27,19 @@ primitive agent negate[T extends number](value: T) -> T
 primitive agent equal[T](left: T, right: T) -> boolean
 @"Whether two values are not equal."
 primitive agent not_equal[T](left: T, right: T) -> boolean
-@"Whether the left number is less than the right."
-primitive agent less_than[T extends number](left: T, right: T) -> boolean
-@"Whether the left number is less than or equal to the right."
-primitive agent less_or_equal[T extends number](left: T, right: T) -> boolean
-@"Whether the left number is greater than the right."
-primitive agent greater_than[T extends number](left: T, right: T) -> boolean
-@"Whether the left number is greater than or equal to the right."
-primitive agent greater_or_equal[T extends number](left: T, right: T) -> boolean
+// The comparison order is total and deterministic: numbers compare numerically, strings compare by
+// UTF-16 code unit (JavaScript's `<`, no locale), and when a union instantiation mixes the kinds,
+// every number orders before every string. `array.sort` / `array.sort_entries` sort by this same order.
+
+@"Whether the left value is less than the right (numbers numerically, strings by UTF-16 code unit;
+in a mixed union, numbers order before strings)."
+primitive agent less_than[T extends number | string](left: T, right: T) -> boolean
+@"Whether the left value is less than or equal to the right (the order of `less_than`)."
+primitive agent less_or_equal[T extends number | string](left: T, right: T) -> boolean
+@"Whether the left value is greater than the right (the order of `less_than`)."
+primitive agent greater_than[T extends number | string](left: T, right: T) -> boolean
+@"Whether the left value is greater than or equal to the right (the order of `less_than`)."
+primitive agent greater_or_equal[T extends number | string](left: T, right: T) -> boolean
 
 // Logical ----------------------------------------------------------------------------------------
 

@@ -44,3 +44,47 @@ export function recordOf(value: Value): Record<string, Value> {
   if (value.kind === "record") return value.fields;
   throw new Error(`expected a record, got ${value.kind}`);
 }
+
+// ─── the scalar comparison order ──────────────────────────────────────────────────────────────
+//
+// The one total order behind the comparison operators (`prelude.less_than` and friends) and the sort
+// prims (`prelude.array.sort` / `sort_entries`): numbers numerically, strings by Unicode code point,
+// and every number before every string — so a `number | string` union instantiation stays
+// deterministic instead of panicking. A key is materialised once per value (a string operand may be
+// blob-backed, so the caller reads it through its string reader before comparing).
+
+/** A comparison-ready scalar: a materialised string, or a number (`text` null). */
+export type ScalarKey = { text: string | null; numeric: number };
+
+export function scalarKeyOfNumber(value: Value): ScalarKey {
+  return { text: null, numeric: numberOf(value) };
+}
+
+export function scalarKeyOfText(text: string): ScalarKey {
+  return { text: text, numeric: 0 };
+}
+
+/** The usual negative / zero / positive ordering number over two keys. */
+export function compareScalarKeys(left: ScalarKey, right: ScalarKey): number {
+  if ((left.text === null) !== (right.text === null)) return left.text === null ? -1 : 1;
+  if (left.text !== null && right.text !== null) return compareByCodePoint(left.text, right.text);
+  return left.numeric < right.numeric ? -1 : left.numeric > right.numeric ? 1 : 0;
+}
+
+/** Lexicographic comparison by Unicode code point — the string prims' declared unit (`string.length`
+ *  counts code points), which differs from JavaScript's UTF-16 code-unit `<` when a surrogate pair
+ *  meets a BMP character at U+E000 or above. */
+export function compareByCodePoint(left: string, right: string): number {
+  const leftIterator = left[Symbol.iterator]();
+  const rightIterator = right[Symbol.iterator]();
+  for (;;) {
+    const leftStep = leftIterator.next();
+    const rightStep = rightIterator.next();
+    if (leftStep.done === true && rightStep.done === true) return 0;
+    if (leftStep.done === true) return -1;
+    if (rightStep.done === true) return 1;
+    const leftPoint = leftStep.value.codePointAt(0) ?? 0;
+    const rightPoint = rightStep.value.codePointAt(0) ?? 0;
+    if (leftPoint !== rightPoint) return leftPoint - rightPoint;
+  }
+}

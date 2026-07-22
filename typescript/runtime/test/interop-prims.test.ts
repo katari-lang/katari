@@ -830,3 +830,76 @@ describe("prelude.files producers (from_base64 / free)", () => {
     });
   });
 });
+
+describe("the scalar comparison order (comparison operators and the sort prims)", () => {
+  const stringValue = (value: string): Value => ({ kind: "string", value });
+  const integerValue = (value: number): Value => ({ kind: "integer", value });
+  const pair = (key: Value, value: Value): Value => ({ kind: "array", elements: [key, value] });
+
+  test("less_than orders strings by Unicode code point, not UTF-16 code unit", async () => {
+    // U+E000 (one BMP code unit, 0xE000) vs U+10000 (a surrogate pair whose high unit is 0xD800):
+    // code-unit `<` would call U+10000 the smaller; code-point order must not.
+    await expect(
+      run("prelude.less_than", { left: stringValue("\u{E000}"), right: stringValue("\u{10000}") }),
+    ).resolves.toEqual({ kind: "boolean", value: true });
+    await expect(
+      run("prelude.less_than", { left: stringValue("b"), right: stringValue("a") }),
+    ).resolves.toEqual({ kind: "boolean", value: false });
+  });
+
+  test("in a mixed number | string instantiation, every number orders before every string", async () => {
+    await expect(
+      run("prelude.less_than", { left: integerValue(999), right: stringValue("0") }),
+    ).resolves.toEqual({ kind: "boolean", value: true });
+    await expect(
+      run("prelude.greater_or_equal", { left: stringValue("0"), right: integerValue(999) }),
+    ).resolves.toEqual({ kind: "boolean", value: true });
+  });
+
+  test("a blob-backed string operand compares by its materialised content", async () => {
+    const blobs = new InMemoryBlobStore();
+    const blobId = "blob-compare" as BlobId;
+    await blobs.put(PROJECT, blobId, new TextEncoder().encode("banana"));
+    const context: PrimContext = { ...contextWith(), blobs };
+    const promoted: Value = { kind: "ref", semanticKind: "string", blobId };
+    await expect(
+      prims.run(
+        "prelude.less_than",
+        { kind: "record", fields: { left: stringValue("apple"), right: promoted } },
+        context,
+      ),
+    ).resolves.toEqual({ kind: "boolean", value: true });
+  });
+
+  test("sort orders scalars ascending and keeps the input untouched", async () => {
+    const input: Value = {
+      kind: "array",
+      elements: [integerValue(3), integerValue(1), integerValue(2)],
+    };
+    await expect(run("prelude.array.sort", { target: input })).resolves.toEqual({
+      kind: "array",
+      elements: [integerValue(1), integerValue(2), integerValue(3)],
+    });
+    // The prim returns a new array; the argument is not mutated in place.
+    expect(input.kind === "array" && input.elements[0]).toEqual(integerValue(3));
+  });
+
+  test("sort_entries orders [key, value] tuples by key and is stable on equal keys", async () => {
+    const entries: Value = {
+      kind: "array",
+      elements: [
+        pair(stringValue("b"), integerValue(1)),
+        pair(stringValue("a"), integerValue(2)),
+        pair(stringValue("b"), integerValue(3)),
+      ],
+    };
+    await expect(run("prelude.array.sort_entries", { entries })).resolves.toEqual({
+      kind: "array",
+      elements: [
+        pair(stringValue("a"), integerValue(2)),
+        pair(stringValue("b"), integerValue(1)),
+        pair(stringValue("b"), integerValue(3)),
+      ],
+    });
+  });
+});

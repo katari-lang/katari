@@ -37,7 +37,17 @@ import {
 } from "../value/validation.js";
 import type { PrimContext, PrimImplementation } from "./context.js";
 import { blobStoreStringReader, literalLift, type StringReader } from "./json-value.js";
-import { arrayOf, field, integerOf, recordOf, stringOf } from "./prim-helpers.js";
+import {
+  arrayOf,
+  compareScalarKeys,
+  field,
+  integerOf,
+  recordOf,
+  type ScalarKey,
+  scalarKeyOfNumber,
+  scalarKeyOfText,
+  stringOf,
+} from "./prim-helpers.js";
 import { errorData, KatariThrow } from "./throw-signal.js";
 import type { BlobEntry } from "./types.js";
 
@@ -67,6 +77,15 @@ function stringReaderOf(context: PrimContext): StringReader {
 /** Read a possibly blob-backed string argument field. */
 function readStringField(argument: Value, name: string, context: PrimContext): Promise<string> {
   return stringReaderOf(context)(field(argument, name));
+}
+
+/** The sort key of a scalar element (the order of `compareScalarKeys`): a number as itself, a string —
+ *  possibly blob-backed — as its materialised content, read once before the synchronous stable sort. */
+async function sortKeyOf(value: Value, read: StringReader): Promise<ScalarKey> {
+  if (value.kind === "string" || (value.kind === "ref" && value.semanticKind === "string")) {
+    return scalarKeyOfText(await read(value));
+  }
+  return scalarKeyOfNumber(value);
 }
 
 /** Read a `file` argument field: a blob ref whose semantic kind is `file` (the surface `file` type). */
@@ -276,6 +295,30 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return { kind: "array", elements };
   },
   "prelude.array.empty": () => ({ kind: "array", elements: [] }),
+  "prelude.array.sort": async (argument, context) => {
+    const read = stringReaderOf(context);
+    const keyed = await Promise.all(
+      arrayOf(field(argument, "target")).map(async (element) => ({
+        element,
+        key: await sortKeyOf(element, read),
+      })),
+    );
+    keyed.sort((left, right) => compareScalarKeys(left.key, right.key));
+    return { kind: "array", elements: keyed.map((entry) => entry.element) };
+  },
+  "prelude.array.sort_entries": async (argument, context) => {
+    const read = stringReaderOf(context);
+    const keyed = await Promise.all(
+      arrayOf(field(argument, "entries")).map(async (entry) => {
+        const pair = arrayOf(entry);
+        const first = pair[0];
+        if (first === undefined) throw new Error("sort_entries expects [key, value] tuples");
+        return { entry, key: await sortKeyOf(first, read) };
+      }),
+    );
+    keyed.sort((left, right) => compareScalarKeys(left.key, right.key));
+    return { kind: "array", elements: keyed.map((item) => item.entry) };
+  },
 
   // ─── prelude.string (indices are Unicode code points, per the declared contract) ───────────
   "prelude.string.length": async (argument, context) => ({
