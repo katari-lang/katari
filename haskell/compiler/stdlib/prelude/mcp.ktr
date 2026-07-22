@@ -131,6 +131,32 @@ external agent provide[effect Scope, R, effect E](
   @"A model-facing name prefix for this server's tools: with `prefix = \"notion\"` a server tool `search` is published as `notion_search` (the toolbox key and the tool's metadata name — the wire still carries the server-declared name). Set it when two connected servers expose the same tool name; `null` keeps the server's own names." prefix: string | null ?= null,
 ) -> R with E from "mcp"
 
+@"One connection of a `provide_all` set: the server, its auth, and an optional model-facing name
+prefix (see `provide`'s @prefix@ — set it on the colliding connections when two servers expose the
+same tool name)."
+data connection(
+  @"The MCP server's endpoint URL." url: string,
+  @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
+  @"The model-facing tool-name prefix, or `null` for the server's own names." prefix: string | null ?= null,
+)
+
+@"Open a whole SET of MCP connections under ONE scope for the extent of @continuation@ — the
+data-driven form of `provide`. The marker is minted once, UNCONDITIONALLY, whatever the array holds:
+an optional connection is an `if` in the DATA (append it to the array or not), never a branch around
+the `use`, so conditional connections stop forking the program's shape (the 2×2 explosion). The
+continuation receives one toolbox per connection, in input order — flatten what you hand an AI loop
+(`array.map` + `record.values` + `array.flatten`). Connections open one by one in order and tear
+down in reverse; any connection's listing failure is the same typed error a lone `provide` raises,
+and tears the already-open ones down. An empty array runs @continuation@ with no toolboxes — the
+same row shape, so callers never branch on emptiness. This must be an external, not a composition:
+only the runtime actually opening the scope can discharge the marker (a plain agent composing
+`provide`s could not type the empty set — there would be nothing to discharge a never-minted
+marker)."
+external agent provide_all[effect Scope, R, effect E](
+  @"The connections to open, in order; empty is fine." connections: array[connection],
+  @"The scope body (bound by `use`): receives one toolbox per connection, in input order." continuation: agent (value: array[toolbox[Scope]]) -> R with E | Scope,
+) -> R with E from "mcp"
+
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
 minted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the
 server-declared tool name, @arguments@ its arguments object as a plain value tree (records / arrays /

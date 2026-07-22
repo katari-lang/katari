@@ -121,6 +121,7 @@ import type { ResourcePool } from "./resource-pool.js";
  *  here, at the payload boundary (tool names are server-scoped and never dotted like this, so they
  *  cannot collide). Past `openPayload` the call shapes are distinct payload variants, not key sniffs. */
 const MCP_PROVIDE_KEY = "prelude.mcp.provide";
+const MCP_PROVIDE_ALL_KEY = "prelude.mcp.provide_all";
 const MCP_SERVE_KEY = "prelude.mcp.serve";
 const MCP_CALL_KEY = "prelude.mcp.call";
 
@@ -157,6 +158,21 @@ type McpPayload =
       prefix: string | null;
       /** The continuation to run inside the scope — consumed (set to `null`) once dispatched, so a reload
        *  distinguishes a listing-phase interruption (re-list) from an active scope (resume). */
+      continuation: Value | null;
+    }
+  | {
+      kind: "provideAll";
+      snapshot: SnapshotId;
+      /** One entry per connection, in input order. The compile-time marker is ONE for the whole set,
+       *  but scope identity is per-connection — the runtime gates a tool call on its own scope's
+       *  liveness and routes by the tool's own descriptor, so nothing needs the identities to agree. */
+      servers: Array<{ scope: string; descriptor: Value; prefix: string | null }>;
+      /** The listings landed so far, by slot — in-memory only (never persisted): a listing is a pure
+       *  read, so a reload just re-lists from the first slot. Listings run SEQUENTIALLY (the active
+       *  slot is the first null), so the credential-park machinery sees at most one in-flight listing —
+       *  exactly a lone provide.  */
+      landed: Array<Json | null>;
+      /** As a provide's: consumed (`null`) once the continuation dispatches. */
       continuation: Value | null;
     }
   | {
@@ -206,6 +222,16 @@ export type McpExtension =
       continuation: Value | null;
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
+    }
+  | {
+      kind: "provideAll";
+      snapshotId: SnapshotId;
+      /** The landed listings are NOT here on purpose: a listing is a pure read, so a reload re-lists
+       *  from the first slot instead of trusting stale toolbox schemas across a restart. */
+      servers: Array<{ scope: string; descriptor: Value; prefix: string | null }>;
+      continuation: Value | null;
+      relays: EscalationRelayRow[];
+      innerCalls: InnerCallRow[];
     };
 
 /** Encode an mcp call's extension document (pure — the persistence port seals it as a whole; the
@@ -232,6 +258,19 @@ export function encodeMcpExtension(extension: McpExtension): Json {
         scopeId: extension.scopeId,
         descriptor: asJson(extension.descriptor),
         prefix: extension.prefix,
+        continuation: asJson(extension.continuation),
+        relays: encodeRelays(extension.relays),
+        innerCalls: encodeInnerCalls(extension.innerCalls),
+      };
+    case "provideAll":
+      return {
+        kind: "provideAll",
+        snapshotId: extension.snapshotId,
+        servers: extension.servers.map((server) => ({
+          scope: server.scope,
+          descriptor: asJson(server.descriptor),
+          prefix: server.prefix,
+        })),
         continuation: asJson(extension.continuation),
         relays: encodeRelays(extension.relays),
         innerCalls: encodeInnerCalls(extension.innerCalls),
@@ -264,6 +303,19 @@ export function decodeMcpExtension(extension: Json): McpExtension {
         scopeId: stringFieldOf(document, "scopeId"),
         descriptor: warmFieldOf<Value>(document, "descriptor"),
         prefix: typeof document.prefix === "string" ? document.prefix : null,
+        continuation: warmFieldOf<Value | null>(document, "continuation"),
+        relays: relaysOf(document),
+        innerCalls: innerCallsOf(document),
+      };
+    case "provideAll":
+      return {
+        kind: "provideAll",
+        snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
+        // A trusted engine-value subtree (embedded descriptors), like a provide's descriptor.
+        servers: warmFieldOf<Array<{ scope: string; descriptor: Value; prefix: string | null }>>(
+          document,
+          "servers",
+        ),
         continuation: warmFieldOf<Value | null>(document, "continuation"),
         relays: relaysOf(document),
         innerCalls: innerCallsOf(document),
@@ -464,6 +516,29 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     argument: Value | null,
     generics: GenericSubstitution | undefined,
   ): McpPayload {
+    if (target.key === MCP_PROVIDE_ALL_KEY) {
+      const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
+      const connections = fields.connections;
+      const servers: Array<{ scope: string; descriptor: Value; prefix: string | null }> = [];
+      if (connections !== undefined && connections.kind === "array") {
+        for (const entry of connections.elements) {
+          const entryFields = entry.kind === "record" ? entry.fields : {};
+          const prefix = entryFields.prefix;
+          servers.push({
+            scope: `mcpscope:${randomBytes(18).toString("base64url")}`,
+            descriptor: descriptorOf(entry),
+            prefix: prefix !== undefined && prefix.kind === "string" ? prefix.value : null,
+          });
+        }
+      }
+      return {
+        kind: "provideAll",
+        snapshot: target.snapshot,
+        servers,
+        landed: servers.map(() => null),
+        continuation: fields.continuation ?? null,
+      };
+    }
     if (target.key === MCP_PROVIDE_KEY) {
       const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
       return {
@@ -519,6 +594,24 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   }
 
   protected dispatch(delegation: DelegationId, payload: McpPayload): void {
+    if (payload.kind === "provideAll") {
+      // Post-commit: register every connection's scope up front (teardown then closes them uniformly at
+      // drop, listing or not), then drive the sequential listing chain — which, for an empty set, goes
+      // straight to the continuation with no toolboxes.
+      for (const server of payload.servers)
+        this.openScope(server.scope, delegation, server.descriptor);
+      if (payload.continuation === null) {
+        this.schedule(() =>
+          this.complete({
+            delegation,
+            outcome: { kind: "error", message: "mcp.provide_all: the continuation is missing" },
+          }),
+        );
+        return;
+      }
+      this.advanceProvideAll(delegation, payload);
+      return;
+    }
     if (payload.kind === "provide") {
       // Post-commit: register the scope, then list the server (a side `listing` delegation, so the
       // completion mints the toolbox rather than settling this call). A fresh provide without a
@@ -534,7 +627,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         );
         return;
       }
-      this.startListing(delegation, payload);
+      this.startListing(delegation, payload.descriptor);
       return;
     }
     if (payload.kind === "serve") {
@@ -606,17 +699,37 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   /** List the server for a provide (a side `listing` delegation): the transport lists under it, and the
    *  completion resolves through `complete`'s listing interception — minting the toolbox and dispatching
    *  the continuation — so the provide's own delegation never carries a transport call. */
-  private startListing(
-    delegation: DelegationId,
-    payload: Extract<McpPayload, { kind: "provide" }>,
-  ): void {
+  private startListing(delegation: DelegationId, descriptor: Value): void {
     const listing = newDelegationId();
     this.listings.set(listing, delegation);
     this.transport.dispatch({
       kind: "listTools",
       delegation: listing,
-      descriptor: valueToJson(payload.descriptor, "reveal"),
+      descriptor: valueToJson(descriptor, "reveal"),
     });
+  }
+
+  /** The next un-landed slot of a provideAll, or null when every listing landed. */
+  private nextSlotOf(payload: Extract<McpPayload, { kind: "provideAll" }>): number | null {
+    const slot = payload.landed.indexOf(null);
+    return slot === -1 ? null : slot;
+  }
+
+  /** Drive a provideAll one step: list the next un-landed server, or — with every listing landed —
+   *  hand the block its toolboxes. Sequential on purpose: at most one listing is ever in flight, so
+   *  ordering, the park machinery and the failure story are exactly a lone provide's. */
+  private advanceProvideAll(
+    delegation: DelegationId,
+    payload: Extract<McpPayload, { kind: "provideAll" }>,
+  ): void {
+    const slot = this.nextSlotOf(payload);
+    if (slot === null) {
+      this.schedule(() => this.startContinuationAll(delegation));
+      return;
+    }
+    const server = payload.servers[slot];
+    if (server === undefined) return; // unreachable: landed and servers share their length
+    this.startListing(delegation, server.descriptor);
   }
 
   /** The park request the mcp reactor raises and reconstructs from — turning on the base's credential-park
@@ -704,7 +817,29 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
    *  is a listing failure the block never saw — settle the provide with it. */
   private onListingSettled(delegation: DelegationId, outcome: ExternalCompletion["outcome"]): void {
     const payload = this.payloadOf(delegation);
-    if (payload === undefined || payload.kind !== "provide") return; // the provide resolved meanwhile
+    if (payload === undefined) return; // the call resolved meanwhile
+    if (payload.kind === "provideAll") {
+      switch (outcome.kind) {
+        case "result": {
+          // Fill the active slot and advance the chain — the next listing, or the continuation. The
+          // landed array is in-memory state only; a crash here re-lists from scratch (a pure read).
+          const slot = this.nextSlotOf(payload);
+          if (slot === null) return; // every slot landed already (a duplicate listing) — nothing to do
+          payload.landed[slot] = outcome.value;
+          this.advanceProvideAll(delegation, payload);
+          return;
+        }
+        case "cancelled":
+          return;
+        case "throw":
+        case "error":
+          // One connection's listing failure fails the whole set (the typed error a lone provide
+          // raises); the already-registered scopes close at drop, exactly like a teardown.
+          this.schedule(() => this.complete({ delegation, outcome }));
+          return;
+      }
+    }
+    if (payload.kind !== "provide") return;
     switch (outcome.kind) {
       case "result":
         this.schedule(() => this.startContinuation(delegation, outcome.value));
@@ -760,6 +895,50 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (opened === null) return; // the provide is winding down — its own cancel path settles it
     // Consumed: from here the continuation is a durable inner delegation, so stop persisting it (a reload
     // resumes that delegation instead of re-listing). `openInnerDelegation` already marked the call dirty.
+    payload.continuation = null;
+  }
+
+  /** The one-time continuation dispatch of a provideAll once EVERY listing landed: mint one toolbox
+   *  per server (each with its own scope identity and prefix) and delegate the continuation with
+   *  `{ value: [toolbox, ...] }`, in input order. Settlement and the consumed-continuation reload
+   *  contract are exactly `startContinuation`'s. */
+  private startContinuationAll(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined || payload.kind !== "provideAll") return; // resolved / cancelled meanwhile
+    const continuation = payload.continuation;
+    if (continuation === null) return; // already dispatched — nothing to do
+    const toolboxes: Value[] = [];
+    for (const [index, server] of payload.servers.entries()) {
+      const landed = payload.landed[index];
+      if (landed === null || landed === undefined) return; // a listing is still outstanding — not ready
+      toolboxes.push(
+        mintToolbox(landed, server.descriptor, server.scope, payload.snapshot, server.prefix),
+      );
+    }
+    const argument: Value = {
+      kind: "record",
+      fields: { value: { kind: "array", elements: toolboxes } },
+    };
+    const dispatched = dispatchCallable(continuation, argument);
+    if ("error" in dispatched) {
+      this.complete({
+        delegation,
+        outcome: {
+          kind: "error",
+          message: `mcp.provide_all: the continuation is ${dispatched.error}`,
+        },
+      });
+      return;
+    }
+    const opened = this.openInnerDelegation(
+      delegation,
+      dispatched.target,
+      dispatched.to,
+      dispatched.argument,
+      CONTINUATION_CALL,
+      dispatched.generics,
+    );
+    if (opened === null) return; // the call is winding down — its own cancel path settles it
     payload.continuation = null;
   }
 
@@ -919,7 +1098,12 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       case "provide":
         // Parked at the listing, so the toolbox was never minted and the continuation is still stored:
         // list again from scratch.
-        this.startListing(delegation, payload);
+        this.startListing(delegation, payload.descriptor);
+        return;
+      case "provideAll":
+        // Parked at the active slot's listing — resume the chain there (the landed slots before it are
+        // still warm in this process; a reloaded park re-lists from the first slot instead).
+        this.advanceProvideAll(delegation, payload);
         return;
       case "serve":
         return; // unreachable: a serve has no transport operation and never parks
@@ -957,7 +1141,16 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (payload !== undefined && payload.kind === "provide") {
       this.openScope(payload.scope, delegation, payload.descriptor);
       if (this.reconstructPark(delegation)) return;
-      if (payload.continuation !== null) this.startListing(delegation, payload);
+      if (payload.continuation !== null) this.startListing(delegation, payload.descriptor);
+      return;
+    }
+    if (payload !== undefined && payload.kind === "provideAll") {
+      for (const server of payload.servers)
+        this.openScope(server.scope, delegation, server.descriptor);
+      if (this.reconstructPark(delegation)) return;
+      // A still-stored continuation means the block never started: re-list from the first slot (the
+      // landed array is not persisted — a listing is a pure read, so re-reading is the recovery).
+      if (payload.continuation !== null) this.advanceProvideAll(delegation, payload);
       return;
     }
     if (this.reconstructPark(delegation)) return;
@@ -974,7 +1167,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       this.schedule(() => this.complete({ delegation, outcome: { kind: "cancelled" } }));
       return;
     }
-    if (payload !== undefined && payload.kind === "provide") {
+    if (payload !== undefined && (payload.kind === "provide" || payload.kind === "provideAll")) {
       for (const [listing, provide] of this.listings) {
         if (provide === delegation) this.transport.abort(listing);
       }
@@ -996,6 +1189,13 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
     if (payload.kind === "provide") {
       this.closeScope(payload.scope);
+      for (const [listing, provide] of [...this.listings]) {
+        if (provide === delegation) this.listings.delete(listing);
+      }
+    }
+    if (payload.kind === "provideAll") {
+      // Reverse order — the unwind of the nesting the sequential open established.
+      for (const server of [...payload.servers].reverse()) this.closeScope(server.scope);
       for (const [listing, provide] of [...this.listings]) {
         if (provide === delegation) this.listings.delete(listing);
       }
@@ -1027,6 +1227,15 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
           scopeId: payload.scope,
           descriptor: payload.descriptor,
           prefix: payload.prefix,
+          continuation: payload.continuation,
+          relays: row.relays,
+          innerCalls: row.innerCalls,
+        });
+      case "provideAll":
+        return encodeMcpExtension({
+          kind: "provideAll",
+          snapshotId: payload.snapshot,
+          servers: payload.servers,
           continuation: payload.continuation,
           relays: row.relays,
           innerCalls: row.innerCalls,
@@ -1069,6 +1278,18 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             scope: decoded.scopeId,
             descriptor: decoded.descriptor,
             prefix: decoded.prefix,
+            continuation: decoded.continuation,
+          },
+          relays: decoded.relays,
+          innerCalls: decoded.innerCalls,
+        };
+      case "provideAll":
+        return {
+          payload: {
+            kind: "provideAll",
+            snapshot: decoded.snapshotId,
+            servers: decoded.servers,
+            landed: decoded.servers.map(() => null),
             continuation: decoded.continuation,
           },
           relays: decoded.relays,

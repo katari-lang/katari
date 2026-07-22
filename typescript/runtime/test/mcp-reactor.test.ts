@@ -1273,3 +1273,302 @@ describe("the provide extension codec carries the prefix", () => {
     expect(legacy.prefix).toBeNull();
   });
 });
+
+// agent main() {
+//   mcp.provide_all(connections = [
+//     connection(url = "https://one.example.test/mcp", auth = headers({})),
+//     connection(url = "https://two.example.test/mcp", auth = headers({}), prefix = "two"),
+//   ], continuation = all_continuation)
+// }
+// agent all_continuation(value) { value.value }   // returns the toolbox array itself
+const PROVIDE_ALL_IR: IRModule = {
+  metadata: { schemaVersion: 1 },
+  blocks: {
+    0: {
+      block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    1: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "loadLiteral",
+            output: 11,
+            value: { kind: "string", value: "https://one.example.test/mcp" },
+          },
+          { kind: "makeRecord", entries: [], output: 12 },
+          { kind: "makeRecord", entries: [["values", 12]], output: 13 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 13,
+            output: 14,
+          },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 11],
+              ["auth", 14],
+            ],
+            output: 15,
+          },
+          {
+            kind: "loadLiteral",
+            output: 16,
+            value: { kind: "string", value: "https://two.example.test/mcp" },
+          },
+          { kind: "makeRecord", entries: [], output: 17 },
+          { kind: "makeRecord", entries: [["values", 17]], output: 18 },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+            argument: 18,
+            output: 19,
+          },
+          { kind: "loadLiteral", output: 20, value: { kind: "string", value: "two" } },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["url", 16],
+              ["auth", 19],
+              ["prefix", 20],
+            ],
+            output: 21,
+          },
+          { kind: "makeTuple", elements: [15, 21], output: 22 },
+          { kind: "loadAgent", output: 23, name: createAgentName("all_continuation") },
+          {
+            kind: "makeRecord",
+            entries: [
+              ["connections", 22],
+              ["continuation", 23],
+            ],
+            output: 24,
+          },
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("prelude.mcp.provide_all") },
+            argument: 24,
+            output: 25,
+          },
+          { kind: "exit", target: 0, value: 25 },
+        ],
+      },
+      parameters: { parameter: 10 },
+    },
+    2: {
+      block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    3: {
+      block: { kind: "external", key: "prelude.mcp.provide_all", input: 30, reactor: "mcp" },
+      parameters: { parameter: 30 },
+    },
+    4: {
+      block: { kind: "agent", body: 5, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    5: {
+      block: { kind: "construct", name: createAgentName("prelude.mcp.headers"), input: 50 },
+      parameters: { parameter: 50 },
+    },
+    6: {
+      block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    },
+    7: {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          { kind: "getField", source: 60, field: "value", output: 61 },
+          { kind: "exit", target: 6, value: 61 },
+        ],
+      },
+      parameters: { parameter: 60 },
+    },
+  },
+  entries: {
+    [createAgentName("main")]: { block: 0, private: false },
+    [createAgentName("prelude.mcp.provide_all")]: { block: 2, private: false },
+    [createAgentName("prelude.mcp.headers")]: { block: 4, private: false },
+    [createAgentName("all_continuation")]: { block: 6, private: false },
+  },
+  names: {},
+};
+
+/** `PROVIDE_ALL_IR` with ONE prefixed connection and a continuation that destructures the toolbox
+ *  array, reads the PREFIXED key and calls the tool — the wire must still carry the server name. */
+const PREFIXED_CALL_IR: IRModule = (() => {
+  const clone: IRModule = structuredClone(PROVIDE_ALL_IR);
+  const main = clone.blocks[1]?.block;
+  if (main?.kind !== "sequence") throw new Error("block 1 must be main's sequence");
+  main.operations = [
+    {
+      kind: "loadLiteral",
+      output: 11,
+      value: { kind: "string", value: "https://two.example.test/mcp" },
+    },
+    { kind: "makeRecord", entries: [], output: 12 },
+    { kind: "makeRecord", entries: [["values", 12]], output: 13 },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.mcp.headers") },
+      argument: 13,
+      output: 14,
+    },
+    { kind: "loadLiteral", output: 15, value: { kind: "string", value: "two" } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["url", 11],
+        ["auth", 14],
+        ["prefix", 15],
+      ],
+      output: 16,
+    },
+    { kind: "makeTuple", elements: [16], output: 17 },
+    { kind: "loadAgent", output: 18, name: createAgentName("all_continuation") },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["connections", 17],
+        ["continuation", 18],
+      ],
+      output: 19,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.mcp.provide_all") },
+      argument: 19,
+      output: 20,
+    },
+    { kind: "exit", target: 0, value: 20 },
+  ];
+  const continuation = clone.blocks[7]?.block;
+  if (continuation?.kind !== "sequence") throw new Error("block 7 must be the continuation sequence");
+  continuation.operations = [
+    { kind: "getField", source: 60, field: "value", output: 61 },
+    {
+      kind: "bindPattern",
+      source: 61,
+      pattern: { kind: "tuple", elements: [{ kind: "variable", variable: 62 }] },
+    },
+    { kind: "getField", source: 62, field: "two_add", output: 63 },
+    { kind: "loadLiteral", output: 64, value: { kind: "integer", value: 19 } },
+    { kind: "loadLiteral", output: 65, value: { kind: "integer", value: 23 } },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["x", 64],
+        ["y", 65],
+      ],
+      output: 66,
+    },
+    {
+      kind: "makeRecord",
+      entries: [
+        ["target", 63],
+        ["args", 66],
+      ],
+      output: 67,
+    },
+    {
+      kind: "delegate",
+      target: { kind: "name", name: createAgentName("prelude.reflection.call_agent") },
+      argument: 67,
+      output: 68,
+    },
+    { kind: "exit", target: 6, value: 68 },
+  ];
+  return clone;
+})();
+
+describe("mcp provide_all (the data-driven scope set)", () => {
+  test("lists sequentially, mints per-connection toolboxes (the second prefixed), and settles with the continuation", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(PROVIDE_ALL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Slot 0 lists first — and ALONE: the chain is sequential, so the second listing must not be in
+    // flight until the first lands.
+    const first = await waitUntil(() => transport.dispatched[0]);
+    if (first.kind !== "listTools") throw new Error("expected a listTools dispatch");
+    expect(first.descriptor).toMatchObject({ url: "https://one.example.test/mcp" });
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.dispatched.length).toBe(1);
+    transport.feed({ delegation: first.delegation, outcome: ADD_LISTING });
+
+    const second = await waitUntil(() => transport.dispatched[1]);
+    if (second.kind !== "listTools") throw new Error("expected a second listTools dispatch");
+    expect(second.descriptor).toMatchObject({ url: "https://two.example.test/mcp" });
+    transport.feed({ delegation: second.delegation, outcome: ADD_LISTING });
+
+    // The continuation received one toolbox per connection, in input order: the first under the
+    // server's own name, the second under the prefixed key with the wire name in its context.
+    const value = await result;
+    if (value === null || value.kind !== "array") throw new Error("expected a toolbox array");
+    expect(value.elements.length).toBe(2);
+    const [plain, prefixed] = value.elements;
+    if (plain?.kind !== "record" || prefixed?.kind !== "record") throw new Error("toolbox records");
+    expect(Object.keys(plain.fields)).toEqual(["add"]);
+    expect(Object.keys(prefixed.fields)).toEqual(["two_add"]);
+    const tool = prefixed.fields.two_add;
+    if (tool?.kind !== "tool" || tool.context?.kind !== "record") throw new Error("prefixed tool");
+    expect(tool.context.fields.server_tool).toEqual({ kind: "string", value: "add" });
+  });
+
+  test("an empty connection set dispatches nothing and hands the continuation an empty array", async () => {
+    const transport = new ControlledMcpTransport();
+    const clone: IRModule = structuredClone(PROVIDE_ALL_IR);
+    const main = clone.blocks[1]?.block;
+    if (main?.kind !== "sequence") throw new Error("block 1 must be main's sequence");
+    const tuple = main.operations.find((operation) => operation.kind === "makeTuple");
+    if (tuple === undefined || tuple.kind !== "makeTuple") throw new Error("no makeTuple");
+    tuple.elements = [];
+    const actor = makeActor(clone, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).resolves.toEqual({ kind: "array", elements: [] });
+    expect(transport.dispatched.length).toBe(0);
+  });
+
+  test("a prefixed tool called through its toolbox key speaks the server's own name on the wire", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(PREFIXED_CALL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const listing = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({ delegation: listing.delegation, outcome: ADD_LISTING });
+
+    const toolCall = await waitUntil(() => transport.dispatched[1]);
+    if (toolCall.kind !== "callTool") throw new Error("expected a callTool dispatch");
+    // The continuation read the PREFIXED key `two_add`; the wire carries the server-declared `add`.
+    expect(toolCall.tool).toBe("add");
+    expect(toolCall.argument).toEqual({ x: 19, y: 23 });
+    transport.feed({ delegation: toolCall.delegation, outcome: { kind: "result", value: "42" } });
+    await expect(result).resolves.toEqual({ kind: "string", value: "42" });
+  });
+
+  test("one connection's listing failure fails the whole set with the typed error", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(PROVIDE_ALL_IR, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const first = await waitUntil(() => transport.dispatched[0]);
+    transport.feed({ delegation: first.delegation, outcome: ADD_LISTING });
+    const second = await waitUntil(() => transport.dispatched[1]);
+    transport.feed({
+      delegation: second.delegation,
+      outcome: {
+        kind: "throw",
+        error: {
+          $katari_constructor: "prelude.mcp.server_error",
+          $katari_value: { message: "listing rejected" },
+        },
+      },
+    });
+    await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*listing rejected/);
+  });
+});
