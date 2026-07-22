@@ -10,7 +10,11 @@
 -- compile-time constant. The @stdlib/@ file layout maps to module names by dropping the @.ktr@
 -- extension and joining path segments with dots — @stdlib/prelude.ktr@ -> @prelude@,
 -- @stdlib/prelude/array.ktr@ -> @prelude.array@ — matching the project-wide module-name rule, so a
--- new stdlib module is added by dropping in a @.ktr@ file with no code change.
+-- new stdlib module is added by dropping in a @.ktr@ file with no code change. CAVEAT: Template
+-- Haskell cannot register the /directory/ as a dependency (only the files that existed at splice
+-- time), and stack's recompilation check hashes file contents — so after ADDING a stdlib file, make
+-- a real edit to THIS module (this comment will do) or the new module silently stays out of the
+-- embedded set.
 module Katari.Stdlib where
 
 import Data.ByteString (ByteString)
