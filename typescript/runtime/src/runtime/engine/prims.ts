@@ -64,7 +64,10 @@ const BUILTIN_PRIMITIVES: Record<string, PrimImplementation> = {
   }),
   "prelude.modulo": numeric((left, right) => {
     if (right === 0) throw new Error("modulo by zero");
-    return left % right;
+    // The declared contract is FLOOR modulo (the result carries the divisor's sign): -1 % 12 is 11,
+    // which is what calendar arithmetic (month folding, day-of-week) counts on. JS's `%` truncates
+    // toward zero instead, so the quotient is floored explicitly.
+    return left - Math.floor(left / right) * right;
   }),
   "prelude.negate": (argument) => {
     const value = numberOf(field(argument, "value"));
