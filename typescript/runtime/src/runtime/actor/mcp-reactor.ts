@@ -665,6 +665,28 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     delegation: DelegationId,
     call: Extract<TransportCall, { kind: "callTool" }>,
   ): void {
+    if (call.descriptor === null || call.descriptor === undefined) {
+      // A minted tool ALWAYS carries its { descriptor, scope } context, so a keyed call without one
+      // is an external THIS runtime does not know — a compiler newer than this runtime (a
+      // `prelude.mcp.*` external added after this image was built), or wire drift. Say that plainly
+      // instead of letting the transport reject a null descriptor with a shape complaint.
+      this.schedule(() =>
+        this.complete({
+          delegation,
+          outcome: {
+            kind: "throw",
+            error: valueToJson(
+              errorData(
+                SERVER_ERROR,
+                `mcp: unknown external "${call.tool}" (no tool context) — this runtime predates the compiler that emitted it; rebuild/upgrade the runtime`,
+              ),
+              "reveal",
+            ),
+          },
+        }),
+      );
+      return;
+    }
     if (call.scope !== null && !this.scopes.has(call.scope)) {
       // The provide scope that minted this tool has closed — the requires-a-live-provide boundary. Reject
       // with a typed `server_error` naming the closed scope's server, so a tool called after its `provide`

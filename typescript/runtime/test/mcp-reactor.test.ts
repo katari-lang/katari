@@ -1572,3 +1572,54 @@ describe("mcp provide_all (the data-driven scope set)", () => {
     await expect(result).rejects.toThrow(/prelude\.mcp\.server_error.*listing rejected/);
   });
 });
+
+describe("version skew: an unknown mcp external says so", () => {
+  test("a keyed call with no tool context completes as the typed skew error, not a shape complaint", async () => {
+    const transport = new ControlledMcpTransport();
+    // main delegates straight to an external key this reactor has no payload arm for — the shape an
+    // OLD runtime sees when a NEWER compiler emits a fresh prelude.mcp.* external.
+    const ir: IRModule = {
+      metadata: { schemaVersion: 1 },
+      blocks: {
+        0: {
+          block: { kind: "agent", body: 1, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+          parameters: {},
+        },
+        1: {
+          block: {
+            kind: "sequence",
+            result: null,
+            operations: [
+              { kind: "makeRecord", entries: [], output: 11 },
+              {
+                kind: "delegate",
+                target: { kind: "name", name: createAgentName("prelude.mcp.future_thing") },
+                argument: 11,
+                output: 12,
+              },
+              { kind: "exit", target: 0, value: 12 },
+            ],
+          },
+          parameters: { parameter: 10 },
+        },
+        2: {
+          block: { kind: "agent", body: 3, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+          parameters: {},
+        },
+        3: {
+          block: { kind: "external", key: "prelude.mcp.future_thing", input: 30, reactor: "mcp" },
+          parameters: { parameter: 30 },
+        },
+      },
+      entries: {
+        [createAgentName("main")]: { block: 0, private: false },
+        [createAgentName("prelude.mcp.future_thing")]: { block: 2, private: false },
+      },
+      names: {},
+    };
+    const actor = makeActor(ir, transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    await expect(result).rejects.toThrow(/unknown external .*future_thing.*predates the compiler/);
+    expect(transport.dispatched.length).toBe(0);
+  });
+});
