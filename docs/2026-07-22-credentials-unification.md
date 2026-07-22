@@ -25,19 +25,24 @@ credential store 経由を強制され、`env.get_secret` との二重管理に�
 「どのパッケージのクレデンシャルが要るか」が出るのは意味であり、共通化しない)。**解決だけを** stdlib の
 直和 + 1 関数に集約する:
 
+**両変種とも名前ベース**(レビューで確定): アプリは秘密の「値」ではなく「置き場所の名前」を書く —
+env のシークレットキーか、oauth の credential 名。解決は使用時点なので、`katari env set` での
+ローテーションも oauth の refresh も再起動なしで効き、秘密値はパッケージ handler の内側にしか現れない
+(アプリコードのデータフローから消える)。
+
 ```katari
 // prelude.credentials(新設)
 @"..."
-data api_key(@"..." value: string of private)
+data env(@"プロジェクト env store 上のシークレットキー。" key: string)
 @"..."
-data oauth(@"runtime の credential store 上の名前。" name: string)
-type source = api_key | oauth
+data oauth(@"runtime credential store 上の credential 名。" name: string)
+type source = env | oauth
 
-@"source を使用時点の実クレデンシャルに解決する。api_key はその値、oauth は oauth.token(name) —
-呼ぶたびに refresh 済みの現在値。"
-agent resolve(source: source) -> string of private with io | prelude.throw[oauth.server_error] {
+@"source を使用時点の実クレデンシャルに解決する。env はそのキーのシークレット、oauth は
+oauth.token(name) — どちらも呼ぶたびに現在値。"
+agent resolve(source: source) -> string of private with io | prelude.throw[env.missing_secret | oauth.server_error] {
   match (source) {
-    case api_key(value => value) -> value
+    case env(key => key) -> env.get_secret(key = key)
     case oauth(name => name) -> oauth.token(name = name)
   }
 }
@@ -59,9 +64,9 @@ agent provider[R, effect E](
 }
 ```
 
-- **per-call 解決**なので OAuth の refresh 鮮度は自動で正しい。api_key の match 1 回は無視できるコスト。
-- 呼び出し側: `use tavily.provider(source = credentials.api_key(value = env.get_secret(key = "TAVILY_API_KEY")))`
-  または `source = credentials.oauth(name = "google-calendar")`。**パッケージは自分がどちらで認証されるかを
+- **per-call 解決**なので OAuth の refresh も env のローテーションも自動で追随する。
+- 呼び出し側: `use tavily.provider(source = credentials.env(key = "TAVILY_API_KEY"))` または
+  `source = credentials.oauth(name = "google-calendar")`。**パッケージは自分がどちらで認証されるかを
   知らない** — 認証方式の選択がアプリ(データ)側に移る。
 - tavily / imagegen / ai(3 プロバイダ)/ google_calendar / e2b は機械的に移行できる。
 - discord / slack は WebSocket 接続時に一度だけ resolve して sidecar へ渡す(接続クレデンシャルは接続の
