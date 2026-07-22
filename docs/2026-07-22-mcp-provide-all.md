@@ -48,8 +48,31 @@ ai.infer_with_region(... tools = tools ...)   // 1 回だけ書く
   接続失敗は typed `mcp.server_error`)。teardown は配列の逆順。
 - `provide` は残す(1 本のときの素直な形)。provide_all は「複数・条件付き」の一般形。
 
-## 実装
+## 同名 tool(レビューで追記)
 
-- runtime の mcp reactor: 既存の per-connection ライフサイクルを N 本束ねるループ。新しい状態機械は不要。
-- stdlib mcp.ktr: `connection` data と `provide_all` 宣言の追加。
+衝突は provide_all 固有ではない(2 本の `provide` でも起きる)が、ここで固める。3 点セット:
+
+1. provide_all 自体はマージしない(接続ごとの `array[toolbox]`)— primitive は構造的に衝突フリー。
+2. 治療は mint 時の `prefix`(**実装済み**: `provide(prefix = "notion")` → モデル/toolbox キーは
+   `notion_search`、wire は minted tool の context の `server_tool` で常にサーバ宣言名)。`connection`
+   にも同フィールドを載せる。暗黙の自動リネームはしない — tool 名はモデルへの API。
+3. 検出は消費者側で **typed throw**(panic は runtime 不整合専用): AI loop は step 前に tool_metas を
+   一度検査して `ai.duplicate_tool(name)` を throw、`mcp.serve` は公開時の重複名を typed で拒否。
+
+## 実装(着手後の知見で更新)
+
+- **provide_all は external でなければならない**(当初案どおり)。stdlib の再帰合成(`provide` の
+  ネスト)で書けるかを試したが、型が正しく拒否する: plain agent は marker を discharge できず
+  (discharge は接続を実際に開く external の特権)、空配列のケースは「mint していない marker の
+  discharge」そのもの — 以前 2×2 の議論で退けた vacuous discharge に他ならない。scope が本物である
+  ためには、runtime が(空集合でも)scope を実際に開く必要がある。
+- reactor 実装案: 新 payload variant `provideAll { scope, servers: [{descriptor, prefix, landed}],
+  continuation }`。同一 scope id を N descriptor に登録(openScope × N)、`startListing` を server
+  ごとに張り(listings map の値を `{delegation, slot}` に拡張)、全 slot 着地で N toolbox を mint して
+  continuation を `{ value: array }` で dispatch。どれかの listing 失敗は全体を typed `server_error`
+  で settle(scope close が全 descriptor を evict)。authorize park は listing 単位で既存の park
+  機構に乗る。extension codec に同 variant を追加。
+- ローカル再帰 agent(`agent f` の中の `agent g` が `f` を呼ぶ形)はチェッカーが
+  「lookupScheme: resolved local variable is not in scope」で panic する **コンパイラバグを発見**
+  (Check.hs:3088)。トップレベル再帰は問題ない。要修正(別件)。
 - K3022(ユーザーモジュールの `from "mcp"` 禁止)はそのまま効く。
