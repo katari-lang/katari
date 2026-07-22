@@ -28,10 +28,11 @@ primitive agent equal[T](left: T, right: T) -> boolean
 @"Whether two values are not equal."
 primitive agent not_equal[T](left: T, right: T) -> boolean
 // The comparison order is total and deterministic: numbers compare numerically, strings compare by
-// UTF-16 code unit (JavaScript's `<`, no locale), and when a union instantiation mixes the kinds,
-// every number orders before every string. `array.sort` / `array.sort_entries` sort by this same order.
+// Unicode code point (no locale — the string module's declared unit), and when a union instantiation
+// mixes the kinds, every number orders before every string. `array.sort` / `array.sort_entries` sort
+// by this same order.
 
-@"Whether the left value is less than the right (numbers numerically, strings by UTF-16 code unit;
+@"Whether the left value is less than the right (numbers numerically, strings by Unicode code point;
 in a mixed union, numbers order before strings)."
 primitive agent less_than[T extends number | string](left: T, right: T) -> boolean
 @"Whether the left value is less than or equal to the right (the order of `less_than`)."
@@ -92,3 +93,22 @@ agent catch[T, F, effect E lacks throw](
   }
   task(value = null)
 }
+
+@"Run @task@ and turn ANY error — whatever its type, declared or not — into a value with @recover@:
+the supervisor shape. Unlike `catch` (whose @F@ names the union and whose @E@ must lack `throw`),
+here @E@ stays fully generic: the handler at `unknown` covers every instantiation a generic row
+could carry, and the SUBTRACTION FORM in the result row is the signature-level proof that nothing
+thrown escapes. @recover@ receives the payload as `unknown` — match on it (`case my_error(...)`)
+to tell anticipated errors apart, and rethrowing is not an option here (the row already lacks
+`throw`); use `catch` or a hand-written handler with a residual rethrow when some errors should
+keep flying."
+agent catch_all[T, effect E](
+  @"The task whose throws are all caught; every other effect passes through." task: agent (value: null) -> T with E,
+  @"Turns any thrown error into the result value." recover: agent (error: unknown) -> T with {...E lacks throw},
+) -> T with {...E lacks throw} {
+  use handler {
+    request throw(error: unknown) -> never { break recover(error = error) }
+  }
+  task(value = null)
+}
+
