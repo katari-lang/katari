@@ -225,7 +225,12 @@ runLetStatement letStmt rest continuation = do
   let typedLetStmt = LetStatement {pattern = typedPattern, value = typedValue, sourceSpan = letStmt.sourceSpan}
   pure (result, StatementLet typedLetStmt : restTyped)
 
--- | A local agent declaration: bind its type as a local for the remainder of the block.
+-- | A local agent declaration: bind its type as a local for the remainder of the block — and, when
+-- the declaration annotates BOTH its return type and its effect, for its own body too, seeded from
+-- the annotations exactly like a top-level recursive group's member ('seedAgentType' /
+-- 'checkAgentBody'). That is what lets a local agent recurse (directly, or through a nested agent
+-- that calls it back). An under-annotated one keeps the synthesize-from-the-body path, where a
+-- self-reference reports the K3013 annotation requirement (see 'lookupScheme').
 runLocalAgentStatement ::
   AgentDeclaration Identified ->
   List (Statement Identified) ->
@@ -234,12 +239,31 @@ runLocalAgentStatement ::
 runLocalAgentStatement declaration rest continuation = case declaration.variableReference.resolution of
   Just (VariableResolutionLocalVariable localId) -> do
     -- A local agent binds its full scheme (its generics included), so explicit application works on
-    -- it exactly as on a top-level value.
-    (typedDeclaration, scheme) <- synthAgent declaration
-    (result, restTyped) <-
-      withLocal localId scheme $
-        walkStatements rest continuation
-    pure (result, StatementAgent typedDeclaration : restTyped)
+    -- it exactly as on a top-level value. Prepared once; both paths below reuse the preparation.
+    preparation <- prepareAgent declaration
+    case (preparation.annotatedReturnType, preparation.annotatedEffect) of
+      (Just _, Just _) -> do
+        -- Fully annotated: the scheme is signature-determined, so seed it BEFORE the body walk with
+        -- the agent's own name in scope. `seedAgentType`'s missing-annotation diagnostics cannot fire
+        -- here (both annotations are present).
+        scheme <- seedAgentType declaration preparation
+        withLocal localId scheme $ do
+          typedDeclaration <- checkAgentBody declaration preparation
+          (result, restTyped) <- walkStatements rest continuation
+          pure (result, StatementAgent typedDeclaration : restTyped)
+      _ -> do
+        -- Under-annotated: the scheme needs the body (the acyclic `synthAgent` shape, inlined so the
+        -- preparation is not elaborated twice); only the REST of the block sees the binding.
+        (returnType, finalEffect, typedBody) <-
+          walkAgentBody declaration preparation preparation.annotatedReturnType preparation.annotatedEffect
+        let functionType = assembleAgent preparation.outerAttribute preparation.parameterObject returnType finalEffect
+        functionSemantic <- denormalizeAt declaration.sourceSpan functionType
+        let typedDeclaration = assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody functionSemantic
+            scheme = Scheme {genericParameters = preparation.genericParameters, valueType = functionType}
+        (result, restTyped) <-
+          withLocal localId scheme $
+            walkStatements rest continuation
+        pure (result, StatementAgent typedDeclaration : restTyped)
   _ -> panic "runLocalAgentStatement: local agent is not resolved to a local"
 
 ------------------------------------------------------------------------------------------------
@@ -386,7 +410,7 @@ literalPatternCover = \case
 
 synthVariableExpression :: VariableExpression Identified -> Checker (Expression Typed, NormalizedType)
 synthVariableExpression expression = do
-  scheme <- lookupScheme expression.variableReference.resolution
+  scheme <- lookupScheme expression.sourceSpan expression.variableReference.resolution
   resultType <- instantiateBare expression.sourceSpan scheme
   typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionVariable
@@ -401,7 +425,7 @@ synthQualifiedReferenceExpression ::
   QualifiedReferenceExpression Identified ->
   Checker (Expression Typed, NormalizedType)
 synthQualifiedReferenceExpression expression = do
-  scheme <- lookupScheme expression.variableReference.resolution
+  scheme <- lookupScheme expression.sourceSpan expression.variableReference.resolution
   resultType <- instantiateBare expression.sourceSpan scheme
   typedExpression expression.sourceSpan resultType $ \semantic ->
     ExpressionQualifiedReference
@@ -591,7 +615,7 @@ synthTypeApplicationExpression expression = do
 synthApplicationCallee :: Expression Identified -> Checker (Expression Typed, Scheme)
 synthApplicationCallee = \case
   ExpressionVariable variable -> do
-    scheme <- lookupScheme variable.variableReference.resolution
+    scheme <- lookupScheme variable.sourceSpan variable.variableReference.resolution
     semantic <- denormalizeAt variable.sourceSpan scheme.valueType
     pure
       ( ExpressionVariable
@@ -604,7 +628,7 @@ synthApplicationCallee = \case
         scheme
       )
   ExpressionQualifiedReference reference -> do
-    scheme <- lookupScheme reference.variableReference.resolution
+    scheme <- lookupScheme reference.sourceSpan reference.variableReference.resolution
     semantic <- denormalizeAt reference.sourceSpan scheme.valueType
     pure
       ( ExpressionQualifiedReference
@@ -3077,15 +3101,23 @@ reportGenericNotApplied sourceSpan parameterNames =
 
 -- | The 'Scheme' a resolved value reference denotes, without instantiating it. Every top-level value
 -- is seeded into the value environment by the SCC driver before any reference to it is checked, and
--- the identifier resolves every local, so a resolved reference is always found — a miss is a
--- compiler bug. An /unresolved/ reference (the identifier already reported it) degrades to bottom.
-lookupScheme :: Maybe VariableResolution -> Checker Scheme
-lookupScheme = \case
+-- the identifier resolves every local, so a resolved reference is always found — with ONE reachable
+-- exception: a local agent's body referencing its own name (the identifier scopes the name over the
+-- body, but an under-annotated declaration has no scheme before its body is checked). That is the
+-- local mirror of the top-level recursive-group rule, so it reports the same K3013 requirement and
+-- degrades to bottom. An /unresolved/ reference (the identifier already reported it) degrades the
+-- same way.
+lookupScheme :: SourceSpan -> Maybe VariableResolution -> Checker Scheme
+lookupScheme sourceSpan = \case
   Just (VariableResolutionLocalVariable localId) -> do
     maybeScheme <- asks (\environment -> Map.lookup localId environment.locals)
     case maybeScheme of
       Just scheme -> pure scheme
-      Nothing -> panic "lookupScheme: resolved local variable is not in scope"
+      Nothing -> do
+        reportMissingAnnotation
+          sourceSpan
+          "this name is used inside its own definition; a recursive local agent requires an explicit return type and effect annotation (they are what seed its type before the body is checked)"
+        pure (monoScheme bottomType)
   Just (VariableResolutionQualifiedName qualifiedName) -> do
     maybeScheme <- asks (\environment -> Map.lookup qualifiedName environment.valueEnvironment)
     case maybeScheme of

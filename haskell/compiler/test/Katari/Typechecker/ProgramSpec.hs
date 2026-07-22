@@ -116,6 +116,35 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
       ]
       `shouldContain` ["K3026"]
 
+  it "a fully annotated local agent may recurse, directly and through a nested agent" $
+    typeErrorCodes
+      [ ( "test",
+          "agent run(flag: boolean) -> string {\n\
+          \  agent bounce(value: boolean) -> string with pure {\n\
+          \    agent inner(inner_value: boolean) -> string with pure {\n\
+          \      match (inner_value) { case true -> bounce(value = false) case false -> \"done\" }\n\
+          \    }\n\
+          \    inner(inner_value = value)\n\
+          \  }\n\
+          \  bounce(value = flag)\n\
+          \}"
+        )
+      ]
+      `shouldBe` []
+
+  it "an under-annotated recursive local agent reports the annotation requirement (K3013), not a panic" $
+    typeErrorCodes
+      [ ( "test",
+          "agent run() -> string {\n\
+          \  agent loop_step(value: string) -> string {\n\
+          \    loop_step(value = value)\n\
+          \  }\n\
+          \  loop_step(value = \"x\")\n\
+          \}"
+        )
+      ]
+      `shouldContain` ["K3013"]
+
   it "a for `then` clause may read a `var` state variable" $
     typeErrorCodes [("test", "agent run() -> integer { for (x in [1], var total = 0) { next x with total = total + x } then (r) { total } }")] `shouldBe` []
 
