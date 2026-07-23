@@ -53,6 +53,7 @@ replay を組んだ瞬間、end-to-end は at-least-once になる。Discord へ
   判定が重なると「watch の無い nursery」と誤認され、run root へ flush されて operator interview に化ける
   (runtime の既知レース)。fiber の先頭は sleep / 外部入力待ちで始まるのが安全 — 実運用の source / tick は
   自然にそうなる。
-- **region から `break` で値を持って抜けない。** continuation の型が `never`(watch 末尾)だと provide の
-  結果 schema が never に stamp され、内側 handler の `break v` は「external result does not conform」panic に
-  なる。region の成果は `store` に書き、別 run で読み出す。
+- **region から値で抜ける公式の形は「handler の `break`」。** watch を覆う handler の clause が `break v` する
+  と、v が provide の結果として返る(構造化並行の「答えを出して畳む」終わり方)。use で抜けるブロックの型は
+  その application の結果型(break union 込み)として推論される — かつては never に潰れて runtime の schema
+  panic になっていた(2026-07-23 修正済み)。

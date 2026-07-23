@@ -106,10 +106,20 @@ spec = do
       codesFor (tickDecl <> "request other() -> integer\nagent run() -> integer { use handler { request tick() -> integer { other() } }\n0 }") `shouldBe` []
     it "explicit handler[R, E] is a concrete handler value" $
       codesFor (tickDecl <> "agent run() -> integer { let h = handler[integer, pure] { request tick() -> integer { next 5 } }\n0 }") `shouldBe` []
+    -- The use application's result IS the block's value (the then-transformed result is what `run`
+    -- returns at runtime), so the declared return must accept it — `string`, not the continuation's
+    -- `integer` R.
     it "a then clause transforms the result: its body need not match R" $
-      codesFor (tickDecl <> "agent run() -> integer { use handler { request tick() -> integer { 5 } } then (r) { \"done\" }\n0 }") `shouldBe` []
+      codesFor (tickDecl <> "agent run() -> string { use handler { request tick() -> integer { 5 } } then (r) { \"done\" }\n0 }") `shouldBe` []
     it "an explicit break bypasses then and the handler still typechecks" $
-      codesFor "request a() -> integer\nrequest b() -> integer\nagent run() -> integer { use handler { request a() -> integer { break true } request b() -> integer { 5 } } then (r) { \"x\" }\n0 }" `shouldBe` []
+      codesFor "request a() -> integer\nrequest b() -> integer\nagent run() -> boolean | string { use handler { request a() -> integer { break true } request b() -> integer { 5 } } then (r) { \"x\" }\n0 }" `shouldBe` []
+    -- The regression pair for the use-exit type: a block a `use` exits evaluates to the APPLICATION's
+    -- result (a handler's break union included), never to `never` — collapsing it to bottom let a
+    -- checker-accepted break value panic on the provider's stamped output schema at runtime.
+    it "a use-exited block's value is the application's result (a break value reaches the return type)" $
+      codesFor "request f() -> never\nagent run() -> string { use handler { request f() -> never { break \"escaped\" } }\nf() }" `shouldBe` []
+    it "rejects a use-exited block whose application result does not fit the declared return (K3001)" $
+      codesFor "request f() -> never\nagent run() -> integer { use handler { request f() -> never { break \"escaped\" } }\nf() }" `shouldContain` ["K3001"]
     it "rejects a then binder whose annotation does not accept R (K3001)" $
       codesFor (tickDecl <> "agent run() -> integer { use handler { request tick() -> integer { 5 } } then (r : string) { r }\n0 }") `shouldContain` ["K3001"]
     -- The inferred request-handler path now disposes against the declared `extends` bound, like the

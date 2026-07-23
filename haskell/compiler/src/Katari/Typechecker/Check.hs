@@ -128,19 +128,24 @@ checkExpression expression expected = do
 -- @never@.
 synthBlock :: Block Identified -> Checker (Block Typed, NormalizedType)
 synthBlock block = do
-  ((typedReturn, trailingType), typedStatements) <-
+  ((typedReturn, trailingType), typedStatements, useExitType) <-
     walkStatements block.statements $ case block.returnExpression of
       Just expression -> do
         (typedValue, resultType) <- synthExpression expression
         pure (Just typedValue, resultType)
       Nothing -> pure (Nothing, nullType)
+  -- A block a jump exits never produces a value of its own (@never@); a block a @use@ exits DOES —
+  -- the provider application's result is delivered as the block's value at runtime — so its type is
+  -- that application's result (a handler's break union included). Collapsing it to @never@ would be
+  -- sound for the block alone but poisons the inference OUTWARD: an enclosing @use@'s @R@ would
+  -- solve to @never@ and its stamped output schema would reject the value that then actually flows.
   pure
     ( Block
         { statements = typedStatements,
           returnExpression = typedReturn,
           sourceSpan = block.sourceSpan
         },
-      if blockExits block then bottomType else trailingType
+      if blockExits block then fromMaybe bottomType useExitType else trailingType
     )
 
 -- | Whether a block makes a global exit, so control never reaches its tail. True once any statement
@@ -170,28 +175,41 @@ statementExits = \case
 walkStatements ::
   List (Statement Identified) ->
   Checker a ->
-  Checker (a, List (Statement Typed))
+  Checker (a, List (Statement Typed), Maybe NormalizedType)
 walkStatements statements continuation = case statements of
   [] -> do
     result <- continuation
-    pure (result, [])
+    pure (result, [], Nothing)
   statement : rest ->
     -- @let@ and a local @agent@ extend the scope of the remaining statements, so they own the recursion;
     -- every other statement is a pass-through that types itself and cons-es onto the walked rest.
+    -- The third component is the USE-EXIT type: a @use@ delegates the rest of the block to its
+    -- continuation and the application's RESULT is what the block evaluates to at runtime, so — unlike
+    -- a @return@ / @break@ / @next@, whose values leave through boundaries checked elsewhere — its type
+    -- must become the block's type ('synthBlock' reads it). The FIRST control exit wins: a jump before
+    -- a @use@ makes the @use@ dead, so the jump arms squash any use-exit type the (still typed) dead
+    -- rest reports.
     let passThrough makeTyped = do
           typedStatement <- makeTyped
-          (result, restTyped) <- walkStatements rest continuation
-          pure (result, typedStatement : restTyped)
+          (result, restTyped, useExit) <- walkStatements rest continuation
+          pure (result, typedStatement : restTyped, useExit)
+        jumpThrough makeTyped = do
+          typedStatement <- makeTyped
+          (result, restTyped, _deadUseExit) <- walkStatements rest continuation
+          pure (result, typedStatement : restTyped, Nothing)
      in case statement of
           StatementLet letStmt -> runLetStatement letStmt rest continuation
           StatementAgent agentDeclaration -> runLocalAgentStatement agentDeclaration rest continuation
           StatementExpression expression -> passThrough (StatementExpression . fst <$> synthExpression expression)
-          StatementUse useStmt -> passThrough (StatementUse <$> handleUseStatement useStmt)
-          StatementReturn returnStmt -> passThrough (StatementReturn <$> checkReturnStatement returnStmt)
-          StatementForNext forNextStmt -> passThrough (StatementForNext <$> checkForNextStatement forNextStmt)
-          StatementForBreak forBreakStmt -> passThrough (StatementForBreak <$> checkForBreakStatement forBreakStmt)
-          StatementBreak breakStmt -> passThrough (StatementBreak <$> checkBreakStatement breakStmt)
-          StatementNext nextStmt -> passThrough (StatementNext <$> checkNextStatement nextStmt)
+          StatementUse useStmt -> do
+            (typedUse, useResultType) <- handleUseStatement useStmt
+            (result, restTyped, _deadUseExit) <- walkStatements rest continuation
+            pure (result, StatementUse typedUse : restTyped, Just useResultType)
+          StatementReturn returnStmt -> jumpThrough (StatementReturn <$> checkReturnStatement returnStmt)
+          StatementForNext forNextStmt -> jumpThrough (StatementForNext <$> checkForNextStatement forNextStmt)
+          StatementForBreak forBreakStmt -> jumpThrough (StatementForBreak <$> checkForBreakStatement forBreakStmt)
+          StatementBreak breakStmt -> jumpThrough (StatementBreak <$> checkBreakStatement breakStmt)
+          StatementNext nextStmt -> jumpThrough (StatementNext <$> checkNextStatement nextStmt)
           StatementFinally finallyStmt -> passThrough (StatementFinally <$> checkFinallyStatement finallyStmt)
           StatementError s -> passThrough (pure (StatementError s))
 
@@ -201,7 +219,7 @@ runLetStatement ::
   LetStatement Identified ->
   List (Statement Identified) ->
   Checker a ->
-  Checker (a, List (Statement Typed))
+  Checker (a, List (Statement Typed), Maybe NormalizedType)
 runLetStatement letStmt rest continuation = do
   -- A variable binder takes its scrutinee from its annotation (or the synthesized value type) and binds
   -- exactly its one local; any other pattern destructures the synthesized value type into its bindings.
@@ -221,9 +239,9 @@ runLetStatement letStmt rest continuation = do
       (typedValue, valueType) <- synthExpression letStmt.value
       (typedPattern, _, bindings) <- checkPattern otherPattern valueType
       pure (typedValue, typedPattern, bindings)
-  (result, restTyped) <- withParameters bindings (walkStatements rest continuation)
+  (result, restTyped, useExit) <- withParameters bindings (walkStatements rest continuation)
   let typedLetStmt = LetStatement {pattern = typedPattern, value = typedValue, sourceSpan = letStmt.sourceSpan}
-  pure (result, StatementLet typedLetStmt : restTyped)
+  pure (result, StatementLet typedLetStmt : restTyped, useExit)
 
 -- | A local agent declaration: bind its type as a local for the remainder of the block — and, when
 -- the declaration annotates BOTH its return type and its effect, for its own body too, seeded from
@@ -235,7 +253,7 @@ runLocalAgentStatement ::
   AgentDeclaration Identified ->
   List (Statement Identified) ->
   Checker a ->
-  Checker (a, List (Statement Typed))
+  Checker (a, List (Statement Typed), Maybe NormalizedType)
 runLocalAgentStatement declaration rest continuation = case declaration.variableReference.resolution of
   Just (VariableResolutionLocalVariable localId) -> do
     -- A local agent binds its full scheme (its generics included), so explicit application works on
@@ -249,8 +267,8 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
         scheme <- seedAgentType declaration preparation
         withLocal localId scheme $ do
           typedDeclaration <- checkAgentBody declaration preparation
-          (result, restTyped) <- walkStatements rest continuation
-          pure (result, StatementAgent typedDeclaration : restTyped)
+          (result, restTyped, useExit) <- walkStatements rest continuation
+          pure (result, StatementAgent typedDeclaration : restTyped, useExit)
       _ -> do
         -- Under-annotated: the scheme needs the body (the acyclic `synthAgent` shape, inlined so the
         -- preparation is not elaborated twice); only the REST of the block sees the binding.
@@ -260,10 +278,10 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
         functionSemantic <- denormalizeAt declaration.sourceSpan functionType
         let typedDeclaration = assembleTypedAgentDeclaration declaration preparation.typedParameters typedBody functionSemantic
             scheme = Scheme {genericParameters = preparation.genericParameters, valueType = functionType}
-        (result, restTyped) <-
+        (result, restTyped, useExit) <-
           withLocal localId scheme $
             walkStatements rest continuation
-        pure (result, StatementAgent typedDeclaration : restTyped)
+        pure (result, StatementAgent typedDeclaration : restTyped, useExit)
   _ -> panic "runLocalAgentStatement: local agent is not resolved to a local"
 
 ------------------------------------------------------------------------------------------------
@@ -294,7 +312,7 @@ runLocalAgentStatement declaration rest continuation = case declaration.variable
 -- that escapes).
 ------------------------------------------------------------------------------------------------
 
-handleUseStatement :: UseStatement Identified -> Checker (UseStatement Typed)
+handleUseStatement :: UseStatement Identified -> Checker (UseStatement Typed, NormalizedType)
 handleUseStatement useStmt = do
   -- The binder declares the continuation's value type A (required); without a binder the continuation
   -- receives null.
@@ -355,14 +373,19 @@ handleUseStatement useStmt = do
   -- inference as a direct call (a provider generic in @R@ infers it from the continuation argument).
   -- The typed node is always an 'ExpressionCall' — carrying the inferred instantiation — so lowering
   -- emits the same single delegate a hand-written @provider(..., continuation = ...)@ would.
-  (typedProvider, _) <- synthCallExpressionWith [("continuation", continuationAgent)] providerCall
+  (typedProvider, providerResultType) <- synthCallExpressionWith [("continuation", continuationAgent)] providerCall
+  -- The application's result is what the enclosing block evaluates to at runtime (the provider
+  -- returns its continuation's result — or, for a handler, the break union joined with it), so it
+  -- rides back to 'walkStatements' as the block's use-exit type.
   pure
-    UseStatement
-      { binder = typedBinder,
-        provider = typedProvider,
-        body = typedBody,
-        sourceSpan = useStmt.sourceSpan
-      }
+    ( UseStatement
+        { binder = typedBinder,
+          provider = typedProvider,
+          body = typedBody,
+          sourceSpan = useStmt.sourceSpan
+        },
+      providerResultType
+    )
 
 -- | A bare @use@ provider as its zero-written-argument application — the wrap that funnels every
 -- admitted provider shape into the one call-typed pipeline of 'handleUseStatement'.
