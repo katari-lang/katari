@@ -1388,7 +1388,7 @@ spec = do
         tickWorker =
           "request tick() -> null\n"
             <> "type ev = tick\n"
-            <> "agent worker(input: null) -> integer with ev {\n  let a = tick()\n  42\n}\n"
+            <> "agent worker(input: null) -> null with ev {\n  let a = tick()\n  null\n}\n"
 
     it "the nursery usage example type-checks: provide opens it, fork spawns a child under the ceiling, watch re-emits, a handler discharges" $
       compiledCodes
@@ -1406,33 +1406,32 @@ spec = do
         )
         `shouldBe` []
 
-    it "fork, join, cancel and watch compose in one nursery: join returns the child's value" $
+    it "fork, cancel and watch compose in one nursery (there is no join: results ride escalations)" $
       compiledCodes
         ( tickWorker
-            <> "agent bot() -> integer with io {\n"
+            <> "agent bot() -> never with io {\n"
             <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
             <> "  use handler { request tick() -> null { null } }\n"
             <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
-            <> "  let result : integer = region.join(nursery = r, handle = f)\n"
             <> "  let g = region.cancel(nursery = r, handle = f)\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
         `shouldBe` []
 
-    it "rejects joining a fiber from a DIFFERENT region: distinct scope markers do not merge (K3001)" $
+    it "rejects cancelling a fiber from a DIFFERENT region: distinct scope markers do not merge (K3001)" $
       -- Two nurseries under distinct markers `scope_a` / `scope_b`; a fiber forked in the first is passed
-      -- to the second's `join`. The nursery pins its marker invariantly, so `join` cannot infer the mere
-      -- UNION of the two scopes — the fiber's `scope_a` is rejected against the nursery's `scope_b`.
+      -- to the second's `cancel`. The nursery pins its marker invariantly, so `cancel` cannot infer the
+      -- mere UNION of the two scopes — the fiber's `scope_a` is rejected against the nursery's `scope_b`.
       compiledCodes
         ( tickWorker
             <> "effect scope_a\n"
             <> "effect scope_b\n"
-            <> "agent bot() -> integer with io {\n"
+            <> "agent bot() -> null with io {\n"
             <> "  let ra : region.nursery[scope_a, ev] = use region.provide[scope_a, ev]\n"
             <> "  let rb : region.nursery[scope_b, ev] = use region.provide[scope_b, ev]\n"
             <> "  let fa = region.fork(nursery = ra, task = worker, argument = null)\n"
-            <> "  region.join(nursery = rb, handle = fa)\n"
+            <> "  region.cancel(nursery = rb, handle = fa)\n"
             <> "}"
         )
         `shouldContain` ["K3001"]
@@ -1452,21 +1451,21 @@ spec = do
         )
         `shouldContain` ["K3001"]
 
-    it "rejects joining a fiber that escaped its provide, in a foreign region: the marker has nowhere to be discharged (K3001)" $
-      -- A fiber value may leave its `provide` (it is an opaque handle), but it can only be joined back in
-      -- a nursery carrying its own scope marker. `leak` returns a `region.scope` fiber; `consume` opens a
-      -- nursery under the distinct `other` marker and cannot join it.
+    it "rejects cancelling a fiber that escaped its provide, in a foreign region: the marker has nowhere to be discharged (K3001)" $
+      -- A fiber value may leave its `provide` (it is an opaque handle), but it can only be cancelled back
+      -- in a nursery carrying its own scope marker. `leak` returns a `region.scope` fiber; `consume` opens
+      -- a nursery under the distinct `other` marker and cannot cancel it.
       compiledCodes
         ( tickWorker
             <> "effect other\n"
-            <> "agent leak() -> region.fiber[region.scope, integer] with io {\n"
+            <> "agent leak() -> region.fiber[region.scope] with io {\n"
             <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
             <> "  region.fork(nursery = r, task = worker, argument = null)\n"
             <> "}\n"
             <> "agent consume() -> null with io {\n"
             <> "  let leaked = leak()\n"
             <> "  let r2 : region.nursery[other, ev] = use region.provide[other, ev]\n"
-            <> "  let bad = region.join(nursery = r2, handle = leaked)\n"
+            <> "  let bad = region.cancel(nursery = r2, handle = leaked)\n"
             <> "  null\n"
             <> "}"
         )

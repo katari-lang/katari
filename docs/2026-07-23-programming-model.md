@@ -44,6 +44,10 @@ replay を組んだ瞬間、end-to-end は at-least-once になる。Discord へ
 - **`time.watch` の tick は at-least-once**(crash 窓で同一 occurrence が再配信されうる)— §3 の dedupe は
   scheduled time で。
 
+- **fiber は結果を持たない(join は存在しない)。** fork の task は `-> null`: fiber の成果は必ず escalation で
+  運ぶ(最後の 1 行で報告する)。settle した値は discard され、durable な残骸はゼロ。「parallel は待つ、
+  region は聞く」— 値を待ち合わせたいなら `parallel`、detach したいなら region。panic だけは system が watch
+  経由で知らせる(自力で報告できない終わり方だから)。
 - **region の並列度は watch の本数で決まる。** fiber の escalation は watch 1 本あたり 1 件ずつ
   (答えが返るまで次を出さない)再放出される。並列にするには `region.watch_many(nursery, width)` **と**
   受け側の `parallel handler` の両方が要る(直列 handler は自分の FIFO で再直列化する — それが正しい場面も

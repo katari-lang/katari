@@ -17,39 +17,16 @@
 // provide is what buys the structured-concurrency story from the base for free — the fiber's escalations
 // relay UP through the provide (the `relays` bridge) into the enclosing program, and the fiber is cancelled
 // by the provide's own cancel cascade (`terminateChildren`) when the block returns, so no fiber outlives its
-// nursery. A fiber that SETTLES before it is joined has its outcome buffered on the provide (the durable
-// `fiberBuffer`) until a `join` takes it.
+// nursery. A fiber that SETTLES is RETIRED on the spot: tasks are `-> null` (the stdlib's fork pins it —
+// results ride escalations, not settlements), so the settled value carries nothing and is discarded. There
+// is deliberately NO `join` and no settled-outcome buffer: a fiber is a detached worker, not a future —
+// `parallel` is the fork-JOIN story, a region is the fork-ESCALATE story — so nothing durable accumulates
+// for fibers nobody awaits, which is exactly what a never-closing resident nursery needs.
 //
-// `join` awaits ONE fiber and returns the value it settled with. Like `fork` it is its OWN call, routed by the
-// fiber HANDLE it is handed — the handle names the scope of the nursery that spawned the fiber (not the
-// `nursery` argument, which the type system only pins `Scope` through), so a fiber is always awaited in its
-// OWN nursery even under nested same-marker scopes. If the fiber already SETTLED its outcome is in the
-// provide's `fiberBuffer`: `join` removes it (single-consumer — the buffer entry is taken once) and settles at
-// once, handing the fiber's result RESOURCES from the provide instance across to the join's own instance so
-// its `delegateAck` reowns them to the join's caller (the fiber's blobs / scopes were re-owned onto the
-// provide when it settled). If the fiber is still RUNNING, `join` holds its call open and parks a WAITER (an
-// in-memory `Map<fiberId, joinDelegation>`, like `mcp`'s served-call waiters) that `bufferFiberOutcome`
-// settles directly instead of buffering when that fiber later lands. A handle that is neither buffered nor
-// running is not joinable — already joined (single-consumer), a malformed handle, or a fiber lost to the
-// buffer's post-commit durability window — and since the checker pins the handle's scope to a live nursery,
-// reaching that runtime state is an engine-invariant break, so it PANICS (`join`'s row declares no throw, and
-// region has no error sum — the same backstop as a dead-scope fork).
-//
-// The scope's identity is a routing key ONLY: the compiler's phantom `scope` marker enforces the "no fiber
-// outlives its provide" story at type-check time, so the runtime never inspects the marker — it registers the
-// scope while the provide is live (mapping it to that provide's call, so a `fork` finds the nursery to spawn
-// into) and closes it at drop. A `fork` whose scope is not live is refused — the requires-a-live-provide
-// boundary, exactly as `mcp` gates a minted tool call on its still-open provide scope; since `fork`'s type
-// discharges `Scope` at its provide, a dead-scope fork is impossible under the checker, so the runtime refusal
-// is an engine-invariant backstop (a panic — `fork`'s row declares no throw, and region has no error sum).
-//
-// `cancel` tears ONE fiber down early. Like `join` it is its OWN call, routed by the fiber HANDLE (its scope
+// `cancel` tears ONE fiber down early. Like `fork` it is its OWN call, routed by the fiber HANDLE (its scope
 // names the nursery). It sends a single `terminate` to that fiber's inner delegation — the SINGLE-fiber form
 // of the base's whole-nursery `terminateChildren` cascade — and settles with `null` once the teardown
-// confirms. A cancelled fiber is torn down with no joinable outcome (a `cancelled` inner outcome is never
-// buffered), so `cancel` makes the fiber UNKNOWN: a later `join` of it PANICS (symmetric to a double-join),
-// and a `join` already PARKED on it when the cancel lands is PANICKED too — "stop, I don't want it" (cancel)
-// and "await its result" (join) are contradictory intents, so their coexistence is a program error. A cancel
+// confirms. A cancel
 // of a fiber that has already SETTLED (its outcome buffered) or is otherwise gone is an idempotent no-op that
 // still succeeds, dropping any buffered outcome so the post-condition ("the fiber is unknown") holds
 // regardless of whether the fiber raced the cancel to completion. A forged / dead-scope handle names no live
@@ -80,8 +57,7 @@
 // scope and resuming its continuation and running fibers as durable core work — there is no external process,
 // so recovery has nothing to reconcile (like `webhook` / `time`). A `fork` persists its (task + argument)
 // re-dispatch and simply re-spawns on reload: its only effect is opening an internal delegation, so re-running
-// an interrupted one is safe (a committed fork is already gone). A `join` persists its (scope + fiber) so a
-// join left waiting by a restart re-drains / re-parks against the reloaded buffer and running-fiber set; it,
+// an interrupted one is safe (a committed fork is already gone). A `cancel` persists its (scope + fiber); it,
 // too, has no external effect to reconcile. None of these mint a public capability token (unlike `mcp.serve` /
 // `webhook`, a nursery has no inbound URL).
 
@@ -91,7 +67,6 @@ import { dispatchCallable } from "../engine/dynamic-dispatch.js";
 import type { AskKind, ExternalEvent, ReactorName } from "../event/types.js";
 import { escalateValue } from "../event/types.js";
 import type { DelegationId, EscalationId, InstanceId, SnapshotId } from "../ids.js";
-import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
   asJson,
@@ -116,18 +91,17 @@ import {
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The reserved dispatch keys the compiled `prelude.region.*` externals arrive under — compared exactly here,
- *  at the payload boundary. All five nursery operations dispatch as their own payload variant; any other key
+ *  at the payload boundary. All four nursery operations dispatch as their own payload variant; any other key
  *  (compiler / wire drift) folds into the defensive `operation` payload, a clear "unimplemented" completion. */
 const REGION_PROVIDE_KEY = "prelude.region.provide";
 const REGION_FORK_KEY = "prelude.region.fork";
-const REGION_JOIN_KEY = "prelude.region.join";
 const REGION_CANCEL_KEY = "prelude.region.cancel";
 const REGION_WATCH_KEY = "prelude.region.watch";
 
 /** The field the minted nursery handle carries its scope identity under — a namespaced marker key (disjoint
  *  from any user-authored record key, which never lives in the `$katari_` namespace), so the handle reads as a
  *  runtime value, not user data. A `fork` reads the scope from the nursery it is handed to route to THIS
- *  nursery; the fiber handle it returns carries the SAME field (plus its fiber id) so a `join` / `cancel`
+ *  nursery; the fiber handle it returns carries the SAME field (plus its fiber id) so a `cancel`
  *  routes back. The nursery type is a phantom `agent` the program never calls, so an opaque record carrying
  *  only the identity is its honest runtime shape (the identity is all the runtime routes on — the fiber-effect
  *  ceiling `E` is a compile-time bound the runtime never checks). */
@@ -146,19 +120,8 @@ const CONTINUATION_CALL = "continuation";
 
 /** The prefix every fiber's inner-call token (its id) carries, so a fiber token is disjoint from
  *  `CONTINUATION_CALL` and recognisable among a provide's inner-call bridges — which `repopulateRunning`
- *  filters on reload to rebuild the running-fiber set a `join` waits on. */
+ *  filters on reload to rebuild the running-fiber set a `cancel` routes against. */
 const FIBER_TOKEN_PREFIX = "fiber:";
-
-/** A fiber that has settled and whose outcome waits on the provide until a `join` takes it. A
- *  fiber's inner delegation delivers only a `result` (normal completion) here — an escalation (panic / throw /
- *  request) relays UP instead of settling the inner call, and a `cancelled` fiber (torn down with its provide)
- *  has no result to join, so neither is buffered. The `error` arm is the base's defensive residue, buffered
- *  for totality but never produced for a fiber. */
-interface BufferedFiber {
-  /** The fiber id the fork handle carried — a `join` / `cancel` names it. */
-  fiber: string;
-  outcome: { kind: "result"; value: Value } | { kind: "error"; message: string };
-}
 
 /** One fiber escalation waiting in a nursery's mailbox — held until a `watch` re-emits it (or, watch-less, it
  *  flushes UP through the provide). Persisted on the provide's extension (a `watch` restored across a restart
@@ -178,7 +141,7 @@ interface MailboxEntry {
 /** What a region call holds, a sum every lifecycle method dispatches once: a `provide` scope (its scope id +
  *  the not-yet-dispatched continuation + the settled-fiber buffer — persisted, so the scope survives a
  *  restart), a `fork` (the task + argument it spawns a fiber from — persisted, so an interrupted fork
- *  re-spawns), a `join` (the scope + fiber id it awaits, read from the handle — persisted, so a waiting join
+ *  re-spawns), a `cancel` (the scope + fiber id it targets, read from the handle — persisted, so a waiting cancel
  *  re-parks after a restart), a `cancel` (the scope + fiber id it tears down, read from the handle — persisted,
  *  so an interrupted cancel re-runs its idempotent teardown), a `watch` (the scope whose fibers' escalations it
  *  re-emits, read from the handle — held open, never settling), or an `operation` — an unknown dispatch key
@@ -204,11 +167,6 @@ type RegionPayload =
       /** The continuation to run inside the scope — consumed (set to `null`) once dispatched, so a reload
        *  distinguishes a not-yet-started provide (re-dispatch it) from an active one (resume). */
       continuation: Value | null;
-      /** The fibers that have settled and await a `join`. The durable buffer for this nursery — persisted on
-       *  the provide's extension, so a restart restores it. A RUNNING fiber is NOT here: its source of truth
-       *  is the base inner-call bridge (its `fiber:` token), which the base already persists; this holds only
-       *  the SETTLED ones the base has already retired. */
-      fiberBuffer: BufferedFiber[];
       /** The fibers' escalations waiting to be re-emitted at a `watch` (or, watch-less, flushed up). FIFO,
        *  drained one-by-one as each answer returns. Persisted on the provide's extension, so a restart restores
        *  the "溜まっていた" requests a watch has not yet serviced. */
@@ -232,22 +190,13 @@ type RegionPayload =
       argument: Value | null;
     }
   | {
-      kind: "join";
-      /** The nursery scope and fiber id the join awaits, read from the fiber HANDLE (its own scope names the
-       *  nursery that spawned it, so a fiber is joined where it lives even under nested same-marker scopes).
-       *  Either is `null` when the handle was malformed — an unjoinable fiber, refused as a panic. Persisted,
-       *  so a join left waiting by a restart re-parks its waiter against the reloaded running fiber. */
-      scope: string | null;
-      fiber: string | null;
-    }
-  | {
       kind: "operation";
       /** The unknown dispatch key the call arrived under (compiler / wire drift) — named in the completion that refuses it. */
       operation: string;
     };
 
 /** A region call's durable extension document — a REAL sum, one tag. A `provide` persists its endpoint payload
- *  (scope id + continuation + settled-fiber buffer + bridges) so a restart re-registers it; a `fork` persists
+ *  (scope id + continuation + bridges) so a restart re-registers it; a `fork` persists
  *  its (task + argument) re-dispatch; an `operation` persists only its key (it fails immediately, but a crash
  *  mid-flight still reloads it as the same refusal). */
 export type RegionExtension =
@@ -256,13 +205,11 @@ export type RegionExtension =
       snapshotId: SnapshotId;
       scopeId: string;
       continuation: Value | null;
-      fiberBuffer: BufferedFiber[];
       mailbox: MailboxEntry[];
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
     }
   | { kind: "fork"; scopeId: string | null; task: Value | null; argument: Value | null }
-  | { kind: "join"; scopeId: string | null; fiberId: string | null }
   | { kind: "cancel"; scopeId: string | null; fiberId: string | null }
   | {
       kind: "watch";
@@ -284,7 +231,6 @@ export function encodeRegionExtension(extension: RegionExtension): Json {
         snapshotId: extension.snapshotId,
         scopeId: extension.scopeId,
         continuation: asJson(extension.continuation),
-        fiberBuffer: asJson(extension.fiberBuffer),
         mailbox: asJson(extension.mailbox),
         relays: encodeRelays(extension.relays),
         innerCalls: encodeInnerCalls(extension.innerCalls),
@@ -296,8 +242,6 @@ export function encodeRegionExtension(extension: RegionExtension): Json {
         task: asJson(extension.task),
         argument: asJson(extension.argument),
       };
-    case "join":
-      return { kind: "join", scopeId: extension.scopeId, fiberId: extension.fiberId };
     case "cancel":
       return { kind: "cancel", scopeId: extension.scopeId, fiberId: extension.fiberId };
     case "watch":
@@ -322,7 +266,6 @@ export function decodeRegionExtension(extension: Json): RegionExtension {
         snapshotId: stringFieldOf(document, "snapshotId") as SnapshotId,
         scopeId: stringFieldOf(document, "scopeId"),
         continuation: warmFieldOf<Value | null>(document, "continuation"),
-        fiberBuffer: warmFieldOf<BufferedFiber[]>(document, "fiberBuffer"),
         mailbox: warmFieldOf<MailboxEntry[]>(document, "mailbox"),
         relays: relaysOf(document),
         innerCalls: innerCallsOf(document),
@@ -333,12 +276,6 @@ export function decodeRegionExtension(extension: Json): RegionExtension {
         scopeId: warmFieldOf<string | null>(document, "scopeId"),
         task: warmFieldOf<Value | null>(document, "task"),
         argument: warmFieldOf<Value | null>(document, "argument"),
-      };
-    case "join":
-      return {
-        kind: "join",
-        scopeId: warmFieldOf<string | null>(document, "scopeId"),
-        fiberId: warmFieldOf<string | null>(document, "fiberId"),
       };
     case "cancel":
       return {
@@ -364,30 +301,22 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** The live provide scopes, by their identity: the provide call each opened (a `fork` opens its fiber as an
    *  inner delegation of THIS call), and that nursery's RUNNING fibers (their inner-delegation ids, so a later
-   *  `join` / `cancel` finds them). Registered at dispatch / reload of a running provide, released at drop —
-   *  `fork` checks membership here (the requires-a-live-provide gate). A settled fiber lives NOT here but in
-   *  the provide payload's `fiberBuffer` (the durable buffer a `join` drains); the running map is in-memory
-   *  routing whose durable twin is the base inner-call bridges. */
+   *  `cancel` finds them). Registered at dispatch / reload of a running provide, released at drop —
+   *  `fork` checks membership here (the requires-a-live-provide gate). A SETTLED fiber lives nowhere: it is
+   *  retired on the spot and its `null` outcome discarded (results ride escalations); the running map is
+   *  in-memory routing whose durable twin is the base inner-call bridges. */
   private readonly scopes = new Map<string, ScopeState>();
-
-  /** The joins parked on a still-running fiber, by that fiber's id — the join's call is held open until the
-   *  fiber lands. In-memory only (like `mcp`'s served-call waiters): the durable twin is the join's own
-   *  `running` row plus the fiber's inner-call bridge, so a restart re-parks the waiter from `startJoin` in
-   *  `recover` against the running-fiber set `repopulateRunning` rebuilt. Single-consumer — one fiber is joined
-   *  once, so a second wait on a fiber already awaited is refused (a running fiber's double-join panic). */
-  private readonly waiters = new Map<string, DelegationId>();
 
   /** The cancels awaiting a still-running fiber's teardown, by that fiber's id — the cancel's call is held open
    *  until the terminate this reactor sent to the fiber's inner delegation confirms (its `cancelled` outcome
-   *  lands in `bufferFiberOutcome`, which settles the cancel with `null`). In-memory only, like `waiters`: the
-   *  durable twin is the cancel's own row plus the fiber's inner-call bridge, so a restart re-parks it by
-   *  re-running `startCancel` in `recover` against the reloaded running-fiber set (a re-sent terminate is
-   *  idempotent). A fiber is cancelled once, but a cancel and a join never coexist on it (their intents are
-   *  exclusive — `startCancel` panics a parked join), so this and `waiters` are disjoint per fiber. */
+   *  lands in `retireFiber`, which settles the cancel with `null`). In-memory only (like `mcp`'s served-call
+   *  waiters): the durable twin is the cancel's own row plus the fiber's inner-call bridge, so a restart
+   *  re-parks it by re-running `startCancel` in `recover` against the reloaded running-fiber set (a re-sent
+   *  terminate is idempotent). */
   private readonly cancelWaiters = new Map<string, DelegationId>();
 
   /** The live `watch` calls of each nursery scope, by the scope identity — the white holes a fiber's
-   *  escalation is re-emitted at. In-memory routing (like `waiters`): the durable twin is each watch's own
+   *  escalation is re-emitted at. In-memory routing (like `cancelWaiters`): the durable twin is each watch's own
    *  call row, so a restart rebuilds this from `recover`. Kept separate from `ScopeState` so a watch's
    *  registration does not depend on the ORDER a reload reloads the provide vs. its watch (both re-register
    *  independently); the drain (`pumpWatch`) reads the provide's mailbox only once the scope itself is live.
@@ -414,7 +343,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   /** Register a provide's scope as live, mapping it to the provide call that opened it (the parent a `fork`
    *  spawns its fiber under). Called at a fresh dispatch and at every reload of a running provide, so a `fork`
    *  finds its nursery. `openScope` itself starts with an empty running-fiber set; on a reload `recover`
-   *  rebuilds it at once from the durable inner-call bridges (`repopulateRunning`), so a `join` can wait on a
+   *  rebuilds it at once from the durable inner-call bridges (`repopulateRunning`), so a `cancel` can route to a
    *  fiber that outlived the restart. A fiber that settles after the reload is buffered on-demand regardless. */
   private openScope(scope: string, provide: DelegationId): void {
     this.scopes.set(scope, { provide, running: new Map() });
@@ -460,7 +389,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         // 18 random bytes, base64url — the scope identity the nursery handle carries and a `fork` checks.
         scope: `regionscope:${randomBytes(18).toString("base64url")}`,
         continuation: fields.continuation ?? null,
-        fiberBuffer: [],
         mailbox: [],
       };
     }
@@ -475,18 +403,11 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         argument: fields.argument ?? null,
       };
     }
-    if (target.key === REGION_JOIN_KEY) {
-      // `join(nursery, handle)`: route on the HANDLE's own scope + fiber id, not the `nursery` argument (which
-      // the type system only pins `Scope` through). The handle names the nursery that spawned the fiber, so a
-      // fiber is awaited where it actually lives even when two nested nurseries share a scope MARKER but hold
-      // distinct runtime identities. A malformed handle yields `null`s, refused as an unjoinable fiber.
-      const handle = fiberHandleOf(fields.handle ?? null);
-      return { kind: "join", scope: handle.scope, fiber: handle.fiber };
-    }
     if (target.key === REGION_CANCEL_KEY) {
-      // `cancel(nursery, handle)`: route on the HANDLE's own scope + fiber id, exactly like `join` — the handle
-      // names the nursery that spawned the fiber, so the fiber is torn down where it actually lives even under
-      // nested same-marker scopes. A malformed / forged handle yields `null`s, refused as an uncancellable fiber.
+      // `cancel(nursery, handle)`: route on the HANDLE's own scope + fiber id, not the `nursery` argument
+      // (which the type system only pins `Scope` through) — the handle names the nursery that spawned the
+      // fiber, so the fiber is torn down where it actually lives even under nested same-marker scopes. A
+      // malformed / forged handle yields `null`s, refused as an uncancellable fiber.
       const handle = fiberHandleOf(fields.handle ?? null);
       return { kind: "cancel", scope: handle.scope, fiber: handle.fiber };
     }
@@ -517,11 +438,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       // Hand the spawn back to the serial loop: opening the fiber's inner delegation is a `send`, which must
       // happen inside a turn (`dispatch` runs post-commit).
       this.schedule(() => this.startFork(delegation));
-      return;
-    }
-    if (payload.kind === "join") {
-      // Draining the buffer / parking a waiter mutates warm state a turn must own, so hand it back to the loop.
-      this.schedule(() => this.startJoin(delegation));
       return;
     }
     if (payload.kind === "cancel") {
@@ -693,99 +609,13 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     });
   }
 
-  /** Await one fiber (a reactor turn). Route on the handle's scope + fiber id: if the fiber already SETTLED its
-   *  outcome is in the nursery's `fiberBuffer` — remove it (single-consumer) and settle the join at once; if it
-   *  is still RUNNING, hold the join open and park a waiter `bufferFiberOutcome` settles when the fiber lands. A
-   *  handle that is neither buffered nor running — a malformed handle, a fiber already joined, or one lost to
-   *  the buffer's post-commit durability window — is not joinable, so PANIC (the checker pins the handle's scope
-   *  to a live nursery, so this is an engine-invariant break; `join` declares no throw and region has no error
-   *  sum, the same backstop as a dead-scope fork). */
-  private startJoin(delegation: DelegationId): void {
-    const payload = this.payloadOf(delegation);
-    if (payload === undefined || payload.kind !== "join") return; // resolved / cancelled meanwhile
-    const { scope, fiber } = payload;
-    const scopeState = scope === null ? undefined : this.scopes.get(scope);
-    if (scope === null || fiber === null || scopeState === undefined) {
-      this.panicUnjoinableFiber(delegation, fiber);
-      return;
-    }
-    const provide = scopeState.provide;
-    const providePayload = this.payloadOf(provide);
-    if (providePayload !== undefined && providePayload.kind === "provide") {
-      const index = providePayload.fiberBuffer.findIndex((buffered) => buffered.fiber === fiber);
-      const buffered = index < 0 ? undefined : providePayload.fiberBuffer[index];
-      if (buffered !== undefined) {
-        // Take the settled outcome (single-consumer) and re-persist the shrunk buffer with the join's own
-        // settlement, so the drain and the settle commit together (a crash before the commit reloads both).
-        providePayload.fiberBuffer.splice(index, 1);
-        this.markCallDirty(provide);
-        this.settleJoin(delegation, provide, buffered.outcome);
-        return;
-      }
-    }
-    if (scopeState.running.has(fiber)) {
-      // Still running: hold the join open and park a waiter. A fiber already awaited by another join cannot be
-      // awaited a second time (single-consumer), so a double-join of a running fiber panics like a stale one.
-      if (this.waiters.has(fiber)) {
-        this.panicUnjoinableFiber(delegation, fiber);
-        return;
-      }
-      this.waiters.set(fiber, delegation);
-      return;
-    }
-    this.panicUnjoinableFiber(delegation, fiber);
-  }
-
-  /** Settle a join with a fiber's outcome — the buffer drain and the waiter path share this. A `result` hands
-   *  back the fiber's value: its resources were re-owned onto the PROVIDE instance when the fiber settled (the
-   *  base's `onDelegateAck`), so move them across to the JOIN call's instance first — release them from the
-   *  provide, claim them onto the join — and the join's own `delegateAck` then releases them to the join's
-   *  caller, ending the reown at the core that called `join`. An `error` (the engine backstop — a fiber's
-   *  failure relays UP, never settling its inner call, so this is never produced for a real fiber) fails the
-   *  join as a panic. */
-  private settleJoin(
-    delegation: DelegationId,
-    provide: DelegationId,
-    outcome: BufferedFiber["outcome"],
-  ): void {
-    if (outcome.kind === "error") {
-      this.complete({ delegation, outcome: { kind: "error", message: outcome.message } });
-      return;
-    }
-    const provideInstance = this.callInstance(provide);
-    const joinInstance = this.callInstance(delegation);
-    if (provideInstance !== undefined && joinInstance !== undefined) {
-      this.pool.release(outcome.value, provideInstance);
-      this.reownIncoming(outcome.value, joinInstance);
-    }
-    // Lower to the completion's wire Json (the base decodes it back), `reveal` so content survives the internal
-    // round-trip — the same shape `deliverInnerOutcome` feeds a continuation's outcome back through.
-    this.complete({
-      delegation,
-      outcome: { kind: "result", value: valueToJson(outcome.value, "reveal") },
-    });
-  }
-
-  /** Fail a join whose handle names no joinable fiber (malformed, already joined, cancelled, or lost) as a
-   *  panic. A cancelled fiber reaches here as UNKNOWN — its `cancel` dropped it from the running set and the
-   *  buffer — so a join of it is refused on the same path as any other non-joinable handle. */
-  private panicUnjoinableFiber(delegation: DelegationId, fiber: string | null): void {
-    this.complete({
-      delegation,
-      outcome: {
-        kind: "error",
-        message: `region.join: the fiber ${fiber ?? "(malformed handle)"} is not joinable in this nursery; it is unknown, already joined, cancelled, or was lost to a runtime restart`,
-      },
-    });
-  }
-
   /** Tear ONE fiber down early (a reactor turn). Route on the handle's scope + fiber id: a live fiber has its
    *  inner delegation terminated (the single-fiber form of the provide's cancel cascade) and the cancel is held
    *  open until that teardown confirms; a fiber already SETTLED or gone is an idempotent no-op that still
-   *  succeeds, its buffered outcome (if any) dropped so the fiber becomes uniformly UNKNOWN. A handle whose
+   *  succeeds. A handle whose
    *  scope is not a live nursery — a forged / hostile-wire handle (its random scope matches nothing) or a dead
    *  scope — PANICS (the checker pins the handle's scope to a live nursery, so this is an engine-invariant
-   *  break; `cancel` declares no throw and region has no error sum, the same backstop as `join` / `fork`). */
+   *  break; `cancel` declares no throw and region has no error sum, the same backstop as `fork`). */
   private startCancel(delegation: DelegationId): void {
     const payload = this.payloadOf(delegation);
     if (payload === undefined || payload.kind !== "cancel") return; // resolved / cancelled meanwhile
@@ -805,33 +635,23 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         this.settleCancel(delegation);
         return;
       }
-      // A live fiber. A join PARKED on it cannot coexist with its cancel — "await its result" and "stop, I
-      // don't want it" are contradictory intents — so panic that join (it will never settle otherwise: the
-      // cancel takes the fiber's teardown outcome). Then terminate the fiber's inner delegation and hold this
-      // cancel open until the teardown confirms in `bufferFiberOutcome`.
-      const parkedJoin = this.waiters.get(fiber);
-      if (parkedJoin !== undefined) {
-        this.waiters.delete(fiber);
-        this.panicJoinCancelled(parkedJoin, fiber);
-      }
+      // A live fiber: terminate its inner delegation and hold this cancel open until the teardown confirms
+      // in `retireFiber`.
       // Drop this fiber's not-yet-emitted escalations so a watch never re-emits a cancelled fiber's requests.
       this.dropFiberMailbox(scopeState.provide, running);
       this.cancelWaiters.set(fiber, delegation);
       this.terminateFiber(scopeState.provide, running);
       return;
     }
-    // Not running: the fiber already settled (buffered) or is otherwise gone (already joined / cancelled). A
-    // cancel is idempotent — succeed with `null` — and drop any buffered outcome so a fiber that raced the
-    // cancel to completion still ends UNKNOWN (a later join panics), a race-independent post-condition. A
-    // parked join cannot exist here: a join parks only on a running fiber.
-    this.dropBufferedFiber(scopeState.provide, fiber);
+    // Not running: the fiber already settled (retired, its outcome discarded) or was already cancelled.
+    // A cancel is idempotent — succeed with `null`.
     this.settleCancel(delegation);
   }
 
   /** Terminate one fiber's inner delegation — the single-fiber form of the base's whole-nursery
    *  `terminateChildren` cascade. The fiber is the PROVIDE's inner delegation (parented there by `fork`), so
    *  the terminate rides the provide's trace context and the answering `terminateAck` reaches the base's
-   *  `onTerminateAck` under the provide, delivering a `cancelled` outcome to `bufferFiberOutcome`. A fiber whose
+   *  `onTerminateAck` under the provide, delivering a `cancelled` outcome to `retireFiber`. A fiber whose
    *  row is already gone / cancelling needs no fresh terminate — its outcome is already on its way, and the
    *  cancel waiter settles when it lands. */
   private terminateFiber(provide: DelegationId, fiberDelegation: DelegationId): void {
@@ -847,36 +667,13 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     });
   }
 
-  /** Drop a fiber's buffered outcome if one is present (a cancel of an already-settled fiber). The dropped
-   *  result's resources were re-owned onto the provide instance when the fiber settled; leaving them there
-   *  reclaims them at the provide's drop, exactly like any un-joined buffered outcome (no leak). */
-  private dropBufferedFiber(provide: DelegationId, fiber: string): void {
-    const payload = this.payloadOf(provide);
-    if (payload === undefined || payload.kind !== "provide") return;
-    const index = payload.fiberBuffer.findIndex((buffered) => buffered.fiber === fiber);
-    if (index < 0) return;
-    payload.fiberBuffer.splice(index, 1);
-    this.markCallDirty(provide);
-  }
-
   /** Settle a cancel with `null` (its declared result) once the fiber it targeted is gone. */
   private settleCancel(delegation: DelegationId): void {
     this.complete({ delegation, outcome: { kind: "result", value: null } });
   }
 
-  /** Panic a join that was parked on a fiber its `cancel` then tore down — cancel and join are exclusive. */
-  private panicJoinCancelled(join: DelegationId, fiber: string): void {
-    this.complete({
-      delegation: join,
-      outcome: {
-        kind: "error",
-        message: `region.join: the fiber ${fiber} was cancelled while this join awaited it; a cancelled fiber cannot be joined (cancel and join are exclusive)`,
-      },
-    });
-  }
-
   /** Fail a cancel whose handle names no live nursery scope (malformed / forged, or a dead scope) as a panic —
-   *  the same engine-invariant backstop as an unjoinable fiber, and the automatic rejection of a hostile-wire
+   *  the engine-invariant backstop, and the automatic rejection of a hostile-wire
    *  handle whose random scope matches nothing. */
   private panicUncancellableFiber(delegation: DelegationId, fiber: string | null): void {
     this.complete({
@@ -891,7 +688,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   /** A settled inner delegation. The CONTINUATION is the whole provide call — feed its outcome back as the
    *  completion on a fresh turn (values lower to the completion's wire Json and decode back at the base,
    *  `reveal` so content survives the internal round-trip). Every other token is a FIBER's settlement:
-   *  hand its outcome to a join already waiting on it, else buffer it on the provide until a `join` takes it. */
+   *  retire it (a waiting cancel settles; the outcome is discarded — results ride escalations). */
   protected override deliverInnerOutcome(delivery: InnerDelivery): void {
     if (delivery.call === CONTINUATION_CALL) {
       this.schedule(() =>
@@ -902,49 +699,26 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       );
       return;
     }
-    this.schedule(() =>
-      this.bufferFiberOutcome(delivery.delegation, delivery.call, delivery.outcome),
-    );
+    this.schedule(() => this.retireFiber(delivery.delegation, delivery.call));
   }
 
-  /** A settled fiber's outcome, on a fresh turn. A CANCEL awaiting this fiber's teardown takes it first — the
-   *  fiber is gone, so the cancel succeeds with `null` and nothing is buffered (whether the outcome is the
-   *  terminate's `cancelled` or a `result` the fiber raced to before the terminate landed). Otherwise a join
-   *  already WAITING on this fiber takes it directly — the settle re-owns the fiber's resources through to the
-   *  join's caller, and nothing is buffered. Otherwise it is buffered on the provide until a later `join` drains
-   *  it (the row re-persists with the enlarged buffer). A `cancelled` fiber with no cancel waiting (torn down
-   *  with its provide) has no result to join and is discarded — its provide is being torn down, so no LIVE join
-   *  can observe it (a join in the same nursery is torn down alongside), and the buffer is dropped at the
-   *  provide's drop anyway. The fiber's result resources were already re-owned onto the provide's instance by
-   *  the base (`onDelegateAck`): a waiting join hands them on; an unjoined buffered outcome (or one a cancel
-   *  discards) reclaims them at the provide's drop (no leak). */
-  private bufferFiberOutcome(
-    provide: DelegationId,
-    fiber: string,
-    outcome: InnerDelivery["outcome"],
-  ): void {
+  /** A settled fiber, on a fresh turn: RETIRE it. A CANCEL awaiting this fiber's teardown settles — whether
+   *  the outcome is the terminate's `cancelled` or a `result` the fiber raced to before the terminate landed,
+   *  the fiber is gone either way. The outcome itself is DISCARDED unconditionally: there is no `join`, tasks
+   *  are `-> null` (the stdlib's fork pins it), so a settled value carries nothing — results ride the fiber's
+   *  escalations, delivered before it could end. Nothing durable remains of a finished fiber, which is what a
+   *  never-closing resident nursery needs. (A stale-IR fiber that somehow settles with a resource-carrying
+   *  value keeps the base's behavior: re-owned onto the provide by `onDelegateAck`, reclaimed at its drop.) */
+  private retireFiber(provide: DelegationId, fiber: string): void {
     const payload = this.payloadOf(provide);
     if (payload === undefined || payload.kind !== "provide") return; // the provide resolved meanwhile
     // Retire the fiber from its scope's running set (a no-op for a fiber never re-registered after a reload).
     this.scopes.get(payload.scope)?.running.delete(fiber);
-    // A cancel is awaiting THIS fiber's teardown: its terminate confirmed (a `cancelled` outcome), or the fiber
-    // raced to completion just before the terminate landed (a `result` now discarded). Either way the fiber is
-    // gone, so the cancel succeeds — and nothing is buffered (a cancelled fiber has no joinable outcome).
     const cancelling = this.cancelWaiters.get(fiber);
     if (cancelling !== undefined) {
       this.cancelWaiters.delete(fiber);
       this.settleCancel(cancelling);
-      return;
     }
-    if (outcome.kind === "cancelled") return; // torn down with the provide — nothing joinable
-    const waiting = this.waiters.get(fiber);
-    if (waiting !== undefined) {
-      this.waiters.delete(fiber);
-      this.settleJoin(waiting, provide, outcome);
-      return;
-    }
-    payload.fiberBuffer.push({ fiber, outcome });
-    this.markCallDirty(provide);
   }
 
   // ─── watch: the white hole (fiber escalations re-emitted at the watch's position) ─────────────────
@@ -1117,14 +891,11 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   }
 
   /** Reactivation. A reloaded PROVIDE re-registers its scope, rebuilds its running-fiber set from the reloaded
-   *  inner-call bridges (so a join can wait on a fiber that outlived the restart), and either re-dispatches its
-   *  continuation (still stored — the block never started) or resumes it (already dispatched, so it, and its
-   *  running fibers, are durable core work); its settled-fiber buffer reloaded on the payload. A reloaded FORK
+   *  inner-call bridges (so a cancel can route to a fiber that outlived the restart), and either re-dispatches
+   *  its continuation (still stored — the block never started) or resumes it (already dispatched, so it, and
+   *  its running fibers, are durable core work). A reloaded FORK
    *  re-spawns: a fork's only effect is opening an inner delegation, so re-running an interrupted one is safe
-   *  (a committed fork is already gone — reaching here means its spawn never committed). A reloaded JOIN re-runs
-   *  its drain / park: it drains the buffer if the fiber landed before the crash, else re-parks its waiter
-   *  against the running fiber (the openScope + repopulateRunning of every provide ran synchronously in this
-   *  same reload, before the scheduled `startJoin` turn). A reloaded CANCEL re-runs its idempotent teardown: it
+   *  (a committed fork is already gone — reaching here means its spawn never committed). A reloaded CANCEL re-runs its idempotent teardown: it
    *  re-terminates the fiber if it is still running (a re-sent terminate is a no-op on an already-cancelling
    *  delegation), else succeeds at once (the fiber's teardown committed before the crash — it is gone). A
    *  reloaded WATCH re-registers as its scope's white hole SYNCHRONOUSLY (before any scheduled pump), its
@@ -1138,9 +909,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     switch (payload.kind) {
       case "fork":
         this.schedule(() => this.startFork(delegation));
-        return;
-      case "join":
-        this.schedule(() => this.startJoin(delegation));
         return;
       case "cancel":
         this.schedule(() => this.startCancel(delegation));
@@ -1215,14 +983,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       return;
     }
     if (
-      payload.kind === "join" &&
-      payload.fiber !== null &&
-      this.waiters.get(payload.fiber) === delegation
-    ) {
-      this.waiters.delete(payload.fiber);
-      return;
-    }
-    if (
       payload.kind === "cancel" &&
       payload.fiber !== null &&
       this.cancelWaiters.get(payload.fiber) === delegation
@@ -1240,7 +1000,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           snapshotId: payload.snapshot,
           scopeId: payload.scope,
           continuation: payload.continuation,
-          fiberBuffer: payload.fiberBuffer,
           mailbox: payload.mailbox,
           relays: row.relays,
           innerCalls: row.innerCalls,
@@ -1251,12 +1010,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           scopeId: payload.scope,
           task: payload.task,
           argument: payload.argument,
-        });
-      case "join":
-        return encodeRegionExtension({
-          kind: "join",
-          scopeId: payload.scope,
-          fiberId: payload.fiber,
         });
       case "cancel":
         return encodeRegionExtension({
@@ -1285,7 +1038,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
             snapshot: decoded.snapshotId,
             scope: decoded.scopeId,
             continuation: decoded.continuation,
-            fiberBuffer: decoded.fiberBuffer,
             mailbox: decoded.mailbox,
           },
           relays: decoded.relays,
@@ -1299,12 +1051,6 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
             task: decoded.task,
             argument: decoded.argument,
           },
-          relays: [],
-          innerCalls: [],
-        };
-      case "join":
-        return {
-          payload: { kind: "join", scope: decoded.scopeId, fiber: decoded.fiberId },
           relays: [],
           innerCalls: [],
         };
@@ -1332,10 +1078,9 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
   override reset(): void {
     super.reset();
     this.scopes.clear();
-    // Waiters (join and cancel) and watch registrations are in-memory routing; a reset (poisoned commit)
-    // rebuilds them from the reloaded rows — each waiting join's `startJoin` / cancel's `startCancel`, and each
-    // watch's registration + the provide's mailbox re-pump, in `recover`.
-    this.waiters.clear();
+    // Cancel waiters and watch registrations are in-memory routing; a reset (poisoned commit) rebuilds them
+    // from the reloaded rows — each waiting cancel's `startCancel`, and each watch's registration + the
+    // provide's mailbox re-pump, in `recover`.
     this.cancelWaiters.clear();
     this.watchesByScope.clear();
     this.watchScope.clear();

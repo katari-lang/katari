@@ -7,7 +7,7 @@
 //
 // Topology mirrored here:
 //   main()            -> region.provide(continuation)
-//   continuation(v)   -> nursery = v.value; handle = route({ nursery }); join(nursery, handle)
+//   continuation(v)   -> nursery = v.value; handle = route({ nursery }); hold (keep the nursery open)
 //   route({nursery})  -> secret = "SECRET"; fork(nursery, task = <closure reading secret>, arg); return handle
 //   task(input)       -> escalate fiber_ask (suspend); then read the captured `secret` and return it
 //
@@ -70,7 +70,9 @@ function captureIr(): IRModule {
         block: { kind: "external", key: "prelude.region.fork", input: 50, reactor: "region" },
         parameters: { parameter: 50 },
       },
-      // continuation: bind the nursery, delegate to `route` (which forks + returns a handle), then join it.
+      // continuation: bind the nursery, delegate to `route` (which forks + returns a handle), then HOLD on
+      // an unhandled request so the nursery stays alive while the fiber runs (there is no join — the fiber
+      // reports its read through `fiber_report`); the hold's answer becomes the continuation's result.
       6: {
         block: { kind: "agent", body: 7, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
@@ -89,17 +91,10 @@ function captureIr(): IRModule {
               argument: 63,
               output: 64,
             },
-            {
-              kind: "makeRecord",
-              entries: [
-                ["nursery", 61],
-                ["handle", 64],
-              ],
-              output: 65,
-            },
+            { kind: "makeRecord", entries: [], output: 65 },
             {
               kind: "delegate",
-              target: { kind: "name", name: createAgentName("prelude.region.join") },
+              target: { kind: "name", name: createAgentName("hold") },
               argument: 65,
               output: 66,
             },
@@ -152,14 +147,23 @@ function captureIr(): IRModule {
         block: { kind: "request", name: createAgentName("fiber_ask"), input: 110 },
         parameters: { parameter: 110 },
       },
-      // join wrapper.
+      // fiber_report: the fiber's value-carrying escalation (a settled value is discarded).
       14: {
         block: { kind: "agent", body: 15, schema: EMPTY_SCHEMA, description: "", defaults: {} },
         parameters: {},
       },
       15: {
-        block: { kind: "external", key: "prelude.region.join", input: 150, reactor: "region" },
+        block: { kind: "request", name: createAgentName("fiber_report"), input: 150 },
         parameters: { parameter: 150 },
+      },
+      // hold: the continuation's keep-the-nursery-alive request.
+      18: {
+        block: { kind: "agent", body: 19, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+        parameters: {},
+      },
+      19: {
+        block: { kind: "request", name: createAgentName("hold"), input: 190 },
+        parameters: { parameter: 190 },
       },
       // The forked closure (block 16). It first escalates fiber_ask to suspend, THEN reads the captured
       // variable 92 (bound in `route`'s scope, its lexical parent) and returns it. The second read is the one
@@ -180,6 +184,13 @@ function captureIr(): IRModule {
               argument: 171,
               output: 172,
             },
+            { kind: "makeRecord", entries: [["value", 92]], output: 173 },
+            {
+              kind: "delegate",
+              target: { kind: "name", name: createAgentName("fiber_report") },
+              argument: 173,
+              output: 174,
+            },
             { kind: "exit", target: 16, value: 92 },
           ],
         },
@@ -190,7 +201,8 @@ function captureIr(): IRModule {
       [createAgentName("main")]: { block: 0, private: false },
       [createAgentName("prelude.region.provide")]: { block: 2, private: false },
       [createAgentName("prelude.region.fork")]: { block: 4, private: false },
-      [createAgentName("prelude.region.join")]: { block: 14, private: false },
+      [createAgentName("fiber_report")]: { block: 14, private: false },
+      [createAgentName("hold")]: { block: 18, private: false },
       [createAgentName("continuation")]: { block: 6, private: false },
       [createAgentName("route")]: { block: 8, private: false },
       [createAgentName("fiber_ask")]: { block: 10, private: false },
@@ -247,8 +259,19 @@ describe("region fork of a scope-capturing closure", () => {
     );
     await actor.answerEscalation(fiberAsk.escalation, { kind: "null" });
 
-    // Fixed: the fiber reads its captured "SECRET" and returns it; the join hands it back and the run resolves.
-    await expect(result).resolves.toEqual({ kind: "string", value: "SECRET" });
+    // Fixed: the fiber reads its captured "SECRET" and REPORTS it (a settled value is discarded, so the
+    // report escalation is the observable); releasing the hold then lets the run finish.
+    const report = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "SECRET" });
+    await actor.answerEscalation(report.escalation, { kind: "null" });
+    const hold = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("hold")),
+    );
+    await actor.answerEscalation(hold.escalation, { kind: "string", value: "done" });
+    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
     // And no deterministic throw was swallowed on the way (the silent-failure signature of the bug).
     expect(errors.filter((line) => line.includes("is unbound in scope"))).toEqual([]);
     // The captured environment was transferred onto the provide, so the nursery's drop reclaims it — nothing
