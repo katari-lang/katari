@@ -472,7 +472,8 @@ lowerModule typeEnvironment valueEnvironment _moduleName module' =
         { dataEnvironment = typeEnvironment.dataEnvironment,
           requestEnvironment = typeEnvironment.requestEnvironment,
           genericsInScope = mempty,
-          world = bottomAttribute
+          world = bottomAttribute,
+          comparingAgentParameters = False
         }
     context =
       LowerContext

@@ -3,10 +3,11 @@ module Katari.Typechecker.ProgramSpec (spec) where
 import Data.Foldable (toList)
 import Data.Map qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Katari.Data.ModuleName (ModuleName (..))
 import Katari.Data.SourceSpan (Located (..))
 import Katari.Diagnostics (Diagnostics)
-import Katari.Error (CompilerError (..), compilerErrorCode, typeErrorCode)
+import Katari.Error (CompilerError (..), compilerErrorCode, renderTypeError, typeErrorCode)
 import Katari.Identifier (identifyModule, scanExports)
 import Katari.Identifier.Monad (IdentifiedModule (..), ImportContext (..))
 import Katari.Parser (parseModule)
@@ -609,6 +610,48 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "currently accepts an undeclared named call argument" $
     typeErrorCodes [("test", "data point(x: integer, y: integer)\nagent make() -> point { point(x = 1, y = 2, bogus = 9) }")] `shouldBe` []
 
+  -- Message hints (asserted as substrings, not full renderings, so wording may still evolve).
+  it "K3011 on a non-request override entry names the union spelling (`| io`)" $
+    typeErrorMessages [("test", "agent f[effect E]() -> null with {...E, io} { null }")]
+      `shouldSatisfy` any
+        (\message -> "K3011" `Text.isInfixOf` message && "only unioned" `Text.isInfixOf` message && "| io" `Text.isInfixOf` message)
+
+  it "K3001 on an agent-parameter NAME mismatch reports the names, not a bogus optionality" $
+    let messages =
+          typeErrorMessages
+            [ ( "test",
+                "external agent watch(tick: agent (time: number) -> null) -> null\n\
+                \agent go() -> null {\n\
+                \  agent my_tick(moment: number) -> null { null }\n\
+                \  watch(tick = my_tick)\n\
+                \}"
+              )
+            ]
+     in do
+          messages `shouldSatisfy` any (Text.isInfixOf "expected a parameter named `time`, found `moment`")
+          messages `shouldSatisfy` (not . any (Text.isInfixOf "Optional field cannot be a subtype of a required field: moment"))
+
+  it "K3001 on a genuinely optional record field keeps the optionality message" $
+    typeErrorMessages
+      [ ( "test",
+          "agent f(point: {x: integer}) -> integer { point.x }\n\
+          \agent g(input: {x?: integer}) -> integer { f(point = input) }"
+        )
+      ]
+      `shouldSatisfy` any (Text.isInfixOf "Optional field cannot be a subtype of a required field: x")
+
+  it "K3013 on a `use` binder names the effect-row synonym idiom" $
+    typeErrorMessages
+      [ ( "test",
+          "request tick() -> null\n\
+          \agent f() -> null {\n\
+          \  let x = use handler { request tick() -> null { next null } }\n\
+          \  tick()\n\
+          \}"
+        )
+      ]
+      `shouldSatisfy` any (Text.isInfixOf "a type synonym can name the row once")
+
 ------------------------------------------------------------------------------------------------
 -- Fixtures
 ------------------------------------------------------------------------------------------------
@@ -629,6 +672,12 @@ fetchLike =
 typeErrorCodes :: [(Text, Text)] -> [Text]
 typeErrorCodes sources =
   [typeErrorCode typeError | located <- toList (runProgramDiagnostics sources), CompilerErrorType typeError <- [located.value]]
+
+-- | The rendered messages of every /type/ error a whole-program run emits — for the hint tests,
+-- which assert a substring (the codes alone cannot see a message improvement).
+typeErrorMessages :: [(Text, Text)] -> [Text]
+typeErrorMessages sources =
+  [renderTypeError typeError | located <- toList (runProgramDiagnostics sources), CompilerErrorType typeError <- [located.value]]
 
 -- | The codes of every diagnostic across all phases, so identifier-phase errors (K2xxx) are visible
 -- too — the type-only 'typeErrorCodes' driver drops them.

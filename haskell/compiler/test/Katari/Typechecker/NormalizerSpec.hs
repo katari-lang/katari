@@ -355,7 +355,8 @@ environment =
           [ (boundedGeneric, boundedTypeParameter),
             (boundedEffectGeneric, boundedEffectParameter)
           ],
-      world = bottomAttribute
+      world = bottomAttribute,
+      comparingAgentParameters = False
     }
   where
     dataInfoOf qualifiedName argumentVariance =

@@ -123,12 +123,33 @@ become mutually substitutable in a row that carries the marker) — the same wid
 always enforced by each tool value's own `{url, auth}` descriptor, so a call never reaches the wrong
 server — at worst a tool whose `provide` has closed fails with a typed `server_error`. A `katari mcp pull`
 binding needs no such discipline: its module namespace mints a distinct marker (`github.connection`) per
-connection automatically, so pulled servers never share a scope."
+connection automatically, so pulled servers never share a scope. When the toolbox itself is never read —
+a pulled binding's tools call through the static `mcp.call` — `open` is the listing-free form of this
+same contract."
 external agent provide[effect Scope, R, effect E](
   @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: string,
   @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
   @"The scope body (bound by `use`): receives the toolbox, and the tools are callable exactly while it runs." continuation: agent (value: toolbox[Scope]) -> R with E | Scope,
   @"A model-facing name prefix for this server's tools: with `prefix = \"notion\"` a server tool `search` is published as `notion_search` (the toolbox key and the tool's metadata name — the wire still carries the server-declared name). Set it when two connected servers expose the same tool name; `null` keeps the server's own names." prefix: string | null ?= null,
+) -> R with E from "mcp"
+
+@"Open an MCP server connection for the extent of @continuation@ WITHOUT listing the server — the
+listing-free form of `provide`, same scoped contract, no toolbox. The runtime registers the
+connection's `Scope` (minted for @continuation@'s row, DISCHARGED from `open`'s own — exactly
+`provide`'s rule, so a live tool context still cannot be forged) and starts @continuation@
+immediately with `null`: no server round-trip happens at open, and the connection tears down when
+@continuation@ settles (or the run is cancelled). Tools are reached STATICALLY through
+`mcp.call[Scope, T]` under the same `{url, auth}` descriptor — the shape a `katari mcp pull` binding
+generates — so prefer `open` wherever the toolbox would be ignored: a pulled binding's `connect`,
+and per-call connections, where `provide`'s per-open listing is pure overhead. `provide` remains the
+dynamic-toolbox form (list the server, hand runtime-minted tools to an AI loop). Because nothing is
+contacted at open, auth surfaces at the FIRST `mcp.call`: a missing or dead `oauth` credential
+pauses that call on an authorization escalation, and rejected `headers` material / server failures
+are its typed throws."
+external agent open[effect Scope, R, effect E](
+  @"The MCP server's endpoint URL (streamable HTTP, with SSE fallback)." url: string,
+  @"How the runtime authenticates with the server: `headers(...)` or `oauth(...)`." auth: auth,
+  @"The scope body (bound by `use`): receives `null` (no toolbox is minted), and `mcp.call[Scope, ...]` is callable exactly while it runs." continuation: agent (value: null) -> R with E | Scope,
 ) -> R with E from "mcp"
 
 @"One connection of a `provide_all` set: the server, its auth, and an optional model-facing name

@@ -29,7 +29,7 @@ import Katari.Data.Environment (GenericParameterInformation (..), GenericParamet
 import Katari.Data.GenericKind (GenericKind (..), renderGenericKind)
 import Katari.Data.Id (GenericId, TypeResolution (..))
 import Katari.Data.QualifiedName (QualifiedName, renderQualifiedName)
-import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..))
+import Katari.Data.SemanticType (FieldInformation (..), SemanticAttribute (..), SemanticEffect (..), SemanticGenericArgument (..), SemanticType (..), renderSemanticEffect)
 import Katari.Data.SourceSpan (SourceSpan, sourceSpanOf)
 import Katari.Diagnostics (Diagnostics, reportAt)
 import Katari.Error (ApplicationArityErrorInfo (..), CompilerError (..), KindErrorInfo (..), MalformedTypeErrorInfo (..), SynonymCycleErrorInfo (..), TypeError (..))
@@ -289,7 +289,19 @@ elaborateOverrideEntry expression = do
   effect <- elaborateAsEffect expression
   case effect of
     SemanticEffectRequest qualifiedName arguments -> pure (Just (qualifiedName, arguments))
-    _ -> Nothing <$ reportMalformed (sourceSpanOf expression) "An effect override must name a request"
+    _ ->
+      -- Every non-request effect (io above all) is still legal in a plain union row, so the writer
+      -- is not stuck: name the union spelling that puts it OUTSIDE the override braces.
+      let rendered = renderSemanticEffect effect
+       in Nothing
+            <$ reportMalformed
+              (sourceSpanOf expression)
+              ( "An effect override must name a request; `"
+                  <> rendered
+                  <> "` cannot be overridden, only unioned — write it outside the braces: `{...E, <requests>} | "
+                  <> rendered
+                  <> "`"
+              )
 
 ------------------------------------------------------------------------------------------------
 -- Names and applications

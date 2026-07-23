@@ -1,7 +1,7 @@
 -- | Code generation for @katari mcp pull@: one MCP server listing in, one self-contained Katari
 -- binding module out — a @connect@ scoped provider (the bare @use github.connect(auth = ...)@ form)
 -- plus one TOP-LEVEL typed agent per server tool, each calling through the schema-blind @mcp.call@
--- external under the provide scope. This follows the package provider idiom (a provider agent + a
+-- external under the connection scope. This follows the package provider idiom (a provider agent + a
 -- capability request + top-level tool agents, as in the @tavily@ / @e2b@ packages): a top-level agent
 -- can close over nothing, so instead of handing the caller a record of closures, @connect@ supplies
 -- the connection's @auth@ AMBIENTLY through a generated @credentials@ request that every tool reads.
@@ -10,19 +10,19 @@
 --
 -- Each module declares its OWN nullary scope marker @effect connection@; being module-namespaced
 -- (@github.connection@), two servers' scopes are distinct names that never merge or widen, so there is no
--- URL keying and no covariance. @connect@ opens the scope with @mcp.provide@ (whose @Scope@ generic it
--- infers from the @mcp.toolbox[connection]@ binder annotation) and serves @credentials@ with a
--- @use handler@. The continuation row uses a MIXED effect spelling: @{...(E | connection), credentials}@ —
--- @connection@ rides the UNION side (so two @connect@s over two servers nest, their distinct markers
--- co-existing), while the handled @credentials@ request rides the OVERWRITE side (a handled request must
--- be pinned out of the shared @E@ for the handler to discharge it; a pure @| credentials@ union leaves it
--- in @E@ and the handler discharge fails, K3001). The two servers' @connection@ markers and @credentials@
--- requests never collide because each is namespaced by its own generated module.
+-- URL keying and no covariance. @connect@ opens the scope with the listing-free @mcp.open@ (explicitly
+-- instantiated, @mcp.open[connection, R, E]@ — a binder-less @use@, since the continuation receives
+-- @null@) and serves @credentials@ with a @use handler@. The continuation row uses a MIXED effect
+-- spelling: @{...(E | connection), credentials}@ — @connection@ rides the UNION side (so two @connect@s
+-- over two servers nest, their distinct markers co-existing), while the handled @credentials@ request
+-- rides the OVERWRITE side (a handled request must be pinned out of the shared @E@ for the handler to
+-- discharge it; a pure @| credentials@ union leaves it in @E@ and the handler discharge fails, K3001).
+-- The two servers' @connection@ markers and @credentials@ requests never collide because each is
+-- namespaced by its own generated module.
 --
--- NOTE: @connect@ still performs @mcp.provide@'s listing round-trip to open the scope, even though
--- these static bindings ignore the minted toolbox and dispatch through @mcp.call@; a future
--- listing-free @mcp.open@ primitive could remove that one-time overhead (unimplemented — recorded in
--- the pull design doc).
+-- @connect@ performs NO listing round-trip: these static bindings dispatch through @mcp.call@ and never
+-- read a toolbox, so the scope opens with @mcp.open@ and the server is first contacted by the first
+-- tool call.
 --
 -- The type mapping is ALL-OR-NOTHING per parameter and per tool output, but it now only chooses the
 -- surface TYPE — the argument value is inserted into the arguments tree AS-IS either way, because a value
@@ -284,18 +284,18 @@ renderBindingModule context listing =
         )
         <> "\n"
 
--- | The module-local scope marker every tool rides and `connect`'s `mcp.provide` discharges. A nullary
+-- | The module-local scope marker every tool rides and `connect`'s `mcp.open` discharges. A nullary
 -- phantom marker, module-namespaced (`github.connection` from `src/github.ktr`), so two servers' scopes
 -- are distinct names that never merge or widen — there is no URL keying and no covariance to reason about.
 markerEffectLines :: List Text
 markerEffectLines =
   [ "",
-    "@\"This server's scope marker: every tool rides it, and `connect`'s `mcp.provide` discharges it, so a tool cannot escape the connection.\"",
+    "@\"This server's scope marker: every tool rides it, and `connect`'s `mcp.open` discharges it, so a tool cannot escape the connection.\"",
     "effect " <> scopeMarker
   ]
 
 -- | The name of the generated scope marker. Referenced unqualified (it is declared in this module) in
--- every tool's row, in `connect`'s continuation row, and as `mcp.call`'s and `mcp.provide`'s scope
+-- every tool's row, in `connect`'s continuation row, and as `mcp.call`'s and `mcp.open`'s scope
 -- generic argument.
 scopeMarker :: Text
 scopeMarker = "connection"
@@ -386,9 +386,9 @@ headerLines context =
     "//",
     "// Each server tool is a TOP-LEVEL agent, callable directly after `use " <> moduleQualifier context <> "connect(auth = ...)`: a",
     "// tool closes over nothing, so the connection's credentials are supplied ambiently by the `credentials`",
-    "// request `connect` serves for the scope's duration. NOTE: `connect` still runs `mcp.provide`'s listing",
-    "// round-trip to open the scope, even though these static bindings ignore the minted toolbox and call",
-    "// through `mcp.call`; a future listing-free `mcp.open` could drop that one-time overhead.",
+    "// request `connect` serves for the scope's duration. `connect` opens the scope with the listing-free",
+    "// `mcp.open` — no server round-trip at open, since these static bindings call through `mcp.call` and",
+    "// never read a toolbox; the server is first contacted by the first tool call.",
     "//",
     "// Type mapping (JSON Schema -> Katari), all-or-nothing per parameter and per tool output:",
     "//   - string / integer / number / boolean / null map directly; array -> array[T];",
@@ -415,15 +415,15 @@ credentialsRequestLines =
   ]
 
 -- | The @connect@ scoped provider. It takes NO @url@ parameter — the pulled url is baked as a plain
--- string routing value in @provide@'s @url@ and every @mcp.call@'s @url@, while the scope identity lives
--- in the module-local @connection@ marker. The body opens the scope with @mcp.provide@ (the @use@ form,
--- since Katari has no anonymous agent expressions — a provider is entered by capturing the rest of
--- the block as its continuation) and serves @credentials@ with a @use handler@. The @use@ binder on
--- the provide is REQUIRED (its @mcp.toolbox[connection]@ annotation is what infers @provide@'s @Scope@
--- generic — @provide@ takes no explicit @[...]@) but is discarded to @_@, because the tools call through
--- the static @mcp.call@ path rather than the minted toolbox. @provide@ discharges @connection@ and the
--- handler discharges @credentials@, so only @io@ (the implicit effect of every external call, which a
--- rigid @E@ cannot absorb) remains on @connect@'s own row. The continuation row's MIXED spelling
+-- string routing value in @mcp.open@'s @url@ and every @mcp.call@'s @url@, while the scope identity lives
+-- in the module-local @connection@ marker. The body opens the scope with the listing-free @mcp.open@
+-- (the @use@ form, since Katari has no anonymous agent expressions — a provider is entered by capturing
+-- the rest of the block as its continuation) and serves @credentials@ with a @use handler@. The @use@ is
+-- BINDER-LESS: @mcp.open@ hands its continuation @null@ (no toolbox is minted — the tools call through
+-- the static @mcp.call@ path), and the explicit @mcp.open[connection, R, E]@ instantiation pins the
+-- @Scope@ generic that a phantom marker could never infer from a row. @mcp.open@ discharges @connection@
+-- and the handler discharges @credentials@, so only @io@ (the implicit effect of every external call,
+-- which a rigid @E@ cannot absorb) remains on @connect@'s own row. The continuation row's MIXED spelling
 -- @{...(E | connection), credentials}@ keeps the handled @credentials@ on the OVERWRITE side so it is
 -- pinned out of the shared @E@ for the handler to discharge (a @| credentials@ union leaves it in @E@
 -- and the discharge fails, K3001); @connection@ rides the UNION side, and — being a distinct nullary
@@ -438,7 +438,7 @@ connectLines context =
         indent 1 "auth: mcp.auth,",
         indent 1 ("continuation: agent (value: null) -> R with {...(E | " <> scopeMarker <> "), credentials},"),
         ") -> R with io | E {",
-        indent 1 ("let _ : mcp.toolbox[" <> scopeMarker <> "] = use mcp.provide[" <> scopeMarker <> ", R, E](url = " <> urlLiteral <> ", auth = auth)"),
+        indent 1 ("use mcp.open[" <> scopeMarker <> ", R, E](url = " <> urlLiteral <> ", auth = auth)"),
         indent 1 "use handler {",
         indent 2 "request credentials() { next auth }",
         indent 1 "}",
@@ -467,9 +467,9 @@ connectDoc context =
     <> moduleQualifier context
     <> "connect(auth = ...)`, after which the tools are called directly (`"
     <> moduleQualifier context
-    <> "get_issue(...)`). Establishes a `provide` scope over `"
+    <> "get_issue(...)`). Opens a listing-free `mcp.open` scope over `"
     <> context.url
-    <> "`, serves the connection's `credentials` to every tool, and discharges both on return. "
+    <> "` (no server round-trip until the first tool call), serves the connection's `credentials` to every tool, and discharges both on return. "
     <> "`auth` is `mcp.headers(values = ...)` for header or anonymous access, or `mcp.oauth(name = \"...\")` "
     <> "for a server-stored credential (a missing one pauses the run on an OAuth authorization escalation; answer it from the admin console or `katari answer`)."
 

@@ -411,7 +411,8 @@ runN action = let (result, _, _) = runRWS action emptyContext () in result
         { dataEnvironment = mempty,
           requestEnvironment = mempty,
           genericsInScope = mempty,
-          world = bottomAttribute
+          world = bottomAttribute,
+          comparingAgentParameters = False
         }
 
 metaA :: GenericId

@@ -320,7 +320,11 @@ handleUseStatement useStmt = do
     Nothing -> pure (nullType, Nothing, [])
     Just patternNode -> do
       (declaredType, typedPattern, binderBindings) <-
-        checkAnnotatedBinder "`use` binder requires an explicit type annotation" patternNode
+        -- The annotation is often a long effect row written twice (the binder and the provider's
+        -- type argument), so the message also names the synonym idiom that spells the row once.
+        checkAnnotatedBinder
+          "`use` binder requires an explicit type annotation (a type synonym can name the row once: `type my_ceiling = <requests> | io` then `nursery[scope, my_ceiling]` — see prelude.region)"
+          patternNode
       pure (declaredType, Just typedPattern, binderBindings)
   -- The continuation is the rest of the block; its result R is its trailing value, synthesized in the
   -- /current/ context — no new return target is pushed, so a @return@ inside targets the enclosing agent

@@ -169,7 +169,9 @@ normalizerEnvironment = do
       { dataEnvironment = typeEnvironment.dataEnvironment,
         requestEnvironment = typeEnvironment.requestEnvironment,
         genericsInScope = generics,
-        world = world
+        world = world,
+        -- A comparison-local marker 'subtypeFunction' raises itself; every entry starts outside one.
+        comparingAgentParameters = False
       }
 
 -- | Run a 'Normalizer' sub-action with the current checker environment, anchoring its errors at

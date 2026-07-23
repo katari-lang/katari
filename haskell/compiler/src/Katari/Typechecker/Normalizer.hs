@@ -60,7 +60,13 @@ data SubtypingContext = SubtypingContext
     -- | The attribute of the context the current 'subtype' comparison is nested inside: bottom
     -- (public) at the top level, raised by 'withWorld' as the comparison descends through private
     -- expectations. Every attribute is compared joined with it.
-    world :: NormalizedAttribute
+    world :: NormalizedAttribute,
+    -- | Whether the object comparison about to run is an agent type's PARAMETER record
+    -- ('subtypeFunction' raises it around its contravariant argument check; 'subtypeObject' consumes
+    -- and lowers it before descending). Parameter names are part of an agent type, so a required
+    -- field present on exactly one side there is a parameter-NAME mismatch — which the plain
+    -- per-field optionality reading would misreport (nothing was declared optional).
+    comparingAgentParameters :: Bool
   }
   deriving (Eq, Show)
 
@@ -91,6 +97,11 @@ currentWorld = asks (\environment -> environment.world)
 -- it: the interior is observed through that attribute, so it joins the world for nested comparisons.
 withWorld :: NormalizedAttribute -> Normalizer a -> Normalizer a
 withWorld attribute = local (\environment -> environment {world = joinAttribute environment.world attribute})
+
+-- | Run a sub-comparison with the agent-parameter marker set (an agent type's argument record) or
+-- cleared (anything nested below it) — see 'comparingAgentParameters'.
+withAgentParameters :: Bool -> Normalizer a -> Normalizer a
+withAgentParameters flag = local (\environment -> environment {comparingAgentParameters = flag})
 
 ------------------------------------------------------------------------------------------------
 -- Environment lookups. A name absent here is a compiler-invariant violation, not a user error: the
@@ -907,10 +918,14 @@ subtypeSlot mismatch checkPresent left right = case (left, right) of
 
 subtypeFunction :: NormalizedFunction -> NormalizedFunction -> Normalizer ()
 subtypeFunction leftFunction rightFunction = do
-  -- NOTE: the function argument is contravariant
-  subtype rightFunction.argumentType leftFunction.argumentType
-  subtype leftFunction.returnType rightFunction.returnType
-  subtype leftFunction.effect rightFunction.effect
+  -- NOTE: the function argument is contravariant. The marker tells the object check underneath that
+  -- it is comparing an agent's PARAMETER record, so a field-name mismatch there reports as the
+  -- parameter-name mismatch it is; the return / effect comparisons run with it cleared, since a
+  -- direct object there is an ordinary result record.
+  withAgentParameters True $ subtype rightFunction.argumentType leftFunction.argumentType
+  withAgentParameters False $ do
+    subtype leftFunction.returnType rightFunction.returnType
+    subtype leftFunction.effect rightFunction.effect
 
 -- | Sequences are covariant: every position's element type must be a subtype, including the tail
 -- (rest). A position is exactly present or absent — an absent position is /not/ @null@ — so the left
@@ -932,15 +947,46 @@ subtypeSequence leftSequence rightSequence
 -- | Object field types are covariant. A field present on only one side is compared against the
 -- other side's rest (treated as optional). A required field on the right must be required on the
 -- left, otherwise the left value may omit a field the right guarantees.
+--
+-- At an agent-parameter comparison ('comparingAgentParameters', raised by 'subtypeFunction' for the
+-- one object that IS the parameter record) the optionality reading of that rule is misleading for a
+-- field the left does not declare at all: under the contravariant flip the left is what the expected
+-- agent type passes and the right is what the actual agent declares, so a required right-only field
+-- paired with a left-only field is two spellings of ONE parameter — a NAME mismatch, reported as
+-- such. Everything nested below the parameter record compares with the marker cleared, so ordinary
+-- record optionality errors keep their message.
 subtypeObject :: NormalizedObject -> NormalizedObject -> Normalizer ()
 subtypeObject leftObject rightObject = do
-  mapM_ checkField (Map.toList (alignObjectFields leftObject rightObject))
-  subtype leftObject.rest rightObject.rest
-  where
-    checkField (fieldName, (leftField, rightField)) = do
-      subtype leftField.normalizedType rightField.normalizedType
-      when (leftField.optional && not rightField.optional) $
-        tellSubtypeMismatch ("Optional field cannot be a subtype of a required field: " <> fieldName) leftField.normalizedType rightField.normalizedType
+  atAgentParameters <- asks (.comparingAgentParameters)
+  let expectedOnlyNames = Map.keys (Map.difference leftObject.fields rightObject.fields)
+      nameMismatch fieldName =
+        atAgentParameters
+          && Map.notMember fieldName leftObject.fields
+          && not (null expectedOnlyNames)
+      checkField (fieldName, (leftField, rightField)) = do
+        subtype leftField.normalizedType rightField.normalizedType
+        when (leftField.optional && not rightField.optional) $
+          tellSubtypeMismatch
+            ( if nameMismatch fieldName
+                then agentParameterNameMismatch expectedOnlyNames fieldName
+                else "Optional field cannot be a subtype of a required field: " <> fieldName
+            )
+            leftField.normalizedType
+            rightField.normalizedType
+  withAgentParameters False $ do
+    mapM_ checkField (Map.toList (alignObjectFields leftObject rightObject))
+    subtype leftObject.rest rightObject.rest
+
+-- | The agent-parameter reading of a missing-vs-extra field pair (see 'subtypeObject'):
+-- @expectedNames@ are the parameters the expected agent type declares that the actual agent lacks,
+-- @foundName@ the actual agent's differently-named parameter.
+agentParameterNameMismatch :: List Text -> Text -> Text
+agentParameterNameMismatch expectedNames foundName =
+  let quoted name = "`" <> name <> "`"
+      expectedText = case expectedNames of
+        [single] -> "a parameter named " <> quoted single
+        several -> "parameters named " <> Text.intercalate ", " (quoted <$> several)
+   in "Agent parameter names are part of the type: expected " <> expectedText <> ", found " <> quoted foundName
 
 -- | The data layer is a union of nominal types. Every nominal type on the left must satisfy one of:
 --

@@ -1213,6 +1213,124 @@ describe("mcp reactor: the direct call (prelude.mcp.call)", () => {
   });
 });
 
+/** Swap an IR's wrapping `prelude.mcp.provide` for the listing-free `prelude.mcp.open` — the same block
+ *  layout (the delegate in `main`, the external block, the entry), only the dispatch key differs. The
+ *  original `prelude.mcp.provide` entry is left in place (nothing calls it), so the transform stays a
+ *  pure key swap. */
+function withOpenProvider(base: IRModule): IRModule {
+  const clone: IRModule = structuredClone(base);
+  const provideEntry = clone.entries[createAgentName("prelude.mcp.provide")];
+  if (provideEntry === undefined) throw new Error("the base IR must enter prelude.mcp.provide");
+  for (const entry of Object.values(clone.blocks)) {
+    const block = entry.block;
+    if (block.kind === "external" && block.key === "prelude.mcp.provide") {
+      block.key = "prelude.mcp.open";
+    }
+    if (block.kind !== "sequence") continue;
+    for (const operation of block.operations) {
+      if (
+        operation.kind === "delegate" &&
+        operation.target.kind === "name" &&
+        String(operation.target.name) === "prelude.mcp.provide"
+      ) {
+        operation.target = { kind: "name", name: createAgentName("prelude.mcp.open") };
+      }
+    }
+  }
+  clone.entries[createAgentName("prelude.mcp.open")] = provideEntry;
+  return clone;
+}
+
+/** `PROVIDE_IR` re-targeted at `prelude.mcp.open`, its continuation returning the `value` it was
+ *  dispatched with — so the run's result IS the continuation's input (asserted `null`: no toolbox). */
+function openNullIr(): IRModule {
+  const clone = withOpenProvider(PROVIDE_IR);
+  const body = clone.blocks[7]?.block;
+  if (body?.kind !== "sequence") throw new Error("block 7 must be the continuation sequence");
+  body.operations = [
+    { kind: "getField", source: 60, field: "value", output: 61 },
+    { kind: "exit", target: 6, value: 61 },
+  ];
+  return clone;
+}
+
+describe("mcp reactor: the listing-free open (prelude.mcp.open)", () => {
+  test("open registers the scope with NO listing: the continuation's direct call is the transport's first dispatch", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(withOpenProvider(CALL_IR), transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The first (and only) transport dispatch is the continuation's own `mcp.call` — no `listTools`
+    // ever ran, and the direct call passed the live-scope gate, so the open registered its
+    // descriptor's scope exactly as a provide would.
+    const call = await waitUntil(() => transport.dispatched[0]);
+    if (call.kind !== "callTool") throw new Error("expected the direct call, not a listing");
+    expect(call.tool).toBe("add");
+    transport.feed({ delegation: call.delegation, outcome: { kind: "result", value: "42" } });
+    await expect(result).resolves.toEqual({ kind: "string", value: "42" });
+    expect(transport.dispatched).toHaveLength(1);
+  });
+
+  test("the open continuation receives { value: null } — no toolbox is minted", async () => {
+    const transport = new ControlledMcpTransport();
+    const actor = makeActor(openNullIr(), transport);
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // The continuation returns its own `value`, so the run resolving to `null` IS the dispatch shape
+    // — and the transport heard nothing at all.
+    await expect(result).resolves.toEqual({ kind: "null" });
+    expect(transport.dispatched).toHaveLength(0);
+  });
+
+  test("a restarted ACTIVE open re-registers its scope without re-dispatching anything", async () => {
+    const persistence = new StoringPersistence();
+    const first = new ControlledMcpTransport();
+    const actor = makeActor(withOpenProvider(CALL_IR), first, persistence);
+    const { run } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+    // Leave the continuation's direct call in flight — the meaningful at-most-once case.
+    await waitUntil(() => first.dispatched[0]);
+
+    // Restart: the open scope re-registers (its continuation was consumed at dispatch and resumes as
+    // durable core work), the in-flight direct call is recovered — not re-run — and the transport
+    // refuses it with the typed restart throw.
+    const second = new ControlledMcpTransport();
+    const reloaded = makeActor(withOpenProvider(CALL_IR), second, persistence);
+    await reloaded.activate();
+    await waitUntil(() => second.recovered[0]);
+    await waitUntil(() => (persistence.peekRun(run)?.state === "error" ? true : undefined));
+    expect(persistence.peekRun(run)?.errorMessage).toContain("interrupted by a runtime restart");
+    // Nothing was re-dispatched: no listing (an open never lists) and no re-run direct call.
+    expect(second.dispatched).toHaveLength(0);
+  });
+});
+
+describe("the provide extension codec carries the open flag", () => {
+  test("encode/decode round-trips open: true, and a pre-open row decodes to false", () => {
+    const encoded = encodeMcpExtension({
+      kind: "provide",
+      snapshotId: SNAPSHOT,
+      scopeId: "mcpscope:abc",
+      descriptor: { kind: "record", fields: {} },
+      prefix: null,
+      open: true,
+      continuation: null,
+      relays: [],
+      innerCalls: [],
+    });
+    const decoded = decodeMcpExtension(encoded);
+    if (decoded.kind !== "provide") throw new Error("must stay a provide");
+    expect(decoded.open).toBe(true);
+    // A row written before `mcp.open` existed has no field — it must decode as a listing provide.
+    if (encoded === null || typeof encoded !== "object" || Array.isArray(encoded)) {
+      throw new Error("doc");
+    }
+    delete (encoded as Record<string, unknown>).open;
+    const legacy = decodeMcpExtension(encoded);
+    if (legacy.kind !== "provide") throw new Error("must stay a provide");
+    expect(legacy.open).toBe(false);
+  });
+});
+
 describe("mintToolbox prefix (the model-facing rename)", () => {
   const LISTING = {
     tools: [
@@ -1258,6 +1376,7 @@ describe("the provide extension codec carries the prefix", () => {
       scopeId: "mcpscope:abc",
       descriptor: { kind: "record", fields: {} },
       prefix: "gh",
+      open: false,
       continuation: null,
       relays: [],
       innerCalls: [],

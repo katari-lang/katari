@@ -14,6 +14,10 @@
 //     descriptor's cached client is evicted and any later call carrying that scope is rejected as a typed
 //     `server_error` (the requires-a-live-provide boundary — the scope's identity is a compiler-only marker,
 //     so the runtime never inspects it; it routes and gates purely by the tool's own descriptor).
+//     The `prelude.mcp.open` external is the LISTING-FREE variant of the same payload (`open: true`): no
+//     `listTools`, no toolbox — the continuation dispatches with `{ value: null }` as soon as the scope
+//     registers, and tools are reached statically through `prelude.mcp.call` under the same descriptor.
+//     Everything else (persistence, recovery, scope registry, teardown) is the provide machinery verbatim.
 //   - `callTool` (a minted tool's call, an `external` target carrying `{ descriptor, scope }` as `context`):
 //     the caller's argument passes to the transport verbatim; the descriptor rides out-of-band; the scope is
 //     checked live first (a closed scope is the typed `server_error` backstop).
@@ -121,6 +125,7 @@ import type { ResourcePool } from "./resource-pool.js";
  *  here, at the payload boundary (tool names are server-scoped and never dotted like this, so they
  *  cannot collide). Past `openPayload` the call shapes are distinct payload variants, not key sniffs. */
 const MCP_PROVIDE_KEY = "prelude.mcp.provide";
+const MCP_OPEN_KEY = "prelude.mcp.open";
 const MCP_PROVIDE_ALL_KEY = "prelude.mcp.provide_all";
 const MCP_SERVE_KEY = "prelude.mcp.serve";
 const MCP_CALL_KEY = "prelude.mcp.call";
@@ -154,10 +159,16 @@ type McpPayload =
       /** The model-facing name prefix for this provide's minted tools (`<prefix>_<tool>`), or null for
        *  the server-declared names. The WIRE name stays the server's own (each minted tool's context
        *  carries it), so a prefix renames what the model and the toolbox keys see, never what the
-       *  server receives. Persisted so a reload re-mints identically. */
+       *  server receives. Persisted so a reload re-mints identically. Always null for `mcp.open`
+       *  (nothing is minted, so there is nothing to rename). */
       prefix: string | null;
+      /** Whether this is the listing-free `prelude.mcp.open` form: no `listTools` and no toolbox — the
+       *  continuation dispatches with `{ value: null }` right after the scope registers. Persisted so a
+       *  reload with a still-stored continuation re-dispatches it instead of re-listing. */
+      open: boolean;
       /** The continuation to run inside the scope — consumed (set to `null`) once dispatched, so a reload
-       *  distinguishes a listing-phase interruption (re-list) from an active scope (resume). */
+       *  distinguishes a pre-continuation interruption (re-list, or re-dispatch for `open`) from an
+       *  active scope (resume). */
       continuation: Value | null;
     }
   | {
@@ -219,6 +230,8 @@ export type McpExtension =
       scopeId: string;
       descriptor: Value;
       prefix: string | null;
+      /** The listing-free `mcp.open` form (see the payload's `open`). */
+      open: boolean;
       continuation: Value | null;
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
@@ -258,6 +271,7 @@ export function encodeMcpExtension(extension: McpExtension): Json {
         scopeId: extension.scopeId,
         descriptor: asJson(extension.descriptor),
         prefix: extension.prefix,
+        open: extension.open,
         continuation: asJson(extension.continuation),
         relays: encodeRelays(extension.relays),
         innerCalls: encodeInnerCalls(extension.innerCalls),
@@ -303,6 +317,8 @@ export function decodeMcpExtension(extension: Json): McpExtension {
         scopeId: stringFieldOf(document, "scopeId"),
         descriptor: warmFieldOf<Value>(document, "descriptor"),
         prefix: typeof document.prefix === "string" ? document.prefix : null,
+        // A row written before `mcp.open` existed has no field — such a provide always listed.
+        open: document.open === true,
         continuation: warmFieldOf<Value | null>(document, "continuation"),
         relays: relaysOf(document),
         innerCalls: innerCallsOf(document),
@@ -539,7 +555,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         continuation: fields.continuation ?? null,
       };
     }
-    if (target.key === MCP_PROVIDE_KEY) {
+    if (target.key === MCP_PROVIDE_KEY || target.key === MCP_OPEN_KEY) {
+      // `mcp.open` is the same payload with `open: true`: no listing, no toolbox (so no prefix — a
+      // rename needs minted tools), the continuation handed `{ value: null }` once the scope registers.
+      const open = target.key === MCP_OPEN_KEY;
       const fields = argument !== null && argument.kind === "record" ? argument.fields : {};
       return {
         kind: "provide",
@@ -548,9 +567,10 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
         scope: `mcpscope:${randomBytes(18).toString("base64url")}`,
         descriptor: descriptorOf(argument),
         prefix:
-          fields.prefix !== undefined && fields.prefix.kind === "string"
+          !open && fields.prefix !== undefined && fields.prefix.kind === "string"
             ? fields.prefix.value
             : null,
+        open,
         continuation: fields.continuation ?? null,
       };
     }
@@ -614,17 +634,24 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     }
     if (payload.kind === "provide") {
       // Post-commit: register the scope, then list the server (a side `listing` delegation, so the
-      // completion mints the toolbox rather than settling this call). A fresh provide without a
-      // continuation is a malformed call that would otherwise register a scope and sit forever —
-      // fail it like serve fails a missing subscriber.
+      // completion mints the toolbox rather than settling this call) — or, for the listing-free
+      // `mcp.open`, dispatch the continuation directly (the scope is the whole point; nothing is
+      // contacted until the first tool call). A fresh call without a continuation is malformed and
+      // would otherwise register a scope and sit forever — fail it like serve fails a missing
+      // subscriber.
       this.openScope(payload.scope, delegation, payload.descriptor);
       if (payload.continuation === null) {
+        const form = payload.open ? "mcp.open" : "mcp.provide";
         this.schedule(() =>
           this.complete({
             delegation,
-            outcome: { kind: "error", message: "mcp.provide: the continuation is missing" },
+            outcome: { kind: "error", message: `${form}: the continuation is missing` },
           }),
         );
+        return;
+      }
+      if (payload.open) {
+        this.schedule(() => this.startOpenContinuation(delegation));
         return;
       }
       this.startListing(delegation, payload.descriptor);
@@ -882,8 +909,6 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
   private startContinuation(delegation: DelegationId, listingJson: Json): void {
     const payload = this.payloadOf(delegation);
     if (payload === undefined || payload.kind !== "provide") return; // resolved / cancelled meanwhile
-    const continuation = payload.continuation;
-    if (continuation === null) return; // already dispatched (a duplicate listing) — nothing to do
     const toolbox = mintToolbox(
       listingJson,
       payload.descriptor,
@@ -896,13 +921,36 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     // exactly a `toolbox[URL]` (a record of the minted tools) for this same provide's URL. So this internal
     // dispatch — which does not go through a dynamic-input boundary's pre-check — never mismatches at the
     // acceptance surface, and needs no guard of its own (a `dispatchCallable` error is a non-callable
-    // continuation, still handled below).
-    const argument: Value = { kind: "record", fields: { value: toolbox } };
+    // continuation, still handled in the shared dispatch).
+    this.dispatchProvideContinuation(delegation, payload, toolbox);
+  }
+
+  /** The listing-free (`mcp.open`) counterpart of `startContinuation` (a reactor turn): no listing landed
+   *  and no toolbox exists, so the continuation receives `null` — its signature (`agent (value: null)`)
+   *  conforms by construction. Settlement and the consumed-continuation reload contract are shared. */
+  private startOpenContinuation(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined || payload.kind !== "provide") return; // resolved / cancelled meanwhile
+    this.dispatchProvideContinuation(delegation, payload, { kind: "null" });
+  }
+
+  /** Delegate a provide's continuation with `{ value }` — the shared tail of `startContinuation` and
+   *  `startOpenContinuation`. The continuation is consumed (`null`) once the inner delegation opens, so a
+   *  reload from there resumes it as durable core work instead of re-listing / re-dispatching. */
+  private dispatchProvideContinuation(
+    delegation: DelegationId,
+    payload: Extract<McpPayload, { kind: "provide" }>,
+    value: Value,
+  ): void {
+    const continuation = payload.continuation;
+    if (continuation === null) return; // already dispatched (a duplicate listing) — nothing to do
+    const argument: Value = { kind: "record", fields: { value } };
     const dispatched = dispatchCallable(continuation, argument);
     if ("error" in dispatched) {
+      const form = payload.open ? "mcp.open" : "mcp.provide";
       this.complete({
         delegation,
-        outcome: { kind: "error", message: `mcp.provide: the continuation is ${dispatched.error}` },
+        outcome: { kind: "error", message: `${form}: the continuation is ${dispatched.error}` },
       });
       return;
     }
@@ -915,8 +963,8 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
       dispatched.generics,
     );
     if (opened === null) return; // the provide is winding down — its own cancel path settles it
-    // Consumed: from here the continuation is a durable inner delegation, so stop persisting it (a reload
-    // resumes that delegation instead of re-listing). `openInnerDelegation` already marked the call dirty.
+    // Consumed: from here the continuation is a durable inner delegation, so stop persisting it.
+    // `openInnerDelegation` already marked the call dirty.
     payload.continuation = null;
   }
 
@@ -1118,6 +1166,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (payload === undefined) return; // the call resolved while the retry was staged (a racing cancel)
     switch (payload.kind) {
       case "provide":
+        // An open provide performs no transport operation of its own, so it can never park (only its
+        // tool calls do, each on its own delegation) — guard for totality.
+        if (payload.open) return;
         // Parked at the listing, so the toolbox was never minted and the continuation is still stored:
         // list again from scratch.
         this.startListing(delegation, payload.descriptor);
@@ -1150,8 +1201,9 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
 
   protected recover(delegation: DelegationId): void {
     // A reloaded serve endpoint re-registers its token; a reloaded provide re-registers its scope, and
-    // either re-lists (its continuation is still stored — the block never started) or resumes (the
-    // continuation was dispatched, so it is durable core work); a transport call reconciles at-most-once.
+    // either re-lists (its continuation is still stored — the block never started; a listing-free
+    // `open` re-dispatches the continuation instead) or resumes (the continuation was dispatched, so
+    // it is durable core work); a transport call reconciles at-most-once.
     // For BOTH provide and transport shapes, an open raised authorize escalation overrides that default:
     // the row IS the durable park state, so the call reconstructs as parked — waiting for the ack, never
     // refused by the reconciliation (its rejected attempt provably never executed server-side).
@@ -1163,7 +1215,12 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
     if (payload !== undefined && payload.kind === "provide") {
       this.openScope(payload.scope, delegation, payload.descriptor);
       if (this.reconstructPark(delegation)) return;
-      if (payload.continuation !== null) this.startListing(delegation, payload.descriptor);
+      if (payload.continuation !== null) {
+        // A still-stored continuation means the block never started. An `open` re-dispatches it
+        // directly (there is no listing to redo); a listing provide re-lists.
+        if (payload.open) this.schedule(() => this.startOpenContinuation(delegation));
+        else this.startListing(delegation, payload.descriptor);
+      }
       return;
     }
     if (payload !== undefined && payload.kind === "provideAll") {
@@ -1249,6 +1306,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
           scopeId: payload.scope,
           descriptor: payload.descriptor,
           prefix: payload.prefix,
+          open: payload.open,
           continuation: payload.continuation,
           relays: row.relays,
           innerCalls: row.innerCalls,
@@ -1300,6 +1358,7 @@ export class McpReactor extends ExternalCallReactor<McpPayload> {
             scope: decoded.scopeId,
             descriptor: decoded.descriptor,
             prefix: decoded.prefix,
+            open: decoded.open,
             continuation: decoded.continuation,
           },
           relays: decoded.relays,

@@ -469,7 +469,9 @@ normalizeAll elaborateContext variances shapes = (environment, boundDiagnostics 
         { dataEnvironment = Map.fromList [(item.qualifiedName, DataInformation {name = item.qualifiedName, genericParameters = parameters, constructor = placeholderConstructor}) | (item, parameters) <- dataParameters],
           requestEnvironment = Map.fromList [(item.qualifiedName, RequestInformation {name = item.qualifiedName, genericParameters = parameters, parameterType = bottomType, returnType = bottomType, marker = collectedMarker item}) | (item, parameters) <- requestParameters],
           genericsInScope = mempty,
-          world = bottomAttribute
+          world = bottomAttribute,
+          -- A comparison-local marker 'subtypeFunction' raises itself; every entry starts outside one.
+          comparingAgentParameters = False
         }
 
     -- The preliminary environment (variance only) suffices to normalize the bound expressions.
