@@ -104,3 +104,22 @@ external agent cancel[effect Scope, effect E, T](
   @"The nursery handle from the enclosing `provide`." nursery: nursery[Scope, E],
   @"A fiber spawned in THIS nursery (its scope marker must match)." handle: fiber[Scope, T],
 ) -> null with Scope from "region"
+
+@"`watch`, WIDENED: run @width@ watches over one nursery, so up to @width@ fiber escalations are
+re-emitted (and answered) CONCURRENTLY — one `watch` relays strictly one escalation at a time,
+answer awaited, so a single watch serializes the fibers' requests end-to-end no matter how parallel
+the fibers or the receiving handler are. The parallelism this opens is only realised by a receiving
+`parallel handler`; a sequential (stateful) handler re-serializes at its own FIFO, which is exactly
+right when order is the point (a chat loop should keep ONE watch: with several, two messages' turns
+can interleave). Plain composition — `parallel for` over `watch` — priced as such; the parallel
+scaffolding is why `io` joins the row that a bare `watch` does not carry."
+agent watch_many[effect Scope, effect E](
+  @"The nursery whose fibers' escalations to re-emit." nursery: nursery[Scope, E],
+  @"How many escalations may be in flight at once." width: integer,
+) -> never with E | Scope | io {
+  forever {
+    parallel for (let _slot in array.range(start = 0, end = width)) {
+      watch[Scope, E](nursery = nursery)
+    }
+  }
+}

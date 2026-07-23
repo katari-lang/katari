@@ -43,3 +43,16 @@ replay を組んだ瞬間、end-to-end は at-least-once になる。Discord へ
   ときの `fetch_error` だけ。
 - **`time.watch` の tick は at-least-once**(crash 窓で同一 occurrence が再配信されうる)— §3 の dedupe は
   scheduled time で。
+
+- **region の並列度は watch の本数で決まる。** fiber の escalation は watch 1 本あたり 1 件ずつ
+  (答えが返るまで次を出さない)再放出される。並列にするには `region.watch_many(nursery, width)` **と**
+  受け側の `parallel handler` の両方が要る(直列 handler は自分の FIFO で再直列化する — それが正しい場面も
+  ある: chat loop はメッセージ順 = turn 順が仕様なので watch 1 本を保て)。実測: width=2 + parallel handler
+  で 2 件の escalation 処理が重なり、width=1 では 2 件目が 1 件目の答えを待つ。
+- **fiber は watch 登録前に escalate してはいけない(起動レース)。** watch 登録前の escalation に quiesce
+  判定が重なると「watch の無い nursery」と誤認され、run root へ flush されて operator interview に化ける
+  (runtime の既知レース)。fiber の先頭は sleep / 外部入力待ちで始まるのが安全 — 実運用の source / tick は
+  自然にそうなる。
+- **region から `break` で値を持って抜けない。** continuation の型が `never`(watch 末尾)だと provide の
+  結果 schema が never に stamp され、内側 handler の `break v` は「external result does not conform」panic に
+  なる。region の成果は `store` に書き、別 run で読み出す。
