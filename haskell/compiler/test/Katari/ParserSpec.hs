@@ -173,6 +173,49 @@ spec = do
       module' <- parseClean "data point(x: integer)\n\nagent main() -> integer { 1 }"
       length module'.declarations `shouldBe` 2
 
+  describe "parameter defaults" $ do
+    it "parses container literal trees on signature parameters (arrays, records, nesting, quoted keys)" $ do
+      module' <-
+        parseClean
+          "data config(tags: array[string] ?= [], point: {x: integer} ?= {x = 1, \"Content-Type\" = \"text\"}, rows: array[unknown] ?= [[1], {y = null}])"
+      case module'.declarations of
+        [DeclarationData dataDeclaration] ->
+          [(.value) <$> parameter.defaultValue | parameter <- dataDeclaration.parameters]
+            `shouldBe` [ Just (DefaultValueArray []),
+                         Just
+                           ( DefaultValueRecord
+                               [ ("x", DefaultValueLiteral (LiteralValueInteger 1)),
+                                 ("Content-Type", DefaultValueLiteral (LiteralValueString "text"))
+                               ]
+                           ),
+                         Just
+                           ( DefaultValueArray
+                               [ DefaultValueArray [DefaultValueLiteral (LiteralValueInteger 1)],
+                                 DefaultValueRecord [("y", DefaultValueLiteral LiteralValueNull)]
+                               ]
+                           )
+                       ]
+        _ -> expectationFailure "expected one data"
+
+    it "parses a container default on an agent parameter binder" $ do
+      module' <- parseClean "agent f(items: array[string] ?= []) -> integer { 0 }"
+      case module'.declarations of
+        [DeclarationAgent agent] -> case agent.parameters of
+          [parameter] -> case parameter.binder of
+            BindVariable _ _ (Just parameterDefault) -> parameterDefault.value `shouldBe` DefaultValueArray []
+            _ -> expectationFailure "expected a defaulted variable binder"
+          _ -> expectationFailure "expected one parameter"
+        _ -> expectationFailure "expected one agent"
+
+    it "still rejects a non-literal expression as a default" $
+      shouldFail "agent f(items: array[string] ?= record.empty()) -> integer { 0 }"
+
+    it "rejects a call expression inside a container default" $
+      shouldFail "agent f(items: array[string] ?= [make()]) -> integer { 0 }"
+
+    it "rejects duplicate keys in a record default" $
+      shouldFail "agent f(point: {x: integer} ?= {x = 1, x = 2}) -> integer { point.x }"
+
   describe "imports" $ do
     it "parses a prefix module import" $ do
       module' <- parseClean "import list_utils.helpers"

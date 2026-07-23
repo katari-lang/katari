@@ -52,6 +52,17 @@
 // `watch` returns `never`: the call is HELD OPEN (it only ever raises, never settles), closing only when the
 // nursery drops or the watch is cancelled.
 //
+// THE NURSERY IS THE REGISTRY (the stdlib's `region.ktr` contract): anything that talks ABOUT fibers reads
+// the runtime's own truth, never a Katari-side mirror. `fork` takes an optional NAME tag, recorded durably on
+// the provide's `names` map while the fiber runs; `roster` answers the RUNNING set as `fiber_info(id, name)`
+// data values in fork order, straight off the running map; `cancel_by_id` addresses a fiber by the
+// runtime-minted id (a live one runs the exact `cancel` teardown and answers `cancelled(id)`; a stale id — an
+// anticipated, often model-supplied miss — answers `unknown_fiber(id)`, never a panic); and a fiber's PANIC is
+// intercepted at `onEscalate` and re-emitted as the typed `crashed(id, name, message)` event — a SYNTHETIC
+// mailbox entry with no child leg (the fiber is dead; the runtime tears it down like a cancel, and the
+// handler's eventual answer is swallowed via the base's moot-answer guard). A watch-less nursery's `crashed`
+// entry flushes UP like any mailbox entry, surfacing at the run root as the usual unhandled request.
+//
 // Durably a `provide` persists its endpoint payload (its scope id + the still-stored continuation + the
 // settled-fiber buffer + the inner-delegation bridges) and survives a restart COMPLETELY, re-registering the
 // scope and resuming its continuation and running fibers as durable core work — there is no external process,
@@ -62,11 +73,20 @@
 // `webhook`, a nursery has no inbound URL).
 
 import { randomBytes } from "node:crypto";
-import type { Json } from "@katari-lang/types";
+import { createAgentName, type Json, type QualifiedName } from "@katari-lang/types";
+import { NURSERY_FIBER_FIELD, NURSERY_SCOPE_FIELD, PANIC_REQUEST } from "../engine/common.js";
 import { dispatchCallable } from "../engine/dynamic-dispatch.js";
 import type { AskKind, ExternalEvent, ReactorName } from "../event/types.js";
 import { escalateValue } from "../event/types.js";
-import type { DelegationId, EscalationId, InstanceId, SnapshotId } from "../ids.js";
+import {
+  type DelegationId,
+  type EscalationId,
+  type InstanceId,
+  newDelegationId,
+  newEscalationId,
+  type SnapshotId,
+} from "../ids.js";
+import { valueToJson } from "../value/codec.js";
 import type { Value } from "../value/types.js";
 import {
   asJson,
@@ -91,26 +111,28 @@ import {
 import type { ResourcePool } from "./resource-pool.js";
 
 /** The reserved dispatch keys the compiled `prelude.region.*` externals arrive under — compared exactly here,
- *  at the payload boundary. All four nursery operations dispatch as their own payload variant; any other key
- *  (compiler / wire drift) folds into the defensive `operation` payload, a clear "unimplemented" completion. */
+ *  at the payload boundary. Every nursery operation dispatches as its own payload variant; any other key
+ *  (compiler / wire drift) folds into the defensive `operation` payload, a clear "unimplemented" completion.
+ *  (The nursery / fiber handles those payloads read carry their identities under the namespaced marker fields
+ *  `NURSERY_SCOPE_FIELD` / `NURSERY_FIBER_FIELD`, shared from `engine/common.ts` — the `fiber_id` prim reads
+ *  the same fields on the engine side, which must not import actor code.) */
 const REGION_PROVIDE_KEY = "prelude.region.provide";
 const REGION_FORK_KEY = "prelude.region.fork";
 const REGION_CANCEL_KEY = "prelude.region.cancel";
 const REGION_WATCH_KEY = "prelude.region.watch";
+const REGION_ROSTER_KEY = "prelude.region.roster";
+const REGION_CANCEL_BY_ID_KEY = "prelude.region.cancel_by_id";
 
-/** The field the minted nursery handle carries its scope identity under — a namespaced marker key (disjoint
- *  from any user-authored record key, which never lives in the `$katari_` namespace), so the handle reads as a
- *  runtime value, not user data. A `fork` reads the scope from the nursery it is handed to route to THIS
- *  nursery; the fiber handle it returns carries the SAME field (plus its fiber id) so a `cancel`
- *  routes back. The nursery type is a phantom `agent` the program never calls, so an opaque record carrying
- *  only the identity is its honest runtime shape (the identity is all the runtime routes on — the fiber-effect
- *  ceiling `E` is a compile-time bound the runtime never checks). */
-const NURSERY_SCOPE_FIELD = "$katari_region_scope";
+/** The typed event a fiber's PANIC becomes at the nursery (the stdlib's `region.crashed` request): the
+ *  runtime tears the dead fiber down and re-emits the ending as DATA — `{ id, name, message }` — instead of
+ *  letting the raw panic unwind the watch context. The runtime is this request's one author. */
+const REGION_CRASHED_REQUEST = createAgentName("prelude.region.crashed");
 
-/** The field the fiber handle carries its fiber id under (alongside the scope) — the same namespaced-marker
- *  convention as the scope, so a `fiber[Scope, T]` handle reads as an opaque runtime value. A `join` / `cancel`
- *  reads it to name WHICH fiber of the nursery to await / tear down. */
-const NURSERY_FIBER_FIELD = "$katari_region_fiber";
+/** The data constructors the registry-facing operations answer with, matching the stdlib's `data`
+ *  declarations exactly (a Katari `match` dispatches on these names). */
+const FIBER_INFO_CONSTRUCTOR = createAgentName("prelude.region.fiber_info");
+const CANCELLED_CONSTRUCTOR = createAgentName("prelude.region.cancelled");
+const UNKNOWN_FIBER_CONSTRUCTOR = createAgentName("prelude.region.unknown_fiber");
 
 /** The continuation's reserved inner-call token: a provide's continuation IS the whole call, so its settlement
  *  settles the provide (the same role `mcp`'s / `webhook`'s subscriber token plays). A fiber uses a fresh
@@ -130,22 +152,27 @@ const FIBER_TOKEN_PREFIX = "fiber:";
  *  rather than dangling in-transit. */
 interface MailboxEntry {
   /** The fiber's own delegation — the leg an answer descends to (via the relay `relayAskUnder` opens), and the
-   *  key a `cancel` drops a fiber's not-yet-emitted escalations by. */
-  child: DelegationId;
-  /** The fiber's escalation id — echoed on the answering `escalateAck` down to the fiber. */
-  childEscalation: EscalationId;
+   *  key a `cancel` drops a fiber's not-yet-emitted escalations by. `null` marks a SYNTHETIC entry — a
+   *  runtime-authored `crashed` event whose fiber is already dead, so there is no leg to answer: its
+   *  re-emission relays under fresh ids that name no live delegation, and the base's moot-answer guard
+   *  swallows the handler's answer (see `emitEntry`). */
+  child: DelegationId | null;
+  /** The fiber's escalation id — echoed on the answering `escalateAck` down to the fiber (`null` on a
+   *  synthetic entry, which has no answer to route). */
+  childEscalation: EscalationId | null;
   /** The ask the fiber raised — re-emitted verbatim at the watch (or, watch-less, up through the provide). */
   ask: AskKind;
 }
 
 /** What a region call holds, a sum every lifecycle method dispatches once: a `provide` scope (its scope id +
- *  the not-yet-dispatched continuation + the settled-fiber buffer — persisted, so the scope survives a
- *  restart), a `fork` (the task + argument it spawns a fiber from — persisted, so an interrupted fork
- *  re-spawns), a `cancel` (the scope + fiber id it targets, read from the handle — persisted, so a waiting cancel
- *  re-parks after a restart), a `cancel` (the scope + fiber id it tears down, read from the handle — persisted,
- *  so an interrupted cancel re-runs its idempotent teardown), a `watch` (the scope whose fibers' escalations it
- *  re-emits, read from the handle — held open, never settling), or an `operation` — an unknown dispatch key
- *  (compiler / wire drift), which fails the call with a clear completion. */
+ *  the not-yet-dispatched continuation + the mailbox + the running fibers' name tags — persisted, so the
+ *  scope survives a restart), a `fork` (the task + argument + name it spawns a fiber from — persisted, so an
+ *  interrupted fork re-spawns), a `cancel` (the scope + fiber id it tears down, read from the handle —
+ *  persisted, so an interrupted cancel re-runs its idempotent teardown), a `cancel_by_id` (the scope + the
+ *  data-addressed fiber id — persisted the same way), a `roster` (the scope whose running set it reads — a
+ *  pure read, re-completable after a restart), a `watch` (the scope whose fibers' escalations it re-emits,
+ *  read from the handle — held open, never settling), or an `operation` — an unknown dispatch key (compiler /
+ *  wire drift), which fails the call with a clear completion. */
 type RegionPayload =
   | {
       kind: "cancel";
@@ -154,6 +181,16 @@ type RegionPayload =
        *  uncancellable fiber, refused as a panic. Persisted, so a cancel interrupted before its teardown
        *  confirmed re-runs identically after a restart (a re-sent terminate is idempotent). */
       scope: string | null;
+      fiber: string | null;
+    }
+  | {
+      kind: "cancel_by_id";
+      /** The nursery scope, read from the NURSERY handle (a dead / forged one is an invariant break, refused
+       *  as a panic — unlike the id, which is anticipated data). Persisted like a `cancel`, so an interrupted
+       *  teardown re-runs idempotently after a restart. */
+      scope: string | null;
+      /** The runtime-minted fiber id to tear down, read from the plain `id` argument (`null` when it was not
+       *  a string — folded into the unknown-id miss, since ids are data, not capabilities). */
       fiber: string | null;
     }
   | {
@@ -171,6 +208,17 @@ type RegionPayload =
        *  drained one-by-one as each answer returns. Persisted on the provide's extension, so a restart restores
        *  the "溜まっていた" requests a watch has not yet serviced. */
       mailbox: MailboxEntry[];
+      /** The RUNNING fibers' name tags, by fiber id — the `fork(name)` echo `roster` and `crashed` report.
+       *  Only named, still-running fibers have an entry (absence IS "unnamed"; `retireFiber` cleans it), and
+       *  it persists with the provide so the roster facts survive a restart alongside the running set. */
+      names: Record<string, string>;
+    }
+  | {
+      kind: "roster";
+      /** The nursery scope whose RUNNING fibers this call lists, read from the handed nursery handle (`null`
+       *  when the handle was malformed — refused as a dead scope, like `watch`). A pure read of the live
+       *  running set, so a reloaded roster simply re-completes. */
+      scope: string | null;
     }
   | {
       kind: "watch";
@@ -188,6 +236,9 @@ type RegionPayload =
        *  before it spawned re-dispatches identically. */
       task: Value | null;
       argument: Value | null;
+      /** The opaque name tag the fork carried (the compiler fills the default, so absent / non-string reads
+       *  as "" — unnamed). Recorded on the provide's `names` at spawn, so `roster` / `crashed` echo it. */
+      name: string;
     }
   | {
       kind: "operation";
@@ -206,11 +257,22 @@ export type RegionExtension =
       scopeId: string;
       continuation: Value | null;
       mailbox: MailboxEntry[];
+      /** The running fibers' name tags (see the payload's `names`) — durable so `roster` and `crashed` still
+       *  echo them after a restart. */
+      names: Record<string, string>;
       relays: EscalationRelayRow[];
       innerCalls: InnerCallRow[];
     }
-  | { kind: "fork"; scopeId: string | null; task: Value | null; argument: Value | null }
+  | {
+      kind: "fork";
+      scopeId: string | null;
+      task: Value | null;
+      argument: Value | null;
+      name: string;
+    }
   | { kind: "cancel"; scopeId: string | null; fiberId: string | null }
+  | { kind: "cancel_by_id"; scopeId: string | null; fiberId: string | null }
+  | { kind: "roster"; scopeId: string | null }
   | {
       kind: "watch";
       scopeId: string | null;
@@ -232,6 +294,7 @@ export function encodeRegionExtension(extension: RegionExtension): Json {
         scopeId: extension.scopeId,
         continuation: asJson(extension.continuation),
         mailbox: asJson(extension.mailbox),
+        names: extension.names,
         relays: encodeRelays(extension.relays),
         innerCalls: encodeInnerCalls(extension.innerCalls),
       };
@@ -241,9 +304,14 @@ export function encodeRegionExtension(extension: RegionExtension): Json {
         scopeId: extension.scopeId,
         task: asJson(extension.task),
         argument: asJson(extension.argument),
+        name: extension.name,
       };
     case "cancel":
       return { kind: "cancel", scopeId: extension.scopeId, fiberId: extension.fiberId };
+    case "cancel_by_id":
+      return { kind: "cancel_by_id", scopeId: extension.scopeId, fiberId: extension.fiberId };
+    case "roster":
+      return { kind: "roster", scopeId: extension.scopeId };
     case "watch":
       return {
         kind: "watch",
@@ -267,21 +335,38 @@ export function decodeRegionExtension(extension: Json): RegionExtension {
         scopeId: stringFieldOf(document, "scopeId"),
         continuation: warmFieldOf<Value | null>(document, "continuation"),
         mailbox: warmFieldOf<MailboxEntry[]>(document, "mailbox"),
+        names: namesOf(document),
         relays: relaysOf(document),
         innerCalls: innerCallsOf(document),
       };
-    case "fork":
+    case "fork": {
+      // Read the name leniently (an absent field is ""): a pre-names row must reload as an unnamed fork
+      // rather than crash the whole load pass.
+      const name = document.name;
       return {
         kind: "fork",
         scopeId: warmFieldOf<string | null>(document, "scopeId"),
         task: warmFieldOf<Value | null>(document, "task"),
         argument: warmFieldOf<Value | null>(document, "argument"),
+        name: typeof name === "string" ? name : "",
       };
+    }
     case "cancel":
       return {
         kind: "cancel",
         scopeId: warmFieldOf<string | null>(document, "scopeId"),
         fiberId: warmFieldOf<string | null>(document, "fiberId"),
+      };
+    case "cancel_by_id":
+      return {
+        kind: "cancel_by_id",
+        scopeId: warmFieldOf<string | null>(document, "scopeId"),
+        fiberId: warmFieldOf<string | null>(document, "fiberId"),
+      };
+    case "roster":
+      return {
+        kind: "roster",
+        scopeId: warmFieldOf<string | null>(document, "scopeId"),
       };
     case "watch":
       return {
@@ -294,6 +379,19 @@ export function decodeRegionExtension(extension: Json): RegionExtension {
     default:
       throw new Error(`unknown region extension kind "${kind}" (corrupt row)`);
   }
+}
+
+/** The provide's durable name-tag map, read leniently: a row written before `names` existed (or with a
+ *  non-object field) reloads as "no named fibers" rather than crashing the load pass — names are echo
+ *  material, not routing, so degrading beats refusing the whole nursery. */
+function namesOf(document: Record<string, Json>): Record<string, string> {
+  const raw = document.names;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const names: Record<string, string> = {};
+  for (const [fiber, name] of Object.entries(raw)) {
+    if (typeof name === "string") names[fiber] = name;
+  }
+  return names;
 }
 
 export class RegionReactor extends ExternalCallReactor<RegionPayload> {
@@ -390,17 +488,37 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
         scope: `regionscope:${randomBytes(18).toString("base64url")}`,
         continuation: fields.continuation ?? null,
         mailbox: [],
+        names: {},
       };
     }
     if (target.key === REGION_FORK_KEY) {
-      // The nursery handle rides the argument (`fork(nursery, task, argument)`); its scope identity is the one
-      // thing the runtime routes on — read it out now, so `dispatch` gates on a plain string. A malformed
-      // handle yields a `null` scope, refused as a dead scope.
+      // The nursery handle rides the argument (`fork(nursery, task, argument, name)`); its scope identity is
+      // the one thing the runtime routes on — read it out now, so `dispatch` gates on a plain string. A
+      // malformed handle yields a `null` scope, refused as a dead scope. The name is a plain tag with a
+      // compiler-filled default, so anything but a string reads as "" (unnamed).
+      const name = fields.name;
       return {
         kind: "fork",
         scope: scopeOfNursery(fields.nursery ?? null),
         task: fields.task ?? null,
         argument: fields.argument ?? null,
+        name: name !== undefined && name.kind === "string" ? name.value : "",
+      };
+    }
+    if (target.key === REGION_ROSTER_KEY) {
+      // `roster(nursery)`: route on the nursery's scope, exactly like `watch` — a malformed handle yields a
+      // `null` scope, refused as a dead scope.
+      return { kind: "roster", scope: scopeOfNursery(fields.nursery ?? null) };
+    }
+    if (target.key === REGION_CANCEL_BY_ID_KEY) {
+      // `cancel_by_id(nursery, id)`: the NURSERY handle gates (its scope must name a live nursery — a forged
+      // handle is an invariant break), while the id is plain data resolved against the running set at
+      // dispatch; a non-string id folds into the unknown-id miss rather than a refusal.
+      const id = fields.id;
+      return {
+        kind: "cancel_by_id",
+        scope: scopeOfNursery(fields.nursery ?? null),
+        fiber: id !== undefined && id.kind === "string" ? id.value : null,
       };
     }
     if (target.key === REGION_CANCEL_KEY) {
@@ -443,6 +561,16 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     if (payload.kind === "cancel") {
       // Sending the fiber's terminate is a `send`, which must happen inside a turn — hand it back to the loop.
       this.schedule(() => this.startCancel(delegation));
+      return;
+    }
+    if (payload.kind === "cancel_by_id") {
+      // The id-addressed cancel shares the terminate path, so it too re-enters the loop for its `send`s.
+      this.schedule(() => this.startCancelById(delegation));
+      return;
+    }
+    if (payload.kind === "roster") {
+      // Completing is `send`-shaped as well; the read itself is pure, so the whole roster is one turn.
+      this.schedule(() => this.startRoster(delegation));
       return;
     }
     if (payload.kind === "watch") {
@@ -601,6 +729,16 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       return;
     }
     scopeState.running.set(fiber, opened);
+    // Record the name tag on the PROVIDE — the durable owner of the roster facts (`roster` and `crashed`
+    // echo it, and it must survive a restart alongside the running set). An empty name is not stored:
+    // absence IS "unnamed". `openInnerDelegation` already marked the provide dirty this turn, so the map
+    // persists with the same commit that persists the fiber's bridge.
+    if (payload.name !== "") {
+      const providePayload = this.payloadOf(scopeState.provide);
+      if (providePayload !== undefined && providePayload.kind === "provide") {
+        providePayload.names[fiber] = payload.name;
+      }
+    }
     // The fork returns the handle NOW; the fiber runs on independently under the provide. (The fork call owns
     // no children of its own, so this settlement drains immediately.)
     this.complete({
@@ -646,6 +784,103 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     // Not running: the fiber already settled (retired, its outcome discarded) or was already cancelled.
     // A cancel is idempotent — succeed with `null`.
     this.settleCancel(delegation);
+  }
+
+  /** Tear down the fiber the runtime knows by ID (a reactor turn) — the data-addressed form of `cancel`, for
+   *  callers whose currency is ids rather than held handles. The NURSERY handle still gates: a dead / forged
+   *  scope is an invariant break, refused as a panic like `watch` / `fork`. The id, by contrast, is
+   *  anticipated input (often model-supplied): one matching no running fiber answers with the
+   *  `unknown_fiber` outcome, and a live one runs exactly the `cancel` teardown, settling with `cancelled`
+   *  once the teardown confirms in `retireFiber`. A fiber another cancel is already tearing down completes
+   *  at once with `cancelled` — the fiber is going either way, and waiting would only race the first
+   *  cancel's waiter. */
+  private startCancelById(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined || payload.kind !== "cancel_by_id") return; // resolved / cancelled meanwhile
+    const scopeState = payload.scope === null ? undefined : this.scopes.get(payload.scope);
+    if (payload.scope === null || scopeState === undefined) {
+      this.complete({
+        delegation,
+        outcome: {
+          kind: "error",
+          message: `region.cancel_by_id: the nursery scope ${payload.scope ?? "(malformed handle)"} is not live (a forged handle, or its region.provide has returned)`,
+        },
+      });
+      return;
+    }
+    const fiber = payload.fiber ?? "";
+    const running = scopeState.running.get(fiber);
+    if (running === undefined) {
+      this.completeWithOutcome(delegation, UNKNOWN_FIBER_CONSTRUCTOR, fiber);
+      return;
+    }
+    if (this.cancelWaiters.has(fiber)) {
+      this.completeWithOutcome(delegation, CANCELLED_CONSTRUCTOR, fiber);
+      return;
+    }
+    // The live-fiber path is byte-for-byte the plain cancel's: drop the fiber's queued escalations, park
+    // this call as the teardown's waiter, terminate the inner delegation.
+    this.dropFiberMailbox(scopeState.provide, running);
+    this.cancelWaiters.set(fiber, delegation);
+    this.terminateFiber(scopeState.provide, running);
+  }
+
+  /** List the nursery's RUNNING fibers (a reactor turn): one `fiber_info(id, name)` per live fiber, in fork
+   *  order (the running map's insertion order, which the durable inner-call bridges preserve across a
+   *  restart). The runtime's own liveness is the ONLY copy — a settled or cancelled fiber is simply absent —
+   *  so there is nothing to reconcile. A dead / forged scope is refused as a panic, like `watch`. */
+  private startRoster(delegation: DelegationId): void {
+    const payload = this.payloadOf(delegation);
+    if (payload === undefined || payload.kind !== "roster") return; // resolved / cancelled meanwhile
+    const scopeState = payload.scope === null ? undefined : this.scopes.get(payload.scope);
+    if (payload.scope === null || scopeState === undefined) {
+      this.complete({
+        delegation,
+        outcome: {
+          kind: "error",
+          message: `region.roster: the nursery scope ${payload.scope ?? "(malformed handle)"} is not live (a forged handle, or its region.provide has returned)`,
+        },
+      });
+      return;
+    }
+    const providePayload = this.payloadOf(scopeState.provide);
+    const names = providePayload?.kind === "provide" ? providePayload.names : {};
+    const infos: Value = {
+      kind: "array",
+      elements: [...scopeState.running.keys()].map(
+        (fiber): Value => ({
+          kind: "record",
+          ctor: FIBER_INFO_CONSTRUCTOR,
+          fields: {
+            id: { kind: "string", value: fiber },
+            name: { kind: "string", value: names[fiber] ?? "" },
+          },
+        }),
+      ),
+    };
+    // Lower to the completion's wire Json the same way an inner outcome lowers (`reveal` — this boundary
+    // faces the engine): the constructor tags ride the `$katari_constructor` convention, which the base
+    // wire decoder reconstructs into data values a Katari `match` dispatches on.
+    this.complete({ delegation, outcome: { kind: "result", value: valueToJson(infos, "reveal") } });
+  }
+
+  /** Settle an id-addressed cancel with one of its `cancel_outcome` data values — `cancelled(id)` or
+   *  `unknown_fiber(id)` — lowered to the completion's wire Json under the `$katari_constructor`
+   *  convention, so the decoded result is a data value a Katari `match` dispatches on. */
+  private completeWithOutcome(
+    delegation: DelegationId,
+    constructorName: QualifiedName,
+    id: string,
+  ): void {
+    const outcome: Value = {
+      kind: "record",
+      ctor: constructorName,
+      fields: { id: { kind: "string", value: id } },
+    };
+    this.complete({
+      delegation,
+      outcome: { kind: "result", value: valueToJson(outcome, "reveal") },
+    });
   }
 
   /** Terminate one fiber's inner delegation — the single-fiber form of the base's whole-nursery
@@ -714,11 +949,28 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     if (payload === undefined || payload.kind !== "provide") return; // the provide resolved meanwhile
     // Retire the fiber from its scope's running set (a no-op for a fiber never re-registered after a reload).
     this.scopes.get(payload.scope)?.running.delete(fiber);
+    // A name tag is roster / crashed material for a RUNNING fiber only — clean it with the running entry,
+    // so the durable map never accumulates settled fibers.
+    if (payload.names[fiber] !== undefined) {
+      delete payload.names[fiber];
+      this.markCallDirty(provide);
+    }
     const cancelling = this.cancelWaiters.get(fiber);
     if (cancelling !== undefined) {
       this.cancelWaiters.delete(fiber);
-      this.settleCancel(cancelling);
+      this.settleCancelWaiter(cancelling, fiber);
     }
+  }
+
+  /** Settle a confirmed teardown's waiting cancel according to ITS OWN call shape: a plain `cancel` declares
+   *  `null` (unchanged), while an id-addressed `cancel_by_id` declares the `cancelled` outcome naming the
+   *  fiber — the one place the two cancel forms diverge. */
+  private settleCancelWaiter(delegation: DelegationId, fiber: string): void {
+    if (this.payloadOf(delegation)?.kind === "cancel_by_id") {
+      this.completeWithOutcome(delegation, CANCELLED_CONSTRUCTOR, fiber);
+      return;
+    }
+    this.settleCancel(delegation);
   }
 
   // ─── watch: the white hole (fiber escalations re-emitted at the watch's position) ─────────────────
@@ -744,22 +996,28 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
    *  mailbox (reowning its carried value onto the provide so the parked ask survives a commit / the provide's
    *  drop) and, when a watch is already registered, re-emit it there at once. An escalation that beats its
    *  watch's registration stays mailboxed until `startWatch` drains it; one on a genuinely watch-less nursery
-   *  flushes up only at `onQuiesce`. Any non-fiber escalation (the continuation's own request) relays up through
-   *  the provide unchanged (the base path). */
+   *  flushes up only at `onQuiesce`. A fiber's PANIC is intercepted here instead of mailboxed: it becomes the
+   *  typed `crashed` event (`crashFiber`). Any non-fiber escalation (the continuation's own request) relays up
+   *  through the provide unchanged (the base path). */
   protected override onEscalate(
     event: Extract<ExternalEvent, { kind: "escalate" }>,
     context: { caller: InstanceId | undefined },
   ): void {
-    const scope = this.fiberScopeOf(event.delegation);
-    if (scope === undefined) {
+    const located = this.runningFiberOf(event.delegation);
+    if (located === undefined) {
       super.onEscalate(event, context);
       return;
     }
+    const scope = located.scope;
     const scopeState = this.scopes.get(scope);
     const provide = scopeState?.provide;
     const payload = provide === undefined ? undefined : this.payloadOf(provide);
     if (provide === undefined || payload === undefined || payload.kind !== "provide") {
       super.onEscalate(event, context);
+      return;
+    }
+    if (event.ask.kind === "request" && event.ask.request === PANIC_REQUEST) {
+      this.crashFiber(located.fiber, provide, payload, event);
       return;
     }
     const carried = escalateValue(event.ask);
@@ -778,6 +1036,45 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     // continuation is blocked, so a watch that was going to register already has, and a mailbox still holding
     // an escalation belongs to a genuinely watch-less nursery (the flush-up relay to the run root).
     if ((this.watchesByScope.get(scope)?.size ?? 0) > 0) this.pumpWatch(scope);
+  }
+
+  /** A fiber PANICKED — the one ending a task cannot report itself. The fiber is dead at this instant (a
+   *  panic never resumes), so instead of mailboxing the raw panic: tear the fiber down exactly like a
+   *  `cancel` (drop its queued escalations, terminate its inner delegation — but with NO waiter, since
+   *  nobody asked), and report the ending as DATA — a SYNTHETIC `crashed` mailbox entry carrying the
+   *  fiber's id, its recorded name tag, and the panic's message. The entry rides the same FIFO as
+   *  ordinary entries, so it surfaces at the watch (or, watch-less, flushes up at quiescence) in arrival
+   *  order; having no child leg, its eventual answer is discarded (see `emitEntry`). The panic escalation
+   *  itself is never answered — its durable row dies with the fiber's teardown, like a cancelled fiber's
+   *  moot escalation. */
+  private crashFiber(
+    fiber: string,
+    provide: DelegationId,
+    payload: Extract<RegionPayload, { kind: "provide" }>,
+    event: Extract<ExternalEvent, { kind: "escalate" }>,
+  ): void {
+    const name = payload.names[fiber] ?? "";
+    const message = panicMessageOf(event.ask);
+    this.dropFiberMailbox(provide, event.delegation);
+    this.terminateFiber(provide, event.delegation);
+    payload.mailbox.push({
+      child: null,
+      childEscalation: null,
+      ask: {
+        kind: "request",
+        request: REGION_CRASHED_REQUEST,
+        argument: {
+          kind: "record",
+          fields: {
+            id: { kind: "string", value: fiber },
+            name: { kind: "string", value: name },
+            message: { kind: "string", value: message },
+          },
+        },
+      },
+    });
+    this.markCallDirty(provide);
+    if ((this.watchesByScope.get(payload.scope)?.size ?? 0) > 0) this.pumpWatch(payload.scope);
   }
 
   /** The answer to an escalation this reactor relayed reached it. The base descent (a relayed answer flows to
@@ -827,13 +1124,28 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       const entry = providePayload.mailbox.shift();
       if (entry === undefined) break;
       this.markCallDirty(scopeState.provide);
-      if (!this.relayAskUnder(watch, entry.child, entry.childEscalation, entry.ask)) {
+      if (!this.emitEntry(watch, entry)) {
         // The watch is winding down (a racing cancel): put the entry back and stop — its drop re-pumps the
         // scope, re-routing what it could not take to another watch or up through the provide.
         providePayload.mailbox.unshift(entry);
         break;
       }
     }
+  }
+
+  /** Re-raise one mailbox entry under `under` (a watch, or — flushing up — the provide). An ordinary entry
+   *  relays with its fiber's own leg, so the handler's answer descends to the fiber. A SYNTHETIC entry (a
+   *  runtime-authored `crashed` event — its fiber is already dead) relays under FRESH ids that name no live
+   *  delegation: the relay row still serialises the watch and re-pumps on its ack, but when the answer
+   *  descends, the base's moot-answer guard (`issuedPeerOf` finds no peer for the fake child) swallows it —
+   *  the exact behaviour a cancelled fiber's in-flight answer already gets, reused rather than re-invented. */
+  private emitEntry(under: DelegationId, entry: MailboxEntry): boolean {
+    return this.relayAskUnder(
+      under,
+      entry.child ?? newDelegationId(),
+      entry.childEscalation ?? newEscalationId(),
+      entry.ask,
+    );
   }
 
   /** Relay a watch-less nursery's mailboxed escalations UP through the provide to the enclosing program — the
@@ -848,18 +1160,19 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
     const entries = providePayload.mailbox.splice(0);
     this.markCallDirty(scopeState.provide);
     for (const entry of entries) {
-      this.relayAskUnder(scopeState.provide, entry.child, entry.childEscalation, entry.ask);
+      this.emitEntry(scopeState.provide, entry);
     }
   }
 
-  /** The nursery scope a still-running fiber's delegation belongs to, or `undefined` when the escalating
-   *  delegation is not a fiber (the provide's continuation, whose escalations relay up unchanged). A scan over
-   *  the live scopes' running sets — each is small (a nursery's in-flight fibers), and a fiber escalation is
-   *  far rarer than an ordinary event, so no reverse index is warranted. */
-  private fiberScopeOf(delegation: DelegationId): string | undefined {
+  /** The nursery scope and fiber id a still-running fiber's delegation belongs to, or `undefined` when the
+   *  escalating delegation is not a fiber (the provide's continuation, whose escalations relay up unchanged).
+   *  A scan over the live scopes' running sets — each is small (a nursery's in-flight fibers), and a fiber
+   *  escalation is far rarer than an ordinary event, so no reverse index is warranted. The fiber id rides
+   *  along because a panic's `crashed` report names it. */
+  private runningFiberOf(delegation: DelegationId): { scope: string; fiber: string } | undefined {
     for (const [scope, state] of this.scopes) {
-      for (const running of state.running.values()) {
-        if (running === delegation) return scope;
+      for (const [fiber, running] of state.running) {
+        if (running === delegation) return { scope, fiber };
       }
     }
     return undefined;
@@ -913,6 +1226,17 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       case "cancel":
         this.schedule(() => this.startCancel(delegation));
         return;
+      case "cancel_by_id":
+        // Same shape as a reloaded cancel: re-run the idempotent teardown against the reloaded running
+        // set — a re-sent terminate is a no-op, and a fiber whose teardown committed answers `unknown_fiber`
+        // (the id-addressed contract: the fiber is gone, however it went).
+        this.schedule(() => this.startCancelById(delegation));
+        return;
+      case "roster":
+        // A roster is a pure read of the live running set, so re-completing an interrupted one is as safe
+        // as re-running an interrupted fork's spawn. Scheduled, so every provide has re-registered first.
+        this.schedule(() => this.startRoster(delegation));
+        return;
       case "watch":
         // Register synchronously (like a provide's `openScope`), so the provide's scheduled `pumpWatch` this
         // reload finds the watch; the live-scope check waits for the pump (the provide may reload later).
@@ -943,9 +1267,10 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 
   /** Rebuild a reloaded provide's running-fiber set from its durable inner-call bridges: every bridge whose
    *  token carries the fiber prefix is a still-running fiber (the continuation's own bridge is filtered out by
-   *  the prefix), so a `join` arriving after a restart can wait on it. A settled fiber is NOT here — it left the
-   *  bridges for the durable `fiberBuffer`, which a `join` drains instead. Runs synchronously in `recover` (not
-   *  scheduled), so every scope is fully populated before any scheduled `startJoin` turn reads it. */
+   *  the prefix), so a `cancel` / `cancel_by_id` / `roster` arriving after a restart routes against it. A
+   *  settled fiber is NOT here — it was retired on the spot, and nothing durable remains of it. Runs
+   *  synchronously in `recover` (not scheduled), so every scope is fully populated before any scheduled
+   *  operation turn reads it. */
   private repopulateRunning(scope: string, provide: DelegationId): void {
     const scopeState = this.scopes.get(scope);
     if (scopeState === undefined) return;
@@ -983,7 +1308,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       return;
     }
     if (
-      payload.kind === "cancel" &&
+      (payload.kind === "cancel" || payload.kind === "cancel_by_id") &&
       payload.fiber !== null &&
       this.cancelWaiters.get(payload.fiber) === delegation
     ) {
@@ -1001,6 +1326,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           scopeId: payload.scope,
           continuation: payload.continuation,
           mailbox: payload.mailbox,
+          names: payload.names,
           relays: row.relays,
           innerCalls: row.innerCalls,
         });
@@ -1010,6 +1336,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           scopeId: payload.scope,
           task: payload.task,
           argument: payload.argument,
+          name: payload.name,
         });
       case "cancel":
         return encodeRegionExtension({
@@ -1017,6 +1344,14 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
           scopeId: payload.scope,
           fiberId: payload.fiber,
         });
+      case "cancel_by_id":
+        return encodeRegionExtension({
+          kind: "cancel_by_id",
+          scopeId: payload.scope,
+          fiberId: payload.fiber,
+        });
+      case "roster":
+        return encodeRegionExtension({ kind: "roster", scopeId: payload.scope });
       case "watch":
         return encodeRegionExtension({
           kind: "watch",
@@ -1039,6 +1374,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
             scope: decoded.scopeId,
             continuation: decoded.continuation,
             mailbox: decoded.mailbox,
+            names: decoded.names,
           },
           relays: decoded.relays,
           innerCalls: decoded.innerCalls,
@@ -1050,6 +1386,7 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
             scope: decoded.scopeId,
             task: decoded.task,
             argument: decoded.argument,
+            name: decoded.name,
           },
           relays: [],
           innerCalls: [],
@@ -1057,6 +1394,18 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
       case "cancel":
         return {
           payload: { kind: "cancel", scope: decoded.scopeId, fiber: decoded.fiberId },
+          relays: [],
+          innerCalls: [],
+        };
+      case "cancel_by_id":
+        return {
+          payload: { kind: "cancel_by_id", scope: decoded.scopeId, fiber: decoded.fiberId },
+          relays: [],
+          innerCalls: [],
+        };
+      case "roster":
+        return {
+          payload: { kind: "roster", scope: decoded.scopeId },
           relays: [],
           innerCalls: [],
         };
@@ -1088,15 +1437,15 @@ export class RegionReactor extends ExternalCallReactor<RegionPayload> {
 }
 
 /** One live nursery's routing state: the provide call that opened it (a `fork`'s fiber parents on this), and
- *  its RUNNING fibers by id (their inner-delegation ids — a `join` / `cancel` awaits / tears one down). A
- *  settled fiber leaves this map for the provide payload's `fiberBuffer`. */
+ *  its RUNNING fibers by id, in fork order (their inner-delegation ids — a `cancel` tears one down, a
+ *  `roster` lists them). A settled fiber simply leaves this map — nothing durable remains of it. */
 interface ScopeState {
   provide: DelegationId;
   running: Map<string, DelegationId>;
 }
 
 /** Mint the nursery handle `region.provide` hands its continuation for `scope`: an opaque record carrying only
- *  the scope identity, under the namespaced marker field. A `fork` / `join` / `watch` / `cancel` reads the
+ *  the scope identity, under the namespaced marker field. A `fork` / `watch` / `roster` / `cancel` reads the
  *  identity from here to route an operation to THIS nursery. */
 function mintNursery(scope: string): Value {
   return {
@@ -1124,6 +1473,18 @@ function fiberHandleOf(handle: Value | null): { scope: string | null; fiber: str
     scope: scope !== undefined && scope.kind === "string" ? scope.value : null,
     fiber: fiber !== undefined && fiber.kind === "string" ? fiber.value : null,
   };
+}
+
+/** The panic message a fiber died with, read from the panic ask's `{ msg }` record for the `crashed`
+ *  report. The engine authors every panic with a plain string (`panicArgument`), so anything else — a
+ *  malformed record, or a blob-backed string ref, which this synchronous path cannot materialise —
+ *  degrades to a placeholder rather than an unrenderable value in the typed event. */
+function panicMessageOf(ask: AskKind): string {
+  const argument = ask.kind === "request" ? ask.argument : null;
+  const message = argument !== null && argument.kind === "record" ? argument.fields.msg : undefined;
+  return message !== undefined && message.kind === "string"
+    ? message.value
+    : "(unrenderable panic message)";
 }
 
 /** A fresh fiber id — the inner-call token the fiber's delegation is bridged under AND the id its handle

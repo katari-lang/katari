@@ -122,7 +122,7 @@ export type AgentBlock = {
   /** The declaration's `@"..."` annotation (empty when undocumented; absent in pre-description IR).
    *  Surfaced by `get_metadata` so an AI sees the callable's description next to its schema. */
   description?: string;
-  defaults: Record<string, Literal>;
+  defaults: Record<string, DefaultValue>;
 };
 
 /** An agent / structural body: a list of operations plus the variable holding its value (if any). */
@@ -368,6 +368,16 @@ export type Literal =
   | { kind: "integer"; value: number }
   | { kind: "number"; value: number }
   | { kind: "string"; value: string };
+
+/**
+ * The constant tree an agent's parameter default carries (`AgentBlock.defaults`): a scalar `Literal`
+ * (sharing its kinds), an array, or a record. A separate union from `Literal` so runtime match
+ * patterns stay scalar-only.
+ */
+export type DefaultValue =
+  | Literal
+  | { kind: "array"; elements: DefaultValue[] }
+  | { kind: "record"; fields: Record<string, DefaultValue> };
 
 /** A runtime match pattern. The whole nested pattern is kept (no compilation to a tag cascade). */
 export type Pattern =

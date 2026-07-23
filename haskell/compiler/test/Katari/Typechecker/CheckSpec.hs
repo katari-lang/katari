@@ -1391,6 +1391,8 @@ spec = do
             <> "agent worker(input: null) -> null with ev {\n  let a = tick()\n  null\n}\n"
 
     it "the nursery usage example type-checks: provide opens it, fork spawns a child under the ceiling, watch re-emits, a handler discharges" $
+      -- The handler covers the ceiling AND `region.crashed` — watch re-emits both, so handling the
+      -- crash event is part of the region's total obligation.
       compiledCodes
         ( botEvents
             <> discordWatch
@@ -1399,6 +1401,7 @@ spec = do
             <> "  use handler {\n"
             <> "    request on_message(source: string, msg: string) -> null { null }\n"
             <> "    request needs_approval(x: string) -> boolean { true }\n"
+            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
             <> "  }\n"
             <> "  let f = region.fork(nursery = r, task = discord_watch, argument = null)\n"
             <> "  region.watch(nursery = r)\n"
@@ -1411,13 +1414,29 @@ spec = do
         ( tickWorker
             <> "agent bot() -> never with io {\n"
             <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
-            <> "  use handler { request tick() -> null { null } }\n"
+            <> "  use handler {\n"
+            <> "    request tick() -> null { null }\n"
+            <> "    request region.crashed(id: string, name: string, message: string) -> null { null }\n"
+            <> "  }\n"
             <> "  let f = region.fork(nursery = r, task = worker, argument = null)\n"
             <> "  let g = region.cancel(nursery = r, handle = f)\n"
             <> "  region.watch(nursery = r)\n"
             <> "}"
         )
         `shouldBe` []
+
+    it "rejects a watch whose surroundings do not handle region.crashed: the crash event is part of the region's total obligation (K3001)" $
+      -- `watch` re-emits `E | crashed`; a handler covering only the ceiling leaves the crash event
+      -- undischarged, so forgetting it is a compile error rather than a runtime surprise.
+      compiledCodes
+        ( tickWorker
+            <> "agent bot() -> never with io {\n"
+            <> "  let r : region.nursery[region.scope, ev] = use region.provide[region.scope, ev]\n"
+            <> "  use handler { request tick() -> null { null } }\n"
+            <> "  region.watch(nursery = r)\n"
+            <> "}"
+        )
+        `shouldContain` ["K3001"]
 
     it "rejects cancelling a fiber from a DIFFERENT region: distinct scope markers do not merge (K3001)" $
       -- Two nurseries under distinct markers `scope_a` / `scope_b`; a fiber forked in the first is passed

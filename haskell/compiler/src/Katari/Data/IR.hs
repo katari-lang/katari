@@ -140,7 +140,7 @@ data Agent = Agent
     -- the body, the runtime fills any parameter absent from the argument record with its default. This
     -- is the single defaults mechanism for every callable — user agents, data constructors, requests,
     -- externals and primitives all carry their defaults here (the leaf blocks no longer do).
-    defaults :: Map Text Literal
+    defaults :: Map Text DefaultValue
   }
   deriving stock (Eq, Show)
 
@@ -440,6 +440,14 @@ data Literal where
   LiteralString :: Text -> Literal
   deriving stock (Eq, Show)
 
+-- | The constant tree an agent's parameter default carries ('Agent.defaults'): a scalar 'Literal',
+-- an array, or a record. A separate sum from 'Literal' so runtime match patterns stay scalar-only.
+data DefaultValue where
+  DefaultLiteral :: Literal -> DefaultValue
+  DefaultArray :: List DefaultValue -> DefaultValue
+  DefaultRecord :: Map Text DefaultValue -> DefaultValue
+  deriving stock (Eq, Show)
+
 -- | A runtime match pattern. The runtime walks it against a value, binding each 'PatternVariable'
 -- position; the whole nested pattern is kept (no compilation to a tag cascade).
 data Pattern where
@@ -639,6 +647,14 @@ instance ToJSON Literal where
     LiteralInteger value -> taggedObject "integer" ["value" .= value]
     LiteralNumber value -> taggedObject "number" ["value" .= value]
     LiteralString value -> taggedObject "string" ["value" .= value]
+
+-- | A scalar encodes exactly as its 'Literal' (the TS union reuses the literal kinds), so only the
+-- container nodes carry tags of their own.
+instance ToJSON DefaultValue where
+  toJSON value = case value of
+    DefaultLiteral literal -> toJSON literal
+    DefaultArray elements -> taggedObject "array" ["elements" .= elements]
+    DefaultRecord fields -> taggedObject "record" ["fields" .= fields]
 
 instance ToJSON Pattern where
   toJSON pattern = case pattern of

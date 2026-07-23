@@ -23,6 +23,7 @@ import {
   CONTEXT_KEY,
   createAgentName,
   DESCRIPTION_KEY,
+  type DefaultValue,
   FILE_KEY,
   GENERICS_KEY,
   type GenericArgumentSchema,
@@ -140,6 +141,24 @@ export function literalToValue(literal: Literal): Value {
       return { kind: "number", value: literal.value };
     case "string":
       return { kind: "string", value: literal.value };
+  }
+}
+
+/** Lift an IR parameter-default tree (`AgentBlock.defaults`) into a runtime value: scalars via
+ *  `literalToValue`, containers built structurally. */
+export function defaultValueToValue(defaultValue: DefaultValue): Value {
+  switch (defaultValue.kind) {
+    case "array":
+      return { kind: "array", elements: defaultValue.elements.map(defaultValueToValue) };
+    case "record": {
+      const fields: Record<string, Value> = {};
+      for (const [name, field] of Object.entries(defaultValue.fields)) {
+        fields[name] = defaultValueToValue(field);
+      }
+      return { kind: "record", fields };
+    }
+    default:
+      return literalToValue(defaultValue);
   }
 }
 

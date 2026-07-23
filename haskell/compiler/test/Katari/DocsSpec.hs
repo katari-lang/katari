@@ -12,7 +12,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Compile (CompileInput (..), CompileResult (..), compile)
-import Katari.Data.AST (LiteralValue (..))
+import Katari.Data.AST (DefaultValue (..), LiteralValue (..))
 import Katari.Data.GenericKind (GenericKind (..))
 import Katari.Data.IR (SchemaInformation (..))
 import Katari.Data.JSONSchema (DescribedSchema (..), JSONSchema (..), ObjectSchema (..))
@@ -123,7 +123,7 @@ spec = describe "Katari.Docs" $ do
       declaration.private `shouldBe` Nothing
       declaration.signature `shouldBe` "request ask(question: string, hint: string ?= \"none\") -> string"
       ((\parameter -> (parameter.label, parameter.defaultValue)) <$> declaration.parameters)
-        `shouldBe` [("question", Nothing), ("hint", Just (LiteralValueString "none"))]
+        `shouldBe` [("question", Nothing), ("hint", Just (DefaultValueLiteral (LiteralValueString "none")))]
       ((.rendered) <$> declaration.returnType) `shouldBe` Just "string"
 
   describe "the other declaration kinds" $ do

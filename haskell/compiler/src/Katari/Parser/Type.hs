@@ -7,6 +7,8 @@
 module Katari.Parser.Type where
 
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import Data.Text qualified as Text
 import GHC.List (List)
 import Katari.Data.AST
 import Katari.Data.GenericKind (GenericKind (..))
@@ -287,9 +289,55 @@ parameterSignature = do
         sourceSpan = mergeSpans startSpan endSpan
       }
 
--- | @?= literal@ — a parameter default (a literal value, not an arbitrary expression).
+-- | @?= value@ — a parameter default (a constant literal tree, not an arbitrary expression).
 parameterDefault :: Parser ParameterDefault
 parameterDefault = do
   defaultSpan <- symbol "?="
-  value <- signedLiteralValue
+  value <- defaultValueTree
   pure ParameterDefault {value = value.value, sourceSpan = mergeSpans defaultSpan value.sourceSpan}
+
+-- | A default's value: a scalar literal, an array @[...]@ of trees, or a record @{label = ..., ...}@
+-- of trees (mirroring the record-literal expression's key forms). Deliberately data, not
+-- expressions: the tree is carried into the IR as a constant the runtime fills without running code.
+defaultValueTree :: Parser (Located DefaultValue)
+defaultValueTree =
+  label "default value" $
+    choice
+      [ fmap DefaultValueLiteral <$> signedLiteralValue,
+        arrayDefaultValue,
+        recordDefaultValue
+      ]
+
+-- | @[tree, ...]@ — an array default.
+arrayDefaultValue :: Parser (Located DefaultValue)
+arrayDefaultValue = do
+  (elements, sourceSpan) <- brackets (commaSeparated defaultValueTree)
+  pure Located {value = DefaultValueArray ((.value) <$> elements), sourceSpan = sourceSpan}
+
+-- | @{label = tree, ...}@ — a record default. Duplicate keys fail here (not later): a default never
+-- reaches the identifier phase's record-literal check (K2003), and silently dropping an entry would
+-- change the filled value.
+recordDefaultValue :: Parser (Located DefaultValue)
+recordDefaultValue = do
+  (entries, sourceSpan) <- bracesMultiline (commaSeparated recordDefaultEntry)
+  case firstDuplicateKey (fst <$> entries) of
+    Just duplicate -> fail ("duplicate record default field \"" <> Text.unpack duplicate <> "\"")
+    Nothing -> pure Located {value = DefaultValueRecord entries, sourceSpan = sourceSpan}
+
+-- | One record-default entry. A key is a bare identifier (@label = v@) or a quoted string
+-- (@"Content-Type" = v@), exactly the two key forms a record literal expression accepts.
+recordDefaultEntry :: Parser (Text, DefaultValue)
+recordDefaultEntry = do
+  name <- identifier <|> stringLiteral
+  assignEquals
+  value <- defaultValueTree
+  pure (name.value, value.value)
+
+-- | The first key appearing twice, scanning left to right. Record defaults hold a handful of
+-- fields, so the quadratic membership test costs nothing.
+firstDuplicateKey :: List Text -> Maybe Text
+firstDuplicateKey = go []
+  where
+    go seen names = case names of
+      [] -> Nothing
+      name : rest -> if name `elem` seen then Just name else go (name : seen) rest

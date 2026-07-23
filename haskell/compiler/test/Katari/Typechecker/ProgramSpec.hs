@@ -562,6 +562,30 @@ spec = describe "checkProgram (value-scheme seeding)" $ do
   it "still rejects omitting a required external-agent parameter (K3001)" $
     typeErrorCodes [("test", "external agent ext(value: integer, flag: integer) -> integer\nagent run() -> integer { ext(value = 1) }")] `shouldContain` ["K3001"]
 
+  -- Container defaults: a default is a constant literal tree, checked against the declared type the
+  -- same way a literal expression would be (an empty array is a closed sequence, so it subtypes any
+  -- `array[T]`; a record default is a closed object).
+  it "accepts an empty-array default on an array parameter" $
+    typeErrorCodes [("test", "agent f(items: array[string] ?= []) -> integer { 0 }")] `shouldBe` []
+
+  it "accepts a populated array default whose elements fit the element type" $
+    typeErrorCodes [("test", "agent f(items: array[integer] ?= [1, 2]) -> integer { 0 }")] `shouldBe` []
+
+  it "rejects an array default whose element type mismatches (K3001)" $
+    typeErrorCodes [("test", "agent f(items: array[string] ?= [1]) -> integer { 0 }")] `shouldContain` ["K3001"]
+
+  it "accepts a record default matching an object parameter and keeps the field readable" $
+    typeErrorCodes [("test", "agent f(point: {x: integer} ?= {x = 1}) -> integer { point.x }")] `shouldBe` []
+
+  it "rejects a record default missing a required field (K3001)" $
+    typeErrorCodes [("test", "agent f(point: {x: integer} ?= {}) -> integer { point.x }")] `shouldContain` ["K3001"]
+
+  it "accepts a nested container default and lets the caller omit the parameter" $
+    typeErrorCodes [("test", "agent f(rows: array[{name: string}] ?= [{name = \"a\"}]) -> integer { 0 }\nagent run() -> integer { f() }")] `shouldBe` []
+
+  it "accepts an empty-array default on a data-constructor parameter" $
+    typeErrorCodes [("test", "data box(items: array[integer] ?= [])\nagent make() -> box { box() }")] `shouldBe` []
+
   -- `with io` and `with pure` are effect-row keywords (like `all` / `never`), so an agent that does io
   -- can spell that row explicitly, and a pure agent can pin its emptiness without the `throw[never]`
   -- workaround.

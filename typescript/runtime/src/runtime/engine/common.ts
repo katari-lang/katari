@@ -60,6 +60,18 @@ export const PANIC_REQUEST = "prelude.panic" as QualifiedName;
  *  `tool` value into this form, so the acceptance surface is the single home of dynamic dispatch. */
 export const CALL_AGENT_NAME = "prelude.reflection.call_agent" as QualifiedName;
 
+/** The field a region nursery handle carries its scope identity under — a namespaced marker key (disjoint
+ *  from any user-authored record key, which never lives in the `$katari_` namespace), so the handle reads
+ *  as a runtime value, not user data. It lives here, with the other cross-layer names, because both sides
+ *  of the layering read the region markers: the region reactor (actor) mints the handles, and the
+ *  `fiber_id` prim (engine) reads a handle — and the engine must not import actor code. */
+export const NURSERY_SCOPE_FIELD = "$katari_region_scope";
+
+/** The field a region fiber handle carries its runtime-minted fiber id under (alongside the scope) — the
+ *  same namespaced-marker convention as `NURSERY_SCOPE_FIELD`, and the same cross-layer home: the region
+ *  reactor routes a `cancel` by it, and the `fiber_id` prim reads it as the fiber's public id. */
+export const NURSERY_FIBER_FIELD = "$katari_region_fiber";
+
 /** The `{ msg }` record a `panic` request carries. Shared by the engine's thread-level panic and the
  *  reactor-level panic (an ffi error, an unresolvable delegate target). */
 export function panicArgument(message: string): Value {

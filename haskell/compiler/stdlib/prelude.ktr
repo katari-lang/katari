@@ -3,6 +3,14 @@
 //
 // Generic bounds give operators precise typing: an arithmetic operator over `T extends number`
 // preserves `integer` when both operands are integers, and widens to `number` otherwise.
+//
+// PRIMARY-ARGUMENT NAMING — the one rule, so a caller never memorizes it per module: the argument an
+// agent operates ON is named `value` when it is a SCALAR the agent reads as a whole (a string, a
+// number, a JSON value being rendered — `string.trim(value = ...)`, `math.floor(value = ...)`,
+// `json.stringify(value = ...)`), and `target` when it is a STRUCTURE the agent reaches INTO (an
+// array, a record, a store subtree, a JSON tree being navigated — `array.length(target = ...)`,
+// `record.get(target = ..., key = ...)`, `json.field(target = ..., key = ...)`). New stdlib and
+// package agents follow the same split.
 
 // Arithmetic -------------------------------------------------------------------------------------
 

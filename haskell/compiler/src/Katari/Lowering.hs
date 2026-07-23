@@ -285,6 +285,14 @@ lowerLiteralValue = \case
   AST.LiteralValueBoolean value -> LiteralBoolean value
   AST.LiteralValueNull -> LiteralNull
 
+-- | Lower a parameter default's constant tree. The parser already rejected duplicate record keys, so
+-- keying the field map drops nothing.
+lowerDefaultValue :: AST.DefaultValue -> DefaultValue
+lowerDefaultValue = \case
+  AST.DefaultValueLiteral literal -> DefaultLiteral (lowerLiteralValue literal)
+  AST.DefaultValueArray elements -> DefaultArray (lowerDefaultValue <$> elements)
+  AST.DefaultValueRecord entries -> DefaultRecord (Map.fromList [(name, lowerDefaultValue entryValue) | (name, entryValue) <- entries])
+
 ---------------------------------------------------------------------------------------------------
 -- Schema building (pure over the precomputed context)
 ---------------------------------------------------------------------------------------------------
@@ -555,7 +563,7 @@ lowerSignatureCallable reference name annotation parameters makeLeaf = do
   inputVariable <- freshVariableId
   let defaults =
         Map.fromList
-          [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, Just parameterDefault <- [parameter.defaultValue]]
+          [(parameter.name, lowerDefaultValue parameterDefault.value) | parameter <- parameters, Just parameterDefault <- [parameter.defaultValue]]
   leafBlock <- freshBlockId
   recordBlock leafBlock (makeLeaf inputVariable) (Map.singleton "parameter" inputVariable) (Just (name <> ".leaf"))
   context <- asks (.context)
@@ -597,7 +605,7 @@ buildAgent catchesReturn agentBlock name description genericBindings functionTyp
   -- mechanism the signature callables use — so the body simply binds each parameter.
   let defaults =
         Map.fromList
-          [(parameter.name, lowerLiteralValue parameterDefault.value) | parameter <- parameters, AST.BindVariable _ _ (Just parameterDefault) <- [parameter.binder]]
+          [(parameter.name, lowerDefaultValue parameterDefault.value) | parameter <- parameters, AST.BindVariable _ _ (Just parameterDefault) <- [parameter.binder]]
       schema = describeInput [(parameter.name, parameter.annotation) | parameter <- parameters] (buildSchemaInformation context genericBindings functionType)
   recordBlock agentBlock (BlockAgent Agent {body = bodyBlock, schema = schema, description = description, defaults = defaults}) mempty (Just name)
 

@@ -157,6 +157,16 @@ external agent provide_all[effect Scope, R, effect E](
   @"The scope body (bound by `use`): receives one toolbox per connection, in input order." continuation: agent (value: array[toolbox[Scope]]) -> R with E | Scope,
 ) -> R with E from "mcp"
 
+@"Flatten a `provide_all` result to one tool array — the `array.map` + `record.values` +
+`array.flatten` composition every AI loop's tool list respelled, packaged so the common case is one
+call: `array.concat(left = my_tools, right = mcp.all_tools(boxes = dynamic))`."
+agent all_tools[effect Scope](@"The toolboxes `provide_all` handed the continuation." boxes: array[toolbox[Scope]]) -> array[tool[Scope]] {
+  agent tools_of(value: toolbox[Scope]) -> array[tool[Scope]] {
+    record.values(target = value)
+  }
+  array.flatten(target = array.map(target = boxes, transform = tools_of))
+}
+
 @"Call one tool on an MCP server directly — the static counterpart of `provide`, with no listing and no
 minted agent value. The seam the binding modules `katari mcp pull` generates are built on: @tool@ is the
 server-declared tool name, @arguments@ its arguments object as a plain value tree (records / arrays /

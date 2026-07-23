@@ -13,7 +13,7 @@
 // materialises through the context's blob store. Privacy is the prim layer's monotonic rule: any
 // private part of the argument marks the whole result private, so these walks keep content.
 
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import {
   type Block,
   createAgentName,
@@ -35,6 +35,7 @@ import {
   renderConformFailures,
   typeSubstitutionOf,
 } from "../value/validation.js";
+import { NURSERY_FIBER_FIELD } from "./common.js";
 import type { PrimContext, PrimImplementation } from "./context.js";
 import { blobStoreStringReader, literalLift, type StringReader } from "./json-value.js";
 import {
@@ -440,6 +441,14 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     const text = await readStringField(argument, "text", context);
     return { kind: "string", value: createHash("sha256").update(text, "utf8").digest("hex") };
   },
+  "prelude.crypto.hmac_sha256": async (argument, context) => {
+    // The keyed, irreversible tag. Deterministic per (key, text), so a replay recomputes the same
+    // tag. Its public result is the one declassification exception to the engine's monotonic taint —
+    // see DECLASSIFYING_PRIMITIVES below and the module contract in `prelude/crypto.ktr`.
+    const key = await readStringField(argument, "key", context);
+    const text = await readStringField(argument, "text", context);
+    return { kind: "string", value: createHmac("sha256", key).update(text, "utf8").digest("hex") };
+  },
 
   // ─── prelude.files ──────────────────────────────────────────────────────────────────────────
   // A `file` value is a slim blob handle (identity only); content comes from the byte store and
@@ -491,6 +500,23 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return NULL_VALUE;
   },
 
+  // ─── prelude.region ─────────────────────────────────────────────────────────────────────────
+  "prelude.region.fiber_id": (argument) => {
+    // A pure read off the handle `region.fork` minted: the runtime-minted id rides the namespaced
+    // marker field, so no reactor round-trip is needed. A value without the marker is not a fiber
+    // handle — the checker's scope gating prevents one from reaching here, so this is an
+    // engine-invariant break: panic (a plain error), the same backstop as the reactor's
+    // forged-handle refusals.
+    const handle = field(argument, "handle");
+    const fiber = handle.kind === "record" ? handle.fields[NURSERY_FIBER_FIELD] : undefined;
+    if (fiber === undefined || fiber.kind !== "string") {
+      throw new Error(
+        "fiber_id: the handle carries no runtime-minted fiber id (not a fiber handle)",
+      );
+    }
+    return { kind: "string", value: fiber.value };
+  },
+
   // ─── AI interop ─────────────────────────────────────────────────────────────────────────────
   "prelude.reflection.get_metadata": async (argument, context) => {
     const metadata = await callableMetadata(field(argument, "value"), context.ir);
@@ -517,6 +543,15 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     throw new Error("call_agent must be dispatched at the delegation boundary (engine bug)");
   },
 };
+
+/** The prims whose results the engine's monotonic taint deliberately does NOT mark private. A prim
+ *  earns membership only when its result reveals nothing about any private input BY CONSTRUCTION —
+ *  irreversibility as declassification. `hmac_sha256` is the charter member: an HMAC tag is
+ *  computationally independent of its key, which is the entire point of asking for a keyed hash
+ *  (a public pseudonym derived from a secret). Anything short of that bar stays tainted. */
+export const DECLASSIFYING_PRIMITIVES: ReadonlySet<string> = new Set([
+  "prelude.crypto.hmac_sha256",
+]);
 
 function sortedKeys(fields: Record<string, Value>): string[] {
   return Object.keys(fields).sort();

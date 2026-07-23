@@ -34,6 +34,14 @@ primitive agent replace(value: string, search: string, replacement: string) -> s
 @"The string with leading and trailing whitespace removed."
 primitive agent trim(value: string) -> string
 
+@"Whether the string is BLANK — empty, or whitespace only. This is `trim(value = ...) == \"\"`
+spelled once: a bare `== \"\"` check misses the whitespace-only case, and a model- or user-supplied
+optional argument is as often a lone space as a true empty string, so 'did the caller give me
+anything' should read through this."
+agent is_blank(value: string) -> boolean {
+  trim(value = value) == ""
+}
+
 @"The string uppercased (Unicode default casing, no locale)."
 primitive agent to_upper(value: string) -> string
 

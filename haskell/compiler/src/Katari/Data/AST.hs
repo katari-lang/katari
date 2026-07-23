@@ -178,9 +178,18 @@ data LiteralValue where
   LiteralValueNull :: LiteralValue
   deriving stock (Eq, Ord, Show)
 
--- | @?= literal@
+-- | The constant tree a parameter default may carry: a scalar literal, an array @[...]@ of trees,
+-- or a record @{label = ..., ...}@ of trees. A separate sum from 'LiteralValue' so literal patterns
+-- stay scalar-only — a default is data the runtime fills, never something matched against.
+data DefaultValue where
+  DefaultValueLiteral :: LiteralValue -> DefaultValue
+  DefaultValueArray :: List DefaultValue -> DefaultValue
+  DefaultValueRecord :: List (Text, DefaultValue) -> DefaultValue
+  deriving stock (Eq, Show)
+
+-- | @?= value@ — a parameter default: a constant literal tree, not an arbitrary expression.
 data ParameterDefault = ParameterDefault
-  { value :: LiteralValue,
+  { value :: DefaultValue,
     sourceSpan :: SourceSpan
   }
   deriving stock (Eq, Show)

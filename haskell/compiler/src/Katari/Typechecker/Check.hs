@@ -3066,12 +3066,24 @@ elaborateAndNormalizeEffect expression = do
   semantic <- runElaborator (elaborateAsEffect expression)
   runNormalizer (sourceSpanOf expression) (normalizeEffect semantic)
 
--- | Check a parameter / pattern default (always a literal) against the parameter's declared type.
+-- | Check a parameter / pattern default (always a constant literal tree) against the parameter's
+-- declared type.
 checkParameterDefault :: NormalizedType -> Maybe ParameterDefault -> Checker ()
 checkParameterDefault declaredType = \case
   Nothing -> pure ()
   Just parameterDefault ->
-    runNormalizer parameterDefault.sourceSpan (subtype (synthLiteralValue parameterDefault.value) declaredType)
+    runNormalizer parameterDefault.sourceSpan (subtype (synthDefaultValue parameterDefault.value) declaredType)
+
+-- | The type a default's constant tree synthesizes: scalars via 'synthLiteralValue'; an array as a
+-- closed sequence (rest @never@, so @[]@ subtypes any @array[T]@ exactly like a tuple expression); a
+-- record as a closed object (rest @never@, like a record literal expression).
+synthDefaultValue :: DefaultValue -> NormalizedType
+synthDefaultValue value = case value of
+  DefaultValueLiteral literal -> synthLiteralValue literal
+  DefaultValueArray elements ->
+    layeredOf neverLayer {sequenceLayer = Just NormalizedSequence {items = synthDefaultValue <$> elements, rest = bottomType}}
+  DefaultValueRecord entries ->
+    namedObjectTypeWithRest bottomType [(name, synthDefaultValue entryValue) | (name, entryValue) <- entries]
 
 privateAttribute :: NormalizedAttribute
 privateAttribute = NormalizedAttribute {private = True, generic = mempty}

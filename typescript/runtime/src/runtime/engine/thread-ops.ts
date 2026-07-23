@@ -10,7 +10,7 @@ import type { Block } from "@katari-lang/types";
 import { isUserFacingRequest } from "../escalation-filter.js";
 import type { AskKind, ModifierMap, ReactorName } from "../event/types.js";
 import type { AskId, CallId, ThreadId } from "../ids.js";
-import { literalToValue } from "../value/codec.js";
+import { defaultValueToValue } from "../value/codec.js";
 import { isTainted, markPrivate } from "../value/privacy.js";
 import type { GenericSubstitution, Value } from "../value/types.js";
 import {
@@ -26,6 +26,7 @@ import {
   terminateInstance,
 } from "./common.js";
 import type { StepContext } from "./context.js";
+import { DECLASSIFYING_PRIMITIVES } from "./interop-prims.js";
 import { runSequence } from "./operations.js";
 import { matchPattern } from "./pattern.js";
 import { readVariable, writeVariable } from "./scope.js";
@@ -425,9 +426,9 @@ function applyDefaults(
   const defaults = agentBlock.defaults;
   if (Object.keys(defaults).length === 0) return record;
   const fields = { ...record.fields };
-  for (const [name, literal] of Object.entries(defaults)) {
+  for (const [name, defaultValue] of Object.entries(defaults)) {
     if (!(name in fields)) {
-      fields[name] = literalToValue(literal);
+      fields[name] = defaultValueToValue(defaultValue);
     }
   }
   return { kind: "record", fields };
@@ -583,7 +584,10 @@ async function createPrimitive(ctx: StepContext, thread: PrimitiveThread): Promi
   // Taint is monotonic through a pure primitive: if any part of the argument is private, so is the result
   // (`concat`-ing a secret yields a secret; comparing one leaks a bit). A source prim (env / secret) marks
   // its own result private regardless; `markPrivate` is idempotent, so this only ever adds the marker.
-  completeThread(ctx, thread, isTainted(argument) ? markPrivate(value) : value);
+  // The one exception: a DECLASSIFYING prim (an irreversible keyed hash), whose result reveals nothing
+  // about its private input by construction — its contract, not its inputs, decides its privacy.
+  const tainted = isTainted(argument) && !DECLASSIFYING_PRIMITIVES.has(name);
+  completeThread(ctx, thread, tainted ? markPrivate(value) : value);
 }
 
 function createConstruct(ctx: StepContext, thread: Thread): void {

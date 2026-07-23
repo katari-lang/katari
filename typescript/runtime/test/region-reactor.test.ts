@@ -591,6 +591,73 @@ function watchIr(bodies?: {
   };
 }
 
+/** Augment a module with the registry-facing region agents the roster / cancel-by-id / crashed tests use:
+ *  the `prelude.region.roster` and `prelude.region.cancel_by_id` external wrappers, the `prelude.array.range`
+ *  prim (a deterministic PANIC source — a range over the materialisation ceiling throws a plain error), and
+ *  a `panicker` task that trips it, so a fiber's crash carries a knowable message. Blocks live at 50+ so
+ *  they never collide with `forkIr` / `watchIr` or the per-test appended blocks. */
+function withRegistryAgents(ir: IRModule): IRModule {
+  ir.blocks[50] = {
+    block: { kind: "agent", body: 51, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[51] = {
+    block: { kind: "external", key: "prelude.region.roster", input: 500, reactor: "region" },
+    parameters: { parameter: 500 },
+  };
+  ir.blocks[52] = {
+    block: { kind: "agent", body: 53, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[53] = {
+    block: { kind: "external", key: "prelude.region.cancel_by_id", input: 520, reactor: "region" },
+    parameters: { parameter: 520 },
+  };
+  ir.blocks[54] = {
+    block: { kind: "agent", body: 55, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[55] = {
+    block: { kind: "primitive", name: "prelude.array.range", input: 540 },
+    parameters: { parameter: 540 },
+  };
+  ir.blocks[56] = {
+    block: { kind: "agent", body: 57, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+    parameters: {},
+  };
+  ir.blocks[57] = {
+    block: {
+      kind: "sequence",
+      result: null,
+      operations: [
+        { kind: "loadLiteral", output: 561, value: { kind: "integer", value: 0 } },
+        { kind: "loadLiteral", output: 562, value: { kind: "integer", value: 20000000 } },
+        {
+          kind: "makeRecord",
+          entries: [
+            ["start", 561],
+            ["end", 562],
+          ],
+          output: 563,
+        },
+        {
+          kind: "delegate",
+          target: { kind: "name", name: createAgentName("prelude.array.range") },
+          argument: 563,
+          output: 564,
+        },
+        { kind: "exit", target: 56, value: 564 },
+      ],
+    },
+    parameters: { parameter: 560 },
+  };
+  ir.entries[createAgentName("prelude.region.roster")] = { block: 50, private: false };
+  ir.entries[createAgentName("prelude.region.cancel_by_id")] = { block: 52, private: false };
+  ir.entries[createAgentName("prelude.array.range")] = { block: 54, private: false };
+  ir.entries[createAgentName("panicker")] = { block: 56, private: false };
+  return ir;
+}
+
 describe("region reactor", () => {
   test("provide hands its continuation a nursery token carrying the scope identity, and settles with the continuation's result", async () => {
     // The continuation returns the nursery handle it received, so the run resolves with it — proving both
@@ -1626,5 +1693,542 @@ describe("region reactor", () => {
       await actorTwo.answerEscalation(report.escalation, { kind: "null" });
     }
     expect(values).toEqual(new Set(["aGVsbG8=", "d29ybGQ="]));
+  });
+
+  test("roster lists the RUNNING fibers as fiber_info(id, name) data values and omits a settled one", async () => {
+    // The continuation forks TWO named fibers — "alpha" (blocks on `fiber_ask`, so it stays running) and
+    // "beta" (the default canceller body, which settles at once) — holds until beta is retired, then returns
+    // the roster. The run resolves with an array of ONE `fiber_info` data value: alpha's, carrying its
+    // runtime-minted id and its name tag; beta — settled — is simply absent (the runtime's liveness is the
+    // only copy, so there is nothing stale to retire).
+    const persistence = new StoringPersistence();
+    const continuation: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "a-arg" } },
+      { kind: "loadLiteral", output: 71, value: { kind: "string", value: "alpha" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+          ["name", 71],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "loadAgent", output: 72, name: createAgentName("canceller") },
+      { kind: "loadLiteral", output: 73, value: { kind: "string", value: "beta" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 72],
+          ["argument", 63],
+          ["name", 73],
+        ],
+        output: 74,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 74,
+        output: 75,
+      },
+      // Hold, so the test can wait for beta's retirement before the roster reads the running set.
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 68 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.roster") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "exit", target: 6, value: 69 },
+    ];
+    const actor = makeActor(
+      withRegistryAgents(forkIr({ continuation, task: askingTask })),
+      persistence,
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    // Alpha is provably running (its fiber_ask is up) and the continuation holds on ask_value.
+    const hold = await waitUntil(() => {
+      const fiber = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_ask"));
+      const gate = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("ask_value"));
+      return fiber !== undefined && gate !== undefined ? gate : undefined;
+    });
+    // Beta retired: the provide's bridges shrink to continuation + alpha, and the durable name map holds
+    // exactly alpha's tag (beta's was cleaned with its running entry).
+    const before = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined &&
+        provide.innerCalls.length === 2 &&
+        Object.values(provide.names).length === 1
+        ? provide
+        : undefined;
+    });
+    expect(Object.values(before.names)).toEqual(["alpha"]);
+
+    await actor.answerEscalation(hold.escalation, { kind: "null" });
+    const value = await result;
+    if (value.kind !== "array") throw new Error("expected the roster array");
+    expect(value.elements).toHaveLength(1);
+    const info = value.elements[0];
+    if (info?.kind !== "record") throw new Error("expected a fiber_info record");
+    // The decoded completion is a DATA value: the constructor tag is what a Katari
+    // `match ... fiber_info(...)` dispatches on, and the fields are what its arms bind.
+    expect(info.ctor).toBe(createAgentName("prelude.region.fiber_info"));
+    expect(info.fields.name).toEqual({ kind: "string", value: "alpha" });
+    const id = info.fields.id;
+    if (id?.kind !== "string") throw new Error("fiber_info must carry a string id");
+    expect(id.value).toMatch(/^fiber:/);
+  });
+
+  test("cancel_by_id tears a running fiber down and answers cancelled(id)", async () => {
+    // The continuation forks a named fiber, reads the id OFF the returned handle (the same field
+    // `fiber_id` reads), holds until the fiber is provably running, then cancels by that id. The
+    // `cancelled(id)` answer settles only when the teardown confirms, so the resolved run proves the
+    // fiber is gone — and nothing leaks behind it.
+    const persistence = new StoringPersistence();
+    const continuation: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("task") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "w-arg" } },
+      { kind: "loadLiteral", output: 71, value: { kind: "string", value: "worker" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+          ["name", 71],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "getField", source: 65, field: "$katari_region_fiber", output: 72 },
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["id", 72],
+        ],
+        output: 68,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel_by_id") },
+        argument: 68,
+        output: 69,
+      },
+      { kind: "exit", target: 6, value: 69 },
+    ];
+    const actor = makeActor(
+      withRegistryAgents(forkIr({ continuation, task: askingTask })),
+      persistence,
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const gate = await waitUntil(() => {
+      const fiber = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_ask"));
+      const hold = actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("ask_value"));
+      return fiber !== undefined && hold !== undefined ? hold : undefined;
+    });
+    await actor.answerEscalation(gate.escalation, { kind: "null" });
+
+    const value = await result;
+    if (value.kind !== "record") throw new Error("expected a cancel_outcome data value");
+    expect(value.ctor).toBe(createAgentName("prelude.region.cancelled"));
+    const id = value.fields.id;
+    if (id?.kind !== "string") throw new Error("cancelled must carry a string id");
+    expect(id.value).toMatch(/^fiber:/);
+    await waitUntil(() => (persistence.instanceCount() === 0 ? true : undefined));
+    expect(persistence.scopeCount()).toBe(0);
+    expect(persistence.envelopeCount("region")).toBe(0);
+  });
+
+  test("cancel_by_id with an id matching no running fiber answers unknown_fiber(id), not an error", async () => {
+    // Ids are data (often model-supplied), so a stale / made-up one is an anticipated miss the caller
+    // renders — unlike a forged NURSERY handle, which stays a panic.
+    const continuation: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadLiteral", output: 62, value: { kind: "string", value: "fiber:missing" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["id", 62],
+        ],
+        output: 63,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.cancel_by_id") },
+        argument: 63,
+        output: 64,
+      },
+      { kind: "exit", target: 6, value: 64 },
+    ];
+    const actor = makeActor(withRegistryAgents(forkIr({ continuation, task: returningTask })));
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const value = await result;
+    if (value.kind !== "record") throw new Error("expected a cancel_outcome data value");
+    expect(value.ctor).toBe(createAgentName("prelude.region.unknown_fiber"));
+    expect(value.fields.id).toEqual({ kind: "string", value: "fiber:missing" });
+  });
+
+  test("a fiber's panic arrives at the watch as the typed crashed event, and the nursery keeps serving", async () => {
+    // The handle body forks a steady worker AND a named `panicker` fiber (its range-over-the-ceiling call
+    // panics), then watches. The panic never unwinds the watch context: the runtime tears the dead fiber
+    // down and re-emits `crashed(id, name, message)` at the watch, where a handler for it — installed next
+    // to `on_message` — reports the record up as `crash_seen` and answers null. The null answer has no
+    // fiber to descend to (swallowed), and the steady worker's own request still round-trips afterwards —
+    // the nursery kept serving.
+    const persistence = new StoringPersistence();
+    const handleBody: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "loadAgent", output: 156, name: createAgentName("panicker") },
+      { kind: "loadLiteral", output: 157, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 148, value: { kind: "string", value: "boom" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 156],
+          ["argument", 157],
+          ["name", 148],
+        ],
+        output: 149,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 149,
+        output: 147,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    const ir = watchIr({ handleBody });
+    // Install a `crashed` handler next to the default `on_message` one: report the crash record up as
+    // `crash_seen` (the test's observable), then answer the crashed event with null.
+    const handleBlock = ir.blocks[14]?.block;
+    if (handleBlock === undefined || handleBlock.kind !== "handle") {
+      throw new Error("watchIr must place the handle at block 14");
+    }
+    handleBlock.handlers.push({ request: createAgentName("prelude.region.crashed"), body: 20 });
+    ir.blocks[20] = {
+      block: {
+        kind: "sequence",
+        result: null,
+        operations: [
+          {
+            kind: "delegate",
+            target: { kind: "name", name: createAgentName("crash_seen") },
+            argument: 200,
+            output: 201,
+          },
+          { kind: "loadLiteral", output: 202, value: { kind: "null" } },
+          { kind: "continue", target: 14, value: 202, modifiers: [] },
+        ],
+      },
+      parameters: { parameter: 200 },
+    };
+    ir.blocks[22] = {
+      block: { kind: "agent", body: 23, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[23] = {
+      block: { kind: "request", name: createAgentName("crash_seen"), input: 220 },
+      parameters: { parameter: 220 },
+    };
+    ir.entries[createAgentName("crash_seen")] = { block: 22, private: false };
+
+    const actor = makeActor(withRegistryAgents(ir), persistence);
+    actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const seen = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("crash_seen")),
+    );
+    const argument = seen.argument;
+    if (argument?.kind !== "record") throw new Error("crash_seen must carry the crashed record");
+    expect(argument.fields.name).toEqual({ kind: "string", value: "boom" });
+    const id = argument.fields.id;
+    if (id?.kind !== "string") throw new Error("crashed must carry a string id");
+    expect(id.value).toMatch(/^fiber:/);
+    const message = argument.fields.message;
+    if (message?.kind !== "string") throw new Error("crashed must carry a string message");
+    expect(message.value).toContain("range(0, 20000000)");
+    // The dead fiber is fully retired while the nursery lives on: the provide's bridges shrink back to
+    // the continuation + the steady worker.
+    await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.innerCalls.length === 2 ? true : undefined;
+    });
+
+    // Answer the report; the handler's null answer to the crashed event itself is swallowed (no fiber to
+    // descend to), freeing the watch — so the steady worker's on_message still round-trips end-to-end.
+    await actor.answerEscalation(seen.escalation, { kind: "null" });
+    const report = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "answered" });
+    await actor.answerEscalation(report.escalation, { kind: "null" });
+  });
+
+  test("a watch-less nursery's crashed event flushes up at quiescence and the run survives its answer", async () => {
+    // No watch anywhere: the synthetic crashed entry flushes UP through the provide like any mailbox
+    // entry, surfacing at the run root as the usual unhandled request. Answering it is swallowed (the
+    // fiber is long dead), and the run then completes normally — the crash cost the region nothing but
+    // the fiber itself.
+    const persistence = new StoringPersistence();
+    const continuation: Operation[] = [
+      { kind: "getField", source: 60, field: "value", output: 61 },
+      { kind: "loadAgent", output: 62, name: createAgentName("panicker") },
+      { kind: "loadLiteral", output: 63, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 71, value: { kind: "string", value: "boom" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 62],
+          ["argument", 63],
+          ["name", 71],
+        ],
+        output: 64,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 64,
+        output: 65,
+      },
+      { kind: "makeRecord", entries: [], output: 66 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("ask_value") },
+        argument: 66,
+        output: 67,
+      },
+      { kind: "exit", target: 6, value: 67 },
+    ];
+    const actor = makeActor(
+      withRegistryAgents(forkIr({ continuation, task: returningTask })),
+      persistence,
+    );
+    const { result } = actor.startRun(createAgentName("main"), SNAPSHOT, null);
+
+    const crashed = await waitUntil(() =>
+      actor
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("prelude.region.crashed")),
+    );
+    const argument = crashed.argument;
+    if (argument?.kind !== "record") throw new Error("crashed must carry its record");
+    expect(argument.fields.name).toEqual({ kind: "string", value: "boom" });
+    const message = argument.fields.message;
+    if (message?.kind !== "string") throw new Error("crashed must carry a string message");
+    expect(message.value).toContain("range(0, 20000000)");
+
+    await actor.answerEscalation(crashed.escalation, { kind: "null" });
+    const gate = await waitUntil(() =>
+      actor.listOpenEscalations().find((open) => open.request === createAgentName("ask_value")),
+    );
+    await actor.answerEscalation(gate.escalation, { kind: "string", value: "done" });
+    await expect(result).resolves.toEqual({ kind: "string", value: "done" });
+  });
+
+  test("fiber names and a pending synthetic crashed entry survive a restart", async () => {
+    // Pre-restart shape: the keeper worker's on_message is held open at the handler (a `gate` hold keeps
+    // the serial watch BUSY), and the handler has forked a `panicker` fiber whose crash therefore sits in
+    // the durable mailbox as a synthetic entry — while the keeper's name tag sits in the durable `names`
+    // map (the crashed fiber's tag was cleaned with its running entry). A fresh actor over the same rows
+    // must reload both, and the re-emitted crashed event must still be answerable (and swallowed) after
+    // the restart.
+    const persistence = new StoringPersistence();
+    const handleBody: Operation[] = [
+      { kind: "loadAgent", output: 150, name: createAgentName("worker") },
+      { kind: "loadLiteral", output: 151, value: { kind: "string", value: "arg" } },
+      { kind: "loadLiteral", output: 149, value: { kind: "string", value: "keeper" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 150],
+          ["argument", 151],
+          ["name", 149],
+        ],
+        output: 152,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 152,
+        output: 153,
+      },
+      { kind: "makeRecord", entries: [["nursery", 61]], output: 154 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.watch") },
+        argument: 154,
+        output: 155,
+      },
+      { kind: "exit", target: 14, value: 155 },
+    ];
+    // The on_message handler forks the panicker FIRST (deterministically while the watch is busy with the
+    // on_message it is servicing), then holds on `gate` until the test releases it.
+    const handler: Operation[] = [
+      { kind: "loadAgent", output: 162, name: createAgentName("panicker") },
+      { kind: "loadLiteral", output: 163, value: { kind: "string", value: "x" } },
+      { kind: "loadLiteral", output: 168, value: { kind: "string", value: "boom" } },
+      {
+        kind: "makeRecord",
+        entries: [
+          ["nursery", 61],
+          ["task", 162],
+          ["argument", 163],
+          ["name", 168],
+        ],
+        output: 164,
+      },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("prelude.region.fork") },
+        argument: 164,
+        output: 165,
+      },
+      { kind: "makeRecord", entries: [], output: 166 },
+      {
+        kind: "delegate",
+        target: { kind: "name", name: createAgentName("gate") },
+        argument: 166,
+        output: 167,
+      },
+      { kind: "continue", target: 14, value: 167, modifiers: [] },
+    ];
+    const ir = withRegistryAgents(watchIr({ handleBody, handler }));
+    ir.blocks[17] = {
+      block: { kind: "agent", body: 18, schema: EMPTY_SCHEMA, description: "", defaults: {} },
+      parameters: {},
+    };
+    ir.blocks[18] = {
+      block: { kind: "request", name: createAgentName("gate"), input: 180 },
+      parameters: { parameter: 180 },
+    };
+    ir.entries[createAgentName("gate")] = { block: 17, private: false };
+
+    const actorOne = makeActor(ir, persistence);
+    actorOne.startRun(createAgentName("main"), SNAPSHOT, null);
+    await waitUntil(() =>
+      actorOne.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    // The crash is fully absorbed pre-restart: the panicker's bridge is gone (continuation + keeper
+    // remain), its synthetic entry is mailboxed, and only the keeper's name survives in the map.
+    const before = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined &&
+        provide.mailbox.length === 1 &&
+        provide.innerCalls.length === 2 &&
+        Object.values(provide.names).length === 1
+        ? provide
+        : undefined;
+    });
+    expect(before.mailbox[0]?.child).toBeNull();
+    const beforeAsk = before.mailbox[0]?.ask;
+    if (beforeAsk?.kind !== "request") throw new Error("the synthetic entry must be a request ask");
+    expect(beforeAsk.request).toBe(createAgentName("prelude.region.crashed"));
+    expect(Object.values(before.names)).toEqual(["keeper"]);
+
+    // Restart: the durable registry facts reload — the keeper's tag and the un-emitted synthetic entry.
+    const actorTwo = makeActor(ir, persistence);
+    await actorTwo.activate();
+    const after = await eventually(async () => {
+      const provide = (await peekRegionProvides(persistence))[0];
+      return provide !== undefined && provide.mailbox.length === 1 ? provide : undefined;
+    });
+    expect(after.mailbox[0]?.child).toBeNull();
+    expect(Object.values(after.names)).toEqual(["keeper"]);
+
+    // Release the gate: the keeper's on_message answers, freeing the watch to re-emit the crashed event.
+    // Nothing catches it (the handle knows only on_message), so it bubbles to the run root, where its
+    // answer is swallowed — and the keeper's post-restart report proves the nursery still serves.
+    const gate = await waitUntil(() =>
+      actorTwo.listOpenEscalations().find((open) => open.request === createAgentName("gate")),
+    );
+    await actorTwo.answerEscalation(gate.escalation, { kind: "string", value: "resumed" });
+    const crashed = await waitUntil(() =>
+      actorTwo
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("prelude.region.crashed")),
+    );
+    const argument = crashed.argument;
+    if (argument?.kind !== "record") throw new Error("crashed must carry its record");
+    expect(argument.fields.name).toEqual({ kind: "string", value: "boom" });
+    await actorTwo.answerEscalation(crashed.escalation, { kind: "null" });
+    const report = await waitUntil(() =>
+      actorTwo
+        .listOpenEscalations()
+        .find((open) => open.request === createAgentName("fiber_report")),
+    );
+    const reported = report.argument?.kind === "record" ? report.argument.fields.value : undefined;
+    expect(reported).toEqual({ kind: "string", value: "resumed" });
+    await actorTwo.answerEscalation(report.escalation, { kind: "null" });
   });
 });

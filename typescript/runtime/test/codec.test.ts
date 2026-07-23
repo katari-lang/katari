@@ -3,10 +3,10 @@
 // `$katari_` discriminator namespace is disjoint from record keys (which travel verbatim), `__proto__` is
 // inert, and non-finite numbers and a redacted subtree are handled at the boundary.
 
-import { createAgentName } from "@katari-lang/types";
+import { createAgentName, type DefaultValue } from "@katari-lang/types";
 import { describe, expect, test } from "vitest";
 import type { BlobId, ScopeId, SnapshotId } from "../src/runtime/ids.js";
-import { jsonToValue, valueToJson } from "../src/runtime/value/codec.js";
+import { defaultValueToValue, jsonToValue, valueToJson } from "../src/runtime/value/codec.js";
 import type { Value } from "../src/runtime/value/types.js";
 
 const SNAPSHOT = "snap-codec" as SnapshotId;
@@ -154,6 +154,46 @@ describe("privacy policy", () => {
 
   test("a redacted document cannot be decoded back", () => {
     expect(() => jsonToValue({ $katari_redacted: true })).toThrow();
+  });
+});
+
+// An agent block's parameter default is a constant literal tree (`AgentBlock.defaults`): scalars share
+// the IR `Literal` kinds, containers nest. `applyDefaults` lifts each omitted parameter's tree through
+// this conversion, so the shapes here are exactly what a filled argument record receives.
+describe("defaultValueToValue — the parameter-default tree lifts structurally", () => {
+  test("a scalar default lifts exactly like an IR literal", () => {
+    expect(defaultValueToValue({ kind: "string", value: "x" })).toEqual({
+      kind: "string",
+      value: "x",
+    });
+    expect(defaultValueToValue({ kind: "null" })).toEqual({ kind: "null" });
+  });
+
+  test("an empty array default lifts to an empty array value", () => {
+    expect(defaultValueToValue({ kind: "array", elements: [] })).toEqual({
+      kind: "array",
+      elements: [],
+    });
+  });
+
+  test("a nested record/array tree lifts structurally", () => {
+    const tree: DefaultValue = {
+      kind: "record",
+      fields: {
+        point: {
+          kind: "record",
+          fields: { x: { kind: "integer", value: 1 } },
+        },
+        tags: { kind: "array", elements: [{ kind: "string", value: "a" }] },
+      },
+    };
+    expect(defaultValueToValue(tree)).toEqual({
+      kind: "record",
+      fields: {
+        point: { kind: "record", fields: { x: { kind: "integer", value: 1 } } },
+        tags: { kind: "array", elements: [{ kind: "string", value: "a" }] },
+      },
+    });
   });
 });
 

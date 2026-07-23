@@ -942,3 +942,29 @@ describe("the scalar comparison order (comparison operators and the sort prims)"
     });
   });
 });
+
+describe("prelude.region", () => {
+  test("fiber_id reads the runtime-minted id off a fiber handle", async () => {
+    // The handle is the opaque record `region.fork` mints: the id rides the namespaced marker field, so
+    // the prim is a pure read — no reactor round-trip.
+    const handle: Value = {
+      kind: "record",
+      fields: {
+        $katari_region_scope: { kind: "string", value: "regionscope:abc" },
+        $katari_region_fiber: { kind: "string", value: "fiber:xyz" },
+      },
+    };
+    await expect(run("prelude.region.fiber_id", { handle })).resolves.toEqual({
+      kind: "string",
+      value: "fiber:xyz",
+    });
+  });
+
+  test("fiber_id panics on a value that is not a fiber handle", async () => {
+    // The checker's scope gating keeps non-handles out, so a marker-less record is an invariant break —
+    // a plain error (panic), not a typed throw.
+    await expect(
+      run("prelude.region.fiber_id", { handle: { kind: "record", fields: {} } }),
+    ).rejects.toThrow(/not a fiber handle/);
+  });
+});

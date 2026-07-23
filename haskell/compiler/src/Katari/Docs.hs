@@ -139,7 +139,7 @@ data ParameterDocumentation = ParameterDocumentation
     -- parameter, whose shape is a pattern, not a type) — 'DocsDeclaration.checkedType' carries the
     -- inferred truth.
     parameterType :: Maybe TypeNode,
-    defaultValue :: Maybe LiteralValue
+    defaultValue :: Maybe DefaultValue
   }
   deriving stock (Eq, Show)
 
@@ -420,6 +420,15 @@ renderLiteralValue = \case
   LiteralValueBoolean False -> "false"
   LiteralValueNull -> "null"
 
+-- | A default tree in its source form: scalars via 'renderLiteralValue'; containers as the array /
+-- record literal syntax the parser accepts. Record keys render bare, the same rule
+-- 'renderSemanticType' uses for object fields.
+renderDefaultValue :: DefaultValue -> Text
+renderDefaultValue = \case
+  DefaultValueLiteral literal -> renderLiteralValue literal
+  DefaultValueArray elements -> "[" <> Text.intercalate ", " (renderDefaultValue <$> elements) <> "]"
+  DefaultValueRecord entries -> "{" <> Text.intercalate ", " [name <> " = " <> renderDefaultValue entryValue | (name, entryValue) <- entries] <> "}"
+
 ---------------------------------------------------------------------------------------------------
 -- Declaration extraction
 ---------------------------------------------------------------------------------------------------
@@ -664,7 +673,7 @@ renderParametersClause parameters = "(" <> Text.intercalate ", " (renderParamete
     renderParameter parameter =
       parameter.label
         <> maybe "" (\parameterType -> ": " <> parameterType.rendered) parameter.parameterType
-        <> maybe "" (\defaultValue -> " ?= " <> renderLiteralValue defaultValue) parameter.defaultValue
+        <> maybe "" (\defaultValue -> " ?= " <> renderDefaultValue defaultValue) parameter.defaultValue
 
 renderReturnClause :: Maybe TypeNode -> Text
 renderReturnClause = maybe "" (\returnType -> " -> " <> returnType.rendered)
@@ -769,9 +778,17 @@ instance ToJSON ParameterDocumentation where
 
 -- | A parameter default carries both the JSON value and its rendered source form, so a @null@
 -- default stays distinguishable from "no default" and the web never re-renders literals.
-defaultDocumentationJSON :: LiteralValue -> Value
+defaultDocumentationJSON :: DefaultValue -> Value
 defaultDocumentationJSON value =
-  object ["value" .= literalValueJSON value, "rendered" .= renderLiteralValue value]
+  object ["value" .= defaultValueJSON value, "rendered" .= renderDefaultValue value]
+
+-- | The default tree as plain JSON: containers nest structurally (an array as a JSON array, a record
+-- as a JSON object), so a consumer reads the value without knowing the compiler's sum.
+defaultValueJSON :: DefaultValue -> Value
+defaultValueJSON = \case
+  DefaultValueLiteral literal -> literalValueJSON literal
+  DefaultValueArray elements -> toJSON (defaultValueJSON <$> elements)
+  DefaultValueRecord entries -> toJSON (Map.fromList [(name, defaultValueJSON entryValue) | (name, entryValue) <- entries])
 
 literalValueJSON :: LiteralValue -> Value
 literalValueJSON = \case
