@@ -434,6 +434,13 @@ export const INTEROP_PRIMITIVES: Record<string, PrimImplementation> = {
     return { kind: "string", value: repeated.slice(0, missing).join("") + value };
   },
 
+  // ─── prelude.crypto ─────────────────────────────────────────────────────────────────────────
+  "prelude.crypto.sha256": async (argument, context) => {
+    // Deterministic over the UTF-8 bytes, so a replay recomputes the same digest.
+    const text = await readStringField(argument, "text", context);
+    return { kind: "string", value: createHash("sha256").update(text, "utf8").digest("hex") };
+  },
+
   // ─── prelude.files ──────────────────────────────────────────────────────────────────────────
   // A `file` value is a slim blob handle (identity only); content comes from the byte store and
   // metadata from the project's blob catalog (the `blobs` rows — the source of truth). Privacy is

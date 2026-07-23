@@ -1,0 +1,10 @@
+// The `prelude.crypto` sub-module: minimal cryptographic primitives. Like the rest of the prelude's
+// primitive surface these are the smallest general capabilities the runtime must supply because no
+// Katari composition can express them — policy (what to hash, whether to salt) stays in the program.
+
+@"The SHA-256 digest of @text@'s UTF-8 bytes, as 64 lowercase hex characters. Deterministic and pure,
+so a replay recomputes the same digest. Typical uses: a stable opaque tag for an external identifier
+(e.g. a hashed end-user id for a provider's abuse-attribution metadata) or a content dedupe key.
+Takes PUBLIC text only — hashing a secret would raise a declassification question (is the digest of a
+secret still secret?) that this minimal surface deliberately leaves unanswered."
+primitive agent sha256(@"The text to digest, hashed as its UTF-8 bytes." text: string) -> string
