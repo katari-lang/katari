@@ -222,15 +222,53 @@ for (const s of samples) {
 
 // Tripwire: every word the compiler reserves must be matched somewhere in the grammar, so a
 // keyword added to the language cannot silently render as a plain identifier again (this is
-// exactly how `finally` slipped through once). Mirrors `reservedWords` in
-// haskell/compiler/src/Katari/Parser/Lexer.hs, plus the positional words the lexer deliberately
-// leaves unreserved (`forever`, `extends`, `literal`) but the grammar still highlights.
+// exactly how `finally` slipped through once). `reservedWords` below is a mirror of the compiler's
+// `reservedWords` in haskell/compiler/src/Katari/Parser/Lexer.hs; the mirror is verified against
+// that source directly (parsed below) so the two cannot drift silently, rather than trusting a hand
+// copy. `positionalWords` are contextual words the lexer deliberately leaves UNreserved (`forever`,
+// `extends`, `literal`) — and so must NOT appear in the lexer set — but the grammar still highlights.
+// (`local`, added later, is contextual the same way and stays out of the lexer's reservedWords too.)
 const reservedWords = [
   "agent", "request", "external", "primitive", "data", "type", "import", "from", "as",
   "use", "handler", "for", "parallel", "if", "else", "match", "case", "return", "next",
   "break", "var", "let", "finally", "then", "in", "with", "of", "true", "false", "null",
 ];
 const positionalWords = ["forever", "extends", "literal"];
+
+// Parse the compiler's `reservedWords` Set.fromList directly and require it to equal the mirror in
+// BOTH directions: a keyword added to the lexer but not the mirror (a coverage gap in the making),
+// or a stale mirror entry the lexer no longer reserves, each fails here.
+const lexerPath = resolve(here, "../../../haskell/compiler/src/Katari/Parser/Lexer.hs");
+const lexerSource = await readFile(lexerPath, "utf8");
+const lexerListMatch = /reservedWords\s*=\s*Set\.fromList\s*\[([\s\S]*?)\]/.exec(lexerSource);
+if (!lexerListMatch) {
+  console.error(
+    "FAIL: [keyword mirror] could not find `reservedWords = Set.fromList [...]` in Lexer.hs",
+  );
+  process.exit(1);
+}
+const lexerReserved = new Set(
+  [...lexerListMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]),
+);
+const mirrorSet = new Set(reservedWords);
+const onlyInLexer = [...lexerReserved].filter((word) => !mirrorSet.has(word));
+const onlyInMirror = [...mirrorSet].filter((word) => !lexerReserved.has(word));
+total += 1;
+if (onlyInLexer.length === 0 && onlyInMirror.length === 0) {
+  passed += 1;
+} else {
+  if (onlyInLexer.length > 0) {
+    console.error(
+      `FAIL: [keyword mirror] Lexer.hs reserves ${JSON.stringify(onlyInLexer)} but the grammar mirror does not — add them here`,
+    );
+  }
+  if (onlyInMirror.length > 0) {
+    console.error(
+      `FAIL: [keyword mirror] the grammar mirror lists ${JSON.stringify(onlyInMirror)} but Lexer.hs does not reserve them — remove them here (a contextual word belongs in positionalWords)`,
+    );
+  }
+  process.exitCode = 1;
+}
 
 function collectMatchSources(node, out) {
   if (Array.isArray(node)) {
