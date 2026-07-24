@@ -10,8 +10,9 @@
 //     boundary is the JSON API; the console loads publicly, then sends the bearer it holds (entered on
 //     its login screen) with every `/api/v1` call.
 //
-// This middleware is only mounted when auth is enforced (a real KATARI_API_KEY); when auth is off the
-// app never registers it (see `app.ts` / `bin.ts`).
+// KATARI_API_KEY is required at boot (`config/env.ts`), so this middleware is mounted unconditionally on
+// every request (see `app.ts`) — there is no "auth off" mode. It short-circuits only the public paths
+// described above; every other request must present the bearer.
 
 import { timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";

@@ -42,14 +42,17 @@ export const escalationService = {
     for (const view of views) {
       let entries = entriesBySnapshot.get(view.snapshotId);
       if (entries === undefined) {
-        // A schema is an enrichment, not the resource: an unloadable snapshot (e.g. a defensive null pin
-        // on a project whose head moved on) degrades that row to `answerSchema: null` rather than failing
-        // the whole listing.
+        // A schema is an enrichment, not the resource: a snapshot that is not there (a defensive null pin
+        // on a project whose head moved on, so `loadSnapshotModules` raises `NotFoundError`) degrades that
+        // row to `answerSchema: null` rather than failing the whole listing. An infrastructure failure (a
+        // transient DB error) or an internal inconsistency (a missing module hash) is NOT that — it must
+        // surface, not be silently swallowed into an empty schema set.
         try {
           entries = collectEntries(
             (await loadSnapshotModules(projectId, view.snapshotId ?? undefined)).modules,
           );
-        } catch {
+        } catch (error) {
+          if (!(error instanceof NotFoundError)) throw error;
           entries = new Map();
         }
         entriesBySnapshot.set(view.snapshotId, entries);
@@ -90,7 +93,10 @@ async function answerSchemaOf(
   try {
     const { modules } = await loadSnapshotModules(projectId, view.snapshotId ?? undefined);
     return deriveAnswerSchema(collectEntries(modules), view.request);
-  } catch {
+  } catch (error) {
+    // Degrade to `null` (unvalidated) exactly where `listOpen` does — a snapshot that is not there — so
+    // the two stay consistent; let an infrastructure failure or internal inconsistency surface instead.
+    if (!(error instanceof NotFoundError)) throw error;
     return null;
   }
 }

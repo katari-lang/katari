@@ -1,7 +1,8 @@
-// The auth boundary for the console. The runtime enforces auth only when a KATARI_API_KEY is set, so the
-// gate is reactive rather than eager: it renders the app straight away and only interposes a login screen
-// once a request actually comes back 401 (reported through `lib/auth`). That way an unauthenticated dev
-// runtime shows no login at all, while a secured one prompts the moment the first request is rejected.
+// The auth boundary for the console. The runtime always enforces auth (KATARI_API_KEY is required at
+// boot), but the gate is reactive rather than eager: it renders the app straight away and only interposes
+// a login screen once a request actually comes back 401 (reported through `lib/auth`). So a session that
+// already holds a valid token renders through untouched, while one without a token is prompted the moment
+// the first request is rejected.
 //
 // Signing in stores the token (sent as a Bearer header by the API layer) and validates it against a
 // protected endpoint before letting the app back in, so a wrong key gives immediate feedback instead of a

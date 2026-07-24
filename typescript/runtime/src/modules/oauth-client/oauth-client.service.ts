@@ -111,14 +111,25 @@ export const oauthClientService = {
   },
 };
 
-/** Unseal a stored client secret. An unsealable value (key rotation, storage corruption) reads as `null`
- *  — a public client — rather than surfacing as a distinct error: a client that cannot be authenticated
- *  as confidential is re-registered, the same remedy as a genuinely public one that will not authorize. */
+/** Unseal a stored client secret. A per-value unseal failure (key rotation, storage corruption, the GCM
+ *  auth tag failing to verify) reads as `null` — a public client — rather than surfacing as a distinct
+ *  error: a client that cannot be authenticated as confidential is re-registered, the same remedy as a
+ *  genuinely public one that will not authorize. A SYSTEMIC crypto failure is not that: if the runtime's
+ *  own `KATARI_SECRET_KEY` is unusable, every unseal would fail, and silently downgrading every client to
+ *  public would mask the misconfiguration — so it surfaces instead of degrading. */
 function unsealSecret(sealed: string | null): string | null {
   if (sealed === null) return null;
   try {
     return decryptSecret(sealed);
-  } catch {
+  } catch (error) {
+    if (isSystemicCryptoFailure(error)) throw error;
     return null;
   }
+}
+
+/** Whether a decrypt error is a failure of the crypto KEY MATERIAL itself (the runtime's secret key is not
+ *  a usable AES-256 key) rather than of this particular ciphertext — the former fails for every stored
+ *  secret, so it must surface rather than degrade a single lookup to `null`. */
+function isSystemicCryptoFailure(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ERR_CRYPTO_INVALID_KEYLEN";
 }

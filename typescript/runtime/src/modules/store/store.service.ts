@@ -17,6 +17,7 @@ import { and, eq, like } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { storeEntries } from "../../db/tables/projects.js";
 import { BadRequestError, NotFoundError } from "../../lib/errors.js";
+import { escapeLike } from "../../lib/paging.js";
 import { sealForStorage, unsealFromStorage } from "../../runtime/actor/seal.js";
 import type { StoreRows } from "../../runtime/actor/store-responder.js";
 import type { ProjectId } from "../../runtime/ids.js";
@@ -59,7 +60,7 @@ export const storeRows: StoreRows = {
         ? eq(storeEntries.projectId, projectId)
         : and(
             eq(storeEntries.projectId, projectId),
-            like(storeEntries.key, `${escapeLikePattern(prefix)}/%`),
+            like(storeEntries.key, `${escapeLike(prefix)}/%`),
           );
     const rows = await db
       .select({ key: storeEntries.key })
@@ -69,11 +70,6 @@ export const storeRows: StoreRows = {
     return rows.map((row) => row.key);
   },
 };
-
-/** LIKE-escape a key prefix so `%` / `_` in a key name match literally. */
-function escapeLikePattern(prefix: string): string {
-  return prefix.replace(/[\\%_]/g, (match) => `\\${match}`);
-}
 
 /** A non-null, non-array JSON object (a bare record or a tagged variant on the wire). */
 function isWireObject(node: unknown): node is { [key: string]: unknown } {

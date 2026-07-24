@@ -17,8 +17,8 @@ export const oauthClientParamSchema = projectIdParamSchema.extend({ name: z.stri
 export const oauthClientBodySchema = z
   .object({
     issuer: z.string().min(1),
-    authorizeEndpoint: z.string().url(),
-    tokenEndpoint: z.string().url(),
+    authorizeEndpoint: z.url(),
+    tokenEndpoint: z.url(),
     clientId: z.string().min(1),
     clientSecret: z.string().min(1).optional(),
     clearSecret: z.boolean().default(false),

@@ -1,7 +1,8 @@
 // Thin fetch wrapper over the runtime API: prefixes the base path, unwraps the `{ ok, data }`
-// envelope, and raises `ApiError` (code + message from the error body) on failure. The runtime is
-// unauthenticated today; an optional stored token is still sent as a Bearer header so a deployment
-// behind an authenticating proxy works without a code change.
+// envelope, and raises `ApiError` (code + message from the error body) on failure. The runtime requires
+// a bearer token (KATARI_API_KEY) on every `/api/v1` call, so the stored token — entered on the console's
+// login screen — is attached as an `Authorization: Bearer` header when present; a request made before a
+// token is stored comes back 401, which drives the login gate (`AuthGate`).
 
 import type {
   AgentDetail,
